@@ -3,36 +3,34 @@
 Host status and placement for coding agents across [Herdr](https://herdr.dev) hosts.
 
 Wrangle measures hosts, places jobs and agents, and queues work. Shepherdr keeps parent/child messages.
-This branch contains the unreleased 0.5 redesign. Published 0.4 binaries do not support these commands.
 
 ## Install
 
-Install the binary on each Herdr host. Replace `vX` with the same release tag in each command.
-The plugin layout and context hook below are unreleased. The published `v0.4.0` tag does not contain them.
+Install the binary on each Herdr host. Use the same release tag in each command.
 
 Binary:
 
 ```sh
-mise use github:oisin-ee/wrangle@vX
+mise use github:oisin-ee/wrangle@v0.5.0
 ```
 
 Pi (extension and skill):
 
 ```sh
-pi install git:github.com/oisin-ee/wrangle@vX
+pi install git:github.com/oisin-ee/wrangle@v0.5.0
 ```
 
 Claude Code (hooks and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/wrangle
+claude plugin marketplace add oisin-ee/wrangle#v0.5.0
 claude plugin install wrangle@wrangle
 ```
 
 Codex (hooks and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/wrangle --ref vX
+codex plugin marketplace add oisin-ee/wrangle --ref v0.5.0
 codex plugin add wrangle@wrangle
 ```
 
@@ -42,7 +40,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (status-board popup):
 
 ```sh
-herdr plugin install oisin-ee/wrangle --ref vX
+herdr plugin install oisin-ee/wrangle --ref v0.5.0 --yes
 ```
 
 Harness plugins use the binary on `PATH`. They do not install it or start host services.

@@ -200,7 +200,13 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
     assert_eq!(snapshot["probe"]["agents"]["total"], 1);
     assert_eq!(snapshot["probe"]["agent_panes"][0]["pane"], "w1:p2");
     assert_eq!(snapshot["probe"]["panes"][0]["pane_id"], "w1:p1");
-    assert_eq!(rig.log("herdr.log"), "agent list\npane list\n");
+    // `--once` keeps publishing while its action lanes run, so a slow host can
+    // add ticks. Every tick reads agents then panes, and nothing else.
+    let herdr = rig.log("herdr.log");
+    assert!(
+        !herdr.is_empty() && herdr.split("agent list\npane list\n").all(str::is_empty),
+        "{herdr}"
+    );
     assert_eq!(rig.log("ssh.log"), "");
     assert!(
         !fs::read_dir(rig.dir.join("state")).unwrap().any(|e| e

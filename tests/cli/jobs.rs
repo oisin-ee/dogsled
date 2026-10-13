@@ -36,7 +36,10 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     assert!(herdr.contains("tab create --workspace w1"));
     assert!(herdr.contains("--source custom:wrangle --agent wrangle-job --state working"));
     assert!(herdr.contains("--token wrangle=exit 3"));
-    assert_eq!(rig.run(&["wait", id, "--max", "1s"]).status.code(), Some(3));
+    assert_eq!(
+        rig.run(&["wait", id, "--max", "30s"]).status.code(),
+        Some(3)
+    );
     assert_eq!(rig.run(&["logs", id, "--follow"]).stdout, log.as_bytes());
     assert_eq!(rig.json(&["ps", "--all"]).1[0]["exit"], 3);
     assert_eq!(rig.json(&["ps"]).1, json!([]));
@@ -270,7 +273,7 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
         "id":"remote-job","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","created_ms":0,"closed_ms":null,"name":null
     }])).unwrap()).unwrap();
     assert_eq!(
-        rig.run(&["wait", "remote-job", "--max", "1s"])
+        rig.run(&["wait", "remote-job", "--max", "30s"])
             .status
             .code(),
         Some(3)

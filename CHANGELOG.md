@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## 0.5.0 - Unreleased
+## 0.5.0 - 2026-10-13
 
 - Detect transcript stalls, publish stall timestamps, and set or clear sidebar marks. Include stall counts in prompt context.
 - Add durable idle-owner check-ins, job-completion events, and top-level stall notifications, independent from admission and publication.
