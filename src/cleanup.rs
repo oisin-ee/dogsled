@@ -17,6 +17,8 @@ pub struct Tree {
     pub repo: String,
     pub path: String,
     pub branch: String,
+    #[serde(default)]
+    pub head: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +36,11 @@ pub struct Plan {
 }
 
 pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
+    ledger.with_lock("repositories", || {
+        let mut repos: BTreeSet<String> = ledger.read("repositories.json")?.unwrap_or_default();
+        repos.insert(tree.repo.clone());
+        ledger.write("repositories.json", &repos)
+    })?;
     ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
         trees.retain(|t| t.path != tree.path);
@@ -55,7 +62,8 @@ fn git(shell: &dyn Shell, repo: &str, args: &[&str]) -> Result<crate::shell::Out
 
 fn trees(node: &Node<'_>, panes: &[Pane], discover: bool) -> Result<Vec<Tree>> {
     let recorded: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-    let mut repos: BTreeSet<String> = recorded.iter().map(|t| t.repo.clone()).collect();
+    let mut repos: BTreeSet<String> = node.ledger.read("repositories.json")?.unwrap_or_default();
+    repos.extend(recorded.iter().map(|t| t.repo.clone()));
     let cwd = std::env::current_dir()?;
     // Discover repositories from live pane directories and the caller. Do not scan home.
     for path in panes
@@ -80,35 +88,42 @@ fn trees(node: &Node<'_>, panes: &[Pane], discover: bool) -> Result<Vec<Tree>> {
     }
     let mut result = Vec::new();
     for repo in repos {
-        let output = git(
-            node.shell,
-            &repo,
-            &["worktree", "list", "--porcelain", "-z"],
-        )?;
-        if !output.ok() {
-            return Err(Error::Invalid(format!(
-                "cannot list worktrees in {repo}: {}",
-                output.stderr.trim()
-            )));
-        }
-        let mut path = String::new();
-        let mut branch = String::new();
-        for field in output.stdout.split('\0') {
-            if let Some(value) = field.strip_prefix("worktree ") {
-                path = value.into();
-            } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
-                branch = value.into();
-            } else if field.is_empty() && !path.is_empty() {
-                if path != repo && !branch.is_empty() {
-                    result.push(Tree {
-                        repo: repo.clone(),
-                        path: path.clone(),
-                        branch: branch.clone(),
-                    });
-                }
-                path.clear();
-                branch.clear();
+        result.extend(repository_trees(node.shell, &repo)?);
+    }
+    Ok(result)
+}
+
+fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
+    let mut result = Vec::new();
+    let output = git(shell, repo, &["worktree", "list", "--porcelain", "-z"])?;
+    if !output.ok() {
+        return Err(Error::Invalid(format!(
+            "cannot list worktrees in {repo}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let mut path = String::new();
+    let mut branch = String::new();
+    let mut head = String::new();
+    for field in output.stdout.split('\0') {
+        if let Some(value) = field.strip_prefix("worktree ") {
+            path = value.into();
+        } else if let Some(value) = field.strip_prefix("HEAD ") {
+            head = value.into();
+        } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
+            branch = value.into();
+        } else if field.is_empty() && !path.is_empty() {
+            if path != repo && !branch.is_empty() {
+                result.push(Tree {
+                    repo: repo.into(),
+                    path: path.clone(),
+                    branch: branch.clone(),
+                    head: head.clone(),
+                });
             }
+            path.clear();
+            branch.clear();
+            head.clear();
         }
     }
     Ok(result)
@@ -232,16 +247,32 @@ fn disk(node: &Node<'_>, trees: &[Tree], plan: &mut Plan) -> Result<()> {
         .collect();
     let mut sizes = Vec::new();
     for path in paths {
-        let out = node
+        if !Path::new(&path).exists() {
+            plan.entries.push(entry(
+                "disk",
+                path,
+                "missing registered path; no disk usage available".into(),
+                false,
+            ));
+            continue;
+        }
+        let measured = node
             .shell
-            .run_ok("du", &["-sk".into(), "--".into(), path.clone()])?;
-        let size: u64 = out
-            .stdout
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| Error::Invalid(format!("invalid du output for {path}")))?;
-        sizes.push((size, path));
+            .run_ok("du", &["-sk".into(), "--".into(), path.clone()])
+            .and_then(|out| {
+                out.stdout
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .ok_or_else(|| Error::Invalid(format!("invalid du output for {path}")))
+            });
+        match measured {
+            Ok(size) => sizes.push((size, path)),
+            Err(error) => {
+                plan.entries
+                    .push(entry("disk", path, format!("unreadable: {error}"), false));
+            }
+        }
     }
     sizes.sort_by_key(|a| std::cmp::Reverse(a.0));
     let largest = sizes
@@ -335,6 +366,9 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
     let trees = trees(node, &panes, true)?;
     let mut plan = Plan::default();
     for tree in &trees {
+        if !Path::new(&tree.path).exists() {
+            continue;
+        }
         if !live(tree, &panes) && retired(node.shell, tree)? {
             let clean = clean(node.shell, tree)?;
             let mut e = entry(
@@ -400,27 +434,55 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
         .ledger
         .read::<Vec<Tree>>("worktrees.json")?
         .unwrap_or_default();
+    for tree in &owned {
+        if !Path::new(&tree.path).exists() {
+            plan.entries.push(entry(
+                "worktrees",
+                tree.path.clone(),
+                "missing registered worktree; stale registration (report only)".into(),
+                false,
+            ));
+        }
+    }
     disk(node, &owned, &mut plan)?;
     processes(node.shell, &panes, &mut plan)?;
     Ok(plan)
 }
 
+fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Tree> {
+    let current = repository_trees(node.shell, &planned.repo)?
+        .into_iter()
+        .find(|t| t.path == planned.path)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "refuse {}: worktree identity disappeared",
+                planned.path
+            ))
+        })?;
+    let repo = crate::prepare::main_checkout(node.shell, &current.path)?;
+    if current != *planned
+        || resolved_path(&repo) != resolved_path(Path::new(&planned.repo))
+        || current.head.is_empty()
+    {
+        return Err(Error::Invalid(format!(
+            "refuse {}: worktree identity changed",
+            planned.path
+        )));
+    }
+    if live(&current, &current_panes(node.shell)?)
+        || !clean(node.shell, &current)?
+        || !retired(node.shell, &current)?
+    {
+        return Err(Error::Invalid(format!(
+            "refuse {}: worktree is live, dirty, or unmerged",
+            current.path
+        )));
+    }
+    Ok(current)
+}
+
 fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
-    if live(tree, &current_panes(node.shell)?) {
-        return Err(Error::Invalid(format!("refuse {}: live pane", tree.path)));
-    }
-    if !retired(node.shell, tree)? {
-        return Err(Error::Invalid(format!(
-            "refuse {}: unmerged branch",
-            tree.path
-        )));
-    }
-    if !clean(node.shell, tree)? {
-        return Err(Error::Invalid(format!(
-            "refuse {}: dirty worktree",
-            tree.path
-        )));
-    }
+    validate_tree(node, tree)?;
     let tasks = node.shell.run_ok(
         "mise",
         &[
@@ -435,44 +497,32 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         Error::Invalid("mise tasks returned no task array; refusing removal".into())
     })?;
     let has_remove = tasks.iter().any(|t| t["name"] == "agent:worktree-remove");
-    // Task discovery can run hooks. Recheck immediately before invoking removal.
-    if live(tree, &current_panes(node.shell)?)
-        || !clean(node.shell, tree)?
-        || !retired(node.shell, tree)?
-    {
-        return Err(Error::Invalid(format!(
-            "refuse {}: worktree changed during planning",
-            tree.path
-        )));
-    }
+    // Task discovery proves existence, not an exact-path removal contract.
+    // The known task takes a branch, which can select a different worktree.
+    // Until it advertises a verifiable path-bound interface, use Git's path API.
+    validate_tree(node, tree)?;
+    node.shell.run_setup_ok(
+        "git",
+        &[
+            "-C".into(),
+            tree.repo.clone(),
+            "worktree".into(),
+            "remove".into(),
+            "--".into(),
+            tree.path.clone(),
+        ],
+    )?;
     let method = if has_remove {
-        node.shell.run_setup_ok(
-            "mise",
-            &[
-                "-C".into(),
-                tree.repo.clone(),
-                "run".into(),
-                "-q".into(),
-                "agent:worktree-remove".into(),
-                "--".into(),
-                tree.branch.clone(),
-            ],
-        )?;
-        "agent:worktree-remove (repository task exists)"
+        "git worktree remove (repository task has no verified exact-path contract)"
     } else {
-        node.shell.run_setup_ok(
-            "git",
-            &[
-                "-C".into(),
-                tree.repo.clone(),
-                "worktree".into(),
-                "remove".into(),
-                "--".into(),
-                tree.path.clone(),
-            ],
-        )?;
         "git worktree remove (no repository remove task)"
     };
+    node.ledger.with_lock("repositories", || {
+        let mut repos: BTreeSet<String> =
+            node.ledger.read("repositories.json")?.unwrap_or_default();
+        repos.insert(tree.repo.clone());
+        node.ledger.write("repositories.json", &repos)
+    })?;
     node.ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
         trees.retain(|t| t.path != tree.path);
@@ -519,10 +569,16 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Vec<String>> {
                     requested.class, requested.id
                 ))
             })?;
+        if candidate.tree != requested.tree {
+            return Err(Error::Invalid(format!(
+                "refuse {}: planned worktree identity changed",
+                requested.id
+            )));
+        }
         match candidate.class.as_str() {
             "worktrees" => results.push(remove_tree(
                 node,
-                candidate
+                requested
                     .tree
                     .as_ref()
                     .ok_or_else(|| Error::Invalid("missing worktree identity".into()))?,

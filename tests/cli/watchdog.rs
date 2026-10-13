@@ -1,7 +1,9 @@
 use super::*;
+const NOW: u64 = 172_800_001;
 
-fn watchdog_rig(name: &str) -> Rig {
+pub(super) fn watchdog_rig(name: &str) -> Rig {
     let rig = Rig::new(name);
+    fs::write(rig.dir.join("clock"), NOW.to_string()).unwrap();
     rig.script("herdr", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/herdr.log"
 case "$*" in
@@ -23,7 +25,7 @@ esac
     rig.script("mise", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/mise.log"
 case "$*" in
- *'tasks --json') if test -f "$RIG/remove-task"; then printf '[{"name":"agent:worktree-remove"}]\n'; else printf '[]\n'; fi ;;
+ *'tasks --json') if test -f "$RIG/change-during-plan"; then touch "$RIG/changed"; fi; if test -f "$RIG/remove-task"; then printf '[{"name":"agent:worktree-remove"}]\n'; else printf '[]\n'; fi ;;
  *'agent:worktree-remove'*) printf '{}\n' ;;
  *) exit 2 ;;
 esac
@@ -32,7 +34,11 @@ esac
 printf '%s\n' "$*" >> "$RIG/git.log"
 case "$*" in
  *'rev-parse --path-format=absolute --git-common-dir') printf '%s\n' "$RIG/home/repo/.git" ;;
- *'worktree list --porcelain -z') printf 'worktree %s\0HEAD abc\0branch refs/heads/main\0\0worktree %s\0HEAD abc\0branch refs/heads/feature\0\0' "$RIG/home/repo" "$RIG/home/repo/tree" ;;
+ *'worktree list --porcelain -z')
+ branch=feature; head=abc; tree=tree
+ if test -f "$RIG/changed"; then branch=unmerged; head=def; fi
+ if test -f "$RIG/second-tree"; then tree=second; fi
+ printf 'worktree %s\0HEAD abc\0branch refs/heads/main\0\0worktree %s\0HEAD %s\0branch refs/heads/%s\0\0' "$RIG/home/repo" "$RIG/home/repo/$tree" "$head" "$branch" ;;
  *'show-ref --verify --quiet refs/heads/feature') if test -f "$RIG/deleted"; then exit 1; fi ;;
  *'symbolic-ref --quiet refs/remotes/origin/HEAD') printf 'refs/remotes/origin/main\n' ;;
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
@@ -71,7 +77,7 @@ fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
     assert!(rig.read("state/host.json")["probe"]["agent_panes"][0]["stalled_since_ms"].is_number());
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("notification show").count(), 1);
-    assert!(log.contains("--token wrangle=stalled"));
+    assert!(log.contains("--token wrangle=stalled 48h"));
     let out = rig.run(&["status", "--brief"]);
     let brief = String::from_utf8(out.stdout).unwrap();
     assert!(brief.contains("1 stalls"));
@@ -88,7 +94,7 @@ fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
 #[test]
 fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
     let rig = watchdog_rig("doctor");
-    rig.snapshot("state/host.json", now(), 0.0, 1);
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
     let mut snapshot = rig.read("state/host.json");
     snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
     rig.put("state/host.json", &snapshot);
@@ -148,7 +154,7 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
         rig.run(&["host", "prune", "--plan", &plan]).status.code(),
         Some(2)
     );
-    rig.snapshot("state/host.json", now(), 0.0, 1);
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
     let mut snapshot = rig.read("state/host.json");
     snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
     rig.put("state/host.json", &snapshot);
@@ -182,11 +188,8 @@ fn prune_confirmation_and_repository_remove_path() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        rig.log("mise.log")
-            .contains("run -q agent:worktree-remove -- feature")
-    );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("repository task exists"));
+    assert!(!rig.log("mise.log").contains("run -q agent:worktree-remove"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no verified exact-path contract"));
 }
 
 #[test]

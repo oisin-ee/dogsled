@@ -139,11 +139,13 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 `wrangle serve` removes worktrees without a question only when their branch is merged or deleted, the worktree is clean,
 and no live pane uses it. Every other class keeps the question in `wrangle prune [--host H] [<class>…]`.
 `prune` shows what it will remove, asks, then removes it. It never kills processes.
-Prepare registers repositories in `worktrees.json`. Hourly automatic cleanup discovers their current Git worktrees, rather than trusting saved paths.
+Prepare registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration. Hourly automatic cleanup discovers their current Git worktrees, rather than trusting saved paths.
 Doctor also discovers repositories from the caller and live pane directories. Neither scans the whole home directory.
 This bounds automatic ownership: unrelated repositories and detached worktrees remain outside automatic cleanup.
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
-Prune revalidates each candidate and uses `agent:worktree-remove` when present, otherwise non-forced `git worktree remove`.
+Prune compares current Git path, branch, HEAD, and repository with the approved plan immediately before removal.
+A branch-taking repository task cannot guarantee an exact path. Until a task exposes a verifiable path-bound contract, removal uses non-forced `git worktree remove -- <path>`.
+Missing or unreadable disk paths remain report-only findings without discarding other candidates.
 
 ### 7. Prompt context
 

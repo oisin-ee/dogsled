@@ -100,7 +100,7 @@ Doctor is read-only. Prune displays candidates and asks before removal; `--yes` 
 Classes are `worktrees`, `panes`, `jobs`, `disk`, and `processes`. Disk and process findings are report-only.
 Never use cleanup to close working or blocked agents. Dirty or live worktrees cannot be removed.
 Automatic cleanup runs hourly for clean, merged-or-deleted worktrees in repositories registered by prepare, with no live pane.
-Prune honors the repository remove task when present and reports its chosen method.
+Prune refuses changed Git identities and reports its removal method. Branch-only tasks cannot guarantee the planned path; Git removes that exact path instead.
 
 ## Checkout and prepare
 

@@ -305,3 +305,41 @@ fn owner_must_still_be_idle_after_log_reads() {
     tick(&rig.fleet(), &reports, 600_001).unwrap();
     assert_eq!(rig.prompts(), 0);
 }
+
+#[test]
+fn closed_item_does_not_observe_reused_or_retracked_pane() {
+    let rig = Rig::new();
+    rig.item("agent");
+    let reports = rig.reports(1, "working", "working", Some(1));
+    tick(&rig.fleet(), &reports, 1).unwrap();
+    let reports = rig.reports(60_001, "working", "idle", Some(1));
+    tick(&rig.fleet(), &reports, 60_001).unwrap();
+    crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
+    let reports = rig.reports(660_001, "idle", "working", Some(60_001));
+    tick(&rig.fleet(), &reports, 660_001).unwrap();
+    assert_eq!(rig.prompts(), 0);
+    crate::items::record(
+        &rig.ledger,
+        Item {
+            id: "new-child".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "child".into(),
+            owner_pane: "owner".into(),
+            name: Some("new-child-name".into()),
+            created_ms: 660_001,
+            closed_ms: None,
+        },
+    )
+    .unwrap();
+    let reports = rig.reports(720_001, "idle", "working", Some(60_001));
+    tick(&rig.fleet(), &reports, 720_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
+    let calls = rig.shell.calls.lock().unwrap();
+    let prompt = calls
+        .iter()
+        .find(|s| s.starts_with("herdr agent prompt"))
+        .unwrap();
+    assert!(prompt.contains("new-child-name"));
+    assert!(!prompt.contains("test-child on"));
+}

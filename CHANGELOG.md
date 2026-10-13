@@ -8,7 +8,9 @@ All notable changes to this project are documented in this file.
 - Add durable idle-owner check-ins, job-completion events, and top-level stall notifications, independent from admission and publication.
 - Resolve exact Claude and Codex transcript session IDs without choosing an ambiguous file.
 - Add read-only `doctor`, confirmed `prune`, and hourly safe worktree cleanup in registered repositories.
-- Revalidate cleanup candidates and honor repository remove tasks. Never kill reported processes or force-remove worktrees.
+- Revalidate complete Git identities and remove only the approved path. Keep repository registrations after the last worktree removal.
+- Preserve cleanup reports when registered paths are missing or unreadable. Never kill reported processes or force-remove worktrees.
+- Stop observing closed items. Show sanitized transcript activity rather than agent footer lines in check-ins.
 
 - Package wrangle hooks and one shared skill for Pi, Claude Code, and Codex. Add Claude and Codex marketplaces.
 - Add `hook context --harness claude|codex|pi`, with event-specific JSON or plain text from the shared brief formatter.

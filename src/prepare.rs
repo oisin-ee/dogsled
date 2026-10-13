@@ -64,6 +64,7 @@ pub fn run(
                     repo: checkout.display().to_string(),
                     path: path.clone(),
                     branch: branch.into(),
+                    head: String::new(),
                 },
             )?;
         }

@@ -1,5 +1,6 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
+mod activity;
 mod budget;
 mod checkout;
 mod cleanup;
@@ -238,6 +239,7 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
                         repo,
                         path: path.clone(),
                         branch,
+                        head: String::new(),
                     },
                 )?;
             }

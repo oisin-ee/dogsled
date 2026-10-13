@@ -9,6 +9,8 @@ mod jobs;
 mod lifecycle;
 #[path = "cli/review.rs"]
 mod review;
+#[path = "cli/review_fixes.rs"]
+mod review_fixes;
 #[path = "cli/transcripts.rs"]
 mod transcripts;
 #[path = "cli/watchdog.rs"]
@@ -127,6 +129,9 @@ esac
             .env("HOME", self.dir.join("home"))
             .env("WRANGLE_CONFIG", self.dir.join("config.toml"))
             .env("WRANGLE_STATE", self.dir.join("state"));
+        if let Ok(now) = fs::read_to_string(self.dir.join("clock")) {
+            cmd.env("WRANGLE_TEST_NOW_MS", now.trim());
+        }
         cmd
     }
     fn run(&self, args: &[&str]) -> Output {

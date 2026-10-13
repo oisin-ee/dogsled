@@ -24,6 +24,14 @@ pub struct Ledger {
 }
 
 pub fn now_ms() -> u64 {
+    // Debug binaries only: deterministic CLI integration tests. Release clocks
+    // cannot be replaced by an environment variable.
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("WRANGLE_TEST_NOW_MS")
+        && let Ok(now) = value.parse()
+    {
+        return now;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)

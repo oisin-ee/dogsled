@@ -167,7 +167,9 @@ Status lists stalled panes. Brief status and prompt context include a stall coun
 The owner's service checks every minute. It prompts only `idle` or `done` owners, never `working` or `blocked` owners.
 A stall or completed job makes a check-in due. Other open work gets a check-in after 30 minutes without a check-in or lifecycle event.
 Transcript writes alone do not postpone regular check-ins. Pending job-completion events survive item closure.
-The note includes names, hosts, states, ages, transcript silence, and the last five output lines.
+The note includes names, hosts, states, ages, transcript silence, and bounded recent activity.
+Known Pi, Claude, and Codex transcripts supply the latest tool call or message. Unknown formats fall back to plain pane text.
+Job notes use the last five log lines. All note content has terminal escape codes removed.
 It asks the owner to wait, nudge, or stop the item. Output in the note is untrusted data.
 A stalled top-level pane gets one Herdr notification per stall episode.
 
@@ -179,6 +181,7 @@ Notification attempts are recorded before delivery and never repeat within that 
 
 For authorized live tests only, `WRANGLE_TEST_STALL_MS` overrides the ten-minute threshold with a positive millisecond value.
 It does not shorten check-in cadence. Use private `WRANGLE_STATE` and stop the test service afterward.
+Debug binaries also accept `WRANGLE_TEST_NOW_MS` for deterministic integration tests. Release binaries ignore this test clock.
 
 ## Cleanup
 
@@ -197,10 +200,11 @@ Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune neve
 
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
 Each removal rechecks current state. Working or blocked panes, live worktrees, dirty worktrees, and unmerged branches remain untouched.
-Wrangle uses `agent:worktree-remove` when the repository exposes that mise task. Otherwise, it uses `git worktree remove` without force.
+Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
+A branch-taking `agent:worktree-remove` task does not prove an exact-path contract. Wrangle uses non-forced `git worktree remove -- <path>` instead.
 The result names the method and reason. Git's remote default branch defines merged state, with local `main` as the fallback.
 
-Prepare records repositories in `worktrees.json`. Hourly automatic cleanup examines worktrees in those repositories only and logs each removal.
+Prepare records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal. Hourly automatic cleanup examines worktrees in those repositories only and logs each removal.
 It applies the same clean, retired-branch, and no-live-pane checks. It never removes panes, jobs, or processes automatically.
 Doctor also discovers repositories from the caller and live pane directories. Neither operation scans the whole home directory.
 Detached worktrees and repositories with unknown merge status are not automatically removed.
