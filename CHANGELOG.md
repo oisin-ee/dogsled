@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.6.0 - 2026-10-14
 
 - Add `close PANE [--host H]`: close a finished child's Herdr workspace, remove its worktree with `wt remove` so the repository's remove hooks run, and end its item. Refuse active agents, dirty or foreign-locked worktrees, and the caller's own workspace before any change.
 - Keep an idle or done agent item open until its pane closes. Check-ins name the exact `wrangle close` command, and the brief, status, and Pi widget show unclosed children.
