@@ -1,5 +1,4 @@
-//! Admission policy. Read once by the lead; the numeric parts travel to remote
-//! hosts on the command line so every host applies the lead's rule.
+//! Host policy and repository prepare hooks.
 
 use std::path::{Path, PathBuf};
 
@@ -9,11 +8,7 @@ use crate::error::{Error, Result};
 
 /// Default `prepare` hook: the agent harness task that creates a writer's
 /// worktree and linked Herdr workspace, printing `{pane_id, workspace_id}`.
-pub const DEFAULT_PREPARE: &[&str] = &[
-    "sh",
-    "-c",
-    "cd {repo} && mise run -q agent:worktree -- {branch} {base}",
-];
+pub const DEFAULT_PREPARE: &[&str] = &["mise", "run", "-q", "agent:worktree", "--", "{branch}"];
 
 /// Default way to run `wrangle` on a remote host.
 pub const DEFAULT_REMOTE_COMMAND: &[&str] = &["mise", "x", "--", "wrangle"];
@@ -25,13 +20,10 @@ pub struct Policy {
     pub load_per_core_max: f64,
     /// Admit while the home filesystem keeps at least this much free.
     pub disk_free_min_percent: f64,
-    /// Load units each unexpired reservation adds, so leads admitting in the
-    /// same minute do not all see the same idle host.
+    /// Load units each unexpired reservation adds to admission.
     pub reservation_load: f64,
     /// A reservation older than this is dropped on the next probe.
     pub reservation_ttl_ms: u64,
-    /// Poll interval for queued tickets (used by the Pi shim).
-    pub poll_ms: u64,
     /// argv prefix that reaches `wrangle` on a remote host over
     /// `ssh -T -o BatchMode=yes`. mise shims are not on the non-interactive
     /// PATH, but `mise` itself is, so the default goes through `mise x`.
@@ -42,8 +34,8 @@ pub struct Policy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Hooks {
-    /// argv template run on the admitted host before a spawn. Placeholders:
-    /// `{repo}`, `{branch}`, `{base}`. Must print one JSON object with `pane_id`.
+    /// argv template run in the checkout. Placeholder: `{branch}`.
+    /// Must print JSON with `pane_id` or `path`.
     pub prepare: Vec<String>,
 }
 
@@ -53,8 +45,7 @@ impl Default for Policy {
             load_per_core_max: 1.5,
             disk_free_min_percent: 15.0,
             reservation_load: 1.0,
-            reservation_ttl_ms: 180_000,
-            poll_ms: 30_000,
+            reservation_ttl_ms: 60_000,
             remote_command: DEFAULT_REMOTE_COMMAND
                 .iter()
                 .map(ToString::to_string)

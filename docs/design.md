@@ -80,17 +80,28 @@ When every host is full, `run` and `place` put the work in the queue and print t
 until the ticket is admitted (and for `run`, until the job ends). The host service admits tickets in order when its
 host has headroom.
 
-### 4. Stall watchdog
+### 4. No wait without a deadline: stalls and check-ins
 
-The host service watches every pane on its host that is `working` or `unknown`. When the pane output does not change
-for the stall time (default 10 min), it:
+Rule: an agent that owns an open child or job hears from wrangle at least every 30 min while it is idle, until that work ends. Nothing depends on the agent remembering.
 
-1. Sets `$wrangle = "stalled 10m"` on the pane, so the sidebar shows it.
-2. Wakes whoever waits for that pane. **Open: the mechanism.** Two choices, decided by test A:
-   - (a) `pane report-agent <pane> --source custom:wrangle --state blocked`, if Shepherdr then wakes the parent.
-   - (b) `herdr agent prompt <parent pane> "<child> stalled 10m: <last lines>"`, if (a) does not wake it.
+**Owners.** Wrangle records the owner (host and pane) of each item:
+- `wrangle run`: the caller's `$HERDR_PANE_ID`.
+- `wrangle agent` (spawn for Claude Code, Codex, and scripts): the caller's pane.
+- Pi children spawned with Shepherdr's `agents` tool: the wrangle Pi extension reads the spawn tool result and runs `wrangle track <machine> <pane>` with its own pane as owner.
 
-For a wrangle job, `--idle-timeout` kills it, and its wrapper reports the result. The watchdog is for agents.
+An item closes when its job ends, when its agent is `idle` or `done` (Shepherdr delivers that result), or when its pane closes.
+
+**Stall.** An agent is stalled when Herdr shows it `working` or `unknown` and its transcript (`transcript` in host.json) has not changed for 10 min. The screen is not a signal: spinners and elapsed timers redraw it while a tool call hangs. An agent with no transcript is never marked stalled. Unit 3 confirms where Claude Code and Codex transcripts are, because Herdr may report only a session id for them.
+
+**Check-in.** `wrangle serve` on the owner's host checks every minute. It reads the state of remote items from the peers' host.json through the status cache. For each owner on its host that is `idle` or `done` and has open items, it runs `herdr agent prompt <owner> "<note>"`:
+- at once when an item stalls or a job ends;
+- otherwise 30 min after the last check-in or item event.
+
+The note lists each item (name, host, state, age, time since its transcript changed, last 5 lines) and asks the owner to keep waiting, nudge the item, or stop it. Serve skips owners that are `working` (the note waits until they are idle) and owners that are `blocked` (the user is in the loop). It sets `$wrangle = "stalled 10m"` on a stalled pane.
+
+**Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
+
+**Bounded waits.** `wrangle wait` ends after `--max` (default 30m) and returns `still running`. A job's `--idle-timeout` kills it after that much silence in its own output.
 
 ### 5. Status
 
@@ -111,7 +122,10 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 - disk above 90 % used, with the largest wrangle-owned paths;
 - processes using more than one core that are not under any Herdr pane (report only).
 
-`wrangle prune [--host H] [<class>…]` shows what it will remove, asks, then removes it. It never kills processes.
+`wrangle serve` removes worktrees without a question only when their branch is merged or deleted, the worktree is clean,
+and no live pane uses it. Every other class keeps the question in `wrangle prune [--host H] [<class>…]`.
+`prune` shows what it will remove, asks, then removes it. It never kills processes.
+Automatic cleanup belongs to unit 3, not the initial host service.
 
 ### 7. Prompt context
 
@@ -124,8 +138,8 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 ## What is removed
 
 - Leads, the lead claim, `⌂`/`↳` marks, and the `$sub`, `$lead`, `$queue` sidebar tokens.
-- The Pi `wrangle` spawn tool. Agents use `wrangle place` and `agents spawn`. The Pi extension keeps the widget and
-  the prompt context only.
+- The Pi `wrangle` spawn tool. Agents use `wrangle place` and `agents spawn`. The Pi extension keeps
+  prompt context only in unit 1. Later units add job and queue widgets.
 - The Herdr release plugin.
 - `docs/plan.md`.
 
@@ -138,17 +152,23 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 
 1. **wrangle 0.5: status and service.** `serve`, memory in the probe, `status --line/--brief`, peer cache, remove
    leads and the Pi spawn tool, add `place`. The service units ship in the release; dotfiles installs them.
+   host.json lists each agent pane with its state, transcript path, and transcript modified time.
 2. **wrangle 0.6: jobs and queue.** `run`, `exec`, `ps`, `logs`, `stop`, `wait`, queue admission by the service.
-3. **wrangle 0.7: watchdog and cleanup.** Stall watchdog (after test A), `doctor`, `prune`.
+   Add `wrangle agent` (spawn any harness through `herdr agent start` and prompt it), owner records for `run` and `agent`,
+   `wrangle track`, and the Pi extension tracking Shepherdr spawns.
+3. **wrangle 0.7: watchdog and cleanup.** Stalls and check-ins (part 4), `doctor`, `prune`.
+   Proof: test A, where a child hangs in a tool call while its parent is idle.
+   It passes when the parent gets a check-in naming the stall within 11 min.
+   Also confirm that `herdr agent prompt` starts a turn in an idle Pi pane.
 4. **agent repo.** Prompt hooks for 3 harnesses, the `wrangle` skill, `20-delegation.md` lines 21–37 and 70–72.
 5. **dotfiles.** Tab-row command to `status --line`; sidebar rows for the new tokens; service install on each host.
 
 Units 1–3 are sequential. Unit 4 can start after 1. Unit 5 follows each release.
 
-## Open decisions
+## Decisions
 
-1. Stall time default: 10 min?
-2. Wake mechanism for stalls: test A decides between (a) and (b).
-3. Should `prune` ever run without a question (for example, merged worktrees with no pane)?
-4. Service install: dotfiles (macOS launchd and Linux systemd user unit), or the infra repo for the Linux hosts?
-5. Drop the pending 0.5.0 `prepare` PR, and fold its fix into unit 1?
+1. Stall: Herdr shows `working` or `unknown` and the transcript is unchanged for 10 min.
+2. Wake mechanism: check-ins through `herdr agent prompt` (part 4); test A proves them in unit 3.
+3. Prune: `wrangle serve` removes clean worktrees without a question when their branch is merged or deleted and no live pane uses them. Every other class keeps the question in `wrangle prune`.
+4. Service install: dotfiles installs the launchd agent (macOS) and the systemd user unit (Linux) on every host.
+5. The old 0.5.0 `prepare` PR was never pushed. Unit 1 carries its fix: the hook runs in the checkout, with no `{repo}`.

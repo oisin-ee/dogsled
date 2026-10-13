@@ -1,250 +1,144 @@
-//! The `prepare` hook: an argv template from the policy, run on the admitted
-//! host after admission. It must print one JSON object with `pane_id`.
-
-use std::path::{Path, PathBuf};
-
-use serde::{Deserialize, Serialize};
+//! Prepare work in the repository checkout, never in the caller's worktree.
 
 use crate::config;
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
-use crate::lead;
-use crate::shell::quote;
+use crate::shell::{Shell, quote};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prepared {
-    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    pub host: Host,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct HookInputs<'a> {
-    pub repo: &'a str,
-    pub branch: &'a str,
-    pub base: &'a str,
-}
-
-/// Substitute `{repo}`, `{branch}`, `{base}`; drop argv words that become
-/// empty (an omitted `base` in an argv-style template).
-#[must_use]
-pub fn render(template: &[String], inputs: HookInputs<'_>) -> Vec<String> {
-    template
-        .iter()
-        .map(|word| {
-            word.replace("{repo}", inputs.repo)
-                .replace("{branch}", inputs.branch)
-                .replace("{base}", inputs.base)
-        })
-        .filter(|word| !word.is_empty())
-        .collect()
-}
-
-/// Parse the hook's stdout: the whole output, else its last non-empty line.
-pub fn parse_output(stdout: &str, host: &Host) -> Result<Prepared> {
-    #[derive(Deserialize)]
-    struct Raw {
-        pane_id: String,
-        #[serde(default)]
-        workspace_id: Option<String>,
+pub fn main_checkout(shell: &dyn Shell, repo: &str) -> Result<PathBuf> {
+    let out = shell.run_ok(
+        "git",
+        &[
+            "-C".into(),
+            repo.into(),
+            "rev-parse".into(),
+            "--path-format=absolute".into(),
+            "--git-common-dir".into(),
+        ],
+    )?;
+    let path = Path::new(out.stdout.trim());
+    if path.as_os_str().is_empty() {
+        return Err(Error::Invalid("git returned no checkout".into()));
     }
-    let candidates = std::iter::once(stdout.trim()).chain(stdout.lines().rev().map(str::trim));
-    for text in candidates.filter(|t| !t.is_empty()) {
-        if let Ok(raw) = serde_json::from_str::<Raw>(text) {
-            return Ok(Prepared {
-                pane_id: raw.pane_id,
-                workspace_id: raw.workspace_id,
-                host: host.clone(),
-            });
+    Ok(if path.file_name().is_some_and(|name| name == ".git") {
+        path.parent()
+            .ok_or_else(|| Error::Invalid("git returned no checkout parent".into()))?
+            .to_path_buf()
+    } else {
+        path.to_path_buf()
+    })
+}
+
+pub fn run(fleet: &Fleet, host: &Host, repo: &str, branch: &str) -> Result<Prepared> {
+    let checkout = main_checkout(fleet.shell, repo)?;
+    if host.is_local() {
+        return local(
+            fleet.shell,
+            fleet.policy,
+            &checkout.display().to_string(),
+            branch,
+        );
+    }
+    let home = Path::new(&fleet.home);
+    let canonical = home.canonicalize().ok();
+    let remote = checkout
+        .strip_prefix(home)
+        .ok()
+        .or_else(|| {
+            canonical
+                .as_deref()
+                .and_then(|home| checkout.strip_prefix(home).ok())
+        })
+        .unwrap_or(&checkout)
+        .display()
+        .to_string();
+    fleet.remote(
+        host,
+        &[
+            "prepare".into(),
+            "--repo".into(),
+            remote,
+            "--branch".into(),
+            branch.into(),
+        ],
+    )
+}
+
+pub fn local(
+    shell: &dyn Shell,
+    policy: &config::Policy,
+    repo: &str,
+    branch: &str,
+) -> Result<Prepared> {
+    let checkout = main_checkout(shell, repo)?;
+    let config = config::load_repo(&checkout)?;
+    let template = config.prepare(policy);
+    if template.is_empty() {
+        return Err(Error::Invalid("hooks.prepare is empty".into()));
+    }
+    if template.iter().any(|word| word.contains("{repo}")) {
+        return Err(Error::Invalid(
+            "hooks.prepare no longer accepts {repo}; the hook runs in the checkout".into(),
+        ));
+    }
+    let argv: Vec<_> = template
+        .iter()
+        .map(|w| w.replace("{branch}", branch).replace("{base}", ""))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let command = format!(
+        "cd {} && exec {}",
+        quote(&checkout.display().to_string()),
+        argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
+    );
+    let out = shell.run_ok("sh", &["-c".into(), command])?;
+    parse_output(&out.stdout)
+}
+
+pub fn parse_output(stdout: &str) -> Result<Prepared> {
+    for text in std::iter::once(stdout.trim()).chain(stdout.lines().rev().map(str::trim)) {
+        if let Ok(prepared) = serde_json::from_str::<Prepared>(text)
+            && (prepared.pane_id.is_some() || prepared.path.is_some())
+        {
+            return Ok(prepared);
         }
     }
     Err(Error::Hook {
-        detail: stdout
-            .trim()
-            .lines()
-            .last()
-            .unwrap_or("no output")
-            .to_string(),
+        detail: stdout.trim().lines().last().unwrap_or("no output").into(),
     })
-}
-
-/// `{repo}` as the admitted host sees it. A directory resolves to its main
-/// checkout, because a linked worktree exists only on the lead's host. A remote
-/// host gets the checkout relative to the lead's home: hosts keep repositories
-/// at the same place under their own home, and ssh starts the hook there. Any
-/// other value (a name, or a path outside home) passes through unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Located {
-    /// The main checkout on the lead's host, when `repo` is a directory.
-    pub checkout: Option<PathBuf>,
-    /// The `{repo}` value for the admitted host.
-    pub repo: String,
-}
-
-pub fn locate(fleet: &Fleet, host: &Host, repo: &str) -> Result<Located> {
-    if !Path::new(repo).is_dir() {
-        return Ok(Located {
-            checkout: None,
-            repo: repo.to_string(),
-        });
-    }
-    let checkout = lead::main_checkout(fleet.shell, repo)?;
-    let repo = if host.is_local() {
-        checkout.display().to_string()
-    } else {
-        relative_to_home(&checkout, Path::new(&fleet.home))
-            .unwrap_or_else(|| checkout.display().to_string())
-    };
-    Ok(Located {
-        checkout: Some(checkout),
-        repo,
-    })
-}
-
-/// `checkout` relative to `home` (`.` for home itself). Git reports resolved
-/// paths, so a symlinked home matches through its canonical form too.
-fn relative_to_home(checkout: &Path, home: &Path) -> Option<String> {
-    let canonical = home.canonicalize().ok();
-    let relative = checkout
-        .strip_prefix(home)
-        .ok()
-        .or_else(|| checkout.strip_prefix(canonical.as_deref()?).ok())?;
-    if relative.as_os_str().is_empty() {
-        Some(".".to_string())
-    } else {
-        Some(relative.display().to_string())
-    }
-}
-
-/// Run the `prepare` template on `host`: the repository's `wrangle.toml`
-/// template when it names one, else the policy's.
-pub fn run(fleet: &Fleet, host: &Host, inputs: HookInputs<'_>) -> Result<Prepared> {
-    let located = locate(fleet, host, inputs.repo)?;
-    let repo_config = match &located.checkout {
-        Some(checkout) => config::load_repo(checkout)?,
-        None => config::RepoConfig::default(),
-    };
-    let inputs = HookInputs {
-        repo: &located.repo,
-        ..inputs
-    };
-    let argv = render(repo_config.prepare(fleet.policy), inputs);
-    let Some((program, rest)) = argv.split_first() else {
-        return Err(Error::Invalid("hooks.prepare is empty".into()));
-    };
-    let out = match host.target.as_deref() {
-        None => fleet.shell.run_ok(program, rest)?,
-        Some(target) => {
-            let command = argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
-            fleet.shell.run_ok(
-                "ssh",
-                &[
-                    "-T".to_string(),
-                    "-o".to_string(),
-                    "BatchMode=yes".to_string(),
-                    "--".to_string(),
-                    target.to_string(),
-                    command,
-                ],
-            )?
-        }
-    };
-    parse_output(&out.stdout, host)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Policy;
-    use crate::ledger::Ledger;
-    use crate::shell::Fake;
-
-    fn inputs<'a>(repo: &'a str, branch: &'a str, base: &'a str) -> HookInputs<'a> {
-        HookInputs { repo, branch, base }
-    }
-
     #[test]
-    fn render_substitutes_and_drops_empty_words() {
-        let argv_template: Vec<String> =
-            ["mise", "run", "agent:worktree", "--", "{branch}", "{base}"]
-                .iter()
-                .map(ToString::to_string)
-                .collect();
+    fn prepare_accepts_path_or_pane_and_rejects_empty_results() {
         assert_eq!(
-            render(&argv_template, inputs("/r", "feat-x", "")),
-            ["mise", "run", "agent:worktree", "--", "feat-x"]
-        );
-        let sh: Vec<String> = crate::config::DEFAULT_PREPARE
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(
-            render(&sh, inputs("/r", "feat-x", "main"))[2],
-            "cd /r && mise run -q agent:worktree -- feat-x main"
-        );
-    }
-
-    #[test]
-    fn relative_to_home_strips_home_or_keeps_none() {
-        let home = Path::new("/nonexistent-home/o");
-        assert_eq!(
-            relative_to_home(Path::new("/nonexistent-home/o/code/rondo"), home).as_deref(),
-            Some("code/rondo")
+            parse_output("progress\n{\"path\":\"/repo/work\"}\n")
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("/repo/work")
         );
         assert_eq!(
-            relative_to_home(Path::new("/nonexistent-home/o"), home).as_deref(),
-            Some(".")
+            parse_output("{\"pane_id\":\"w1:p1\"}")
+                .unwrap()
+                .pane_id
+                .as_deref(),
+            Some("w1:p1")
         );
-        assert_eq!(relative_to_home(Path::new("/srv/rondo"), home), None);
-    }
-
-    #[test]
-    fn remote_hook_enters_the_checkout_relative_to_home() {
-        let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join("wrangle-hook-remote"));
-        let policy = Policy::default();
-        let dir = std::env::temp_dir().display().to_string();
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/nonexistent-home/o".to_string(),
-            hosts: Vec::new(),
-        };
-        let host = Host {
-            id: "8103".to_string(),
-            label: "netcup".to_string(),
-            target: Some("netcup-dev".to_string()),
-        };
-        shell.on(
-            &format!("git -C {dir} rev-parse --path-format=absolute --git-common-dir"),
-            "/nonexistent-home/o/code/rondo/.git\n",
-        );
-        shell.on(
-            "ssh -T -o BatchMode=yes -- netcup-dev sh -c 'cd code/rondo && mise run -q agent:worktree -- feat-x main'",
-            "{\"pane_id\":\"w9:p1\"}\n",
-        );
-        let p = run(&fleet, &host, inputs(&dir, "feat-x", "main")).unwrap();
-        assert_eq!(p.pane_id, "w9:p1");
-
-        // A name, not a directory, reaches the hook unchanged.
-        assert_eq!(locate(&fleet, &host, "rondo").unwrap().repo, "rondo");
-    }
-
-    #[test]
-    fn parse_output_accepts_trailing_json_line() {
-        let host = Host::local();
-        let p = parse_output(
-            "creating worktree…\n{\"pane_id\":\"w7:p2\",\"workspace_id\":\"w7\"}\n",
-            &host,
-        )
-        .unwrap();
-        assert_eq!(p.pane_id, "w7:p2");
-        assert_eq!(p.workspace_id.as_deref(), Some("w7"));
-        assert!(matches!(
-            parse_output("nothing here", &host),
-            Err(Error::Hook { .. })
-        ));
+        assert!(parse_output("{}").is_err());
     }
 }

@@ -5,20 +5,10 @@ id = "wrangle"
 name = "wrangle"
 version = "0.4.0"
 min_herdr_version = "0.9.1"
-description = "Releases a child's wrangle reservation when its pane closes, and opens the fleet board."
+description = "Opens the wrangle host status board."
 platforms = ["macos", "linux"]
 
-# Herdr sets HERDR_PANE_ID to the closed pane. The reservation attached to it ends at once
-# instead of at its TTL. A pane without a reservation is a no-op.
-[[events]]
-on = "pane.closed"
-command = ["sh", "plugin/release.sh"]
-
-[[events]]
-on = "pane.exited"
-command = ["sh", "plugin/release.sh"]
-
-# Every host, its headroom, reservations, and the queue; refreshes until you press q or Ctrl-C.
+# Every host, its agents, and its reservations. Refreshes until Ctrl-C.
 [[panes]]
 id = "board"
 title = "wrangle"

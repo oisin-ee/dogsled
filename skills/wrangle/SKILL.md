@@ -1,63 +1,60 @@
 ---
 name: wrangle
-description: Orchestrate parallel coding agents across Herdr hosts with the wrangle tool. Use when splitting work into units, spawning or queueing children, or following up on their results.
+description: Read host status and reserve capacity before spawning a coding agent with Shepherdr.
 ---
 
-# wrangle
+# Wrangle: host status and placement
 
-`wrangle` picks the host for each child, reserves a slot there, and spawns through Shepherdr. When every host is full, it gives you a ticket and wakes you when the ticket is admitted. You never pick a host, a layout, read load, or poll.
+Use the CLI for placement. Use Shepherdr's `agents` tool for spawning and parent/child messages.
+Wrangle registers no Pi tool or widget in 0.5.
 
-One lead per repository. Your first `wrangle` call claims the lead for your repository: your pane shows `⌂ <repo>` in the Herdr sidebar, and every child shows `↳ <name>`. Children without a branch open as tabs in your workspace. Children with a branch open in their worktree's workspace.
+## Read status
 
-## Procedure
-
-1. Split the task into units. One unit is one change that merges on its own. Commit your own changes before you spawn, because a worktree starts from the committed HEAD.
-
-2. For each unit, call the tool once. Give the child a writer branch when it edits files:
-
-   ```
-   wrangle agent_type=general label="unit a" message="<task>" branch=feat/unit-a base=main
-   ```
-
-   Omit `machine`. Set `machine` only when the unit needs one host, for example a browser on `local`. Omit `branch` for read-only work. Then the child gets a new workspace on the admitted host.
-
-3. Read the result:
-   - `spawned`: note `name`, `target`, and `host`. The child runs. Continue with the next unit.
-   - `queued`: note `ticket`. Continue with other work or end your turn. A `wrangle` message arrives when the ticket is admitted. Then call `wrangle ticket=<ticket>`. The stored arguments are reused.
-   - `lead_exists`: another session leads this repository. Do not spawn. Send the unit to that lead with `agents send` (its `pane` and `name` are in the result), or tell the user. Pass `take_over=true` only when the user asks for it.
-   - `isError`: read the text. Correct the call, or report the blocker.
-
-4. Do not call `wrangle` again for the same ticket before the wake-up message. Do not call `wrangle action=status` in a loop. One `status` call is fine when you report.
-
-5. After the spawn, use `agents` for the child: `send`, `read`, `answer`, `watch`, `assign`. The call never waits for the child: it returns once the child has its task, and the child's completion or blockage arrives later as a message. Keep working on other units meanwhile. Do not wait on the child with `sleep`, `watch`, or a blocking `assign`.
-
-6. After you merge or drop a unit, remove its worktree with the repository's remove task (`agent:worktree-remove` in a repository that uses the agent harness). The reservation ends when the pane closes or when its TTL ends.
-
-7. Leave panes marked `↳` alone unless their `lead` token names your lead (`lead:<repo>`). They belong to another lead. `wrangle action=status` lists every lead with its children.
-
-## Without the Pi tool
-
-In a shell (Claude Code, Codex, a script), the CLI does the same work:
-
-```
-wrangle spawn --kind claude --name unit-a --message "<task>" --branch feat/unit-a --base main --json
+```sh
+wrangle status
+wrangle status --json
+wrangle status --brief
 ```
 
-Inside Herdr, omit `--lead`: the spawn claims the repository's lead on `$HERDR_PANE_ID`. If another pane holds it, the spawn fails with exit 2 and names that pane; `wrangle lead` (exit 1, `lead_exists`) shows the same without spawning. Outside Herdr, pass `--lead <your-name>`.
+Every enabled Herdr host stays visible. `service: down` means the snapshot is missing, unavailable, or older than 30 seconds.
+A down host is not eligible. `status --line` uses `▲` for ineligible hosts and `?` for failed host reads.
 
-Exit 0 prints `{"spawned": true, "pane_id": …, "name": …}`. Exit 1 prints `{"queued": true, "ticket": …}`. If the exit code is 1, retry later with `wrangle spawn --ticket <ticket>` and the same arguments. `wrangle status` shows every host and your queue. Then follow the child with `herdr [--machine <id>] agent read <name>` and `herdr [--machine <id>] agent prompt <name> "<text>"`.
+The Pi extension adds brief status before each agent turn. It does not spawn or monitor children.
 
-If `status` is `blocked`, the child sits on a startup dialog. Read its pane, answer the dialog with `herdr agent send-keys`, then prompt it.
+## Place and spawn
 
-`wrangle report --since 24h` shows queue wait, run time, and host refusal counts with reasons, while `--json` returns structured data.
-The local ledger appends lifecycle metadata to `events.jsonl` without prompts or messages and removes records older than 30 days on each append.
-The duration filter accepts whole numbers with `ms`, `s`, `m`, `h`, or `d`.
-Missing endpoints produce unknown durations.
-Each queued admission attempt counts once per refused host.
+1. Reserve capacity for the child:
 
-## Rules
+   ```sh
+   wrangle place --json
+   ```
 
-- `machine` is a resource pin, not a work-to-host mapping. `wrangle` balances the hosts.
-- There is no `placement` or `workspace` argument. The layout follows from `branch`.
-- Every writer gets its own branch. The `prepare` hook makes the worktree on the admitted host. A repository can set its own hook in `wrangle.toml`.
-- Give the child one unit, its allowed files, its verification command, and commit authority. Do not give it the transcript.
+   For a writer, prepare its worktree on the selected host:
+
+   ```sh
+   wrangle place --branch feat/unit-a --repo /path/to/repo --json
+   ```
+
+2. Read `host.id`, `host.label`, and any returned `path` and `pane_id`.
+3. Spawn through `agents`, using that machine and the prepared pane or path. Omit `machine` for `local`.
+4. Use `agents` for messages, follow-up, and completion. Do not call a removed `wrangle spawn` or ticket API.
+
+`--host H` pins placement by id or label. Without it, wrangle selects the host with the most headroom.
+A prepared pane ends its reservation when an agent appears there. Otherwise, the reservation expires after 60 seconds by default.
+
+If `place` exits 1, it returns `{"full": true, "hosts": [...]}`.
+Inspect the host reasons and report the capacity limit. There is no queue or automatic retry in 0.5.
+Exit 2 means an error. Read the error before another attempt.
+
+## Prepare hook
+
+The hook runs in the repository's main checkout on the selected host.
+A repository's `wrangle.toml` can replace the host policy's `hooks.prepare`.
+Use `{branch}` as an argument placeholder. Do not use the removed `{repo}` placeholder.
+The hook returns JSON with `path`, `pane_id`, or both.
+
+## Service
+
+Each host needs `wrangle serve`. Its default interval is ten seconds.
+Dotfiles owns service installation. Do not install, replace, or restart host services without permission.
+For an authorized one-shot measurement, run `wrangle serve --once`.

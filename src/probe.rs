@@ -1,141 +1,165 @@
-//! Measure one host: load, cores, home disk, Herdr agents, and the live
-//! reservations in its ledger. Runs on the host it describes.
-
-use std::collections::BTreeMap;
-
-use serde::{Deserialize, Serialize};
+//! Local measurements. The service collects agents and all panes separately.
 
 use crate::error::{Error, Result};
-use crate::ledger::{Ledger, Reservation};
+use crate::ledger::Reservation;
 use crate::shell::Shell;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCounts {
     pub total: usize,
-    /// `agent_status` → count, as Herdr reports it (`idle`, `working`, `done`, …).
-    #[serde(default)]
     pub by_status: BTreeMap<String, usize>,
 }
 
 impl AgentCounts {
-    /// Agents that still hold a pane and may run: everything not `done`.
-    #[must_use]
     pub fn live(&self) -> usize {
         self.total
             .saturating_sub(self.by_status.get("done").copied().unwrap_or(0))
     }
 }
 
-/// One Herdr pane that carries wrangle tokens: a lead (`role=lead`) or a
-/// child (`lead=` or the older `owner=`). Other panes are not reported.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pane {
-    #[serde(default)]
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_status: Option<String>,
-    #[serde(default)]
-    pub tokens: BTreeMap<String, String>,
 }
 
-impl Pane {
-    #[must_use]
-    pub fn token(&self, key: &str) -> Option<&str> {
-        self.tokens.get(key).map(String::as_str)
-    }
+/// Stable service contract, independent of Herdr's raw response fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Agent {
+    pub pane: String,
+    pub agent: Option<String>,
+    pub state: String,
+    pub name: Option<String>,
+    pub transcript: Option<String>,
+    pub transcript_modified: Option<u64>,
+}
 
-    /// The repository this pane leads, when it carries `role=lead`.
-    #[must_use]
-    pub fn lead_repo(&self) -> Option<&str> {
-        (self.token("role") == Some("lead"))
-            .then(|| self.token("repo"))
-            .flatten()
-    }
+#[derive(Debug, Deserialize)]
+struct RawAgent {
+    pane_id: String,
+    agent: Option<String>,
+    agent_status: Option<String>,
+    name: Option<String>,
+    agent_session: Option<AgentSession>,
+}
 
-    /// The lead that owns this child: `lead=`, else the older `owner=`.
-    #[must_use]
-    pub fn owner(&self) -> Option<&str> {
-        self.token("lead").or_else(|| self.token("owner"))
-    }
+#[derive(Debug, Deserialize)]
+struct AgentSession {
+    kind: String,
+    value: String,
+}
 
-    #[must_use]
-    pub fn is_done(&self) -> bool {
-        self.agent_status.as_deref() == Some("done")
-    }
-
-    #[must_use]
-    pub fn label(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.pane_id)
-    }
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Memory {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Probe {
-    /// `local` or the Herdr machine id.
     pub host: String,
     pub label: String,
     pub load1: f64,
     pub cores: u32,
+    pub memory: Memory,
     pub disk_free_percent: f64,
     pub agents: AgentCounts,
+    pub agent_panes: Vec<Agent>,
     pub reservations: Vec<Reservation>,
-    /// Leads and children on this host. Empty from a host that runs an
-    /// older `wrangle`.
-    #[serde(default)]
     pub panes: Vec<Pane>,
 }
 
-/// Measure this machine. `home` is the filesystem the disk rule watches.
-pub fn local(
-    shell: &dyn Shell,
-    ledger: &Ledger,
-    ttl_ms: u64,
-    host: &str,
-    label: &str,
-    home: &str,
-) -> Result<Probe> {
-    let list = agent_list(shell)?;
+pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
+    let agent_panes = agent_list(shell)?;
+    let mut agents = AgentCounts::default();
+    for pane in &agent_panes {
+        agents.total += 1;
+        *agents.by_status.entry(pane.state.clone()).or_default() += 1;
+    }
+    let panes = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
+    let value: serde_json::Value = serde_json::from_str(&panes.stdout)?;
+    let panes = value
+        .pointer("/result/panes")
+        .ok_or_else(|| parse_error("herdr pane list", &panes.stdout))?;
     Ok(Probe {
-        host: host.to_string(),
-        label: label.to_string(),
+        host: "local".into(),
+        label: "local".into(),
         load1: load1(shell)?,
         cores: cores(),
+        memory: memory(shell)?,
         disk_free_percent: disk_free_percent(shell, home)?,
-        agents: list.counts,
-        reservations: ledger.reservations(ttl_ms)?,
-        panes: list.panes,
+        agents,
+        agent_panes,
+        reservations: Vec::new(),
+        panes: serde_json::from_value(panes.clone())?,
     })
 }
 
-#[must_use]
+pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
+    let out = shell.run_ok("herdr", &["agent".into(), "list".into()])?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    let agents = value
+        .pointer("/result/agents")
+        .ok_or_else(|| parse_error("herdr agent list", &out.stdout))?;
+    let agents: Vec<RawAgent> = serde_json::from_value(agents.clone())?;
+    Ok(agents
+        .into_iter()
+        .map(|raw| {
+            let transcript = raw
+                .agent_session
+                .filter(|session| session.kind == "path")
+                .map(|session| session.value);
+            let transcript_modified = transcript.as_deref().and_then(|path| {
+                std::fs::metadata(path)
+                    .ok()?
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+            });
+            Agent {
+                pane: raw.pane_id,
+                agent: raw.agent,
+                state: raw.agent_status.unwrap_or_else(|| "unknown".into()),
+                name: raw.name,
+                transcript,
+                transcript_modified,
+            }
+        })
+        .collect())
+}
+
+fn parse_error(origin: &str, detail: &str) -> Error {
+    Error::Parse {
+        origin: origin.into(),
+        detail: detail.trim().into(),
+    }
+}
+
 pub fn cores() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
-/// One-minute load: `/proc/loadavg` where it exists (Linux), else
-/// `sysctl -n vm.loadavg` (macOS, BSD).
 pub fn load1(shell: &dyn Shell) -> Result<f64> {
-    if let Ok(text) = shell.read_file("/proc/loadavg") {
-        return parse_loadavg(&text).ok_or_else(|| Error::Parse {
-            origin: "/proc/loadavg".to_string(),
-            detail: text.trim().to_string(),
-        });
-    }
-    let out = shell.run_ok("sysctl", &["-n".to_string(), "vm.loadavg".to_string()])?;
-    parse_loadavg(&out.stdout).ok_or_else(|| Error::Parse {
-        origin: "sysctl vm.loadavg".to_string(),
-        detail: out.stdout.trim().to_string(),
-    })
+    let text = match shell.read_file("/proc/loadavg") {
+        Ok(text) => text,
+        Err(_) => {
+            shell
+                .run_ok("sysctl", &["-n".into(), "vm.loadavg".into()])?
+                .stdout
+        }
+    };
+    parse_loadavg(&text).ok_or_else(|| parse_error("load average", &text))
 }
 
-/// First number in `0.52 0.58 0.59 1/389 12345` or `{ 0.52 0.58 0.59 }`.
-#[must_use]
 pub fn parse_loadavg(text: &str) -> Option<f64> {
     text.split(|c: char| c.is_whitespace() || c == '{' || c == '}')
         .find(|s| !s.is_empty())
@@ -143,142 +167,205 @@ pub fn parse_loadavg(text: &str) -> Option<f64> {
 }
 
 pub fn disk_free_percent(shell: &dyn Shell, path: &str) -> Result<f64> {
-    let out = shell.run_ok("df", &["-Pk".to_string(), path.to_string()])?;
-    parse_df(&out.stdout).ok_or_else(|| Error::Parse {
-        origin: format!("df -Pk {path}"),
-        detail: out.stdout.trim().to_string(),
+    let out = shell.run_ok("df", &["-Pk".into(), path.into()])?;
+    parse_df(&out.stdout).ok_or_else(|| parse_error("df -Pk", &out.stdout))
+}
+
+pub fn parse_df(text: &str) -> Option<f64> {
+    let cols: Vec<_> = text
+        .lines()
+        .rfind(|l| !l.trim().is_empty())?
+        .split_whitespace()
+        .collect();
+    let total: f64 = cols.get(1)?.parse().ok()?;
+    let available: f64 = cols.get(3)?.parse().ok()?;
+    (total > 0.0).then_some(available / total * 100.0)
+}
+
+pub fn memory(shell: &dyn Shell) -> Result<Memory> {
+    if let Ok(meminfo) = shell.read_file("/proc/meminfo") {
+        if let Some(memory) = user_slice_memory(shell)? {
+            return Ok(memory);
+        }
+        return parse_meminfo(&meminfo).ok_or_else(|| parse_error("/proc/meminfo", &meminfo));
+    }
+    let total = shell
+        .run_ok("sysctl", &["-n".into(), "hw.memsize".into()])?
+        .stdout;
+    let vm = shell.run_ok("vm_stat", &[])?.stdout;
+    parse_vm_stat(
+        &vm,
+        total
+            .trim()
+            .parse()
+            .map_err(|_| parse_error("hw.memsize", &total))?,
+    )
+    .ok_or_else(|| parse_error("vm_stat", &vm))
+}
+
+/// Select the closest finite user-slice ceiling, not a session scope or the
+/// host's root cgroup. Read usage from that same slice.
+fn user_slice_memory(shell: &dyn Shell) -> Result<Option<Memory>> {
+    let Ok(cgroup) = shell.read_file("/proc/self/cgroup") else {
+        return Ok(None);
+    };
+    let Some(path) = cgroup.lines().find_map(|line| line.strip_prefix("0::")) else {
+        return Ok(None);
+    };
+    let mut prefix = String::from("/sys/fs/cgroup");
+    let mut slices = Vec::new();
+    for component in path.split('/').filter(|part| !part.is_empty()) {
+        prefix.push('/');
+        prefix.push_str(component);
+        if component == "user.slice"
+            || (component.starts_with("user-") && component.strip_suffix(".slice").is_some())
+        {
+            slices.push(prefix.clone());
+        }
+    }
+    for slice in slices.iter().rev() {
+        let Ok(limit) = shell.read_file(&format!("{slice}/memory.max")) else {
+            continue;
+        };
+        if limit.trim() == "max" {
+            continue;
+        }
+        let total_bytes = limit
+            .trim()
+            .parse()
+            .map_err(|_| parse_error("memory.max", &limit))?;
+        let current = shell.read_file(&format!("{slice}/memory.current"))?;
+        let used_bytes = current
+            .trim()
+            .parse()
+            .map_err(|_| parse_error("memory.current", &current))?;
+        return Ok(Some(Memory {
+            used_bytes,
+            total_bytes,
+        }));
+    }
+    Ok(None)
+}
+
+fn parse_meminfo(text: &str) -> Option<Memory> {
+    let kb = |key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    };
+    let total_bytes = kb("MemTotal:")?;
+    Some(Memory {
+        used_bytes: total_bytes.saturating_sub(kb("MemAvailable:")?),
+        total_bytes,
     })
 }
 
-/// Free percent from POSIX `df -Pk`: `Available / 1024-blocks × 100` on the
-/// last line.
-#[must_use]
-pub fn parse_df(text: &str) -> Option<f64> {
-    let line = text.lines().rfind(|l| !l.trim().is_empty())?;
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    // Filesystem 1024-blocks Used Available Capacity Mounted-on
-    if cols.len() < 5 {
-        return None;
-    }
-    let total: f64 = cols[1].parse().ok()?;
-    let available: f64 = cols[3].parse().ok()?;
-    if total <= 0.0 {
-        return None;
-    }
-    Some(available / total * 100.0)
-}
-
-/// `herdr agent list` on this host, counted and filtered to wrangle panes.
-pub fn agent_list(shell: &dyn Shell) -> Result<AgentList> {
-    let out = shell.run_ok("herdr", &["agent".to_string(), "list".to_string()])?;
-    parse_agent_list(&out.stdout)
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentList {
-    pub counts: AgentCounts,
-    /// Only panes with a `role`, `lead`, or `owner` token.
-    pub panes: Vec<Pane>,
-}
-
-#[derive(Deserialize)]
-struct RawList {
-    result: RawListResult,
-}
-
-#[derive(Deserialize)]
-struct RawListResult {
-    #[serde(default)]
-    agents: Vec<Pane>,
-}
-
-const WRANGLE_TOKENS: [&str; 3] = ["role", "lead", "owner"];
-
-/// Parse `herdr agent list` JSON (`{"result":{"agents":[…]}}`): count every
-/// agent by status and keep the panes that carry wrangle tokens.
-pub fn parse_agent_list(text: &str) -> Result<AgentList> {
-    let list: RawList = serde_json::from_str(text).map_err(|e| Error::Parse {
-        origin: "herdr agent list".to_string(),
-        detail: e.to_string(),
-    })?;
-    let mut out = AgentList::default();
-    for row in list.result.agents {
-        out.counts.total += 1;
-        let status = row
-            .agent_status
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        *out.counts.by_status.entry(status).or_insert(0) += 1;
-        if WRANGLE_TOKENS.iter().any(|k| row.tokens.contains_key(*k)) {
-            out.panes.push(row);
-        }
-    }
-    Ok(out)
+fn parse_vm_stat(text: &str, total_bytes: u64) -> Option<Memory> {
+    let header = text.lines().next()?;
+    let page_size: u64 = header
+        .split("page size of ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let pages = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key))?
+            .trim()
+            .trim_end_matches('.')
+            .parse::<u64>()
+            .ok()
+    };
+    let available = pages("Pages free:")?
+        .checked_add(pages("Pages inactive:")?)?
+        .checked_add(pages("Pages speculative:")?)?
+        .checked_mul(page_size)?;
+    Some(Memory {
+        used_bytes: total_bytes.saturating_sub(available),
+        total_bytes,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::Fake;
 
     #[test]
-    fn loadavg_linux_and_sysctl_forms() {
+    fn parses_system_measurements() {
+        assert_eq!(parse_loadavg("{ 33.81 24.81 15.46 }"), Some(33.81));
+        assert_eq!(parse_loadavg("0.5 0.2 0.1 1/10 42"), Some(0.5));
+        assert_eq!(parse_df("FS 1000 500 400 60% /"), Some(40.0));
         assert_eq!(
-            parse_loadavg("34.20 28.66 21.17 16/2698 1480037\n"),
-            Some(34.2)
+            parse_meminfo("MemTotal: 100 kB\nMemAvailable: 25 kB\n"),
+            Some(Memory {
+                used_bytes: 76800,
+                total_bytes: 102_400
+            })
         );
-        assert_eq!(parse_loadavg("{ 33.81 24.81 15.46 }\n"), Some(33.81));
-        assert_eq!(parse_loadavg(""), None);
+        assert_eq!(
+            parse_vm_stat(
+                "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 2.\nPages inactive: 3.\nPages speculative: 1.\n",
+                40960
+            ),
+            Some(Memory {
+                used_bytes: 16384,
+                total_bytes: 40960
+            })
+        );
+        assert!(parse_vm_stat("bad", 10).is_none());
     }
 
     #[test]
-    fn df_last_line_free_percent() {
-        let text = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                    /dev/disk3s5 1000 700 250 76% /System/Volumes/Data\n";
-        let free = parse_df(text).unwrap();
-        assert!((free - 25.0).abs() < 1e-9);
-        assert_eq!(parse_df("Filesystem\n"), None);
+    fn memory_uses_user_slice_not_session_limit() {
+        let shell = Fake::new();
+        shell
+            .on(
+                "read /proc/meminfo",
+                "MemTotal: 100 kB\nMemAvailable: 25 kB",
+            )
+            .on(
+                "read /proc/self/cgroup",
+                "0::/user.slice/user-1000.slice/session-5.scope\n",
+            )
+            .on(
+                "read /sys/fs/cgroup/user.slice/user-1000.slice/memory.max",
+                "8192",
+            )
+            .on(
+                "read /sys/fs/cgroup/user.slice/user-1000.slice/memory.current",
+                "4096",
+            );
+        assert_eq!(
+            memory(&shell).unwrap(),
+            Memory {
+                used_bytes: 4096,
+                total_bytes: 8192
+            }
+        );
+        shell.on(
+            "read /sys/fs/cgroup/user.slice/user-1000.slice/memory.max",
+            "max",
+        );
+        assert_eq!(memory(&shell).unwrap().total_bytes, 102_400);
     }
 
     #[test]
-    fn agent_list_counts_by_status() {
-        let text = r#"{"id":"cli:agent:list","result":{"agents":[
-            {"agent":"pi","agent_status":"idle","pane_id":"w1:p1"},
-            {"agent":"pi","agent_status":"done","pane_id":"w1:p2"},
-            {"agent":"pi","agent_status":"working","pane_id":"w1:p3"},
-            {"agent":"claude","pane_id":"w1:p4"}
-        ],"type":"agent_list"}}"#;
-        let c = parse_agent_list(text).unwrap().counts;
-        assert_eq!(c.total, 4);
-        assert_eq!(c.by_status["idle"], 1);
-        assert_eq!(c.by_status["unknown"], 1);
-        assert_eq!(c.live(), 3);
-    }
-
-    #[test]
-    fn agent_list_keeps_leads_and_children_only() {
-        let text = r#"{"result":{"agents":[
-            {"agent":"pi","agent_status":"working","pane_id":"w42:p1","workspace_id":"w42",
-             "display_agent":"⌂ rondo","tokens":{"role":"lead","repo":"rondo"}},
-            {"agent":"pi","agent_status":"idle","pane_id":"w42:pX","workspace_id":"w42",
-             "name":"jalgpall-data","tokens":{"owner":"w42:pP","sub":"●"}},
-            {"agent":"pi","agent_status":"idle","pane_id":"w42:pY","name":"kid",
-             "tokens":{"lead":"lead:rondo","sub":"●"}},
-            {"agent":"pi","agent_status":"working","pane_id":"w42:p7"}
-        ]}}"#;
-        let list = parse_agent_list(text).unwrap();
-        assert_eq!(list.counts.total, 4);
-        let ids: Vec<&str> = list.panes.iter().map(|p| p.pane_id.as_str()).collect();
-        assert_eq!(ids, ["w42:p1", "w42:pX", "w42:pY"]);
-        assert_eq!(list.panes[0].lead_repo(), Some("rondo"));
-        assert_eq!(list.panes[0].workspace_id.as_deref(), Some("w42"));
-        assert_eq!(list.panes[1].owner(), Some("w42:pP"));
-        assert_eq!(list.panes[2].owner(), Some("lead:rondo"));
-        assert_eq!(list.panes[2].label(), "kid");
-        assert_eq!(list.panes[1].lead_repo(), None);
-    }
-
-    #[test]
-    fn agent_list_garbage_is_a_parse_error() {
-        assert!(matches!(parse_agent_list("nope"), Err(Error::Parse { .. })));
+    fn mac_memory_uses_vm_stat_page_size() {
+        let shell = Fake::new();
+        shell.on("sysctl -n hw.memsize", "65536\n")
+            .on("vm_stat", "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1.\nPages inactive: 1.\nPages speculative: 0.\n");
+        assert_eq!(
+            memory(&shell).unwrap(),
+            Memory {
+                used_bytes: 32768,
+                total_bytes: 65536
+            }
+        );
     }
 }
