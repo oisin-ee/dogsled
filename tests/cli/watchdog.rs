@@ -137,7 +137,13 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
         Some(2)
     );
     fs::remove_file(rig.dir.join("dirty")).unwrap();
-    rig.put("panes.json", &json!({"result":{"panes":[{"pane_id":"live","cwd":rig.dir.join("home/repo/tree/subdir")}]}}));
+    let alias = rig.dir.join("alias");
+    std::os::unix::fs::symlink(rig.dir.join("home/repo/tree"), &alias).unwrap();
+    // Missing subdirectories still belong to the live pane, through a symlink.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"live","cwd":alias.join("subdir")}]}}),
+    );
     assert_eq!(
         rig.run(&["host", "prune", "--plan", &plan]).status.code(),
         Some(2)

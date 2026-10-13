@@ -156,17 +156,24 @@ fn retired(shell: &dyn Shell, tree: &Tree) -> Result<bool> {
     }
 }
 
+fn resolved_path(path: &Path) -> std::path::PathBuf {
+    for ancestor in path.ancestors() {
+        if let Ok(root) = ancestor.canonicalize() {
+            return path
+                .strip_prefix(ancestor)
+                .map_or(root.clone(), |suffix| root.join(suffix));
+        }
+    }
+    path.to_path_buf()
+}
+
 fn live(tree: &Tree, panes: &[Pane]) -> bool {
     panes.iter().any(|p| {
         [p.cwd.as_deref(), p.foreground_cwd.as_deref()]
             .into_iter()
             .flatten()
             .any(|cwd| {
-                let cwd = Path::new(cwd).canonicalize().unwrap_or_else(|_| cwd.into());
-                let path = Path::new(&tree.path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| tree.path.clone().into());
-                cwd.starts_with(path)
+                resolved_path(Path::new(cwd)).starts_with(resolved_path(Path::new(&tree.path)))
             })
     })
 }
