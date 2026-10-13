@@ -138,9 +138,20 @@ Automatic cleanup belongs to unit 3, not the initial host service.
 
 | Harness | Hook | Content |
 |---|---|---|
-| Pi | `before_agent_start` (wrangle Pi extension) | `wrangle status --brief` |
-| Claude Code | `UserPromptSubmit` (agent repo lifecycle runner) | same |
-| Codex | `UserPromptSubmit` (agent repo lifecycle runner) | same |
+| Pi | `before_agent_start` (wrangle Pi extension) | `wrangle hook context --harness pi` |
+| Claude Code | `SessionStart`, `UserPromptSubmit` (wrangle plugin) | `wrangle hook context --harness claude` |
+| Codex | `SessionStart`, `UserPromptSubmit` (wrangle plugin) | `wrangle hook context --harness codex` |
+
+The CLI reads status through the existing peer cache and formats `status --brief` for each harness.
+Claude Code and Codex receive `hookSpecificOutput` JSON with the event name and `additionalContext`. Pi receives plain text.
+Plugin registrations pass `--event` explicitly. The default is `UserPromptSubmit`. No hook reads stdin.
+Without `HERDR_ENV` or snapshots, the hook prints nothing. Its total command budget is five seconds.
+Failures contribute no context and exit successfully. Plugin commands also end with `|| true`.
+
+Wrangle owns both marketplaces, both plugin manifests, and the hooks under `plugins/wrangle`.
+Codex declares its hooks inline and uses `$PLUGIN_ROOT`. Claude reads `hooks/hooks.json` and uses `$CLAUDE_PLUGIN_ROOT`.
+Pi, Claude Code, and Codex share the single skill under `plugins/wrangle/skills/wrangle`.
+The Pi extension and Herdr manifest stay at the repository root paths. Binary archives retain the service templates.
 
 ## What is removed
 
@@ -168,10 +179,12 @@ Automatic cleanup belongs to unit 3, not the initial host service.
    Proof: test A, where a child hangs in a tool call while its parent is idle.
    It passes when the parent gets a check-in naming the stall within 11 min.
    Also confirm that `herdr agent prompt` starts a turn in an idle Pi pane.
-4. **agent repo.** Prompt hooks for 3 harnesses, the `wrangle` skill, `20-delegation.md` lines 21–37 and 70–72.
+4. **wrangle standalone package.** Wrangle owns prompt hooks and one shared skill for Pi, Claude Code, and Codex.
+   Add the two marketplaces, two plugin manifests, and `hook context`. Keep all package versions equal to Cargo without a version bump.
+   Agent-repository delegation rules are outside this unit.
 5. **dotfiles.** Tab-row command to `status --line`; sidebar rows for the new tokens; service install on each host.
 
-Units 1–3 are sequential. Unit 4 can start after 1. Unit 5 follows each release.
+Units 1–3 are sequential. Unit 4 builds on units 1 and 2. Unit 5 follows each release.
 
 ## Decisions
 

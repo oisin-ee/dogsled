@@ -29,7 +29,7 @@
       "./pi/index.ts"
     ],
     "skills": [
-      "./skills"
+      "./plugins/wrangle/skills/wrangle"
     ]
   },
   "peerDependencies": {

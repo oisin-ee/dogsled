@@ -122,9 +122,23 @@ pub enum Command {
     Cancel {
         ticket: String,
     },
+    /// Add host status to a harness prompt without blocking it on failure.
+    #[command(subcommand)]
+    Hook(HookCommand),
     /// Internal local operations used by peers over SSH.
     #[command(subcommand, hide = true)]
     Host(HostCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HookCommand {
+    Context {
+        #[arg(long)]
+        harness: crate::context::Harness,
+        /// The lifecycle event registered by the plugin; stdin is never read.
+        #[arg(long, default_value = "UserPromptSubmit")]
+        event: crate::context::Event,
+    },
 }
 
 #[derive(Debug, Subcommand)]

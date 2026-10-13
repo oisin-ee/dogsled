@@ -1,0 +1,11 @@
+{
+  "name": "wrangle",
+  "version": "0.4.0",
+  "description": "Host status, placement, jobs, and queue admission for Herdr agents.",
+  "author": {
+    "name": "oisin-ee",
+    "url": "https://github.com/oisin-ee"
+  },
+  "repository": "https://github.com/oisin-ee/wrangle",
+  "license": "MIT"
+}

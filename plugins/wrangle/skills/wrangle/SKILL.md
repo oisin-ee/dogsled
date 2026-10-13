@@ -17,7 +17,9 @@ wrangle items --owner "$HERDR_PANE_ID" --json
 ```
 
 A missing, failed, or stale snapshot makes a host ineligible.
-Status shows open items per owner and pending tickets. Pi adds brief status before each turn.
+Status shows open items per owner and pending tickets. Each harness adds brief status through its wrangle package.
+`wrangle hook context --harness claude|codex|pi` supplies that context. Claude Code and Codex run it at session start and prompt submission.
+Without Herdr or snapshots, it prints nothing. Hook failures never block a prompt.
 The Pi widget lists this session's open jobs and pending tickets. It refreshes after tool results and every ten seconds.
 
 ## Place an agent

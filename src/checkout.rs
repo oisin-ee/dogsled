@@ -1,8 +1,8 @@
 //! Repository identity and home-relative checkout provisioning.
 
 use crate::error::{Error, Result};
-use crate::hook;
 use crate::hosts::{Fleet, Host};
+use crate::prepare;
 use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ pub fn discover(
         }
         return Ok(None);
     }
-    let path = hook::main_checkout(shell, cwd)?;
+    let path = prepare::main_checkout(shell, cwd)?;
     let origin = shell
         .run_ok(
             "git",

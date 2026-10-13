@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## 0.5.0 - Unreleased
 
+- Package wrangle hooks and one shared skill for Pi, Claude Code, and Codex. Add Claude and Codex marketplaces.
+- Add `hook context --harness claude|codex|pi`, with event-specific JSON or plain text from the shared brief formatter.
+- Bound prompt context to five seconds. Missing Herdr, snapshots, or binaries do not block prompts.
+- Keep package versions aligned with Cargo and verify plugin paths and release service templates in tests.
+
 - Keep job capture and exit status independent from a closed pane output.
 - Enforce one command deadline across discovery, preparation, transport, and lock waits. Bound routine operations to 30 seconds and setup operations to 10 minutes.
 - Run service actions independently from snapshot publication and record ticket timeouts without stopping the probe loop.

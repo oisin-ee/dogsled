@@ -1,10 +1,10 @@
 //! User-facing status formatting and placement. No agent spawning or queue.
 
 use crate::error::Result;
-use crate::hook::Prepared;
 use crate::hosts::{Fleet, Host, HostReport};
 use crate::ledger::new_id;
 use crate::plan;
+use crate::prepare::Prepared;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -12,6 +12,14 @@ pub struct Status {
     pub hosts: Vec<HostReport>,
     pub items: Vec<crate::items::Item>,
     pub queue: Vec<crate::work::Ticket>,
+}
+
+pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
+    Ok(Status {
+        hosts: fleet.status(crate::ledger::now_ms())?,
+        items: crate::items::list(fleet.ledger)?,
+        queue: crate::work::queue(fleet.ledger)?,
+    })
 }
 
 #[derive(Debug, Serialize)]
