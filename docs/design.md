@@ -94,7 +94,8 @@ Rule: an agent that owns an open child or job hears from wrangle at least every 
 - `wrangle agent` (spawn for Claude Code, Codex, and scripts): the caller's pane.
 - Pi children spawned with Shepherdr's `agents` tool: the wrangle Pi extension reads the spawn tool result and runs `wrangle track <machine> <pane>` with its own pane as owner.
 
-An item closes when its job ends, when its agent is `idle` or `done` (Shepherdr delivers that result), or when its pane closes.
+A job item closes when its job ends. An agent item closes when its pane closes. A finished (`idle` or `done`) agent stays open,
+so check-ins keep naming it until the owner runs `wrangle close <pane>`, which closes its workspace and removes its worktree with `wt remove`.
 
 **Stall.** An agent is stalled when Herdr shows it `working` or `unknown` and its transcript (`transcript` in host.json) has not changed for 10 min. The screen is not a signal: spinners and elapsed timers redraw it while a tool call hangs. An agent with no transcript is never marked stalled. Unit 3 confirms where Claude Code and Codex transcripts are, because Herdr may report only a session id for them.
 

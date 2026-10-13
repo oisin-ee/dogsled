@@ -133,6 +133,15 @@ pub enum Command {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Close a finished child: remove its worktree with the repository's remove hook,
+    /// close its pane, and end its item. Refuses a working, blocked, or unknown agent.
+    Close {
+        /// The child's Herdr pane (the spawn result's `target`).
+        pane: String,
+        /// The child's host. Defaults to the host of the open item for this pane, else local.
+        #[arg(long)]
+        host: Option<String>,
+    },
     Cancel {
         ticket: String,
     },
@@ -169,6 +178,9 @@ pub enum HostCommand {
     Prune {
         #[arg(long)]
         plan: String,
+    },
+    Close {
+        pane: String,
     },
     Launch {
         #[arg(long)]

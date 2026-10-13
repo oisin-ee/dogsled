@@ -34,6 +34,38 @@ pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
     })
 }
 
+/// End every open item on `host`'s `pane`, after `wrangle close` removed it.
+pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize> {
+    ledger.with_lock("items", || {
+        let mut items = list(ledger)?;
+        let mut count = 0;
+        for item in items
+            .iter_mut()
+            .filter(|i| i.closed_ms.is_none() && i.host == host && i.pane == pane)
+        {
+            item.closed_ms = Some(now);
+            count += 1;
+        }
+        ledger.write("items.json", &items)?;
+        Ok(count)
+    })
+}
+
+/// An open agent item whose agent is idle or done: its result is ready, and its
+/// pane and worktree wait for `wrangle close`.
+pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
+    item.closed_ms.is_none()
+        && item.kind == "agent"
+        && hosts
+            .iter()
+            .filter(|h| h.host.id == item.host)
+            .filter_map(|h| h.probe.as_ref())
+            .flat_map(|p| &p.agent_panes)
+            .any(|a| a.pane == item.pane && matches!(a.state.as_str(), "idle" | "done"))
+}
+
+/// A job item ends with its job. An agent item stays open while its pane exists, so the
+/// owner keeps hearing about a finished child until `wrangle close` removes it.
 pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> {
     ledger.with_lock("items", || {
         let mut items = list(ledger)?;
@@ -51,16 +83,11 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
             if host.sampled_ms.is_none_or(|t| t < item.created_ms) {
                 continue;
             }
-            let ended = if item.kind == "job" {
-                host.jobs
+            let ended = item.kind == "job"
+                && host
+                    .jobs
                     .iter()
-                    .any(|j| j.id == item.id && j.ended_ms.is_some())
-            } else {
-                probe
-                    .agent_panes
-                    .iter()
-                    .any(|a| a.pane == item.pane && matches!(a.state.as_str(), "idle" | "done"))
-            };
+                    .any(|j| j.id == item.id && j.ended_ms.is_some());
             let gone = !probe.panes.iter().any(|p| p.pane_id == item.pane);
             if ended || gone {
                 item.closed_ms = Some(now);

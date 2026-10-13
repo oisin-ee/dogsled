@@ -54,12 +54,13 @@ test("tracks structured and text spawn results, filters widget, and cleans up ti
 	r.items({ items: [
 		{ id: "j1", kind: "job", host: "peer", pane: "w2:p1", closed_ms: null },
 		{ id: "j2", kind: "job", closed_ms: 100 },
-		{ id: "a1", kind: "agent", closed_ms: null },
+		{ id: "a1", kind: "agent", name: "worker", host: "peer", pane: "w3:p1", closed_ms: null },
+		{ id: "a2", kind: "agent", name: "closed", closed_ms: 100 },
 	], queue: [{ id: "t1", state: "pending" }, { id: "t2", state: "admitted" }] });
 	const spawn = { spawned: true, machine: "peer", target: "w2:p1", name: "worker" };
 	await r.invoke("tool_result", { toolName: "agents", isError: false, details: spawn, content: [] });
 	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "track peer w2:p1 --name worker"));
-	assert.deepEqual(r.widgets.at(-1), ["wrangle", ["job j1 · peer · w2:p1", "queued t1"], { placement: "aboveEditor" }]);
+	assert.deepEqual(r.widgets.at(-1), ["wrangle", ["job j1 · peer · w2:p1", "child worker · peer · w3:p1 · wrangle close when done", "queued t1"], { placement: "aboveEditor" }]);
 	await r.invoke("tool_result", { toolName: "agents", isError: false, content: [{ type: "text", text: JSON.stringify(spawn) }] });
 	assert.equal(r.calls.filter(call => call[1] === "track").length, 2);
 	await r.invoke("tool_result", { toolName: "agents", isError: false, content: [{ type: "text", text: "not a spawn" }] });

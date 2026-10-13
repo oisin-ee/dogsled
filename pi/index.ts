@@ -13,8 +13,12 @@ function widgetLines(value: unknown): string[] {
 	const lines: string[] = [];
 	for (const value of data["items"]) {
 		const item = object(value);
-		if (item?.["kind"] === "job" && item["closed_ms"] === null) {
+		if (item?.["closed_ms"] !== null) continue;
+		if (item["kind"] === "job") {
 			lines.push(`job ${String(item["id"])} · ${String(item["host"])} · ${String(item["pane"])}`);
+		} else if (item["kind"] === "agent") {
+			// A child stays listed until `wrangle close` removes its pane and worktree.
+			lines.push(`child ${String(item["name"] ?? item["id"])} · ${String(item["host"])} · ${String(item["pane"])} · wrangle close when done`);
 		}
 	}
 	for (const value of data["queue"]) {

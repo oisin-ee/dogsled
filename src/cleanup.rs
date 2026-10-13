@@ -219,7 +219,7 @@ fn entry(class: &str, id: String, detail: String, removable: bool) -> Entry {
     }
 }
 
-fn current_panes(shell: &dyn Shell) -> Result<Vec<Pane>> {
+pub fn current_panes(shell: &dyn Shell) -> Result<Vec<Pane>> {
     let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
     Ok(serde_json::from_value(

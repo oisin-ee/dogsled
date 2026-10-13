@@ -369,7 +369,25 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
             tail.unwrap_or_else(|e| format!("(output unavailable: {e})"))
         );
     }
-    note.push_str("Decide whether to keep waiting, nudge the item (`agents send` or `herdr agent prompt`), or stop it (`wrangle stop` for a job, or close its pane).\n");
+    let finished: Vec<_> = items
+        .iter()
+        .filter(|i| crate::items::finished(i, reports))
+        .map(|i| {
+            format!(
+                "`wrangle close {} --host {}`",
+                crate::shell::quote(&i.pane),
+                crate::shell::quote(&i.host)
+            )
+        })
+        .collect();
+    if !finished.is_empty() {
+        let _ = writeln!(
+            note,
+            "Finished children keep their pane and worktree until you close them. After you take or drop each result, run: {}.",
+            finished.join(", ")
+        );
+    }
+    note.push_str("Decide whether to keep waiting, nudge the item (`agents send` or `herdr agent prompt`), close a finished child (`wrangle close`), or stop a job (`wrangle stop`).\n");
     crate::activity::plain(&note)
 }
 
