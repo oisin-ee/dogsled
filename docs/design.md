@@ -104,6 +104,13 @@ An item closes when its job ends, when its agent is `idle` or `done` (Shepherdr 
 
 The note lists each item (name, host, state, age, time since its transcript changed, last 5 lines) and asks the owner to keep waiting, nudge the item, or stop it. Serve skips owners that are `working` (the note waits until they are idle) and owners that are `blocked` (the user is in the loop). It sets `$wrangle = "stalled 10m"` on a stalled pane.
 
+**Durability.** Events are captured before reconciliation, including between one-minute check-in deadlines. Transcript writes alone are not lifecycle events.
+Normal restarts retain delivered events and last-send times. Herdr has no prompt idempotency key, so crash-safe exactly-once delivery is unavailable.
+Each prompt attempt is persisted before submission. Interrupted or failed attempts remain visible and retry after 30 minutes.
+This can duplicate one delayed check-in after an ambiguous acceptance, but avoids restart spam and silent permanent loss.
+Top-level notification attempts are at-most-once per stall; a crash during submission can lose that notification.
+Watchdog and admission have separate action workers, so slow setup cannot block check-ins or publication.
+
 **Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
 
 **Bounded waits.** One deadline starts at command entry. `--max` (default 30m) includes discovery, locks, transport, preparation, admission, and job completion.
@@ -132,7 +139,13 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 `wrangle serve` removes worktrees without a question only when their branch is merged or deleted, the worktree is clean,
 and no live pane uses it. Every other class keeps the question in `wrangle prune [--host H] [<class>…]`.
 `prune` shows what it will remove, asks, then removes it. It never kills processes.
-Automatic cleanup belongs to unit 3, not the initial host service.
+Prepare registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration. Hourly automatic cleanup discovers their current Git worktrees, rather than trusting saved paths.
+Doctor also discovers repositories from the caller and live pane directories. Neither scans the whole home directory.
+This bounds automatic ownership: unrelated repositories and detached worktrees remain outside automatic cleanup.
+The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
+Prune compares current Git path, branch, HEAD, and repository with the approved plan immediately before removal.
+A branch-taking repository task cannot guarantee an exact path. Until a task exposes a verifiable path-bound contract, removal uses non-forced `git worktree remove -- <path>`.
+Missing or unreadable disk paths remain report-only findings without discarding other candidates.
 
 ### 7. Prompt context
 

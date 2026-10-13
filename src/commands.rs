@@ -161,13 +161,20 @@ pub fn brief(status: &Status) -> String {
         row.push_str(&summary(host));
     }
     rows.push(format!(
-        "{} open items · {} queued. Run `wrangle status` for details.",
+        "{} open items · {} queued · {} stalls. Run `wrangle status` for details.",
         status
             .items
             .iter()
             .filter(|i| i.closed_ms.is_none())
             .count(),
-        status.queue.iter().filter(|t| t.state == "pending").count()
+        status.queue.iter().filter(|t| t.state == "pending").count(),
+        status
+            .hosts
+            .iter()
+            .filter_map(|h| h.probe.as_ref())
+            .flat_map(|p| &p.agent_panes)
+            .filter(|a| a.stalled_since_ms.is_some())
+            .count()
     ));
     format!("{}\n", rows.join("\n"))
 }
@@ -198,10 +205,18 @@ pub fn render(status: &Status) -> String {
         if let Some(probe) = &host.probe {
             for agent in &probe.agent_panes {
                 lines.push(format!(
-                    "  {} {} {}",
+                    "  {} {} {}{}",
                     agent.pane,
                     agent.state,
-                    agent.name.as_deref().unwrap_or("")
+                    agent.name.as_deref().unwrap_or(""),
+                    agent.stalled_since_ms.map_or_else(String::new, |_| format!(
+                        " stalled {}",
+                        crate::watchdog::age(
+                            host.sampled_ms
+                                .unwrap_or(0)
+                                .saturating_sub(agent.transcript_modified.unwrap_or(0))
+                        )
+                    ))
                 ));
             }
             if !probe.reservations.is_empty() {

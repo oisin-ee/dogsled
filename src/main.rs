@@ -1,7 +1,9 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
+mod activity;
 mod budget;
 mod checkout;
+mod cleanup;
 mod cli;
 mod commands;
 mod config;
@@ -18,6 +20,8 @@ mod probe;
 mod runtime;
 mod service;
 mod shell;
+mod transcript;
+mod watchdog;
 mod work;
 #[cfg(test)]
 mod work_tests;
@@ -188,6 +192,24 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
             &checkout::local(node.shell, node.home, &host_label, &path, &origin)?,
             String::new,
         )?,
+        HostCommand::Parent { pane } => {
+            watchdog::register_parent(node.ledger, node.shell, &pane)?;
+            print(true, &true, String::new)?;
+        }
+        HostCommand::Tail { kind, id } => {
+            let tail = if kind == "job" {
+                watchdog::job_tail(node.ledger, &id)?
+            } else {
+                watchdog::pane_tail(node.shell, &id)?
+            };
+            print(true, &tail, String::new)?;
+        }
+        HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
+        HostCommand::Prune { plan } => print(
+            true,
+            &cleanup::apply(node, &serde_json::from_str(&plan)?, now_ms())?,
+            String::new,
+        )?,
         HostCommand::Snapshot => print(
             true,
             &node.ledger.read::<node::Snapshot>("host.json")?,
@@ -205,20 +227,23 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
             }
         }
         HostCommand::Prepare { repo, branch, base } => {
-            print(
-                true,
-                &prepare::local(
-                    node.shell,
-                    policy,
-                    &std::path::Path::new(node.home)
-                        .join(repo)
-                        .display()
-                        .to_string(),
-                    &branch,
-                    base.as_deref(),
-                )?,
-                String::new,
-            )?;
+            let repo = std::path::Path::new(node.home)
+                .join(repo)
+                .display()
+                .to_string();
+            let prepared = prepare::local(node.shell, policy, &repo, &branch, base.as_deref())?;
+            if let Some(path) = &prepared.path {
+                cleanup::remember(
+                    node.ledger,
+                    cleanup::Tree {
+                        repo,
+                        path: path.clone(),
+                        branch,
+                        head: String::new(),
+                    },
+                )?;
+            }
+            print(true, &prepared, String::new)?;
         }
     }
     Ok(ExitCode::SUCCESS)

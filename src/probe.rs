@@ -28,6 +28,10 @@ pub struct Pane {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_status: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
 }
 
 /// Stable service contract, independent of Herdr's raw response fields.
@@ -39,6 +43,10 @@ pub struct Agent {
     pub name: Option<String>,
     pub transcript: Option<String>,
     pub transcript_modified: Option<u64>,
+    #[serde(default)]
+    pub stalled_since_ms: Option<u64>,
+    #[serde(default)]
+    pub state_since_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,10 +120,9 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
     Ok(agents
         .into_iter()
         .map(|raw| {
-            let transcript = raw
-                .agent_session
-                .filter(|session| session.kind == "path")
-                .map(|session| session.value);
+            let transcript = raw.agent_session.and_then(|session| {
+                crate::transcript::resolve(raw.agent.as_deref(), &session.kind, &session.value)
+            });
             let transcript_modified = transcript.as_deref().and_then(|path| {
                 std::fs::metadata(path)
                     .ok()?
@@ -132,6 +139,8 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 name: raw.name,
                 transcript,
                 transcript_modified,
+                stalled_since_ms: None,
+                state_since_ms: None,
             }
         })
         .collect())

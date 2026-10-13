@@ -178,12 +178,54 @@ pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<Ex
             },
             true,
         ),
-        command => inspect(fleet, command, json_output),
+        command => cleanup_command(fleet, command, json_output),
     }
 }
 
-fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
+fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
     match command {
+        Command::Doctor { host } => {
+            let host = fleet.find(host.as_deref().unwrap_or("local"))?;
+            let plan = if host.is_local() {
+                crate::cleanup::doctor(&fleet.node(), now_ms())?
+            } else {
+                fleet.remote(host, &["doctor".into()])?
+            };
+            crate::print(json_output, &plan, || crate::cleanup::render(&plan))?;
+        }
+        Command::Prune { host, yes, classes } => {
+            let host = fleet.find(host.as_deref().unwrap_or("local"))?;
+            let mut plan: crate::cleanup::Plan = if host.is_local() {
+                crate::cleanup::doctor(&fleet.node(), now_ms())?
+            } else {
+                fleet.remote(host, &["doctor".into()])?
+            };
+            plan.entries
+                .retain(|e| classes.is_empty() || classes.contains(&e.class));
+            crate::print(json_output, &plan, || crate::cleanup::render(&plan))?;
+            if !yes {
+                eprint!("Remove these eligible entries? [y/N] ");
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            let result = if host.is_local() {
+                crate::cleanup::apply(&fleet.node(), &plan, now_ms())?
+            } else {
+                fleet.remote(
+                    host,
+                    &[
+                        "prune".into(),
+                        "--plan".into(),
+                        serde_json::to_string(&plan)?,
+                    ],
+                )?
+            };
+            crate::print(json_output, &result, || result.join("\n") + "\n")?;
+        }
         Command::Track { host, pane, name } => {
             let host = fleet.find(&host)?;
             let item = Item {
@@ -197,8 +239,20 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
                 closed_ms: None,
             };
             items::record(fleet.ledger, item.clone())?;
+            if host.is_local() {
+                crate::watchdog::register_parent(fleet.ledger, fleet.shell, &item.pane)?;
+            } else {
+                let _: bool = fleet.remote(host, &["parent".into(), item.pane.clone()])?;
+            }
             crate::print(true, &item, String::new)?;
         }
+        command => return inspect(fleet, command, json_output),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
+    match command {
         Command::Items { owner } => {
             let items: Vec<_> = items::list(fleet.ledger)?
                 .into_iter()

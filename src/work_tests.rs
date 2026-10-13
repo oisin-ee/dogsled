@@ -27,6 +27,8 @@ fn snapshot(now: u64) -> Snapshot {
                 name: None,
                 transcript: None,
                 transcript_modified: None,
+                stalled_since_ms: None,
+                state_since_ms: None,
             }],
             reservations: Vec::new(),
             panes: vec![Pane {
