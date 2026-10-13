@@ -89,7 +89,7 @@ fn marker(host: &HostReport) -> &'static str {
 fn load(host: &HostReport) -> String {
     host.probe
         .as_ref()
-        .map_or_else(|| "-/−".into(), |p| format!("{:.0}/{}", p.load1, p.cores))
+        .map_or_else(|| "-".into(), |p| format!("{:.0}/{}", p.load1, p.cores))
 }
 
 pub fn line(status: &Status) -> String {
