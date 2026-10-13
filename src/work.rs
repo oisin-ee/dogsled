@@ -245,7 +245,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                 name,
                 message,
             } => {
-                shell.run_ok(
+                shell.run_setup_ok(
                     "herdr",
                     &[
                         "agent".into(),
@@ -336,7 +336,7 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
     let result = if host.is_local() {
         launch(fleet.ledger, fleet.shell, &launch_request, now)?
     } else {
-        fleet.remote(
+        fleet.remote_setup(
             &host,
             &[
                 "launch".into(),

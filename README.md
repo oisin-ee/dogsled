@@ -56,7 +56,8 @@ Both timeout defaults are unlimited. Durations accept integer `ms`, `s`, `m`, an
 The sidebar shows `working`, then `idle` for success or `blocked` for failure, with a `wrangle` exit or timeout token.
 
 `--max` sets one deadline from command startup, including discovery, placement, admission, and job completion. It defaults to 30 minutes.
-Every external call and lock wait uses the remaining budget, capped at 30 seconds per operation.
+Operations use the remaining command budget, capped at 30 seconds for routine calls and locks, or 10 minutes for setup.
+Setup includes prepare hooks, repository clones, mise trust checks, and agent startup, locally and through SSH.
 A non-waiting action reports the operation that exceeded its deadline.
 `logs --follow` can continue indefinitely, but each remote read has a 30-second limit.
 Run long waits through the harness's background-task facility.
@@ -79,7 +80,7 @@ For non-waiting callers, admission prompts the owner only in `idle` or `done`. O
 Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
 The measurement step uses no SSH. It reads load, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
-A separate action worker keeps slow admission independent from the publication interval. External calls and lock waits have 30-second limits.
+A separate action worker keeps slow admission independent from the publication interval. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
 An admission timeout records a failed ticket. The service continues publication and later actions.
 It writes `~/.local/state/wrangle/host.json` through atomic replacement.
 Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, and `transcript_modified`.

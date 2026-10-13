@@ -155,13 +155,21 @@ impl<'a> Fleet<'a> {
         self.remote_bounded(host, args, self.shell.budget().remaining("ssh")?)
     }
 
+    pub fn remote_setup<T: for<'de> Deserialize<'de>>(
+        &self,
+        host: &Host,
+        args: &[String],
+    ) -> Result<T> {
+        self.remote_bounded(host, args, crate::budget::SETUP_LIMIT)
+    }
+
     pub fn remote_bounded<T: for<'de> Deserialize<'de>>(
         &self,
         host: &Host,
         args: &[String],
         timeout: std::time::Duration,
     ) -> Result<T> {
-        let timeout = timeout.min(self.shell.budget().remaining("ssh")?);
+        let timeout = self.shell.budget().with_limit("ssh", timeout)?;
         let mut bounded_args = args.to_vec();
         if self.shell.budget().deadline.is_some() {
             bounded_args.extend(["--budget-ms".into(), timeout.as_millis().to_string()]);

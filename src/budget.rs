@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use std::time::{Duration, Instant};
 
 pub const CALL_LIMIT: Duration = Duration::from_secs(30);
+pub const SETUP_LIMIT: Duration = Duration::from_mins(10);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Budget {
@@ -18,9 +19,12 @@ impl Budget {
     }
 
     pub fn remaining(self, operation: &str) -> Result<Duration> {
-        let remaining = self.deadline.map_or(CALL_LIMIT, |end| {
-            end.saturating_duration_since(Instant::now())
-                .min(CALL_LIMIT)
+        self.with_limit(operation, CALL_LIMIT)
+    }
+
+    pub fn with_limit(self, operation: &str, limit: Duration) -> Result<Duration> {
+        let remaining = self.deadline.map_or(limit, |end| {
+            end.saturating_duration_since(Instant::now()).min(limit)
         });
         if remaining.is_zero() {
             Err(Error::Deadline(operation.into()))

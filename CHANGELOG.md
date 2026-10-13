@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 ## 0.5.0 - Unreleased
 
 - Keep job capture and exit status independent from a closed pane output.
-- Enforce one command deadline across discovery, preparation, transport, and lock waits. Bound each external operation to 30 seconds.
+- Enforce one command deadline across discovery, preparation, transport, and lock waits. Bound routine operations to 30 seconds and setup operations to 10 minutes.
 - Run service actions independently from snapshot publication and record ticket timeouts without stopping the probe loop.
 - Keep the Pi polling timer active after an initial refresh failure. Race concurrent store tests through barriers.
 

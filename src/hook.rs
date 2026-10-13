@@ -81,7 +81,7 @@ pub fn run(
     if let Some(base) = base {
         args.extend(["--base".into(), base.into()]);
     }
-    fleet.remote(host, &args)
+    fleet.remote_setup(host, &args)
 }
 
 pub fn local(
@@ -98,7 +98,7 @@ pub fn local(
         quote(&checkout.display().to_string()),
         argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
     );
-    let out = shell.run_ok("sh", &["-c".into(), command])?;
+    let out = shell.run_setup_ok("sh", &["-c".into(), command])?;
     parse_output(&out.stdout)
 }
 
@@ -155,6 +155,102 @@ pub fn parse_output(stdout: &str) -> Result<Prepared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Debug)]
+    struct TimedHook {
+        elapsed: std::time::Duration,
+        budget: crate::budget::Budget,
+    }
+
+    impl Shell for TimedHook {
+        fn budget(&self) -> crate::budget::Budget {
+            self.budget
+        }
+
+        fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
+            if program == "git" {
+                return Ok(crate::shell::Output {
+                    status: 0,
+                    stdout: "/repo/.git".into(),
+                    stderr: String::new(),
+                });
+            }
+            self.run_bounded(program, args, self.budget.remaining(program)?)
+        }
+
+        fn run_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            timeout: std::time::Duration,
+        ) -> Result<crate::shell::Output> {
+            // Inject elapsed child time rather than sleep for production limits.
+            if self.elapsed > timeout {
+                return Err(Error::Deadline(format!("{program} {}", args.join(" "))));
+            }
+            Ok(crate::shell::Output {
+                status: 0,
+                stdout: "{\"path\":\"/repo/tree\"}".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn prepare_uses_setup_limit_and_honors_shorter_command_deadline() {
+        use crate::budget::{Budget, CALL_LIMIT, SETUP_LIMIT};
+        use std::time::{Duration, Instant};
+        let policy = config::Policy::default();
+        let shell = TimedHook {
+            elapsed: CALL_LIMIT + Duration::from_secs(1),
+            budget: Budget::default(),
+        };
+        assert_eq!(
+            local(&shell, &policy, "/repo", "feature", None)
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("/repo/tree")
+        );
+        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![host.clone()],
+        };
+        assert_eq!(
+            run(&fleet, &host, "/repo", "feature", None)
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("/repo/tree")
+        );
+        let shell = TimedHook {
+            elapsed: SETUP_LIMIT + Duration::from_secs(1),
+            budget: Budget::default(),
+        };
+        let error = local(&shell, &policy, "/repo", "feature", None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("deadline reached: sh -c cd /repo && exec mise")
+        );
+        let shell = TimedHook {
+            elapsed: CALL_LIMIT + Duration::from_secs(1),
+            budget: Budget::until(Instant::now() + CALL_LIMIT),
+        };
+        assert!(matches!(
+            local(&shell, &policy, "/repo", "feature", None),
+            Err(Error::Deadline(_))
+        ));
+    }
+
     #[test]
     fn default_template_and_embedded_values_are_literal() {
         let template = config::Policy::default().hooks.prepare;

@@ -96,7 +96,7 @@ pub fn ensure(fleet: &Fleet, host: &Host, repo: &Repository) -> Result<String> {
             &repo.origin,
         );
     }
-    fleet.remote(
+    fleet.remote_setup(
         host,
         &[
             "checkout".into(),
@@ -155,7 +155,7 @@ pub fn local(
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let cloned = shell.run(
+        let cloned = shell.run_setup(
             "git",
             &["clone".into(), "--".into(), origin.into(), display.clone()],
         )?;
@@ -166,7 +166,7 @@ pub fn local(
             )));
         }
         // Only the new checkout may acquire trust. Never trust ancestors or all configs.
-        let checked = shell.run(
+        let checked = shell.run_setup(
             "mise",
             &[
                 "-C".into(),
@@ -198,8 +198,8 @@ pub fn local(
                     "{host}: untrusted config outside new checkout {display}"
                 ))
             })?;
-            shell.run_ok("mise", &["trust".into(), config.display().to_string()])?;
-            shell.run_ok(
+            shell.run_setup_ok("mise", &["trust".into(), config.display().to_string()])?;
+            shell.run_setup_ok(
                 "mise",
                 &[
                     "-C".into(),

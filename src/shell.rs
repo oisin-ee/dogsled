@@ -39,6 +39,20 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
         self.run(program, args)
     }
 
+    /// Setup has a separate ceiling; the command deadline still takes precedence.
+    fn run_setup(&self, program: &str, args: &[String]) -> Result<Output> {
+        self.run_bounded(
+            program,
+            args,
+            self.budget()
+                .with_limit(program, crate::budget::SETUP_LIMIT)?,
+        )
+    }
+
+    fn run_setup_ok(&self, program: &str, args: &[String]) -> Result<Output> {
+        checked(program, args, self.run_setup(program, args)?)
+    }
+
     /// Read a whole file (for `/proc/loadavg`). Fakes script this too so the
     /// probe tests run the same on every platform.
     fn read_file(&self, path: &str) -> Result<String> {
@@ -47,17 +61,20 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
 
     /// Run and treat a non-zero status as an error.
     fn run_ok(&self, program: &str, args: &[String]) -> Result<Output> {
-        let out = self.run(program, args)?;
-        if out.ok() {
-            Ok(out)
-        } else {
-            Err(Error::Command {
-                program: program.to_string(),
-                args: args.join(" "),
-                status: out.status.to_string(),
-                stderr: out.stderr.trim().to_string(),
-            })
-        }
+        checked(program, args, self.run(program, args)?)
+    }
+}
+
+fn checked(program: &str, args: &[String], out: Output) -> Result<Output> {
+    if out.ok() {
+        Ok(out)
+    } else {
+        Err(Error::Command {
+            program: program.to_string(),
+            args: args.join(" "),
+            status: out.status.to_string(),
+            stderr: out.stderr.trim().to_string(),
+        })
     }
 }
 
@@ -78,7 +95,7 @@ impl Shell for System {
     ) -> Result<Output> {
         use std::os::unix::process::CommandExt as _;
         let operation = format!("{program} {}", args.join(" "));
-        let timeout = timeout.min(self.budget.remaining(&operation)?);
+        let timeout = self.budget.with_limit(&operation, timeout)?;
         if timeout.is_zero() {
             return Err(Error::Deadline(operation));
         }
