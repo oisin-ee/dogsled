@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.6.2 - 2026-10-14
+
+- Accept a host checkout whose origin names the same repository in another spelling, such as `git@github.com:owner/repo.git` for `https://github.com/owner/repo.git`. Compare host and repository path, not the raw URL.
+
 ## 0.6.1 - 2026-10-14
 
 - Remove the hourly automatic worktree cleanup from `serve`. Wrangle never removes anything on a timer.

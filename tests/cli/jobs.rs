@@ -292,13 +292,13 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
 }
 
 #[test]
-fn checkout_clones_missing_path_rejects_mismatch_and_reports_clone_failure() {
+fn checkout_clones_missing_path_accepts_ssh_origin_rejects_mismatch_and_reports_clone_failure() {
     let rig = Rig::new("checkout");
     rig.script("git", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/git.log"
 case "$*" in
   'clone '*) if test -f "$RIG/fail-clone"; then echo credentials >&2; exit 1; fi; mkdir -p "$4"; printf '[tools]\n' > "$4/mise.toml" ;;
-  *'remote get-url origin') printf '%s\n' 'https://other.invalid/repo.git' ;;
+  *'remote get-url origin') if test -f "$RIG/origin"; then cat "$RIG/origin"; else printf '%s\n' 'https://other.invalid/repo.git'; fi ;;
   *'rev-parse --show-toplevel') printf '%s\n' "$2" ;;
   *) exit 2 ;;
 esac
@@ -341,6 +341,9 @@ esac
             && text.contains("https://other.invalid/repo.git")
     );
     assert_eq!(rig.log("git.log").matches("clone --").count(), 1);
+    fs::write(rig.dir.join("origin"), "git@expected.invalid:repo.git\n").unwrap();
+    assert_eq!(rig.json(&args).0, 0);
+    fs::remove_file(rig.dir.join("origin")).unwrap();
     fs::write(rig.dir.join("fail-clone"), "").unwrap();
     let (code, error) = rig.json(&[
         "host",

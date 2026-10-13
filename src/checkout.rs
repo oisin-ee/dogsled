@@ -110,6 +110,48 @@ pub fn ensure(fleet: &Fleet, host: &Host, repo: &Repository) -> Result<String> {
     )
 }
 
+/// Host and repository path that a git remote URL names. The ssh, scp-like, and
+/// https spellings of one repository give the same identity. A local path has none.
+fn identity(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
+        if !matches!(
+            scheme,
+            "https" | "http" | "ssh" | "git" | "git+ssh" | "ssh+git"
+        ) {
+            return None;
+        }
+        rest.split_once('/')?
+    } else {
+        // scp-like `[user@]host:path`. Git treats a slash before the colon as a local path.
+        let (authority, path) = url.split_once(':')?;
+        if authority.contains('/') {
+            return None;
+        }
+        (authority, path)
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host.split_once(':').map_or(host, |(h, _)| h);
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), path.to_owned()))
+}
+
+/// Whether two origin URLs name the same repository. URLs without a host and
+/// repository path must match exactly.
+fn same_repository(a: &str, b: &str) -> bool {
+    match (identity(a), identity(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.trim() == b.trim(),
+    }
+}
+
 pub fn local(
     shell: &dyn Shell,
     home: &str,
@@ -141,7 +183,7 @@ pub fn local(
         )?;
         let same_root = root.ok()
             && Path::new(root.stdout.trim()).canonicalize().ok() == path.canonicalize().ok();
-        if !actual.ok() || actual.stdout.trim() != origin || !same_root {
+        if !actual.ok() || !same_repository(actual.stdout.trim(), origin) || !same_root {
             return Err(Error::Invalid(format!(
                 "{host}: checkout {display}: expected origin {origin}, found {}",
                 if actual.ok() {
@@ -212,4 +254,40 @@ pub fn local(
         }
     }
     Ok(display)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_repository;
+
+    #[test]
+    fn ssh_and_https_spellings_name_one_repository() {
+        let https = "https://github.com/oisin-ee/rondo.git";
+        for other in [
+            "git@github.com:oisin-ee/rondo.git",
+            "git@github.com:oisin-ee/rondo",
+            "ssh://git@github.com/oisin-ee/rondo.git",
+            "ssh://git@github.com:22/oisin-ee/rondo.git/",
+            "https://user@GitHub.com/oisin-ee/rondo",
+            "github.com:oisin-ee/rondo.git",
+        ] {
+            assert!(same_repository(https, other), "{other}");
+        }
+    }
+
+    #[test]
+    fn different_repositories_and_local_paths_stay_distinct() {
+        let https = "https://github.com/oisin-ee/rondo.git";
+        for other in [
+            "git@github.com:oisin-ee/wrangle.git",
+            "git@github.com:someone/rondo.git",
+            "git@gitlab.com:oisin-ee/rondo.git",
+            "/srv/git/oisin-ee/rondo.git",
+            "file:///github.com/oisin-ee/rondo.git",
+        ] {
+            assert!(!same_repository(https, other), "{other}");
+        }
+        assert!(same_repository("/srv/git/rondo.git", "/srv/git/rondo.git"));
+        assert!(!same_repository("/srv/git/rondo.git", "/srv/git/rondo"));
+    }
 }
