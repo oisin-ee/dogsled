@@ -246,9 +246,49 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             }
             crate::print(true, &item, String::new)?;
         }
+        Command::Close { pane, host } => {
+            let host = match host {
+                Some(host) => fleet.find(&host)?,
+                None => close_host(fleet, &pane)?,
+            };
+            let closed: crate::close::Closed = if host.is_local() {
+                crate::close::local(fleet.shell, &pane, &crate::close::Caller::from_env())?
+            } else {
+                fleet.remote_setup(host, &["close".into(), pane.clone()])?
+            };
+            items::close(fleet.ledger, &host.id, &pane, now_ms())?;
+            crate::print(json_output, &closed, || {
+                closed.worktree.as_ref().map_or_else(
+                    || format!("closed pane {} on {}\n", closed.pane, host.label),
+                    |tree| {
+                        format!(
+                            "closed {} on {}: removed {} ({})\n",
+                            closed.pane, host.label, tree.path, tree.branch
+                        )
+                    },
+                )
+            })?;
+        }
         command => return inspect(fleet, command, json_output),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The host of the open item for `pane`. Pane ids repeat across hosts, so more than one is ambiguous.
+fn close_host<'a>(fleet: &'a Fleet, pane: &str) -> Result<&'a crate::hosts::Host> {
+    let hosts: std::collections::BTreeSet<_> = items::list(fleet.ledger)?
+        .into_iter()
+        .filter(|i| i.closed_ms.is_none() && i.pane == pane)
+        .map(|i| i.host)
+        .collect();
+    match hosts.len() {
+        0 => fleet.find("local"),
+        1 => fleet.find(hosts.first().map_or("local", String::as_str)),
+        _ => Err(Error::Invalid(format!(
+            "pane {pane} has open items on {}; pass --host",
+            hosts.into_iter().collect::<Vec<_>>().join(", ")
+        ))),
+    }
 }
 
 fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {

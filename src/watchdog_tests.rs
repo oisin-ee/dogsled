@@ -315,6 +315,11 @@ fn closed_item_does_not_observe_reused_or_retracked_pane() {
     let reports = rig.reports(60_001, "working", "idle", Some(1));
     tick(&rig.fleet(), &reports, 60_001).unwrap();
     crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
+    assert_eq!(crate::items::list(&rig.ledger).unwrap()[0].closed_ms, None);
+    assert_eq!(
+        crate::items::close(&rig.ledger, "local", "child", 60_001).unwrap(),
+        1
+    );
     let reports = rig.reports(660_001, "idle", "working", Some(60_001));
     tick(&rig.fleet(), &reports, 660_001).unwrap();
     assert_eq!(rig.prompts(), 0);
@@ -342,4 +347,46 @@ fn closed_item_does_not_observe_reused_or_retracked_pane() {
         .unwrap();
     assert!(prompt.contains("new-child-name"));
     assert!(!prompt.contains("test-child on"));
+}
+
+#[test]
+fn finished_child_stays_open_and_check_ins_ask_for_close_until_its_pane_is_gone() {
+    let rig = Rig::new();
+    rig.item("agent");
+    let reports = rig.reports(1, "working", "working", Some(1));
+    tick(&rig.fleet(), &reports, 1).unwrap();
+    let reports = rig.reports(60_001, "idle", "done", Some(1));
+    crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
+    let item = &crate::items::list(&rig.ledger).unwrap()[0];
+    assert_eq!(item.closed_ms, None);
+    assert!(crate::items::finished(item, &reports));
+    tick(&rig.fleet(), &reports, 60_001).unwrap();
+    assert_eq!(rig.prompts(), 0);
+    // The regular check-in names the exact close command, and repeats while it is open.
+    for (now, count) in [(1_860_001, 1), (3_660_001, 2)] {
+        let reports = rig.reports(now, "idle", "done", Some(1));
+        tick(&rig.fleet(), &reports, now).unwrap();
+        assert_eq!(rig.prompts(), count);
+    }
+    assert!(
+        rig.shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("run: `wrangle close child --host local`"))
+    );
+    // A closed pane ends the item without `wrangle close`.
+    let mut reports = rig.reports(3_720_001, "idle", "done", Some(1));
+    reports[0]
+        .probe
+        .as_mut()
+        .unwrap()
+        .panes
+        .retain(|p| p.pane_id != "child");
+    crate::items::reconcile(&rig.ledger, &reports, 3_720_001).unwrap();
+    assert_eq!(
+        crate::items::list(&rig.ledger).unwrap()[0].closed_ms,
+        Some(3_720_001)
+    );
 }

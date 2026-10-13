@@ -5,6 +5,7 @@ mod budget;
 mod checkout;
 mod cleanup;
 mod cli;
+mod close;
 mod commands;
 mod config;
 mod context;
@@ -205,6 +206,12 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
             print(true, &tail, String::new)?;
         }
         HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
+        // Over SSH the caller has no pane or workspace on this host.
+        HostCommand::Close { pane } => print(
+            true,
+            &close::local(node.shell, &pane, &close::Caller::default())?,
+            String::new,
+        )?,
         HostCommand::Prune { plan } => print(
             true,
             &cleanup::apply(node, &serde_json::from_str(&plan)?, now_ms())?,

@@ -160,13 +160,23 @@ pub fn brief(status: &Status) -> String {
         }
         row.push_str(&summary(host));
     }
+    let finished = status
+        .items
+        .iter()
+        .filter(|i| crate::items::finished(i, &status.hosts))
+        .count();
     rows.push(format!(
-        "{} open items · {} queued · {} stalls. Run `wrangle status` for details.",
+        "{} open items{} · {} queued · {} stalls. Run `wrangle status` for details.",
         status
             .items
             .iter()
             .filter(|i| i.closed_ms.is_none())
             .count(),
+        if finished == 0 {
+            String::new()
+        } else {
+            format!(" ({finished} finished: run `wrangle close <pane>` after taking each result)")
+        },
         status.queue.iter().filter(|t| t.state == "pending").count(),
         status
             .hosts
@@ -226,8 +236,17 @@ pub fn render(status: &Status) -> String {
     }
     for item in status.items.iter().filter(|i| i.closed_ms.is_none()) {
         lines.push(format!(
-            "owner {}: {} {} on {} ({})",
-            item.owner_pane, item.kind, item.id, item.host, item.pane
+            "owner {}: {} {} on {} ({}){}",
+            item.owner_pane,
+            item.kind,
+            item.id,
+            item.host,
+            item.pane,
+            if crate::items::finished(item, &status.hosts) {
+                " finished: wrangle close"
+            } else {
+                ""
+            }
         ));
     }
     for ticket in status.queue.iter().filter(|t| t.state == "pending") {

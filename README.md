@@ -106,14 +106,27 @@ A wait deadline does not cancel its job or ticket. `cancel` only cancels pending
 The owner's host stores locked `items.json` and `queue.json` files.
 An item records its host, pane, owner pane, creation time, and closure time.
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
-The service closes items after job completion, agent `idle` or `done`, or pane removal.
-It ignores stale snapshots and snapshots older than the item's creation.
+The service closes a job item after job completion, and any item after pane removal.
+An agent item that is `idle` or `done` stays open, so the owner keeps hearing about it until `wrangle close` removes it.
+The service ignores stale snapshots and snapshots older than the item's creation.
+
+```sh
+wrangle close w2:p1
+wrangle close w9:p1 --host netcup --json
+```
+
+`close` ends a finished child. `--host` defaults to the host of the pane's open item, else local.
+In a linked worktree, it closes the worktree's Herdr workspace, unlocks an `agent:worktree` lock, and runs `wt remove --foreground <branch>` in the main checkout.
+Worktrunk runs the repository's remove hooks and deletes the branch only when it is merged. A pane outside a worktree is closed alone.
+It refuses a missing pane, the caller's own pane or workspace, any agent in the workspace that is not `idle` or `done`, a dirty or detached worktree, and any other lock.
+Each refusal happens before a change. If `wt remove` fails, wrangle relocks the worktree and the item stays open.
+The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted}|null,pane_closed}`. A remote host runs the same steps over SSH.
 
 The service admits tickets in FIFO order using the same placement policy.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
 A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
 For non-waiting callers, admission prompts the owner only in `idle` or `done`. Other states defer the prompt.
-`status` lists open items per owner and pending tickets. `--brief` includes their counts.
+`status` lists open items per owner and pending tickets, and marks finished children. `--brief` includes their counts and the number of finished children.
 
 ## Host service and status
 
@@ -283,7 +296,7 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 The Pi extension calls `wrangle hook context --harness pi` before each prompt.
 It tracks successful Shepherdr `agents` spawn results through `wrangle track`.
-An above-editor widget lists this session's open jobs and pending tickets. It refreshes every ten seconds and after tool results.
+An above-editor widget lists this session's open jobs, unclosed children, and pending tickets. It refreshes every ten seconds and after tool results.
 An empty list removes the widget. Shutdown stops the timer. Widget and tracking failures still appear as extension errors.
 `$WRANGLE_BIN` selects the binary used by the extension.
 

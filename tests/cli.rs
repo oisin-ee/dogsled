@@ -1,6 +1,8 @@
 //! Exercise the real commands with private state and fake Herdr/SSH on PATH.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
+#[path = "cli/close.rs"]
+mod close;
 #[path = "cli/context.rs"]
 mod context;
 #[path = "cli/jobs.rs"]
