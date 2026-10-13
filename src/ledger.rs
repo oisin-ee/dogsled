@@ -15,8 +15,6 @@ use crate::error::Result;
 pub struct Reservation {
     pub id: String,
     pub created_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pane: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,12 +120,13 @@ mod tests {
                 &vec![Reservation {
                     id: "one".into(),
                     created_ms: 100,
-                    pane: None,
                 }],
             )
             .unwrap();
-        assert_eq!(ledger.reservations(60_099, 60_000).unwrap().len(), 1);
-        assert_eq!(ledger.reservations(60_100, 60_000).unwrap(), Vec::new());
+        let ttl = crate::config::Policy::default().reservation_ttl_ms;
+        assert_eq!(ttl, 90_000);
+        assert_eq!(ledger.reservations(90_099, ttl).unwrap().len(), 1);
+        assert_eq!(ledger.reservations(90_100, ttl).unwrap(), Vec::new());
         fs::remove_dir_all(ledger.dir).unwrap();
     }
 

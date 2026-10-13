@@ -46,6 +46,8 @@ pub enum Command {
         host: Option<String>,
         #[arg(long)]
         branch: Option<String>,
+        #[arg(long, requires = "branch")]
+        base: Option<String>,
         /// Repository directory. Defaults to the current directory.
         #[arg(long)]
         repo: Option<String>,
@@ -64,21 +66,13 @@ pub enum HostCommand {
         #[command(flatten)]
         thresholds: ThresholdArgs,
     },
-    Bind {
-        #[arg(long)]
-        id: String,
-        #[arg(long)]
-        pane: String,
-    },
-    Release {
-        #[arg(long)]
-        id: String,
-    },
     Prepare {
         #[arg(long)]
         repo: String,
         #[arg(long)]
         branch: String,
+        #[arg(long)]
+        base: Option<String>,
     },
 }
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Wrangle host status service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mise x -- wrangle serve
+Restart=on-failure
+RestartSec=10
+StateDirectory=wrangle
+Environment=WRANGLE_STATE=%S/wrangle
+StandardOutput=append:%S/wrangle/serve.stdout.log
+StandardError=append:%S/wrangle/serve.stderr.log
+
+[Install]
+WantedBy=default.target

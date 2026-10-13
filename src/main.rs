@@ -97,14 +97,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         },
-        Command::Place { host, branch, repo } => {
+        Command::Place {
+            host,
+            branch,
+            base,
+            repo,
+        } => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             let repo = repo.map_or_else(
                 || std::env::current_dir().map(|p| p.display().to_string()),
                 Ok,
             )?;
-            let placed =
-                commands::place(&fleet, host.as_deref(), branch.as_deref(), &repo, now_ms())?;
+            let placed = commands::place(
+                &fleet,
+                host.as_deref(),
+                branch.as_deref(),
+                base.as_deref(),
+                &repo,
+                now_ms(),
+            )?;
             let full = matches!(placed, commands::Placement::Full { .. });
             print(cli.json || full, &placed, || {
                 commands::render_place(&placed)
@@ -135,18 +146,10 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
                 return Ok(Error::Full.exit_code());
             }
         }
-        HostCommand::Bind { id, pane } => {
-            node.bind(&id, &pane, now_ms())?;
-            print(true, &serde_json::json!({"bound": true}), String::new)?;
-        }
-        HostCommand::Release { id } => {
-            node.release(&id, now_ms())?;
-            print(true, &serde_json::json!({"released": true}), String::new)?;
-        }
-        HostCommand::Prepare { repo, branch } => {
+        HostCommand::Prepare { repo, branch, base } => {
             print(
                 true,
-                &hook::local(node.shell, policy, &repo, &branch)?,
+                &hook::local(node.shell, policy, &repo, &branch, base.as_deref())?,
                 String::new,
             )?;
         }

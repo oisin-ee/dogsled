@@ -108,7 +108,6 @@ mod tests {
                 .map(|i| Reservation {
                     id: format!("r{i}"),
                     created_ms: 0,
-                    pane: None,
                 })
                 .collect(),
             panes: Vec::new(),
@@ -183,7 +182,6 @@ mod tests {
             let r = Reservation {
                 id: format!("r{i}"),
                 created_ms: 0,
-                pane: None,
             };
             if host == "a" {
                 a.reservations.push(r);

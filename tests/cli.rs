@@ -64,7 +64,6 @@ case "$*" in
     cat "$RIG/remote.json" ;;
   *'host reserve'*) cat "$RIG/reserve.json" ;;
   *'host prepare'*) printf '%s\n' '{"pane_id":"w9:p1","path":"/remote/tree"}' ;;
-  *'host bind'*|*'host release'*) echo '{}' ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
@@ -272,6 +271,10 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     assert_eq!(status["hosts"][1]["service"], "down");
     assert_eq!(status["hosts"][1]["probe"]["load1"], 6.0);
     assert_eq!(status["hosts"][1]["headroom"]["eligible"], false);
+    assert_eq!(
+        String::from_utf8(rig.run(&["status", "--line"]).stdout).unwrap(),
+        "local ? · netcup 6/7 ?\n"
+    );
     rig.expire_cache();
     fs::write(rig.dir.join("unreachable"), "").unwrap();
     let (_, status) = rig.json(&["status"]);
@@ -458,36 +461,30 @@ fn concurrent_placement_rechecks_capacity_under_host_lock() {
 }
 
 #[test]
-fn reservation_ends_on_agent_in_bound_pane_or_ttl() {
+fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     let rig = Rig::new("reservation");
-    rig.snapshot("state/host.json", now(), 0.0, 2);
-    let (_, placed) = rig.json(&["place"]);
-    let id = placed["reservation"].as_str().unwrap();
-    assert_eq!(
-        rig.json(&["host", "bind", "--id", id, "--pane", "w1:p8"]).0,
-        0
-    );
+    rig.snapshot("state/host.json", now(), 2.0, 2);
+    assert_eq!(rig.json(&["place"]).0, 0);
+    assert!(!rig.log("herdr.log").contains("agent list"));
     rig.put(
         "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"w1:p9"}]}}),
+        &json!({"result":{"agents":[{"pane_id":"w1:p8"}]}}),
     );
+    assert_eq!(rig.json(&["place"]).0, 1);
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(
         rig.read("state/placements.json").as_array().unwrap().len(),
         1
     );
     rig.put(
-        "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"w1:p8"}]}}),
-    );
-    assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/placements.json"), json!([]));
-    rig.put(
         "state/placements.json",
-        &json!([{"id":"expired","created_ms":now()-60_001}]),
+        &json!([{"id":"expired","created_ms":now()-90_001}]),
     );
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.read("state/placements.json"), json!([]));
+    for command in ["bind", "release"] {
+        assert_eq!(rig.run(&["host", command]).status.code(), Some(2));
+    }
 }
 
 fn repository(path: &Path) {
@@ -539,11 +536,7 @@ fn prepare_runs_in_checkout_not_caller_and_returns_path_and_pane() {
             .success()
     );
     fs::create_dir(worktree.join("subdir")).unwrap();
-    fs::write(
-        repo.join("wrangle.toml"),
-        "[hooks]\nprepare = ['sh', 'prepare.sh', '{branch}']\n",
-    )
-    .unwrap();
+    rig.config("[hooks]\nprepare = ['sh', 'prepare.sh', '{branch}', '{base}']\n");
     fs::write(repo.join("prepare.sh"), "printf '%s' \"$PWD\" > cwd.txt\nprintf '%s' \"$1\" > branch.txt\nprintf '%s\\n' '{\"pane_id\":\"w9:p1\",\"path\":\"/work/tree\"}'\n").unwrap();
     rig.snapshot("state/host.json", now(), 0.0, 8);
     let (code, placed) = rig.json(&[
@@ -564,7 +557,52 @@ fn prepare_runs_in_checkout_not_caller_and_returns_path_and_pane() {
         fs::read_to_string(repo.join("branch.txt")).unwrap(),
         "feature;literal"
     );
-    assert_eq!(rig.read("state/placements.json")[0]["pane"], "w9:p1");
+    assert_eq!(
+        rig.read("state/placements.json").as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn base_and_branch_values_are_literal_and_omitted_base_drops_one_word() {
+    let rig = Rig::new("base");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.config("[hooks]\nprepare = ['sh', 'prepare.sh', '{branch}', '{base}']\n");
+    fs::write(repo.join("prepare.sh"), "printf '%s\\n' \"$#\" \"$1\" \"${2-}\" > args.txt\nprintf '%s\\n' '{\"path\":\"/work/tree\"}'\n").unwrap();
+    assert_eq!(
+        rig.json(&[
+            "place",
+            "--branch",
+            "feat/{base}",
+            "--base",
+            "main/{branch}",
+            "--repo",
+            repo.to_str().unwrap()
+        ])
+        .0,
+        0
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("args.txt")).unwrap(),
+        "2\nfeat/{base}\nmain/{branch}\n"
+    );
+    assert_eq!(
+        rig.json(&[
+            "place",
+            "--branch",
+            "feat/{base}",
+            "--repo",
+            repo.to_str().unwrap()
+        ])
+        .0,
+        0
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("args.txt")).unwrap(),
+        "1\nfeat/{base}\n\n"
+    );
 }
 
 #[test]
@@ -580,6 +618,8 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         "netcup",
         "--branch",
         "feature",
+        "--base",
+        "main",
         "--repo",
         repo.to_str().unwrap(),
     ]);
@@ -587,19 +627,21 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     assert_eq!(placed["path"], "/remote/tree");
     let ssh = rig.log("ssh.log");
     assert!(
-        ssh.contains("custom wrangle host prepare --repo 'repo space' --branch feature --json"),
+        ssh.contains(
+            "custom wrangle host prepare --repo 'repo space' --branch feature --base main --json"
+        ),
         "{ssh}"
     );
-    assert!(ssh.contains("host bind"));
+    assert!(!ssh.contains("host bind"));
 }
 
 #[test]
-fn prepare_failure_releases_reservation_and_old_placeholder_fails_explicitly() {
+fn prepare_failure_keeps_reservation_and_unknown_placeholder_fails_explicitly() {
     let rig = Rig::new("prepare-failure");
     let repo = rig.dir.join("home/repo");
     repository(&repo);
     rig.snapshot("state/host.json", now(), 0.0, 8);
-    fs::write(repo.join("wrangle.toml"), "[hooks]\nprepare = ['false']\n").unwrap();
+    rig.config("[hooks]\nprepare = ['false']\n");
     assert_eq!(
         rig.json(&[
             "place",
@@ -611,12 +653,11 @@ fn prepare_failure_releases_reservation_and_old_placeholder_fails_explicitly() {
         .0,
         2
     );
-    assert_eq!(rig.read("state/placements.json"), json!([]));
-    fs::write(
-        repo.join("wrangle.toml"),
-        "[hooks]\nprepare = ['echo', '{repo}']\n",
-    )
-    .unwrap();
+    assert_eq!(
+        rig.read("state/placements.json").as_array().unwrap().len(),
+        1
+    );
+    rig.config("[hooks]\nprepare = ['echo', '{unknown}']\n");
     let (code, error) = rig.json(&[
         "place",
         "--branch",
@@ -629,7 +670,7 @@ fn prepare_failure_releases_reservation_and_old_placeholder_fails_explicitly() {
         error["error"]
             .as_str()
             .unwrap()
-            .contains("no longer accepts {repo}")
+            .contains("unknown hook placeholder {unknown}")
     );
 }
 

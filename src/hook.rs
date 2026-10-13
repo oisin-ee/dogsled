@@ -41,7 +41,13 @@ pub fn main_checkout(shell: &dyn Shell, repo: &str) -> Result<PathBuf> {
     })
 }
 
-pub fn run(fleet: &Fleet, host: &Host, repo: &str, branch: &str) -> Result<Prepared> {
+pub fn run(
+    fleet: &Fleet,
+    host: &Host,
+    repo: &str,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<Prepared> {
     let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
         return local(
@@ -49,6 +55,7 @@ pub fn run(fleet: &Fleet, host: &Host, repo: &str, branch: &str) -> Result<Prepa
             fleet.policy,
             &checkout.display().to_string(),
             branch,
+            base,
         );
     }
     let home = Path::new(&fleet.home);
@@ -64,16 +71,17 @@ pub fn run(fleet: &Fleet, host: &Host, repo: &str, branch: &str) -> Result<Prepa
         .unwrap_or(&checkout)
         .display()
         .to_string();
-    fleet.remote(
-        host,
-        &[
-            "prepare".into(),
-            "--repo".into(),
-            remote,
-            "--branch".into(),
-            branch.into(),
-        ],
-    )
+    let mut args = vec![
+        "prepare".into(),
+        "--repo".into(),
+        remote,
+        "--branch".into(),
+        branch.into(),
+    ];
+    if let Some(base) = base {
+        args.extend(["--base".into(), base.into()]);
+    }
+    fleet.remote(host, &args)
 }
 
 pub fn local(
@@ -81,23 +89,10 @@ pub fn local(
     policy: &config::Policy,
     repo: &str,
     branch: &str,
+    base: Option<&str>,
 ) -> Result<Prepared> {
     let checkout = main_checkout(shell, repo)?;
-    let config = config::load_repo(&checkout)?;
-    let template = config.prepare(policy);
-    if template.is_empty() {
-        return Err(Error::Invalid("hooks.prepare is empty".into()));
-    }
-    if template.iter().any(|word| word.contains("{repo}")) {
-        return Err(Error::Invalid(
-            "hooks.prepare no longer accepts {repo}; the hook runs in the checkout".into(),
-        ));
-    }
-    let argv: Vec<_> = template
-        .iter()
-        .map(|w| w.replace("{branch}", branch).replace("{base}", ""))
-        .filter(|w| !w.is_empty())
-        .collect();
+    let argv = render(&policy.hooks.prepare, branch, base)?;
     let command = format!(
         "cd {} && exec {}",
         quote(&checkout.display().to_string()),
@@ -105,6 +100,43 @@ pub fn local(
     );
     let out = shell.run_ok("sh", &["-c".into(), command])?;
     parse_output(&out.stdout)
+}
+
+/// Parse the template once. Substituted values are data, not templates.
+fn render(template: &[String], branch: &str, base: Option<&str>) -> Result<Vec<String>> {
+    if template.is_empty() {
+        return Err(Error::Invalid("hooks.prepare is empty".into()));
+    }
+    template
+        .iter()
+        .filter(|word| !(word.as_str() == "{base}" && base.is_none()))
+        .map(|word| {
+            let mut output = String::new();
+            let mut rest = word.as_str();
+            while let Some(start) = rest.find('{') {
+                output.push_str(&rest[..start]);
+                let end = rest[start..]
+                    .find('}')
+                    .map(|end| start + end)
+                    .ok_or_else(|| {
+                        Error::Invalid(format!("unclosed hook placeholder {}", &rest[start..]))
+                    })?;
+                let placeholder = &rest[start..=end];
+                output.push_str(match placeholder {
+                    "{branch}" => branch,
+                    "{base}" => base.unwrap_or(""),
+                    _ => {
+                        return Err(Error::Invalid(format!(
+                            "unknown hook placeholder {placeholder}"
+                        )));
+                    }
+                });
+                rest = &rest[end + 1..];
+            }
+            output.push_str(rest);
+            Ok(output)
+        })
+        .collect()
 }
 
 pub fn parse_output(stdout: &str) -> Result<Prepared> {
@@ -123,6 +155,38 @@ pub fn parse_output(stdout: &str) -> Result<Prepared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_template_and_embedded_values_are_literal() {
+        let template = config::Policy::default().hooks.prepare;
+        assert_eq!(
+            render(&template, "feat/{base}", Some("main/{branch}")).unwrap(),
+            [
+                "mise",
+                "run",
+                "-q",
+                "agent:worktree",
+                "--",
+                "feat/{base}",
+                "main/{branch}"
+            ]
+        );
+        assert_eq!(
+            render(&template, "feat/{base}", None).unwrap(),
+            ["mise", "run", "-q", "agent:worktree", "--", "feat/{base}"]
+        );
+        assert_eq!(
+            render(&["prefix:{base}".into(), String::new()], "b", None).unwrap(),
+            ["prefix:", ""]
+        );
+        assert!(
+            render(&["{repo}".into()], "b", None)
+                .unwrap_err()
+                .to_string()
+                .contains("{repo}")
+        );
+        assert!(render(&["{unclosed".into()], "b", None).is_err());
+    }
+
     #[test]
     fn prepare_accepts_path_or_pane_and_rejects_empty_results() {
         assert_eq!(

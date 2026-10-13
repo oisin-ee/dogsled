@@ -18,7 +18,7 @@ wrangle status --brief             # at most six lines for prompt hooks
 wrangle status --watch             # refresh until interrupted
 wrangle place --json               # reserve the host with the most headroom
 wrangle place --host netcup --json # pin by host id or label
-wrangle place --branch feat/unit-a --repo /path/to/repo --json
+wrangle place --branch feat/unit-a --base main --repo /path/to/repo --json
 ```
 
 Exit codes: 0 success, 1 no eligible host, 2 error.
@@ -34,8 +34,9 @@ Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `trans
 Transcript paths come from Herdr path sessions. Their modification times use Unix milliseconds. Unavailable paths or times are null.
 The service stops with an error if a measurement fails. The last complete snapshot remains available.
 
-On Linux, memory comes from a finite cgroup v2 user-slice limit and its usage.
-Without that limit, it comes from `/proc/meminfo`.
+On Linux, the smallest finite `memory.max` from the process cgroup through its ancestors governs memory.
+Used memory is that scope's `memory.current` minus `inactive_file` from `memory.stat`.
+Without a finite limit, memory comes from `/proc/meminfo`: total minus `MemAvailable`.
 On macOS, memory comes from `vm_stat` and `sysctl hw.memsize`.
 Memory is informational. It does not change the headroom formula.
 
@@ -54,7 +55,8 @@ Example tab-row output:
 local 50/12 ▲ · netcup 3/16 · momokaya-2 6/7
 ```
 
-`▲` means not eligible. `?` means the host read failed.
+`▲` means not eligible. `?` means the snapshot is missing, stale, or unavailable.
+A host without measurements prints `momokaya-2 ?`. A stale host keeps its last numbers, followed by ` ?`.
 `--brief` includes load/cores, memory, disk, agent counts, and a hint to run `wrangle status`.
 Fleets larger than five hosts share lines to preserve both the six-line limit and visibility of every host.
 `--watch --interval N` changes the refresh interval. Its default is five seconds.
@@ -71,15 +73,14 @@ A host needs a fresh service snapshot, positive headroom, and at least the confi
 The host with most headroom wins. Ties use fewer live agents, then host id.
 The selected host rechecks reservations under its own lock before it accepts the placement.
 
-`place` writes a reservation with a default TTL of 60 seconds.
+`place` writes a reservation with a default TTL of 90 seconds.
 It returns the host id and label. JSON also includes the reservation id.
 With `--branch`, it runs the prepare hook and returns the hook's `path` and `pane_id`, when present.
 Then start the agent through Shepherdr, using that host and prepared pane or path.
 Wrangle does not start an agent, choose a pane layout, or claim a repository lead.
 
-A reservation with a prepared pane ends when that pane appears in `herdr agent list`, or at its TTL.
-A placement without a pane remains reserved until its TTL.
-If preparation fails, wrangle releases its reservation and reports the error.
+A reservation ends only at its TTL, which covers the lag of the one-minute load average.
+Agent discovery and prepare failures do not end it early.
 
 ## Configuration
 
@@ -91,26 +92,22 @@ Unknown keys are errors.
 load_per_core_max = 1.5
 disk_free_min_percent = 15
 reservation_load = 1.0
-reservation_ttl_ms = 60000
+reservation_ttl_ms = 90000
 remote_command = ["mise", "x", "--", "wrangle"]
 
 [hooks]
-prepare = ["mise", "run", "-q", "agent:worktree", "--", "{branch}"]
+prepare = ["mise", "run", "-q", "agent:worktree", "--", "{branch}", "{base}"]
 ```
 
-Each repository can replace the prepare hook in `wrangle.toml` at its main checkout:
-
-```toml
-[hooks]
-prepare = ["./scripts/prepare-child", "{branch}"]
-```
+The prepare hook belongs only to host policy. Repository setup belongs to the repository's Worktrunk configuration.
 
 The hook runs with the main checkout as its working directory, including calls from a linked worktree.
 For peers, a checkout under the local home maps to the same relative path under the peer's home.
-The peer reads its own checkout's `wrangle.toml`, falling back to its host policy.
+The peer reads its own host policy.
 Checkouts outside the home keep their absolute path.
-Hooks substitute `{branch}` in each argument. Prefer an argument list over shell interpolation.
-`{repo}` is removed and produces an explicit error.
+Hooks substitute `{branch}` and `{base}` literally, without interpreting placeholders inside their values.
+When `--base` is absent, a word that is only `{base}` is omitted. Other placeholders produce an error that names them.
+Prefer an argument list over shell interpolation.
 
 The hook must print JSON with `pane_id`, `path`, or both. `workspace_id` is optional.
 Progress text can precede a final JSON line.
@@ -145,6 +142,11 @@ npm ci
 ```
 
 The executable is `target/release/wrangle`.
+Release archives include `wrangle.service` and `dev.wrangle.plist` from `plugin/services/`.
+Both run `wrangle serve` through `~/.local/bin/mise`, restart on failure, and log to the wrangle state directory.
+Dotfiles installs the systemd user unit or renders the launchd template with an absolute, XML-escaped `@HOME@` path.
+For launchd, dotfiles creates `~/.local/state/wrangle` before loading the agent. Systemd creates it through `StateDirectory`.
+If mise has a different installation path, dotfiles adjusts the executable path.
 Install the same release on every host before enabling its service. This PR does not install or start host services.
 
 The pre-commit hook runs `mise run check`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.

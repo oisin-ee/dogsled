@@ -187,32 +187,6 @@ impl<'a> Fleet<'a> {
         )
     }
 
-    pub fn bind(&self, host: &Host, id: &str, pane: &str, now: u64) -> Result<()> {
-        if host.is_local() {
-            return self.node().bind(id, pane, now);
-        }
-        let _: serde_json::Value = self.remote(
-            host,
-            &[
-                "bind".into(),
-                "--id".into(),
-                id.into(),
-                "--pane".into(),
-                pane.into(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn release(&self, host: &Host, id: &str, now: u64) -> Result<()> {
-        if host.is_local() {
-            return self.node().release(id, now);
-        }
-        let _: serde_json::Value =
-            self.remote(host, &["release".into(), "--id".into(), id.into()])?;
-        Ok(())
-    }
-
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
         std::thread::scope(|scope| {
             let handles: Vec<_> = self

@@ -40,7 +40,7 @@ The Pi extension adds brief status before each agent turn. It does not spawn or 
 4. Use `agents` for messages, follow-up, and completion. Do not call a removed `wrangle spawn` or ticket API.
 
 `--host H` pins placement by id or label. Without it, wrangle selects the host with the most headroom.
-A prepared pane ends its reservation when an agent appears there. Otherwise, the reservation expires after 60 seconds by default.
+Every reservation expires only at its TTL, 90 seconds by default. This covers the lag of the one-minute load average.
 
 If `place` exits 1, it returns `{"full": true, "hosts": [...]}`.
 Inspect the host reasons and report the capacity limit. There is no queue or automatic retry in 0.5.
@@ -49,8 +49,9 @@ Exit 2 means an error. Read the error before another attempt.
 ## Prepare hook
 
 The hook runs in the repository's main checkout on the selected host.
-A repository's `wrangle.toml` can replace the host policy's `hooks.prepare`.
-Use `{branch}` as an argument placeholder. Do not use the removed `{repo}` placeholder.
+Only host policy sets `hooks.prepare`. Repository setup belongs to Worktrunk configuration.
+Use `{branch}` and `{base}` as argument placeholders. Pass `--base main` to select a base.
+Without `--base`, wrangle omits a word that is only `{base}`. Other placeholders are errors.
 The hook returns JSON with `path`, `pane_id`, or both.
 
 ## Service

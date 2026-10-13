@@ -184,7 +184,7 @@ pub fn parse_df(text: &str) -> Option<f64> {
 
 pub fn memory(shell: &dyn Shell) -> Result<Memory> {
     if let Ok(meminfo) = shell.read_file("/proc/meminfo") {
-        if let Some(memory) = user_slice_memory(shell)? {
+        if let Some(memory) = cgroup_memory(shell)? {
             return Ok(memory);
         }
         return parse_meminfo(&meminfo).ok_or_else(|| parse_error("/proc/meminfo", &meminfo));
@@ -203,48 +203,57 @@ pub fn memory(shell: &dyn Shell) -> Result<Memory> {
     .ok_or_else(|| parse_error("vm_stat", &vm))
 }
 
-/// Select the closest finite user-slice ceiling, not a session scope or the
-/// host's root cgroup. Read usage from that same slice.
-fn user_slice_memory(shell: &dyn Shell) -> Result<Option<Memory>> {
+/// The smallest finite ancestor limit governs the process. Measure that
+/// scope's working set, excluding inactive file cache.
+fn cgroup_memory(shell: &dyn Shell) -> Result<Option<Memory>> {
     let Ok(cgroup) = shell.read_file("/proc/self/cgroup") else {
         return Ok(None);
     };
     let Some(path) = cgroup.lines().find_map(|line| line.strip_prefix("0::")) else {
         return Ok(None);
     };
-    let mut prefix = String::from("/sys/fs/cgroup");
-    let mut slices = Vec::new();
-    for component in path.split('/').filter(|part| !part.is_empty()) {
-        prefix.push('/');
-        prefix.push_str(component);
-        if component == "user.slice"
-            || (component.starts_with("user-") && component.strip_suffix(".slice").is_some())
-        {
-            slices.push(prefix.clone());
-        }
-    }
-    for slice in slices.iter().rev() {
-        let Ok(limit) = shell.read_file(&format!("{slice}/memory.max")) else {
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    let process = root.join(path.trim_start_matches('/'));
+    let mut governing: Option<(std::path::PathBuf, u64)> = None;
+    for scope in process
+        .ancestors()
+        .take_while(|scope| scope.starts_with(root))
+    {
+        let Ok(limit) = shell.read_file(&scope.join("memory.max").display().to_string()) else {
             continue;
         };
         if limit.trim() == "max" {
             continue;
         }
-        let total_bytes = limit
+        let limit: u64 = limit
             .trim()
             .parse()
             .map_err(|_| parse_error("memory.max", &limit))?;
-        let current = shell.read_file(&format!("{slice}/memory.current"))?;
-        let used_bytes = current
-            .trim()
-            .parse()
-            .map_err(|_| parse_error("memory.current", &current))?;
-        return Ok(Some(Memory {
-            used_bytes,
-            total_bytes,
-        }));
+        if governing
+            .as_ref()
+            .is_none_or(|(_, current)| limit < *current)
+        {
+            governing = Some((scope.to_path_buf(), limit));
+        }
     }
-    Ok(None)
+    let Some((scope, total_bytes)) = governing else {
+        return Ok(None);
+    };
+    let current = shell.read_file(&scope.join("memory.current").display().to_string())?;
+    let current: u64 = current
+        .trim()
+        .parse()
+        .map_err(|_| parse_error("memory.current", &current))?;
+    let stat = shell.read_file(&scope.join("memory.stat").display().to_string())?;
+    let inactive: u64 = stat
+        .lines()
+        .find_map(|line| line.strip_prefix("inactive_file "))
+        .and_then(|value| value.trim().parse().ok())
+        .ok_or_else(|| parse_error("memory.stat inactive_file", &stat))?;
+    Ok(Some(Memory {
+        used_bytes: current.saturating_sub(inactive),
+        total_bytes,
+    }))
 }
 
 fn parse_meminfo(text: &str) -> Option<Memory> {
@@ -322,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_uses_user_slice_not_session_limit() {
+    fn memory_uses_tightest_ancestor_working_set() {
         let shell = Fake::new();
         shell
             .on(
@@ -331,28 +340,59 @@ mod tests {
             )
             .on(
                 "read /proc/self/cgroup",
-                "0::/user.slice/user-1000.slice/session-5.scope\n",
+                "0::/user.slice/user-1000.slice/session.scope\n",
+            )
+            .on(
+                "read /sys/fs/cgroup/user.slice/user-1000.slice/session.scope/memory.max",
+                "16384",
             )
             .on(
                 "read /sys/fs/cgroup/user.slice/user-1000.slice/memory.max",
                 "8192",
             )
+            .on("read /sys/fs/cgroup/user.slice/memory.max", "32768")
+            .on("read /sys/fs/cgroup/memory.max", "max")
             .on(
                 "read /sys/fs/cgroup/user.slice/user-1000.slice/memory.current",
-                "4096",
+                "7000",
+            )
+            .on(
+                "read /sys/fs/cgroup/user.slice/user-1000.slice/memory.stat",
+                "anon 1000\ninactive_file 3000\n",
             );
         assert_eq!(
             memory(&shell).unwrap(),
             Memory {
-                used_bytes: 4096,
+                used_bytes: 4000,
                 total_bytes: 8192
             }
         );
-        shell.on(
-            "read /sys/fs/cgroup/user.slice/user-1000.slice/memory.max",
-            "max",
+        shell
+            .on("read /sys/fs/cgroup/memory.max", "4096")
+            .on("read /sys/fs/cgroup/memory.current", "2000")
+            .on("read /sys/fs/cgroup/memory.stat", "inactive_file 500\n");
+        assert_eq!(
+            memory(&shell).unwrap(),
+            Memory {
+                used_bytes: 1500,
+                total_bytes: 4096
+            }
         );
-        assert_eq!(memory(&shell).unwrap().total_bytes, 102_400);
+        for path in [
+            "",
+            "/user.slice",
+            "/user.slice/user-1000.slice",
+            "/user.slice/user-1000.slice/session.scope",
+        ] {
+            shell.on(&format!("read /sys/fs/cgroup{path}/memory.max"), "max");
+        }
+        assert_eq!(
+            memory(&shell).unwrap(),
+            Memory {
+                used_bytes: 76800,
+                total_bytes: 102_400
+            }
+        );
     }
 
     #[test]

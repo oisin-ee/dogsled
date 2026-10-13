@@ -47,13 +47,12 @@ this cache, so they cost one ssh read per peer per 10 s at most.
 
 ### 2. Placement: `wrangle place`
 
-`wrangle place [--host H] [--branch B] [--repo R]` picks the host with the most headroom, writes a short
-reservation (default 60 s) on it, and prints the host. With `--branch` it also creates the worktree on that host
+`wrangle place [--host H] [--branch B] [--base B] [--repo R]` picks the host with the most headroom, writes a short
+reservation (default 90 s) on it, and prints the host. With `--branch` it also creates the worktree on that host
 (the prepare hook, now run in the checkout) and prints its path.
 
 The agent then spawns with Shepherdr: `agents spawn machine=<host> cwd=<path> …`. The reservation stops two callers
-from picking the same host before the new agent shows in `herdr agent list`. It ends when the agent appears, or at
-the TTL.
+from picking the same host before the new agent shows in `herdr agent list`. It ends at its TTL (default 90 s), which covers the lag of the 1-minute load average.
 
 Jobs use the same placement inside `wrangle run`.
 

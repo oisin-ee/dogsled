@@ -7,8 +7,10 @@ All notable changes to this project are documented in this file.
 - Add `serve` with local-only probes, atomic `host.json`, memory used/total, and a configurable ten-second interval.
 - Record each agent pane, harness, state, transcript path, and transcript file modification time in the host snapshot.
 - Make `status` read snapshots, with parallel peer reads and a shared ten-second cache. Show stale and unavailable hosts instead of hiding them.
-- Add `status --line`, `status --brief`, and `place`. Placement reserves capacity for 60 seconds by default and can prepare a worktree.
-- Run prepare hooks in the repository checkout. Remove `{repo}` substitution.
+- Add `status --line`, `status --brief`, and `place`. Placement reserves capacity until its TTL (90 seconds by default) and can prepare a worktree.
+- Run host-policy prepare hooks in the repository checkout. Restore `--base` and literal `{branch}`/`{base}` substitution. Reject unknown placeholders. Remove repository hook overrides.
+- Report Linux working-set memory from the cgroup with the smallest finite ancestor limit.
+- Bundle launchd and systemd service definitions in release archives. Dotfiles installs them later.
 - Replace the Pi spawn tool and widget with prompt context from `wrangle status --brief`.
 - Remove leads, marks, ticket admission, spawn, cancel, queue, lifecycle reports, and Herdr release hooks. The new placement ledger does not read old ticket state.
 - Remove the sidebar snippet and obsolete lead/placement plan. Keep the Herdr status-board popup.

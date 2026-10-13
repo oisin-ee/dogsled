@@ -1,9 +1,9 @@
 //! User-facing status formatting and placement. No agent spawning or queue.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::hook::{self, Prepared};
 use crate::hosts::{Fleet, Host, HostReport};
-use crate::ledger::{new_id, now_ms};
+use crate::ledger::new_id;
 use crate::plan;
 use serde::Serialize;
 
@@ -31,6 +31,7 @@ pub fn place(
     fleet: &Fleet,
     host: Option<&str>,
     branch: Option<&str>,
+    base: Option<&str>,
     repo: &str,
     now: u64,
 ) -> Result<Placement> {
@@ -47,23 +48,10 @@ pub fn place(
         let outcome = fleet.reserve(host, &id, now)?;
         if outcome.reserved {
             let prepared = if let Some(branch) = branch {
-                match hook::run(fleet, host, repo, branch) {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        fleet.release(host, &id, now_ms()).map_err(|release| {
-                            Error::Invalid(format!(
-                                "{error}; reservation cleanup failed: {release}"
-                            ))
-                        })?;
-                        return Err(error);
-                    }
-                }
+                hook::run(fleet, host, repo, branch, base)?
             } else {
                 Prepared::default()
             };
-            if let Some(pane) = &prepared.pane_id {
-                fleet.bind(host, &id, pane, now_ms())?;
-            }
             return Ok(Placement::Placed {
                 host: host.clone(),
                 reservation: id,
@@ -82,7 +70,7 @@ pub fn place(
 }
 
 fn marker(host: &HostReport) -> &'static str {
-    if !host.reachable {
+    if !host.reachable || host.service == "down" {
         " ?"
     } else if !host.headroom.as_ref().is_some_and(|h| h.eligible) {
         " ▲"
@@ -103,12 +91,18 @@ pub fn line(status: &Status) -> String {
         status
             .hosts
             .iter()
-            .map(|host| format!(
-                "{} {}{}",
-                one_line(&host.host.label),
-                load(host),
-                marker(host)
-            ))
+            .map(|host| {
+                if host.probe.is_none() {
+                    format!("{} ?", one_line(&host.host.label))
+                } else {
+                    format!(
+                        "{} {}{}",
+                        one_line(&host.host.label),
+                        load(host),
+                        marker(host)
+                    )
+                }
+            })
             .collect::<Vec<_>>()
             .join(" · ")
     )
