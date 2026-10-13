@@ -75,6 +75,8 @@ fn waiting_queue_caller_observes_service_admission_without_sleep() {
     output.read_line(&mut line).unwrap();
     let queued: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(queued["queued"], true);
+    // The fixture supplies admission capacity, not the CI runner's current load.
+    rig.config("load_per_core_max = 1000000\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(child.wait().unwrap().code(), Some(3));
     assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");

@@ -219,7 +219,9 @@ fn queue_admission_is_fifo_and_owner_wake_waits_for_idle() {
             .unwrap()
             .contains("2 queued")
     );
-    rig.config("");
+    // Admission behavior is independent of the CI runner's real probe load/disk.
+    // Exact capacity thresholds and FIFO blocking use the injected-time unit fixture.
+    rig.config("load_per_core_max = 1000000\ndisk_free_min_percent = 0\n");
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":"working"}]}}),
