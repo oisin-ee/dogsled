@@ -83,7 +83,13 @@ export default function wrangle(pi: ExtensionAPI) {
 		await update(ctx);
 	});
 	pi.on("before_agent_start", async (event) => {
-		const status = await exec(["status", "--brief"]);
-		return { systemPrompt: `${event.systemPrompt}\n\n## Host status\n${status.trim()}\n` };
+		// Context is optional, including when the binary is absent or fails.
+		try {
+			const result = await pi.exec(binary, ["hook", "context", "--harness", "pi"], { timeout: 6_000 });
+			if (result.code !== 0 || !result.stdout.trim()) return;
+			return { systemPrompt: `${event.systemPrompt}\n\n## Host status\n${result.stdout.trim()}\n` };
+		} catch {
+			return;
+		}
 	});
 }

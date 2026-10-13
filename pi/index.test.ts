@@ -10,28 +10,37 @@ function rig() {
 	const widgets: unknown[] = [];
 	const notices: unknown[] = [];
 	let code = 0;
+	let context = "local 3/8\n";
+	let missing = false;
 	let items: unknown = { items: [], queue: [] };
 	const api = {
 		on(event: string, fn: Handler) { handlers.set(event, fn); },
-		async exec(binary: string, args: string[]) {
+		async exec(binary: string, args: string[], options?: { timeout: number }) {
 			calls.push([binary, ...args]);
-			return { code, stdout: args[0] === "status" ? "local 3/8\n" : JSON.stringify(items), stderr: "failure", killed: false };
+			if (missing) throw new Error("ENOENT");
+			if (args[0] === "hook") assert.equal(options?.timeout, 6_000);
+			return { code, stdout: args[0] === "hook" ? context : JSON.stringify(items), stderr: "failure", killed: false };
 		},
 	};
 	wrangle(api as unknown as ExtensionAPI);
 	const ctx = { mode: "tui", ui: { setWidget: (...args: unknown[]) => widgets.push(args), notify: (...args: unknown[]) => notices.push(args) } };
-	return { calls, widgets, notices, ctx, fail: () => { code = 2; }, recover: () => { code = 0; }, items: (value: unknown) => { items = value; },
+	return { calls, widgets, notices, ctx, context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, items: (value: unknown) => { items = value; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler); return handler(event, ctx);
 		} };
 }
 
-test("keeps the fresh brief and surfaces status errors", async () => {
+test("uses the shared context hook and leaves prompts unchanged when unavailable", async () => {
 	const r = rig();
 	assert.equal(r.calls.length, 0);
 	assert.deepEqual(await r.invoke("before_agent_start", { systemPrompt: "base" }), { systemPrompt: "base\n\n## Host status\nlocal 3/8\n" });
+	assert.deepEqual(r.calls[0]?.slice(1), ["hook", "context", "--harness", "pi"]);
+	r.context("");
+	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
 	r.fail();
-	await assert.rejects(r.invoke("before_agent_start", { systemPrompt: "base" }), /failure/);
+	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
+	r.missing();
+	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
 });
 
 test("tracks structured and text spawn results, filters widget, and cleans up timer", async (t) => {

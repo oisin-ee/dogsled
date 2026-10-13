@@ -5,6 +5,48 @@ Host status and placement for coding agents across [Herdr](https://herdr.dev) ho
 Wrangle measures hosts, places jobs and agents, and queues work. Shepherdr keeps parent/child messages.
 This branch contains the unreleased 0.5 redesign. Published 0.4 binaries do not support these commands.
 
+## Install
+
+Install the binary on each Herdr host. Replace `vX` with the same release tag in each command.
+The plugin layout and context hook below are unreleased. The published `v0.4.0` tag does not contain them.
+
+Binary:
+
+```sh
+mise use github:oisin-ee/wrangle@vX
+```
+
+Pi (extension and skill):
+
+```sh
+pi install git:github.com/oisin-ee/wrangle@vX
+```
+
+Claude Code (hooks and skill):
+
+```sh
+claude plugin marketplace add oisin-ee/wrangle
+claude plugin install wrangle@wrangle
+```
+
+Codex (hooks and skill):
+
+```sh
+codex plugin marketplace add oisin-ee/wrangle --ref vX
+codex plugin add wrangle@wrangle
+```
+
+Codex requires review and trust before it runs plugin hooks. See the [Codex hooks documentation](https://developers.openai.com/codex/hooks#plugin-hooks).
+The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#codex-plugin) describes plugin installation.
+
+Herdr (status-board popup):
+
+```sh
+herdr plugin install oisin-ee/wrangle --ref vX
+```
+
+Harness plugins use the binary on `PATH`. They do not install it or start host services.
+
 ## Commands
 
 ```sh
@@ -176,12 +218,22 @@ Host snapshots use `host.json`. New placement reservations use `placements.json`
 Jobs use `jobs/`, owner items use `items.json`, and FIFO tickets use `queue.json`.
 The removed lead ledger and event log are not read or migrated.
 
-## Pi and Herdr
+## Prompt context and integrations
 
-The Pi extension adds `wrangle status --brief` to each prompt through `before_agent_start`.
+`wrangle hook context --harness claude|codex|pi` formats the same text as `status --brief`.
+Claude Code and Codex register `SessionStart` and `UserPromptSubmit` hooks in `plugins/wrangle`.
+Each registration supplies `--event SessionStart` or `--event UserPromptSubmit`. The default event is `UserPromptSubmit`.
+The CLI never reads stdin. Claude Code and Codex receive `hookSpecificOutput` JSON with `hookEventName` and `additionalContext`.
+Pi receives plain text through its `before_agent_start` extension. All three use the same snapshot reader and formatter.
+
+Without `HERDR_ENV`, service snapshots, or a usable binary, the hooks add nothing.
+A hook has a five-second command budget. Hook failures exit successfully without output.
+Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the binary fails.
+
+The Pi extension calls `wrangle hook context --harness pi` before each prompt.
 It tracks successful Shepherdr `agents` spawn results through `wrangle track`.
 An above-editor widget lists this session's open jobs and pending tickets. It refreshes every ten seconds and after tool results.
-An empty list removes the widget. Shutdown stops the timer. Status and tracking failures appear as extension errors.
+An empty list removes the widget. Shutdown stops the timer. Widget and tracking failures still appear as extension errors.
 `$WRANGLE_BIN` selects the binary used by the extension.
 
 The Herdr plugin keeps only the status-board popup:
@@ -191,7 +243,7 @@ herdr plugin pane open --plugin wrangle --entrypoint board
 ```
 
 The popup runs `wrangle status --watch`. The pane-close release hooks and sidebar token configuration are removed.
-The skill in `skills/wrangle/SKILL.md` describes placement followed by Shepherdr spawning.
+All three harness packages share `plugins/wrangle/skills/wrangle/SKILL.md`. It describes placement, jobs, and queue admission.
 
 ## Build and development
 
@@ -203,7 +255,8 @@ npm ci
 ```
 
 The executable is `target/release/wrangle`.
-Release archives include `wrangle.service` and `dev.wrangle.plist` from `plugin/services/`.
+Release archives include the binary, `wrangle.service`, and `dev.wrangle.plist` from `plugin/services/`.
+Harness installers read their manifests and skill from Git, not the binary archive. The skill move does not change the archive contents.
 Both run `wrangle serve` through `~/.local/bin/mise`, restart on failure, and log to the wrangle state directory.
 Dotfiles installs the systemd user unit or renders the launchd template with an absolute, XML-escaped `@HOME@` path.
 For launchd, dotfiles creates `~/.local/state/wrangle` before loading the agent. Systemd creates it through `StateDirectory`.

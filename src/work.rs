@@ -293,9 +293,9 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
             .repository
             .as_ref()
             .ok_or_else(|| Error::Invalid("branch requires repository".into()))?;
-        crate::hook::run(fleet, &host, &repo.path, branch, request.base.as_deref())?
+        crate::prepare::run(fleet, &host, &repo.path, branch, request.base.as_deref())?
     } else {
-        crate::hook::Prepared::default()
+        crate::prepare::Prepared::default()
     };
     if matches!(request.action, Action::Place) {
         return Ok(Some(

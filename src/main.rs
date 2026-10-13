@@ -5,14 +5,15 @@ mod checkout;
 mod cli;
 mod commands;
 mod config;
+mod context;
 mod error;
-mod hook;
 mod hosts;
 mod items;
 mod jobs;
 mod ledger;
 mod node;
 mod plan;
+mod prepare;
 mod probe;
 mod runtime;
 mod service;
@@ -22,7 +23,7 @@ mod work;
 mod work_tests;
 
 use clap::Parser;
-use cli::{Cli, Command, HostCommand};
+use cli::{Cli, Command, HookCommand, HostCommand};
 use error::{Error, Result};
 use ledger::{Ledger, now_ms};
 use node::Node;
@@ -34,6 +35,10 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
+    let hook = matches!(cli.command, Command::Hook(_));
+    if hook && std::env::var_os("HERDR_ENV").is_none() {
+        return ExitCode::SUCCESS;
+    }
     let started = std::time::Instant::now();
     let (max, waiting) = match &cli.command {
         Command::Wait { max, .. }
@@ -47,11 +52,18 @@ fn main() -> ExitCode {
         _ => (None, false),
     };
     let max = cli.budget_ms.or(max);
+    let max = if hook {
+        Some(max.unwrap_or(5_000).min(5_000))
+    } else {
+        max
+    };
     let budget = max.map_or_else(budget::Budget::default, |ms| {
         budget::Budget::until(started + std::time::Duration::from_millis(ms))
     });
     match run(cli, budget) {
         Ok(code) => code,
+        // Prompt context is optional: unavailable state must not block a turn.
+        Err(_) if hook => ExitCode::SUCCESS,
         Err(Error::Deadline(_)) if waiting => {
             println!("still running");
             ExitCode::from(124)
@@ -115,11 +127,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             brief,
         } => loop {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home.clone())?;
-            let status = commands::Status {
-                hosts: fleet.status(now_ms())?,
-                items: items::list(&ledger)?,
-                queue: work::queue(&ledger)?,
-            };
+            let status = commands::status(&fleet)?;
             if watch && !cli.json && !line && !brief {
                 print!("\x1b[2J\x1b[H");
             }
@@ -137,6 +145,11 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         },
+        Command::Hook(HookCommand::Context { harness, event }) => {
+            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
+            let status = commands::status(&fleet)?;
+            print(false, &(), || context::format(harness, event, &status))?;
+        }
         command => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             return runtime::dispatch(&fleet, command, cli.json);
@@ -194,7 +207,7 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
         HostCommand::Prepare { repo, branch, base } => {
             print(
                 true,
-                &hook::local(
+                &prepare::local(
                     node.shell,
                     policy,
                     &std::path::Path::new(node.home)
