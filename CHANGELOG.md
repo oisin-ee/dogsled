@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.6.1 - 2026-10-14
 
 - Remove the hourly automatic worktree cleanup from `serve`. Wrangle never removes anything on a timer.
 - Prompt the owner as soon as its child finishes, with the exact `wrangle close` command. Idle and done count as one event.
