@@ -114,3 +114,32 @@ fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
     cmd.env("HERDR_ENV", "1");
     assert!(bounded(cmd).status.success());
 }
+
+#[test]
+fn context_lists_close_commands_only_for_the_callers_finished_children() {
+    let rig = Rig::new("context-close");
+    rig.snapshot("state/host.json", now(), 1.0, 8);
+    // The snapshot's idle agent is in pane w1:p1. Both items name it; only one is the caller's.
+    rig.put(
+        "state/items.json",
+        &json!([
+            {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
+             "name":"worker","created_ms":1,"closed_ms":null},
+            {"id":"theirs","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w9:p9",
+             "name":"other","created_ms":1,"closed_ms":null}
+        ]),
+    );
+    let status = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
+    assert!(status.contains("(2 finished)"), "{status}");
+    assert!(!status.contains("wrangle close"), "{status}");
+    let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
+    cmd.env("HERDR_ENV", "1");
+    let out = String::from_utf8(bounded(cmd).stdout).unwrap();
+    assert!(
+        out.ends_with(
+            "Your finished children: `wrangle close w1:p1 --host local` (worker). Close each one after you take or drop its result.\n"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("(other)"), "{out}");
+}

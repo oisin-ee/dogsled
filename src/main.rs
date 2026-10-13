@@ -153,7 +153,10 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         Command::Hook(HookCommand::Context { harness, event }) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             let status = commands::status(&fleet)?;
-            print(false, &(), || context::format(harness, event, &status))?;
+            let owner = std::env::var("HERDR_PANE_ID").ok();
+            print(false, &(), || {
+                context::format(harness, event, &status, owner.as_deref())
+            })?;
         }
         command => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;

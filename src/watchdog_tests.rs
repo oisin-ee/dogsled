@@ -350,43 +350,54 @@ fn closed_item_does_not_observe_reused_or_retracked_pane() {
 }
 
 #[test]
-fn finished_child_stays_open_and_check_ins_ask_for_close_until_its_pane_is_gone() {
+fn finished_child_prompts_its_owner_at_once_and_until_it_is_closed() {
     let rig = Rig::new();
     rig.item("agent");
     let reports = rig.reports(1, "working", "working", Some(1));
     tick(&rig.fleet(), &reports, 1).unwrap();
+    assert_eq!(rig.prompts(), 0);
+    // The child finishes while its owner is idle: the owner hears at once, with the close command.
     let reports = rig.reports(60_001, "idle", "done", Some(1));
     crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
     let item = &crate::items::list(&rig.ledger).unwrap()[0];
     assert_eq!(item.closed_ms, None);
     assert!(crate::items::finished(item, &reports));
     tick(&rig.fleet(), &reports, 60_001).unwrap();
-    assert_eq!(rig.prompts(), 0);
-    // The regular check-in names the exact close command, and repeats while it is open.
-    for (now, count) in [(1_860_001, 1), (3_660_001, 2)] {
-        let reports = rig.reports(now, "idle", "done", Some(1));
-        tick(&rig.fleet(), &reports, now).unwrap();
-        assert_eq!(rig.prompts(), count);
-    }
+    assert_eq!(rig.prompts(), 1);
     assert!(
-        rig.shell
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|s| s.contains("run: `wrangle close child --host local`"))
+        rig.shell.calls.lock().unwrap().iter().any(
+            |s| s.contains("finished") && s.contains("run: `wrangle close child --host local`")
+        )
     );
-    // A closed pane ends the item without `wrangle close`.
-    let mut reports = rig.reports(3_720_001, "idle", "done", Some(1));
+    // Done and idle are one event: a flip does not prompt again before the check-in.
+    let reports = rig.reports(120_001, "idle", "idle", Some(1));
+    tick(&rig.fleet(), &reports, 120_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
+    // The regular check-in repeats while the child stays open.
+    let reports = rig.reports(1_860_001, "idle", "done", Some(1));
+    tick(&rig.fleet(), &reports, 1_860_001).unwrap();
+    assert_eq!(rig.prompts(), 2);
+    // After `wrangle close`, the owner hears nothing more about it.
+    crate::items::close(&rig.ledger, "local", "child", 1_900_000).unwrap();
+    let reports = rig.reports(5_000_001, "idle", "done", Some(1));
+    tick(&rig.fleet(), &reports, 5_000_001).unwrap();
+    assert_eq!(rig.prompts(), 2);
+}
+
+#[test]
+fn finished_child_ends_its_item_when_its_pane_is_gone() {
+    let rig = Rig::new();
+    rig.item("agent");
+    let mut reports = rig.reports(60_001, "idle", "done", Some(1));
     reports[0]
         .probe
         .as_mut()
         .unwrap()
         .panes
         .retain(|p| p.pane_id != "child");
-    crate::items::reconcile(&rig.ledger, &reports, 3_720_001).unwrap();
+    crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
     assert_eq!(
         crate::items::list(&rig.ledger).unwrap()[0].closed_ms,
-        Some(3_720_001)
+        Some(60_001)
     );
 }

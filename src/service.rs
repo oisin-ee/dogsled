@@ -29,8 +29,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, watchdog: bool) -> Re
         crate::watchdog::tick(&fleet, &reports, now)?;
         items::reconcile(ledger, &reports, now)
     } else {
-        work::tick(&fleet, now_ms())?;
-        crate::cleanup::auto(&fleet.node(), now_ms())
+        work::tick(&fleet, now_ms())
     }
 }
 

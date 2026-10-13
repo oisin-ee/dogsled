@@ -238,18 +238,30 @@ fn item_state<'a>(
             .agent_panes
             .iter()
             .find(|a| a.pane == item.pane)?;
+        // A finished child is urgent: its owner must take the result and close it now.
+        // Idle and done are one event, so a flip between them does not prompt again.
+        let finished = matches!(agent.state.as_str(), "idle" | "done");
         Some((
             host,
             if agent.stalled_since_ms.is_some() {
                 "stalled".into()
+            } else if finished {
+                "finished".into()
             } else {
                 agent.state.clone()
             },
             agent.transcript_modified,
-            agent.stalled_since_ms.is_some(),
-            agent
-                .stalled_since_ms
-                .map_or_else(|| agent.state.clone(), |since| format!("stalled:{since}")),
+            agent.stalled_since_ms.is_some() || finished,
+            agent.stalled_since_ms.map_or_else(
+                || {
+                    if finished {
+                        "finished".into()
+                    } else {
+                        agent.state.clone()
+                    }
+                },
+                |since| format!("stalled:{since}"),
+            ),
         ))
     }
 }
@@ -383,7 +395,7 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
     if !finished.is_empty() {
         let _ = writeln!(
             note,
-            "Finished children keep their pane and worktree until you close them. After you take or drop each result, run: {}.",
+            "A finished child keeps its pane, workspace, and worktree until you close it. Take or drop each result, then run: {}.",
             finished.join(", ")
         );
     }
@@ -449,9 +461,12 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             let open: Vec<_> = items
                 .iter()
                 .filter(|i| {
+                    // A closed agent item was closed by its owner or lost its pane:
+                    // nothing remains to report. An ended job still reports its result.
                     i.owner_pane == owner
                         && (i.closed_ms.is_none()
-                            || state.events.get(&i.id).is_some_and(|e| e.urgent))
+                            || (i.kind == "job"
+                                && state.events.get(&i.id).is_some_and(|e| e.urgent)))
                 })
                 .collect();
             if open.is_empty() {

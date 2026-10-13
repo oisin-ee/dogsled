@@ -137,12 +137,10 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 - disk above 90 % used, with the largest wrangle-owned paths;
 - processes using more than one core that are not under any Herdr pane (report only).
 
-`wrangle serve` removes worktrees without a question only when their branch is merged or deleted, the worktree is clean,
-and no live pane uses it. Every other class keeps the question in `wrangle prune [--host H] [<class>…]`.
-`prune` shows what it will remove, asks, then removes it. It never kills processes.
-Prepare registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration. Hourly automatic cleanup discovers their current Git worktrees, rather than trusting saved paths.
-Doctor also discovers repositories from the caller and live pane directories. Neither scans the whole home directory.
-This bounds automatic ownership: unrelated repositories and detached worktrees remain outside automatic cleanup.
+Wrangle never removes anything on a timer. The lead that started a child closes it with `wrangle close` when it is finished.
+Every other class waits for `wrangle prune [--host H] [<class>…]`, which shows what it will remove, asks, then removes it. It never kills processes.
+Prepare registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
+Doctor also discovers repositories from the caller and live pane directories. It never scans the whole home directory.
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
 Prune compares current Git path, branch, HEAD, and repository with the approved plan immediately before removal.
 A branch-taking repository task cannot guarantee an exact path. Until a task exposes a verifiable path-bound contract, removal uses non-forced `git worktree remove -- <path>`.
@@ -204,6 +202,6 @@ Units 1–3 are sequential. Unit 4 builds on units 1 and 2. Unit 5 follows each 
 
 1. Stall: Herdr shows `working` or `unknown` and the transcript is unchanged for 10 min.
 2. Wake mechanism: check-ins through `herdr agent prompt` (part 4); test A proves them in unit 3.
-3. Prune: `wrangle serve` removes clean worktrees without a question when their branch is merged or deleted and no live pane uses them. Every other class keeps the question in `wrangle prune`.
+3. Cleanup: the lead that started a child closes it with `wrangle close` when it finishes. Wrangle prompts that lead at once, then at each check-in until it does. Nothing is removed on a timer; `wrangle prune` asks first.
 4. Service install: dotfiles installs the launchd agent (macOS) and the systemd user unit (Linux) on every host.
 5. The old 0.5.0 `prepare` PR was never pushed. Unit 1 carries its fix: the hook runs in the checkout, with no `{repo}`.
