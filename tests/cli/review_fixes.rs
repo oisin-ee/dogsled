@@ -14,28 +14,6 @@ fn removal_refuses_identity_changed_during_planning() {
 }
 
 #[test]
-fn automatic_repository_survives_last_removal_and_next_hour_discovers_new_tree() {
-    let rig = watchdog_rig("retained-repo");
-    let run = || rig.run(&["serve", "--once", "--interval", "1"]);
-    assert!(run().status.success());
-    assert_eq!(rig.log("git.log").matches("worktree remove --").count(), 1);
-    assert_eq!(rig.read("state/worktrees.json"), json!([]));
-    assert_eq!(
-        rig.read("state/repositories.json"),
-        json!([rig.dir.join("home/repo")])
-    );
-    fs::create_dir_all(rig.dir.join("home/repo/second")).unwrap();
-    fs::write(rig.dir.join("second-tree"), "").unwrap();
-    fs::write(rig.dir.join("clock"), "176400000").unwrap();
-    assert!(run().status.success());
-    assert_eq!(rig.log("git.log").matches("worktree remove --").count(), 1);
-    fs::write(rig.dir.join("clock"), "176400001").unwrap();
-    assert!(run().status.success());
-    assert_eq!(rig.log("git.log").matches("worktree remove --").count(), 2);
-    assert!(rig.log("git.log").contains("worktree remove --"));
-}
-
-#[test]
 fn low_disk_missing_and_unreadable_paths_preserve_other_candidates() {
     let rig = watchdog_rig("missing-disk");
     let missing = rig.dir.join("home/repo/missing");

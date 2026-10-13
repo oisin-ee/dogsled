@@ -1,6 +1,6 @@
 //! One prompt-context formatter for Pi, Claude Code, and Codex.
 
-use crate::commands::{Status, brief};
+use crate::commands::{Status, brief, close_line};
 use clap::ValueEnum;
 use serde::Serialize;
 
@@ -18,11 +18,15 @@ pub enum Event {
     UserPromptSubmit,
 }
 
-pub fn format(harness: Harness, event: Event, status: &Status) -> String {
+/// `owner` is the caller's Herdr pane. Its finished children get their close commands.
+pub fn format(harness: Harness, event: Event, status: &Status, owner: Option<&str>) -> String {
     if status.hosts.iter().all(|host| host.sampled_ms.is_none()) {
         return String::new();
     }
-    let text = brief(status);
+    let mut text = brief(status);
+    if let Some(line) = owner.and_then(|owner| close_line(status, owner)) {
+        text.push_str(&line);
+    }
     match harness {
         Harness::Pi => text,
         Harness::Claude | Harness::Codex => format!(
@@ -65,7 +69,7 @@ mod tests {
         for harness in [Harness::Claude, Harness::Codex] {
             for event in [Event::SessionStart, Event::UserPromptSubmit] {
                 let output: serde_json::Value =
-                    serde_json::from_str(&format(harness, event, &status)).unwrap();
+                    serde_json::from_str(&format(harness, event, &status, None)).unwrap();
                 assert_eq!(
                     output,
                     serde_json::json!({
@@ -83,7 +87,7 @@ mod tests {
     fn pi_receives_plain_brief_text() {
         let status = status();
         assert_eq!(
-            format(Harness::Pi, Event::UserPromptSubmit, &status),
+            format(Harness::Pi, Event::UserPromptSubmit, &status, None),
             brief(&status)
         );
     }
@@ -93,7 +97,7 @@ mod tests {
         let mut status = status();
         status.hosts[0].sampled_ms = None;
         for harness in [Harness::Claude, Harness::Codex, Harness::Pi] {
-            assert_eq!(format(harness, Event::SessionStart, &status), "");
+            assert_eq!(format(harness, Event::SessionStart, &status, None), "");
         }
     }
 }

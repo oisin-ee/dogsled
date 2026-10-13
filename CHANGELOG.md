@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Remove the hourly automatic worktree cleanup from `serve`. Wrangle never removes anything on a timer.
+- Prompt the owner as soon as its child finishes, with the exact `wrangle close` command. Idle and done count as one event.
+- List close commands in prompt context only for the caller's own finished children. `status --brief` shows only the count.
+- Stop prompting about an agent item after it closes.
+
 ## 0.6.0 - 2026-10-14
 
 - Add `close PANE [--host H]`: close a finished child's Herdr workspace, remove its worktree with `wt remove` so the repository's remove hooks run, and end its item. Refuse active agents, dirty or foreign-locked worktrees, and the caller's own workspace before any change.

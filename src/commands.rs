@@ -175,7 +175,7 @@ pub fn brief(status: &Status) -> String {
         if finished == 0 {
             String::new()
         } else {
-            format!(" ({finished} finished: run `wrangle close <pane>` after taking each result)")
+            format!(" ({finished} finished)")
         },
         status.queue.iter().filter(|t| t.state == "pending").count(),
         status
@@ -187,6 +187,40 @@ pub fn brief(status: &Status) -> String {
             .count()
     ));
     format!("{}\n", rows.join("\n"))
+}
+
+/// The exact close command for each of `owner`'s finished children, for that owner's prompt.
+/// Other owners' children are never listed, so an agent is never told to close work it did not start.
+pub fn close_line(status: &Status, owner: &str) -> Option<String> {
+    let commands: Vec<_> = status
+        .items
+        .iter()
+        .filter(|i| i.owner_pane == owner && crate::items::finished(i, &status.hosts))
+        .map(|i| {
+            format!(
+                "`wrangle close {} --host {}`{}",
+                crate::shell::quote(&i.pane),
+                crate::shell::quote(&i.host),
+                i.name
+                    .as_deref()
+                    .map_or_else(String::new, |n| format!(" ({})", one_line(n)))
+            )
+        })
+        .collect();
+    if commands.is_empty() {
+        return None;
+    }
+    let shown = commands.len().min(5);
+    let more = commands.len() - shown;
+    Some(format!(
+        "Your finished children: {}{}. Close each one after you take or drop its result.\n",
+        commands[..shown].join(", "),
+        if more == 0 {
+            String::new()
+        } else {
+            format!(", and {more} more (see `wrangle status`)")
+        }
+    ))
 }
 
 pub fn render(status: &Status) -> String {

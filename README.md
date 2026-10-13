@@ -107,7 +107,7 @@ The owner's host stores locked `items.json` and `queue.json` files.
 An item records its host, pane, owner pane, creation time, and closure time.
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
 The service closes a job item after job completion, and any item after pane removal.
-An agent item that is `idle` or `done` stays open, so the owner keeps hearing about it until `wrangle close` removes it.
+An agent item that is `idle` or `done` stays open. The service prompts its owner at once with the exact `wrangle close` command, then at each check-in until the child is closed.
 The service ignores stale snapshots and snapshots older than the item's creation.
 
 ```sh
@@ -126,7 +126,7 @@ The service admits tickets in FIFO order using the same placement policy.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
 A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
 For non-waiting callers, admission prompts the owner only in `idle` or `done`. Other states defer the prompt.
-`status` lists open items per owner and pending tickets, and marks finished children. `--brief` includes their counts and the number of finished children.
+`status` lists open items per owner and pending tickets, and marks finished children. `--brief` includes their counts and the number of finished children. Prompt context adds the close commands for the caller's own finished children only.
 
 ## Host service and status
 
@@ -215,10 +215,9 @@ Removal rechecks Git path, branch, HEAD, and repository against the approved pla
 A branch-taking `agent:worktree-remove` task does not prove an exact-path contract. Wrangle uses non-forced `git worktree remove -- <path>` instead.
 The result names the method and reason. Git's remote default branch defines merged state, with local `main` as the fallback.
 
-Prepare records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal. Hourly automatic cleanup examines worktrees in those repositories only and logs each removal.
-It applies the same clean, retired-branch, and no-live-pane checks. It never removes panes, jobs, or processes automatically.
-Doctor also discovers repositories from the caller and live pane directories. Neither operation scans the whole home directory.
-Detached worktrees and repositories with unknown merge status are not automatically removed.
+Prepare records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
+Doctor also discovers repositories from the caller and live pane directories. It never scans the whole home directory.
+Wrangle never removes anything on a timer. A lead removes its finished children with `wrangle close`; everything else waits for a confirmed `prune`.
 
 ## Placement
 

@@ -193,35 +193,19 @@ fn prune_confirmation_and_repository_remove_path() {
 }
 
 #[test]
-fn auto_prune_only_clean_retired_unused_trees_and_runs_hourly() {
-    for condition in ["dirty", "unmerged", "live", "clean", "deleted"] {
-        let rig = watchdog_rig(&format!("auto-{condition}"));
-        match condition {
-            "dirty"|"unmerged"|"deleted" => { fs::write(rig.dir.join(condition),"").unwrap(); },
-            "live" => rig.put("panes.json", &json!({"result":{"panes":[{"pane_id":"live","cwd":rig.dir.join("home/repo/tree")}]}})),
-            _ => (),
-        }
+fn serve_never_removes_worktrees() {
+    // Removal is the owner's `wrangle close` or a confirmed `prune`, never a timer.
+    let rig = watchdog_rig("serve-no-removal");
+    fs::write(rig.dir.join("deleted"), "").unwrap();
+    for clock in ["172800001", "176400001"] {
+        fs::write(rig.dir.join("clock"), clock).unwrap();
         let out = rig.run(&["serve", "--once", "--interval", "1"]);
         assert!(
             out.status.success(),
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let removed = rig.log("git.log").matches("worktree remove --").count();
-        assert_eq!(
-            removed,
-            usize::from(matches!(condition, "clean" | "deleted")),
-            "{condition}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            rig.run(&["serve", "--once", "--interval", "1"])
-                .status
-                .success()
-        );
-        assert_eq!(
-            rig.log("git.log").matches("worktree remove --").count(),
-            removed
-        );
     }
+    assert!(!rig.log("git.log").contains("worktree remove"));
+    assert!(rig.dir.join("home/repo/tree").exists());
 }

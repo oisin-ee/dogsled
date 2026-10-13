@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const DAY: u64 = 86_400_000;
-const HOUR: u64 = 3_600_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tree {
@@ -60,7 +59,7 @@ fn git(shell: &dyn Shell, repo: &str, args: &[&str]) -> Result<crate::shell::Out
     )
 }
 
-fn trees(node: &Node<'_>, panes: &[Pane], discover: bool) -> Result<Vec<Tree>> {
+fn trees(node: &Node<'_>, panes: &[Pane]) -> Result<Vec<Tree>> {
     let recorded: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
     let mut repos: BTreeSet<String> = node.ledger.read("repositories.json")?.unwrap_or_default();
     repos.extend(recorded.iter().map(|t| t.repo.clone()));
@@ -70,7 +69,7 @@ fn trees(node: &Node<'_>, panes: &[Pane], discover: bool) -> Result<Vec<Tree>> {
         .iter()
         .flat_map(|p| [p.cwd.as_deref(), p.foreground_cwd.as_deref()])
         .flatten()
-        .chain(cwd.to_str().filter(|_| discover))
+        .chain(cwd.to_str())
     {
         let root = git(
             node.shell,
@@ -363,7 +362,7 @@ fn processes(shell: &dyn Shell, panes: &[Pane], plan: &mut Plan) -> Result<()> {
 
 pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
     let panes = current_panes(node.shell)?;
-    let trees = trees(node, &panes, true)?;
+    let trees = trees(node, &panes)?;
     let mut plan = Plan::default();
     for tree in &trees {
         if !Path::new(&tree.path).exists() {
@@ -605,28 +604,6 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Vec<String>> {
         }
     }
     Ok(results)
-}
-
-pub fn auto(node: &Node<'_>, now: u64) -> Result<()> {
-    node.ledger.with_lock("cleanup", || {
-        let last: Option<u64> = node.ledger.read("cleanup.json")?;
-        if last.is_some_and(|t| now.saturating_sub(t) < HOUR) {
-            return Ok(());
-        }
-        node.ledger.write("cleanup.json", &now)?;
-        // Registered repositories remain discoverable after their last pane closes.
-        // Automatic removal never expands to unrelated live-pane repositories.
-        for tree in trees(node, &[], false)? {
-            if Path::new(&tree.path).exists()
-                && !live(&tree, &current_panes(node.shell)?)
-                && retired(node.shell, &tree)?
-                && clean(node.shell, &tree)?
-            {
-                eprintln!("wrangle cleanup: {}", remove_tree(node, &tree)?);
-            }
-        }
-        Ok(())
-    })
 }
 
 pub fn render(plan: &Plan) -> String {
