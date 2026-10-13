@@ -12,8 +12,19 @@ use std::time::{Duration, Instant};
 
 fn actions(ledger: &Ledger, policy: &Policy, home: String) -> Result<()> {
     let shell = System::default();
-    let fleet = Fleet::discover(&shell, ledger, policy, home)?;
-    work::tick(&fleet, now_ms())
+    let fleet = if items::list(ledger)?.is_empty() && work::queue(ledger)?.is_empty() {
+        Fleet {
+            shell: &shell,
+            ledger,
+            policy,
+            home,
+            hosts: vec![crate::hosts::Host::local()],
+        }
+    } else {
+        Fleet::discover(&shell, ledger, policy, home)?
+    };
+    work::tick(&fleet, now_ms())?;
+    crate::cleanup::auto(&fleet.node(), now_ms())
 }
 
 pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
@@ -23,11 +34,7 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
     loop {
         node.tick(now_ms())?;
         if worker.is_none() {
-            if items::list(node.ledger)?.is_empty() && work::queue(node.ledger)?.is_empty() {
-                if once {
-                    return Ok(());
-                }
-            } else {
+            {
                 let mut ledger = node.ledger.clone();
                 ledger.budget = crate::budget::Budget::default();
                 let policy = policy.clone();

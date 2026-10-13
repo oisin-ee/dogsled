@@ -43,6 +43,20 @@ pub enum Command {
         #[arg(long, conflicts_with = "json")]
         brief: bool,
     },
+    /// List cleanup candidates without changing them.
+    Doctor {
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Show and confirm a safe cleanup plan.
+    Prune {
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(value_parser = ["worktrees", "panes", "jobs", "disk", "processes"])]
+        classes: Vec<String>,
+    },
     /// Reserve capacity on the host with the most headroom.
     Place {
         #[arg(long)]
@@ -144,6 +158,18 @@ pub enum HookCommand {
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
     Snapshot,
+    Parent {
+        pane: String,
+    },
+    Tail {
+        kind: String,
+        id: String,
+    },
+    Doctor,
+    Prune {
+        #[arg(long)]
+        plan: String,
+    },
     Launch {
         #[arg(long)]
         request: String,

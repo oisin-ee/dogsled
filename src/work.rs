@@ -245,6 +245,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                 name,
                 message,
             } => {
+                crate::watchdog::register_parent(ledger, &pane)?;
                 shell.run_setup_ok(
                     "herdr",
                     &[
@@ -425,6 +426,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
 
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     let reports = fleet.status(now)?;
+    crate::watchdog::tick(fleet, &reports, now)?;
     items::reconcile(fleet.ledger, &reports, now)?;
     fleet.ledger.with_lock("admission", || {
         admit(fleet, now)?;

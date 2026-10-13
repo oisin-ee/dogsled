@@ -39,11 +39,12 @@ pub struct Node<'a> {
 }
 
 impl Node<'_> {
-    /// One service cycle. Future watchdog and admission steps belong after
-    /// publication, rather than in fleet reads or transport.
+    /// Publication never waits for prompts, notifications, or cleanup.
     pub fn tick(&self, now: u64) -> Result<()> {
         let mut probe = probe::local(self.shell, self.home)?;
         self.ledger.with_lock("host", || {
+            let previous: Option<Snapshot> = self.ledger.read("host.json")?;
+            crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);
             probe.reservations = self.live_reservations(now)?;
             self.ledger.write(
                 "host.json",

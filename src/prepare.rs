@@ -50,13 +50,24 @@ pub fn run(
 ) -> Result<Prepared> {
     let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
-        return local(
+        let prepared = local(
             fleet.shell,
             fleet.policy,
             &checkout.display().to_string(),
             branch,
             base,
-        );
+        )?;
+        if let Some(path) = &prepared.path {
+            crate::cleanup::remember(
+                fleet.ledger,
+                crate::cleanup::Tree {
+                    repo: checkout.display().to_string(),
+                    path: path.clone(),
+                    branch: branch.into(),
+                },
+            )?;
+        }
+        return Ok(prepared);
     }
     let home = Path::new(&fleet.home);
     let canonical = home.canonicalize().ok();
