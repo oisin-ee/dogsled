@@ -14,6 +14,8 @@ pub const STALE_MS: u64 = 30_000;
 pub struct Snapshot {
     pub sampled_ms: u64,
     pub probe: Probe,
+    #[serde(default)]
+    pub jobs: Vec<crate::jobs::Job>,
 }
 
 impl Snapshot {
@@ -48,6 +50,7 @@ impl Node<'_> {
                 &Snapshot {
                     sampled_ms: now,
                     probe,
+                    jobs: crate::jobs::list(self.ledger)?,
                 },
             )
         })

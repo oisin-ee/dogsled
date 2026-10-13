@@ -43,6 +43,7 @@ pub struct HostReport {
     pub probe: Option<Probe>,
     pub headroom: Option<Headroom>,
     pub error: Option<String>,
+    pub jobs: Vec<crate::jobs::Job>,
 }
 
 #[derive(Deserialize)]
@@ -152,10 +153,34 @@ impl<'a> Fleet<'a> {
 
     pub fn remote<T: for<'de> Deserialize<'de>>(&self, host: &Host, args: &[String]) -> Result<T> {
         let out = self.shell.run("ssh", &self.remote_argv(host, args))?;
+        Self::parse_remote(host, args, &out)
+    }
+
+    pub fn remote_bounded<T: for<'de> Deserialize<'de>>(
+        &self,
+        host: &Host,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<T> {
+        let out = self
+            .shell
+            .run_bounded("ssh", &self.remote_argv(host, args), timeout)?;
+        Self::parse_remote(host, args, &out)
+    }
+
+    fn parse_remote<T: for<'de> Deserialize<'de>>(
+        host: &Host,
+        args: &[String],
+        out: &crate::shell::Output,
+    ) -> Result<T> {
         if out.status != 0 && out.status != 1 {
+            let detail = serde_json::from_str::<serde_json::Value>(&out.stdout)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| out.stderr.trim().to_owned());
             return Err(Error::Ssh {
                 target: host.label.clone(),
-                detail: format!("exit {}: {}", out.status, out.stderr.trim()),
+                detail: format!("exit {}: {detail}", out.status),
             });
         }
         serde_json::from_str(&out.stdout).map_err(|e| Error::Parse {
@@ -230,6 +255,10 @@ impl<'a> Fleet<'a> {
         });
         let fresh = cached.available && cached.snapshot.as_ref().is_some_and(|s| s.fresh(now));
         let sampled_ms = cached.snapshot.as_ref().map(|s| s.sampled_ms);
+        let jobs = cached
+            .snapshot
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.jobs.clone());
         let probe = cached.snapshot.map(|s| {
             let mut probe = s.probe;
             probe.host.clone_from(&host.id);
@@ -255,6 +284,7 @@ impl<'a> Fleet<'a> {
             probe,
             headroom,
             error: cached.error,
+            jobs,
         }
     }
 
@@ -341,6 +371,7 @@ mod tests {
         };
         let snapshot = Snapshot {
             sampled_ms: 100,
+            jobs: Vec::new(),
             probe: Probe {
                 host: "local".into(),
                 label: "local".into(),

@@ -2,7 +2,7 @@
 
 Host status and placement for coding agents across [Herdr](https://herdr.dev) hosts.
 
-Wrangle measures hosts and reserves capacity. Shepherdr starts agents and handles parent/child messages.
+Wrangle measures hosts, places jobs and agents, and queues work. Shepherdr keeps parent/child messages.
 This branch contains the unreleased 0.5 redesign. Published 0.4 binaries do not support these commands.
 
 ## Commands
@@ -21,14 +21,60 @@ wrangle place --host netcup --json # pin by host id or label
 wrangle place --branch feat/unit-a --base main --repo /path/to/repo --json
 ```
 
-Exit codes: 0 success, 1 no eligible host, 2 error.
-When every host is full, `place` prints `{"full": true, "hosts": [...]}` even without `--json`.
-There is no queue in 0.5. Jobs and a new queue belong to 0.6.
+Exit codes: 0 success, 1 queued without waiting, 2 error. Job waits return the job's exit code.
+When every host is full, `place`, `agent`, and `run` print `{"queued":true,"ticket":"…"}`.
+`--wait --max 30m` waits for admission. A wait that reaches its deadline prints `still running` and exits 124.
+
+## Jobs, agents, and owners
+
+```sh
+wrangle run --wait -- sh -c 'echo hi; exit 3'
+wrangle run --host netcup --cwd /tmp --timeout 1h --idle-timeout 10m -- make test
+wrangle run --branch feat/job --base main --cwd /path/to/repo -- cargo test
+wrangle ps --all
+wrangle logs JOB --follow
+wrangle stop JOB
+wrangle wait JOB --max 30m
+wrangle agent --kind codex --name reviewer --message 'Review the change' --branch feat/review --base main
+wrangle track netcup w1:p2 --name child
+wrangle items --owner "$HERDR_PANE_ID" --json
+wrangle cancel TICKET
+```
+
+Jobs use a new tab in the caller's workspace. Agents can use the pane returned by the prepare hook.
+Remote work uses a workspace with the same name as the caller's workspace, creating it when absent.
+Without a branch, a remote non-repository `--cwd` must exist there.
+Repository directories map to the same path relative to home. A linked-worktree caller needs `--branch` to preserve its branch remotely.
+
+The pane runs `wrangle exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
+The atomic `jobs/ID.json` contains the command, directory, host, owner, exit code, signal, reason, and millisecond timestamps.
+`host.json` includes job records. `ps --all` includes completed jobs and reads remote records through the snapshot cache.
+`logs`, `stop`, and `wait` use the configured SSH transport for remote jobs.
+`stop` requests a process-group kill. Timeouts and wrapper termination also kill the process group.
+Both timeout defaults are unlimited. Durations accept integer `ms`, `s`, `m`, and `h` suffixes.
+The sidebar shows `working`, then `idle` for success or `blocked` for failure, with a `wrangle` exit or timeout token.
+
+`run --wait` waits for admission, then the job, with `--max` applied to each wait.
+Run long waits through the harness's background-task facility.
+A wait deadline does not cancel its job or ticket. `cancel` only cancels pending tickets.
+
+The owner's host stores locked `items.json` and `queue.json` files.
+An item records its host, pane, owner pane, creation time, and closure time.
+`items --json` returns `{items,queue}`. `--owner` filters both collections.
+The service closes items after job completion, agent `idle` or `done`, or pane removal.
+It ignores stale snapshots and snapshots older than the item's creation.
+
+The service admits tickets in FIFO order using the same placement policy.
+It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
+A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
+For non-waiting callers, admission prompts the owner only in `idle` or `done`. Other states defer the prompt.
+`status` lists open items per owner and pending tickets. `--brief` includes their counts.
 
 ## Host service and status
 
 Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
-The service uses no SSH. It reads load, cores, memory, home disk space, Herdr agents, and Herdr panes.
+The measurement step uses no SSH. It reads load, cores, memory, home disk space, Herdr agents, and Herdr panes.
+When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
 It writes `~/.local/state/wrangle/host.json` through atomic replacement.
 Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, and `transcript_modified`.
 Transcript paths come from Herdr path sessions. Their modification times use Unix milliseconds. Unavailable paths or times are null.
@@ -77,7 +123,7 @@ The selected host rechecks reservations under its own lock before it accepts the
 It returns the host id and label. JSON also includes the reservation id.
 With `--branch`, it runs the prepare hook and returns the hook's `path` and `pane_id`, when present.
 Then start the agent through Shepherdr, using that host and prepared pane or path.
-Wrangle does not start an agent, choose a pane layout, or claim a repository lead.
+`place` does not start an agent or claim a repository lead. `run` and `agent` perform placement and launch together.
 
 A reservation ends only at its TTL, which covers the lag of the one-minute load average.
 Agent discovery and prepare failures do not end it early.
@@ -102,6 +148,11 @@ prepare = ["mise", "run", "-q", "agent:worktree", "--", "{branch}", "{base}"]
 The prepare hook belongs only to host policy. Repository setup belongs to the repository's Worktrunk configuration.
 
 The hook runs with the main checkout as its working directory, including calls from a linked worktree.
+Before repository work, wrangle verifies the selected host's checkout against the caller's `git remote get-url origin`.
+If the host has no checkout of the repository, wrangle clones it from the caller's origin into the same path relative to home first.
+An existing path with a different origin, or a non-repository path, is an error. Wrangle does not overwrite it.
+Clone errors identify the host and origin. Wrangle does not silently move the work elsewhere.
+After a fresh clone, wrangle checks mise configuration. If mise reports missing trust, wrangle trusts only that new checkout's configuration.
 For peers, a checkout under the local home maps to the same relative path under the peer's home.
 The peer reads its own host policy.
 Checkouts outside the home keep their absolute path.
@@ -115,12 +166,15 @@ Progress text can precede a final JSON line.
 State defaults to `$XDG_STATE_HOME/wrangle`, or `~/.local/state/wrangle`.
 `$WRANGLE_STATE` selects a complete state-directory path.
 Host snapshots use `host.json`. New placement reservations use `placements.json`.
-The removed ticket ledger, queue, and event log are not read or migrated.
+Jobs use `jobs/`, owner items use `items.json`, and FIFO tickets use `queue.json`.
+The removed lead ledger and event log are not read or migrated.
 
 ## Pi and Herdr
 
 The Pi extension adds `wrangle status --brief` to each prompt through `before_agent_start`.
-It registers no tool, timer, or widget. Status failures appear as extension errors.
+It tracks successful Shepherdr `agents` spawn results through `wrangle track`.
+An above-editor widget lists this session's open jobs and pending tickets. It refreshes every ten seconds and after tool results.
+An empty list removes the widget. Shutdown stops the timer. Status and tracking failures appear as extension errors.
 `$WRANGLE_BIN` selects the binary used by the extension.
 
 The Herdr plugin keeps only the status-board popup:
@@ -151,4 +205,4 @@ Install the same release on every host before enabling its service. This PR does
 
 The pre-commit hook runs `mise run check`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.
 CLI behavior tests use private state and fake Herdr/SSH executables. Time-sensitive unit tests inject timestamps.
-See [the design](docs/design.md) for later jobs, watchdog, and cleanup units.
+See [the design](docs/design.md) for the later watchdog and cleanup unit.

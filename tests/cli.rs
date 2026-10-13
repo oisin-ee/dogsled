@@ -1,6 +1,11 @@
 //! Exercise the real commands with private state and fake Herdr/SSH on PATH.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
+#[path = "cli/jobs.rs"]
+mod jobs;
+#[path = "cli/lifecycle.rs"]
+mod lifecycle;
+
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -50,6 +55,10 @@ case "$*" in
   'machine list --json') cat "$RIG/machines.json" ;;
   'agent list') cat "$RIG/agents.json" ;;
   'pane list') cat "$RIG/panes.json" ;;
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
+  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1"}}}' ;;
+  'pane run'*) shift 3; sh -c "$*" > "$RIG/job-output" 2>&1; printf '{}\n' ;;
+  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
@@ -63,6 +72,12 @@ case "$*" in
     if test -f "$RIG/unreachable"; then echo offline >&2; exit 255; fi
     cat "$RIG/remote.json" ;;
   *'host reserve'*) cat "$RIG/reserve.json" ;;
+  *'host checkout'*) printf '%s\n' '"/remote/repo"' ;;
+  *'host launch'*) printf '%s\n' '{"id":"remote-job","host":"8103","pane":"w9:p1","name":"worker"}' ;;
+  *'host jobs'*) cat "$RIG/jobs.json" ;;
+  *'host job '*) cat "$RIG/job.json" ;;
+  *'host logs'*) cat "$RIG/logs.json" ;;
+  *'host stop'*) printf '{}\n' ;;
   *'host prepare'*) printf '%s\n' '{"pane_id":"w9:p1","path":"/remote/tree"}' ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
@@ -97,6 +112,9 @@ esac
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .current_dir(self.dir.join("home"))
+            .env("HERDR_PANE_ID", "w1:p1")
+            .env("HERDR_WORKSPACE_ID", "w1")
             .env("RIG", &self.dir)
             .env("HOME", self.dir.join("home"))
             .env("WRANGLE_CONFIG", self.dir.join("config.toml"))
@@ -429,15 +447,15 @@ fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
 }
 
 #[test]
-fn full_is_exit_one_with_json_and_no_queue() {
+fn full_is_exit_one_with_durable_queue() {
     let rig = Rig::new("full");
     rig.snapshot("state/host.json", now(), 3.0, 2);
     let output = rig.run(&["place"]);
     assert_eq!(output.status.code(), Some(1));
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["full"], true);
-    assert_eq!(value["hosts"].as_array().unwrap().len(), 1);
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(value["queued"], true);
+    assert!(value["ticket"].is_string());
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
     rig.snapshot("state/host.json", 0, 0.0, 2);
     assert_eq!(rig.json(&["place"]).0, 1);
 }
@@ -471,6 +489,11 @@ fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
         &json!({"result":{"agents":[{"pane_id":"w1:p8"}]}}),
     );
     assert_eq!(rig.json(&["place"]).0, 1);
+    let queued = rig.read("state/queue.json")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(rig.run(&["cancel", &queued]).status.success());
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(
         rig.read("state/placements.json").as_array().unwrap().len(),
@@ -493,6 +516,20 @@ fn repository(path: &Path) {
         isolated("git")
             .args(["init", "-q"])
             .arg(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        isolated("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git"
+            ])
             .status()
             .unwrap()
             .success()

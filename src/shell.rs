@@ -26,6 +26,17 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
     /// `Err` only when the process could not be started.
     fn run(&self, program: &str, args: &[String]) -> Result<Output>;
 
+    /// Run with a caller-owned wall-clock budget.
+    fn run_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        let _ = timeout;
+        self.run(program, args)
+    }
+
     /// Read a whole file (for `/proc/loadavg`). Fakes script this too so the
     /// probe tests run the same on every platform.
     fn read_file(&self, path: &str) -> Result<String> {
@@ -52,6 +63,53 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
 pub struct System;
 
 impl Shell for System {
+    fn run_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        use std::os::unix::process::CommandExt as _;
+        let child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()?;
+        let pid = child.id();
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = send.send(child.wait_with_output());
+        });
+        let result = match recv.recv_timeout(timeout) {
+            Ok(result) => result.map_err(Error::from),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let pid = i32::try_from(pid).map_err(|e| Error::Invalid(e.to_string()))?;
+                match nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                ) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => (),
+                    Err(e) => return Err(Error::Invalid(e.to_string())),
+                }
+                Err(Error::Deadline)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(Error::Invalid("command worker disconnected".into()))
+            }
+        };
+        worker
+            .join()
+            .map_err(|_| Error::Invalid("command worker failed".into()))?;
+        let out = result?;
+        Ok(Output {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         let out = Command::new(program)
             .args(args.iter().map(OsStr::new))

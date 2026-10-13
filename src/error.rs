@@ -37,6 +37,8 @@ pub enum Error {
     Full,
     #[error("{0}")]
     Invalid(String),
+    #[error("command deadline reached")]
+    Deadline,
     #[error("prepare hook printed no `pane_id` or `path`: {detail}")]
     Hook { detail: String },
 }

@@ -1,16 +1,23 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
+mod checkout;
 mod cli;
 mod commands;
 mod config;
 mod error;
 mod hook;
 mod hosts;
+mod items;
+mod jobs;
 mod ledger;
 mod node;
 mod plan;
 mod probe;
+mod runtime;
 mod shell;
+mod work;
+#[cfg(test)]
+mod work_tests;
 
 use clap::Parser;
 use cli::{Cli, Command, HostCommand};
@@ -64,12 +71,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Serve { interval, once } => loop {
             node.tick(now_ms())?;
+            if !items::list(&ledger)?.is_empty() || !work::queue(&ledger)?.is_empty() {
+                let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home.clone())?;
+                work::tick(&fleet, now_ms())?;
+            }
             if once {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         },
         Command::Host(cmd) => return host(cmd, &node, &policy),
+        Command::Exec {
+            id,
+            cmd,
+            timeout,
+            idle_timeout,
+        } => return runtime::exec(&ledger, &shell, id, cmd, timeout, idle_timeout),
         Command::Status {
             watch,
             interval,
@@ -79,6 +96,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home.clone())?;
             let status = commands::Status {
                 hosts: fleet.status(now_ms())?,
+                items: items::list(&ledger)?,
+                queue: work::queue(&ledger)?,
             };
             if watch && !cli.json && !line && !brief {
                 print!("\x1b[2J\x1b[H");
@@ -97,32 +116,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         },
-        Command::Place {
-            host,
-            branch,
-            base,
-            repo,
-        } => {
+        command => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            let repo = repo.map_or_else(
-                || std::env::current_dir().map(|p| p.display().to_string()),
-                Ok,
-            )?;
-            let placed = commands::place(
-                &fleet,
-                host.as_deref(),
-                branch.as_deref(),
-                base.as_deref(),
-                &repo,
-                now_ms(),
-            )?;
-            let full = matches!(placed, commands::Placement::Full { .. });
-            print(cli.json || full, &placed, || {
-                commands::render_place(&placed)
-            })?;
-            if full {
-                return Ok(ExitCode::from(error::EXIT_FULL));
-            }
+            return runtime::dispatch(&fleet, command, cli.json);
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -130,6 +126,34 @@ fn run(cli: Cli) -> Result<ExitCode> {
 
 fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<ExitCode> {
     match cmd {
+        HostCommand::Launch { request } => print(
+            true,
+            &work::launch(
+                node.ledger,
+                node.shell,
+                &serde_json::from_str(&request)?,
+                now_ms(),
+            )?,
+            String::new,
+        )?,
+        HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
+        HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
+        HostCommand::Logs { id, offset } => {
+            print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;
+        }
+        HostCommand::Stop { id } => {
+            jobs::stop(node.ledger, &id)?;
+            print(true, &serde_json::json!({"stopped":true}), String::new)?;
+        }
+        HostCommand::Checkout {
+            path,
+            origin,
+            host_label,
+        } => print(
+            true,
+            &checkout::local(node.shell, node.home, &host_label, &path, &origin)?,
+            String::new,
+        )?,
         HostCommand::Snapshot => print(
             true,
             &node.ledger.read::<node::Snapshot>("host.json")?,
@@ -149,7 +173,16 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
         HostCommand::Prepare { repo, branch, base } => {
             print(
                 true,
-                &hook::local(node.shell, policy, &repo, &branch, base.as_deref())?,
+                &hook::local(
+                    node.shell,
+                    policy,
+                    &std::path::Path::new(node.home)
+                        .join(repo)
+                        .display()
+                        .to_string(),
+                    &branch,
+                    base.as_deref(),
+                )?,
                 String::new,
             )?;
         }
