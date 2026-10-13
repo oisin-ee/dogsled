@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## 0.5.0 - Unreleased
 
+- Keep job capture and exit status independent from a closed pane output.
+- Enforce one command deadline across discovery, preparation, transport, and lock waits. Bound routine operations to 30 seconds and setup operations to 10 minutes.
+- Run service actions independently from snapshot publication and record ticket timeouts without stopping the probe loop.
+- Keep the Pi polling timer active after an initial refresh failure. Race concurrent store tests through barriers.
+
+- Add jobs (`run`, `exec`, `ps`, `logs`, `stop`, `wait`) with output logs, process-group cancellation, deadlines, and sidebar lifecycle reports.
+- Add harness-independent `agent`, owner-host `track` and `items`, and locked FIFO admission with `cancel` and idle-owner wake-ups.
+- Add jobs to host snapshots and open items and tickets to status. Service admission and owner reconciliation use the peer cache.
+- Clone missing repository checkouts from the caller's origin before prepare or launch. Reject origin conflicts without overwriting paths.
+- Check mise trust after fresh clones and trust only the new checkout when mise refuses its configuration.
+- Track Shepherdr spawns in Pi and show open jobs and tickets above the editor, refreshed every ten seconds and after tool results.
 - Add `serve` with local-only probes, atomic `host.json`, memory used/total, and a configurable ten-second interval.
 - Record each agent pane, harness, state, transcript path, and transcript file modification time in the host snapshot.
 - Make `status` read snapshots, with parallel peer reads and a shared ten-second cache. Show stale and unavailable hosts instead of hiding them.
@@ -11,8 +22,8 @@ All notable changes to this project are documented in this file.
 - Run host-policy prepare hooks in the repository checkout. Restore `--base` and literal `{branch}`/`{base}` substitution. Reject unknown placeholders. Remove repository hook overrides.
 - Report Linux working-set memory from the cgroup with the smallest finite ancestor limit.
 - Bundle launchd and systemd service definitions in release archives. Dotfiles installs them later.
-- Replace the Pi spawn tool and widget with prompt context from `wrangle status --brief`.
-- Remove leads, marks, ticket admission, spawn, cancel, queue, lifecycle reports, and Herdr release hooks. The new placement ledger does not read old ticket state.
+- Replace the Pi spawn tool with CLI placement and keep prompt context from `wrangle status --brief`.
+- Remove leads, marks, the old spawn/ticket API, lifecycle reports, and Herdr release hooks. The new stores do not migrate old ticket state.
 - Remove the sidebar snippet and obsolete lead/placement plan. Keep the Herdr status-board popup.
 - Document the approved transcript-based stalls, owner check-ins, and cleanup decisions for later units.
 

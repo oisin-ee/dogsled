@@ -1,7 +1,6 @@
 //! The one seam between the engine and the operating system. Tests supply a
 //! fake; the binary supplies `System`.
 
-use std::ffi::OsStr;
 use std::process::{Command, Stdio};
 
 use crate::error::{Error, Result};
@@ -22,9 +21,37 @@ impl Output {
 }
 
 pub trait Shell: Send + Sync + std::fmt::Debug {
+    fn budget(&self) -> crate::budget::Budget {
+        crate::budget::Budget::default()
+    }
     /// Run `program args…` with no stdin, capturing both streams. Returns
     /// `Err` only when the process could not be started.
     fn run(&self, program: &str, args: &[String]) -> Result<Output>;
+
+    /// Run with a caller-owned wall-clock budget.
+    fn run_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        let _ = timeout;
+        self.run(program, args)
+    }
+
+    /// Setup has a separate ceiling; the command deadline still takes precedence.
+    fn run_setup(&self, program: &str, args: &[String]) -> Result<Output> {
+        self.run_bounded(
+            program,
+            args,
+            self.budget()
+                .with_limit(program, crate::budget::SETUP_LIMIT)?,
+        )
+    }
+
+    fn run_setup_ok(&self, program: &str, args: &[String]) -> Result<Output> {
+        checked(program, args, self.run_setup(program, args)?)
+    }
 
     /// Read a whole file (for `/proc/loadavg`). Fakes script this too so the
     /// probe tests run the same on every platform.
@@ -34,34 +61,86 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
 
     /// Run and treat a non-zero status as an error.
     fn run_ok(&self, program: &str, args: &[String]) -> Result<Output> {
-        let out = self.run(program, args)?;
-        if out.ok() {
-            Ok(out)
-        } else {
-            Err(Error::Command {
-                program: program.to_string(),
-                args: args.join(" "),
-                status: out.status.to_string(),
-                stderr: out.stderr.trim().to_string(),
-            })
-        }
+        checked(program, args, self.run(program, args)?)
+    }
+}
+
+fn checked(program: &str, args: &[String], out: Output) -> Result<Output> {
+    if out.ok() {
+        Ok(out)
+    } else {
+        Err(Error::Command {
+            program: program.to_string(),
+            args: args.join(" "),
+            status: out.status.to_string(),
+            stderr: out.stderr.trim().to_string(),
+        })
     }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct System;
+pub struct System {
+    pub budget: crate::budget::Budget,
+}
 
 impl Shell for System {
-    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
-        let out = Command::new(program)
-            .args(args.iter().map(OsStr::new))
+    fn budget(&self) -> crate::budget::Budget {
+        self.budget
+    }
+    fn run_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        use std::os::unix::process::CommandExt as _;
+        let operation = format!("{program} {}", args.join(" "));
+        let timeout = self.budget.with_limit(&operation, timeout)?;
+        if timeout.is_zero() {
+            return Err(Error::Deadline(operation));
+        }
+        let child = Command::new(program)
+            .args(args)
             .stdin(Stdio::null())
-            .output()?;
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()?;
+        let pid = child.id();
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = send.send(child.wait_with_output());
+        });
+        let result = match recv.recv_timeout(timeout) {
+            Ok(result) => result.map_err(Error::from),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let pid = i32::try_from(pid).map_err(|e| Error::Invalid(e.to_string()))?;
+                match nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                ) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => (),
+                    Err(e) => return Err(Error::Invalid(e.to_string())),
+                }
+                Err(Error::Deadline(operation))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(Error::Invalid("command worker disconnected".into()))
+            }
+        };
+        worker
+            .join()
+            .map_err(|_| Error::Invalid("command worker failed".into()))?;
+        let out = result?;
         Ok(Output {
             status: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
+    }
+
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        self.run_bounded(program, args, self.budget.remaining(program)?)
     }
 }
 

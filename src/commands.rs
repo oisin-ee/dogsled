@@ -1,7 +1,7 @@
 //! User-facing status formatting and placement. No agent spawning or queue.
 
 use crate::error::Result;
-use crate::hook::{self, Prepared};
+use crate::hook::Prepared;
 use crate::hosts::{Fleet, Host, HostReport};
 use crate::ledger::new_id;
 use crate::plan;
@@ -10,6 +10,8 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct Status {
     pub hosts: Vec<HostReport>,
+    pub items: Vec<crate::items::Item>,
+    pub queue: Vec<crate::work::Ticket>,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,14 +29,7 @@ pub enum Placement {
     },
 }
 
-pub fn place(
-    fleet: &Fleet,
-    host: Option<&str>,
-    branch: Option<&str>,
-    base: Option<&str>,
-    repo: &str,
-    now: u64,
-) -> Result<Placement> {
+pub fn place(fleet: &Fleet, host: Option<&str>, now: u64) -> Result<Placement> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
     let mut reports = fleet.status(now)?;
     let mut candidates: Vec<_> = reports
@@ -47,11 +42,7 @@ pub fn place(
         let id = new_id();
         let outcome = fleet.reserve(host, &id, now)?;
         if outcome.reserved {
-            let prepared = if let Some(branch) = branch {
-                hook::run(fleet, host, repo, branch, base)?
-            } else {
-                Prepared::default()
-            };
+            let prepared = Prepared::default();
             return Ok(Placement::Placed {
                 host: host.clone(),
                 reservation: id,
@@ -62,6 +53,14 @@ pub fn place(
             report.headroom = outcome.headroom;
         }
         candidates.retain(|c| c.host != host.id);
+    }
+    if let Some(error) = reports
+        .iter()
+        .filter(|report| pinned.is_none_or(|host| host.id == report.host.id))
+        .filter_map(|report| report.error.as_ref())
+        .find(|error| error.contains("deadline reached"))
+    {
+        return Err(crate::error::Error::Deadline(format!("placement: {error}")));
     }
     Ok(Placement::Full {
         full: true,
@@ -153,7 +152,15 @@ pub fn brief(status: &Status) -> String {
         }
         row.push_str(&summary(host));
     }
-    rows.push("Run `wrangle status` for details.".into());
+    rows.push(format!(
+        "{} open items · {} queued. Run `wrangle status` for details.",
+        status
+            .items
+            .iter()
+            .filter(|i| i.closed_ms.is_none())
+            .count(),
+        status.queue.iter().filter(|t| t.state == "pending").count()
+    ));
     format!("{}\n", rows.join("\n"))
 }
 
@@ -171,6 +178,15 @@ pub fn render(status: &Status) -> String {
         if let Some(error) = &host.error {
             lines.push(format!("  {error}"));
         }
+        for job in &host.jobs {
+            lines.push(format!(
+                "  job {} {} exit={} {}",
+                job.id,
+                job.state,
+                job.exit.map_or_else(|| "-".into(), |code| code.to_string()),
+                one_line(&job.cmd.join(" "))
+            ));
+        }
         if let Some(probe) = &host.probe {
             for agent in &probe.agent_panes {
                 lines.push(format!(
@@ -185,23 +201,17 @@ pub fn render(status: &Status) -> String {
             }
         }
     }
-    format!("{}\n", lines.join("\n"))
-}
-
-pub fn render_place(placement: &Placement) -> String {
-    match placement {
-        Placement::Placed { host, prepared, .. } => {
-            let mut text = format!("{} ({})", host.id, host.label);
-            if let Some(path) = &prepared.path {
-                text.push('\n');
-                text.push_str(path);
-            }
-            if let Some(pane) = &prepared.pane_id {
-                text.push('\n');
-                text.push_str(pane);
-            }
-            format!("{text}\n")
-        }
-        Placement::Full { .. } => "every eligible host is full\n".into(),
+    for item in status.items.iter().filter(|i| i.closed_ms.is_none()) {
+        lines.push(format!(
+            "owner {}: {} {} on {} ({})",
+            item.owner_pane, item.kind, item.id, item.host, item.pane
+        ));
     }
+    for ticket in status.queue.iter().filter(|t| t.state == "pending") {
+        lines.push(format!(
+            "queued {} owner {}",
+            ticket.id, ticket.request.owner
+        ));
+    }
+    format!("{}\n", lines.join("\n"))
 }

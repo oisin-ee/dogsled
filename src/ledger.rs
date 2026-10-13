@@ -20,6 +20,7 @@ pub struct Reservation {
 #[derive(Debug, Clone)]
 pub struct Ledger {
     pub dir: PathBuf,
+    pub budget: crate::budget::Budget,
 }
 
 pub fn now_ms() -> u64 {
@@ -51,7 +52,17 @@ pub fn new_id() -> String {
 
 impl Ledger {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            budget: crate::budget::Budget::default(),
+        }
+    }
+
+    pub fn child(&self, name: &str) -> Self {
+        Self {
+            dir: self.dir.join(name),
+            budget: self.budget,
+        }
     }
 
     pub fn with_lock<T>(&self, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -62,7 +73,21 @@ impl Ledger {
             .read(true)
             .write(true)
             .open(self.dir.join(format!("{name}.lock")))?;
-        lock.lock()?;
+        let operation = format!("lock {}", self.dir.join(format!("{name}.lock")).display());
+        let end = std::time::Instant::now() + self.budget.remaining(&operation)?;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let remaining = end.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(crate::error::Error::Deadline(operation));
+                    }
+                    std::thread::sleep(remaining.min(std::time::Duration::from_millis(2)));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
         // Dropping the file releases the lock, including on error or panic.
         f()
     }
@@ -133,9 +158,11 @@ mod tests {
     #[test]
     fn lock_serializes_concurrent_writers_without_lost_updates() {
         let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let barrier = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
+                    barrier.wait();
                     ledger
                         .with_lock("host", || {
                             let n: u64 = ledger.read("counter.json")?.unwrap_or_default();

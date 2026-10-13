@@ -1,61 +1,100 @@
 ---
 name: wrangle
-description: Read host status and reserve capacity before spawning a coding agent with Shepherdr.
+description: Place jobs and coding agents across Herdr hosts, inspect owned work, and queue work until capacity becomes available.
 ---
 
-# Wrangle: host status and placement
+# Wrangle: jobs and agents
 
-Use the CLI for placement. Use Shepherdr's `agents` tool for spawning and parent/child messages.
-Wrangle registers no Pi tool or widget in 0.5.
+Use wrangle for host status, placement, jobs, and queue admission.
+Use Shepherdr's `agents` tool for parent/child messages. Wrangle registers no Pi tool.
 
 ## Read status
 
 ```sh
 wrangle status
-wrangle status --json
 wrangle status --brief
+wrangle items --owner "$HERDR_PANE_ID" --json
 ```
 
-Every enabled Herdr host stays visible. `service: down` means the snapshot is missing, unavailable, or older than 30 seconds.
-A down host is not eligible. `status --line` uses `▲` for ineligible hosts and `?` for failed host reads.
+A missing, failed, or stale snapshot makes a host ineligible.
+Status shows open items per owner and pending tickets. Pi adds brief status before each turn.
+The Pi widget lists this session's open jobs and pending tickets. It refreshes after tool results and every ten seconds.
 
-The Pi extension adds brief status before each agent turn. It does not spawn or monitor children.
+## Place an agent
 
-## Place and spawn
+```sh
+wrangle place --branch feat/unit-a --base main --repo /path/to/repo --json
+```
 
-1. Reserve capacity for the child:
+Read `host.id`, `path`, and `pane_id`. Spawn through Shepherdr with that machine and prepared pane or directory.
+Omit the Shepherdr machine selector for `local`. The Pi extension tracks successful `agents` spawn results.
+For agents from other callers, record ownership explicitly:
 
-   ```sh
-   wrangle place --json
-   ```
+```sh
+wrangle track HOST PANE --name worker
+```
 
-   For a writer, prepare its worktree on the selected host:
+For a harness-independent launch, use:
 
-   ```sh
-   wrangle place --branch feat/unit-a --repo /path/to/repo --json
-   ```
+```sh
+wrangle agent --kind codex --name reviewer --message 'Review the change' --branch feat/review --base main
+```
 
-2. Read `host.id`, `host.label`, and any returned `path` and `pane_id`.
-3. Spawn through `agents`, using that machine and the prepared pane or path. Omit `machine` for `local`.
-4. Use `agents` for messages, follow-up, and completion. Do not call a removed `wrangle spawn` or ticket API.
+Wrangle starts the requested Herdr kind and submits the message. It returns `{host,pane,name}`.
+`--host H` pins placement. Without it, wrangle chooses the host with the most headroom.
+A reservation lasts 90 seconds by default, covering the lag of the one-minute load average.
 
-`--host H` pins placement by id or label. Without it, wrangle selects the host with the most headroom.
-Every reservation expires only at its TTL, 90 seconds by default. This covers the lag of the one-minute load average.
+## Run a job
 
-If `place` exits 1, it returns `{"full": true, "hosts": [...]}`.
-Inspect the host reasons and report the capacity limit. There is no queue or automatic retry in 0.5.
-Exit 2 means an error. Read the error before another attempt.
+```sh
+wrangle run --wait --max 30m --timeout 1h --idle-timeout 10m -- cargo test
+wrangle ps --all
+wrangle logs JOB --follow
+wrangle wait JOB --max 30m
+wrangle stop JOB
+```
 
-## Prepare hook
+Run long waits through the harness's background-task tool. A completed wait returns the job's exit code.
+At the wait deadline, wrangle prints `still running` and exits 124. The job continues until completion or cancellation.
+Job timeouts kill the process group. Both timeout defaults are unlimited.
+Durations accept integer `ms`, `s`, `m`, and `h` suffixes.
+Output remains in the pane and the job log. A final record contains the exit code, signal, reason, and timestamps.
 
-The hook runs in the repository's main checkout on the selected host.
-Only host policy sets `hooks.prepare`. Repository setup belongs to Worktrunk configuration.
-Use `{branch}` and `{base}` as argument placeholders. Pass `--base main` to select a base.
-Without `--base`, wrangle omits a word that is only `{base}`. Other placeholders are errors.
-The hook returns JSON with `path`, `pane_id`, or both.
+Jobs use a tab in the caller's workspace. Agents can use the prepare hook's pane.
+Remote work uses a workspace with the same name. Without a branch, remote non-repository `--cwd` must exist.
+Repository directories map to the checkout on that host. Use `--branch` to preserve a worktree branch remotely.
+
+## Queue and ownership
+
+When no host qualifies, `place`, `agent`, and `run` return `{"queued":true,"ticket":"…"}` and exit 1.
+With `--wait`, they wait for admission. `run --wait` then waits for the job.
+`--max` bounds the whole command, including discovery and admission, and defaults to 30 minutes. A timed-out ticket remains pending.
+Routine calls and lock waits have a 30-second limit. Prepare, clone, mise trust, and agent startup have a 10-minute limit.
+The command deadline takes precedence when shorter.
+
+```sh
+wrangle cancel TICKET
+```
+
+The owner's host service admits tickets in FIFO order. It prompts non-waiting owners only when they are `idle` or `done`.
+An item closes after job completion, agent completion, or pane removal.
+`items --json` returns `{items,queue}`. `--owner` filters both collections.
+Exit 2 means an error. Inspect it before another attempt.
+
+## Checkout and prepare
+
+The prepare hook runs in the repository's main checkout on the selected host.
+Wrangle clones a missing checkout from the caller's origin into the same path relative to home.
+An existing path must be a checkout with the same origin. Wrangle does not overwrite a conflicting path.
+Clone failures name the host and origin. Only a fresh clone can receive mise trust after a trust refusal.
+
+Host policy owns `hooks.prepare`. Repository setup belongs to Worktrunk configuration.
+Use `{branch}` and `{base}` placeholders. Other placeholders are errors.
+For jobs and agents, the hook must return a `path`. It can also return a `pane_id`.
 
 ## Service
 
 Each host needs `wrangle serve`. Its default interval is ten seconds.
-Dotfiles owns service installation. Do not install, replace, or restart host services without permission.
-For an authorized one-shot measurement, run `wrangle serve --once`.
+Measurement is local. Queue admission and owner reconciliation use the peer cache and SSH transport.
+Dotfiles owns service installation. Do not install or restart services without permission.
+For an authorized one-shot cycle, run `wrangle serve --once`.

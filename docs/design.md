@@ -31,15 +31,14 @@ Wrangle does placement, jobs, the queue, the stall watchdog, status, and cleanup
 
 ### 1. Host service: `wrangle serve`
 
-One process per host, started by launchd (macOS) or a systemd user unit (Linux). It does local work only. It does
-not use ssh.
+One process per host, started by launchd (macOS) or a systemd user unit (Linux). It does local work only. It uses SSH only for owner-state reads and queue admission. The measurement step remains local.
 
 Every N seconds (default 10) it:
 
 - Probes the host: load1, cores, memory used, disk free, Herdr agents and panes (`herdr agent list`, `pane list`).
 - Writes the probe to `~/.local/state/wrangle/host.json`.
 - Runs the stall watchdog on this host's panes (part 4).
-- Starts queued work for this host when it has headroom (part 3).
+- Starts queued work on an eligible host when it has headroom (part 3).
 
 `wrangle status` reads the local `host.json` and fetches each peer's `host.json` over ssh, in parallel, with a short
 cache (default 10 s). It never probes a peer itself. Pi, the prompt hooks, and the tab-row command all read through
@@ -50,6 +49,10 @@ this cache, so they cost one ssh read per peer per 10 s at most.
 `wrangle place [--host H] [--branch B] [--base B] [--repo R]` picks the host with the most headroom, writes a short
 reservation (default 90 s) on it, and prints the host. With `--branch` it also creates the worktree on that host
 (the prepare hook, now run in the checkout) and prints its path.
+
+If the host has no checkout of the repository, wrangle clones it from the caller's origin into the same path relative to home first.
+An existing checkout must have the same origin. Clone failures stop admission rather than silently moving work to another host.
+Only a freshly cloned checkout can receive mise trust after a trust refusal.
 
 The agent then spawns with Shepherdr: `agents spawn machine=<host> cwd=<path> …`. The reservation stops two callers
 from picking the same host before the new agent shows in `herdr agent list`. It ends at its TTL (default 90 s), which covers the lag of the 1-minute load average.
@@ -63,7 +66,8 @@ wrangle run [--host H] [--branch B] [--cwd D] [--timeout T] [--idle-timeout T] [
 wrangle ps | logs <id> | stop <id> | wait <id>
 ```
 
-- Placement as in part 2. A remote job needs a pushed branch: wrangle creates the worktree on that host from it.
+- Placement as in part 2. With `--branch`, the prepare hook creates the worktree on the selected host.
+  Without a branch, remote work runs in `--cwd`. Non-repository directories must already exist there.
 - Wrangle opens a pane: a tab in the caller's workspace locally, or a workspace with the same name on the remote.
 - The pane runs `wrangle exec <id> -- <cmd>`, a small wrapper that:
   - reports `working` with `--agent wrangle-job` and shows the command as the agent name;
@@ -76,8 +80,10 @@ wrangle ps | logs <id> | stop <id> | wait <id>
 - Without `--wait`, the call returns the job id at once. `wrangle wait <id>` can follow later.
 
 When every host is full, `run` and `place` put the work in the queue and print the ticket. With `--wait` they block
-until the ticket is admitted (and for `run`, until the job ends). The host service admits tickets in order when its
-host has headroom.
+until the ticket is admitted (and for `run`, until the job ends). The owner's host service admits tickets in order when an eligible host has headroom.
+Admission uses the shared status cache and SSH transport, unlike the local-only measurement step.
+`agent` also queues and supports `--wait`. All admission waits accept `--max` (default 30m).
+A service interruption during admission marks that ticket failed on restart, preventing an automatic duplicate launch.
 
 ### 4. No wait without a deadline: stalls and check-ins
 
@@ -100,7 +106,9 @@ The note lists each item (name, host, state, age, time since its transcript chan
 
 **Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
 
-**Bounded waits.** `wrangle wait` ends after `--max` (default 30m) and returns `still running`. A job's `--idle-timeout` kills it after that much silence in its own output.
+**Bounded waits.** One deadline starts at command entry. `--max` (default 30m) includes discovery, locks, transport, preparation, admission, and job completion.
+Routine calls and lock waits also have a 30-second limit. Setup calls (prepare, clone, mise trust, agent startup) have a 10-minute limit. Wait paths return `still running` and exit 124 at the deadline.
+Non-waiting actions report the operation that timed out. Service admission runs separately from periodic snapshot publication. A job's `--idle-timeout` kills it after that much silence in its own output.
 
 ### 5. Status
 
@@ -154,7 +162,8 @@ Automatic cleanup belongs to unit 3, not the initial host service.
    host.json lists each agent pane with its state, transcript path, and transcript modified time.
 2. **wrangle 0.6: jobs and queue.** `run`, `exec`, `ps`, `logs`, `stop`, `wait`, queue admission by the service.
    Add `wrangle agent` (spawn any harness through `herdr agent start` and prompt it), owner records for `run` and `agent`,
-   `wrangle track`, and the Pi extension tracking Shepherdr spawns.
+   `wrangle track`, and the Pi extension tracking Shepherdr spawns. The widget lists open jobs and tickets every 10 seconds.
+   Unit 2 remains in the 0.5.0 unreleased changelog. It does not bump or publish a version.
 3. **wrangle 0.7: watchdog and cleanup.** Stalls and check-ins (part 4), `doctor`, `prune`.
    Proof: test A, where a child hangs in a tool call while its parent is idle.
    It passes when the parent gets a check-in naming the stall within 11 min.

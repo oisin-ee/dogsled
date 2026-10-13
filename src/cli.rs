@@ -16,13 +16,16 @@ pub struct Cli {
     pub json: bool,
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Remaining caller budget propagated across SSH.
+    #[arg(long, global = true, hide = true)]
+    pub budget_ms: Option<u64>,
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Collect this host's measurements. Never uses SSH.
+    /// Publish local measurements, reconcile owned work, and admit queued actions.
     Serve {
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
@@ -51,6 +54,73 @@ pub enum Command {
         /// Repository directory. Defaults to the current directory.
         #[arg(long)]
         repo: Option<String>,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, default_value = "30m", value_parser = crate::jobs::duration)]
+        max: u64,
+    },
+    /// Place a command in a Herdr tab, or queue it until capacity is available.
+    Run {
+        #[command(flatten)]
+        placement: WorkArgs,
+        #[arg(long, value_parser = crate::jobs::duration)]
+        timeout: Option<u64>,
+        #[arg(long, value_parser = crate::jobs::duration)]
+        idle_timeout: Option<u64>,
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// Execute a job inside its pane.
+    Exec {
+        id: String,
+        #[arg(long, value_parser = crate::jobs::duration)]
+        timeout: Option<u64>,
+        #[arg(long, value_parser = crate::jobs::duration)]
+        idle_timeout: Option<u64>,
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// List jobs across the fleet.
+    Ps {
+        #[arg(long)]
+        all: bool,
+    },
+    Logs {
+        id: String,
+        #[arg(long)]
+        follow: bool,
+    },
+    Stop {
+        id: String,
+    },
+    Wait {
+        id: String,
+        #[arg(long, default_value = "30m", value_parser = crate::jobs::duration)]
+        max: u64,
+    },
+    /// Start any harness supported by Herdr.
+    Agent {
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        message: String,
+        #[command(flatten)]
+        placement: WorkArgs,
+    },
+    Track {
+        host: String,
+        pane: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Items {
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    Cancel {
+        ticket: String,
     },
     /// Internal local operations used by peers over SSH.
     #[command(subcommand, hide = true)]
@@ -60,6 +130,30 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
     Snapshot,
+    Launch {
+        #[arg(long)]
+        request: String,
+    },
+    Job {
+        id: String,
+    },
+    Jobs,
+    Stop {
+        id: String,
+    },
+    Logs {
+        id: String,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    Checkout {
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        origin: String,
+        #[arg(long)]
+        host_label: String,
+    },
     Reserve {
         #[arg(long)]
         id: String,
@@ -74,6 +168,22 @@ pub enum HostCommand {
         #[arg(long)]
         base: Option<String>,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct WorkArgs {
+    #[arg(long)]
+    pub host: Option<String>,
+    #[arg(long)]
+    pub branch: Option<String>,
+    #[arg(long, requires = "branch")]
+    pub base: Option<String>,
+    #[arg(long)]
+    pub cwd: Option<String>,
+    #[arg(long)]
+    pub wait: bool,
+    #[arg(long, default_value = "30m", value_parser = crate::jobs::duration)]
+    pub max: u64,
 }
 
 #[derive(Debug, Clone, Copy, Args)]
