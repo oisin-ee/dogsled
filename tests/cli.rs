@@ -5,6 +5,8 @@
 mod jobs;
 #[path = "cli/lifecycle.rs"]
 mod lifecycle;
+#[path = "cli/review.rs"]
+mod review;
 
 use serde_json::{Value, json};
 use std::fs;
@@ -665,7 +667,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     let ssh = rig.log("ssh.log");
     assert!(
         ssh.contains(
-            "custom wrangle host prepare --repo 'repo space' --branch feature --base main --json"
+            "custom wrangle host prepare --repo 'repo space' --branch feature --base main --budget-ms"
         ),
         "{ssh}"
     );

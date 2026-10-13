@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## 0.5.0 - Unreleased
 
+- Keep job capture and exit status independent from a closed pane output.
+- Enforce one command deadline across discovery, preparation, transport, and lock waits. Bound each external operation to 30 seconds.
+- Run service actions independently from snapshot publication and record ticket timeouts without stopping the probe loop.
+- Keep the Pi polling timer active after an initial refresh failure. Race concurrent store tests through barriers.
+
 - Add jobs (`run`, `exec`, `ps`, `logs`, `stop`, `wait`) with output logs, process-group cancellation, deadlines, and sidebar lifecycle reports.
 - Add harness-independent `agent`, owner-host `track` and `items`, and locked FIFO admission with `cancel` and idle-owner wake-ups.
 - Add jobs to host snapshots and open items and tickets to status. Service admission and owner reconciliation use the peer cache.

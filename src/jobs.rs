@@ -49,7 +49,7 @@ pub fn duration(text: &str) -> std::result::Result<u64, String> {
 }
 
 pub fn store(ledger: &Ledger) -> Ledger {
-    Ledger::new(ledger.dir.join("jobs"))
+    ledger.child("jobs")
 }
 
 pub fn validate_id(id: &str) -> Result<()> {
@@ -191,6 +191,13 @@ fn reader(mut input: impl Read + Send + 'static, send: mpsc::Sender<std::io::Res
     });
 }
 
+fn pane_write(bytes: &[u8]) -> bool {
+    std::io::stdout()
+        .write_all(bytes)
+        .and_then(|()| std::io::stdout().flush())
+        .is_ok()
+}
+
 fn capture(ledger: &Ledger, job: &Job) -> Result<(std::process::ExitStatus, Option<String>)> {
     let mut signals = signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGINT,
@@ -230,6 +237,7 @@ fn capture(ledger: &Ledger, job: &Job) -> Result<(std::process::ExitStatus, Opti
         let mut reason = None;
         let mut status = None;
         let mut disconnected = false;
+        let mut pane_output = true;
         loop {
             if status.is_none() {
                 status = child.try_wait()?;
@@ -266,8 +274,9 @@ fn capture(ledger: &Ledger, job: &Job) -> Result<(std::process::ExitStatus, Opti
                 Ok(bytes) => {
                     let bytes = bytes?;
                     log.write_all(&bytes)?;
-                    std::io::stdout().write_all(&bytes)?;
-                    std::io::stdout().flush()?;
+                    if pane_output {
+                        pane_output = pane_write(&bytes);
+                    }
                     last = Instant::now();
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => (),
@@ -305,7 +314,10 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
         job.started_ms = Some(now_ms());
         job.state = "working".into();
         save(ledger, &job)?;
-        let outcome = report(shell, &job, "working", None).and_then(|()| capture(ledger, &job));
+        if let Err(error) = report(shell, &job, "working", None) {
+            eprintln!("wrangle pane report: {error}");
+        }
+        let outcome = capture(ledger, &job);
         match &outcome {
             Ok((status, reason)) => {
                 job.signal = status.signal();
@@ -345,7 +357,9 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
                 .map_or_else(|| format!("exit {code}"), Clone::clone),
             age
         );
-        report(shell, &job, &job.state, Some(&token))?;
+        if let Err(error) = report(shell, &job, &job.state, Some(&token)) {
+            eprintln!("wrangle pane report: {error}");
+        }
         outcome?;
         Ok(code)
     })

@@ -68,7 +68,8 @@ Repository directories map to the checkout on that host. Use `--branch` to prese
 
 When no host qualifies, `place`, `agent`, and `run` return `{"queued":true,"ticket":"…"}` and exit 1.
 With `--wait`, they wait for admission. `run --wait` then waits for the job.
-`--max` bounds each wait and defaults to 30 minutes. A timed-out ticket remains pending.
+`--max` bounds the whole command, including discovery and admission, and defaults to 30 minutes. A timed-out ticket remains pending.
+External calls and lock waits also have a 30-second per-operation limit.
 
 ```sh
 wrangle cancel TICKET

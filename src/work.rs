@@ -60,13 +60,23 @@ pub struct Ticket {
     pub created_ms: u64,
     pub state: String,
     pub waiting: bool,
+    pub waiting_until_ms: Option<u64>,
     pub notified: bool,
     pub result: Option<Value>,
     pub error: Option<String>,
 }
 
 pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
-    Ok(ledger.read("queue.json")?.unwrap_or_default())
+    let mut tickets: Vec<Ticket> = ledger.read("queue.json")?.unwrap_or_default();
+    for ticket in &mut tickets {
+        if ticket
+            .waiting_until_ms
+            .is_some_and(|end| crate::ledger::now_ms() >= end)
+        {
+            ticket.waiting = false;
+        }
+    }
+    Ok(tickets)
 }
 
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
@@ -79,6 +89,16 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             created_ms: now,
             state: "pending".into(),
             waiting,
+            waiting_until_ms: if waiting {
+                ledger.budget.deadline.map(|end| {
+                    now.saturating_add(
+                        end.saturating_duration_since(std::time::Instant::now())
+                            .as_millis() as u64,
+                    )
+                })
+            } else {
+                None
+            },
             notified: false,
             result: None,
             error: None,
@@ -168,7 +188,7 @@ fn pane(shell: &dyn Shell, launch: &Launch) -> Result<String> {
 
 pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
-    let receipts = Ledger::new(ledger.dir.join("launches"));
+    let receipts = ledger.child("launches");
     receipts.with_lock(&launch.id, || {
         let file = format!("{}.json", launch.id);
         if let Some(value) = receipts.read::<Value>(&file)? {

@@ -8,6 +8,7 @@ function rig() {
 	const handlers = new Map<string, Handler>();
 	const calls: string[][] = [];
 	const widgets: unknown[] = [];
+	const notices: unknown[] = [];
 	let code = 0;
 	let items: unknown = { items: [], queue: [] };
 	const api = {
@@ -18,8 +19,8 @@ function rig() {
 		},
 	};
 	wrangle(api as unknown as ExtensionAPI);
-	const ctx = { mode: "tui", ui: { setWidget: (...args: unknown[]) => widgets.push(args), notify: () => {} } };
-	return { calls, widgets, ctx, fail: () => { code = 2; }, items: (value: unknown) => { items = value; },
+	const ctx = { mode: "tui", ui: { setWidget: (...args: unknown[]) => widgets.push(args), notify: (...args: unknown[]) => notices.push(args) } };
+	return { calls, widgets, notices, ctx, fail: () => { code = 2; }, recover: () => { code = 0; }, items: (value: unknown) => { items = value; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler); return handler(event, ctx);
 		} };
@@ -61,4 +62,22 @@ test("tracks structured and text spawn results, filters widget, and cleans up ti
 	t.mock.timers.tick(10_000);
 	assert.equal(r.calls.length, before + 1);
 	assert.deepEqual(r.widgets.at(-1), ["wrangle", undefined]);
+});
+
+test("startup refresh failure notifies and the timer recovers", async (t) => {
+	const previous = process.env["HERDR_PANE_ID"];
+	process.env["HERDR_PANE_ID"] = "w1:p1";
+	t.after(() => { if (previous === undefined) delete process.env["HERDR_PANE_ID"]; else process.env["HERDR_PANE_ID"] = previous; });
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	r.fail();
+	await r.invoke("session_start");
+	assert.equal(r.notices.length, 1);
+	assert.equal(r.widgets.length, 0);
+	r.recover();
+	r.items({ items: [{ id: "j1", kind: "job", host: "local", pane: "w2:p1", closed_ms: null }], queue: [] });
+	t.mock.timers.tick(10_000);
+	await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+	assert.deepEqual(r.widgets.at(-1), ["wrangle", ["job j1 · local · w2:p1"], { placement: "aboveEditor" }]);
+	await r.invoke("session_shutdown");
 });

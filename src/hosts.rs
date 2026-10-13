@@ -152,8 +152,7 @@ impl<'a> Fleet<'a> {
     }
 
     pub fn remote<T: for<'de> Deserialize<'de>>(&self, host: &Host, args: &[String]) -> Result<T> {
-        let out = self.shell.run("ssh", &self.remote_argv(host, args))?;
-        Self::parse_remote(host, args, &out)
+        self.remote_bounded(host, args, self.shell.budget().remaining("ssh")?)
     }
 
     pub fn remote_bounded<T: for<'de> Deserialize<'de>>(
@@ -162,9 +161,14 @@ impl<'a> Fleet<'a> {
         args: &[String],
         timeout: std::time::Duration,
     ) -> Result<T> {
+        let timeout = timeout.min(self.shell.budget().remaining("ssh")?);
+        let mut bounded_args = args.to_vec();
+        if self.shell.budget().deadline.is_some() {
+            bounded_args.extend(["--budget-ms".into(), timeout.as_millis().to_string()]);
+        }
         let out = self
             .shell
-            .run_bounded("ssh", &self.remote_argv(host, args), timeout)?;
+            .run_bounded("ssh", &self.remote_argv(host, &bounded_args), timeout)?;
         Self::parse_remote(host, args, &out)
     }
 
@@ -174,6 +178,15 @@ impl<'a> Fleet<'a> {
         out: &crate::shell::Output,
     ) -> Result<T> {
         if out.status != 0 && out.status != 1 {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout)
+                && value["deadline"] == true
+            {
+                return Err(Error::Deadline(format!(
+                    "ssh {}: {}",
+                    host.label,
+                    value["error"].as_str().unwrap_or("remote deadline")
+                )));
+            }
             let detail = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 .ok()
                 .and_then(|v| v["error"].as_str().map(str::to_owned))
@@ -213,7 +226,7 @@ impl<'a> Fleet<'a> {
     }
 
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
-        std::thread::scope(|scope| {
+        let reports = std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .hosts
                 .iter()
@@ -227,7 +240,9 @@ impl<'a> Fleet<'a> {
                         .map_err(|_| Error::Invalid(format!("{} status worker failed", host.label)))
                 })
                 .collect()
-        })
+        });
+        self.shell.budget().remaining("fleet status")?;
+        reports
     }
 
     fn read_host(&self, host: &Host, now: u64) -> HostReport {

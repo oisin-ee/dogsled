@@ -10,7 +10,7 @@ use crate::work::{self, Action, Request};
 use serde_json::{Value, json};
 use std::io::Write as _;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn caller() -> Result<String> {
     std::env::var("HERDR_PANE_ID").map_err(|_| Error::Invalid("HERDR_PANE_ID is required".into()))
@@ -56,8 +56,7 @@ fn request(fleet: &Fleet, args: &WorkArgs, action: Action) -> Result<Request> {
     })
 }
 
-fn wait_ticket(fleet: &Fleet, id: &str, max: u64) -> Result<Option<Value>> {
-    let start = Instant::now();
+fn wait_ticket(fleet: &Fleet, id: &str) -> Result<Value> {
     loop {
         let tickets = work::queue(fleet.ledger)?;
         let ticket = tickets
@@ -65,7 +64,12 @@ fn wait_ticket(fleet: &Fleet, id: &str, max: u64) -> Result<Option<Value>> {
             .find(|t| t.id == id)
             .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))?;
         match ticket.state.as_str() {
-            "admitted" => return Ok(ticket.result.clone()),
+            "admitted" => {
+                return ticket
+                    .result
+                    .clone()
+                    .ok_or_else(|| Error::Invalid("missing admission result".into()));
+            }
             "failed" | "cancelled" => {
                 return Err(Error::Invalid(
                     ticket
@@ -76,47 +80,22 @@ fn wait_ticket(fleet: &Fleet, id: &str, max: u64) -> Result<Option<Value>> {
             }
             _ => (),
         }
-        if start.elapsed() >= Duration::from_millis(max) {
-            // The bounded waiter leaves a durable ticket and enables its later wake-up.
-            fleet.ledger.with_lock("queue", || {
-                let mut tickets = work::queue(fleet.ledger)?;
-                if let Some(ticket) = tickets.iter_mut().find(|t| t.id == id) {
-                    ticket.waiting = false;
-                }
-                fleet.ledger.write("queue.json", &tickets)
-            })?;
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        fleet.ledger.budget.pause()?;
     }
 }
 
-pub fn wait_job(fleet: &Fleet, id: &str, max: u64) -> Result<i32> {
+pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
     let host = work::job_host(fleet, id, now_ms())?;
-    let start = Instant::now();
     loop {
-        let remaining = Duration::from_millis(max).saturating_sub(start.elapsed());
-        let result = if host.is_local() {
-            jobs::get(fleet.ledger, id)
+        let job: Job = if host.is_local() {
+            jobs::get(fleet.ledger, id)?
         } else {
-            fleet.remote_bounded(host, &["job".into(), id.into()], remaining)
-        };
-        let job: Job = match result {
-            Ok(job) => job,
-            Err(Error::Deadline) => {
-                println!("still running");
-                return Ok(124);
-            }
-            Err(error) => return Err(error),
+            fleet.remote(host, &["job".into(), id.into()])?
         };
         if job.ended_ms.is_some() {
             return Ok(job.exit.unwrap_or(2));
         }
-        if start.elapsed() >= Duration::from_millis(max) {
-            println!("still running");
-            return Ok(124);
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        fleet.ledger.budget.pause()?;
     }
 }
 
@@ -131,11 +110,7 @@ fn submit(fleet: &Fleet, args: &WorkArgs, action: Action, json_output: bool) -> 
         if !args.wait {
             return Ok(ExitCode::from(1));
         }
-        let Some(result) = wait_ticket(fleet, &ticket, args.max)? else {
-            println!("still running");
-            return Ok(ExitCode::from(124));
-        };
-        result
+        wait_ticket(fleet, &ticket)?
     };
     crate::print(
         json_output || !matches!(result["host"], Value::Object(_)),
@@ -146,7 +121,7 @@ fn submit(fleet: &Fleet, args: &WorkArgs, action: Action, json_output: bool) -> 
         let id = result["id"]
             .as_str()
             .ok_or_else(|| Error::Invalid("launch returned no id".into()))?;
-        return Ok(ExitCode::from(wait_job(fleet, id, args.max)? as u8));
+        return Ok(ExitCode::from(wait_job(fleet, id)? as u8));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -276,7 +251,7 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
                 let _: Value = fleet.remote(host, &["stop".into(), id])?;
             }
         }
-        Command::Wait { id, max } => return Ok(ExitCode::from(wait_job(fleet, &id, max)? as u8)),
+        Command::Wait { id, .. } => return Ok(ExitCode::from(wait_job(fleet, &id)? as u8)),
         Command::Logs { id, follow } => {
             let host = work::job_host(fleet, &id, now_ms())?;
             let mut offset = 0;

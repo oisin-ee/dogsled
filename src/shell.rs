@@ -1,7 +1,6 @@
 //! The one seam between the engine and the operating system. Tests supply a
 //! fake; the binary supplies `System`.
 
-use std::ffi::OsStr;
 use std::process::{Command, Stdio};
 
 use crate::error::{Error, Result};
@@ -22,6 +21,9 @@ impl Output {
 }
 
 pub trait Shell: Send + Sync + std::fmt::Debug {
+    fn budget(&self) -> crate::budget::Budget {
+        crate::budget::Budget::default()
+    }
     /// Run `program args…` with no stdin, capturing both streams. Returns
     /// `Err` only when the process could not be started.
     fn run(&self, program: &str, args: &[String]) -> Result<Output>;
@@ -60,9 +62,14 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct System;
+pub struct System {
+    pub budget: crate::budget::Budget,
+}
 
 impl Shell for System {
+    fn budget(&self) -> crate::budget::Budget {
+        self.budget
+    }
     fn run_bounded(
         &self,
         program: &str,
@@ -70,6 +77,11 @@ impl Shell for System {
         timeout: std::time::Duration,
     ) -> Result<Output> {
         use std::os::unix::process::CommandExt as _;
+        let operation = format!("{program} {}", args.join(" "));
+        let timeout = timeout.min(self.budget.remaining(&operation)?);
+        if timeout.is_zero() {
+            return Err(Error::Deadline(operation));
+        }
         let child = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
@@ -93,7 +105,7 @@ impl Shell for System {
                     Ok(()) | Err(nix::errno::Errno::ESRCH) => (),
                     Err(e) => return Err(Error::Invalid(e.to_string())),
                 }
-                Err(Error::Deadline)
+                Err(Error::Deadline(operation))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 Err(Error::Invalid("command worker disconnected".into()))
@@ -111,15 +123,7 @@ impl Shell for System {
     }
 
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
-        let out = Command::new(program)
-            .args(args.iter().map(OsStr::new))
-            .stdin(Stdio::null())
-            .output()?;
-        Ok(Output {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        self.run_bounded(program, args, self.budget.remaining(program)?)
     }
 }
 

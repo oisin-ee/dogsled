@@ -51,11 +51,11 @@ export default function wrangle(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (timer) clearInterval(timer);
 		generation++;
-		await update(ctx);
 		if (owner && ctx.mode === "tui") {
 			timer = setInterval(() => { void update(ctx).catch(error => ctx.ui.notify(String(error), "error")); }, 10_000);
 			timer.unref();
 		}
+		await update(ctx).catch(error => ctx.ui.notify(String(error), "error"));
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		generation++;

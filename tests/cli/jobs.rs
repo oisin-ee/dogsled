@@ -36,10 +36,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     assert!(herdr.contains("tab create --workspace w1"));
     assert!(herdr.contains("--source custom:wrangle --agent wrangle-job --state working"));
     assert!(herdr.contains("--token wrangle=exit 3"));
-    assert_eq!(
-        rig.run(&["wait", id, "--max", "0ms"]).status.code(),
-        Some(3)
-    );
+    assert_eq!(rig.run(&["wait", id, "--max", "1s"]).status.code(), Some(3));
     assert_eq!(rig.run(&["logs", id, "--follow"]).stdout, log.as_bytes());
     assert_eq!(rig.json(&["ps", "--all"]).1[0]["exit"], 3);
     assert_eq!(rig.json(&["ps"]).1, json!([]));
@@ -165,13 +162,17 @@ fn agent_places_starts_prompts_and_tracks_any_kind() {
 #[test]
 fn concurrent_item_and_queue_writers_keep_every_record() {
     let rig = Rig::new("concurrent-items-queue");
+    let barrier = std::sync::Barrier::new(8);
     rig.snapshot("state/host.json", now(), 99.0, 2);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let rig = &rig;
+                let barrier = &barrier;
                 scope.spawn(move || {
+                    barrier.wait();
                     assert_eq!(rig.json(&["track", "local", &format!("w3:p{i}")]).0, 0);
+                    barrier.wait();
                     assert_eq!(rig.json(&["place"]).0, 1);
                 })
             })
@@ -200,14 +201,14 @@ fn queue_admission_is_fifo_and_owner_wake_waits_for_idle() {
         "hello",
     ]);
     assert_eq!(
-        rig.run(&["run", "--wait", "--max", "0ms", "--", "true"])
+        rig.run(&["run", "--wait", "--max", "200ms", "--", "true"])
             .status
             .code(),
         Some(124)
     );
     let tickets = rig.read("state/queue.json");
     assert_eq!(tickets.as_array().unwrap().len(), 3);
-    assert_eq!(tickets[2]["waiting"], false);
+    assert_eq!(rig.json(&["items"]).1["queue"][2]["waiting"], false);
     assert_eq!(
         rig.run(&["cancel", second["ticket"].as_str().unwrap()])
             .status
@@ -283,7 +284,7 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
     assert_eq!(rig.json(&["ps", "--all"]).1[0]["host"], "8103");
     assert!(
         rig.log("ssh.log")
-            .contains("custom-wrangle host job remote-job --json")
+            .contains("custom-wrangle host job remote-job --budget-ms")
     );
 }
 

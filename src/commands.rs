@@ -54,6 +54,14 @@ pub fn place(fleet: &Fleet, host: Option<&str>, now: u64) -> Result<Placement> {
         }
         candidates.retain(|c| c.host != host.id);
     }
+    if let Some(error) = reports
+        .iter()
+        .filter(|report| pinned.is_none_or(|host| host.id == report.host.id))
+        .filter_map(|report| report.error.as_ref())
+        .find(|error| error.contains("deadline reached"))
+    {
+        return Err(crate::error::Error::Deadline(format!("placement: {error}")));
+    }
     Ok(Placement::Full {
         full: true,
         hosts: reports,

@@ -16,6 +16,9 @@ pub struct Cli {
     pub json: bool,
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Remaining caller budget propagated across SSH.
+    #[arg(long, global = true, hide = true)]
+    pub budget_ms: Option<u64>,
     #[command(subcommand)]
     pub command: Command,
 }

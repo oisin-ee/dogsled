@@ -106,7 +106,9 @@ The note lists each item (name, host, state, age, time since its transcript chan
 
 **Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
 
-**Bounded waits.** `wrangle wait` ends after `--max` (default 30m) and returns `still running`. A job's `--idle-timeout` kills it after that much silence in its own output.
+**Bounded waits.** One deadline starts at command entry. `--max` (default 30m) includes discovery, locks, transport, preparation, admission, and job completion.
+External calls and lock waits also have a 30-second limit. Wait paths return `still running` and exit 124 at the deadline.
+Non-waiting actions report the operation that timed out. Service admission runs separately from periodic snapshot publication. A job's `--idle-timeout` kills it after that much silence in its own output.
 
 ### 5. Status
 

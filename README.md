@@ -47,6 +47,7 @@ Without a branch, a remote non-repository `--cwd` must exist there.
 Repository directories map to the same path relative to home. A linked-worktree caller needs `--branch` to preserve its branch remotely.
 
 The pane runs `wrangle exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
+If the pane output closes, capture continues to the log and preserves the child exit code.
 The atomic `jobs/ID.json` contains the command, directory, host, owner, exit code, signal, reason, and millisecond timestamps.
 `host.json` includes job records. `ps --all` includes completed jobs and reads remote records through the snapshot cache.
 `logs`, `stop`, and `wait` use the configured SSH transport for remote jobs.
@@ -54,7 +55,10 @@ The atomic `jobs/ID.json` contains the command, directory, host, owner, exit cod
 Both timeout defaults are unlimited. Durations accept integer `ms`, `s`, `m`, and `h` suffixes.
 The sidebar shows `working`, then `idle` for success or `blocked` for failure, with a `wrangle` exit or timeout token.
 
-`run --wait` waits for admission, then the job, with `--max` applied to each wait.
+`--max` sets one deadline from command startup, including discovery, placement, admission, and job completion. It defaults to 30 minutes.
+Every external call and lock wait uses the remaining budget, capped at 30 seconds per operation.
+A non-waiting action reports the operation that exceeded its deadline.
+`logs --follow` can continue indefinitely, but each remote read has a 30-second limit.
 Run long waits through the harness's background-task facility.
 A wait deadline does not cancel its job or ticket. `cancel` only cancels pending tickets.
 
@@ -75,6 +79,8 @@ For non-waiting callers, admission prompts the owner only in `idle` or `done`. O
 Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
 The measurement step uses no SSH. It reads load, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
+A separate action worker keeps slow admission independent from the publication interval. External calls and lock waits have 30-second limits.
+An admission timeout records a failed ticket. The service continues publication and later actions.
 It writes `~/.local/state/wrangle/host.json` through atomic replacement.
 Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, and `transcript_modified`.
 Transcript paths come from Herdr path sessions. Their modification times use Unix milliseconds. Unavailable paths or times are null.

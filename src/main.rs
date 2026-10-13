@@ -1,5 +1,6 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
+mod budget;
 mod checkout;
 mod cli;
 mod commands;
@@ -14,6 +15,7 @@ mod node;
 mod plan;
 mod probe;
 mod runtime;
+mod service;
 mod shell;
 mod work;
 #[cfg(test)]
@@ -32,11 +34,34 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
-    match run(cli) {
+    let started = std::time::Instant::now();
+    let (max, waiting) = match &cli.command {
+        Command::Wait { max, .. }
+        | Command::Place {
+            max, wait: true, ..
+        } => (Some(*max), true),
+        Command::Place { max, .. } => (Some(*max), false),
+        Command::Run { placement, .. } | Command::Agent { placement, .. } => {
+            (Some(placement.max), placement.wait)
+        }
+        _ => (None, false),
+    };
+    let max = cli.budget_ms.or(max);
+    let budget = max.map_or_else(budget::Budget::default, |ms| {
+        budget::Budget::until(started + std::time::Duration::from_millis(ms))
+    });
+    match run(cli, budget) {
         Ok(code) => code,
+        Err(Error::Deadline(_)) if waiting => {
+            println!("still running");
+            ExitCode::from(124)
+        }
         Err(error) => {
             if json {
-                println!("{}", serde_json::json!({ "error": error.to_string() }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "error": error.to_string(), "deadline": matches!(error, Error::Deadline(_)) })
+                );
             } else {
                 eprintln!("wrangle: {error}");
             }
@@ -57,10 +82,11 @@ fn print<T: Serialize>(json: bool, value: &T, text: impl FnOnce() -> String) -> 
     Ok(())
 }
 
-fn run(cli: Cli) -> Result<ExitCode> {
+fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
-    let shell = System;
-    let ledger = Ledger::new(ledger::default_dir());
+    let shell = System { budget };
+    let mut ledger = Ledger::new(ledger::default_dir());
+    ledger.budget = budget;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
     let node = Node {
         shell: &shell,
@@ -69,17 +95,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
         home: &home,
     };
     match cli.command {
-        Command::Serve { interval, once } => loop {
-            node.tick(now_ms())?;
-            if !items::list(&ledger)?.is_empty() || !work::queue(&ledger)?.is_empty() {
-                let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home.clone())?;
-                work::tick(&fleet, now_ms())?;
-            }
-            if once {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(interval));
-        },
+        Command::Serve { interval, once } => service::serve(
+            &node,
+            &policy,
+            std::time::Duration::from_secs(interval),
+            once,
+        )?,
         Command::Host(cmd) => return host(cmd, &node, &policy),
         Command::Exec {
             id,
