@@ -245,7 +245,6 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                 name,
                 message,
             } => {
-                crate::watchdog::register_parent(ledger, &pane)?;
                 shell.run_setup_ok(
                     "herdr",
                     &[
@@ -267,6 +266,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                         message.clone(),
                     ],
                 )?;
+                crate::watchdog::register_parent(ledger, shell, &pane)?;
                 json!({"host":launch.host,"pane":pane,"name":name})
             }
             Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
@@ -426,8 +426,6 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
 
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     let reports = fleet.status(now)?;
-    crate::watchdog::tick(fleet, &reports, now)?;
-    items::reconcile(fleet.ledger, &reports, now)?;
     fleet.ledger.with_lock("admission", || {
         admit(fleet, now)?;
         for ticket in queue(fleet.ledger)? {

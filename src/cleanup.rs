@@ -53,7 +53,7 @@ fn git(shell: &dyn Shell, repo: &str, args: &[&str]) -> Result<crate::shell::Out
     )
 }
 
-fn trees(node: &Node<'_>, panes: &[Pane]) -> Result<Vec<Tree>> {
+fn trees(node: &Node<'_>, panes: &[Pane], discover: bool) -> Result<Vec<Tree>> {
     let recorded: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
     let mut repos: BTreeSet<String> = recorded.iter().map(|t| t.repo.clone()).collect();
     let cwd = std::env::current_dir()?;
@@ -62,7 +62,7 @@ fn trees(node: &Node<'_>, panes: &[Pane]) -> Result<Vec<Tree>> {
         .iter()
         .flat_map(|p| [p.cwd.as_deref(), p.foreground_cwd.as_deref()])
         .flatten()
-        .chain(cwd.to_str())
+        .chain(cwd.to_str().filter(|_| discover))
     {
         let root = git(
             node.shell,
@@ -109,12 +109,6 @@ fn trees(node: &Node<'_>, panes: &[Pane]) -> Result<Vec<Tree>> {
                 path.clear();
                 branch.clear();
             }
-        }
-    }
-    // A deleted branch can disappear from Git's branch field; retain registered identities.
-    for tree in recorded {
-        if Path::new(&tree.path).exists() && !result.iter().any(|t| t.path == tree.path) {
-            result.push(tree);
         }
     }
     Ok(result)
@@ -167,7 +161,13 @@ fn live(tree: &Tree, panes: &[Pane]) -> bool {
         [p.cwd.as_deref(), p.foreground_cwd.as_deref()]
             .into_iter()
             .flatten()
-            .any(|cwd| Path::new(cwd).starts_with(&tree.path))
+            .any(|cwd| {
+                let cwd = Path::new(cwd).canonicalize().unwrap_or_else(|_| cwd.into());
+                let path = Path::new(&tree.path)
+                    .canonicalize()
+                    .unwrap_or_else(|_| tree.path.clone().into());
+                cwd.starts_with(path)
+            })
     })
 }
 
@@ -325,7 +325,7 @@ fn processes(shell: &dyn Shell, panes: &[Pane], plan: &mut Plan) -> Result<()> {
 
 pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
     let panes = current_panes(node.shell)?;
-    let trees = trees(node, &panes)?;
+    let trees = trees(node, &panes, true)?;
     let mut plan = Plan::default();
     for tree in &trees {
         if !live(tree, &panes) && retired(node.shell, tree)? {
@@ -352,7 +352,10 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
         let agents = crate::probe::agent_list(node.shell)?;
         for agent in snapshot.probe.agent_panes.iter().filter(|a| stale(a, now)) {
             if agents.iter().any(|a| {
-                a.pane == agent.pane && a.state == agent.state && a.transcript == agent.transcript
+                a.pane == agent.pane
+                    && a.state == agent.state
+                    && a.transcript == agent.transcript
+                    && a.transcript_modified == agent.transcript_modified
             }) {
                 plan.entries.push(entry(
                     "panes",
@@ -421,9 +424,20 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         ],
     )?;
     let tasks: serde_json::Value = serde_json::from_str(&tasks.stdout)?;
-    let has_remove = tasks
-        .as_array()
-        .is_some_and(|tasks| tasks.iter().any(|t| t["name"] == "agent:worktree-remove"));
+    let tasks = tasks.as_array().ok_or_else(|| {
+        Error::Invalid("mise tasks returned no task array; refusing removal".into())
+    })?;
+    let has_remove = tasks.iter().any(|t| t["name"] == "agent:worktree-remove");
+    // Task discovery can run hooks. Recheck immediately before invoking removal.
+    if live(tree, &current_panes(node.shell)?)
+        || !clean(node.shell, tree)?
+        || !retired(node.shell, tree)?
+    {
+        return Err(Error::Invalid(format!(
+            "refuse {}: worktree changed during planning",
+            tree.path
+        )));
+    }
     let method = if has_remove {
         node.shell.run_setup_ok(
             "mise",
@@ -537,9 +551,9 @@ pub fn auto(node: &Node<'_>, now: u64) -> Result<()> {
             return Ok(());
         }
         node.ledger.write("cleanup.json", &now)?;
-        // Automatic cleanup stays within worktrees prepared by this state owner.
-        let trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-        for tree in trees {
+        // Registered repositories remain discoverable after their last pane closes.
+        // Automatic removal never expands to unrelated live-pane repositories.
+        for tree in trees(node, &[], false)? {
             if Path::new(&tree.path).exists()
                 && !live(&tree, &current_panes(node.shell)?)
                 && retired(node.shell, &tree)?

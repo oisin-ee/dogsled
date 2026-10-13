@@ -240,7 +240,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             };
             items::record(fleet.ledger, item.clone())?;
             if host.is_local() {
-                crate::watchdog::register_parent(fleet.ledger, &item.pane)?;
+                crate::watchdog::register_parent(fleet.ledger, fleet.shell, &item.pane)?;
             } else {
                 let _: bool = fleet.remote(host, &["parent".into(), item.pane.clone()])?;
             }

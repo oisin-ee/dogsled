@@ -9,6 +9,10 @@ mod jobs;
 mod lifecycle;
 #[path = "cli/review.rs"]
 mod review;
+#[path = "cli/transcripts.rs"]
+mod transcripts;
+#[path = "cli/watchdog.rs"]
+mod watchdog;
 
 use serde_json::{Value, json};
 use std::fs;

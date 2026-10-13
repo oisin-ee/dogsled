@@ -52,7 +52,7 @@ Harness plugins use the binary on `PATH`. They do not install it or start host s
 ```sh
 wrangle serve                     # local measurements every 10 seconds
 wrangle serve --interval 20        # change the interval, in seconds
-wrangle serve --once               # publish one snapshot, then exit
+wrangle serve --once               # publish and run each action lane once
 wrangle status                    # hosts, agents, and reservations
 wrangle status --json
 wrangle status --line              # one line for the tab row
@@ -122,11 +122,13 @@ For non-waiting callers, admission prompts the owner only in `idle` or `done`. O
 Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
 The measurement step uses no SSH. It reads load, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
-A separate action worker keeps slow admission independent from the publication interval. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
+Separate watchdog and admission workers keep prompts and slow setup independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
 An admission timeout records a failed ticket. The service continues publication and later actions.
 It writes `~/.local/state/wrangle/host.json` through atomic replacement.
 Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, and `transcript_modified`.
-Transcript paths come from Herdr path sessions. Their modification times use Unix milliseconds. Unavailable paths or times are null.
+Transcript paths come from Herdr path sessions. Exact Claude and Codex session IDs also resolve against their standard session directories.
+Ambiguous, absent, or unreadable transcripts remain unstalled. Modification times use Unix milliseconds.
+Each pane also has `stalled_since_ms` and `state_since_ms`. The latter records the start of the observed state.
 The service stops with an error if a measurement fails. The last complete snapshot remains available.
 
 On Linux, the smallest finite `memory.max` from the process cgroup through its ancestors governs memory.
@@ -155,6 +157,53 @@ A host without measurements prints `momokaya-2 ?`. A stale host keeps its last n
 `--brief` includes load/cores, memory, disk, agent counts, and a hint to run `wrangle status`.
 Fleets larger than five hosts share lines to preserve both the six-line limit and visibility of every host.
 `--watch --interval N` changes the refresh interval. Its default is five seconds.
+
+## Stalls and check-ins
+
+A `working` or `unknown` agent stalls after ten minutes without a transcript change. Screen redraws do not reset this clock.
+An agent without a readable transcript never stalls. Recovery clears its `$wrangle` sidebar token.
+Status lists stalled panes. Brief status and prompt context include a stall count within six lines.
+
+The owner's service checks every minute. It prompts only `idle` or `done` owners, never `working` or `blocked` owners.
+A stall or completed job makes a check-in due. Other open work gets a check-in after 30 minutes without a check-in or lifecycle event.
+Transcript writes alone do not postpone regular check-ins. Pending job-completion events survive item closure.
+The note includes names, hosts, states, ages, transcript silence, and the last five output lines.
+It asks the owner to wait, nudge, or stop the item. Output in the note is untrusted data.
+A stalled top-level pane gets one Herdr notification per stall episode.
+
+Locked `watchdog.json` records events and delivery attempts. `parents.json` identifies tracked children on their own host.
+A normal service restart does not repeat a delivered check-in. Herdr offers no delivery idempotency key.
+An interrupted or failed prompt remains `pending` or `uncertain` on disk and retries after 30 minutes, not every tick.
+A crash between Herdr acceptance and local confirmation can therefore duplicate one delayed check-in.
+Notification attempts are recorded before delivery and never repeat within that stall; a crash can lose that notification.
+
+For authorized live tests only, `WRANGLE_TEST_STALL_MS` overrides the ten-minute threshold with a positive millisecond value.
+It does not shorten check-in cadence. Use private `WRANGLE_STATE` and stop the test service afterward.
+
+## Cleanup
+
+```sh
+wrangle doctor --json
+wrangle doctor --host netcup
+wrangle prune worktrees jobs
+wrangle prune --host netcup --yes panes
+```
+
+Doctor changes no candidates. It reports `worktrees`, `panes`, `jobs`, `disk`, and `processes`.
+Worktrees need a merged or deleted branch and no live pane. Dirty candidates are reported but cannot be removed.
+Panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
+Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known wrangle-owned paths.
+Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune never kills processes or frees arbitrary disk paths.
+
+Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
+Each removal rechecks current state. Working or blocked panes, live worktrees, dirty worktrees, and unmerged branches remain untouched.
+Wrangle uses `agent:worktree-remove` when the repository exposes that mise task. Otherwise, it uses `git worktree remove` without force.
+The result names the method and reason. Git's remote default branch defines merged state, with local `main` as the fallback.
+
+Prepare records repositories in `worktrees.json`. Hourly automatic cleanup examines worktrees in those repositories only and logs each removal.
+It applies the same clean, retired-branch, and no-live-pane checks. It never removes panes, jobs, or processes automatically.
+Doctor also discovers repositories from the caller and live pane directories. Neither operation scans the whole home directory.
+Detached worktrees and repositories with unknown merge status are not automatically removed.
 
 ## Placement
 
@@ -265,4 +314,4 @@ Install the same release on every host before enabling its service. This PR does
 
 The pre-commit hook runs `mise run check`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.
 CLI behavior tests use private state and fake Herdr/SSH executables. Time-sensitive unit tests inject timestamps.
-See [the design](docs/design.md) for the later watchdog and cleanup unit.
+See [the design](docs/design.md) for watchdog delivery guarantees and cleanup scope.

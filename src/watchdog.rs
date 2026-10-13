@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+#[cfg(test)]
+#[path = "watchdog_tests.rs"]
+mod tests;
+
 pub const MINUTE: u64 = 60_000;
 const CHECK_IN: u64 = 30 * MINUTE;
 
@@ -25,9 +29,15 @@ pub fn observe(probe: &mut Probe, previous: Option<&Probe>, now: u64) {
     for agent in &mut probe.agent_panes {
         let old = previous.and_then(|p| p.agent_panes.iter().find(|a| a.pane == agent.pane));
         agent.state_since_ms = Some(
-            old.filter(|a| a.state == agent.state && a.transcript == agent.transcript)
-                .and_then(|a| a.state_since_ms)
-                .unwrap_or(now),
+            old.filter(|a| {
+                (a.state == agent.state
+                    || (matches!(a.state.as_str(), "idle" | "done")
+                        && matches!(agent.state.as_str(), "idle" | "done")))
+                    && a.transcript == agent.transcript
+                    && a.transcript_modified == agent.transcript_modified
+            })
+            .and_then(|a| a.state_since_ms)
+            .unwrap_or(now),
         );
         agent.stalled_since_ms = if matches!(agent.state.as_str(), "working" | "unknown")
             && agent.transcript.is_some()
@@ -66,13 +76,58 @@ struct State {
     events: BTreeMap<String, Event>,
     marks: BTreeMap<String, String>,
     notified: BTreeMap<String, u64>,
+    #[serde(default)]
+    deliveries: BTreeMap<String, Delivery>,
 }
 
-pub fn register_parent(ledger: &Ledger, pane: &str) -> Result<()> {
+#[derive(Debug, Serialize, Deserialize)]
+struct Delivery {
+    attempted_ms: u64,
+    outcome: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Parent {
+    transcript: Option<String>,
+}
+
+pub fn register_parent(ledger: &Ledger, shell: &dyn crate::shell::Shell, pane: &str) -> Result<()> {
+    let transcript = crate::probe::agent_list(shell)?
+        .into_iter()
+        .find(|a| a.pane == pane)
+        .and_then(|a| a.transcript);
     ledger.with_lock("parents", || {
-        let mut panes: BTreeSet<String> = ledger.read("parents.json")?.unwrap_or_default();
-        panes.insert(pane.into());
+        let mut panes: BTreeMap<String, Parent> = ledger.read("parents.json")?.unwrap_or_default();
+        panes.insert(pane.into(), Parent { transcript });
         ledger.write("parents.json", &panes)
+    })
+}
+
+fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
+    ledger.with_lock("parents", || {
+        let mut parents: BTreeMap<String, Parent> =
+            ledger.read("parents.json")?.unwrap_or_default();
+        parents.retain(|pane, parent| {
+            probe.agent_panes.iter().any(|agent| {
+                agent.pane == *pane
+                    && !matches!(agent.state.as_str(), "idle" | "done")
+                    && parent
+                        .transcript
+                        .as_ref()
+                        .is_none_or(|path| agent.transcript.as_ref() == Some(path))
+            })
+        });
+        for (pane, parent) in &mut parents {
+            if parent.transcript.is_none() {
+                parent.transcript = probe
+                    .agent_panes
+                    .iter()
+                    .find(|a| a.pane == *pane)
+                    .and_then(|a| a.transcript.clone());
+            }
+        }
+        ledger.write("parents.json", &parents)?;
+        Ok(parents)
     })
 }
 
@@ -84,7 +139,7 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
     else {
         return Ok(());
     };
-    let parents: BTreeSet<String> = fleet.ledger.read("parents.json")?.unwrap_or_default();
+    let parents = parents(fleet.ledger, probe)?;
     let owned = crate::items::list(fleet.ledger)?;
     let live: BTreeSet<_> = probe.agent_panes.iter().map(|a| a.pane.clone()).collect();
     state.marks.retain(|pane, _| live.contains(pane));
@@ -110,11 +165,15 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
                 )?;
                 state.marks.insert(agent.pane.clone(), token);
             }
-            let has_owner = parents.contains(&agent.pane)
+            let has_owner = parents.contains_key(&agent.pane)
                 || owned
                     .iter()
                     .any(|i| i.host == "local" && i.pane == agent.pane && i.closed_ms.is_none());
             if !has_owner && state.notified.get(&agent.pane) != Some(&since) {
+                // Herdr has no idempotency key. Persist the attempt before the effect:
+                // an interrupted notification is visible on disk and never repeats.
+                state.notified.insert(agent.pane.clone(), since);
+                fleet.ledger.write("watchdog.json", state)?;
                 fleet.shell.run_ok(
                     "herdr",
                     &[
@@ -130,7 +189,6 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
                         ),
                     ],
                 )?;
-                state.notified.insert(agent.pane.clone(), since);
             }
         } else {
             if state.marks.contains_key(&agent.pane) {
@@ -189,10 +247,9 @@ fn item_state<'a>(
             },
             agent.transcript_modified,
             agent.stalled_since_ms.is_some(),
-            format!(
-                "{}:{:?}:{:?}",
-                agent.state, agent.transcript_modified, agent.stalled_since_ms
-            ),
+            agent
+                .stalled_since_ms
+                .map_or_else(|| agent.state.clone(), |since| format!("stalled:{since}")),
         ))
     }
 }
@@ -295,9 +352,38 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
     note
 }
 
+fn capture_events(state: &mut State, items: &[Item], reports: &[HostReport], now: u64) {
+    for item in items {
+        if item.closed_ms.is_some() && !state.events.contains_key(&item.id) {
+            continue;
+        }
+        if let Some((_, _, _, urgent, signature)) = item_state(item, reports) {
+            let event = state
+                .events
+                .entry(item.id.clone())
+                .or_insert_with(|| Event {
+                    signature: String::new(),
+                    last_ms: item.created_ms,
+                    urgent: false,
+                });
+            if event.signature != signature {
+                if !event.signature.is_empty() || urgent {
+                    event.last_ms = now;
+                }
+                event.signature = signature;
+                event.urgent |= urgent;
+            }
+        }
+    }
+}
+
 pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
     fleet.ledger.with_lock("watchdog", || {
         let mut state: State = fleet.ledger.read("watchdog.json")?.unwrap_or_default();
+        let items = crate::items::list(fleet.ledger)?;
+        capture_events(&mut state, &items, reports, now);
+        // Persist observed events before reconciliation, including between scan deadlines.
+        fleet.ledger.write("watchdog.json", &state)?;
         marks(fleet, reports, &mut state, now)?;
         if state
             .last_scan_ms
@@ -306,30 +392,6 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             return Ok(());
         }
         state.last_scan_ms = Some(now);
-        let items = crate::items::list(fleet.ledger)?;
-        for item in &items {
-            if item.closed_ms.is_some() && !state.events.contains_key(&item.id) {
-                continue;
-            }
-            if let Some((_, _, _, urgent, signature)) = item_state(item, reports) {
-                let event = state
-                    .events
-                    .entry(item.id.clone())
-                    .or_insert_with(|| Event {
-                        signature: String::new(),
-                        last_ms: item.created_ms,
-                        urgent: false,
-                    });
-                if event.signature != signature {
-                    if !event.signature.is_empty() || urgent {
-                        event.last_ms = now;
-                    }
-                    event.signature = signature;
-                    event.urgent |= urgent;
-                }
-            }
-        }
-        // Persist observed events even when the owner is working, blocked, or absent.
         fleet.ledger.write("watchdog.json", &state)?;
         let owners: BTreeSet<_> = items.iter().map(|i| i.owner_pane.as_str()).collect();
         for owner in owners {
@@ -368,15 +430,44 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             if !urgent && now.saturating_sub(latest) < CHECK_IN {
                 continue;
             }
-            fleet.shell.run_ok(
+            if state.deliveries.get(owner).is_some_and(|d| {
+                matches!(d.outcome.as_str(), "pending" | "uncertain")
+                    && now.saturating_sub(d.attempted_ms) < CHECK_IN
+            }) {
+                continue;
+            }
+            let note = note(fleet, &open, reports, now);
+            // Revalidate after potentially slow log/SSH reads. A cached idle state
+            // cannot authorize prompting an owner that started another turn.
+            if !crate::probe::agent_list(fleet.shell)?
+                .iter()
+                .any(|a| a.pane == owner && matches!(a.state.as_str(), "idle" | "done"))
+            {
+                continue;
+            }
+            state.deliveries.insert(
+                owner.into(),
+                Delivery {
+                    attempted_ms: now,
+                    outcome: "pending".into(),
+                },
+            );
+            fleet.ledger.write("watchdog.json", &state)?;
+            let result = fleet.shell.run_ok(
                 "herdr",
-                &[
-                    "agent".into(),
-                    "prompt".into(),
-                    owner.into(),
-                    note(fleet, &open, reports, now),
-                ],
-            )?;
+                &["agent".into(), "prompt".into(), owner.into(), note],
+            );
+            state.deliveries.insert(
+                owner.into(),
+                Delivery {
+                    attempted_ms: now,
+                    outcome: if result.is_ok() { "sent" } else { "uncertain" }.into(),
+                },
+            );
+            if let Err(error) = result {
+                fleet.ledger.write("watchdog.json", &state)?;
+                return Err(error);
+            }
             state.sent.insert(owner.into(), now);
             for item in open {
                 if let Some(event) = state.events.get_mut(&item.id) {

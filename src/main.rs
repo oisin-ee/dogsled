@@ -192,7 +192,7 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
             String::new,
         )?,
         HostCommand::Parent { pane } => {
-            watchdog::register_parent(node.ledger, &pane)?;
+            watchdog::register_parent(node.ledger, node.shell, &pane)?;
             print(true, &true, String::new)?;
         }
         HostCommand::Tail { kind, id } => {

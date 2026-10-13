@@ -14,6 +14,19 @@ pub fn resolve(agent: Option<&str>, kind: &str, value: &str) -> Option<String> {
     {
         return None;
     }
+    // Only validated UUID session IDs can name a transcript. Harness-private
+    // identifiers or future formats stay unstalled rather than matching by guess.
+    if value.len() != 36
+        || !value.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+    {
+        return None;
+    }
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let (root, depth, suffix) = match agent? {
         "claude" => (
