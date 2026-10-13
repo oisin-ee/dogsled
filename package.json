@@ -1,6 +1,6 @@
 {
   "name": "wrangle",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Host status and placement for Herdr agents. CLI, Pi prompt context, and skill.",
   "type": "module",
   "license": "MIT",
