@@ -13,3 +13,5 @@ installers = []
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
+# Dotfiles installs these templates; dist only bundles them beside the binary.
+include = ["plugin/services/wrangle.service", "plugin/services/dev.wrangle.plist"]

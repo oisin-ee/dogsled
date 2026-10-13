@@ -1,5 +1,4 @@
-//! Admission policy. Read once by the lead; the numeric parts travel to remote
-//! hosts on the command line so every host applies the lead's rule.
+//! Host policy, including the prepare hook.
 
 use std::path::{Path, PathBuf};
 
@@ -10,9 +9,13 @@ use crate::error::{Error, Result};
 /// Default `prepare` hook: the agent harness task that creates a writer's
 /// worktree and linked Herdr workspace, printing `{pane_id, workspace_id}`.
 pub const DEFAULT_PREPARE: &[&str] = &[
-    "sh",
-    "-c",
-    "cd {repo} && mise run -q agent:worktree -- {branch} {base}",
+    "mise",
+    "run",
+    "-q",
+    "agent:worktree",
+    "--",
+    "{branch}",
+    "{base}",
 ];
 
 /// Default way to run `wrangle` on a remote host.
@@ -25,13 +28,10 @@ pub struct Policy {
     pub load_per_core_max: f64,
     /// Admit while the home filesystem keeps at least this much free.
     pub disk_free_min_percent: f64,
-    /// Load units each unexpired reservation adds, so leads admitting in the
-    /// same minute do not all see the same idle host.
+    /// Load units each unexpired reservation adds to admission.
     pub reservation_load: f64,
     /// A reservation older than this is dropped on the next probe.
     pub reservation_ttl_ms: u64,
-    /// Poll interval for queued tickets (used by the Pi shim).
-    pub poll_ms: u64,
     /// argv prefix that reaches `wrangle` on a remote host over
     /// `ssh -T -o BatchMode=yes`. mise shims are not on the non-interactive
     /// PATH, but `mise` itself is, so the default goes through `mise x`.
@@ -42,8 +42,8 @@ pub struct Policy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Hooks {
-    /// argv template run on the admitted host before a spawn. Placeholders:
-    /// `{repo}`, `{branch}`, `{base}`. Must print one JSON object with `pane_id`.
+    /// argv template run in the checkout. Placeholders: `{branch}` and `{base}`.
+    /// Must print JSON with `pane_id` or `path`.
     pub prepare: Vec<String>,
 }
 
@@ -53,8 +53,7 @@ impl Default for Policy {
             load_per_core_max: 1.5,
             disk_free_min_percent: 15.0,
             reservation_load: 1.0,
-            reservation_ttl_ms: 180_000,
-            poll_ms: 30_000,
+            reservation_ttl_ms: 90_000,
             remote_command: DEFAULT_REMOTE_COMMAND
                 .iter()
                 .map(ToString::to_string)
@@ -93,49 +92,6 @@ impl From<&Policy> for Thresholds {
     }
 }
 
-/// The optional repository file, at the root of the main checkout.
-pub const REPO_FILE: &str = "wrangle.toml";
-
-/// `wrangle.toml` in a repository: how that repository prepares a child.
-/// Admission thresholds stay in the host's policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RepoConfig {
-    pub hooks: RepoHooks,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RepoHooks {
-    /// Replaces the policy's `hooks.prepare` for this repository.
-    pub prepare: Option<Vec<String>>,
-}
-
-impl RepoConfig {
-    /// The `prepare` template for this repository: its own, else the policy's.
-    #[must_use]
-    pub fn prepare<'a>(&'a self, policy: &'a Policy) -> &'a [String] {
-        self.hooks
-            .prepare
-            .as_deref()
-            .unwrap_or(&policy.hooks.prepare)
-    }
-}
-
-/// Read `wrangle.toml` from `checkout`. A missing file means no override; an
-/// invalid file is an error, like the policy file.
-pub fn load_repo(checkout: &Path) -> Result<RepoConfig> {
-    let path = checkout.join(REPO_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).map_err(|source| Error::Config {
-            path: path.display().to_string(),
-            source,
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RepoConfig::default()),
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// `$WRANGLE_CONFIG`, else `$XDG_CONFIG_HOME/wrangle/config.toml`, else
 /// `~/.config/wrangle/config.toml`.
 #[must_use]
@@ -170,23 +126,6 @@ pub fn parse(text: &str) -> std::result::Result<Policy, toml::de::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repo_file_overrides_only_what_it_names() {
-        let policy = Policy::default();
-        let none: RepoConfig = toml::from_str("[hooks]\n").unwrap();
-        assert_eq!(none.prepare(&policy), policy.hooks.prepare.as_slice());
-        let own: RepoConfig =
-            toml::from_str("[hooks]\nprepare = [\"./prepare\", \"{branch}\"]\n").unwrap();
-        assert_eq!(own.prepare(&policy), ["./prepare", "{branch}"]);
-        assert!(toml::from_str::<RepoConfig>("load_per_core_max = 2.0\n").is_err());
-    }
-
-    #[test]
-    fn missing_repo_file_is_no_override() {
-        let dir = std::env::temp_dir().join(format!("wrangle-repo-cfg-{}", std::process::id()));
-        assert_eq!(load_repo(&dir).unwrap(), RepoConfig::default());
-    }
 
     #[test]
     fn empty_text_is_defaults() {

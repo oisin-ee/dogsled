@@ -20,6 +20,7 @@ pub struct Headroom {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "plan", rename_all = "snake_case")]
+#[cfg(test)]
 pub enum Plan {
     Admit { host: String },
     Full,
@@ -67,6 +68,7 @@ pub fn choose(evals: &[Headroom]) -> Option<&Headroom> {
 }
 
 #[must_use]
+#[cfg(test)]
 pub fn plan(probes: &[Probe], t: &Thresholds) -> Plan {
     let evals: Vec<Headroom> = probes.iter().map(|p| evaluate(p, t)).collect();
     match choose(&evals) {
@@ -99,13 +101,13 @@ mod tests {
             load1,
             cores,
             disk_free_percent: disk,
+            memory: crate::probe::Memory::default(),
+            agent_panes: Vec::new(),
             agents: AgentCounts::default(),
             reservations: (0..reservations)
                 .map(|i| Reservation {
-                    ticket: format!("t{i}"),
-                    lead: "lead".to_string(),
+                    id: format!("r{i}"),
                     created_ms: 0,
-                    pane: None,
                 })
                 .collect(),
             panes: Vec::new(),
@@ -178,10 +180,8 @@ mod tests {
                 unreachable!("two idle hosts cannot be full");
             };
             let r = Reservation {
-                ticket: format!("t{i}"),
-                lead: "l".into(),
+                id: format!("r{i}"),
                 created_ms: 0,
-                pane: None,
             };
             if host == "a" {
                 a.reservations.push(r);

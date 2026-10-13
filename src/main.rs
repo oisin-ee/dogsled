@@ -1,51 +1,39 @@
-//! `wrangle`: admit, queue, and spawn coding agents across Herdr hosts.
-//!
-//! Exit codes: 0 ok, 1 every eligible host is full (the JSON body carries
-//! the queued ticket), 2 any other error.
+//! Host status, local service, and capacity reservations for Herdr agents.
 
 mod cli;
 mod commands;
 mod config;
 mod error;
-mod herdr;
 mod hook;
 mod hosts;
-mod lead;
 mod ledger;
 mod node;
 mod plan;
 mod probe;
-mod report;
 mod shell;
-mod spawn;
-
-use std::io::Write as _;
-use std::process::ExitCode;
 
 use clap::Parser;
-use serde::Serialize;
-
 use cli::{Cli, Command, HostCommand};
-use commands::AdmitOutput;
 use error::{Error, Result};
-use hosts::Fleet;
-use ledger::Ledger;
+use ledger::{Ledger, now_ms};
 use node::Node;
+use serde::Serialize;
 use shell::System;
+use std::io::Write as _;
+use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json;
     match run(cli) {
         Ok(code) => code,
-        Err(e) => {
+        Err(error) => {
             if json {
-                let body = serde_json::json!({ "error": e.to_string() });
-                println!("{body}");
+                println!("{}", serde_json::json!({ "error": error.to_string() }));
             } else {
-                eprintln!("wrangle: {e}");
+                eprintln!("wrangle: {error}");
             }
-            e.exit_code()
+            error.exit_code()
         }
     }
 }
@@ -58,337 +46,113 @@ fn print<T: Serialize>(json: bool, value: &T, text: impl FnOnce() -> String) -> 
     } else {
         write!(out, "{}", text())?;
     }
+    out.flush()?;
     Ok(())
 }
 
-/// The Herdr `[ui.sidebar.agents]` block that renders the wrangle marks.
-const SIDEBAR: &str = include_str!("../herdr-sidebar.toml");
-
-fn home() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
-}
-
 fn run(cli: Cli) -> Result<ExitCode> {
-    let json = cli.json;
     let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
     let shell = System;
     let ledger = Ledger::new(ledger::default_dir());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let node = Node {
+        shell: &shell,
+        ledger: &ledger,
+        thresholds: config::Thresholds::from(&policy),
+        home: &home,
+    };
     match cli.command {
-        Command::Host(cmd) => host(cmd, shell, &ledger, &policy, json),
-        Command::Report { since } => {
-            let out = report::report(&ledger, since)?;
-            print(json, &out, || report::render(&out))?;
-            Ok(ExitCode::SUCCESS)
-        }
-        cmd => {
-            let fleet = Fleet::discover(&shell, &ledger, &policy, home())?;
-            lead(cmd, &fleet, json)
-        }
-    }
-}
-
-/// The lead-side commands.
-fn lead(cmd: Command, fleet: &Fleet, json: bool) -> Result<ExitCode> {
-    match cmd {
-        Command::Probe { machine } => {
-            let reports = commands::probe(fleet, machine.as_deref())?;
-            print(json, &reports, || {
-                commands::render_status(&commands::Status {
-                    leads: Vec::new(),
-                    hosts: reports.clone(),
-                    queue: Vec::new(),
-                })
-            })?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Admit {
-            lead,
-            machine,
-            ticket,
-        } => {
-            let out = commands::admit(
-                fleet,
-                lead.as_deref().unwrap_or_default(),
-                machine.as_deref(),
-                ticket.as_deref(),
-            )?;
-            let code = match &out {
-                AdmitOutput::Admitted(_) => ExitCode::SUCCESS,
-                AdmitOutput::Queued(_) => Error::Full.exit_code(),
-            };
-            print(json, &out, || match &out {
-                AdmitOutput::Admitted(a) => format!(
-                    "admitted {} on {} (headroom {:.2})\n",
-                    a.ticket, a.host.label, a.headroom.headroom
-                ),
-                AdmitOutput::Queued(q) => format!("queued {}: {}\n", q.ticket, q.reason),
-            })?;
-            Ok(code)
-        }
-        Command::Release {
-            ticket,
-            pane,
-            machine,
-        } => {
-            let out = match (ticket, pane) {
-                (Some(t), _) => commands::release_ticket(fleet, &t)?,
-                (None, Some(p)) => commands::release_pane(fleet, &p, machine.as_deref())?,
-                (None, None) => return Err(Error::Invalid("--ticket or --pane".into())),
-            };
-            print(json, &out, || format!("released {}\n", out.released))?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Status { sidebar: true, .. } => {
-            let body = serde_json::json!({ "sidebar": SIDEBAR });
-            print(json, &body, || SIDEBAR.to_string())?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Status {
-            watch, interval, ..
-        } => {
-            loop {
-                let st = commands::status(fleet)?;
-                if watch && !json {
-                    // Clear the screen between frames of the board.
-                    print!("\x1b[2J\x1b[H");
-                }
-                print(json, &st, || commands::render_status(&st))?;
-                if !watch {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+        Command::Serve { interval, once } => loop {
+            node.tick(now_ms())?;
+            if once {
+                break;
             }
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Lead {
-            repo,
-            pane,
-            take_over,
-        } => {
-            let pane = pane
-                .or_else(|| std::env::var("HERDR_PANE_ID").ok())
-                .ok_or_else(|| Error::Invalid("lead needs --pane or $HERDR_PANE_ID".into()))?;
-            let repo = lead::repo_name(fleet.shell, repo.as_deref())?;
-            let out = lead::claim(fleet.shell, &repo, &pane, take_over)?;
-            print(json, &out, || match &out {
-                lead::LeadOutput::Claimed(c) => format!("lead {} on {}\n", c.lead, c.pane),
-                lead::LeadOutput::Exists(e) => format!("{}\n", e.next),
+            std::thread::sleep(std::time::Duration::from_secs(interval));
+        },
+        Command::Host(cmd) => return host(cmd, &node, &policy),
+        Command::Status {
+            watch,
+            interval,
+            line,
+            brief,
+        } => loop {
+            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home.clone())?;
+            let status = commands::Status {
+                hosts: fleet.status(now_ms())?,
+            };
+            if watch && !cli.json && !line && !brief {
+                print!("\x1b[2J\x1b[H");
+            }
+            print(cli.json, &status, || {
+                if line {
+                    commands::line(&status)
+                } else if brief {
+                    commands::brief(&status)
+                } else {
+                    commands::render(&status)
+                }
             })?;
-            Ok(match out {
-                lead::LeadOutput::Claimed(_) => ExitCode::SUCCESS,
-                lead::LeadOutput::Exists(_) => ExitCode::from(error::EXIT_FULL),
-            })
-        }
-        Command::Cancel { ticket } => {
-            let out = commands::cancel(fleet, &ticket)?;
-            print(json, &out, || format!("cancelled {}\n", out.ticket))?;
-            Ok(ExitCode::SUCCESS)
-        }
-        cmd => report(cmd, fleet, json),
-    }
-}
-
-/// The sidebar and notification commands.
-fn spawn_cmd(fleet: &Fleet, req: &spawn::SpawnRequest<'_>, json: bool) -> Result<ExitCode> {
-    let out = spawn::spawn(fleet, req)?;
-    print(json, &out, || match &out {
-        spawn::SpawnOutput::Spawned(s) => {
-            format!("spawned {} on {} in {}\n", s.name, s.host.label, s.pane_id)
-        }
-        spawn::SpawnOutput::Queued(q) => format!("queued {}: {}\n", q.ticket, q.reason),
-    })?;
-    Ok(match out {
-        spawn::SpawnOutput::Spawned(_) => ExitCode::SUCCESS,
-        spawn::SpawnOutput::Queued(_) => ExitCode::from(error::EXIT_FULL),
-    })
-}
-
-fn report(cmd: Command, fleet: &Fleet, json: bool) -> Result<ExitCode> {
-    match cmd {
-        Command::Mark {
-            pane,
-            lead,
-            name,
-            machine,
-            ticket,
-            clear,
+            if !watch {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(interval));
+        },
+        Command::Place {
+            host,
+            branch,
+            base,
+            repo,
         } => {
-            let out = commands::mark(
-                fleet,
-                machine.as_deref(),
-                &pane,
-                lead.as_deref().unwrap_or_default(),
-                name.as_deref().unwrap_or_default(),
-                ticket.as_deref(),
-                clear,
+            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
+            let repo = repo.map_or_else(
+                || std::env::current_dir().map(|p| p.display().to_string()),
+                Ok,
             )?;
-            print(json, &out, || {
-                format!(
-                    "{} {}\n",
-                    if out.marked { "marked" } else { "cleared" },
-                    out.pane
-                )
+            let placed = commands::place(
+                &fleet,
+                host.as_deref(),
+                branch.as_deref(),
+                base.as_deref(),
+                &repo,
+                now_ms(),
+            )?;
+            let full = matches!(placed, commands::Placement::Full { .. });
+            print(cli.json || full, &placed, || {
+                commands::render_place(&placed)
             })?;
-            Ok(ExitCode::SUCCESS)
+            if full {
+                return Ok(ExitCode::from(error::EXIT_FULL));
+            }
         }
-        Command::Queue { pane, count } => {
-            let out = commands::queue(fleet, &pane, count)?;
-            print(json, &out, || {
-                format!("reported {} queued on {}\n", out.count, out.pane)
-            })?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Prepare {
-            machine,
-            branch,
-            base,
-            repo,
-        } => {
-            let host = match machine.as_deref() {
-                Some(m) => fleet.find(m)?,
-                None => fleet.find(hosts::LOCAL)?,
-            };
-            let cwd = std::env::current_dir()?.display().to_string();
-            let inputs = hook::HookInputs {
-                repo: repo.as_deref().unwrap_or(&cwd),
-                branch: &branch,
-                base: &base,
-            };
-            let out = hook::run(fleet, host, inputs)?;
-            print(json, &out, || {
-                format!("prepared {} on {}\n", out.pane_id, out.host.label)
-            })?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Spawn {
-            ticket,
-            lead,
-            take_over,
-            machine,
-            kind,
-            name,
-            label,
-            message,
-            branch,
-            base,
-            repo,
-            cwd,
-        } => {
-            let pane = std::env::var("HERDR_PANE_ID").ok();
-            let req = spawn::SpawnRequest {
-                ticket: ticket.as_deref(),
-                lead: lead.as_deref(),
-                pane: pane.as_deref(),
-                take_over,
-                machine: machine.as_deref(),
-                kind: &kind,
-                name: &name,
-                label: label.as_deref(),
-                message: &message,
-                branch: branch.as_deref(),
-                base: base.as_deref(),
-                repo: repo.as_deref(),
-                cwd: cwd.as_deref(),
-            };
-            spawn_cmd(fleet, &req, json)
-        }
-        Command::Notify { title, body } => {
-            commands::notify(fleet, &title, &body)?;
-            print(json, &serde_json::json!({ "notified": true }), || {
-                format!("notified: {title}\n")
-            })?;
-            Ok(ExitCode::SUCCESS)
-        }
-        _ => Ok(ExitCode::SUCCESS),
     }
+    Ok(ExitCode::SUCCESS)
 }
 
-fn node<'a>(
-    shell: &'a System,
-    ledger: &'a Ledger,
-    home: &'a str,
-    base: config::Thresholds,
-    identity: &'a cli::HostIdentity,
-    thresholds: cli::ThresholdArgs,
-) -> Node<'a> {
-    Node {
-        shell,
-        ledger,
-        thresholds: thresholds.over(base),
-        host: &identity.host_id,
-        label: &identity.label,
-        home,
-    }
-}
-
-/// The per-host primitives, run on this machine.
-fn host(
-    cmd: HostCommand,
-    shell: System,
-    ledger: &Ledger,
-    policy: &config::Policy,
-    json: bool,
-) -> Result<ExitCode> {
-    let base = config::Thresholds::from(policy);
-    let home = home();
-    let shell = &shell;
+fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<ExitCode> {
     match cmd {
-        HostCommand::Probe {
-            identity,
-            thresholds,
-        } => {
-            let p = node(shell, ledger, &home, base, &identity, thresholds).probe()?;
-            print(json, &p, || format!("{p:#?}\n"))?;
-            Ok(ExitCode::SUCCESS)
-        }
-        HostCommand::Reserve {
-            lead,
-            ticket,
-            identity,
-            thresholds,
-        } => {
-            let out =
-                node(shell, ledger, &home, base, &identity, thresholds).reserve(&lead, &ticket)?;
-            print(json, &out, || {
-                format!(
-                    "{} {} (headroom {:.2})\n",
-                    if out.reserved { "reserved" } else { "full" },
-                    out.ticket,
-                    out.headroom.headroom
-                )
-            })?;
-            Ok(if out.reserved {
-                ExitCode::SUCCESS
-            } else {
-                Error::Full.exit_code()
-            })
-        }
-        HostCommand::Release {
-            ticket,
-            pane,
-            identity,
-            thresholds,
-        } => {
-            let n = node(shell, ledger, &home, base, &identity, thresholds);
-            let out = match (ticket, pane) {
-                (Some(t), _) => n.release_ticket(&t)?,
-                (None, Some(p)) => n.release_pane(&p)?,
-                (None, None) => return Err(Error::Invalid("--ticket or --pane".into())),
+        HostCommand::Snapshot => print(
+            true,
+            &node.ledger.read::<node::Snapshot>("host.json")?,
+            String::new,
+        )?,
+        HostCommand::Reserve { id, thresholds } => {
+            let node = Node {
+                thresholds: thresholds.over(node.thresholds),
+                ..*node
             };
-            print(json, &out, || format!("released {}\n", out.released))?;
-            Ok(ExitCode::SUCCESS)
+            let out = node.reserve(&id, now_ms())?;
+            print(true, &out, String::new)?;
+            if !out.reserved {
+                return Ok(Error::Full.exit_code());
+            }
         }
-        HostCommand::SetPane {
-            ticket,
-            pane,
-            identity,
-            thresholds,
-        } => {
-            let found =
-                node(shell, ledger, &home, base, &identity, thresholds).set_pane(&ticket, &pane)?;
-            let out = hosts::SetPaneOutcome { found };
-            print(json, &out, || format!("found {found}\n"))?;
-            Ok(ExitCode::SUCCESS)
+        HostCommand::Prepare { repo, branch, base } => {
+            print(
+                true,
+                &hook::local(node.shell, policy, &repo, &branch, base.as_deref())?,
+                String::new,
+            )?;
         }
     }
+    Ok(ExitCode::SUCCESS)
 }

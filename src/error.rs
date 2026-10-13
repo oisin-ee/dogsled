@@ -31,17 +31,13 @@ pub enum Error {
     Ssh { target: String, detail: String },
     #[error("unexpected output from {origin}: {detail}")]
     Parse { origin: String, detail: String },
-    #[error("unknown machine {0}; see `wrangle probe`")]
+    #[error("unknown host {0}; see `wrangle status`")]
     UnknownMachine(String),
-    #[error("ticket {0} is not queued or reserved")]
-    UnknownTicket(String),
     #[error("every eligible host is full")]
     Full,
     #[error("{0}")]
     Invalid(String),
-    #[error("{0}")]
-    LeadExists(String),
-    #[error("prepare hook printed no `pane_id`: {detail}")]
+    #[error("prepare hook printed no `pane_id` or `path`: {detail}")]
     Hook { detail: String },
 }
 

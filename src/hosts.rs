@@ -1,68 +1,47 @@
-//! The fleet: this machine plus every enabled Herdr machine profile. Each
-//! primitive runs in-process for the local host and over `ssh -T` for the
-//! rest (the same transport Shepherdr uses for `herdr`).
-
-use std::thread;
-
-use serde::{Deserialize, Serialize};
+//! Fleet discovery, parallel snapshot reads, and the shared SSH transport.
 
 use crate::config::{Policy, Thresholds};
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
-use crate::node::{Node, ReleaseOutcome, ReserveOutcome};
+use crate::node::{Node, ReserveOutcome, Snapshot};
 use crate::plan::{Headroom, evaluate};
 use crate::probe::Probe;
 use crate::shell::{Shell, quote};
+use serde::{Deserialize, Serialize};
 
 pub const LOCAL: &str = "local";
+const CACHE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
-    /// `local` or the Herdr machine id.
     pub id: String,
     pub label: String,
-    /// ssh target; `None` for this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
 
 impl Host {
-    #[must_use]
     pub fn local() -> Self {
         Self {
-            id: LOCAL.to_string(),
-            label: LOCAL.to_string(),
+            id: LOCAL.into(),
+            label: LOCAL.into(),
             target: None,
         }
     }
-
-    #[must_use]
     pub fn is_local(&self) -> bool {
         self.target.is_none()
     }
-
-    /// `--machine` value for `herdr` and Shepherdr: `None` for local.
-    #[must_use]
-    pub fn machine(&self) -> Option<&str> {
-        if self.is_local() {
-            None
-        } else {
-            Some(&self.id)
-        }
-    }
 }
 
-/// One host's probe, or why it could not be probed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostReport {
     #[serde(flatten)]
     pub host: Host,
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: String,
+    pub reachable: bool,
+    pub sampled_ms: Option<u64>,
     pub probe: Option<Probe>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headroom: Option<Headroom>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -74,17 +53,12 @@ struct MachineRow {
     #[serde(default = "default_true")]
     enabled: bool,
 }
-
 fn default_true() -> bool {
     true
 }
 
-/// Parse `herdr machine list --json`, keeping enabled machines.
-pub fn parse_machine_list(text: &str) -> Result<Vec<Host>> {
-    let rows: Vec<MachineRow> = serde_json::from_str(text).map_err(|e| Error::Parse {
-        origin: "herdr machine list --json".to_string(),
-        detail: e.to_string(),
-    })?;
+fn parse_machine_list(text: &str) -> Result<Vec<Host>> {
+    let rows: Vec<MachineRow> = serde_json::from_str(text)?;
     Ok(rows
         .into_iter()
         .filter(|m| m.enabled)
@@ -94,6 +68,16 @@ pub fn parse_machine_list(text: &str) -> Result<Vec<Host>> {
             target: Some(m.target),
         })
         .collect())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Cached {
+    fetched_ms: u64,
+    source: Vec<String>,
+    snapshot: Option<Snapshot>,
+    reachable: bool,
+    available: bool,
+    error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -106,21 +90,13 @@ pub struct Fleet<'a> {
 }
 
 impl<'a> Fleet<'a> {
-    /// Local plus every enabled machine profile.
     pub fn discover(
         shell: &'a dyn Shell,
         ledger: &'a Ledger,
         policy: &'a Policy,
         home: String,
     ) -> Result<Self> {
-        let out = shell.run_ok(
-            "herdr",
-            &[
-                "machine".to_string(),
-                "list".to_string(),
-                "--json".to_string(),
-            ],
-        )?;
+        let out = shell.run_ok("herdr", &["machine".into(), "list".into(), "--json".into()])?;
         let mut hosts = vec![Host::local()];
         hosts.extend(parse_machine_list(&out.stdout)?);
         Ok(Self {
@@ -132,330 +108,267 @@ impl<'a> Fleet<'a> {
         })
     }
 
-    #[must_use]
     pub fn thresholds(&self) -> Thresholds {
         Thresholds::from(self.policy)
     }
 
-    /// Resolve `--machine` by id or label; `local`, or omitted, is this host.
-    pub fn find(&self, machine: &str) -> Result<&Host> {
+    pub fn find(&self, host: &str) -> Result<&Host> {
         self.hosts
             .iter()
-            .find(|h| h.id == machine || h.label == machine)
-            .ok_or_else(|| Error::UnknownMachine(machine.to_string()))
+            .find(|h| h.id == host || h.label == host)
+            .ok_or_else(|| Error::UnknownMachine(host.into()))
     }
 
-    /// Hosts a call may use: the pinned one, or all of them.
-    pub fn eligible(&self, machine: Option<&str>) -> Result<Vec<&Host>> {
-        match machine {
-            Some(m) => Ok(vec![self.find(m)?]),
-            None => Ok(self.hosts.iter().collect()),
-        }
-    }
-
-    fn node<'b>(&'b self, host: &'b Host) -> Node<'b> {
+    pub fn node(&self) -> Node<'_> {
         Node {
             shell: self.shell,
             ledger: self.ledger,
             thresholds: self.thresholds(),
-            host: &host.id,
-            label: &host.label,
             home: &self.home,
         }
     }
 
-    /// `ssh -T -o BatchMode=yes -- <target> <remote_command> host <args…>`,
-    /// each remote word single-quoted for the far shell. The host's id and
-    /// label travel along because the far side does not know them.
-    pub(crate) fn remote_argv(&self, host: &Host, args: &[String]) -> Vec<String> {
-        let t = self.thresholds();
-        let target = host.target.clone().unwrap_or_default();
-        let words: Vec<String> = self
+    pub fn remote_argv(&self, host: &Host, args: &[String]) -> Vec<String> {
+        let words: Vec<_> = self
             .policy
             .remote_command
             .iter()
             .cloned()
-            .chain(["host".to_string()])
+            .chain(["host".into()])
             .chain(args.iter().cloned())
-            .chain([
-                "--host-id".to_string(),
-                host.id.clone(),
-                "--label".to_string(),
-                host.label.clone(),
-                "--load-per-core-max".to_string(),
-                t.load_per_core_max.to_string(),
-                "--disk-free-min-percent".to_string(),
-                t.disk_free_min_percent.to_string(),
-                "--reservation-load".to_string(),
-                t.reservation_load.to_string(),
-                "--reservation-ttl-ms".to_string(),
-                t.reservation_ttl_ms.to_string(),
-                "--json".to_string(),
-            ])
+            .chain(["--json".into()])
             .collect();
-        let command = words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
         vec![
-            "-T".to_string(),
-            "-o".to_string(),
-            "BatchMode=yes".to_string(),
-            "--".to_string(),
-            target,
-            command,
+            "-T".into(),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "ConnectTimeout=5".into(),
+            "--".into(),
+            host.target.clone().unwrap_or_default(),
+            words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" "),
         ]
     }
 
-    /// Run a `host` primitive on `host` and parse its JSON. Exit 1 carries a
-    /// JSON body too (`reserved: false`); anything else is an ssh failure.
-    fn remote<T: for<'de> Deserialize<'de>>(&self, host: &Host, args: &[String]) -> Result<T> {
-        let Some(target) = host.target.as_deref() else {
-            return Err(Error::Invalid(format!("{} is the local host", host.id)));
-        };
+    pub fn remote<T: for<'de> Deserialize<'de>>(&self, host: &Host, args: &[String]) -> Result<T> {
         let out = self.shell.run("ssh", &self.remote_argv(host, args))?;
-        // Exit 1 with a JSON body is `reserved: false`; exit 1 with no body is
-        // the remote launcher failing (for example mise without the tool).
-        if (out.status != 0 && out.status != 1) || out.stdout.trim().is_empty() {
+        if out.status != 0 && out.status != 1 {
             return Err(Error::Ssh {
-                target: target.to_string(),
-                detail: format!(
-                    "exit {}: {}",
-                    out.status,
-                    out.stderr.trim().lines().next().unwrap_or("no output")
-                ),
+                target: host.label.clone(),
+                detail: format!("exit {}: {}", out.status, out.stderr.trim()),
             });
         }
         serde_json::from_str(&out.stdout).map_err(|e| Error::Parse {
-            origin: format!("ssh {target} wrangle host {}", args.join(" ")),
-            detail: format!("{e}: {}", out.stdout.trim()),
+            origin: format!("{} host {}", host.label, args.join(" ")),
+            detail: e.to_string(),
         })
     }
 
-    pub fn probe(&self, host: &Host) -> Result<Probe> {
+    pub fn reserve(&self, host: &Host, id: &str, now: u64) -> Result<ReserveOutcome> {
         if host.is_local() {
-            self.node(host).probe()
-        } else {
-            self.remote(host, &["probe".to_string()])
+            return self.node().reserve(id, now);
         }
+        let t = self.thresholds();
+        self.remote(
+            host,
+            &[
+                "reserve".into(),
+                "--id".into(),
+                id.into(),
+                "--load-per-core-max".into(),
+                t.load_per_core_max.to_string(),
+                "--disk-free-min-percent".into(),
+                t.disk_free_min_percent.to_string(),
+                "--reservation-load".into(),
+                t.reservation_load.to_string(),
+                "--reservation-ttl-ms".into(),
+                t.reservation_ttl_ms.to_string(),
+            ],
+        )
     }
 
-    /// Probe every given host in parallel; failures become reports.
-    pub fn probe_all(&self, hosts: &[&Host]) -> Vec<HostReport> {
-        let t = self.thresholds();
-        thread::scope(|s| {
-            let handles: Vec<_> = hosts
+    pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .hosts
                 .iter()
-                .map(|host| s.spawn(move || (host, self.probe(host))))
+                .map(|host| (host, scope.spawn(move || self.read_host(host, now))))
                 .collect();
             handles
                 .into_iter()
-                .map(|h| match h.join() {
-                    Ok((host, Ok(probe))) => HostReport {
-                        host: (*host).clone(),
-                        ok: true,
-                        headroom: Some(evaluate(&probe, &t)),
-                        probe: Some(probe),
-                        error: None,
-                    },
-                    Ok((host, Err(e))) => HostReport {
-                        host: (*host).clone(),
-                        ok: false,
-                        probe: None,
-                        headroom: None,
-                        error: Some(e.to_string()),
-                    },
-                    Err(_) => HostReport {
-                        host: Host::local(),
-                        ok: false,
-                        probe: None,
-                        headroom: None,
-                        error: Some("probe thread panicked".to_string()),
-                    },
+                .map(|(host, handle)| {
+                    handle
+                        .join()
+                        .map_err(|_| Error::Invalid(format!("{} status worker failed", host.label)))
                 })
                 .collect()
         })
     }
 
-    pub fn reserve(&self, host: &Host, lead: &str, ticket: &str) -> Result<ReserveOutcome> {
-        if host.is_local() {
-            self.node(host).reserve(lead, ticket)
+    fn read_host(&self, host: &Host, now: u64) -> HostReport {
+        let result = if host.is_local() {
+            self.ledger
+                .read::<Snapshot>("host.json")
+                .map(|snapshot| Cached {
+                    fetched_ms: now,
+                    source: Vec::new(),
+                    snapshot,
+                    reachable: true,
+                    available: true,
+                    error: None,
+                })
         } else {
-            self.remote(
-                host,
-                &[
-                    "reserve".to_string(),
-                    "--lead".to_string(),
-                    lead.to_string(),
-                    "--ticket".to_string(),
-                    ticket.to_string(),
-                ],
-            )
+            self.cached_peer(host, now)
+        };
+        let cached = result.unwrap_or_else(|e| Cached {
+            fetched_ms: now,
+            source: Vec::new(),
+            snapshot: None,
+            reachable: false,
+            available: false,
+            error: Some(e.to_string()),
+        });
+        let fresh = cached.available && cached.snapshot.as_ref().is_some_and(|s| s.fresh(now));
+        let sampled_ms = cached.snapshot.as_ref().map(|s| s.sampled_ms);
+        let probe = cached.snapshot.map(|s| {
+            let mut probe = s.probe;
+            probe.host.clone_from(&host.id);
+            probe.label.clone_from(&host.label);
+            probe
+                .reservations
+                .retain(|r| now.saturating_sub(r.created_ms) < self.policy.reservation_ttl_ms);
+            probe
+        });
+        let headroom = probe.as_ref().map(|probe| {
+            let mut headroom = evaluate(probe, &self.thresholds());
+            if !fresh {
+                headroom.eligible = false;
+                headroom.reason = Some("service: down".into());
+            }
+            headroom
+        });
+        HostReport {
+            host: host.clone(),
+            service: if fresh { "up" } else { "down" }.into(),
+            reachable: cached.reachable,
+            sampled_ms,
+            probe,
+            headroom,
+            error: cached.error,
         }
     }
 
-    pub fn release_ticket(&self, host: &Host, ticket: &str) -> Result<ReleaseOutcome> {
-        if host.is_local() {
-            self.node(host).release_ticket(ticket)
-        } else {
-            self.remote(
-                host,
-                &[
-                    "release".to_string(),
-                    "--ticket".to_string(),
-                    ticket.to_string(),
-                ],
-            )
-        }
-    }
-
-    pub fn release_pane(&self, host: &Host, pane: &str) -> Result<ReleaseOutcome> {
-        if host.is_local() {
-            self.node(host).release_pane(pane)
-        } else {
-            self.remote(
-                host,
-                &[
-                    "release".to_string(),
-                    "--pane".to_string(),
-                    pane.to_string(),
-                ],
-            )
-        }
-    }
-
-    pub fn set_pane(&self, host: &Host, ticket: &str, pane: &str) -> Result<bool> {
-        if host.is_local() {
-            self.node(host).set_pane(ticket, pane)
-        } else {
-            let out: SetPaneOutcome = self.remote(
-                host,
-                &[
-                    "set-pane".to_string(),
-                    "--ticket".to_string(),
-                    ticket.to_string(),
-                    "--pane".to_string(),
-                    pane.to_string(),
-                ],
-            )?;
-            Ok(out.found)
-        }
-    }
-
-    /// Release a ticket everywhere; sums what each reachable host dropped.
-    pub fn release_ticket_everywhere(&self, ticket: &str) -> usize {
-        thread::scope(|s| {
-            let handles: Vec<_> = self
-                .hosts
-                .iter()
-                .map(|host| s.spawn(move || self.release_ticket(host, ticket)))
-                .collect();
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok())
-                .filter_map(std::result::Result::ok)
-                .map(|o| o.released)
-                .sum()
+    fn cached_peer(&self, host: &Host, now: u64) -> Result<Cached> {
+        // Hex encoding prevents host ids from becoming path components.
+        let key = host
+            .id
+            .as_bytes()
+            .iter()
+            .flat_map(|b| {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                [
+                    char::from(HEX[usize::from(b >> 4)]),
+                    char::from(HEX[usize::from(b & 15)]),
+                ]
+            })
+            .collect::<String>();
+        let name = format!("peer-{key}");
+        let file = format!("{name}.json");
+        let source = self.remote_argv(host, &["snapshot".into()]);
+        self.ledger.with_lock(&name, || {
+            let previous: Option<Cached> = self
+                .ledger
+                .read::<Cached>(&file)?
+                .filter(|c| c.source == source);
+            if let Some(cached) = &previous
+                && now.saturating_sub(cached.fetched_ms) < CACHE_MS
+            {
+                return Ok(cached.clone());
+            }
+            let (snapshot, reachable, available, error) =
+                match self.remote::<Option<Snapshot>>(host, &["snapshot".into()]) {
+                    Ok(Some(snapshot)) => (Some(snapshot), true, true, None),
+                    Ok(None) => (
+                        previous.and_then(|c| c.snapshot),
+                        true,
+                        false,
+                        Some("host.json is missing; service: down".into()),
+                    ),
+                    Err(e) => (
+                        previous.and_then(|c| c.snapshot),
+                        false,
+                        false,
+                        Some(e.to_string()),
+                    ),
+                };
+            let cached = Cached {
+                fetched_ms: now,
+                source: source.clone(),
+                snapshot,
+                reachable,
+                available,
+                error,
+            };
+            self.ledger.write(&file, &cached)?;
+            Ok(cached)
         })
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetPaneOutcome {
-    pub found: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::new_id;
+    use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
 
-    const MACHINES: &str = r#"[
-      {"id":"8103","label":"netcup","target":"netcup-dev","session":"default","enabled":true,"selected":false},
-      {"id":"08c2","label":"momokaya-2","target":"momokaya-2-dev","session":"default","enabled":false,"selected":false}
-    ]"#;
-
     #[test]
-    fn machine_list_keeps_enabled_hosts() {
-        let hosts = parse_machine_list(MACHINES).unwrap();
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].label, "netcup");
-        assert_eq!(hosts[0].machine(), Some("8103"));
-        assert_eq!(Host::local().machine(), None);
-    }
-
-    fn fleet<'a>(shell: &'a Fake, ledger: &'a Ledger, policy: &'a Policy) -> Fleet<'a> {
-        Fleet::discover(shell, ledger, policy, "/tmp/home".to_string()).unwrap()
-    }
-
-    #[test]
-    fn remote_argv_quotes_and_carries_thresholds() {
+    fn cache_and_service_boundaries_use_injected_time() {
         let shell = Fake::new();
-        shell.on("herdr machine list --json", MACHINES);
-        let ledger = Ledger::new(std::env::temp_dir().join("wrangle-hosts-argv"));
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
         let policy = Policy::default();
-        let f = fleet(&shell, &ledger, &policy);
-        let netcup = f.find("netcup").unwrap();
-        let argv = f.remote_argv(
-            netcup,
-            &["reserve".into(), "--lead".into(), "my lead".into()],
-        );
-        assert_eq!(
-            &argv[..5],
-            &["-T", "-o", "BatchMode=yes", "--", "netcup-dev"]
-        );
-        assert_eq!(
-            argv[5],
-            "mise x -- wrangle host reserve --lead 'my lead' --host-id 8103 --label netcup \
-             --load-per-core-max 1.5 --disk-free-min-percent 15 --reservation-load 1 \
-             --reservation-ttl-ms 180000 --json"
-        );
-    }
-
-    #[test]
-    fn find_by_id_or_label_and_unknown() {
-        let shell = Fake::new();
-        shell.on("herdr machine list --json", MACHINES);
-        let ledger = Ledger::new(std::env::temp_dir().join("wrangle-hosts-find"));
-        let policy = Policy::default();
-        let f = fleet(&shell, &ledger, &policy);
-        assert_eq!(f.find("netcup").unwrap().id, "8103");
-        assert_eq!(f.find("8103").unwrap().label, "netcup");
-        assert!(f.find("local").unwrap().is_local());
-        assert!(matches!(f.find("mars"), Err(Error::UnknownMachine(_))));
-        assert_eq!(f.eligible(None).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn remote_probe_parses_json_and_reports_ssh_failure() {
-        let shell = Fake::new();
-        shell.on("herdr machine list --json", MACHINES);
-        let ledger = Ledger::new(std::env::temp_dir().join("wrangle-hosts-remote"));
-        let policy = Policy::default();
-        let f = fleet(&shell, &ledger, &policy);
-        let netcup = f.find("netcup").unwrap().clone();
-        let argv = f.remote_argv(&netcup, &["probe".into()]);
-        let key = format!("ssh {}", argv.join(" "));
-        let body = r#"{"host":"8103","label":"netcup","load1":1.0,"cores":16,
-            "disk_free_percent":18.0,"agents":{"total":0,"by_status":{}},"reservations":[]}"#;
-        shell.on(&key, body);
-        let reports = f.probe_all(&[&netcup]);
-        assert!(reports[0].ok, "{:?}", reports[0].error);
-        assert!(reports[0].headroom.as_ref().unwrap().eligible);
-
-        shell.on_output(
-            &key,
-            crate::shell::Output {
-                status: 255,
-                stdout: String::new(),
-                stderr: "Permission denied (publickey)".into(),
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![host.clone()],
+        };
+        let snapshot = Snapshot {
+            sampled_ms: 100,
+            probe: Probe {
+                host: "local".into(),
+                label: "local".into(),
+                load1: 0.0,
+                cores: 8,
+                memory: Memory::default(),
+                disk_free_percent: 50.0,
+                agents: AgentCounts::default(),
+                agent_panes: Vec::new(),
+                reservations: Vec::new(),
+                panes: Vec::new(),
             },
+        };
+        let command = format!(
+            "ssh {}",
+            fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
         );
-        let reports = f.probe_all(&[&netcup]);
-        assert!(!reports[0].ok);
-        assert!(
-            reports[0]
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("Permission denied")
-        );
+        shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
+        assert_eq!(fleet.status(100).unwrap()[0].service, "up");
+        shell.on(&command, "null");
+        assert_eq!(fleet.status(10_099).unwrap()[0].service, "up");
+        let missing = fleet.status(10_100).unwrap();
+        assert_eq!(missing[0].service, "down");
+        assert!(missing[0].reachable);
+        assert!(missing[0].probe.is_some());
+        shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
+        assert_eq!(fleet.status(30_100).unwrap()[0].service, "up");
+        assert_eq!(fleet.status(30_101).unwrap()[0].service, "down");
+        std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 }

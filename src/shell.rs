@@ -99,15 +99,6 @@ impl Fake {
         }
         self
     }
-
-    /// Script the one-minute load (the probe reads `/proc/loadavg` first).
-    pub fn with_load(&self, load: &str) -> &Self {
-        self.on("read /proc/loadavg", load)
-    }
-
-    pub fn calls(&self) -> Vec<String> {
-        self.calls.lock().map(|c| c.clone()).unwrap_or_default()
-    }
 }
 
 #[cfg(test)]
