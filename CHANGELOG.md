@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.7.2 - 2026-10-14
 
 - Let prune try every entry. A failed or refused entry no longer stops the rest; prune reports each failure and exits with status 2. `--json` returns `{results,failures}`.
 - Drop a worktree's registration when `close` removes it, so doctor no longer lists it as a stale registration.
