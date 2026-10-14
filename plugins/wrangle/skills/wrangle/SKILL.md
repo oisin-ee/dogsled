@@ -28,7 +28,15 @@ The Pi widget lists this session's open jobs and pending tickets. It refreshes a
 wrangle place --branch feat/unit-a --base main --repo /path/to/repo --json
 ```
 
-Read `host.id`, `path`, and `pane_id`. Spawn through Shepherdr with that machine and prepared pane or directory.
+Read `host.id`, `path`, and `pane_id`. The prepare hook opens the worktree as a Herdr workspace, grouped under the repository's workspace.
+Spawn the agent in that workspace's pane, and always set `placement`:
+
+```
+agents spawn machine=<host.id> placement=pane pane=<pane_id> …
+```
+
+Do not pass `cwd` with `placement=pane`; Shepherdr refuses it. When the hook returns only `path`, use `placement=new_workspace cwd=<path>`.
+Without `placement`, Shepherdr ignores `pane` and opens a tab in the caller's workspace. That tab is outside the worktree's workspace, and `wrangle close` refuses it.
 Omit the Shepherdr machine selector for `local`. The Pi extension tracks successful `agents` spawn results.
 For agents from other callers, record ownership explicitly:
 
