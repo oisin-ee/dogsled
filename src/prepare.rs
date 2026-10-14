@@ -104,7 +104,7 @@ pub fn local(
     base: Option<&str>,
 ) -> Result<Prepared> {
     let checkout = main_checkout(shell, repo)?;
-    let argv = render(&policy.hooks.prepare, branch, base)?;
+    let argv = policy.hooks.prepare_argv(branch, base)?;
     let command = format!(
         "cd {} && exec {}",
         quote(&checkout.display().to_string()),
@@ -112,43 +112,6 @@ pub fn local(
     );
     let out = shell.run_setup_ok("sh", &["-c".into(), command])?;
     parse_output(&out.stdout)
-}
-
-/// Parse the template once. Substituted values are data, not templates.
-fn render(template: &[String], branch: &str, base: Option<&str>) -> Result<Vec<String>> {
-    if template.is_empty() {
-        return Err(Error::Invalid("hooks.prepare is empty".into()));
-    }
-    template
-        .iter()
-        .filter(|word| !(word.as_str() == "{base}" && base.is_none()))
-        .map(|word| {
-            let mut output = String::new();
-            let mut rest = word.as_str();
-            while let Some(start) = rest.find('{') {
-                output.push_str(&rest[..start]);
-                let end = rest[start..]
-                    .find('}')
-                    .map(|end| start + end)
-                    .ok_or_else(|| {
-                        Error::Invalid(format!("unclosed hook placeholder {}", &rest[start..]))
-                    })?;
-                let placeholder = &rest[start..=end];
-                output.push_str(match placeholder {
-                    "{branch}" => branch,
-                    "{base}" => base.unwrap_or(""),
-                    _ => {
-                        return Err(Error::Invalid(format!(
-                            "unknown hook placeholder {placeholder}"
-                        )));
-                    }
-                });
-                rest = &rest[end + 1..];
-            }
-            output.push_str(rest);
-            Ok(output)
-        })
-        .collect()
 }
 
 pub fn parse_output(stdout: &str) -> Result<Prepared> {
@@ -261,6 +224,14 @@ mod tests {
             local(&shell, &policy, "/repo", "feature", None),
             Err(Error::Deadline(_))
         ));
+    }
+
+    fn render(template: &[String], branch: &str, base: Option<&str>) -> Result<Vec<String>> {
+        config::Hooks {
+            prepare: template.to_vec(),
+            ..config::Hooks::default()
+        }
+        .prepare_argv(branch, base)
     }
 
     #[test]

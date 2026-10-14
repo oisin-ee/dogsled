@@ -198,9 +198,8 @@ pub fn close_line(status: &Status, owner: &str) -> Option<String> {
         .filter(|i| i.owner_pane == owner && crate::items::finished(i, &status.hosts))
         .map(|i| {
             format!(
-                "`wrangle close {} --host {}`{}",
-                crate::shell::quote(&i.pane),
-                crate::shell::quote(&i.host),
+                "{}{}",
+                crate::items::close_command(i, &status.hosts),
                 i.name
                     .as_deref()
                     .map_or_else(String::new, |n| format!(" ({})", one_line(n)))
@@ -277,9 +276,12 @@ pub fn render(status: &Status) -> String {
             item.host,
             item.pane,
             if crate::items::finished(item, &status.hosts) {
-                " finished: wrangle close"
+                format!(
+                    " finished; run {}",
+                    crate::items::close_command(item, &status.hosts)
+                )
             } else {
-                ""
+                String::new()
             }
         ));
     }

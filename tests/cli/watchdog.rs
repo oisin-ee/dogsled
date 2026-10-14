@@ -13,6 +13,7 @@ case "$*" in
  'pane read'*) printf '1\n2\n3\n4\n5\n' ;;
  'pane report-metadata'*|'notification show'*|'agent prompt'*|'pane close'*) printf '{}\n' ;;
  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[]}}}' ;;
+ 'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
  *) echo unexpected >&2; exit 2 ;;
 esac
 "#);
@@ -22,28 +23,38 @@ esac
     );
     rig.script("df", "#!/bin/sh\nprintf 'FS 1000 950 50 95%% /\n'\n");
     rig.script("du", "#!/bin/sh\nprintf '42 path\n'\n");
-    rig.script("mise", r#"#!/bin/sh
+    rig.script(
+        "mise",
+        r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/mise.log"
 case "$*" in
- *'tasks --json') if test -f "$RIG/change-during-plan"; then touch "$RIG/changed"; fi; if test -f "$RIG/remove-task"; then printf '[{"name":"agent:worktree-remove"}]\n'; else printf '[]\n'; fi ;;
- *'agent:worktree-remove'*) printf '{}\n' ;;
+ *'agent:worktree-remove -- feature') touch "$RIG/removed"; printf '{}\n' ;;
  *) exit 2 ;;
 esac
-"#);
+"#,
+    );
     rig.script("git", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/git.log"
 case "$*" in
  *'rev-parse --path-format=absolute --git-common-dir') printf '%s\n' "$RIG/home/repo/.git" ;;
  *'worktree list --porcelain -z')
- branch=feature; head=abc; tree=tree
- if test -f "$RIG/changed"; then branch=unmerged; head=def; fi
+ head=abc; tree=tree
+ if test -f "$RIG/changed"; then head=def; fi
  if test -f "$RIG/second-tree"; then tree=second; fi
- printf 'worktree %s\0HEAD abc\0branch refs/heads/main\0\0worktree %s\0HEAD %s\0branch refs/heads/%s\0\0' "$RIG/home/repo" "$RIG/home/repo/$tree" "$head" "$branch" ;;
+ printf 'worktree %s\0HEAD abc\0branch refs/heads/main\0\0worktree %s\0HEAD %s\0branch refs/heads/feature\0\0' "$RIG/home/repo" "$RIG/home/repo/$tree" "$head" ;;
+ *'worktree list --porcelain')
+ printf 'worktree %s\n\n' "$RIG/home/repo"
+ if ! test -f "$RIG/removed"; then printf 'worktree %s\nlocked agent:worktree\n\n' "$RIG/home/repo/tree"; fi ;;
  *'show-ref --verify --quiet refs/heads/feature') if test -f "$RIG/deleted"; then exit 1; fi ;;
  *'symbolic-ref --quiet refs/remotes/origin/HEAD') printf 'refs/remotes/origin/main\n' ;;
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
- *'status --porcelain --untracked-files=all') if test -f "$RIG/dirty"; then printf ' M file\n'; fi ;;
- *'worktree remove --'*) printf 'removed\n' ;;
+ *'rev-parse refs/heads/feature refs/remotes/origin/main') printf 'abc\nmain\n' ;;
+ *'merge-base refs/remotes/origin/main refs/heads/feature') printf 'fork\n' ;;
+ *'diff --name-only -z --no-renames fork refs/heads/feature') printf 'file\0' ;;
+ *'log --no-merges --format=%H %P fork..refs/remotes/origin/main -- :(literal)file') ;;
+ *'status --porcelain --untracked-files=all')
+ if test -f "$RIG/change-during-plan"; then touch "$RIG/changed"; fi
+ if test -f "$RIG/dirty"; then printf ' M file\n'; fi ;;
  *) echo unexpected >&2; exit 2 ;;
 esac
 "#);
@@ -148,7 +159,7 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
     // Missing subdirectories still belong to the live pane, through a symlink.
     rig.put(
         "panes.json",
-        &json!({"result":{"panes":[{"pane_id":"live","cwd":alias.join("subdir")}]}}),
+        &json!({"result":{"panes":[{"pane_id":"live","agent":"pi","agent_status":"working","cwd":alias.join("subdir")}]}}),
     );
     assert_eq!(
         rig.run(&["host", "prune", "--plan", &plan]).status.code(),
@@ -175,21 +186,69 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
 }
 
 #[test]
-fn prune_confirmation_and_repository_remove_path() {
+fn prune_confirmation_and_configured_remove_hook() {
     let rig = watchdog_rig("prune-method");
     assert!(rig.run(&["prune", "worktrees"]).status.success());
-    assert!(!rig.log("git.log").contains("worktree remove"));
-    assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
-    assert!(rig.log("git.log").contains("worktree remove --"));
-    fs::write(rig.dir.join("remove-task"), "").unwrap();
+    assert_eq!(rig.log("mise.log"), "");
+    // An idle shell in the worktree does not hold it; prune closes it, then runs the hook.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"shell","cwd":rig.dir.join("home/repo/tree")}]}}),
+    );
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(!rig.log("mise.log").contains("run -q agent:worktree-remove"));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("no verified exact-path contract"));
+    assert_eq!(
+        rig.log("mise.log"),
+        "run -q agent:worktree-remove -- feature\n"
+    );
+    assert!(rig.log("herdr.log").contains("pane close shell"));
+    assert!(!rig.log("git.log").contains("worktree remove"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("and closed shell"));
+    assert_eq!(rig.read("state/worktrees.json"), json!([]));
+}
+
+#[test]
+fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
+    let rig = watchdog_rig("prune-held");
+    let tree = rig.dir.join("home/repo/tree");
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"child","agent":"pi","agent_status":"done","cwd":tree}]}}),
+    );
+    let (_, plan) = rig.json(&["doctor"]);
+    let entry = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["class"] == "worktrees")
+        .unwrap()
+        .clone();
+    assert_eq!(entry["removable"], false, "{entry}");
+    assert!(entry["detail"].as_str().unwrap().contains("wrangle close"));
+    assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
+    assert_eq!(rig.log("mise.log"), "");
+    // A stale agent no longer holds it.
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
+    let mut snapshot = rig.read("state/host.json");
+    snapshot["probe"]["agent_panes"][0]["pane"] = json!("child");
+    snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
+    rig.put("state/host.json", &snapshot);
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"child","agent":"pi","agent_status":"idle"}]}}),
+    );
+    let out = rig.run(&["prune", "--yes", "worktrees"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(rig.log("herdr.log").contains("pane close child"));
+    assert!(rig.log("mise.log").contains("agent:worktree-remove"));
 }
 
 #[test]

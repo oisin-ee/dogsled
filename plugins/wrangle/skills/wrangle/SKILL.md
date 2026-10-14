@@ -99,10 +99,10 @@ wrangle close PANE [--host HOST]
 ```
 
 `PANE` is the spawn result's `target`. `--host` defaults to the host of the pane's open item.
-It closes the child's Herdr workspace, removes its worktree with `wt remove` from the main checkout, and ends the item.
-The repository's remove hooks run, so the worktree's containers and stacks stop. `wt` deletes the branch only when it is merged.
-A pane outside a worktree is closed alone.
-It refuses, before it changes anything, a working, blocked, or `unknown` agent, a dirty worktree, a foreign lock, and your own workspace.
+It closes the panes and Herdr workspace that use the child's worktree, removes the worktree through the host's `remove` hook from the main checkout, and ends the item.
+The default hook runs the repository's remove hooks, so the worktree's containers and stacks stop. It deletes the branch only when it is merged.
+A pane outside a worktree is closed alone. A child tab in your own workspace is closed too.
+It refuses, before it changes anything, a working, blocked, or `unknown` agent, a shell running a command in the worktree, a dirty worktree, a foreign lock, your own pane, and a worktree you work in.
 Report a refusal. Do not close the pane or remove the worktree by hand.
 Until you close it, a finished child appears in the brief, the Pi widget, and each check-in, with its close command.
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
@@ -123,9 +123,10 @@ wrangle prune --host HOST worktrees jobs
 
 Doctor is read-only. Prune displays candidates and asks before removal; `--yes` skips only the question.
 Classes are `worktrees`, `panes`, `jobs`, `disk`, and `processes`. Disk and process findings are report-only.
-Never use cleanup to close working or blocked agents. Dirty or live worktrees cannot be removed.
+Never use cleanup to close working or blocked agents. Dirty, foreign-locked, or held worktrees cannot be removed.
+A worktree is a candidate when its branch is merged, squashed, or cherry-picked into the remote default branch. A shell with no running command does not hold it.
 Wrangle never removes anything on a timer. Close your own finished children with `wrangle close`.
-Prune refuses changed Git identities and reports its removal method. Branch-only tasks cannot guarantee the planned path; Git removes that exact path instead.
+Prune refuses changed Git identities, closes the idle panes and workspace that show the worktree, and removes it through the host's `remove` hook.
 
 ## Checkout and prepare
 
@@ -134,7 +135,7 @@ Wrangle clones a missing checkout from the caller's origin into the same path re
 An existing path must be a checkout with the same origin. Wrangle does not overwrite a conflicting path.
 Clone failures name the host and origin. Only a fresh clone can receive mise trust after a trust refusal.
 
-Host policy owns `hooks.prepare`. Repository setup belongs to Worktrunk configuration.
+Host policy owns `hooks.prepare` and `hooks.remove`. Repository setup belongs to the repository's configuration.
 Use `{branch}` and `{base}` placeholders. Other placeholders are errors.
 For jobs and agents, the hook must return a `path`. It can also return a `pane_id`.
 

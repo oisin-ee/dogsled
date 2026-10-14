@@ -5,12 +5,10 @@ use super::*;
 fn removal_refuses_identity_changed_during_planning() {
     let rig = watchdog_rig("identity-race");
     fs::write(rig.dir.join("change-during-plan"), "").unwrap();
-    fs::write(rig.dir.join("remove-task"), "").unwrap();
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("identity changed"));
-    assert!(!rig.log("git.log").contains("worktree remove --"));
-    assert!(!rig.log("mise.log").contains("run -q agent:worktree-remove"));
+    assert_eq!(rig.log("mise.log"), "");
 }
 
 #[test]
@@ -41,6 +39,24 @@ fn low_disk_missing_and_unreadable_paths_preserve_other_candidates() {
     assert!(plan.to_string().contains("largest wrangle-owned paths"));
     assert!(!rig.log("du.log").contains(missing.to_str().unwrap()));
     assert!(rig.run(&["prune", "--yes", "processes"]).status.success());
+    // A missing registered worktree is a stale registration; prune drops only the record.
+    let plan = json!({"entries": plan["entries"].as_array().unwrap().iter()
+        .filter(|e| e["class"] == "worktrees" && e["id"] == json!(missing)).collect::<Vec<_>>()});
+    let out = rig.run(&["host", "prune", "--plan", &plan.to_string()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let paths: Vec<_> = rig
+        .read("state/worktrees.json")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["path"].clone())
+        .collect();
+    assert!(!paths.contains(&json!(missing)));
+    assert!(paths.contains(&json!(unreadable)));
 }
 
 #[test]

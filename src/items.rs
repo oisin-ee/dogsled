@@ -64,6 +64,19 @@ pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
             .any(|a| a.pane == item.pane && matches!(a.state.as_str(), "idle" | "done"))
 }
 
+/// The exact command that closes `item`, naming its host by label.
+pub fn close_command(item: &Item, hosts: &[HostReport]) -> String {
+    let host = hosts
+        .iter()
+        .find(|h| h.host.id == item.host)
+        .map_or(item.host.as_str(), |h| h.host.label.as_str());
+    format!(
+        "`wrangle close {} --host {}`",
+        crate::shell::quote(&item.pane),
+        crate::shell::quote(host)
+    )
+}
+
 /// A job item ends with its job. An agent item stays open while its pane exists, so the
 /// owner keeps hearing about a finished child until `wrangle close` removes it.
 pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> {

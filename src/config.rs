@@ -18,6 +18,17 @@ pub const DEFAULT_PREPARE: &[&str] = &[
     "{base}",
 ];
 
+/// Default `remove` hook: the agent harness task that removes a branch worktree with the
+/// repository's remove hooks, unlocking an `agent:worktree` lock first.
+pub const DEFAULT_REMOVE: &[&str] = &[
+    "mise",
+    "run",
+    "-q",
+    "agent:worktree-remove",
+    "--",
+    "{branch}",
+];
+
 /// Default way to run `wrangle` on a remote host.
 pub const DEFAULT_REMOTE_COMMAND: &[&str] = &["mise", "x", "--", "wrangle"];
 
@@ -45,6 +56,62 @@ pub struct Hooks {
     /// argv template run in the checkout. Placeholders: `{branch}` and `{base}`.
     /// Must print JSON with `pane_id` or `path`.
     pub prepare: Vec<String>,
+    /// argv template run in the main checkout to remove a linked worktree after wrangle
+    /// closed its panes and workspace. Placeholders: `{branch}` and `{path}`. It must remove
+    /// a worktree that carries an `agent:worktree` lock, and keep an unmerged branch.
+    pub remove: Vec<String>,
+}
+
+impl Hooks {
+    pub fn prepare_argv(&self, branch: &str, base: Option<&str>) -> Result<Vec<String>> {
+        render(
+            "prepare",
+            &self.prepare,
+            &[("{branch}", Some(branch)), ("{base}", base)],
+        )
+    }
+
+    pub fn remove_argv(&self, branch: &str, path: &str) -> Result<Vec<String>> {
+        render(
+            "remove",
+            &self.remove,
+            &[("{branch}", Some(branch)), ("{path}", Some(path))],
+        )
+    }
+}
+
+/// Parse the template once. Substituted values are data, not templates. A word that is
+/// exactly a placeholder without a value is dropped.
+fn render(hook: &str, template: &[String], values: &[(&str, Option<&str>)]) -> Result<Vec<String>> {
+    if template.is_empty() {
+        return Err(Error::Invalid(format!("hooks.{hook} is empty")));
+    }
+    let value = |placeholder: &str| values.iter().find(|(name, _)| *name == placeholder);
+    template
+        .iter()
+        .filter(|word| !value(word).is_some_and(|(_, v)| v.is_none()))
+        .map(|word| {
+            let mut output = String::new();
+            let mut rest = word.as_str();
+            while let Some(start) = rest.find('{') {
+                output.push_str(&rest[..start]);
+                let end = rest[start..]
+                    .find('}')
+                    .map(|end| start + end)
+                    .ok_or_else(|| {
+                        Error::Invalid(format!("unclosed hook placeholder {}", &rest[start..]))
+                    })?;
+                let placeholder = &rest[start..=end];
+                let (_, substituted) = value(placeholder).ok_or_else(|| {
+                    Error::Invalid(format!("unknown hook placeholder {placeholder}"))
+                })?;
+                output.push_str(substituted.unwrap_or(""));
+                rest = &rest[end + 1..];
+            }
+            output.push_str(rest);
+            Ok(output)
+        })
+        .collect()
 }
 
 impl Default for Policy {
@@ -67,6 +134,7 @@ impl Default for Hooks {
     fn default() -> Self {
         Self {
             prepare: DEFAULT_PREPARE.iter().map(ToString::to_string).collect(),
+            remove: DEFAULT_REMOVE.iter().map(ToString::to_string).collect(),
         }
     }
 }
@@ -138,6 +206,40 @@ mod tests {
         assert!((p.load_per_core_max - 2.0).abs() < f64::EPSILON);
         assert!((p.disk_free_min_percent - 15.0).abs() < f64::EPSILON);
         assert_eq!(p.hooks.prepare, vec!["true".to_string()]);
+    }
+
+    #[test]
+    fn remove_hook_defaults_to_the_agent_task_and_takes_branch_and_path() {
+        let hooks = Hooks::default();
+        assert_eq!(
+            hooks.remove_argv("feat/{path}", "/r/t").unwrap(),
+            [
+                "mise",
+                "run",
+                "-q",
+                "agent:worktree-remove",
+                "--",
+                "feat/{path}"
+            ]
+        );
+        let hooks = parse("[hooks]\nremove = [\"git\", \"worktree\", \"remove\", \"{path}\"]\n")
+            .unwrap()
+            .hooks;
+        assert_eq!(
+            hooks.remove_argv("b", "/r/t").unwrap(),
+            ["git", "worktree", "remove", "/r/t"]
+        );
+        assert_eq!(hooks.prepare, Hooks::default().prepare);
+        let hooks = parse("[hooks]\nremove = [\"x\", \"{base}\"]\n")
+            .unwrap()
+            .hooks;
+        assert!(
+            hooks
+                .remove_argv("b", "/p")
+                .unwrap_err()
+                .to_string()
+                .contains("{base}")
+        );
     }
 
     #[test]

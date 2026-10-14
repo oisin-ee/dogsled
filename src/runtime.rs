@@ -189,7 +189,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             let plan = if host.is_local() {
                 crate::cleanup::doctor(&fleet.node(), now_ms())?
             } else {
-                fleet.remote(host, &["doctor".into()])?
+                fleet.remote_setup(host, &["doctor".into()])?
             };
             crate::print(json_output, &plan, || crate::cleanup::render(&plan))?;
         }
@@ -198,7 +198,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             let mut plan: crate::cleanup::Plan = if host.is_local() {
                 crate::cleanup::doctor(&fleet.node(), now_ms())?
             } else {
-                fleet.remote(host, &["doctor".into()])?
+                fleet.remote_setup(host, &["doctor".into()])?
             };
             plan.entries
                 .retain(|e| classes.is_empty() || classes.contains(&e.class));
@@ -215,7 +215,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             let result = if host.is_local() {
                 crate::cleanup::apply(&fleet.node(), &plan, now_ms())?
             } else {
-                fleet.remote(
+                fleet.remote_setup(
                     host,
                     &[
                         "prune".into(),
@@ -252,7 +252,12 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                 None => close_host(fleet, &pane)?,
             };
             let closed: crate::close::Closed = if host.is_local() {
-                crate::close::local(fleet.shell, &pane, &crate::close::Caller::from_env())?
+                crate::close::local(
+                    fleet.shell,
+                    &fleet.policy.hooks,
+                    &pane,
+                    &crate::close::Caller::from_env(),
+                )?
             } else {
                 fleet.remote_setup(host, &["close".into(), pane.clone()])?
             };

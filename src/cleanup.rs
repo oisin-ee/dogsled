@@ -128,70 +128,6 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
     Ok(result)
 }
 
-fn retired(shell: &dyn Shell, tree: &Tree) -> Result<bool> {
-    let branch = format!("refs/heads/{}", tree.branch);
-    let exists = git(
-        shell,
-        &tree.repo,
-        &["show-ref", "--verify", "--quiet", &branch],
-    )?;
-    if exists.status == 1 {
-        return Ok(true);
-    }
-    if !exists.ok() {
-        return Err(Error::Invalid(format!(
-            "cannot inspect branch {}",
-            tree.branch
-        )));
-    }
-    // The repository's remote default branch is authoritative; local main is the fallback.
-    let default = git(
-        shell,
-        &tree.repo,
-        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    )?;
-    let base = if default.ok() {
-        default.stdout.trim()
-    } else {
-        "refs/heads/main"
-    };
-    let merged = git(
-        shell,
-        &tree.repo,
-        &["merge-base", "--is-ancestor", &branch, base],
-    )?;
-    match merged.status {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(Error::Invalid(format!(
-            "cannot determine merge status of {} against {base}",
-            tree.branch
-        ))),
-    }
-}
-
-fn resolved_path(path: &Path) -> std::path::PathBuf {
-    for ancestor in path.ancestors() {
-        if let Ok(root) = ancestor.canonicalize() {
-            return path
-                .strip_prefix(ancestor)
-                .map_or(root.clone(), |suffix| root.join(suffix));
-        }
-    }
-    path.to_path_buf()
-}
-
-fn live(tree: &Tree, panes: &[Pane]) -> bool {
-    panes.iter().any(|p| {
-        [p.cwd.as_deref(), p.foreground_cwd.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(|cwd| {
-                resolved_path(Path::new(cwd)).starts_with(resolved_path(Path::new(&tree.path)))
-            })
-    })
-}
-
 fn clean(shell: &dyn Shell, tree: &Tree) -> Result<bool> {
     let output = git(
         shell,
@@ -364,25 +300,32 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
     let panes = current_panes(node.shell)?;
     let trees = trees(node, &panes)?;
     let mut plan = Plan::default();
+    let stale_panes = stale_agents(node, now)?;
     for tree in &trees {
         if !Path::new(&tree.path).exists() {
             continue;
         }
-        if !live(tree, &panes) && retired(node.shell, tree)? {
-            let clean = clean(node.shell, tree)?;
-            let mut e = entry(
-                "worktrees",
-                tree.path.clone(),
-                format!(
-                    "branch {} merged or deleted; {}",
-                    tree.branch,
-                    if clean { "clean" } else { "dirty: refused" }
-                ),
-                clean,
-            );
-            e.tree = Some(tree.clone());
-            plan.entries.push(e);
-        }
+        let Some(integrated) = crate::integration::check(node.shell, &tree.repo, &tree.branch)?
+        else {
+            continue;
+        };
+        let held = assess(node, tree, &panes, &stale_panes)?;
+        let mut e = entry(
+            "worktrees",
+            tree.path.clone(),
+            format!(
+                "branch {} {integrated}; {}",
+                tree.branch,
+                if held.blockers.is_empty() {
+                    "clean and unused".into()
+                } else {
+                    format!("refused: {}", held.blockers.join("; "))
+                }
+            ),
+            held.blockers.is_empty(),
+        );
+        e.tree = Some(tree.clone());
+        plan.entries.push(e);
     }
     if let Some(snapshot) = node
         .ledger
@@ -438,8 +381,8 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
             plan.entries.push(entry(
                 "worktrees",
                 tree.path.clone(),
-                "missing registered worktree; stale registration (report only)".into(),
-                false,
+                "missing registered worktree; drops the stale registration".into(),
+                true,
             ));
         }
     }
@@ -448,7 +391,66 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
     Ok(plan)
 }
 
-fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Tree> {
+/// Why removing `tree` would lose something. Empty means it is clean, unlocked or agent-locked,
+/// and every pane that holds it is an idle shell or an agent idle past a day.
+struct Held {
+    workspace: Option<String>,
+    holders: Vec<Pane>,
+    blockers: Vec<String>,
+}
+
+fn assess(node: &Node<'_>, tree: &Tree, panes: &[Pane], stale: &BTreeSet<String>) -> Result<Held> {
+    let mut blockers = Vec::new();
+    if !clean(node.shell, tree)? {
+        blockers.push("uncommitted changes".to_string());
+    }
+    let checkout = Path::new(&tree.repo);
+    if let Some(lock) = crate::worktree::lock_reason(node.shell, checkout, &tree.path)?
+        && lock != crate::worktree::AGENT_LOCK
+    {
+        blockers.push(format!("locked ({lock})"));
+    }
+    let workspace = crate::worktree::workspace(node.shell, checkout, &tree.path)?;
+    let holders: Vec<Pane> = crate::worktree::holders(panes, &tree.path, workspace.as_deref())
+        .into_iter()
+        .cloned()
+        .collect();
+    for pane in &holders {
+        if let Some(reason) = crate::worktree::busy(node.shell, pane)? {
+            blockers.push(format!("{} is busy ({reason})", pane.pane_id));
+        } else if pane.agent.is_some() && !stale.contains(&pane.pane_id) {
+            blockers.push(format!(
+                "{} has a {} agent; its owner closes it with `wrangle close`",
+                pane.pane_id,
+                pane.agent_status.as_deref().unwrap_or("quiet")
+            ));
+        }
+    }
+    Ok(Held {
+        workspace,
+        holders,
+        blockers,
+    })
+}
+
+/// Agent panes idle or done for more than a day, from a fresh service snapshot.
+fn stale_agents(node: &Node<'_>, now: u64) -> Result<BTreeSet<String>> {
+    Ok(node
+        .ledger
+        .read::<Snapshot>("host.json")?
+        .filter(|s| s.fresh(now))
+        .map(|s| {
+            s.probe
+                .agent_panes
+                .iter()
+                .filter(|a| stale(a, now))
+                .map(|a| a.pane.clone())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn validate_tree(node: &Node<'_>, planned: &Tree, now: u64) -> Result<Held> {
     let current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
         .find(|t| t.path == planned.path)
@@ -460,7 +462,7 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Tree> {
         })?;
     let repo = crate::prepare::main_checkout(node.shell, &current.path)?;
     if current != *planned
-        || resolved_path(&repo) != resolved_path(Path::new(&planned.repo))
+        || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
         || current.head.is_empty()
     {
         return Err(Error::Invalid(format!(
@@ -468,54 +470,29 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Tree> {
             planned.path
         )));
     }
-    if live(&current, &current_panes(node.shell)?)
-        || !clean(node.shell, &current)?
-        || !retired(node.shell, &current)?
-    {
+    if crate::integration::check(node.shell, &current.repo, &current.branch)?.is_none() {
         return Err(Error::Invalid(format!(
-            "refuse {}: worktree is live, dirty, or unmerged",
-            current.path
+            "refuse {}: branch {} is not integrated",
+            current.path, current.branch
         )));
     }
-    Ok(current)
+    let held = assess(
+        node,
+        &current,
+        &current_panes(node.shell)?,
+        &stale_agents(node, now)?,
+    )?;
+    if !held.blockers.is_empty() {
+        return Err(Error::Invalid(format!(
+            "refuse {}: {}",
+            current.path,
+            held.blockers.join("; ")
+        )));
+    }
+    Ok(held)
 }
 
-fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
-    validate_tree(node, tree)?;
-    let tasks = node.shell.run_ok(
-        "mise",
-        &[
-            "-C".into(),
-            tree.repo.clone(),
-            "tasks".into(),
-            "--json".into(),
-        ],
-    )?;
-    let tasks: serde_json::Value = serde_json::from_str(&tasks.stdout)?;
-    let tasks = tasks.as_array().ok_or_else(|| {
-        Error::Invalid("mise tasks returned no task array; refusing removal".into())
-    })?;
-    let has_remove = tasks.iter().any(|t| t["name"] == "agent:worktree-remove");
-    // Task discovery proves existence, not an exact-path removal contract.
-    // The known task takes a branch, which can select a different worktree.
-    // Until it advertises a verifiable path-bound interface, use Git's path API.
-    validate_tree(node, tree)?;
-    node.shell.run_setup_ok(
-        "git",
-        &[
-            "-C".into(),
-            tree.repo.clone(),
-            "worktree".into(),
-            "remove".into(),
-            "--".into(),
-            tree.path.clone(),
-        ],
-    )?;
-    let method = if has_remove {
-        "git worktree remove (repository task has no verified exact-path contract)"
-    } else {
-        "git worktree remove (no repository remove task)"
-    };
+fn forget(node: &Node<'_>, tree: &Tree) -> Result<()> {
     node.ledger.with_lock("repositories", || {
         let mut repos: BTreeSet<String> =
             node.ledger.read("repositories.json")?.unwrap_or_default();
@@ -526,8 +503,54 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
         trees.retain(|t| t.path != tree.path);
         node.ledger.write("worktrees.json", &trees)
+    })
+}
+
+fn remove_tree(node: &Node<'_>, tree: &Tree, now: u64) -> Result<String> {
+    let held = validate_tree(node, tree, now)?;
+    let linked = crate::worktree::Linked {
+        checkout: tree.repo.clone().into(),
+        path: tree.path.clone(),
+        branch: tree.branch.clone(),
+    };
+    let holders: Vec<&Pane> = held.holders.iter().collect();
+    let deleted = crate::worktree::remove(
+        node.shell,
+        node.hooks,
+        &linked,
+        held.workspace.as_deref(),
+        &holders,
+    )?;
+    forget(node, tree)?;
+    let closed = holders
+        .iter()
+        .map(|p| p.pane_id.as_str())
+        .chain(held.workspace.as_deref())
+        .collect::<Vec<_>>();
+    Ok(format!(
+        "removed {}{}{}",
+        tree.path,
+        if closed.is_empty() {
+            String::new()
+        } else {
+            format!(" and closed {}", closed.join(", "))
+        },
+        if deleted { "; branch deleted" } else { "" }
+    ))
+}
+
+fn drop_registration(node: &Node<'_>, path: &str) -> Result<String> {
+    node.ledger.with_lock("worktrees", || {
+        let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
+        if Path::new(path).exists() {
+            return Err(Error::Invalid(format!(
+                "refuse {path}: the worktree exists again"
+            )));
+        }
+        trees.retain(|t| t.path != path);
+        node.ledger.write("worktrees.json", &trees)
     })?;
-    Ok(format!("removed {} via {method}", tree.path))
+    Ok(format!("dropped the stale registration of {path}"))
 }
 
 fn remove_job(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
@@ -558,6 +581,11 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Vec<String>> {
             results.push(format!("{} {}: report only", requested.class, requested.id));
             continue;
         }
+        // A refused entry stays: the plan shows why, and prune removes only eligible entries.
+        if !requested.removable {
+            results.push(format!("{} {}: kept", requested.class, requested.id));
+            continue;
+        }
         let candidate = actual
             .entries
             .iter()
@@ -575,13 +603,10 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Vec<String>> {
             )));
         }
         match candidate.class.as_str() {
-            "worktrees" => results.push(remove_tree(
-                node,
-                requested
-                    .tree
-                    .as_ref()
-                    .ok_or_else(|| Error::Invalid("missing worktree identity".into()))?,
-            )?),
+            "worktrees" => results.push(match &requested.tree {
+                Some(tree) => remove_tree(node, tree, now)?,
+                None => drop_registration(node, &candidate.id)?,
+            }),
             "panes" => {
                 let agents = crate::probe::agent_list(node.shell)?;
                 if !agents

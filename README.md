@@ -116,17 +116,18 @@ wrangle close w9:p1 --host netcup --json
 ```
 
 `close` ends a finished child. `--host` defaults to the host of the pane's open item, else local.
-In a linked worktree, it closes the worktree's Herdr workspace, unlocks an `agent:worktree` lock, and runs `wt remove --foreground <branch>` in the main checkout.
-Worktrunk runs the repository's remove hooks and deletes the branch only when it is merged. A pane outside a worktree is closed alone.
-It refuses a missing pane, the caller's own pane or workspace, any agent in the workspace that is not `idle` or `done`, a dirty or detached worktree, and any other lock.
-Each refusal happens before a change. If `wt remove` fails, wrangle relocks the worktree and the item stays open.
+In a linked worktree, it closes every pane that uses the worktree and the Herdr workspace that shows it. Then it runs the `remove` hook in the main checkout.
+The default hook, `agent:worktree-remove`, unlocks an `agent:worktree` lock, runs the repository's remove hooks, and deletes the branch only when it is merged. A pane outside a worktree is closed alone.
+A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a dirty or detached worktree, and any other lock.
+It also refuses a busy target or a busy pane that uses the worktree: an agent that is not `idle` or `done`, or a shell with a foreground command.
+Each refusal happens before a change. If the hook fails, the item stays open and the error names the worktree.
 The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted}|null,pane_closed}`. A remote host runs the same steps over SSH.
 
 The service admits tickets in FIFO order using the same placement policy.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
 A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
 For non-waiting callers, admission prompts the owner only in `idle` or `done`. Other states defer the prompt.
-`status` lists open items per owner and pending tickets, and marks finished children. `--brief` includes their counts and the number of finished children. Prompt context adds the close commands for the caller's own finished children only.
+`status` lists open items per owner and pending tickets, and prints the close command for each finished child. `--brief` includes their counts and the number of finished children. Prompt context adds the close commands for the caller's own finished children only.
 
 ## Host service and status
 
@@ -204,16 +205,23 @@ wrangle prune --host netcup --yes panes
 ```
 
 Doctor changes no candidates. It reports `worktrees`, `panes`, `jobs`, `disk`, and `processes`.
-Worktrees need a merged or deleted branch and no live pane. Dirty candidates are reported but cannot be removed.
+Worktrees need an integrated branch, a clean tree, no foreign lock, and no pane that holds them.
+A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when one commit on that branch applies it.
+A commit applies the branch when it changes every path the branch changed, and merging the branch into the commit's parent gives the commit's content on those paths. This finds merge, squash, and cherry-pick results from Git alone.
+A branch on the base tip has no work yet and is not a candidate. Results use the remote-tracking branch, so `git fetch` keeps them current.
+A pane holds a worktree when it works in it or sits in its workspace. A shell with no foreground command does not hold it.
+An agent holds it until it has been `idle` or `done` for 24 hours. Before that, its owner closes it with `wrangle close`.
+Held, dirty, and locked integrated worktrees are reported with the reason and are not removed.
+A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
 Panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
 Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known wrangle-owned paths.
 Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune never kills processes or frees arbitrary disk paths.
 
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
-Each removal rechecks current state. Working or blocked panes, live worktrees, dirty worktrees, and unmerged branches remain untouched.
+Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and unintegrated branches remain untouched.
 Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
-A branch-taking `agent:worktree-remove` task does not prove an exact-path contract. Wrangle uses non-forced `git worktree remove -- <path>` instead.
-The result names the method and reason. Git's remote default branch defines merged state, with local `main` as the fallback.
+Worktree removal closes the panes that use the worktree and its workspace, then runs the `remove` hook, the same as `close`. Wrangle checks that the worktree is gone afterwards.
+The result names the removed path and the closed panes.
 
 Prepare records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller and live pane directories. It never scans the whole home directory.
@@ -255,11 +263,14 @@ remote_command = ["mise", "x", "--", "wrangle"]
 
 [hooks]
 prepare = ["mise", "run", "-q", "agent:worktree", "--", "{branch}", "{base}"]
+remove = ["mise", "run", "-q", "agent:worktree-remove", "--", "{branch}"]
 ```
 
-The prepare hook belongs only to host policy. Repository setup belongs to the repository's Worktrunk configuration.
+The hooks belong only to host policy. Repository setup and remove hooks belong to the repository's own configuration.
+The `remove` hook takes `{branch}` and `{path}`. It must remove a worktree that carries an `agent:worktree` lock, and keep an unmerged branch.
+For example, `remove = ["git", "worktree", "remove", "{path}"]` works for unlocked worktrees without repository hooks.
 
-The hook runs with the main checkout as its working directory, including calls from a linked worktree.
+Both hooks run with the main checkout as their working directory, including calls from a linked worktree.
 Before repository work, wrangle verifies the selected host's checkout against the caller's `git remote get-url origin`.
 If the host has no checkout of the repository, wrangle clones it from the caller's origin into the same path relative to home first.
 An existing path with a different origin, or a non-repository path, is an error. Wrangle does not overwrite it.
