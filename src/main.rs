@@ -11,6 +11,7 @@ mod config;
 mod context;
 mod error;
 mod hosts;
+mod integration;
 mod items;
 mod jobs;
 mod ledger;
@@ -26,6 +27,7 @@ mod watchdog;
 mod work;
 #[cfg(test)]
 mod work_tests;
+mod worktree;
 
 use clap::Parser;
 use cli::{Cli, Command, HookCommand, HostCommand};
@@ -110,6 +112,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         ledger: &ledger,
         thresholds: config::Thresholds::from(&policy),
         home: &home,
+        hooks: &policy.hooks,
     };
     match cli.command {
         Command::Serve { interval, once } => service::serve(
@@ -212,7 +215,7 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
         // Over SSH the caller has no pane or workspace on this host.
         HostCommand::Close { pane } => print(
             true,
-            &close::local(node.shell, &pane, &close::Caller::default())?,
+            &close::local(node.shell, &policy.hooks, &pane, &close::Caller::default())?,
             String::new,
         )?,
         HostCommand::Prune { plan } => print(

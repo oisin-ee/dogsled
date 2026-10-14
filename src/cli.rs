@@ -133,8 +133,8 @@ pub enum Command {
         #[arg(long)]
         owner: Option<String>,
     },
-    /// Close a finished child: close its Herdr workspace, remove its worktree with `wt remove`
-    /// (the repository's remove hooks run), and end its item. Refuses an active agent or dirty worktree.
+    /// Close a finished child: close the panes and Herdr workspace that use its worktree, remove
+    /// the worktree with the host's `remove` hook, and end its item. Refuses busy or dirty work.
     Close {
         /// The child's Herdr pane (the spawn result's `target`).
         pane: String,

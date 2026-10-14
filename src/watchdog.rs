@@ -384,13 +384,7 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
     let finished: Vec<_> = items
         .iter()
         .filter(|i| crate::items::finished(i, reports))
-        .map(|i| {
-            format!(
-                "`wrangle close {} --host {}`",
-                crate::shell::quote(&i.pane),
-                crate::shell::quote(&i.host)
-            )
-        })
+        .map(|i| crate::items::close_command(i, reports))
         .collect();
     if !finished.is_empty() {
         let _ = writeln!(
