@@ -201,6 +201,51 @@ fn failed_remove_hook_reports_its_error_and_keeps_the_item_open() {
 }
 
 #[test]
+fn doctor_lists_each_linked_worktree_once_and_never_the_main_checkout() {
+    let (rig, tree) = close_rig("close-repo-identity");
+    let repo = rig.dir.join("home/repo");
+    // The remote default branch is ahead of the main checkout, and the feature is in it.
+    git(&tree, &["commit", "-q", "--allow-empty", "-m", "feature"]);
+    let ahead = git(
+        &tree,
+        &[
+            "commit-tree",
+            "-p",
+            "feat/x",
+            "-m",
+            "after the feature",
+            "feat/x^{tree}",
+        ],
+    );
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", ahead.trim()],
+    );
+    git(
+        &repo,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    // The same repository is registered under its path and through a symlink.
+    let link = rig.dir.join("home/link");
+    std::os::unix::fs::symlink(&repo, &link).unwrap();
+    rig.put("state/repositories.json", &json!([repo, link]));
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
+    let (_, plan) = rig.json(&["doctor"]);
+    let trees: Vec<_> = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["class"] == "worktrees")
+        .map(|e| e["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(trees, [tree.display().to_string()], "{plan}");
+}
+
+#[test]
 fn doctor_finds_a_squashed_branch_held_only_by_an_idle_shell_and_prune_removes_it() {
     let (rig, tree) = close_rig("close-squash");
     let repo = rig.dir.join("home/repo");

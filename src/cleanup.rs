@@ -85,6 +85,11 @@ fn trees(node: &Node<'_>, panes: &[Pane]) -> Result<Vec<Tree>> {
             }
         }
     }
+    // One repository reached through a symlink is still one repository.
+    let repos: BTreeSet<String> = repos
+        .into_iter()
+        .map(|repo| std::fs::canonicalize(&repo).map_or(repo, |p| p.display().to_string()))
+        .collect();
     let mut result = Vec::new();
     for repo in repos {
         result.extend(repository_trees(node.shell, &repo)?);
@@ -104,6 +109,8 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
     let mut path = String::new();
     let mut branch = String::new();
     let mut head = String::new();
+    // Git lists the main worktree first. It is never a cleanup candidate.
+    let mut main = true;
     for field in output.stdout.split('\0') {
         if let Some(value) = field.strip_prefix("worktree ") {
             path = value.into();
@@ -112,7 +119,7 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
         } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
             branch = value.into();
         } else if field.is_empty() && !path.is_empty() {
-            if path != repo && !branch.is_empty() {
+            if !main && !branch.is_empty() {
                 result.push(Tree {
                     repo: repo.into(),
                     path: path.clone(),
@@ -120,6 +127,7 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
                     head: head.clone(),
                 });
             }
+            main = false;
             path.clear();
             branch.clear();
             head.clear();
@@ -420,7 +428,7 @@ fn assess(node: &Node<'_>, tree: &Tree, panes: &[Pane], stale: &BTreeSet<String>
             blockers.push(format!("{} is busy ({reason})", pane.pane_id));
         } else if pane.agent.is_some() && !stale.contains(&pane.pane_id) {
             blockers.push(format!(
-                "{} has a {} agent; its owner closes it with `wrangle close`",
+                "{} has an agent that is {}; its owner closes it with `wrangle close`",
                 pane.pane_id,
                 pane.agent_status.as_deref().unwrap_or("quiet")
             ));
