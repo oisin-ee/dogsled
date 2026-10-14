@@ -306,6 +306,7 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 The Pi extension calls `wrangle hook context --harness pi` before each prompt.
 It tracks successful Shepherdr `agents` spawn results through `wrangle track`.
+It gives every `agents spawn` without a `placement` its own worktree workspace, placed through `wrangle place` when none is open.
 An above-editor widget lists this session's open jobs, unclosed children, and pending tickets. It refreshes every ten seconds and after tool results.
 An empty list removes the widget. Shutdown stops the timer. Widget and tracking failures still appear as extension errors.
 `$WRANGLE_BIN` selects the binary used by the extension.

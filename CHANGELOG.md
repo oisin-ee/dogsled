@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - Skill: spawn a placed agent with `placement=pane pane=<pane_id>`. Without `placement`, Shepherdr ignored the prepared pane and opened a tab in the caller's workspace.
+- Pi: give every `agents spawn` without a `placement` its own worktree workspace. Use the prepared or open worktree pane, or place a new `agent/<label>` branch with `wrangle place`. A queued or failed placement blocks the spawn with its reason.
 - Find integrated worktrees from Git alone: a deleted branch, an ancestor of the remote default branch, or a branch that one commit there applies (merge, squash, or cherry-pick). A branch on the base tip is not a candidate.
 - Do not count a shell with no foreground command as holding a worktree. Prune closes such panes and the worktree's workspace before removal. Doctor reports held integrated worktrees with the reason.
 - Add `hooks.remove` (`{branch}`, `{path}`), default `mise run -q agent:worktree-remove -- {branch}`. `close` and `prune` both remove through it; wrangle no longer runs `wt` or `git worktree remove` itself.

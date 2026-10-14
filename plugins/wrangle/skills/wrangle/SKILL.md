@@ -36,7 +36,16 @@ agents spawn machine=<host.id> placement=pane pane=<pane_id> …
 ```
 
 Do not pass `cwd` with `placement=pane`; Shepherdr refuses it. When the hook returns only `path`, use `placement=new_workspace cwd=<path>`.
-Without `placement`, Shepherdr ignores `pane` and opens a tab in the caller's workspace. That tab is outside the worktree's workspace, and `wrangle close` refuses it.
+
+In Pi, the wrangle extension sets the placement of an `agents spawn` that has none, so a child never opens as a tab in your workspace:
+
+- `pane` alone becomes `placement=pane`, and `cwd` is dropped.
+- A `cwd` in a worktree uses that worktree's open workspace pane, or places the worktree's branch.
+- The main checkout, or no `cwd`, places a new `agent/<label>` branch from your committed HEAD (from the default branch on a remote `machine`).
+- A remote `machine` with only `cwd` is refused: place first, then pass the pane.
+- A directory outside any repository gets `placement=new_workspace`.
+
+A queued or failed placement blocks the spawn and names the ticket or error. An explicit `placement` is never changed.
 Omit the Shepherdr machine selector for `local`. The Pi extension tracks successful `agents` spawn results.
 For agents from other callers, record ownership explicitly:
 

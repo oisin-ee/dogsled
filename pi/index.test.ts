@@ -74,6 +74,15 @@ test("tracks structured and text spawn results, filters widget, and cleans up ti
 	assert.deepEqual(r.widgets.at(-1), ["wrangle", undefined]);
 });
 
+test("tool_call places agents spawns and ignores other tools", async () => {
+	const r = rig();
+	assert.equal(await r.invoke("tool_call", { toolName: "bash", input: { command: "ls" } }), undefined);
+	const input = { action: "spawn", pane: "w8M:p1", cwd: "/x" };
+	assert.equal(await r.invoke("tool_call", { toolName: "agents", input }), undefined);
+	assert.deepEqual(input, { action: "spawn", pane: "w8M:p1", placement: "pane" });
+	assert.equal(r.calls.length, 0);
+});
+
 test("startup refresh failure notifies and the timer recovers", async (t) => {
 	const previous = process.env["HERDR_PANE_ID"];
 	process.env["HERDR_PANE_ID"] = "w1:p1";

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { placeSpawn } from "./placement.ts";
 
 function object(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -66,6 +67,11 @@ export default function wrangle(pi: ExtensionAPI) {
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		if (ctx.mode === "tui") ctx.ui.setWidget("wrangle", undefined);
+	});
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "agents") return;
+		const decision = await placeSpawn(event.input, (bin, args, options) => pi.exec(bin, args, options), binary, ctx.cwd, ctx.signal);
+		return decision.block ? { block: true, reason: decision.reason } : undefined;
 	});
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.toolName === "agents" && !event.isError && owner) {
