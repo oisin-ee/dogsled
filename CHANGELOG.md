@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Skill: spawn a placed agent with `placement=pane pane=<pane_id>`. Without `placement`, Shepherdr ignored the prepared pane and opened a tab in the caller's workspace.
+
 ## 0.6.2 - 2026-10-14
 
 - Accept a host checkout whose origin names the same repository in another spelling, such as `git@github.com:owner/repo.git` for `https://github.com/owner/repo.git`. Compare host and repository path, not the raw URL.
