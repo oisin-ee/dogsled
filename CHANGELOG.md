@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.7.1 - 2026-10-14
 
 - Never list a repository's main checkout as a cleanup candidate, even when it lags the remote default branch. List each linked worktree once when the repository is registered through a symlink.
 
