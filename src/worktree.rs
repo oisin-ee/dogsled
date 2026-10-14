@@ -3,6 +3,7 @@
 
 use crate::config::Hooks;
 use crate::error::{Error, Result};
+use crate::ledger::Ledger;
 use crate::probe::Pane;
 use crate::shell::{Shell, quote};
 use std::path::{Path, PathBuf};
@@ -193,6 +194,7 @@ pub fn busy(shell: &dyn Shell, pane: &Pane) -> Result<Option<String>> {
 /// Returns whether the branch is gone afterwards.
 pub fn remove(
     shell: &dyn Shell,
+    ledger: &Ledger,
     hooks: &Hooks,
     tree: &Linked,
     workspace: Option<&str>,
@@ -222,10 +224,17 @@ pub fn remove(
     );
     let out = shell.run_setup("sh", &["-c".into(), command])?;
     if !out.ok() {
+        // The runner's summary is the last line; the cause is usually just above it.
+        let lines: Vec<&str> = out
+            .stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        let tail = lines[lines.len().saturating_sub(4)..].join(" | ");
         return Err(Error::Invalid(format!(
             "remove hook failed for {} after its panes closed: {}",
             tree.path,
-            out.stderr.trim().lines().last().unwrap_or("no output")
+            if tail.is_empty() { "no output" } else { &tail }
         )));
     }
     if listed(shell, &tree.checkout, &tree.path)? {
@@ -234,6 +243,7 @@ pub fn remove(
             tree.path
         )));
     }
+    crate::cleanup::forget(ledger, &tree.path)?;
     Ok(git(
         shell,
         &tree.checkout,

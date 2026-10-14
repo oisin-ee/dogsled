@@ -3,6 +3,7 @@
 
 use crate::config::Hooks;
 use crate::error::{Error, Result};
+use crate::ledger::Ledger;
 use crate::worktree::{self, AGENT_LOCK, refuse};
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,7 @@ impl Caller {
 /// closed; the caller's own pane, and a worktree the caller works in or shows, are refused.
 pub fn local(
     shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
     hooks: &Hooks,
     pane: &str,
     caller: &Caller,
@@ -117,7 +119,8 @@ pub fn local(
     }
     // The target is a holder through its cwd, so removal closes it unless its workspace does.
     let pane_closed = workspace.is_none() || target.workspace_id != workspace;
-    let branch_deleted = worktree::remove(shell, hooks, &tree, workspace.as_deref(), &holders)?;
+    let branch_deleted =
+        worktree::remove(shell, ledger, hooks, &tree, workspace.as_deref(), &holders)?;
     Ok(Closed {
         pane: pane.into(),
         worktree: Some(Worktree {

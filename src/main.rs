@@ -215,7 +215,13 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
         // Over SSH the caller has no pane or workspace on this host.
         HostCommand::Close { pane } => print(
             true,
-            &close::local(node.shell, &policy.hooks, &pane, &close::Caller::default())?,
+            &close::local(
+                node.shell,
+                node.ledger,
+                &policy.hooks,
+                &pane,
+                &close::Caller::default(),
+            )?,
             String::new,
         )?,
         HostCommand::Prune { plan } => print(

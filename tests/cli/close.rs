@@ -52,7 +52,7 @@ esac
         "remove-hook",
         r#"#!/bin/sh
 printf '%s %s\n' "$(pwd -P)" "$*" >> "$RIG/hook.log"
-if test -f "$RIG/hook-fails"; then echo 'pre-remove hook failed' >&2; exit 1; fi
+if test -f "$RIG/hook-fails"; then printf 'pre-remove hook failed\n\n[remove-hook] ERROR task failed\n' >&2; exit 1; fi
 git worktree unlock "$2" && git worktree remove "$2" && { git branch -q -d "$1" 2>/dev/null || true; }
 "#,
     );
@@ -93,6 +93,15 @@ fn item(rig: &Rig, host: &str) {
     );
 }
 
+fn registered(rig: &Rig) -> Vec<Value> {
+    rig.read("state/worktrees.json")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["path"].clone())
+        .collect()
+}
+
 fn hook_log(rig: &Rig, tree: &Path) -> String {
     let main = rig.dir.join("home/repo").canonicalize().unwrap();
     format!("{} feat/x {}\n", main.display(), tree.display())
@@ -103,6 +112,12 @@ fn close_removes_workspace_then_worktree_through_the_remove_hook_and_ends_the_it
     let (rig, tree) = close_rig("close-worktree");
     panes(&rig, "done", &tree);
     item(&rig, "local");
+    let repo = rig.dir.join("home/repo").canonicalize().unwrap();
+    let other = json!({"repo":repo,"path":repo.join(".worktrees/other"),"branch":"other"});
+    rig.put(
+        "state/worktrees.json",
+        &json!([{"repo":repo,"path":tree,"branch":"feat/x"}, other]),
+    );
     let (code, closed) = rig.json(&["close", "w2:p1"]);
     assert_eq!(code, 0, "{closed}");
     assert_eq!(
@@ -116,6 +131,8 @@ fn close_removes_workspace_then_worktree_through_the_remove_hook_and_ends_the_it
     assert!(!herdr.contains("pane close"));
     assert!(!tree.exists());
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    // Close forgets the removed worktree's registration, like prune.
+    assert_eq!(registered(&rig), [other["path"].clone()]);
 }
 
 #[test]
@@ -198,6 +215,51 @@ fn failed_remove_hook_reports_its_error_and_keeps_the_item_open() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("pre-remove hook failed"));
     assert!(tree.exists());
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
+#[test]
+fn prune_tries_every_entry_and_reports_each_failure() {
+    let (rig, tree) = close_rig("prune-continues");
+    let repo = rig.dir.join("home/repo").canonicalize().unwrap();
+    // The feature is merged; the remove hook fails for it. A stale registration comes after it.
+    git(&tree, &["commit", "-q", "--allow-empty", "-m", "feature"]);
+    let ahead = git(
+        &tree,
+        &[
+            "commit-tree",
+            "-p",
+            "feat/x",
+            "-m",
+            "after the feature",
+            "feat/x^{tree}",
+        ],
+    );
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", ahead.trim()],
+    );
+    let gone = repo.join(".worktrees/gone");
+    rig.put(
+        "state/worktrees.json",
+        &json!([{"repo":repo,"path":tree,"branch":"feat/x"},{"repo":repo,"path":gone,"branch":"gone"}]),
+    );
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
+    fs::write(rig.dir.join("hook-fails"), "").unwrap();
+    let out = rig.run(&["prune", "--yes", "worktrees"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "{stdout}");
+    assert!(stdout.contains(&format!(
+        "dropped the stale registration of {}",
+        gone.display()
+    )));
+    assert!(
+        stdout.contains("failed: remove hook failed for"),
+        "{stdout}"
+    );
+    // The hook's own message, not only the runner's last line.
+    assert!(stdout.contains("pre-remove hook failed"), "{stdout}");
+    assert!(tree.exists());
+    assert_eq!(registered(&rig), [json!(tree)]);
 }
 
 #[test]
