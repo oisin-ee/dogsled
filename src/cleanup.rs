@@ -500,17 +500,12 @@ fn validate_tree(node: &Node<'_>, planned: &Tree, now: u64) -> Result<Held> {
     Ok(held)
 }
 
-fn forget(node: &Node<'_>, tree: &Tree) -> Result<()> {
-    node.ledger.with_lock("repositories", || {
-        let mut repos: BTreeSet<String> =
-            node.ledger.read("repositories.json")?.unwrap_or_default();
-        repos.insert(tree.repo.clone());
-        node.ledger.write("repositories.json", &repos)
-    })?;
-    node.ledger.with_lock("worktrees", || {
-        let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-        trees.retain(|t| t.path != tree.path);
-        node.ledger.write("worktrees.json", &trees)
+/// Drop a removed worktree's registration. Its repository stays registered.
+pub fn forget(ledger: &Ledger, path: &str) -> Result<()> {
+    ledger.with_lock("worktrees", || {
+        let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
+        trees.retain(|t| t.path != path);
+        ledger.write("worktrees.json", &trees)
     })
 }
 
@@ -524,12 +519,12 @@ fn remove_tree(node: &Node<'_>, tree: &Tree, now: u64) -> Result<String> {
     let holders: Vec<&Pane> = held.holders.iter().collect();
     let deleted = crate::worktree::remove(
         node.shell,
+        node.ledger,
         node.hooks,
         &linked,
         held.workspace.as_deref(),
         &holders,
     )?;
-    forget(node, tree)?;
     let closed = holders
         .iter()
         .map(|p| p.pane_id.as_str())
@@ -580,63 +575,86 @@ fn remove_job(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
     })
 }
 
-pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Vec<String>> {
-    let mut results = Vec::new();
+/// What prune did. Each entry is independent, so one failure does not stop the others.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Applied {
+    pub results: Vec<String>,
+    pub failures: Vec<String>,
+}
+
+impl Applied {
+    pub fn render(&self) -> String {
+        self.results
+            .iter()
+            .cloned()
+            .chain(self.failures.iter().map(|f| format!("failed: {f}")))
+            .map(|line| line + "\n")
+            .collect()
+    }
+}
+
+pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
+    let mut applied = Applied::default();
     // A remote plan is input, not authority: rebuild the candidate set on this host.
     let actual = doctor(node, now)?;
     for requested in &plan.entries {
-        if matches!(requested.class.as_str(), "disk" | "processes") {
-            results.push(format!("{} {}: report only", requested.class, requested.id));
-            continue;
-        }
-        // A refused entry stays: the plan shows why, and prune removes only eligible entries.
-        if !requested.removable {
-            results.push(format!("{} {}: kept", requested.class, requested.id));
-            continue;
-        }
-        let candidate = actual
-            .entries
-            .iter()
-            .find(|e| e.class == requested.class && e.id == requested.id && e.removable)
-            .ok_or_else(|| {
-                Error::Invalid(format!(
-                    "refuse {} {}: no longer safe to remove",
-                    requested.class, requested.id
-                ))
-            })?;
-        if candidate.tree != requested.tree {
-            return Err(Error::Invalid(format!(
-                "refuse {}: planned worktree identity changed",
-                requested.id
-            )));
-        }
-        match candidate.class.as_str() {
-            "worktrees" => results.push(match &requested.tree {
-                Some(tree) => remove_tree(node, tree, now)?,
-                None => drop_registration(node, &candidate.id)?,
-            }),
-            "panes" => {
-                let agents = crate::probe::agent_list(node.shell)?;
-                if !agents
-                    .iter()
-                    .any(|a| a.pane == candidate.id && matches!(a.state.as_str(), "idle" | "done"))
-                {
-                    return Err(Error::Invalid(format!(
-                        "refuse {}: pane is not idle or done",
-                        candidate.id
-                    )));
-                }
-                node.shell.run_ok(
-                    "herdr",
-                    &["pane".into(), "close".into(), candidate.id.clone()],
-                )?;
-                results.push(format!("closed pane {}", candidate.id));
-            }
-            "jobs" => results.push(remove_job(node, &candidate.id, now)?),
-            _ => return Err(Error::Invalid("unknown cleanup class".into())),
+        match apply_one(node, &actual, requested, now) {
+            Ok(result) => applied.results.push(result),
+            Err(e) => applied.failures.push(e.to_string()),
         }
     }
-    Ok(results)
+    Ok(applied)
+}
+
+fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<String> {
+    if matches!(requested.class.as_str(), "disk" | "processes") {
+        return Ok(format!("{} {}: report only", requested.class, requested.id));
+    }
+    // A refused entry stays: the plan shows why, and prune removes only eligible entries.
+    if !requested.removable {
+        return Ok(format!("{} {}: kept", requested.class, requested.id));
+    }
+    let candidate = actual
+        .entries
+        .iter()
+        .find(|e| e.class == requested.class && e.id == requested.id && e.removable)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "refuse {} {}: no longer safe to remove",
+                requested.class, requested.id
+            ))
+        })?;
+    if candidate.tree != requested.tree {
+        return Err(Error::Invalid(format!(
+            "refuse {}: planned worktree identity changed",
+            requested.id
+        )));
+    }
+    match candidate.class.as_str() {
+        "worktrees" => match &requested.tree {
+            Some(tree) => remove_tree(node, tree, now),
+            None => drop_registration(node, &candidate.id),
+        },
+        "panes" => {
+            let agents = crate::probe::agent_list(node.shell)?;
+            if !agents
+                .iter()
+                .any(|a| a.pane == candidate.id && matches!(a.state.as_str(), "idle" | "done"))
+            {
+                return Err(Error::Invalid(format!(
+                    "refuse {}: pane is not idle or done",
+                    candidate.id
+                )));
+            }
+            node.shell.run_ok(
+                "herdr",
+                &["pane".into(), "close".into(), candidate.id.clone()],
+            )?;
+            Ok(format!("closed pane {}", candidate.id))
+        }
+        "jobs" => remove_job(node, &candidate.id, now),
+        _ => Err(Error::Invalid("unknown cleanup class".into())),
+    }
 }
 
 pub fn render(plan: &Plan) -> String {

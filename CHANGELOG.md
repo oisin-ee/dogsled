@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Let prune try every entry. A failed or refused entry no longer stops the rest; prune reports each failure and exits with status 2. `--json` returns `{results,failures}`.
+- Drop a worktree's registration when `close` removes it, so doctor no longer lists it as a stale registration.
+- Show the last lines of a failed remove hook's output, not only the task runner's summary line.
+
 ## 0.7.1 - 2026-10-14
 
 - Never list a repository's main checkout as a cleanup candidate, even when it lags the remote default branch. List each linked worktree once when the repository is registered through a symlink.

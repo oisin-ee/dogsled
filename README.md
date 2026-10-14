@@ -121,6 +121,7 @@ The default hook, `agent:worktree-remove`, unlocks an `agent:worktree` lock, run
 A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a dirty or detached worktree, and any other lock.
 It also refuses a busy target or a busy pane that uses the worktree: an agent that is not `idle` or `done`, or a shell with a foreground command.
 Each refusal happens before a change. If the hook fails, the item stays open and the error names the worktree.
+After removal, close drops the worktree's registration, as prune does.
 The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted}|null,pane_closed}`. A remote host runs the same steps over SSH.
 
 The service admits tickets in FIFO order using the same placement policy.
@@ -221,7 +222,8 @@ Prune displays a plan and asks before removal. `--yes` skips that question, not 
 Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and unintegrated branches remain untouched.
 Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
 Worktree removal closes the panes that use the worktree and its workspace, then runs the `remove` hook, the same as `close`. Wrangle checks that the worktree is gone afterwards.
-The result names the removed path and the closed panes.
+Each entry is independent. A failed or refused entry does not stop the others; prune reports each failure, then exits with status 2.
+`--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed hook's error includes its last lines of output.
 
 Prepare records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller and live pane directories. It never scans the whole home directory.

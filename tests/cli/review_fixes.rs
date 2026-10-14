@@ -7,7 +7,8 @@ fn removal_refuses_identity_changed_during_planning() {
     fs::write(rig.dir.join("change-during-plan"), "").unwrap();
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("identity changed"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("failed: refuse"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("identity changed"));
     assert_eq!(rig.log("mise.log"), "");
 }
 

@@ -212,7 +212,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            let result = if host.is_local() {
+            let applied: crate::cleanup::Applied = if host.is_local() {
                 crate::cleanup::apply(&fleet.node(), &plan, now_ms())?
             } else {
                 fleet.remote_setup(
@@ -224,7 +224,10 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                     ],
                 )?
             };
-            crate::print(json_output, &result, || result.join("\n") + "\n")?;
+            crate::print(json_output, &applied, || applied.render())?;
+            if !applied.failures.is_empty() {
+                return Ok(ExitCode::from(2));
+            }
         }
         Command::Track { host, pane, name } => {
             let host = fleet.find(&host)?;
@@ -254,6 +257,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             let closed: crate::close::Closed = if host.is_local() {
                 crate::close::local(
                     fleet.shell,
+                    fleet.ledger,
                     &fleet.policy.hooks,
                     &pane,
                     &crate::close::Caller::from_env(),

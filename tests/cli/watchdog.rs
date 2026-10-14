@@ -149,10 +149,13 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
     let (_, plan) = rig.json(&["doctor"]);
     let plan = json!({"entries": plan["entries"].as_array().unwrap().iter().filter(|e| e["class"] == "worktrees").collect::<Vec<_>>()}).to_string();
     fs::write(rig.dir.join("dirty"), "").unwrap();
-    assert_eq!(
-        rig.run(&["host", "prune", "--plan", &plan]).status.code(),
-        Some(2)
-    );
+    let refused = |plan: &str| {
+        let (code, applied) = rig.json(&["host", "prune", "--plan", plan]);
+        assert_eq!(code, 0, "{applied}");
+        assert_eq!(applied["results"], json!([]), "{applied}");
+        applied["failures"][0].as_str().unwrap().to_owned()
+    };
+    assert!(refused(&plan).contains("no longer safe"));
     fs::remove_file(rig.dir.join("dirty")).unwrap();
     let alias = rig.dir.join("alias");
     std::os::unix::fs::symlink(rig.dir.join("home/repo/tree"), &alias).unwrap();
@@ -161,10 +164,7 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":"live","agent":"pi","agent_status":"working","cwd":alias.join("subdir")}]}}),
     );
-    assert_eq!(
-        rig.run(&["host", "prune", "--plan", &plan]).status.code(),
-        Some(2)
-    );
+    assert!(refused(&plan).contains("no longer safe"));
     rig.snapshot("state/host.json", NOW, 0.0, 1);
     let mut snapshot = rig.read("state/host.json");
     snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
@@ -175,10 +175,8 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
     );
     let pane_plan=json!({"entries":[{"class":"panes","id":"w1:p1","detail":"old","removable":true,"tree":null}]}).to_string();
     assert_eq!(
-        rig.run(&["host", "prune", "--plan", &pane_plan])
-            .status
-            .code(),
-        Some(2)
+        refused(&pane_plan),
+        "refuse panes w1:p1: no longer safe to remove"
     );
     assert!(!rig.log("herdr.log").contains("pane close"));
     assert!(!rig.log("git.log").contains("worktree remove"));
