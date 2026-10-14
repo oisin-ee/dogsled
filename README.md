@@ -11,26 +11,26 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/wrangle@v0.7.1
+mise use github:oisin-ee/wrangle@v0.7.2
 ```
 
 Pi (extension and skill):
 
 ```sh
-pi install git:github.com/oisin-ee/wrangle@v0.7.1
+pi install git:github.com/oisin-ee/wrangle@v0.7.2
 ```
 
 Claude Code (hooks and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/wrangle#v0.7.1
+claude plugin marketplace add oisin-ee/wrangle#v0.7.2
 claude plugin install wrangle@wrangle
 ```
 
 Codex (hooks and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/wrangle --ref v0.7.1
+codex plugin marketplace add oisin-ee/wrangle --ref v0.7.2
 codex plugin add wrangle@wrangle
 ```
 
@@ -40,7 +40,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (status-board popup):
 
 ```sh
-herdr plugin install oisin-ee/wrangle --ref v0.7.1 --yes
+herdr plugin install oisin-ee/wrangle --ref v0.7.2 --yes
 ```
 
 Harness plugins use the binary on `PATH`. They do not install it or start host services.
