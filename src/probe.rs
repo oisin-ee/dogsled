@@ -43,9 +43,10 @@ pub struct Pane {
     pub idle_since_ms: Option<u64>,
 }
 
-/// What a pane's shell runs in the foreground, or `None` at an empty prompt or when the pane
-/// closed after it was listed: a closed pane runs nothing.
-pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
+/// Herdr's process information for a pane: its shell and foreground processes. `None` when the
+/// pane closed after it was listed. Every caller reads a pane from an earlier list, so a closed
+/// pane is an ordinary race, not a failure.
+pub fn process_info(shell: &dyn Shell, pane: &str) -> Result<Option<serde_json::Value>> {
     let args = [
         "pane".to_string(),
         "process-info".into(),
@@ -67,10 +68,20 @@ pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
         }
     }
     let out = crate::shell::checked("herdr", &args, out)?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
-    let info = value
-        .pointer("/result/process_info")
-        .ok_or_else(|| Error::Invalid(format!("{pane} has no process information")))?;
+    let mut value: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    value
+        .pointer_mut("/result/process_info")
+        .map(serde_json::Value::take)
+        .map(Some)
+        .ok_or_else(|| Error::Invalid(format!("{pane} has no process information")))
+}
+
+/// What a pane's shell runs in the foreground, or `None` at an empty prompt or when the pane
+/// closed after it was listed: a closed pane runs nothing.
+pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
+    let Some(info) = process_info(shell, pane)? else {
+        return Ok(None);
+    };
     let shell_pid = info["shell_pid"].as_u64();
     Ok(info["foreground_processes"]
         .as_array()

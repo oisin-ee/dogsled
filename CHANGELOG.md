@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Doctor's process scan tolerates panes that close after the pane list. All process queries share the same closed-pane handling.
+
 ## 0.8.0 - 2026-10-15
 
 - Doctor no longer lists a new worktree as merged when its base moves on. A worktree whose HEAD has not moved since Git made it, on a branch with no commits beyond the base, holds no work: it is ordinary work for its first day, then removable. Before, its branch counted as merged as soon as it was an ancestor of the base, so a worktree an agent had just made was removable.
