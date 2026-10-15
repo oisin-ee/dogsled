@@ -53,9 +53,12 @@ case "$*" in
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
  *'rev-parse refs/heads/feature refs/remotes/origin/main') printf 'abc\nmain\n' ;;
  *'merge-base refs/remotes/origin/main refs/heads/feature') printf 'fork\n' ;;
- *'log --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --first-parent fork..refs/heads/feature --')
+ *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --first-parent fork..refs/heads/feature --')
  printf '\001abc fork\0\n:100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0file\0' ;;
- *'log --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --no-merges fork..refs/remotes/origin/main -- :(literal)file') ;;
+ *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --no-merges fork..refs/remotes/origin/main -- :(literal)file') ;;
+ *'config --name-only --get-regexp ^merge\..*\.driver$') exit 1 ;;
+ *'merge-tree --write-tree --no-messages refs/remotes/origin/main refs/heads/feature') printf 'branch-tree\n' ;;
+ *'rev-parse refs/remotes/origin/main^{tree}') printf 'main-tree\n' ;;
  *'for-each-ref --format=%(objectname) %(refname) refs/heads/') printf 'abc refs/heads/main\nabc refs/heads/feature\n' ;;
  *'rev-list --count refs/remotes/origin/main..refs/heads/feature') printf '2\n' ;;
  *'rev-list --count refs/heads/feature --not --remotes') printf '1\n' ;;

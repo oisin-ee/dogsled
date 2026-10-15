@@ -9,7 +9,8 @@
 //!
 //! Each path merges on its own, from blob ids in `git log --raw`, with `git merge-file` only
 //! where both sides changed a file. A doubtful path is a conflict, so the error is to keep a
-//! branch, never to remove one.
+//! branch, never to remove one. Finally, a clean `git merge-tree` result identical to the
+//! default branch's tree proves that merging the branch would change nothing.
 
 use crate::error::{Error, Result};
 use crate::shell::Shell;
@@ -27,6 +28,8 @@ pub enum Integrated {
     Applied { base: String, commit: String },
     /// Each of `commits` on `base` applies one consecutive run of the branch, in branch order.
     Stacked { base: String, commits: Vec<String> },
+    /// A clean merge into `base` produces its existing tree.
+    MergeTree { base: String },
 }
 
 fn abbreviated(commit: &str) -> &str {
@@ -38,6 +41,9 @@ impl std::fmt::Display for Integrated {
         match self {
             Self::Deleted => write!(f, "deleted"),
             Self::Ancestor { base } => write!(f, "merged into {base}"),
+            Self::MergeTree { base } => {
+                write!(f, "integrated into {base} by merge-tree (no changes)")
+            }
             Self::Applied { base, commit } => {
                 write!(f, "applied to {base} by {}", abbreviated(commit))
             }
@@ -153,7 +159,8 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
     let mut points = vec![fork];
     points.extend(branch.iter().map(|c| c.id.clone()));
     let Some(applied) = runs(shell, repo, &points, &branch, &candidates)? else {
-        return Ok(None);
+        return Ok(merge_tree_unchanged(shell, repo, &base, &reference)?
+            .then_some(Integrated::MergeTree { base: name }));
     };
     Ok(Some(match <[String; 1]>::try_from(applied) {
         Ok([commit]) => Integrated::Applied { base: name, commit },
@@ -162,6 +169,44 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
             commits,
         },
     }))
+}
+
+/// Compare whole trees without invoking user merge drivers. Keep repository attributes
+/// (including binary files), but replace configured commands with Git's text merge.
+fn merge_tree_unchanged(shell: &dyn Shell, repo: &str, base: &str, branch: &str) -> Result<bool> {
+    let drivers = git(
+        shell,
+        repo,
+        &[
+            "config",
+            "--name-only",
+            "--get-regexp",
+            r"^merge\..*\.driver$",
+        ],
+    )?;
+    if !matches!(drivers.status, 0 | 1) {
+        return Err(failed(repo, "read merge drivers", &drivers));
+    }
+    let mut options = vec!["merge.default=text".to_string()];
+    for driver in drivers.stdout.lines().collect::<BTreeSet<_>>() {
+        options.push(format!("{driver}=git merge-file -- %A %O %B"));
+    }
+    let mut args: Vec<&str> = options
+        .iter()
+        .flat_map(|value| ["-c", value.as_str()])
+        .collect();
+    args.extend(["merge-tree", "--write-tree", "--no-messages", base, branch]);
+    let merged = git(shell, repo, &args)?;
+    match merged.status {
+        0 => (),
+        1 => return Ok(false),
+        _ => return Err(failed(repo, "merge trees", &merged)),
+    }
+    let tree = git(shell, repo, &["rev-parse", &format!("{base}^{{tree}}")])?;
+    if !tree.ok() {
+        return Err(failed(repo, "resolve default branch tree", &tree));
+    }
+    Ok(!tree.stdout.trim().is_empty() && merged.stdout.trim() == tree.stdout.trim())
 }
 
 /// One commit from `git log`, with what it changed against its first parent (limited to the
@@ -183,6 +228,8 @@ fn commits(
 ) -> Result<Vec<Commit>> {
     let mut args = vec![
         "log",
+        "--no-ext-diff",
+        "--no-textconv",
         "--reverse",
         "--no-renames",
         "--raw",
@@ -304,6 +351,8 @@ fn changes(
     let pathspec: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
     let mut args = vec![
         "diff",
+        "--no-ext-diff",
+        "--no-textconv",
         "--raw",
         "-z",
         "--no-renames",
@@ -572,6 +621,97 @@ mod tests {
         assert!(applied(repo.check("feat").as_ref()));
         // `other` adds the same path with other content: an add/add conflict, not applied.
         assert_eq!(repo.check("other"), None);
+    }
+
+    #[test]
+    fn merge_tree_finds_work_applied_across_commits_without_user_tools() {
+        let repo = Repo::new("merge-tree");
+        repo.commit(
+            ".gitattributes",
+            "a merge=custom diff=custom\n",
+            "attributes",
+        );
+        repo.git(&["switch", "-q", "-c", "feat"]);
+        std::fs::write(repo.0.join("b"), "new\n").unwrap();
+        repo.commit("a", "1\n2\nthree\n", "two paths together");
+        repo.git(&["switch", "-q", "main"]);
+        repo.commit("a", "one\n2\nthree\n", "apply a with another change");
+        repo.commit("b", "new\n", "apply b separately");
+        // No single commit applies the branch, but merging it changes nothing. The
+        // text merge must work even if a configured driver is missing or dishonest.
+        repo.git(&["config", "diff.external", "wrangle-missing-diff"]);
+        repo.git(&["config", "diff.custom.command", "wrangle-missing-diff"]);
+        repo.git(&["config", "diff.custom.textconv", "wrangle-missing-diff"]);
+        repo.git(&["config", "merge.default", "custom"]);
+        for driver in ["wrangle-missing-merge", "false", "true"] {
+            repo.git(&["config", "merge.custom.driver", driver]);
+            let found = repo.check("feat").unwrap();
+            assert_eq!(
+                found,
+                Integrated::MergeTree {
+                    base: "main".into()
+                }
+            );
+            assert_eq!(
+                found.to_string(),
+                "integrated into main by merge-tree (no changes)"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_tree_conflict_is_not_integrated_even_with_a_successful_user_driver() {
+        let repo = Repo::new("merge-tree-conflict");
+        repo.commit(".gitattributes", "a merge=custom\n", "attributes");
+        repo.git(&["switch", "-q", "-c", "feat"]);
+        repo.commit("a", "branch\n", "branch change");
+        repo.git(&["switch", "-q", "main"]);
+        repo.commit("a", "main\n", "different change");
+        // This driver would discard the branch change and report a clean no-op.
+        repo.git(&["config", "merge.custom.driver", "true"]);
+        assert_eq!(repo.check("feat"), None);
+    }
+
+    #[test]
+    fn merge_tree_errors_are_reported_and_conflicted_trees_are_never_accepted() {
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "git -C repo config --name-only --get-regexp ^merge\\..*\\.driver$",
+            "",
+        );
+        for status in [1, 128] {
+            shell.on_output(
+                "git -C repo -c merge.default=text merge-tree --write-tree --no-messages main feat",
+                Output {
+                    status,
+                    stdout: "same-tree\n".into(),
+                    stderr: "merge failed".into(),
+                },
+            );
+            shell.on("git -C repo rev-parse main^{tree}", "same-tree\n");
+            let result = merge_tree_unchanged(&shell, "repo", "main", "feat");
+            if status == 1 {
+                assert!(!result.unwrap());
+            } else {
+                assert!(result.unwrap_err().to_string().contains("merge failed"));
+            }
+        }
+    }
+
+    #[test]
+    fn merge_tree_that_readds_a_deleted_file_is_not_integrated() {
+        let repo = Repo::new("merge-tree-readd");
+        repo.git(&["switch", "-q", "-c", "feat"]);
+        std::fs::write(repo.0.join("b"), "new\n").unwrap();
+        repo.commit("c", "new\n", "add b and c");
+        repo.git(&["switch", "-q", "main"]);
+        repo.commit("b", "new\n", "apply b");
+        repo.commit("c", "new\n", "apply c");
+        repo.git(&["rm", "-q", "b"]);
+        repo.git(&["commit", "-q", "-m", "delete b"]);
+        let merged = repo.git(&["merge-tree", "--write-tree", "main", "feat"]);
+        assert_ne!(merged, repo.git(&["rev-parse", "main^{tree}"]));
+        assert_eq!(repo.check("feat"), None);
     }
 
     #[test]
