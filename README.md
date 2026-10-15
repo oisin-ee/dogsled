@@ -214,7 +214,7 @@ wrangle prune --host netcup --yes panes
 ```
 
 Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `disk`, `processes`, and `repositories`.
-A removable worktree has an integrated branch, or a branch with no commits more than 24 hours after Git made the worktree. It also needs a clean tree, no foreign lock, and no pane that uses it.
+A removable worktree has a HEAD that has not moved more than 24 hours after Git made it, or an integrated branch. A worktree whose HEAD has not moved is not integrated, even when its base moved past it. It also needs a clean tree, no foreign lock, and no pane that uses it.
 A worktree whose branch has unmerged commits and that no pane uses is report-only. Doctor shows the commits ahead, how many are on no remote, and the age of the last commit.
 A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when commits on that branch apply it.
 The branch's commits split into consecutive runs, and each run needs one commit that applies it. A commit applies a run when it changes every path the run changed, and merging the run into the commit's parent gives the commit's content on those paths.

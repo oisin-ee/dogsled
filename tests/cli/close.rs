@@ -412,7 +412,12 @@ fn doctor_removes_a_worktree_with_no_commits_a_day_after_it_was_made() {
             .find(|e| e["class"] == "worktrees")
             .cloned()
     };
-    // A new worktree is ordinary work.
+    // Main moves on, so feat/x is an ancestor of main. That is not a merge: a new worktree
+    // whose HEAD never moved is ordinary work.
+    git(
+        &rig.dir.join("home/repo"),
+        &["commit", "-q", "--allow-empty", "-m", "main moves on"],
+    );
     assert_eq!(found(&rig), None);
     fs::write(rig.dir.join("clock"), (now() + 2 * 86_400_000).to_string()).unwrap();
     let entry = found(&rig).unwrap();
