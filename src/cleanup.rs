@@ -610,10 +610,42 @@ fn branches(shell: &dyn Shell, repo: &str, now: u64, plan: &mut Plan) -> Result<
     Ok(())
 }
 
-/// Panes whose closing loses nothing, from a fresh service snapshot: agents idle or done for a
-/// day, and shells with no foreground command at any sample for a day.
+/// Panes whose closing loses nothing. At once: a shell at an empty prompt in an ended job's tab,
+/// whose output the job log keeps, or in a directory that no longer exists. From a fresh
+/// service snapshot: agents idle or done for a day, and shells with no foreground command at
+/// any sample for a day.
 fn idle_panes(node: &Node<'_>, now: u64, panes: &[Pane]) -> Result<BTreeMap<String, String>> {
     let mut idle = BTreeMap::new();
+    let ended: BTreeMap<String, crate::jobs::Job> = crate::jobs::list(node.ledger)?
+        .into_iter()
+        .filter(|job| job.ended_ms.is_some())
+        .map(|job| (job.pane.clone(), job))
+        .collect();
+    for pane in panes.iter().filter(|p| p.agent.is_none()) {
+        let reason = if let Some(job) = ended.get(&pane.pane_id) {
+            format!(
+                "job {} ended{}; its log keeps the output",
+                job.id,
+                job.exit
+                    .map_or(String::new(), |code| format!(" with exit {code}"))
+            )
+        } else if pane
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| !Path::new(cwd).exists())
+        {
+            "shell in a deleted directory".to_string()
+        } else {
+            continue;
+        };
+        // It is still a shell at an empty prompt.
+        if matches!(
+            crate::probe::foreground(node.shell, &pane.pane_id),
+            Ok(None)
+        ) {
+            idle.insert(pane.pane_id.clone(), reason);
+        }
+    }
     let Some(snapshot) = node
         .ledger
         .read::<Snapshot>("host.json")?
@@ -640,6 +672,9 @@ fn idle_panes(node: &Node<'_>, now: u64, panes: &[Pane]) -> Result<BTreeMap<Stri
         }
     }
     for sampled in &snapshot.probe.panes {
+        if idle.contains_key(&sampled.pane_id) {
+            continue;
+        }
         let Some(since) = sampled
             .idle_since_ms
             .filter(|t| now.saturating_sub(*t) > DAY)

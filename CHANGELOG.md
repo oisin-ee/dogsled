@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Prune closes an ended job's tab at once when its shell is at an empty prompt. The job log keeps the output. A shell in a directory that no longer exists also closes at once. Other idle shells still need a day.
+
 ## 0.8.1 - 2026-10-15
 
 - Doctor's process scan tolerates panes that close after the pane list. All process queries share the same closed-pane handling.
