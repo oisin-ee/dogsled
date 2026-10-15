@@ -401,3 +401,43 @@ fn finished_child_ends_its_item_when_its_pane_is_gone() {
         Some(60_001)
     );
 }
+
+#[test]
+fn check_ins_report_orphans_the_sweep_keeps() {
+    let rig = Rig::new();
+    rig.item("agent");
+    crate::items::record(
+        &rig.ledger,
+        Item {
+            id: "orphan".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "lost".into(),
+            owner_pane: "gone".into(),
+            name: Some("lost-child".into()),
+            created_ms: 1,
+            closed_ms: None,
+        },
+    )
+    .unwrap();
+    rig.ledger
+        .write(
+            "orphans.json",
+            &json!([{"item":"orphan","host":"local","pane":"lost","owner_pane":"gone",
+                "name":"lost-child","reason":"owner gone is gone; the child is working","since_ms":1}]),
+        )
+        .unwrap();
+    let reports = rig.reports(60_001, "idle", "done", Some(1));
+    tick(&rig.fleet(), &reports, 60_001).unwrap();
+    let calls = rig.shell.calls.lock().unwrap();
+    let prompt = calls
+        .iter()
+        .find(|s| s.starts_with("herdr agent prompt owner"))
+        .unwrap();
+    assert!(
+        prompt.contains(
+            "Orphaned children the sweep keeps: lost-child on local (owner gone is gone; the child is working)."
+        ),
+        "{prompt}"
+    );
+}

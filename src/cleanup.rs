@@ -1,4 +1,7 @@
 //! Conservative cleanup plans. Every destructive action revalidates local state.
+//!
+//! One survey serves two scopes. `prune` sees every class and removes what a person confirms.
+//! The `serve` sweep sees only entries whose removal loses nothing and applies them unasked.
 
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
@@ -32,6 +35,67 @@ pub struct Entry {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Plan {
     pub entries: Vec<Entry>,
+}
+
+/// Who reads a survey. `Prune` is `doctor` and `prune`: every class, with removal after a
+/// person confirms it. `Sweep` is the `serve` sweep: only entries whose removal loses nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Prune,
+    Sweep,
+}
+
+/// The working directory of every process this user can see, resolved, or `None` when the
+/// process table cannot be read. Linux reads `/proc/<pid>/cwd`; macOS asks `lsof`. Wrangle's
+/// own process is included, so the caller's directory counts as used.
+pub fn process_cwds(shell: &dyn Shell) -> Option<Vec<std::path::PathBuf>> {
+    let proc = Path::new("/proc");
+    if proc.join("self/cwd").exists() {
+        let entries = std::fs::read_dir(proc).ok()?;
+        return Some(
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                })
+                // Another user's process, or one that already exited, has no readable cwd.
+                .filter_map(|e| std::fs::read_link(e.path().join("cwd")).ok())
+                .collect(),
+        );
+    }
+    let out = shell
+        .run(
+            "lsof",
+            &["-a".into(), "-d".into(), "cwd".into(), "-Fn".into()],
+        )
+        .ok()?;
+    // lsof exits 1 when some processes are unreadable; its output still lists the rest.
+    if out.stdout.is_empty() {
+        return None;
+    }
+    Some(
+        out.stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix('n'))
+            .map(|cwd| crate::worktree::resolved(Path::new(cwd)))
+            .collect(),
+    )
+}
+
+/// The first process working directory inside `path`, if any.
+fn process_in<'a>(cwds: &'a [std::path::PathBuf], path: &str) -> Option<&'a std::path::PathBuf> {
+    let root = crate::worktree::resolved(Path::new(path));
+    cwds.iter().find(|cwd| cwd.starts_with(&root))
+}
+
+/// What one survey saw of the host, shared by every worktree's finding.
+struct Seen {
+    scope: Scope,
+    panes: Vec<Pane>,
+    stale: BTreeSet<String>,
+    cwds: Option<Vec<std::path::PathBuf>>,
 }
 
 pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
@@ -429,24 +493,46 @@ fn processes(shell: &dyn Shell, panes: &[Pane], plan: &mut Plan) -> Result<()> {
 }
 
 pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
+    survey(node, Scope::Prune, now)
+}
+
+/// The cleanup plan for `scope`. In `Sweep` scope a worktree that cannot be checked is skipped,
+/// so one broken entry does not stop the sweep of the others.
+pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
+    // Process directories first: wrangle's own Git calls below run with `-C`, not `cd`.
+    let cwds = process_cwds(node.shell);
     let panes = current_panes(node.shell)?;
     let workspaces = workspaces(node.shell)?;
     let mut plan = Plan::default();
     let repos = repositories(node, &panes, &workspaces, &mut plan)?;
-    let stale_panes = stale_agents(node, now)?;
+    let seen = Seen {
+        scope,
+        stale: match scope {
+            Scope::Prune => stale_agents(node, now)?,
+            Scope::Sweep => BTreeSet::new(),
+        },
+        panes,
+        cwds,
+    };
     let mut closing = Closing::default();
     let trees: Vec<Tree> = trees(node.shell, &repos)?
         .into_iter()
         .filter(|t| Path::new(&t.path).exists())
         .collect();
-    let found = parallel(&trees, |tree| {
-        disposition(node, tree, &panes, &stale_panes, now)
-    });
+    let found = parallel(&trees, |tree| disposition(node, tree, &seen, now));
+    let mut removed = BTreeSet::new();
     for (tree, found) in trees.iter().zip(found) {
-        let Some(found) = found? else {
-            continue;
+        let found = match (found, scope) {
+            (Ok(Some(found)), _) => found,
+            (Ok(None), _) => continue,
+            (Err(error), Scope::Sweep) => {
+                eprintln!("wrangle sweep: skip {}: {error}", tree.path);
+                continue;
+            }
+            (Err(error), Scope::Prune) => return Err(error),
         };
         if found.removable {
+            removed.insert(tree.path.clone());
             closing.workspaces.extend(found.usage.workspace.clone());
             closing
                 .panes
@@ -462,9 +548,33 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
         plan.entries.push(e);
     }
     for repo in &repos {
-        branches(node.shell, repo, now, &mut plan)?;
+        match (branches(node.shell, repo, scope, now, &mut plan), scope) {
+            (Ok(()), _) => (),
+            (Err(error), Scope::Sweep) => {
+                eprintln!("wrangle sweep: skip branches in {repo}: {error}");
+            }
+            (Err(error), Scope::Prune) => return Err(error),
+        }
     }
-    idle(node, now, &panes, &workspaces, &closing, &mut plan)?;
+    idle(
+        node,
+        scope,
+        now,
+        &seen.panes,
+        &workspaces,
+        &closing,
+        &mut plan,
+    )?;
+    if scope == Scope::Sweep {
+        return Ok(plan);
+    }
+    targets(node, &repos, &trees, &removed, &seen, &mut plan)?;
+    prune_only(node, &seen, now, &mut plan)?;
+    Ok(plan)
+}
+
+/// The classes the sweep never applies: expired jobs, stale registrations, disk, and processes.
+fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result<()> {
     for job in crate::jobs::list(node.ledger)? {
         if job.ended_ms.is_some_and(|t| now.saturating_sub(t) > DAY) {
             plan.entries.push(entry(
@@ -496,9 +606,128 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
             ));
         }
     }
-    disk(node, &owned, &mut plan)?;
-    processes(node.shell, &panes, &mut plan)?;
-    Ok(plan)
+    disk(node, &owned, plan)?;
+    processes(node.shell, &seen.panes, plan)
+}
+
+/// The signature that Cargo, and every tool that follows the Cache Directory Tagging
+/// Specification, writes at the start of `CACHEDIR.TAG`.
+const CACHEDIR_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
+
+fn cache_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+        && std::fs::read_to_string(path.join("CACHEDIR.TAG"))
+            .is_ok_and(|tag| tag.starts_with(CACHEDIR_SIGNATURE))
+}
+
+/// Build output: a directory tagged with `CACHEDIR.TAG` directly under a main checkout or a
+/// linked worktree, such as Rust's `target/`. Removal loses only what a build makes again, so it
+/// is removable when no pane, workspace, or process uses the checkout. Only `prune` removes it.
+fn targets(
+    node: &Node<'_>,
+    repos: &BTreeSet<String>,
+    trees: &[Tree],
+    removed: &BTreeSet<String>,
+    seen: &Seen,
+    plan: &mut Plan,
+) -> Result<()> {
+    let mut checkouts = Vec::new();
+    for repo in repos {
+        checkouts.extend(listed(node.shell, repo)?.into_iter().take(1));
+    }
+    // A worktree that this plan removes takes its build output with it.
+    checkouts.extend(trees.iter().filter(|t| !removed.contains(&t.path)).cloned());
+    // Work in a linked worktree uses that worktree, even when it sits inside the main checkout.
+    let linked: Vec<std::path::PathBuf> = trees
+        .iter()
+        .map(|t| crate::worktree::resolved(Path::new(&t.path)))
+        .collect();
+    for checkout in checkouts {
+        let Ok(children) = std::fs::read_dir(&checkout.path) else {
+            continue;
+        };
+        let mut found: Vec<_> = children
+            .flatten()
+            .map(|child| child.path())
+            .filter(|path| cache_dir(path))
+            .collect();
+        if found.is_empty() {
+            continue;
+        }
+        found.sort();
+        let users = checkout_users(node, &checkout, &linked, seen)?;
+        for path in found {
+            let mut e = entry(
+                "targets",
+                path.display().to_string(),
+                if users.is_empty() {
+                    format!("build output in {}; nothing uses it", checkout.path)
+                } else {
+                    format!(
+                        "build output in {}; refused: {}",
+                        checkout.path,
+                        users.join("; ")
+                    )
+                },
+                users.is_empty(),
+            );
+            e.tree = Some(checkout.clone());
+            plan.entries.push(e);
+        }
+    }
+    Ok(())
+}
+
+/// What uses a checkout: its Herdr workspace, a pane in it, or a process working in it. Work in
+/// another linked worktree nested inside it is that worktree's.
+fn checkout_users(
+    node: &Node<'_>,
+    checkout: &Tree,
+    linked: &[std::path::PathBuf],
+    seen: &Seen,
+) -> Result<Vec<String>> {
+    let root = crate::worktree::resolved(Path::new(&checkout.path));
+    let own = |path: &Path| {
+        path.starts_with(&root)
+            && !linked
+                .iter()
+                .any(|tree| *tree != root && tree.starts_with(&root) && path.starts_with(tree))
+    };
+    let mut users = Vec::new();
+    if let Some(workspace) =
+        crate::worktree::workspace(node.shell, Path::new(&checkout.repo), &checkout.path)?
+    {
+        users.push(format!("workspace {workspace} shows it"));
+    }
+    for pane in &seen.panes {
+        if [pane.cwd.as_deref(), pane.foreground_cwd.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|cwd| own(&crate::worktree::resolved(Path::new(cwd))))
+        {
+            users.push(format!("{} works in it", pane.pane_id));
+        }
+    }
+    match &seen.cwds {
+        None => users.push("the process table is unreadable".into()),
+        Some(cwds) => {
+            if let Some(cwd) = cwds.iter().find(|cwd| own(cwd)) {
+                users.push(format!("a process works in {}", cwd.display()));
+            }
+        }
+    }
+    Ok(users)
+}
+
+fn remove_target(path: &str) -> Result<String> {
+    // A symlink or a directory that lost its tag is not the build output the plan saw.
+    if !cache_dir(Path::new(path)) {
+        return Err(Error::Invalid(format!(
+            "refuse {path}: no longer a tagged cache directory"
+        )));
+    }
+    std::fs::remove_dir_all(path)?;
+    Ok(format!("removed build output {path}"))
 }
 
 /// `f` over `items` on a few threads, in order. Each item spawns Git processes, which run
@@ -540,8 +769,9 @@ struct Closing {
 }
 
 /// Local branches without a worktree. Deleting one loses nothing when it is integrated or every
-/// commit is on a remote branch. The default branch is kept.
-fn branches(shell: &dyn Shell, repo: &str, now: u64, plan: &mut Plan) -> Result<()> {
+/// commit is on a remote branch. The default branch is kept. The sweep takes only branches whose
+/// every commit is on a remote ref, and lists nothing else.
+fn branches(shell: &dyn Shell, repo: &str, scope: Scope, now: u64, plan: &mut Plan) -> Result<()> {
     let checked_out: BTreeSet<String> =
         listed(shell, repo)?.into_iter().map(|t| t.branch).collect();
     let base = crate::integration::base(shell, repo)?;
@@ -577,24 +807,27 @@ fn branches(shell: &dyn Shell, repo: &str, now: u64, plan: &mut Plan) -> Result<
     let found = parallel(&candidates, |&(_, reference, branch)| {
         // The remote check is one cheap call; the integration search is the costly one.
         let unpushed = count(shell, repo, &[reference, "--not", "--remotes"])?;
-        let (detail, removable) = if unpushed == 0 {
-            ("every commit is on a remote branch".into(), true)
+        Ok(if unpushed == 0 {
+            Some(("every commit is on a remote branch".into(), true))
+        } else if scope == Scope::Sweep {
+            None
         } else if let Some(integrated) = crate::integration::check(shell, repo, branch)? {
-            (integrated.to_string(), true)
+            Some((integrated.to_string(), true))
         } else {
-            (
+            Some((
                 format!(
                     "{} on no remote, the last {} ago",
                     commits(unpushed),
                     since(last_commit(shell, repo, reference, now)?)
                 ),
                 false,
-            )
-        };
-        Ok((detail, removable))
+            ))
+        })
     });
     for (&(head, _, branch), found) in candidates.iter().zip(found) {
-        let (detail, removable) = found?;
+        let Some((detail, removable)) = found? else {
+            continue;
+        };
         let mut e = entry("branches", format!("{repo} {branch}"), detail, removable);
         e.tree = Some(Tree {
             repo: repo.into(),
@@ -610,8 +843,14 @@ fn branches(shell: &dyn Shell, repo: &str, now: u64, plan: &mut Plan) -> Result<
 /// Panes whose closing loses nothing. At once: a shell at an empty prompt in an ended job's tab,
 /// whose output the job log keeps, or in a directory that no longer exists. From a fresh
 /// service snapshot: agents idle or done for a day, and shells with no foreground command at
-/// any sample for a day.
-fn idle_panes(node: &Node<'_>, now: u64, panes: &[Pane]) -> Result<BTreeMap<String, String>> {
+/// any sample for a day. The sweep takes only the immediate rules, and never the caller's pane.
+fn idle_panes(
+    node: &Node<'_>,
+    scope: Scope,
+    now: u64,
+    panes: &[Pane],
+) -> Result<BTreeMap<String, String>> {
+    let caller = std::env::var("HERDR_PANE_ID").ok();
     let mut idle = BTreeMap::new();
     let ended: BTreeMap<String, crate::jobs::Job> = crate::jobs::list(node.ledger)?
         .into_iter()
@@ -619,6 +858,9 @@ fn idle_panes(node: &Node<'_>, now: u64, panes: &[Pane]) -> Result<BTreeMap<Stri
         .map(|job| (job.pane.clone(), job))
         .collect();
     for pane in panes.iter().filter(|p| p.agent.is_none()) {
+        if scope == Scope::Sweep && caller.as_deref() == Some(pane.pane_id.as_str()) {
+            continue;
+        }
         let reason = if let Some(job) = ended.get(&pane.pane_id) {
             format!(
                 "job {} ended{}; its log keeps the output",
@@ -642,6 +884,9 @@ fn idle_panes(node: &Node<'_>, now: u64, panes: &[Pane]) -> Result<BTreeMap<Stri
         ) {
             idle.insert(pane.pane_id.clone(), reason);
         }
+    }
+    if scope == Scope::Sweep {
+        return Ok(idle);
     }
     let Some(snapshot) = node
         .ledger
@@ -703,13 +948,14 @@ fn idle_panes(node: &Node<'_>, now: u64, panes: &[Pane]) -> Result<BTreeMap<Stri
 /// caller's workspace and those a worktree removal closes are not entries.
 fn idle(
     node: &Node<'_>,
+    scope: Scope,
     now: u64,
     panes: &[Pane],
     workspaces: &[Workspace],
     closing: &Closing,
     plan: &mut Plan,
 ) -> Result<()> {
-    let idle = idle_panes(node, now, panes)?;
+    let idle = idle_panes(node, scope, now, panes)?;
     let caller = std::env::var("HERDR_WORKSPACE_ID").ok();
     let mut members: BTreeMap<&str, Vec<&Pane>> = BTreeMap::new();
     for pane in panes {
@@ -768,18 +1014,19 @@ struct Usage {
     in_use: Vec<String>,
 }
 
-fn usage(node: &Node<'_>, tree: &Tree, panes: &[Pane], stale: &BTreeSet<String>) -> Result<Usage> {
+fn usage(node: &Node<'_>, tree: &Tree, seen: &Seen) -> Result<Usage> {
     let checkout = Path::new(&tree.repo);
     let workspace = crate::worktree::workspace(node.shell, checkout, &tree.path)?;
-    let holders: Vec<Pane> = crate::worktree::holders(panes, &tree.path, workspace.as_deref())
-        .into_iter()
-        .cloned()
-        .collect();
+    let holders: Vec<Pane> =
+        crate::worktree::holders(&seen.panes, &tree.path, workspace.as_deref())
+            .into_iter()
+            .cloned()
+            .collect();
     let mut in_use = Vec::new();
     for pane in &holders {
         if let Some(reason) = crate::worktree::busy(node.shell, pane)? {
             in_use.push(format!("{} is busy ({reason})", pane.pane_id));
-        } else if pane.agent.is_some() && !stale.contains(&pane.pane_id) {
+        } else if pane.agent.is_some() && !seen.stale.contains(&pane.pane_id) {
             in_use.push(format!(
                 "{} has an agent that is {}; its owner closes it with `wrangle close`",
                 pane.pane_id,
@@ -792,6 +1039,34 @@ fn usage(node: &Node<'_>, tree: &Tree, panes: &[Pane], stale: &BTreeSet<String>)
         holders,
         in_use,
     })
+}
+
+/// Why the sweep keeps a worktree that `prune` could remove: the sweep takes only a worktree that
+/// nothing holds, not even an idle shell, a workspace, or a process working in it.
+fn held(tree: &Tree, usage: &Usage, seen: &Seen) -> Vec<String> {
+    if seen.scope == Scope::Prune {
+        return Vec::new();
+    }
+    let mut held: Vec<String> = usage
+        .holders
+        .iter()
+        .map(|p| format!("{} holds it", p.pane_id))
+        .chain(
+            usage
+                .workspace
+                .iter()
+                .map(|w| format!("workspace {w} shows it")),
+        )
+        .collect();
+    match &seen.cwds {
+        None => held.push("the process table is unreadable".into()),
+        Some(cwds) => {
+            if let Some(cwd) = process_in(cwds, &tree.path) {
+                held.push(format!("a process works in {}", cwd.display()));
+            }
+        }
+    }
+    held
 }
 
 /// What removing `tree` itself would lose: uncommitted changes or a foreign lock.
@@ -817,17 +1092,12 @@ struct Disposition {
 /// Doctor's finding for a worktree, or `None` when it is ordinary work. Removable: a worktree
 /// whose HEAD has not moved a day after Git made it and whose branch has no commits beyond the
 /// base, or an integrated branch, when the worktree
-/// is clean and no pane uses it. An unused worktree with unmerged commits is reported.
-fn disposition(
-    node: &Node<'_>,
-    tree: &Tree,
-    panes: &[Pane],
-    stale: &BTreeSet<String>,
-    now: u64,
-) -> Result<Option<Disposition>> {
-    let usage = usage(node, tree, panes, stale)?;
+/// is clean and no pane uses it. An unused worktree with unmerged commits is reported. The sweep
+/// takes only an integrated branch's worktree, and lists nothing else.
+fn disposition(node: &Node<'_>, tree: &Tree, seen: &Seen, now: u64) -> Result<Option<Disposition>> {
+    let usage = usage(node, tree, seen)?;
     if tree.branch.is_empty() {
-        return detached(node, tree, usage, now).map(Some);
+        return detached(node, tree, usage, seen, now).map(Some);
     }
     let base = crate::integration::base(node.shell, &tree.repo)?;
     let branch = format!("refs/heads/{}", tree.branch);
@@ -842,6 +1112,10 @@ fn disposition(
         _ => None,
     };
     let (finding, eligible) = if let Some(origin) = untouched {
+        // The sweep never takes a worktree for having no commits: that is a person's call.
+        if seen.scope == Scope::Sweep {
+            return Ok(None);
+        }
         let made = now.saturating_sub(origin.made_ms);
         if made <= DAY || !usage.in_use.is_empty() {
             return Ok(None);
@@ -858,7 +1132,7 @@ fn disposition(
         crate::integration::check(node.shell, &tree.repo, &tree.branch)?
     {
         (format!("branch {} {integrated}", tree.branch), true)
-    } else if !usage.in_use.is_empty() {
+    } else if !usage.in_use.is_empty() || seen.scope == Scope::Sweep {
         return Ok(None);
     } else {
         let ahead = count(node.shell, &tree.repo, &[&format!("{base}..{branch}")])?;
@@ -881,6 +1155,7 @@ fn disposition(
         .in_use
         .iter()
         .cloned()
+        .chain(held(tree, &usage, seen))
         .chain(blockers(node, tree)?)
         .collect();
     Ok(Some(Disposition {
@@ -899,7 +1174,13 @@ fn disposition(
 
 /// A detached worktree has no branch to integrate. Removing it loses nothing when it is clean,
 /// unheld, and a remote branch holds its HEAD.
-fn detached(node: &Node<'_>, tree: &Tree, usage: Usage, now: u64) -> Result<Disposition> {
+fn detached(
+    node: &Node<'_>,
+    tree: &Tree,
+    usage: Usage,
+    seen: &Seen,
+    now: u64,
+) -> Result<Disposition> {
     let head = &tree.head[..tree.head.len().min(10)];
     let unpushed = count(node.shell, &tree.repo, &[&tree.head, "--not", "--remotes"])?;
     let finding = if unpushed == 0 {
@@ -915,6 +1196,7 @@ fn detached(node: &Node<'_>, tree: &Tree, usage: Usage, now: u64) -> Result<Disp
         .in_use
         .iter()
         .cloned()
+        .chain(held(tree, &usage, seen))
         .chain(blockers(node, tree)?)
         .collect();
     Ok(Disposition {
@@ -948,7 +1230,7 @@ fn stale_agents(node: &Node<'_>, now: u64) -> Result<BTreeSet<String>> {
         .unwrap_or_default())
 }
 
-fn validate_tree(node: &Node<'_>, planned: &Tree, now: u64) -> Result<Usage> {
+fn validate_tree(node: &Node<'_>, planned: &Tree, scope: Scope, now: u64) -> Result<Usage> {
     let current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
         .find(|t| t.path == planned.path)
@@ -968,14 +1250,16 @@ fn validate_tree(node: &Node<'_>, planned: &Tree, now: u64) -> Result<Usage> {
             planned.path
         )));
     }
-    let found = disposition(
-        node,
-        &current,
-        &current_panes(node.shell)?,
-        &stale_agents(node, now)?,
-        now,
-    )?
-    .ok_or_else(|| {
+    let seen = Seen {
+        scope,
+        cwds: process_cwds(node.shell),
+        panes: current_panes(node.shell)?,
+        stale: match scope {
+            Scope::Prune => stale_agents(node, now)?,
+            Scope::Sweep => BTreeSet::new(),
+        },
+    };
+    let found = disposition(node, &current, &seen, now)?.ok_or_else(|| {
         Error::Invalid(format!(
             "refuse {}: branch {} is not a cleanup candidate",
             current.path, current.branch
@@ -999,8 +1283,8 @@ pub fn forget(ledger: &Ledger, path: &str) -> Result<()> {
     })
 }
 
-fn remove_tree(node: &Node<'_>, tree: &Tree, now: u64) -> Result<String> {
-    let held = validate_tree(node, tree, now)?;
+fn remove_tree(node: &Node<'_>, tree: &Tree, scope: Scope, now: u64) -> Result<String> {
+    let held = validate_tree(node, tree, scope, now)?;
     let linked = crate::worktree::Linked {
         checkout: tree.repo.clone().into(),
         path: tree.path.clone(),
@@ -1109,7 +1393,7 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
     // A remote plan is input, not authority: rebuild the candidate set on this host.
     let actual = doctor(node, now)?;
     for requested in &plan.entries {
-        match apply_one(node, &actual, requested, now) {
+        match apply_one(node, Scope::Prune, &actual, requested, now) {
             Ok(result) => applied.results.push(result),
             Err(e) => applied.failures.push(e.to_string()),
         }
@@ -1117,7 +1401,34 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
     Ok(applied)
 }
 
-fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<String> {
+/// The classes the sweep applies. Everything else waits for `prune`.
+pub const SWEPT: [&str; 4] = ["worktrees", "branches", "workspaces", "panes"];
+
+/// The `serve` sweep: survey in `Sweep` scope and apply each removable entry with the same
+/// checks as `prune`. Each entry is independent, so one failure does not stop the others.
+pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
+    let mut applied = Applied::default();
+    let plan = survey(node, Scope::Sweep, now)?;
+    for entry in plan
+        .entries
+        .iter()
+        .filter(|e| e.removable && SWEPT.contains(&e.class.as_str()))
+    {
+        match apply_one(node, Scope::Sweep, &plan, entry, now) {
+            Ok(result) => applied.results.push(result),
+            Err(e) => applied.failures.push(e.to_string()),
+        }
+    }
+    Ok(applied)
+}
+
+fn apply_one(
+    node: &Node<'_>,
+    scope: Scope,
+    actual: &Plan,
+    requested: &Entry,
+    now: u64,
+) -> Result<String> {
     if matches!(requested.class.as_str(), "disk" | "processes") {
         return Ok(format!("{} {}: report only", requested.class, requested.id));
     }
@@ -1143,7 +1454,7 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
     }
     match candidate.class.as_str() {
         "worktrees" => match &requested.tree {
-            Some(tree) => remove_tree(node, tree, now),
+            Some(tree) => remove_tree(node, tree, scope, now),
             None => drop_registration(node, &candidate.id),
         },
         "branches" => match &requested.tree {
@@ -1176,6 +1487,7 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             Ok(format!("closed pane {}", candidate.id))
         }
         "jobs" => remove_job(node, &candidate.id, now),
+        "targets" => remove_target(&candidate.id),
         _ => Err(Error::Invalid("unknown cleanup class".into())),
     }
 }

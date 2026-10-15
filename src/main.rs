@@ -23,6 +23,7 @@ mod repository;
 mod runtime;
 mod service;
 mod shell;
+mod sweep;
 mod transcript;
 mod watchdog;
 mod work;
@@ -214,9 +215,15 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         }
         HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
         // Over SSH the caller has no pane or workspace on this host.
-        HostCommand::Close { pane } => print(
+        HostCommand::Close { pane, pushed } => print(
             true,
-            &close::local(node.shell, node.ledger, &pane, &close::Caller::default())?,
+            &close::local(
+                node.shell,
+                node.ledger,
+                &pane,
+                &close::Caller::default(),
+                pushed,
+            )?,
             String::new,
         )?,
         HostCommand::Prune { plan } => print(

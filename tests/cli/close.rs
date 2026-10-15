@@ -11,7 +11,7 @@ teardown = [
 
 /// A real repository with a `wrangle.toml` teardown and a locked linked worktree on `feat/x`.
 /// Fake Herdr serves `panes.json` and `worktrees.json`, which shows the worktree in workspace w2.
-fn close_rig(name: &str) -> (Rig, PathBuf) {
+pub(super) fn close_rig(name: &str) -> (Rig, PathBuf) {
     let rig = Rig::new(name);
     let repo = rig.dir.join("home/repo");
     fs::create_dir_all(&repo).unwrap();
@@ -74,7 +74,7 @@ fn advance_main(rig: &Rig) {
     );
 }
 
-fn git(dir: &Path, args: &[&str]) -> String {
+pub(super) fn git(dir: &Path, args: &[&str]) -> String {
     let out = isolated("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@t"])
         .args(args)
@@ -118,7 +118,7 @@ fn registered(rig: &Rig) -> Vec<Value> {
 }
 
 /// The teardown's log line: it ran in the worktree, with every placeholder substituted.
-fn hook_log(rig: &Rig, tree: &Path) -> String {
+pub(super) fn hook_log(rig: &Rig, tree: &Path) -> String {
     let main = rig.dir.join("home/repo").canonicalize().unwrap();
     format!(
         "{} {} feat/x {}\n",
@@ -128,7 +128,7 @@ fn hook_log(rig: &Rig, tree: &Path) -> String {
     )
 }
 
-fn branch_exists(rig: &Rig, branch: &str) -> bool {
+pub(super) fn branch_exists(rig: &Rig, branch: &str) -> bool {
     !git(&rig.dir.join("home/repo"), &["branch", "--list", branch])
         .trim()
         .is_empty()

@@ -15,6 +15,8 @@ mod place;
 mod review;
 #[path = "cli/review_fixes.rs"]
 mod review_fixes;
+#[path = "cli/sweep.rs"]
+mod sweep;
 #[path = "cli/transcripts.rs"]
 mod transcripts;
 #[path = "cli/watchdog.rs"]
@@ -223,13 +225,18 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
             <= snapshot["sampled_ms"].as_u64().unwrap()
     );
     // `--once` keeps publishing while its action lanes run, so a slow host can
-    // add ticks. Every tick reads agents, panes, and each shell's foreground, and nothing else.
+    // add ticks. Every tick reads agents, panes, and each shell's foreground. The sweep reads
+    // panes and workspaces, and finds nothing to close: the caller's own shell is never swept.
     let herdr = rig.log("herdr.log");
+    assert!(herdr.contains("agent list\npane list\npane process-info --pane w1:p1\n"));
     assert!(
-        !herdr.is_empty()
-            && herdr
-                .split("agent list\npane list\npane process-info --pane w1:p1\n")
-                .all(str::is_empty),
+        herdr.lines().all(|line| [
+            "agent list",
+            "pane list",
+            "pane process-info --pane w1:p1",
+            "workspace list"
+        ]
+        .contains(&line)),
         "{herdr}"
     );
     assert_eq!(rig.log("ssh.log"), "");

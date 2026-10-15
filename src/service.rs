@@ -1,4 +1,6 @@
-//! Publication, watchdog, and admission have independent clocks and budgets.
+//! Publication, watchdog, admission, and the sweep have independent clocks and budgets.
+//! Publication runs on the loop itself; each action lane runs on its own thread, so a slow sweep
+//! never delays a check-in or an admission.
 
 use crate::config::Policy;
 use crate::error::{Error, Result};
@@ -10,7 +12,17 @@ use crate::{items, work};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-fn actions(ledger: &Ledger, policy: &Policy, home: String, watchdog: bool) -> Result<()> {
+/// The action lanes, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Watchdog,
+    Admission,
+    Sweep,
+}
+
+const LANES: [Lane; 3] = [Lane::Watchdog, Lane::Admission, Lane::Sweep];
+
+fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result<()> {
     let shell = System::default();
     let fleet = if items::list(ledger)?.is_empty() && work::queue(ledger)?.is_empty() {
         Fleet {
@@ -23,20 +35,22 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, watchdog: bool) -> Re
     } else {
         Fleet::discover(&shell, ledger, policy, home)?
     };
-    if watchdog {
-        let now = now_ms();
-        let reports = fleet.status(now)?;
-        crate::watchdog::tick(&fleet, &reports, now)?;
-        items::reconcile(ledger, &reports, now)
-    } else {
-        work::tick(&fleet, now_ms())
+    match lane {
+        Lane::Watchdog => {
+            let now = now_ms();
+            let reports = fleet.status(now)?;
+            crate::watchdog::tick(&fleet, &reports, now)?;
+            items::reconcile(ledger, &reports, now)
+        }
+        Lane::Admission => work::tick(&fleet, now_ms()),
+        Lane::Sweep => crate::sweep::pass(&fleet, now_ms()),
     }
 }
 
 pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
-    let mut workers: [Option<std::thread::JoinHandle<()>>; 2] = [None, None];
-    let mut completed = [false; 2];
+    let mut workers: [Option<std::thread::JoinHandle<()>>; LANES.len()] = Default::default();
+    let mut completed = [false; LANES.len()];
     let mut next = Instant::now();
     loop {
         node.tick(now_ms())?;
@@ -48,7 +62,7 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
                 let home = node.home.to_owned();
                 let send = send.clone();
                 *worker = Some(std::thread::spawn(move || {
-                    let _ = send.send((lane, actions(&ledger, &policy, home, lane == 0)));
+                    let _ = send.send((lane, actions(&ledger, &policy, home, LANES[lane])));
                 }));
             }
         }
@@ -63,7 +77,7 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
                     }
                     completed[lane] = true;
                     if let Err(error) = result {
-                        eprintln!("wrangle service lane {lane}: {error}");
+                        eprintln!("wrangle service lane {:?}: {error}", LANES[lane]);
                     }
                     if once && completed.iter().all(|done| *done) {
                         return Ok(());

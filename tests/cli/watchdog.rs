@@ -1,5 +1,5 @@
 use super::*;
-const NOW: u64 = 172_800_001;
+pub(super) const NOW: u64 = 172_800_001;
 
 pub(super) fn watchdog_rig(name: &str) -> Rig {
     let rig = Rig::new(name);
@@ -308,7 +308,7 @@ fn doctor_reports_an_unused_unmerged_worktree_and_prune_keeps_it() {
 }
 
 /// Herdr whose `process-info` shows a foreground command for each pane named in `$RIG/busy`.
-fn shells_rig(name: &str) -> Rig {
+pub(super) fn shells_rig(name: &str) -> Rig {
     let rig = watchdog_rig(name);
     rig.script("herdr", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/herdr.log"
@@ -512,22 +512,4 @@ fn doctor_closes_ended_job_tabs_and_shells_in_deleted_directories_at_once() {
     }
     // The job record and log stay until they expire.
     assert!(rig.dir.join("state/jobs/r-1.json").exists());
-}
-
-#[test]
-fn serve_never_removes_worktrees() {
-    // Removal is the owner's `wrangle close` or a confirmed `prune`, never a timer.
-    let rig = watchdog_rig("serve-no-removal");
-    fs::write(rig.dir.join("deleted"), "").unwrap();
-    for clock in ["172800001", "176400001"] {
-        fs::write(rig.dir.join("clock"), clock).unwrap();
-        let out = rig.run(&["serve", "--once", "--interval", "1"]);
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    assert!(!rig.log("git.log").contains("worktree remove"));
-    assert!(rig.dir.join("home/repo/tree").exists());
 }

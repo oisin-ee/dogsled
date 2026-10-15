@@ -402,6 +402,25 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
             finished.join(", ")
         );
     }
+    // An orphan has no owner to hear about it, so every check-in on this host reports it.
+    if let Ok(orphans) = crate::sweep::list(fleet.ledger)
+        && !orphans.is_empty()
+    {
+        let _ = writeln!(
+            note,
+            "Orphaned children the sweep keeps: {}. See `wrangle status`.",
+            orphans
+                .iter()
+                .map(|o| format!(
+                    "{} on {} ({})",
+                    o.name.as_deref().unwrap_or(&o.pane),
+                    o.host,
+                    o.reason
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
     note.push_str("Decide whether to keep waiting, nudge the item (`agents send` or `herdr agent prompt`), close a finished child (`wrangle close`), or stop a job (`wrangle stop`).\n");
     crate::activity::plain(&note)
 }

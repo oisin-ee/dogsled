@@ -135,13 +135,13 @@ fn service_publishes_snapshots_while_remote_action_times_out() {
     let (_, ticket) = rig.json(&["place", "--host", "netcup"]);
     rig.expire_cache();
     rig.script("ssh", "#!/bin/sh\nexec sleep 60\n");
-    // Every pane-list call reads the previous published snapshot. This observes
-    // publication at each service tick without sleeps or polling in the test.
+    // Every agent-list call, which only a publication tick makes, reads the previous published
+    // snapshot. This observes publication at each service tick without sleeps or polling.
     rig.script("herdr", r#"#!/bin/sh
 case "$*" in
  'machine list --json') cat "$RIG/machines.json" ;;
- 'agent list') cat "$RIG/agents.json" ;;
- 'pane list') cat "$RIG/state/host.json" >> "$RIG/publications"; printf '\n---\n' >> "$RIG/publications"; cat "$RIG/panes.json" ;;
+ 'agent list') cat "$RIG/state/host.json" >> "$RIG/publications"; printf '\n---\n' >> "$RIG/publications"; cat "$RIG/agents.json" ;;
+ 'pane list') cat "$RIG/panes.json" ;;
  *) exit 2 ;;
 esac
 "#);

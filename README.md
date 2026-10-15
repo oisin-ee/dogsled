@@ -141,7 +141,7 @@ For non-waiting callers, admission prompts the owner only in `idle` or `done`. O
 Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
 The measurement step uses no SSH. It reads CPU busy time, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
-Separate watchdog and admission workers keep prompts and slow setup independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
+Separate watchdog, admission, and sweep workers keep prompts, slow setup, and cleanup independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
 An admission timeout records a failed ticket. The service continues publication and later actions.
 It writes `~/.local/state/wrangle/host.json` through atomic replacement.
 Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, and `transcript_modified`.
@@ -217,9 +217,10 @@ wrangle doctor --json
 wrangle doctor --host netcup
 wrangle prune worktrees jobs
 wrangle prune --host netcup --yes panes
+wrangle prune targets
 ```
 
-Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `disk`, `processes`, and `repositories`.
+Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `targets`, `disk`, `processes`, and `repositories`.
 Doctor lists linked worktrees on a branch and detached ones.
 A removable worktree has a HEAD that has not moved more than 24 hours after Git made it and no commits beyond the base, or an integrated branch.
 A detached worktree is removable when it is clean, no pane holds it, and a remote branch holds its HEAD. Otherwise doctor reports its commits on no remote. A worktree whose HEAD has not moved is not integrated, even when its base moved past it. It also needs a clean tree, no foreign lock, and no pane that uses it.
@@ -239,6 +240,9 @@ Other panes need more than 24 hours continuously idle or done, based on service 
 A shell pane is idle when the service found no foreground command at each sample for more than 24 hours, and it still has none. Herdr reports no activity time, so a command that starts and ends between samples does not count.
 A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
 Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known wrangle-owned paths.
+A `targets` entry is build output: a directory with a `CACHEDIR.TAG` that starts with the cache-directory signature, directly under a main checkout or a linked worktree, such as Rust's `target/`.
+It is removable when no Herdr workspace shows the checkout and no pane or process works in it. Work in a linked worktree inside the main checkout uses that worktree, not the main checkout.
+Prune removes it after it checks the tag again. A worktree that the same plan removes takes its build output with it, so that output is not listed.
 Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune never kills processes or frees arbitrary disk paths.
 
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
@@ -251,7 +255,21 @@ Each entry is independent. A failed or refused entry does not stop the others; p
 Placement records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
 A configured path that is not a Git checkout is a report-only `repositories` entry.
-Wrangle never removes anything on a timer. A lead removes its finished children with `wrangle close`; everything else waits for a confirmed `prune`.
+### The sweep in `serve`
+
+A lead removes its finished children with `wrangle close`, and a job closes its own tab. That closed loop ends most work.
+The sweep catches what a broken loop leaves behind: a crashed owner, a killed process, or a worktree that something else made.
+On each pass, the service's sweep worker builds the doctor plan in sweep scope. It applies only entries whose removal loses nothing:
+
+- `panes` and `workspaces`: a shell at an empty prompt in an ended job's tab, or in a directory that no longer exists. A workspace closes whole when every pane in it is one of these.
+- `worktrees`: a clean worktree whose branch is integrated, or a clean detached worktree whose HEAD is on a remote branch. Nothing may hold it: no pane works in it, no workspace shows it, and no process works in it. An idle shell holds it too.
+- `branches`: a local branch with no worktree whose every commit is on a remote ref. An integrated branch with commits on no remote waits for `prune`.
+- Orphaned children: an open agent item whose owner pane no longer exists, whose child is `idle` or `done`, whose worktree is clean, and whose every commit is on a remote ref. The sweep closes it as `wrangle close` does: `teardown`, the workspace, the worktree, and the item. A remote child closes over SSH with `host close --pushed`.
+
+The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
+Each removal is a `wrangle sweep:` line on stderr, the service journal.
+An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
+Everything else is for a confirmed `prune`: idle shells and agents after a day, a worktree with no commits a day after it was made, integrated branches with unpushed commits, ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
 
 ## Placement
 

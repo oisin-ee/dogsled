@@ -60,6 +60,7 @@ mod tests {
             }],
             items: Vec::new(),
             queue: Vec::new(),
+            orphans: Vec::new(),
         }
     }
 
