@@ -135,10 +135,12 @@ wrangle prune --host HOST worktrees jobs
 ```
 
 Doctor is read-only. Prune displays candidates and asks before removal; `--yes` skips only the question.
-Classes are `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `disk`, `processes`, and `repositories`. Disk, process, and repository findings are report-only, as are worktrees and branches with unpushed or unmerged work.
+Classes are `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `targets`, `disk`, `processes`, and `repositories`. Disk, process, and repository findings are report-only, as are worktrees and branches with unpushed or unmerged work. `targets` is build output, such as Rust `target/` directories that nothing uses; only `prune` removes it.
 Never use cleanup to close working or blocked agents. Dirty, foreign-locked, or held worktrees cannot be removed.
 A worktree is a candidate when its branch is merged, squashed, or cherry-picked into the remote default branch, or its HEAD has not moved a day after it was made. A detached worktree is a candidate when a remote branch holds its HEAD. A new worktree with no commits is never a merged branch. A shell with no running command does not hold it.
-Wrangle never removes anything on a timer. Close your own finished children with `wrangle close`.
+Close your own finished children with `wrangle close`. That is the loop; do not leave them for the sweep.
+`serve` sweeps only what loses nothing: ended job tabs, shells in deleted directories, clean integrated worktrees that nothing holds, fully pushed branches, and orphaned children (owner gone, idle or done, clean, pushed).
+An orphan that is dirty, unpushed, working, or blocked stays open and shows as `orphaned:` in status, the brief, and check-ins. Take it over or decide its fate; the sweep never will.
 Prune refuses changed Git identities and removes a worktree the same way as `close`.
 
 ## Checkout and worktrees

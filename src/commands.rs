@@ -12,6 +12,8 @@ pub struct Status {
     pub hosts: Vec<HostReport>,
     pub items: Vec<crate::items::Item>,
     pub queue: Vec<crate::work::Ticket>,
+    /// Open children whose owner is gone and that the sweep keeps, with the reason.
+    pub orphans: Vec<crate::sweep::Orphan>,
 }
 
 pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
@@ -19,6 +21,7 @@ pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
         hosts: fleet.status(crate::ledger::now_ms())?,
         items: crate::items::list(fleet.ledger)?,
         queue: crate::work::queue(fleet.ledger)?,
+        orphans: crate::sweep::list(fleet.ledger)?,
     })
 }
 
@@ -170,8 +173,13 @@ pub fn brief(status: &Status) -> String {
         .iter()
         .filter(|i| crate::items::finished(i, &status.hosts))
         .count();
+    let orphans = if status.orphans.is_empty() {
+        String::new()
+    } else {
+        format!(" · {} orphaned", status.orphans.len())
+    };
     rows.push(format!(
-        "{} open items{} · {} queued · {} stalls. Run `wrangle status` for details.",
+        "{} open items{}{orphans} · {} queued · {} stalls. Run `wrangle status` for details.",
         status
             .items
             .iter()
@@ -280,7 +288,9 @@ pub fn render(status: &Status) -> String {
             item.id,
             item.host,
             item.pane,
-            if crate::items::finished(item, &status.hosts) {
+            if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
+                format!(" orphaned: {}", one_line(&orphan.reason))
+            } else if crate::items::finished(item, &status.hosts) {
                 format!(
                     " finished; run {}",
                     crate::items::close_command(item, &status.hosts)

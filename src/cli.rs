@@ -54,7 +54,7 @@ pub enum Command {
         host: Option<String>,
         #[arg(long)]
         yes: bool,
-        #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "disk", "processes"])]
+        #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "targets", "disk", "processes"])]
         classes: Vec<String>,
     },
     /// Reserve capacity on the host with the most headroom.
@@ -181,6 +181,9 @@ pub enum HostCommand {
     },
     Close {
         pane: String,
+        /// Also refuse a worktree with a commit on no remote ref: the sweep's orphan close.
+        #[arg(long)]
+        pushed: bool,
     },
     Launch {
         #[arg(long)]

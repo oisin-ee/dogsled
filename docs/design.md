@@ -116,7 +116,7 @@ Normal restarts retain delivered events and last-send times. Herdr has no prompt
 Each prompt attempt is persisted before submission. Interrupted or failed attempts remain visible and retry after 30 minutes.
 This can duplicate one delayed check-in after an ambiguous acceptance, but avoids restart spam and silent permanent loss.
 Top-level notification attempts are at-most-once per stall; a crash during submission can lose that notification.
-Watchdog and admission have separate action workers, so slow setup cannot block check-ins or publication.
+Watchdog, admission, and the sweep have separate action workers, so slow setup or cleanup cannot block check-ins or publication.
 
 **Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
 
@@ -145,11 +145,22 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 - shells at an empty prompt in an ended job's tab or in a deleted directory, at once;
 - panes whose agent has been `done` or `idle`, or whose shell has run no command, for more than 24 h;
 - wrangle jobs that ended more than 24 h ago, with their logs;
+- build output (`targets`): a directory tagged with `CACHEDIR.TAG` directly under a checkout or worktree that no workspace, pane, or process uses, such as Rust's `target/`;
 - disk above 90 % used, with the largest wrangle-owned paths;
 - processes using more than one core that are not under any Herdr pane (report only).
 
-Wrangle never removes anything on a timer. The lead that started a child closes it with `wrangle close` when it is finished.
-Every other class waits for `wrangle prune [--host H] [<class>…]`, which shows what it will remove, asks, then removes it. It never kills processes.
+Cleanup is a closed loop first. The lead that started a child closes it with `wrangle close` when it is finished, and a job closes its own tab.
+`serve` runs a last-resort sweep on its own action worker, beside the watchdog and admission. Publication stays measurement only.
+Each pass builds the doctor plan in sweep scope and applies only entries whose removal loses nothing:
+
+- ended job tabs and shells in deleted directories (the immediate pane rules), and a workspace made only of them;
+- clean worktrees that nothing holds (no pane, workspace, or process) whose branch is integrated, and clean, unheld detached worktrees whose HEAD is on a remote;
+- local branches without a worktree whose every commit is on a remote ref;
+- orphaned children: an open agent item whose owner pane is gone, whose child is idle or done, and whose worktree is clean and pushed. The sweep closes it as `wrangle close` would (teardown, workspace, worktree, item); a remote child closes through `host close --pushed`.
+
+A dirty, unpushed, working, or blocked orphan stays. Status, the brief, and each check-in on the host report it from `orphans.json`.
+The sweep never touches the service's own pane, workspace, or working directory. It takes the same per-worktree checks as `close` and `prune`, journals each removal on stderr, and continues past a failed entry.
+Every other class waits for `wrangle prune [--host H] [<class>…]`, which shows what it will remove, asks, then removes it: idle shells and agents after a day, worktrees with no commits after a day, integrated but unpushed branches, jobs, stale registrations, and `targets`. Disk and processes are report-only. Prune never kills processes.
 Placement registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
@@ -213,6 +224,6 @@ Units 1–3 are sequential. Unit 4 builds on units 1 and 2. Unit 5 follows each 
 
 1. Stall: Herdr shows `working` or `unknown` and the transcript is unchanged for 10 min.
 2. Wake mechanism: check-ins through `herdr agent prompt` (part 4); test A proves them in unit 3.
-3. Cleanup: the lead that started a child closes it with `wrangle close` when it finishes. Wrangle prompts that lead at once, then at each check-in until it does. Nothing is removed on a timer; `wrangle prune` asks first.
+3. Cleanup: the lead that started a child closes it with `wrangle close` when it finishes. Wrangle prompts that lead at once, then at each check-in until it does. The `serve` sweep is the last resort: it removes only what loses nothing (part 6). Everything else waits for `wrangle prune`, which asks first.
 4. Service install: dotfiles installs the launchd agent (macOS) and the systemd user unit (Linux) on every host.
 5. The old 0.5.0 `prepare` PR was never pushed. Unit 1 carries its fix: the hook runs in the checkout, with no `{repo}`.

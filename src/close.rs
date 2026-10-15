@@ -51,11 +51,14 @@ impl Caller {
 
 /// Every refusal happens before anything changes. A child tab in the caller's workspace is
 /// closed; the caller's own pane, and a worktree the caller works in or shows, are refused.
+/// With `pushed`, a worktree with a commit on no remote ref is refused too: the sweep closes an
+/// orphan only when that loses nothing.
 pub fn local(
     shell: &dyn crate::shell::Shell,
     ledger: &Ledger,
     pane: &str,
     caller: &Caller,
+    pushed: bool,
 ) -> Result<Closed> {
     let panes = crate::cleanup::current_panes(shell)?;
     let target = panes
@@ -85,19 +88,7 @@ pub fn local(
         });
     };
     outside(&tree, caller)?;
-    let status = shell.run(
-        "git",
-        &[
-            "-C".into(),
-            tree.path.clone(),
-            "status".into(),
-            "--porcelain".into(),
-            "--untracked-files=all".into(),
-        ],
-    )?;
-    if status.status != 0 || !status.stdout.trim().is_empty() {
-        return Err(refuse(&format!("{} has uncommitted changes", tree.path)));
-    }
+    unsaved(shell, &tree.path, pushed)?;
     if let Some(lock) = worktree::lock_reason(shell, &tree.checkout, &tree.path)?
         && lock != AGENT_LOCK
     {
@@ -146,6 +137,35 @@ pub fn local(
         }),
         pane_closed,
     })
+}
+
+/// Refuse a worktree with uncommitted changes, and with `pushed`, one with a commit on no remote
+/// ref.
+fn unsaved(shell: &dyn crate::shell::Shell, path: &str, pushed: bool) -> Result<()> {
+    let git = |args: &[&str]| {
+        let mut words = vec!["-C".to_string(), path.to_string()];
+        words.extend(args.iter().map(ToString::to_string));
+        shell.run("git", &words)
+    };
+    let status = git(&["status", "--porcelain", "--untracked-files=all"])?;
+    if status.status != 0 || !status.stdout.trim().is_empty() {
+        return Err(refuse(&format!("{path} has uncommitted changes")));
+    }
+    if !pushed {
+        return Ok(());
+    }
+    let out = git(&["rev-list", "--count", "HEAD", "--not", "--remotes"])?;
+    match out.stdout.trim().parse::<u64>() {
+        Ok(0) if out.ok() => Ok(()),
+        Ok(n) if out.ok() => Err(refuse(&format!(
+            "{path} has {n} commit{} on no remote",
+            if n == 1 { "" } else { "s" }
+        ))),
+        _ => Err(refuse(&format!(
+            "cannot count unpushed commits in {path}: {}",
+            out.stderr.trim()
+        ))),
+    }
 }
 
 /// Refuse a worktree outside the repository's worktree directory, or one the caller is in.

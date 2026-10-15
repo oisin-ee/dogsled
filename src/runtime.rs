@@ -260,6 +260,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                     fleet.ledger,
                     &pane,
                     &crate::close::Caller::from_env(),
+                    false,
                 )?
             } else {
                 fleet.remote_setup(host, &["close".into(), pane.clone()])?
