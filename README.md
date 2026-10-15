@@ -133,7 +133,7 @@ For non-waiting callers, admission prompts the owner only in `idle` or `done`. O
 ## Host service and status
 
 Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
-The measurement step uses no SSH. It reads load, cores, memory, home disk space, Herdr agents, and Herdr panes.
+The measurement step uses no SSH. It reads CPU busy time, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
 Separate watchdog and admission workers keep prompts and slow setup independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
 An admission timeout records a failed ticket. The service continues publication and later actions.
@@ -147,8 +147,15 @@ The service stops with an error if a measurement fails. The last complete snapsh
 On Linux, the smallest finite `memory.max` from the process cgroup through its ancestors governs memory.
 Used memory is that scope's `memory.current` minus `inactive_file` from `memory.stat`.
 Without a finite limit, memory comes from `/proc/meminfo`: total minus `MemAvailable`.
-On macOS, memory comes from `vm_stat` and `sysctl hw.memsize`.
-Memory is informational. It does not change the headroom formula.
+With a finite limit, the probe measures both and reports the scope with less free memory.
+On macOS, memory comes from `vm_stat` and `sysctl hw.memsize`, and `pressure_level` from `sysctl kern.memorystatus_vm_pressure_level` (1 normal, 2 warn, 4 critical).
+
+CPU busy is the fraction of the last interval that the CPUs were not idle.
+On Linux the probe records cumulative `/proc/stat` ticks (`cpu_ticks`); the service derives `busy` from the previous snapshot, so the first tick after start has no sample and admits nothing.
+On macOS `busy` comes from a one-second `iostat -c 2 -w 1` window.
+`load1` stays in the probe for display. It no longer takes part in admission.
+
+Every tick appends one line to `~/.local/state/wrangle/samples.jsonl`: time, cores, busy, load1, memory, pressure level, disk, reservations, live agents, free cores, and the admission verdict. Lines older than seven days are dropped on append.
 
 `status` reads the local snapshot and each enabled Herdr peer's snapshot.
 Peer reads run in parallel through SSH and the configured `remote_command`.
@@ -162,12 +169,13 @@ The JSON output contains `hosts`, with service state, reachability, sample time,
 Example tab-row output:
 
 ```text
-local 50/12 ▲ · netcup 3/16 · momokaya-2 6/7
+local 11/12 ▲ · netcup 3/16 · momokaya-2 1/7
 ```
 
 `▲` means not eligible. `?` means the snapshot is missing, stale, or unavailable.
 A host without measurements prints `momokaya-2 ?`. A stale host keeps its last numbers, followed by ` ?`.
-`--brief` includes load/cores, memory, disk, agent counts, and a hint to run `wrangle status`.
+The numbers are busy cores over cores. A host without a CPU sample shows `load N/cores` instead.
+`--brief` includes busy/cores, memory, disk, agent counts, and a hint to run `wrangle status`.
 Fleets larger than five hosts share lines to preserve both the six-line limit and visibility of every host.
 `--watch --interval N` changes the refresh interval. Its default is five seconds.
 
@@ -238,14 +246,23 @@ Wrangle never removes anything on a timer. A lead removes its finished children 
 
 ## Placement
 
-Headroom remains:
+Headroom is free cores:
 
 ```text
-load_per_core_max × cores − load1 − reservation_load × reservations
+cores × (1 − busy) − reservation_load × reservations
 ```
 
-A host needs a fresh service snapshot, positive headroom, and at least the configured minimum free disk percentage.
-The host with most headroom wins. Ties use fewer live agents, then host id.
+A host is eligible when all of these hold:
+
+- a fresh service snapshot with a CPU sample;
+- at least `disk_free_min_percent` free on the home filesystem;
+- on macOS, memory pressure below critical;
+- free memory of at least `memory_reserve_bytes × (reservations + 1)`;
+- free cores of at least `free_core_fraction_min × cores`.
+
+The host with most free cores wins. Ties use fewer live agents, then host id.
+The reasons for each refusal appear in `status --json` under `headroom.reason`.
+The thresholds come from the fleet measurements in `docs/research/2026-10-15-admission-metric.md`.
 The selected host rechecks reservations under its own lock before it accepts the placement.
 
 `place` writes a reservation with a default TTL of 90 seconds.
@@ -254,7 +271,7 @@ With `--branch`, it runs the prepare hook and returns the hook's `path` and `pan
 Then start the agent through Shepherdr, using that host and prepared pane or path.
 `place` does not start an agent or claim a repository lead. `run` and `agent` perform placement and launch together.
 
-A reservation ends only at its TTL, which covers the lag of the one-minute load average.
+A reservation ends only at its TTL, which covers the time until the new agent appears in `herdr agent list` and its first build appears in the busy fraction.
 Agent discovery and prepare failures do not end it early.
 
 ## Configuration
@@ -264,7 +281,8 @@ The optional host policy lives in `~/.config/wrangle/config.toml`.
 Unknown keys are errors.
 
 ```toml
-load_per_core_max = 1.5
+free_core_fraction_min = 0.25
+memory_reserve_bytes = 3221225472
 disk_free_min_percent = 15
 reservation_load = 1.0
 reservation_ttl_ms = 90000

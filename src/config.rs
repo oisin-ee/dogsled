@@ -35,13 +35,23 @@ pub const DEFAULT_REMOTE_COMMAND: &[&str] = &["mise", "x", "--", "wrangle"];
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
-    /// Admit while `load1 / cores` stays below this.
-    pub load_per_core_max: f64,
+    /// Admit while free cores (`cores × (1 − busy) − reservations`) stay at or
+    /// above this fraction of the host's cores. 0.25 scored the lowest
+    /// admission error on both sampled hosts (4 of 16, 3 of 12 cores).
+    pub free_core_fraction_min: f64,
+    /// Bytes that must be free for the new agent and for each unexpired
+    /// reservation: agent p90 RSS (0.4 GiB) plus build-tree p90 RSS
+    /// (2.5–3.2 GiB) measured on the fleet.
+    pub memory_reserve_bytes: u64,
     /// Admit while the home filesystem keeps at least this much free.
     pub disk_free_min_percent: f64,
-    /// Load units each unexpired reservation adds to admission.
+    /// Cores each unexpired reservation subtracts from the free cores. One
+    /// agent's mean demand is 0.5–0.9 cores (build duty cycle × median build
+    /// tree), so one core each.
     pub reservation_load: f64,
-    /// A reservation older than this is dropped on the next probe.
+    /// A reservation older than this is dropped on the next probe. It covers
+    /// the time until the new agent shows in `herdr agent list` and its first
+    /// build shows in the busy fraction.
     pub reservation_ttl_ms: u64,
     /// argv prefix that reaches `wrangle` on a remote host over
     /// `ssh -T -o BatchMode=yes`. mise shims are not on the non-interactive
@@ -126,7 +136,8 @@ fn render(hook: &str, template: &[String], values: &[(&str, Option<&str>)]) -> R
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            load_per_core_max: 1.5,
+            free_core_fraction_min: 0.25,
+            memory_reserve_bytes: 3 * 1024 * 1024 * 1024,
             disk_free_min_percent: 15.0,
             reservation_load: 1.0,
             reservation_ttl_ms: 90_000,
@@ -153,7 +164,8 @@ impl Default for Hooks {
 /// its own lock. Serialised on the command line of `wrangle host reserve`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Thresholds {
-    pub load_per_core_max: f64,
+    pub free_core_fraction_min: f64,
+    pub memory_reserve_bytes: u64,
     pub disk_free_min_percent: f64,
     pub reservation_load: f64,
     pub reservation_ttl_ms: u64,
@@ -162,7 +174,8 @@ pub struct Thresholds {
 impl From<&Policy> for Thresholds {
     fn from(p: &Policy) -> Self {
         Self {
-            load_per_core_max: p.load_per_core_max,
+            free_core_fraction_min: p.free_core_fraction_min,
+            memory_reserve_bytes: p.memory_reserve_bytes,
             disk_free_min_percent: p.disk_free_min_percent,
             reservation_load: p.reservation_load,
             reservation_ttl_ms: p.reservation_ttl_ms,
@@ -212,9 +225,10 @@ mod tests {
 
     #[test]
     fn partial_override_keeps_other_defaults() {
-        let p = parse("load_per_core_max = 2.0\n[hooks]\nprepare = [\"true\"]\n").unwrap();
-        assert!((p.load_per_core_max - 2.0).abs() < f64::EPSILON);
+        let p = parse("free_core_fraction_min = 0.5\n[hooks]\nprepare = [\"true\"]\n").unwrap();
+        assert!((p.free_core_fraction_min - 0.5).abs() < f64::EPSILON);
         assert!((p.disk_free_min_percent - 15.0).abs() < f64::EPSILON);
+        assert_eq!(p.memory_reserve_bytes, 3 * 1024 * 1024 * 1024);
         assert_eq!(p.hooks.prepare, vec!["true".to_string()]);
     }
 

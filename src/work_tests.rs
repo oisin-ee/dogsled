@@ -17,6 +17,8 @@ fn snapshot(now: u64) -> Snapshot {
             label: "local".into(),
             load1: 0.0,
             cores: 1,
+            cpu_ticks: None,
+            busy: Some(0.0),
             memory: Memory::default(),
             disk_free_percent: 99.0,
             agents: AgentCounts::default(),
@@ -44,7 +46,7 @@ fn fifo_admission_rechecks_reservations_and_retries_notification_on_next_tick() 
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     let shell = Fake::new();
     let policy = Policy {
-        load_per_core_max: 1.0,
+        memory_reserve_bytes: 0,
         ..Policy::default()
     };
     let fleet = Fleet {

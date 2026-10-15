@@ -35,7 +35,7 @@ One process per host, started by launchd (macOS) or a systemd user unit (Linux).
 
 Every N seconds (default 10) it:
 
-- Probes the host: load1, cores, memory used, disk free, Herdr agents and panes (`herdr agent list`, `pane list`).
+- Probes the host: CPU busy fraction, cores, memory used (and macOS pressure level), disk free, Herdr agents and panes (`herdr agent list`, `pane list`); appends the sample to `samples.jsonl`.
 - Writes the probe to `~/.local/state/wrangle/host.json`.
 - Runs the stall watchdog on this host's panes (part 4).
 - Starts queued work on an eligible host when it has headroom (part 3).
@@ -55,7 +55,7 @@ An existing checkout must have the same origin. Clone failures stop admission ra
 Only a freshly cloned checkout can receive mise trust after a trust refusal.
 
 The agent then spawns with Shepherdr: `agents spawn machine=<host> cwd=<path> …`. The reservation stops two callers
-from picking the same host before the new agent shows in `herdr agent list`. It ends at its TTL (default 90 s), which covers the lag of the 1-minute load average.
+from picking the same host before the new agent shows in `herdr agent list`. It ends at its TTL (default 90 s), which covers the time until the agent is listed and its first build shows in the busy fraction.
 
 Jobs use the same placement inside `wrangle run`.
 
@@ -179,7 +179,7 @@ The Pi extension and Herdr manifest stay at the repository root paths. Binary ar
 ## What stays
 
 - Host policy in `~/.config/wrangle/config.toml` (thresholds, `remote_command`).
-- The headroom formula and the `prepare` hook (run in the checkout, from the pending 0.5.0 fix).
+- The `prepare` hook (run in the checkout, from the pending 0.5.0 fix). The headroom formula changed in 0.8: free cores from the CPU busy fraction plus a memory reserve, replacing load1 (`docs/research/2026-10-15-admission-metric.md`).
 
 ## Units, in order
 

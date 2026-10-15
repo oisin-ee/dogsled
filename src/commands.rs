@@ -87,9 +87,14 @@ fn marker(host: &HostReport) -> &'static str {
 }
 
 fn load(host: &HostReport) -> String {
-    host.probe
-        .as_ref()
-        .map_or_else(|| "-".into(), |p| format!("{:.0}/{}", p.load1, p.cores))
+    // Busy cores over the last interval; load1 only while no sample exists.
+    host.probe.as_ref().map_or_else(
+        || "-".into(),
+        |p| match p.busy {
+            Some(busy) => format!("{:.0}/{}", busy * f64::from(p.cores), p.cores),
+            None => format!("load {:.0}/{}", p.load1, p.cores),
+        },
+    )
 }
 
 pub fn line(status: &Status) -> String {
