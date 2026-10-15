@@ -151,8 +151,12 @@ esac
         (out.status.code().unwrap(), value)
     }
     fn snapshot(&self, path: &str, sampled: u64, load: f64, cores: u32) {
+        // Busy fraction that reproduces the old load rule's verdict for this load. The zero
+        // tick counters let a Linux `serve --once` derive a busy sample from one real reading.
+        let busy = (load / (1.5 * f64::from(cores))).min(1.0);
         self.put(path, &json!({"sampled_ms":sampled,"probe":{
-            "host":"local","label":"local","load1":load,"cores":cores,
+            "host":"local","label":"local","load1":load,"cores":cores,"busy":busy,
+            "cpu_ticks":{"busy":0,"total":0},
             "memory":{"used_bytes":1_073_741_824_u64,"total_bytes":8_589_934_592_u64},
             "disk_free_percent":50.0,"agents":{"total":1,"by_status":{"idle":1}},
             "agent_panes":[{"pane":"w1:p1","agent":"pi","state":"idle","name":null,"transcript":null,"transcript_modified":null}],"reservations":[],"panes":[]
@@ -282,7 +286,7 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     let line = rig.run(&["status", "--line"]);
     assert_eq!(
         String::from_utf8(line.stdout).unwrap(),
-        "local 50/12 ▲ · netcup 3/16\n"
+        "local 12/12 ▲ · netcup 2/16\n"
     );
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     assert_eq!(brief.lines().count(), 3);
@@ -312,7 +316,7 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     assert_eq!(status["hosts"][1]["headroom"]["eligible"], false);
     assert_eq!(
         String::from_utf8(rig.run(&["status", "--line"]).stdout).unwrap(),
-        "local ? · netcup 6/7 ?\n"
+        "local ? · netcup 4/7 ?\n"
     );
     rig.expire_cache();
     fs::write(rig.dir.join("unreachable"), "").unwrap();
@@ -322,7 +326,7 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     assert!(
         String::from_utf8(rig.run(&["status", "--line"]).stdout)
             .unwrap()
-            .contains("netcup 6/7 ?")
+            .contains("netcup 4/7 ?")
     );
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
     rig.expire_cache();

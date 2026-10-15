@@ -241,7 +241,9 @@ pub struct WorkArgs {
 #[derive(Debug, Clone, Copy, Args)]
 pub struct ThresholdArgs {
     #[arg(long)]
-    pub load_per_core_max: Option<f64>,
+    pub free_core_fraction_min: Option<f64>,
+    #[arg(long)]
+    pub memory_reserve_bytes: Option<u64>,
     #[arg(long)]
     pub disk_free_min_percent: Option<f64>,
     #[arg(long)]
@@ -252,7 +254,12 @@ pub struct ThresholdArgs {
 impl ThresholdArgs {
     pub fn over(self, base: Thresholds) -> Thresholds {
         Thresholds {
-            load_per_core_max: self.load_per_core_max.unwrap_or(base.load_per_core_max),
+            free_core_fraction_min: self
+                .free_core_fraction_min
+                .unwrap_or(base.free_core_fraction_min),
+            memory_reserve_bytes: self
+                .memory_reserve_bytes
+                .unwrap_or(base.memory_reserve_bytes),
             disk_free_min_percent: self
                 .disk_free_min_percent
                 .unwrap_or(base.disk_free_min_percent),

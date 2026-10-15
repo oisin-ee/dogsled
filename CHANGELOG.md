@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Admit on free cores and free memory instead of the one-minute load average. Free cores are `cores × (1 − busy) − reservation_load × reservations`, busy being the CPU busy fraction over the last probe interval (`/proc/stat` deltas on Linux, `iostat` on macOS). A host needs `free_core_fraction_min × cores` free (default 0.25), `memory_reserve_bytes` free per reservation plus one (default 3 GiB), and macOS memory pressure below critical. On the measured fleet the load rule refused the Mac while it was free 84% of the time; the research note in `docs/research/2026-10-15-admission-metric.md` records the evidence. Config keys `load_per_core_max` is gone; `free_core_fraction_min` and `memory_reserve_bytes` replace it (unknown keys are still errors).
+- Probe `busy`, `cpu_ticks`, and `memory.pressure_level`; status lines show busy cores over cores. With a finite cgroup limit the probe reports whichever of the cgroup and `/proc/meminfo` has less free memory.
+- Append every probe to `~/.local/state/wrangle/samples.jsonl` (seven-day window) so thresholds can be re-scored on real data.
+
 ## 0.7.2 - 2026-10-14
 
 - Let prune try every entry. A failed or refused entry no longer stops the rest; prune reports each failure and exits with status 2. `--json` returns `{results,failures}`.

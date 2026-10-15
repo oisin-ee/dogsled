@@ -191,7 +191,7 @@ fn concurrent_item_and_queue_writers_keep_every_record() {
 #[test]
 fn queue_admission_is_fifo_and_owner_wake_waits_for_idle() {
     let rig = Rig::new("queue-admit");
-    rig.config("load_per_core_max = 0\n");
+    rig.config("free_core_fraction_min = 2\n");
     rig.snapshot("state/host.json", now(), 0.0, 8);
     let (_, first) = rig.json(&["place"]);
     let (_, second) = rig.json(&[
@@ -225,7 +225,7 @@ fn queue_admission_is_fifo_and_owner_wake_waits_for_idle() {
     );
     // Admission behavior is independent of the CI runner's real probe load/disk.
     // Exact capacity thresholds and FIFO blocking use the injected-time unit fixture.
-    rig.config("load_per_core_max = 1000000\ndisk_free_min_percent = 0\n");
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":"working"}]}}),
