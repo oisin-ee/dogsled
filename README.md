@@ -226,7 +226,8 @@ A pane holds a worktree when it works in it or sits in its workspace. A shell wi
 An agent holds it until it has been `idle` or `done` for 24 hours. Before that, its owner closes it with `wrangle close`.
 Held, dirty, and locked integrated worktrees are reported with the reason and are not removed.
 A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
-Panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
+A shell with no foreground command in an ended job's tab is idle at once: the job log keeps its output. So is a shell whose directory no longer exists.
+Other panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
 A shell pane is idle when the service found no foreground command at each sample for more than 24 hours, and it still has none. Herdr reports no activity time, so a command that starts and ends between samples does not count.
 A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
 Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known wrangle-owned paths.

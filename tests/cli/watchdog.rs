@@ -425,6 +425,87 @@ fn doctor_closes_an_all_idle_workspace_whole_and_other_idle_panes_alone() {
 }
 
 #[test]
+fn doctor_closes_ended_job_tabs_and_shells_in_deleted_directories_at_once() {
+    let rig = shells_rig("spent-panes");
+    let home = rig.dir.join("home");
+    let gone = rig.dir.join("home/repo/.git/wt/trash/old (deleted)");
+    let pane = |id: &str, cwd: &Path| json!({"pane_id":id,"workspace_id":"w4","cwd":cwd});
+    // w4:p1 ended its job; w4:p2's job runs; w4:p3 ended but runs a command again; w4:p4's
+    // directory is gone; w4:p5 is an ordinary shell seen idle for minutes.
+    let live = [
+        pane("w4:p1", &home),
+        pane("w4:p2", &home),
+        pane("w4:p3", &home),
+        pane("w4:p4", &gone),
+        pane("w4:p5", &home),
+    ];
+    rig.put("panes.json", &json!({"result":{"panes":live}}));
+    fs::write(rig.dir.join("busy"), "w4:p2\nw4:p3\n").unwrap();
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    let job = |id: &str, pane: &str, ended: Option<u64>| {
+        rig.put(
+            &format!("state/jobs/{id}.json"),
+            &json!({"id":id,"cmd":["true"],"cwd":home,"host":"h","owner":"w1:p1","pane":pane,
+                "state":if ended.is_some() {"idle"} else {"working"},"exit":ended.map(|_| 0),
+                "signal":null,"reason":null,"started_ms":NOW - 60_000,"ended_ms":ended,
+                "timeout_ms":null,"idle_timeout_ms":null}),
+        );
+    };
+    job("r-1", "w4:p1", Some(NOW - 1_000));
+    job("r-2", "w4:p2", None);
+    job("r-3", "w4:p3", Some(NOW - 1_000));
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
+    let mut snapshot = rig.read("state/host.json");
+    snapshot["probe"]["agent_panes"] = json!([]);
+    snapshot["probe"]["panes"] = json!(
+        live.iter()
+            .map(|p| {
+                let mut p = p.clone();
+                p["idle_shell"] = json!(true);
+                p["idle_since_ms"] = json!(NOW - 60_000);
+                p
+            })
+            .collect::<Vec<_>>()
+    );
+    rig.put("state/host.json", &snapshot);
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    let panes: Vec<_> = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["class"] == "panes" || e["class"] == "workspaces")
+        .map(|e| (e["id"].as_str().unwrap(), e["detail"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        panes,
+        [
+            (
+                "w4:p1",
+                "job r-1 ended with exit 0; its log keeps the output"
+            ),
+            ("w4:p4", "shell in a deleted directory"),
+        ],
+        "{plan}"
+    );
+    let out = rig.run(&["prune", "--yes", "panes"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = rig.log("herdr.log");
+    for closed in ["pane close w4:p1", "pane close w4:p4"] {
+        assert!(log.contains(closed), "{log}");
+    }
+    for kept in ["w4:p2", "w4:p3", "w4:p5"] {
+        assert!(!log.contains(&format!("pane close {kept}")), "{log}");
+    }
+    // The job record and log stay until they expire.
+    assert!(rig.dir.join("state/jobs/r-1.json").exists());
+}
+
+#[test]
 fn serve_never_removes_worktrees() {
     // Removal is the owner's `wrangle close` or a confirmed `prune`, never a timer.
     let rig = watchdog_rig("serve-no-removal");

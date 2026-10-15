@@ -135,6 +135,7 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 - unused worktrees with unmerged commits (report only);
 - local branches without a worktree that are integrated or fully on a remote, and the others (report only);
 - workspaces whose every pane is idle;
+- shells at an empty prompt in an ended job's tab or in a deleted directory, at once;
 - panes whose agent has been `done` or `idle`, or whose shell has run no command, for more than 24 h;
 - wrangle jobs that ended more than 24 h ago, with their logs;
 - disk above 90 % used, with the largest wrangle-owned paths;
