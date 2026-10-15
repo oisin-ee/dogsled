@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 - Close each job tab after `exec` saves the final record and reports completion. `wait` and `logs` still work after the tab closes.
 - Log pane-close failures to stderr without changing the job result. Prune retains its ended-job-tab fallback.
+- Create and remove worktrees natively, without `wt` or host `mise` tasks. An optional `wrangle.toml` in the repository's main checkout sets `[worktree]` `dir` (default `.worktrees`), `setup`, and `teardown`. Commands run with `sh -c` in the worktree and can use `{main}`, `{path}`, and `{branch}`, each quoted as one shell word. Unknown placeholders and unknown keys are errors. A missing file means the defaults.
+- `place`, `agent --branch`, and `run --branch` run `git worktree add` (a new branch from `--base` or the default branch, or an existing branch), lock the worktree with the reason `agent:worktree`, run `setup`, and open it with `herdr worktree open --no-focus`. A failed `setup` removes the new worktree and the branch it made, and placement fails. When the main checkout had no Herdr workspace, wrangle records the anchor in `.git/agent-worktree-anchor`. Refusals match the old `agent:worktree` task: an invalid branch name, `--base` for an existing branch, a foreign lock, and a workspace that already shows the worktree.
+- `close` and `prune` run `teardown` in the worktree first, so a failure keeps the worktree, its panes, and its lock. Then they close its panes and workspace, unlock, and run `git worktree remove` without force. The branch is deleted only when the integration check finds it integrated, so a squash-merged branch now goes too. After the last child, the anchor workspace closes when it is unfocused, is not the caller's, and has one pane with no agent.
+- `close` also refuses a worktree outside the repository's worktree directory and a caller whose directory is inside the worktree. The JSON `worktree` result gains `anchor_closed` when the anchor closed.
+- Doctor lists detached-HEAD worktrees. One is removable when it is clean, no pane holds it, and a remote branch holds its HEAD. `close` refuses a detached worktree and points at `prune`.
+- Breaking: remove `hooks.prepare` and `hooks.remove` from the host config. A `[hooks]` table is now an unknown-key error. Move repository remove hooks, such as `.config/wt.toml` `[pre-remove]`, to `wrangle.toml` `teardown`.
 
 ## 0.8.2 - 2026-10-15
 
