@@ -50,8 +50,8 @@ case "$*" in
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
  *'rev-parse refs/heads/feature refs/remotes/origin/main') printf 'abc\nmain\n' ;;
  *'merge-base refs/remotes/origin/main refs/heads/feature') printf 'fork\n' ;;
- *'diff --name-only -z --no-renames fork refs/heads/feature') printf 'file\0' ;;
- *'log --no-merges --format=%H %P fork..refs/remotes/origin/main -- :(literal)file') ;;
+ *'log --reverse --no-renames --name-only -z --format=%x01%H %P --first-parent fork..refs/heads/feature --') printf '\001abc fork\0\nfile\0' ;;
+ *'log --reverse --no-renames --name-only -z --format=%x01%H %P --no-merges fork..refs/remotes/origin/main -- :(literal)file') ;;
  *'status --porcelain --untracked-files=all')
  if test -f "$RIG/change-during-plan"; then touch "$RIG/changed"; fi
  if test -f "$RIG/dirty"; then printf ' M file\n'; fi ;;
@@ -247,6 +247,26 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
     );
     assert!(rig.log("herdr.log").contains("pane close child"));
     assert!(rig.log("mise.log").contains("agent:worktree-remove"));
+}
+
+#[test]
+fn doctor_skips_a_branch_that_no_base_commit_applies() {
+    let rig = watchdog_rig("doctor-unmerged");
+    fs::write(rig.dir.join("unmerged"), "").unwrap();
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    assert!(
+        !plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["class"] == "worktrees"),
+        "{plan}"
+    );
+    assert!(
+        rig.log("git.log")
+            .contains("--first-parent fork..refs/heads/feature")
+    );
 }
 
 #[test]
