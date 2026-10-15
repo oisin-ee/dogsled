@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.7.3 - 2026-10-15
 
 - Find a stacked branch as integrated when each branch in the stack landed as its own squash. A branch whose commits split into consecutive runs, each applied by one commit on the default branch, is integrated; doctor names every applying commit.
 - Doctor finds more cruft. New classes: `branches` (local branches without a worktree, removable when integrated or fully on a remote), `workspaces` (a workspace whose every pane is idle closes whole), and `repositories` (a configured path that is not a checkout).
