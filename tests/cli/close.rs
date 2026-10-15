@@ -396,6 +396,38 @@ esac
 }
 
 #[test]
+fn doctor_reports_a_worktree_made_on_a_branch_that_already_had_commits() {
+    let (rig, _) = close_rig("close-made-on-work");
+    rig.config("[cleanup]\nrepositories = [\"~/repo\"]\n");
+    let repo = rig.dir.join("home/repo");
+    // feat/y gets a commit of its own, adding a file, in a worktree that is then removed.
+    git(&repo, &["worktree", "add", "-q", "-b", "feat/y", "scratch"]);
+    fs::write(repo.join("scratch/work.txt"), "work\n").unwrap();
+    git(&repo.join("scratch"), &["add", "work.txt"]);
+    git(&repo.join("scratch"), &["commit", "-q", "-m", "work"]);
+    git(&repo, &["worktree", "remove", "scratch"]);
+    git(&repo, &["worktree", "add", "-q", ".worktrees/y", "feat/y"]);
+    fs::write(rig.dir.join("clock"), (now() + 2 * 86_400_000).to_string()).unwrap();
+    let (_, plan) = rig.json(&["doctor"]);
+    let entry = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["tree"]["branch"] == "feat/y")
+        .cloned()
+        .unwrap();
+    // Its HEAD never moved, but the branch holds a commit main does not have.
+    assert!(
+        entry["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("branch feat/y has 1 commit not on main,"),
+        "{entry}"
+    );
+    assert_eq!(entry["removable"], false);
+}
+
+#[test]
 fn doctor_removes_a_worktree_with_no_commits_a_day_after_it_was_made() {
     let (rig, tree) = close_rig("close-empty");
     // The configured repository is how doctor finds it: nothing registered, no pane in it.

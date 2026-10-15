@@ -65,7 +65,7 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
     }
 }
 
-fn checked(program: &str, args: &[String], out: Output) -> Result<Output> {
+pub(crate) fn checked(program: &str, args: &[String], out: Output) -> Result<Output> {
     if out.ok() {
         Ok(out)
     } else {

@@ -43,17 +43,30 @@ pub struct Pane {
     pub idle_since_ms: Option<u64>,
 }
 
-/// What a pane's shell runs in the foreground, or `None` at an empty prompt.
+/// What a pane's shell runs in the foreground, or `None` at an empty prompt or when the pane
+/// closed after it was listed: a closed pane runs nothing.
 pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
-    let out = shell.run_ok(
-        "herdr",
-        &[
-            "pane".into(),
-            "process-info".into(),
-            "--pane".into(),
-            pane.into(),
-        ],
-    )?;
+    let args = [
+        "pane".to_string(),
+        "process-info".into(),
+        "--pane".into(),
+        pane.into(),
+    ];
+    let out = shell.run("herdr", &args)?;
+    if !out.ok() {
+        let code = |text: &str| {
+            serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|v| v.pointer("/error/code")?.as_str().map(str::to_string))
+        };
+        if [&out.stderr, &out.stdout]
+            .into_iter()
+            .any(|text| code(text).as_deref() == Some("pane_not_found"))
+        {
+            return Ok(None);
+        }
+    }
+    let out = crate::shell::checked("herdr", &args, out)?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
     let info = value
         .pointer("/result/process_info")
@@ -444,6 +457,27 @@ fn parse_vm_stat(text: &str, total_bytes: u64) -> Option<Memory> {
 mod tests {
     use super::*;
     use crate::shell::Fake;
+
+    #[test]
+    fn a_pane_that_closed_after_it_was_listed_runs_nothing() {
+        let shell = Fake::new();
+        let failed = |stderr: &str| crate::shell::Output {
+            status: 1,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        };
+        // Herdr 0.9.4 writes this to stderr for a closed pane.
+        shell.on_output(
+            "herdr pane process-info --pane w1:p1",
+            failed(r#"{"error":{"code":"pane_not_found","message":"pane not found"},"id":"cli:pane:process_info"}"#),
+        );
+        shell.on_output(
+            "herdr pane process-info --pane w1:p2",
+            failed(r#"{"error":{"code":"server_unavailable"}}"#),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), None);
+        assert!(foreground(&shell, "w1:p2").is_err());
+    }
 
     #[test]
     fn cpu_ticks_exclude_idle_iowait_and_duplicate_guest_time() {

@@ -792,7 +792,8 @@ struct Disposition {
 }
 
 /// Doctor's finding for a worktree, or `None` when it is ordinary work. Removable: a worktree
-/// whose HEAD has not moved a day after Git made it, or an integrated branch, when the worktree
+/// whose HEAD has not moved a day after Git made it and whose branch has no commits beyond the
+/// base, or an integrated branch, when the worktree
 /// is clean and no pane uses it. An unused worktree with unmerged commits is reported.
 fn disposition(
     node: &Node<'_>,
@@ -802,10 +803,18 @@ fn disposition(
     now: u64,
 ) -> Result<Option<Disposition>> {
     let usage = usage(node, tree, panes, stale)?;
-    // A worktree whose HEAD never moved holds no work, whatever the base did since. Its branch
-    // is an ancestor of the base once the base moves, but that is not a merge: it is a new
-    // worktree, or an abandoned one after a day.
-    let untouched = origin(&tree.path).filter(|o| o.start.as_deref() == Some(tree.head.as_str()));
+    let base = crate::integration::base(node.shell, &tree.repo)?;
+    let branch = format!("refs/heads/{}", tree.branch);
+    // A worktree whose HEAD never moved, on a branch with no commits beyond the base, holds no
+    // work. Its branch is an ancestor of the base once the base moves, but that is not a merge:
+    // it is a new worktree, or an abandoned one after a day. A worktree made on a branch that
+    // already had commits keeps them, so it goes through the integration check.
+    let untouched = match origin(&tree.path) {
+        Some(o) if o.start.as_deref() == Some(tree.head.as_str()) => {
+            (count(node.shell, &tree.repo, &[&format!("{base}..{branch}")])? == 0).then_some(o)
+        }
+        _ => None,
+    };
     let (finding, eligible) = if let Some(origin) = untouched {
         let made = now.saturating_sub(origin.made_ms);
         if made <= DAY || !usage.in_use.is_empty() {
@@ -826,8 +835,6 @@ fn disposition(
     } else if !usage.in_use.is_empty() {
         return Ok(None);
     } else {
-        let base = crate::integration::base(node.shell, &tree.repo)?;
-        let branch = format!("refs/heads/{}", tree.branch);
         let ahead = count(node.shell, &tree.repo, &[&format!("{base}..{branch}")])?;
         let pushed = match count(node.shell, &tree.repo, &[&branch, "--not", "--remotes"])? {
             0 => "all on a remote branch".to_string(),
