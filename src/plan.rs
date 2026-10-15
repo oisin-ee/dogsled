@@ -100,6 +100,8 @@ mod tests {
             label: host.to_string(),
             load1,
             cores,
+            cpu_ticks: None,
+            busy: None,
             disk_free_percent: disk,
             memory: crate::probe::Memory::default(),
             agent_panes: Vec::new(),

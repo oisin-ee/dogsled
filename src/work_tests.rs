@@ -17,6 +17,8 @@ fn snapshot(now: u64) -> Snapshot {
             label: "local".into(),
             load1: 0.0,
             cores: 1,
+            cpu_ticks: None,
+            busy: None,
             memory: Memory::default(),
             disk_free_percent: 99.0,
             agents: AgentCounts::default(),

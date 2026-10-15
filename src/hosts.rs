@@ -401,6 +401,8 @@ mod tests {
                 label: "local".into(),
                 load1: 0.0,
                 cores: 8,
+                cpu_ticks: None,
+                busy: None,
                 memory: Memory::default(),
                 disk_free_percent: 50.0,
                 agents: AgentCounts::default(),

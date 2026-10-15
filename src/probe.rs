@@ -70,6 +70,17 @@ struct AgentSession {
 pub struct Memory {
     pub used_bytes: u64,
     pub total_bytes: u64,
+    /// macOS memory pressure: 1 normal, 2 warn, 4 critical. None on Linux.
+    #[serde(default)]
+    pub pressure_level: Option<u8>,
+}
+
+/// Cumulative CPU ticks since boot in `USER_HZ`. Guest ticks are already
+/// included in user/nice; busy excludes idle and iowait.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuTicks {
+    pub busy: u64,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +89,12 @@ pub struct Probe {
     pub label: String,
     pub load1: f64,
     pub cores: u32,
+    /// Linux cumulative ticks; the service derives busy from two samples.
+    #[serde(default)]
+    pub cpu_ticks: Option<CpuTicks>,
+    /// Busy fraction over the last interval. Filled directly only on macOS.
+    #[serde(default)]
+    pub busy: Option<f64>,
     pub memory: Memory,
     pub disk_free_percent: f64,
     pub agents: AgentCounts,
@@ -103,6 +120,8 @@ pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
         label: "local".into(),
         load1: load1(shell)?,
         cores: cores(),
+        cpu_ticks: cpu_ticks(shell)?,
+        busy: mac_busy(shell)?,
         memory: memory(shell)?,
         disk_free_percent: disk_free_percent(shell, home)?,
         agents,
@@ -177,6 +196,58 @@ pub fn parse_loadavg(text: &str) -> Option<f64> {
         .and_then(|s| s.parse().ok())
 }
 
+pub fn cpu_ticks(shell: &dyn Shell) -> Result<Option<CpuTicks>> {
+    let Ok(text) = shell.read_file("/proc/stat") else {
+        return Ok(None);
+    };
+    parse_proc_stat(&text)
+        .map(Some)
+        .ok_or_else(|| parse_error("/proc/stat", &text))
+}
+
+pub fn parse_proc_stat(text: &str) -> Option<CpuTicks> {
+    let mut fields = text.lines().next()?.split_whitespace();
+    if fields.next()? != "cpu" {
+        return None;
+    }
+    let ticks: Vec<u64> = fields
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    // The first eight counters exclude guest and guest_nice.
+    let total = ticks
+        .get(..8)?
+        .iter()
+        .try_fold(0_u64, |sum, tick| sum.checked_add(*tick))?;
+    let busy = total.checked_sub(ticks[3])?.checked_sub(ticks[4])?;
+    Some(CpuTicks { busy, total })
+}
+
+pub fn mac_busy(shell: &dyn Shell) -> Result<Option<f64>> {
+    if shell.read_file("/proc/stat").is_ok() {
+        return Ok(None);
+    }
+    let out = shell.run_ok(
+        "iostat",
+        &["-c".into(), "2".into(), "-w".into(), "1".into()],
+    )?;
+    parse_iostat(&out.stdout)
+        .map(Some)
+        .ok_or_else(|| parse_error("iostat", &out.stdout))
+}
+
+pub fn parse_iostat(text: &str) -> Option<f64> {
+    let idle: f64 = text
+        .lines()
+        .rfind(|line| !line.trim().is_empty())?
+        .split_whitespace()
+        .rev()
+        .nth(3)?
+        .parse()
+        .ok()?;
+    (0.0..=100.0).contains(&idle).then_some(1.0 - idle / 100.0)
+}
+
 pub fn disk_free_percent(shell: &dyn Shell, path: &str) -> Result<f64> {
     let out = shell.run_ok("df", &["-Pk".into(), path.into()])?;
     parse_df(&out.stdout).ok_or_else(|| parse_error("df -Pk", &out.stdout))
@@ -195,23 +266,40 @@ pub fn parse_df(text: &str) -> Option<f64> {
 
 pub fn memory(shell: &dyn Shell) -> Result<Memory> {
     if let Ok(meminfo) = shell.read_file("/proc/meminfo") {
-        if let Some(memory) = cgroup_memory(shell)? {
-            return Ok(memory);
-        }
-        return parse_meminfo(&meminfo).ok_or_else(|| parse_error("/proc/meminfo", &meminfo));
+        let host = parse_meminfo(&meminfo).ok_or_else(|| parse_error("/proc/meminfo", &meminfo))?;
+        let cgroup = cgroup_memory(shell)?;
+        return Ok(cgroup
+            .filter(|memory| {
+                memory.total_bytes.saturating_sub(memory.used_bytes)
+                    < host.total_bytes.saturating_sub(host.used_bytes)
+            })
+            .unwrap_or(host));
     }
     let total = shell
         .run_ok("sysctl", &["-n".into(), "hw.memsize".into()])?
         .stdout;
     let vm = shell.run_ok("vm_stat", &[])?.stdout;
-    parse_vm_stat(
+    let pressure = shell
+        .run_ok(
+            "sysctl",
+            &["-n".into(), "kern.memorystatus_vm_pressure_level".into()],
+        )?
+        .stdout;
+    let mut memory = parse_vm_stat(
         &vm,
         total
             .trim()
             .parse()
             .map_err(|_| parse_error("hw.memsize", &total))?,
     )
-    .ok_or_else(|| parse_error("vm_stat", &vm))
+    .ok_or_else(|| parse_error("vm_stat", &vm))?;
+    memory.pressure_level = Some(
+        pressure
+            .trim()
+            .parse()
+            .map_err(|_| parse_error("kern.memorystatus_vm_pressure_level", &pressure))?,
+    );
+    Ok(memory)
 }
 
 /// The smallest finite ancestor limit governs the process. Measure that
@@ -264,6 +352,7 @@ fn cgroup_memory(shell: &dyn Shell) -> Result<Option<Memory>> {
     Ok(Some(Memory {
         used_bytes: current.saturating_sub(inactive),
         total_bytes,
+        pressure_level: None,
     }))
 }
 
@@ -281,6 +370,7 @@ fn parse_meminfo(text: &str) -> Option<Memory> {
     Some(Memory {
         used_bytes: total_bytes.saturating_sub(kb("MemAvailable:")?),
         total_bytes,
+        pressure_level: None,
     })
 }
 
@@ -308,6 +398,7 @@ fn parse_vm_stat(text: &str, total_bytes: u64) -> Option<Memory> {
     Some(Memory {
         used_bytes: total_bytes.saturating_sub(available),
         total_bytes,
+        pressure_level: None,
     })
 }
 
@@ -315,6 +406,137 @@ fn parse_vm_stat(text: &str, total_bytes: u64) -> Option<Memory> {
 mod tests {
     use super::*;
     use crate::shell::Fake;
+
+    #[test]
+    fn cpu_ticks_exclude_idle_iowait_and_duplicate_guest_time() {
+        assert_eq!(
+            parse_proc_stat("cpu  100 20 30 400 50 6 7 8 9 10\ncpu0 1 2 3\n"),
+            Some(CpuTicks {
+                busy: 171,
+                total: 621
+            })
+        );
+        for text in [
+            "",
+            "cpu0 1 2 3 4 5 6 7 8",
+            "cpu 1 2",
+            "cpu 1 2 3 4 bad 6 7 8",
+            "cpu 18446744073709551615 1 0 0 0 0 0 0",
+        ] {
+            assert_eq!(parse_proc_stat(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn iostat_uses_last_interval() {
+        let text = "              disk0       cpu    load average\n    KB/t tps MB/s  us sy id  1m 5m 15m\n    1.00 1 1.0  1 2 97  3.00 4.00 5.00\n    21.34 77 1.63  38 25 37  8.59 12.37 15.00\n\n";
+        assert_eq!(parse_iostat(text), Some(0.63));
+        for text in ["", "\n", "bad", "1 2 101 3 4 5", "1 2 NaN 3 4 5"] {
+            assert_eq!(parse_iostat(text), None, "{text}");
+        }
+    }
+
+    fn local_shell() -> Fake {
+        let shell = Fake::new();
+        shell
+            .on("herdr agent list", r#"{"result":{"agents":[]}}"#)
+            .on("herdr pane list", r#"{"result":{"panes":[]}}"#)
+            .on("df -Pk /home", "FS 1000 500 400 60% /");
+        shell
+    }
+
+    #[test]
+    fn linux_local_collects_ticks_without_mac_measurements() {
+        let shell = local_shell();
+        shell
+            .on("read /proc/stat", "cpu 100 20 30 400 50 6 7 8 9 10")
+            .on("read /proc/loadavg", "0.5 0.2 0.1 1/10 42")
+            .on(
+                "read /proc/meminfo",
+                "MemTotal: 100 kB\nMemAvailable: 25 kB",
+            );
+        let probe = local(&shell, "/home").unwrap();
+        assert_eq!(
+            probe.cpu_ticks,
+            Some(CpuTicks {
+                busy: 171,
+                total: 621
+            })
+        );
+        assert_eq!(probe.busy, None);
+        assert_eq!(probe.memory.pressure_level, None);
+    }
+
+    #[test]
+    fn mac_local_collects_busy_and_memory_pressure() {
+        let shell = local_shell();
+        shell.on("sysctl -n vm.loadavg", "{ 1.0 2.0 3.0 }")
+            .on("iostat -c 2 -w 1", "us sy id 1m 5m 15m\n1 2 97 1 2 3\n38 25 37 8.59 12.37 15.00\n")
+            .on("sysctl -n hw.memsize", "65536\n")
+            .on("sysctl -n kern.memorystatus_vm_pressure_level", "2\n")
+            .on("vm_stat", "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1.\nPages inactive: 1.\nPages speculative: 0.\n");
+        let probe = local(&shell, "/home").unwrap();
+        assert_eq!(probe.cpu_ticks, None);
+        assert_eq!(probe.busy, Some(0.63));
+        assert_eq!(probe.memory.pressure_level, Some(2));
+    }
+
+    #[test]
+    fn older_probes_default_new_measurements() {
+        let memory: Memory = serde_json::from_str(r#"{"used_bytes":1,"total_bytes":2}"#).unwrap();
+        assert_eq!(memory.pressure_level, None);
+        let probe: Probe = serde_json::from_str(r#"{"host":"old","label":"old","load1":0,"cores":1,"memory":{"used_bytes":1,"total_bytes":2},"disk_free_percent":50,"agents":{"total":0,"by_status":{}},"agent_panes":[],"reservations":[],"panes":[]}"#).unwrap();
+        assert_eq!(probe.cpu_ticks, None);
+        assert_eq!(probe.busy, None);
+        assert_eq!(probe.memory.pressure_level, None);
+    }
+
+    #[test]
+    fn malformed_measurements_report_parse_errors() {
+        let shell = Fake::new();
+        shell.on("read /proc/stat", "cpu broken");
+        assert!(matches!(cpu_ticks(&shell), Err(Error::Parse { .. })));
+        let shell = Fake::new();
+        shell.on("iostat -c 2 -w 1", "bad");
+        assert!(matches!(mac_busy(&shell), Err(Error::Parse { .. })));
+    }
+
+    #[test]
+    fn memory_uses_scope_with_less_free_space() {
+        let gib = 1024_u64.pow(3);
+        let shell = Fake::new();
+        shell
+            .on("read /proc/self/cgroup", "0::/\n")
+            .on("read /sys/fs/cgroup/memory.max", &(4 * gib).to_string())
+            .on("read /sys/fs/cgroup/memory.current", &(3 * gib).to_string())
+            .on("read /sys/fs/cgroup/memory.stat", "inactive_file 0\n")
+            .on(
+                "read /proc/meminfo",
+                "MemTotal: 67108864 kB\nMemAvailable: 524288 kB\n",
+            );
+        // Host has 0.5 GiB free, less than the cgroup's 1 GiB.
+        assert_eq!(
+            memory(&shell).unwrap(),
+            Memory {
+                used_bytes: 64 * gib - gib / 2,
+                total_bytes: 64 * gib,
+                pressure_level: None,
+            }
+        );
+        shell.on(
+            "read /proc/meminfo",
+            "MemTotal: 67108864 kB\nMemAvailable: 2097152 kB\n",
+        );
+        // Host now has 2 GiB free; the cgroup's 1 GiB governs.
+        assert_eq!(
+            memory(&shell).unwrap(),
+            Memory {
+                used_bytes: 3 * gib,
+                total_bytes: 4 * gib,
+                pressure_level: None,
+            }
+        );
+    }
 
     #[test]
     fn parses_system_measurements() {
@@ -325,7 +547,8 @@ mod tests {
             parse_meminfo("MemTotal: 100 kB\nMemAvailable: 25 kB\n"),
             Some(Memory {
                 used_bytes: 76800,
-                total_bytes: 102_400
+                total_bytes: 102_400,
+                pressure_level: None,
             })
         );
         assert_eq!(
@@ -335,7 +558,8 @@ mod tests {
             ),
             Some(Memory {
                 used_bytes: 16384,
-                total_bytes: 40960
+                total_bytes: 40960,
+                pressure_level: None,
             })
         );
         assert!(parse_vm_stat("bad", 10).is_none());
@@ -375,7 +599,8 @@ mod tests {
             memory(&shell).unwrap(),
             Memory {
                 used_bytes: 4000,
-                total_bytes: 8192
+                total_bytes: 8192,
+                pressure_level: None,
             }
         );
         shell
@@ -386,7 +611,8 @@ mod tests {
             memory(&shell).unwrap(),
             Memory {
                 used_bytes: 1500,
-                total_bytes: 4096
+                total_bytes: 4096,
+                pressure_level: None,
             }
         );
         for path in [
@@ -401,7 +627,8 @@ mod tests {
             memory(&shell).unwrap(),
             Memory {
                 used_bytes: 76800,
-                total_bytes: 102_400
+                total_bytes: 102_400,
+                pressure_level: None,
             }
         );
     }
@@ -409,13 +636,15 @@ mod tests {
     #[test]
     fn mac_memory_uses_vm_stat_page_size() {
         let shell = Fake::new();
+        shell.on("sysctl -n kern.memorystatus_vm_pressure_level", "1\n");
         shell.on("sysctl -n hw.memsize", "65536\n")
             .on("vm_stat", "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1.\nPages inactive: 1.\nPages speculative: 0.\n");
         assert_eq!(
             memory(&shell).unwrap(),
             Memory {
                 used_bytes: 32768,
-                total_bytes: 65536
+                total_bytes: 65536,
+                pressure_level: Some(1),
             }
         );
     }
