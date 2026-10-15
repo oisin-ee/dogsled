@@ -360,6 +360,14 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
         if let Err(error) = report(shell, &job, &job.state, Some(&token)) {
             eprintln!("wrangle pane report: {error}");
         }
+        // Closing our own foreground pane can terminate this wrapper. Keep all
+        // durable writes and completion reports above this final best-effort call.
+        if !job.pane.is_empty()
+            && let Err(error) =
+                shell.run_ok("herdr", &["pane".into(), "close".into(), job.pane.clone()])
+        {
+            eprintln!("wrangle pane close: {error}");
+        }
         outcome?;
         Ok(code)
     })

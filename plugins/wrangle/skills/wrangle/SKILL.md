@@ -77,7 +77,11 @@ Run long waits through the harness's background-task tool. A completed wait retu
 At the wait deadline, wrangle prints `still running` and exits 124. The job continues until completion or cancellation.
 Job timeouts kill the process group. Both timeout defaults are unlimited.
 Durations accept integer `ms`, `s`, `m`, and `h` suffixes.
-Output remains in the pane and the job log. Once the job ends, prune can close its tab: the log keeps the output. A final record contains the exit code, signal, reason, and timestamps.
+While the job runs, output goes to the pane and the job log.
+When the job ends, `exec` saves the final record, reports completion, then closes its own pane and tab.
+The final record contains the exit code, signal, reason, and timestamps.
+`wrangle logs JOB` and `wrangle wait JOB` still work after the tab closes.
+If the close fails, `exec` logs the error to stderr and preserves the result. Prune can close the ended job tab later.
 
 Jobs use a tab in the caller's workspace. Agents with `--branch` use the worktree workspace's pane.
 Remote work uses a workspace with the same name. Without a branch, remote non-repository `--cwd` must exist.

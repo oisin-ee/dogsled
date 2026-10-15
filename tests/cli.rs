@@ -73,6 +73,11 @@ case "$*" in
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;
   'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1"}}}' ;;
   'pane run'*) shift 3; sh -c "$*" > "$RIG/job-output" 2>&1; printf '{}\n' ;;
+  'pane close '*)
+    mkdir -p "$RIG/at-close"
+    cp "$WRANGLE_STATE"/jobs/*.json "$RIG/at-close/"
+    if test -f "$RIG/fail-close"; then echo close-refused >&2; exit 1; fi
+    printf '{}\n' ;;
   'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
   *) echo unexpected >&2; exit 2 ;;
 esac

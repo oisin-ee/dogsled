@@ -75,10 +75,15 @@ wrangle ps | logs <id> | stop <id> | wait <id>
   - writes stdout and stderr to `~/.local/state/wrangle/jobs/<id>.log` and to the pane;
   - kills the command at `--timeout`, or when it prints nothing for `--idle-timeout`;
   - writes `{exit, signal, started, ended}` to `jobs/<id>.json`;
-  - reports `idle` with `$wrangle = "exit 0 · 3m"`, or `blocked` with `"exit 1 · 3m"` or `"timeout"`.
+  - reports `idle` with `$wrangle = "exit 0 · 3m"`, or `blocked` with `"exit 1 · 3m"` or `"timeout"`;
+  - closes its own pane with `herdr pane close <job.pane>`, which removes the job tab.
 - `--wait` blocks until the job ends and exits with its code. Each harness runs it with its own background tool
   (Pi `bg_task`, Claude Code `run_in_background`, Codex background shell), so the caller wakes when the job ends.
 - Without `--wait`, the call returns the job id at once. `wrangle wait <id>` can follow later.
+
+The close can terminate `exec`, because it runs in that pane. The log, final record, and completion reports must finish first.
+A failed close writes an error to stderr without changing the job record or exit code. Prune retains its ended-job-tab fallback.
+`wait` and `logs` read the ledger, not the pane, so both work after the tab closes.
 
 When every host is full, `run` and `place` put the work in the queue and print the ticket. With `--wait` they block
 until the ticket is admitted (and for `run`, until the job ends). The owner's host service admits tickets in order when an eligible host has headroom.
