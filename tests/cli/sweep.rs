@@ -363,7 +363,9 @@ fn serve_closes_a_remote_orphan_over_ssh_with_the_pushed_check() {
     child(&rig, "idle", &tree);
     rig.peer();
     let mut remote = rig.read("remote.json");
+    // The peer lists the child's pane, so item reconciliation keeps the item open.
     remote["probe"]["agent_panes"][0]["pane"] = json!("w2:p1");
+    remote["probe"]["panes"] = json!([{"pane_id":"w2:p1","workspace_id":"w2"}]);
     rig.put("remote.json", &remote);
     orphan(&rig, "w9:p1", "8103");
     rig.script(
