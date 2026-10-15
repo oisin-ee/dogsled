@@ -171,42 +171,123 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
     }))
 }
 
-/// Compare whole trees without invoking user merge drivers. Keep repository attributes
-/// (including binary files), but replace configured commands with Git's text merge.
+/// A disposable object store: no repository config, info/attributes, or writes to the source.
+struct MergeRepo(std::path::PathBuf);
+
+impl MergeRepo {
+    fn new() -> Result<Self> {
+        let path = std::env::temp_dir().join(format!("wrangle-merge-{}", crate::ledger::new_id()));
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+
+    fn git(&self, shell: &dyn Shell, args: &[&str]) -> Result<crate::shell::Output> {
+        // Git hooks can export repository paths and command-scope configuration. Neither
+        // those nor system/global config and attributes belong in this merge calculation.
+        let mut words = Vec::new();
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                words.extend(["-u".into(), key]);
+            }
+        }
+        words.extend([
+            "GIT_CONFIG_NOSYSTEM=1".into(),
+            "GIT_CONFIG_GLOBAL=/dev/null".into(),
+            "GIT_ATTR_NOSYSTEM=1".into(),
+            "git".into(),
+            "-C".into(),
+            self.0.display().to_string(),
+            "-c".into(),
+            "core.attributesFile=/dev/null".into(),
+        ]);
+        words.extend(args.iter().map(ToString::to_string));
+        shell.run("env", &words)
+    }
+}
+
+impl Drop for MergeRepo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Compare whole trees with Git's built-in merge, independent of all user merge drivers
+/// and attributes. An empty attribute source also excludes committed .gitattributes.
 fn merge_tree_unchanged(shell: &dyn Shell, repo: &str, base: &str, branch: &str) -> Result<bool> {
-    let drivers = git(
+    let source = git(
         shell,
         repo,
         &[
-            "config",
-            "--name-only",
-            "--get-regexp",
-            r"^merge\..*\.driver$",
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-object-format",
+            "--git-path",
+            "objects",
         ],
     )?;
-    if !matches!(drivers.status, 0 | 1) {
-        return Err(failed(repo, "read merge drivers", &drivers));
+    if !source.ok() {
+        return Err(failed(repo, "locate merge objects", &source));
     }
-    let mut options = vec!["merge.default=text".to_string()];
-    for driver in drivers.stdout.lines().collect::<BTreeSet<_>>() {
-        options.push(format!("{driver}=git merge-file -- %A %O %B"));
+    let fields: Vec<&str> = source.stdout.lines().collect();
+    let [format, objects] = fields.as_slice() else {
+        return Err(Error::Invalid(format!(
+            "{repo}: invalid merge object store"
+        )));
+    };
+    let tips = git(
+        shell,
+        repo,
+        &["rev-parse", base, branch, &format!("{base}^{{tree}}")],
+    )?;
+    if !tips.ok() {
+        return Err(failed(repo, "resolve merge trees", &tips));
     }
-    let mut args: Vec<&str> = options
-        .iter()
-        .flat_map(|value| ["-c", value.as_str()])
-        .collect();
-    args.extend(["merge-tree", "--write-tree", "--no-messages", base, branch]);
-    let merged = git(shell, repo, &args)?;
+    let fields: Vec<&str> = tips.stdout.lines().collect();
+    let [base, branch, tree] = fields.as_slice() else {
+        return Err(Error::Invalid(format!("{repo}: invalid merge tips")));
+    };
+    let isolated = MergeRepo::new()?;
+    let init = isolated.git(
+        shell,
+        &[
+            "init",
+            "--bare",
+            "--quiet",
+            "--template=",
+            &format!("--object-format={format}"),
+        ],
+    )?;
+    if !init.ok() {
+        return Err(failed(repo, "initialize merge object store", &init));
+    }
+    // Git reads original objects through an alternate, but writes merge objects only here.
+    std::fs::write(
+        isolated.0.join("objects/info/alternates"),
+        format!("{}\n", serde_json::to_string(objects)?),
+    )?;
+    let empty = isolated.git(
+        shell,
+        &["hash-object", "-t", "tree", "-w", "--", "/dev/null"],
+    )?;
+    if !empty.ok() {
+        return Err(failed(repo, "create empty attribute source", &empty));
+    }
+    let merged = isolated.git(
+        shell,
+        &[
+            &format!("--attr-source={}", empty.stdout.trim()),
+            "merge-tree",
+            "--write-tree",
+            "--no-messages",
+            base,
+            branch,
+        ],
+    )?;
     match merged.status {
-        0 => (),
-        1 => return Ok(false),
-        _ => return Err(failed(repo, "merge trees", &merged)),
+        0 => Ok(!tree.is_empty() && merged.stdout.trim() == *tree),
+        1 => Ok(false),
+        _ => Err(failed(repo, "merge trees", &merged)),
     }
-    let tree = git(shell, repo, &["rev-parse", &format!("{base}^{{tree}}")])?;
-    if !tree.ok() {
-        return Err(failed(repo, "resolve default branch tree", &tree));
-    }
-    Ok(!tree.stdout.trim().is_empty() && merged.stdout.trim() == tree.stdout.trim())
 }
 
 /// One commit from `git log`, with what it changed against its first parent (limited to the
@@ -667,35 +748,38 @@ mod tests {
         repo.commit("a", "branch\n", "branch change");
         repo.git(&["switch", "-q", "main"]);
         repo.commit("a", "main\n", "different change");
-        // This driver would discard the branch change and report a clean no-op.
+        // A failed driver can print main's tree while reporting a conflict. The tree
+        // alone is not proof. A successful driver that discards work is unsafe too.
+        repo.git(&["config", "merge.custom.driver", "false"]);
+        let merged = git(
+            &Isolated,
+            repo.path(),
+            &["merge-tree", "--write-tree", "main", "feat"],
+        )
+        .unwrap();
+        assert_eq!(merged.status, 1);
+        assert_eq!(
+            merged.stdout.lines().next().unwrap(),
+            repo.git(&["rev-parse", "main^{tree}"])
+        );
+        assert_eq!(repo.check("feat"), None);
         repo.git(&["config", "merge.custom.driver", "true"]);
+        assert_eq!(repo.check("feat"), None);
+        // Attributes must not replace a real conflict with the built-in union driver.
+        std::fs::write(repo.0.join(".git/info/attributes"), "a merge=union\n").unwrap();
         assert_eq!(repo.check("feat"), None);
     }
 
     #[test]
-    fn merge_tree_errors_are_reported_and_conflicted_trees_are_never_accepted() {
-        let shell = crate::shell::Fake::new();
-        shell.on(
-            "git -C repo config --name-only --get-regexp ^merge\\..*\\.driver$",
-            "",
+    fn merge_tree_errors_are_reported() {
+        let repo = Repo::new("merge-tree-error");
+        let result = merge_tree_unchanged(&Isolated, repo.path(), "main", "missing");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("resolve merge trees")
         );
-        for status in [1, 128] {
-            shell.on_output(
-                "git -C repo -c merge.default=text merge-tree --write-tree --no-messages main feat",
-                Output {
-                    status,
-                    stdout: "same-tree\n".into(),
-                    stderr: "merge failed".into(),
-                },
-            );
-            shell.on("git -C repo rev-parse main^{tree}", "same-tree\n");
-            let result = merge_tree_unchanged(&shell, "repo", "main", "feat");
-            if status == 1 {
-                assert!(!result.unwrap());
-            } else {
-                assert!(result.unwrap_err().to_string().contains("merge failed"));
-            }
-        }
     }
 
     #[test]

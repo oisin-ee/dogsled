@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-- Doctor also reports a branch as integrated when a clean `git merge-tree` result equals the default branch's tree. The detail names the merge-tree rule. Conflicts and changed trees do not satisfy this rule. Integration checks use Git's text merge instead of configured merge drivers and disable external diff tools.
+- Doctor also reports a branch as integrated when a clean `git merge-tree` result equals the default branch's tree. The detail names the merge-tree rule. Conflicts and changed trees do not satisfy this rule. Integration checks disable external diff tools and text conversion. The merge-tree check uses an isolated object store without user configuration or attributes.
 
 ## 0.8.2 - 2026-10-15
 
