@@ -392,19 +392,10 @@ fn processes(shell: &dyn Shell, panes: &[Pane], plan: &mut Plan) -> Result<()> {
     }
     let mut roots = BTreeSet::new();
     for pane in panes {
-        let out = shell.run_ok(
-            "herdr",
-            &[
-                "pane".into(),
-                "process-info".into(),
-                "--pane".into(),
-                pane.pane_id.clone(),
-            ],
-        )?;
-        let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
-        let info = value
-            .pointer("/result/process_info")
-            .ok_or_else(|| Error::Invalid("missing pane process information".into()))?;
+        // A pane that closed since the list has no processes left to own.
+        let Some(info) = crate::probe::process_info(shell, &pane.pane_id)? else {
+            continue;
+        };
         if let Some(pid) = info["shell_pid"].as_u64() {
             roots.insert(pid as u32);
         }

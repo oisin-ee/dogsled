@@ -12,6 +12,7 @@ case "$*" in
  'pane list') cat "$RIG/panes.json" ;;
  'pane read'*) printf '1\n2\n3\n4\n5\n' ;;
  'pane report-metadata'*|'notification show'*|'agent prompt'*|'pane close'*) printf '{}\n' ;;
+ 'pane process-info --pane gone') printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane not found"}}' >&2; exit 1 ;;
  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[]}}}' ;;
  'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
  'workspace list') cat "$RIG/workspaces.json" 2>/dev/null || printf '%s\n' '{"result":{"workspaces":[]}}' ;;
@@ -148,6 +149,20 @@ fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
     );
     assert_eq!(rig.json(&["doctor", "--host", "netcup"]).1, plan);
     assert!(rig.log("ssh.log").contains("host doctor"));
+}
+
+#[test]
+fn doctor_finds_processes_when_a_pane_closes_after_the_list() {
+    let rig = watchdog_rig("doctor-closed-pane");
+    // Herdr listed "gone", then it closed before doctor asked for its processes.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"gone","cwd":"/"},{"pane_id":"w1:p1","cwd":"/"}]}}),
+    );
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    assert!(plan.to_string().contains("orphan"), "{plan}");
+    assert!(!plan.to_string().contains("pane-child"), "{plan}");
 }
 
 #[test]
