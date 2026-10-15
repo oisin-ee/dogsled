@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - Find a stacked branch as integrated when each branch in the stack landed as its own squash. A branch whose commits split into consecutive runs, each applied by one commit on the default branch, is integrated; doctor names every applying commit.
+- Doctor finds more cruft. New classes: `branches` (local branches without a worktree, removable when integrated or fully on a remote), `workspaces` (a workspace whose every pane is idle closes whole), and `repositories` (a configured path that is not a checkout).
+- Doctor finds a shell pane idle for 24 hours. The service records when each shell last had no foreground command, because Herdr reports no activity time.
+- Doctor removes a worktree with no commits a day after Git made it, and reports unused worktrees with unmerged work: commits ahead, commits on no remote, and the last commit's age.
+- Doctor reads repositories from Herdr workspaces and the new `[cleanup] repositories` policy, so repositories without a live pane are checked.
+- The integration search merges each path on its own and reads each commit's changes from one `git log`. On a host with 250 branches, doctor took 13 seconds instead of 7 minutes.
 
 ## 0.7.2 - 2026-10-14
 

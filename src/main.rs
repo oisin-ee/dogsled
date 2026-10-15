@@ -113,6 +113,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         thresholds: config::Thresholds::from(&policy),
         home: &home,
         hooks: &policy.hooks,
+        cleanup: &policy.cleanup,
     };
     match cli.command {
         Command::Serve { interval, once } => service::serve(

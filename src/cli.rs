@@ -54,7 +54,7 @@ pub enum Command {
         host: Option<String>,
         #[arg(long)]
         yes: bool,
-        #[arg(value_parser = ["worktrees", "panes", "jobs", "disk", "processes"])]
+        #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "disk", "processes"])]
         classes: Vec<String>,
     },
     /// Reserve capacity on the host with the most headroom.

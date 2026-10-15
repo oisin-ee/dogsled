@@ -34,6 +34,37 @@ pub struct Pane {
     pub cwd: Option<String>,
     #[serde(default)]
     pub foreground_cwd: Option<String>,
+    /// A pane without an agent whose shell runs no foreground command.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idle_shell: bool,
+    /// Start of the observed idle-shell run. Herdr reports no activity time, so the service
+    /// keeps it across samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since_ms: Option<u64>,
+}
+
+/// What a pane's shell runs in the foreground, or `None` at an empty prompt.
+pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
+    let out = shell.run_ok(
+        "herdr",
+        &[
+            "pane".into(),
+            "process-info".into(),
+            "--pane".into(),
+            pane.into(),
+        ],
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    let info = value
+        .pointer("/result/process_info")
+        .ok_or_else(|| Error::Invalid(format!("{pane} has no process information")))?;
+    let shell_pid = info["shell_pid"].as_u64();
+    Ok(info["foreground_processes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["pid"].as_u64() != shell_pid)
+        .map(|p| p["name"].as_str().unwrap_or("a command").to_string()))
 }
 
 /// Stable service contract, independent of Herdr's raw response fields.
@@ -95,9 +126,16 @@ pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
     }
     let panes = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&panes.stdout)?;
-    let panes = value
-        .pointer("/result/panes")
-        .ok_or_else(|| parse_error("herdr pane list", &panes.stdout))?;
+    let mut panes: Vec<Pane> = serde_json::from_value(
+        value
+            .pointer("/result/panes")
+            .ok_or_else(|| parse_error("herdr pane list", &panes.stdout))?
+            .clone(),
+    )?;
+    for pane in panes.iter_mut().filter(|p| p.agent.is_none()) {
+        // A pane closed since the list is not idle; it is gone.
+        pane.idle_shell = matches!(foreground(shell, &pane.pane_id), Ok(None));
+    }
     Ok(Probe {
         host: "local".into(),
         label: "local".into(),
@@ -108,7 +146,7 @@ pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
         agents,
         agent_panes,
         reservations: Vec::new(),
-        panes: serde_json::from_value(panes.clone())?,
+        panes,
     })
 }
 

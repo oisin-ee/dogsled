@@ -167,27 +167,7 @@ pub fn busy(shell: &dyn Shell, pane: &Pane) -> Result<Option<String>> {
         let status = pane.agent_status.as_deref().unwrap_or("unknown");
         return Ok((!matches!(status, "idle" | "done")).then(|| format!("{agent} {status}")));
     }
-    let out = shell.run_ok(
-        "herdr",
-        &[
-            "pane".into(),
-            "process-info".into(),
-            "--pane".into(),
-            pane.pane_id.clone(),
-        ],
-    )?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
-    let info = value
-        .pointer("/result/process_info")
-        .ok_or_else(|| Error::Invalid(format!("{} has no process information", pane.pane_id)))?;
-    let shell_pid = info["shell_pid"].as_u64();
-    let command = info["foreground_processes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|p| p["pid"].as_u64() != shell_pid)
-        .map(|p| p["name"].as_str().unwrap_or("a command").to_string());
-    Ok(command.map(|name| format!("running {name}")))
+    Ok(crate::probe::foreground(shell, &pane.pane_id)?.map(|name| format!("running {name}")))
 }
 
 /// Close the holders and the workspace, then run the remove hook in the main checkout.

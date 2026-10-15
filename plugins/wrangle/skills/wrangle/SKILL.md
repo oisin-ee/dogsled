@@ -131,9 +131,9 @@ wrangle prune --host HOST worktrees jobs
 ```
 
 Doctor is read-only. Prune displays candidates and asks before removal; `--yes` skips only the question.
-Classes are `worktrees`, `panes`, `jobs`, `disk`, and `processes`. Disk and process findings are report-only.
+Classes are `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `disk`, `processes`, and `repositories`. Disk, process, and repository findings are report-only, as are worktrees and branches with unpushed or unmerged work.
 Never use cleanup to close working or blocked agents. Dirty, foreign-locked, or held worktrees cannot be removed.
-A worktree is a candidate when its branch is merged, squashed, or cherry-picked into the remote default branch. A shell with no running command does not hold it.
+A worktree is a candidate when its branch is merged, squashed, or cherry-picked into the remote default branch, or has no commits a day after it was made. A shell with no running command does not hold it.
 Wrangle never removes anything on a timer. Close your own finished children with `wrangle close`.
 Prune refuses changed Git identities, closes the idle panes and workspace that show the worktree, and removes it through the host's `remove` hook.
 
