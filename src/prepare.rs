@@ -1,9 +1,10 @@
 //! Prepare work in the repository checkout, never in the caller's worktree.
 
-use crate::config;
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
-use crate::shell::{Shell, quote};
+use crate::repository::Values;
+use crate::shell::Shell;
+use crate::worktree::{self, AGENT_LOCK};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -50,13 +51,7 @@ pub fn run(
 ) -> Result<Prepared> {
     let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
-        let prepared = local(
-            fleet.shell,
-            fleet.policy,
-            &checkout.display().to_string(),
-            branch,
-            base,
-        )?;
+        let prepared = local(fleet.shell, &checkout.display().to_string(), branch, base)?;
         if let Some(path) = &prepared.path {
             crate::cleanup::remember(
                 fleet.ledger,
@@ -96,192 +91,213 @@ pub fn run(
     fleet.remote_setup(host, &args)
 }
 
-pub fn local(
-    shell: &dyn Shell,
-    policy: &config::Policy,
-    repo: &str,
-    branch: &str,
-    base: Option<&str>,
-) -> Result<Prepared> {
+/// Create or reuse the branch's linked worktree in the main checkout of `repo`, lock it as an
+/// agent worktree, run the repository's `setup` in a new one, and open it as a Herdr workspace
+/// linked to the repository. Records the main checkout's workspace as the anchor when the
+/// repository had none open.
+pub fn local(shell: &dyn Shell, repo: &str, branch: &str, base: Option<&str>) -> Result<Prepared> {
+    let invalid = branch.is_empty()
+        || branch.starts_with('-')
+        || !shell
+            .run(
+                "git",
+                &["check-ref-format".into(), "--branch".into(), branch.into()],
+            )?
+            .ok();
+    if invalid {
+        return Err(Error::Invalid(format!(
+            "{branch} is not a valid branch name"
+        )));
+    }
+    shell
+        .run_ok("herdr", &["workspace".into(), "list".into()])
+        .map_err(|e| Error::Invalid(format!("no Herdr server is reachable on this host: {e}")))?;
     let checkout = main_checkout(shell, repo)?;
-    let argv = policy.hooks.prepare_argv(branch, base)?;
-    let command = format!(
-        "cd {} && exec {}",
-        quote(&checkout.display().to_string()),
-        argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
-    );
-    let out = shell.run_setup_ok("sh", &["-c".into(), command])?;
-    parse_output(&out.stdout)
-}
-
-pub fn parse_output(stdout: &str) -> Result<Prepared> {
-    for text in std::iter::once(stdout.trim()).chain(stdout.lines().rev().map(str::trim)) {
-        if let Ok(prepared) = serde_json::from_str::<Prepared>(text)
-            && (prepared.pane_id.is_some() || prepared.path.is_some())
+    let settings = crate::repository::load(&checkout)?;
+    let existing = worktree::list(shell, &checkout)?
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some(branch));
+    let has_branch = existing.is_some()
+        || git(
+            &checkout,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .run(shell)?
+        .ok();
+    if has_branch && base.is_some() {
+        return Err(Error::Invalid(format!(
+            "branch {branch} exists; omit --base"
+        )));
+    }
+    let (path, created) = if let Some(found) = existing {
+        (reuse(shell, &checkout, found)?, false)
+    } else {
+        let path = checkout
+            .join(&settings.worktree.dir)
+            .join(branch.replace(['/', '\\'], "-"))
+            .display()
+            .to_string();
+        let mut args = vec!["worktree", "add", "--lock", "--reason", AGENT_LOCK];
+        let start;
+        if has_branch {
+            args.extend([path.as_str(), branch]);
+        } else {
+            start = match base {
+                Some(base) => base.to_string(),
+                None => default_branch(shell, &checkout)?,
+            };
+            args.extend(["-b", branch, path.as_str(), start.as_str()]);
+        }
+        git(&checkout, &args).setup_ok(shell)?;
+        (path, true)
+    };
+    if created {
+        let values = Values {
+            main: &checkout,
+            path: &path,
+            branch,
+        };
+        if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
         {
-            return Ok(prepared);
+            discard(shell, &checkout, &path, (!has_branch).then_some(branch))?;
+            return Err(Error::Invalid(format!(
+                "{error}; the new worktree was removed"
+            )));
         }
     }
-    Err(Error::Hook {
-        detail: stdout.trim().lines().last().unwrap_or("no output").into(),
+    open(shell, &checkout, &path)
+}
+
+/// The branch's existing linked worktree, locked as an agent worktree. Another lock, or the
+/// main checkout, is someone else's.
+fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<String> {
+    if worktree::same(&found.path, &checkout.display().to_string()) {
+        return Err(Error::Invalid(format!(
+            "branch {} is checked out in the main checkout {}",
+            found.branch.unwrap_or_default(),
+            found.path
+        )));
+    }
+    match found.lock.as_deref() {
+        None => git(
+            checkout,
+            &["worktree", "lock", "--reason", AGENT_LOCK, &found.path],
+        )
+        .run_ok(shell)?,
+        Some(AGENT_LOCK) => (),
+        Some(other) => {
+            return Err(Error::Invalid(format!(
+                "{} is locked ({other}); it is not an agent worktree",
+                found.path
+            )));
+        }
+    }
+    Ok(found.path)
+}
+
+/// The local name of the repository's default branch, the base of a new branch.
+fn default_branch(shell: &dyn Shell, checkout: &Path) -> Result<String> {
+    let base = crate::integration::base(shell, &checkout.display().to_string())?;
+    Ok(base
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| base.strip_prefix("refs/heads/"))
+        .unwrap_or(&base)
+        .to_string())
+}
+
+/// Remove a worktree that `place` just made and whose setup failed. It holds nothing yet, so
+/// the removal is forced through the agent lock, and a branch made for it goes too.
+fn discard(shell: &dyn Shell, checkout: &Path, path: &str, branch: Option<&str>) -> Result<()> {
+    git(checkout, &["worktree", "remove", "-f", "-f", path]).run_ok(shell)?;
+    if let Some(branch) = branch {
+        git(checkout, &["branch", "-D", branch]).run_ok(shell)?;
+    }
+    Ok(())
+}
+
+/// Open `path` as a Herdr workspace without focus, and record the anchor when Herdr opened the
+/// main checkout's workspace for it. A workspace that already showed the path may belong to a
+/// running child, so that is an error.
+fn open(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Prepared> {
+    let main = checkout.display().to_string();
+    let before = worktree::workspace(shell, checkout, &main)?;
+    let out = shell.run_ok(
+        "herdr",
+        &[
+            "worktree".into(),
+            "open".into(),
+            "--cwd".into(),
+            main.clone(),
+            "--path".into(),
+            path.into(),
+            "--no-focus".into(),
+        ],
+    )?;
+    let opened: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    if before.is_none()
+        && let Some(anchor) = worktree::workspace(shell, checkout, &main)?
+    {
+        worktree::record_anchor(shell, checkout, &anchor)?;
+    }
+    let workspace_id = opened
+        .pointer("/result/workspace/workspace_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    if opened.pointer("/result/already_open") == Some(&serde_json::Value::Bool(true)) {
+        return Err(Error::Invalid(format!(
+            "Herdr workspace {} already shows {path}; a child may own it",
+            workspace_id.as_deref().unwrap_or("?")
+        )));
+    }
+    let pane_id = opened
+        .pointer("/result/root_pane/pane_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    if pane_id.is_none() {
+        return Err(Error::Parse {
+            origin: "herdr worktree open".into(),
+            detail: out.stdout.trim().into(),
+        });
+    }
+    Ok(Prepared {
+        pane_id,
+        workspace_id,
+        path: Some(
+            opened
+                .pointer("/result/worktree/path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(path)
+                .to_string(),
+        ),
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[derive(Debug)]
-    struct TimedHook {
-        elapsed: std::time::Duration,
-        budget: crate::budget::Budget,
+/// One Git invocation in `dir`.
+struct Git(Vec<String>);
+
+fn git(dir: &Path, args: &[&str]) -> Git {
+    Git(["-C".to_string(), dir.display().to_string()]
+        .into_iter()
+        .chain(args.iter().map(ToString::to_string))
+        .collect())
+}
+
+impl Git {
+    fn run(&self, shell: &dyn Shell) -> Result<crate::shell::Output> {
+        shell.run("git", &self.0)
     }
 
-    impl Shell for TimedHook {
-        fn budget(&self) -> crate::budget::Budget {
-            self.budget
-        }
-
-        fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
-            if program == "git" {
-                return Ok(crate::shell::Output {
-                    status: 0,
-                    stdout: "/repo/.git".into(),
-                    stderr: String::new(),
-                });
-            }
-            self.run_bounded(program, args, self.budget.remaining(program)?)
-        }
-
-        fn run_bounded(
-            &self,
-            program: &str,
-            args: &[String],
-            timeout: std::time::Duration,
-        ) -> Result<crate::shell::Output> {
-            // Inject elapsed child time rather than sleep for production limits.
-            if self.elapsed > timeout {
-                return Err(Error::Deadline(format!("{program} {}", args.join(" "))));
-            }
-            Ok(crate::shell::Output {
-                status: 0,
-                stdout: "{\"path\":\"/repo/tree\"}".into(),
-                stderr: String::new(),
-            })
-        }
+    fn run_ok(&self, shell: &dyn Shell) -> Result<()> {
+        shell.run_ok("git", &self.0).map(drop)
     }
 
-    #[test]
-    fn prepare_uses_setup_limit_and_honors_shorter_command_deadline() {
-        use crate::budget::{Budget, CALL_LIMIT, SETUP_LIMIT};
-        use std::time::{Duration, Instant};
-        let policy = config::Policy::default();
-        let shell = TimedHook {
-            elapsed: CALL_LIMIT + Duration::from_secs(1),
-            budget: Budget::default(),
-        };
-        assert_eq!(
-            local(&shell, &policy, "/repo", "feature", None)
-                .unwrap()
-                .path
-                .as_deref(),
-            Some("/repo/tree")
-        );
-        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        let host = Host {
-            id: "peer".into(),
-            label: "peer".into(),
-            target: Some("peer-ssh".into()),
-        };
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/home".into(),
-            hosts: vec![host.clone()],
-        };
-        assert_eq!(
-            run(&fleet, &host, "/repo", "feature", None)
-                .unwrap()
-                .path
-                .as_deref(),
-            Some("/repo/tree")
-        );
-        let shell = TimedHook {
-            elapsed: SETUP_LIMIT + Duration::from_secs(1),
-            budget: Budget::default(),
-        };
-        let error = local(&shell, &policy, "/repo", "feature", None).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("deadline reached: sh -c cd /repo && exec mise")
-        );
-        let shell = TimedHook {
-            elapsed: CALL_LIMIT + Duration::from_secs(1),
-            budget: Budget::until(Instant::now() + CALL_LIMIT),
-        };
-        assert!(matches!(
-            local(&shell, &policy, "/repo", "feature", None),
-            Err(Error::Deadline(_))
-        ));
-    }
-
-    fn render(template: &[String], branch: &str, base: Option<&str>) -> Result<Vec<String>> {
-        config::Hooks {
-            prepare: template.to_vec(),
-            ..config::Hooks::default()
-        }
-        .prepare_argv(branch, base)
-    }
-
-    #[test]
-    fn default_template_and_embedded_values_are_literal() {
-        let template = config::Policy::default().hooks.prepare;
-        assert_eq!(
-            render(&template, "feat/{base}", Some("main/{branch}")).unwrap(),
-            [
-                "mise",
-                "run",
-                "-q",
-                "agent:worktree",
-                "--",
-                "feat/{base}",
-                "main/{branch}"
-            ]
-        );
-        assert_eq!(
-            render(&template, "feat/{base}", None).unwrap(),
-            ["mise", "run", "-q", "agent:worktree", "--", "feat/{base}"]
-        );
-        assert_eq!(
-            render(&["prefix:{base}".into(), String::new()], "b", None).unwrap(),
-            ["prefix:", ""]
-        );
-        assert!(
-            render(&["{repo}".into()], "b", None)
-                .unwrap_err()
-                .to_string()
-                .contains("{repo}")
-        );
-        assert!(render(&["{unclosed".into()], "b", None).is_err());
-    }
-
-    #[test]
-    fn prepare_accepts_path_or_pane_and_rejects_empty_results() {
-        assert_eq!(
-            parse_output("progress\n{\"path\":\"/repo/work\"}\n")
-                .unwrap()
-                .path
-                .as_deref(),
-            Some("/repo/work")
-        );
-        assert_eq!(
-            parse_output("{\"pane_id\":\"w1:p1\"}")
-                .unwrap()
-                .pane_id
-                .as_deref(),
-            Some("w1:p1")
-        );
-        assert!(parse_output("{}").is_err());
+    /// A checkout can take longer than an ordinary call.
+    fn setup_ok(&self, shell: &dyn Shell) -> Result<()> {
+        shell.run_setup_ok("git", &self.0).map(drop)
     }
 }

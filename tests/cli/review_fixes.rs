@@ -9,7 +9,7 @@ fn removal_refuses_identity_changed_during_planning() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stdout).contains("failed: refuse"));
     assert!(String::from_utf8_lossy(&out.stdout).contains("identity changed"));
-    assert_eq!(rig.log("mise.log"), "");
+    assert!(!rig.log("git.log").contains("worktree remove"));
 }
 
 #[test]

@@ -19,6 +19,7 @@ mod node;
 mod plan;
 mod prepare;
 mod probe;
+mod repository;
 mod runtime;
 mod service;
 mod shell;
@@ -112,7 +113,6 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         ledger: &ledger,
         thresholds: config::Thresholds::from(&policy),
         home: &home,
-        hooks: &policy.hooks,
         cleanup: &policy.cleanup,
     };
     match cli.command {
@@ -122,7 +122,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             std::time::Duration::from_secs(interval),
             once,
         )?,
-        Command::Host(cmd) => return host(cmd, &node, &policy),
+        Command::Host(cmd) => return host(cmd, &node),
         Command::Exec {
             id,
             cmd,
@@ -170,7 +170,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<ExitCode> {
+fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::Launch { request } => print(
             true,
@@ -216,13 +216,7 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
         // Over SSH the caller has no pane or workspace on this host.
         HostCommand::Close { pane } => print(
             true,
-            &close::local(
-                node.shell,
-                node.ledger,
-                &policy.hooks,
-                &pane,
-                &close::Caller::default(),
-            )?,
+            &close::local(node.shell, node.ledger, &pane, &close::Caller::default())?,
             String::new,
         )?,
         HostCommand::Prune { plan } => print(
@@ -251,7 +245,7 @@ fn host(cmd: HostCommand, node: &Node<'_>, policy: &config::Policy) -> Result<Ex
                 .join(repo)
                 .display()
                 .to_string();
-            let prepared = prepare::local(node.shell, policy, &repo, &branch, base.as_deref())?;
+            let prepared = prepare::local(node.shell, &repo, &branch, base.as_deref())?;
             if let Some(path) = &prepared.path {
                 cleanup::remember(
                     node.ledger,

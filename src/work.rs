@@ -304,9 +304,10 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         ));
     }
     let cwd = if request.branch.is_some() {
-        prepared.path.clone().ok_or_else(|| {
-            Error::Invalid("prepare hook must return path for a job or agent".into())
-        })?
+        prepared
+            .path
+            .clone()
+            .ok_or_else(|| Error::Invalid("the prepared worktree has no path".into()))?
     } else if host.is_local() {
         request.cwd.clone()
     } else if let (Some(checkout), Some(repo)) = (checkout, &request.repository) {

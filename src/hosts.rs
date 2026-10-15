@@ -126,7 +126,6 @@ impl<'a> Fleet<'a> {
             ledger: self.ledger,
             thresholds: self.thresholds(),
             home: &self.home,
-            hooks: &self.policy.hooks,
             cleanup: &self.policy.cleanup,
         }
     }

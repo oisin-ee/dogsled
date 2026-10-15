@@ -26,16 +26,6 @@ esac
     );
     rig.script("df", "#!/bin/sh\nprintf 'FS 1000 950 50 95%% /\n'\n");
     rig.script("du", "#!/bin/sh\nprintf '42 path\n'\n");
-    rig.script(
-        "mise",
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> "$RIG/mise.log"
-case "$*" in
- *'agent:worktree-remove -- feature') touch "$RIG/removed"; printf '{}\n' ;;
- *) exit 2 ;;
-esac
-"#,
-    );
     rig.script("git", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/git.log"
 case "$*" in
@@ -48,6 +38,9 @@ case "$*" in
  *'worktree list --porcelain')
  printf 'worktree %s\n\n' "$RIG/home/repo"
  if ! test -f "$RIG/removed"; then printf 'worktree %s\nlocked agent:worktree\n\n' "$RIG/home/repo/tree"; fi ;;
+ *'worktree unlock '*) ;;
+ *'worktree remove '*) touch "$RIG/removed" ;;
+ *'branch -D feature') touch "$RIG/deleted" ;;
  *'show-ref --verify --quiet refs/heads/feature') if test -f "$RIG/deleted"; then exit 1; fi ;;
  *'symbolic-ref --quiet refs/remotes/origin/HEAD') printf 'refs/remotes/origin/main\n' ;;
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
@@ -211,11 +204,11 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
 }
 
 #[test]
-fn prune_confirmation_and_configured_remove_hook() {
+fn prune_confirmation_and_native_removal() {
     let rig = watchdog_rig("prune-method");
     assert!(rig.run(&["prune", "worktrees"]).status.success());
-    assert_eq!(rig.log("mise.log"), "");
-    // An idle shell in the worktree does not hold it; prune closes it, then runs the hook.
+    assert!(!rig.log("git.log").contains("worktree remove"));
+    // An idle shell in the worktree does not hold it; prune removes the worktree, then closes it.
     rig.put(
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":"shell","cwd":rig.dir.join("home/repo/tree")}]}}),
@@ -226,13 +219,24 @@ fn prune_confirmation_and_configured_remove_hook() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        rig.log("mise.log"),
-        "run -q agent:worktree-remove -- feature\n"
-    );
+    let tree = rig.dir.join("home/repo/tree");
+    let git = rig.log("git.log");
+    let unlock = git
+        .find(&format!("worktree unlock {}", tree.display()))
+        .unwrap();
+    let remove = git
+        .find(&format!("worktree remove {}", tree.display()))
+        .unwrap();
+    assert!(unlock < remove, "{git}");
+    // Integrated by ancestry, so the branch goes too; never a forced worktree removal.
+    assert!(git.contains("branch -D feature"));
+    assert!(!git.contains("remove -f"));
     assert!(rig.log("herdr.log").contains("pane close shell"));
-    assert!(!rig.log("git.log").contains("worktree remove"));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("and closed shell"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("and closed shell; branch deleted"),
+        "{stdout}"
+    );
     assert_eq!(rig.read("state/worktrees.json"), json!([]));
 }
 
@@ -255,7 +259,7 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
     assert_eq!(entry["removable"], false, "{entry}");
     assert!(entry["detail"].as_str().unwrap().contains("wrangle close"));
     assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
-    assert_eq!(rig.log("mise.log"), "");
+    assert!(!rig.log("git.log").contains("worktree remove"));
     // A stale agent no longer holds it.
     rig.snapshot("state/host.json", NOW, 0.0, 1);
     let mut snapshot = rig.read("state/host.json");
@@ -273,7 +277,7 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(rig.log("herdr.log").contains("pane close child"));
-    assert!(rig.log("mise.log").contains("agent:worktree-remove"));
+    assert!(rig.log("git.log").contains("worktree remove"));
 }
 
 #[test]
@@ -300,7 +304,7 @@ fn doctor_reports_an_unused_unmerged_worktree_and_prune_keeps_it() {
             .contains("--first-parent fork..refs/heads/feature")
     );
     assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
-    assert_eq!(rig.log("mise.log"), "");
+    assert!(!rig.log("git.log").contains("worktree remove"));
 }
 
 /// Herdr whose `process-info` shows a foreground command for each pane named in `$RIG/busy`.

@@ -1,11 +1,11 @@
 //! Close a finished child: the panes and Herdr workspace that hold its worktree, the worktree
-//! (through the repository's `remove` hook), and its pane.
+//! (after the repository's `teardown`), its branch when integrated, and its pane.
 
-use crate::config::Hooks;
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 use crate::worktree::{self, AGENT_LOCK, refuse};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Worktree {
@@ -13,8 +13,11 @@ pub struct Worktree {
     pub branch: String,
     /// The Herdr workspace that showed the worktree, closed before removal.
     pub workspace: Option<String>,
-    /// The remove hook deletes the branch only when it is merged.
+    /// The branch is deleted only when `integration::check` finds it integrated.
     pub branch_deleted: bool,
+    /// The main checkout's anchor workspace, closed after its last child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_closed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,11 +29,12 @@ pub struct Closed {
     pub pane_closed: bool,
 }
 
-/// The caller's own pane and workspace. Over SSH both are empty.
+/// The caller's own pane, workspace, and directory. Over SSH all are empty.
 #[derive(Debug, Default)]
 pub struct Caller {
     pub pane: Option<String>,
     pub workspace: Option<String>,
+    pub cwd: Option<String>,
 }
 
 impl Caller {
@@ -38,6 +42,9 @@ impl Caller {
         Self {
             pane: std::env::var("HERDR_PANE_ID").ok(),
             workspace: std::env::var("HERDR_WORKSPACE_ID").ok(),
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|d| d.display().to_string()),
         }
     }
 }
@@ -47,7 +54,6 @@ impl Caller {
 pub fn local(
     shell: &dyn crate::shell::Shell,
     ledger: &Ledger,
-    hooks: &Hooks,
     pane: &str,
     caller: &Caller,
 ) -> Result<Closed> {
@@ -78,6 +84,7 @@ pub fn local(
             pane_closed: true,
         });
     };
+    outside(&tree, caller)?;
     let status = shell.run(
         "git",
         &[
@@ -85,6 +92,7 @@ pub fn local(
             tree.path.clone(),
             "status".into(),
             "--porcelain".into(),
+            "--untracked-files=all".into(),
         ],
     )?;
     if status.status != 0 || !status.stdout.trim().is_empty() {
@@ -119,16 +127,48 @@ pub fn local(
     }
     // The target is a holder through its cwd, so removal closes it unless its workspace does.
     let pane_closed = workspace.is_none() || target.workspace_id != workspace;
-    let branch_deleted =
-        worktree::remove(shell, ledger, hooks, &tree, workspace.as_deref(), &holders)?;
+    let removed = worktree::remove(
+        shell,
+        ledger,
+        &tree,
+        workspace.as_deref(),
+        &holders,
+        caller.workspace.as_deref(),
+    )?;
     Ok(Closed {
         pane: pane.into(),
         worktree: Some(Worktree {
             path: tree.path,
             branch: tree.branch,
             workspace,
-            branch_deleted,
+            branch_deleted: removed.branch_deleted,
+            anchor_closed: removed.anchor_closed,
         }),
         pane_closed,
     })
+}
+
+/// Refuse a worktree outside the repository's worktree directory, or one the caller is in.
+fn outside(tree: &worktree::Linked, caller: &Caller) -> Result<()> {
+    let settings = crate::repository::load(&tree.checkout)?;
+    let home = tree.checkout.join(&settings.worktree.dir);
+    let path = worktree::resolved(Path::new(&tree.path));
+    if !path.starts_with(worktree::resolved(&home)) {
+        return Err(refuse(&format!(
+            "{} is not under {}",
+            tree.path,
+            home.display()
+        )));
+    }
+    if caller
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| worktree::resolved(Path::new(cwd)).starts_with(&path))
+    {
+        return Err(refuse(&format!(
+            "the caller is inside {}; run from the main checkout",
+            tree.path
+        )));
+    }
+    Ok(())
 }
