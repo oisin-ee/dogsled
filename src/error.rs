@@ -39,8 +39,6 @@ pub enum Error {
     Invalid(String),
     #[error("deadline reached: {0}")]
     Deadline(String),
-    #[error("prepare hook printed no `pane_id` or `path`: {detail}")]
-    Hook { detail: String },
 }
 
 impl Error {

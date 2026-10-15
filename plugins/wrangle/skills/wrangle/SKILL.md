@@ -28,14 +28,14 @@ The Pi widget lists this session's open jobs and pending tickets. It refreshes a
 wrangle place --branch feat/unit-a --base main --repo /path/to/repo --json
 ```
 
-Read `host.id`, `path`, and `pane_id`. The prepare hook opens the worktree as a Herdr workspace, grouped under the repository's workspace.
+Read `host.id`, `path`, and `pane_id`. Wrangle creates the worktree, runs the repository's `setup`, and opens it as a Herdr workspace, grouped under the repository's workspace.
 Spawn the agent in that workspace's pane, and always set `placement`:
 
 ```
 agents spawn machine=<host.id> placement=pane pane=<pane_id> …
 ```
 
-Do not pass `cwd` with `placement=pane`; Shepherdr refuses it. When the hook returns only `path`, use `placement=new_workspace cwd=<path>`.
+Do not pass `cwd` with `placement=pane`; Shepherdr refuses it.
 
 In Pi, the wrangle extension sets the placement of an `agents spawn` that has none, so a child never opens as a tab in your workspace:
 
@@ -79,7 +79,7 @@ Job timeouts kill the process group. Both timeout defaults are unlimited.
 Durations accept integer `ms`, `s`, `m`, and `h` suffixes.
 Output remains in the pane and the job log. Once the job ends, prune can close its tab: the log keeps the output. A final record contains the exit code, signal, reason, and timestamps.
 
-Jobs use a tab in the caller's workspace. Agents can use the prepare hook's pane.
+Jobs use a tab in the caller's workspace. Agents with `--branch` use the worktree workspace's pane.
 Remote work uses a workspace with the same name. Without a branch, remote non-repository `--cwd` must exist.
 Repository directories map to the checkout on that host. Use `--branch` to preserve a worktree branch remotely.
 
@@ -88,7 +88,7 @@ Repository directories map to the checkout on that host. Use `--branch` to prese
 When no host qualifies, `place`, `agent`, and `run` return `{"queued":true,"ticket":"…"}` and exit 1.
 With `--wait`, they wait for admission. `run --wait` then waits for the job.
 `--max` bounds the whole command, including discovery and admission, and defaults to 30 minutes. A timed-out ticket remains pending.
-Routine calls and lock waits have a 30-second limit. Prepare, clone, mise trust, and agent startup have a 10-minute limit.
+Routine calls and lock waits have a 30-second limit. Worktree creation, `setup` and `teardown` commands, clone, mise trust, and agent startup have a 10-minute limit.
 The command deadline takes precedence when shorter.
 
 ```sh
@@ -108,10 +108,10 @@ wrangle close PANE [--host HOST]
 ```
 
 `PANE` is the spawn result's `target`. `--host` defaults to the host of the pane's open item.
-It closes the panes and Herdr workspace that use the child's worktree, removes the worktree through the host's `remove` hook from the main checkout, and ends the item.
-The default hook runs the repository's remove hooks, so the worktree's containers and stacks stop. It deletes the branch only when it is merged.
+It runs the repository's `teardown` in the child's worktree, so its containers and stacks stop. Then it closes the panes and Herdr workspace that use the worktree, removes the worktree with `git worktree remove`, and ends the item.
+It deletes the branch only when it is integrated, and closes the repository's idle anchor workspace after its last child. A failed `teardown` keeps everything.
 A pane outside a worktree is closed alone. A child tab in your own workspace is closed too.
-It refuses, before it changes anything, a working, blocked, or `unknown` agent, a shell running a command in the worktree, a dirty worktree, a foreign lock, your own pane, and a worktree you work in.
+It refuses, before it changes anything, a working, blocked, or `unknown` agent, a shell running a command in the worktree, a dirty or detached worktree, a foreign lock, your own pane, and a worktree you work in.
 Report a refusal. Do not close the pane or remove the worktree by hand.
 Until you close it, a finished child appears in the brief, the Pi widget, and each check-in, with its close command.
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
@@ -133,20 +133,19 @@ wrangle prune --host HOST worktrees jobs
 Doctor is read-only. Prune displays candidates and asks before removal; `--yes` skips only the question.
 Classes are `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `disk`, `processes`, and `repositories`. Disk, process, and repository findings are report-only, as are worktrees and branches with unpushed or unmerged work.
 Never use cleanup to close working or blocked agents. Dirty, foreign-locked, or held worktrees cannot be removed.
-A worktree is a candidate when its branch is merged, squashed, or cherry-picked into the remote default branch, or its HEAD has not moved a day after it was made. A new worktree with no commits is never a merged branch. A shell with no running command does not hold it.
+A worktree is a candidate when its branch is merged, squashed, or cherry-picked into the remote default branch, or its HEAD has not moved a day after it was made. A detached worktree is a candidate when a remote branch holds its HEAD. A new worktree with no commits is never a merged branch. A shell with no running command does not hold it.
 Wrangle never removes anything on a timer. Close your own finished children with `wrangle close`.
-Prune refuses changed Git identities, closes the idle panes and workspace that show the worktree, and removes it through the host's `remove` hook.
+Prune refuses changed Git identities and removes a worktree the same way as `close`.
 
-## Checkout and prepare
+## Checkout and worktrees
 
-The prepare hook runs in the repository's main checkout on the selected host.
+Wrangle creates the worktree from the repository's main checkout on the selected host.
 Wrangle clones a missing checkout from the caller's origin into the same path relative to home.
 An existing path must be a checkout with the same origin. Wrangle does not overwrite a conflicting path.
 Clone failures name the host and origin. Only a fresh clone can receive mise trust after a trust refusal.
 
-Host policy owns `hooks.prepare` and `hooks.remove`. Repository setup belongs to the repository's configuration.
-Use `{branch}` and `{base}` placeholders. Other placeholders are errors.
-For jobs and agents, the hook must return a `path`. It can also return a `pane_id`.
+The repository's `wrangle.toml` sets `[worktree]` `dir` (default `.worktrees`), `setup`, and `teardown`. Commands can use `{main}`, `{path}`, and `{branch}`; other placeholders are errors.
+A failed `setup` removes the new worktree and fails placement. Host config has no worktree hooks.
 
 ## Service
 

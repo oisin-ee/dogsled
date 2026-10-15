@@ -81,7 +81,7 @@ wrangle items --owner "$HERDR_PANE_ID" --json
 wrangle cancel TICKET
 ```
 
-Jobs use a new tab in the caller's workspace. Agents can use the pane returned by the prepare hook.
+Jobs use a new tab in the caller's workspace. With `--branch`, an agent uses the pane of the worktree's new Herdr workspace.
 Remote work uses a workspace with the same name as the caller's workspace, creating it when absent.
 Without a branch, a remote non-repository `--cwd` must exist there.
 Repository directories map to the same path relative to home. A linked-worktree caller needs `--branch` to preserve its branch remotely.
@@ -97,7 +97,7 @@ The sidebar shows `working`, then `idle` for success or `blocked` for failure, w
 
 `--max` sets one deadline from command startup, including discovery, placement, admission, and job completion. It defaults to 30 minutes.
 Operations use the remaining command budget, capped at 30 seconds for routine calls and locks, or 10 minutes for setup.
-Setup includes prepare hooks, repository clones, mise trust checks, and agent startup, locally and through SSH.
+Setup includes worktree creation and `setup` commands, repository clones, mise trust checks, and agent startup, locally and through SSH.
 A non-waiting action reports the operation that exceeded its deadline.
 `logs --follow` can continue indefinitely, but each remote read has a 30-second limit.
 Run long waits through the harness's background-task facility.
@@ -116,13 +116,16 @@ wrangle close w9:p1 --host netcup --json
 ```
 
 `close` ends a finished child. `--host` defaults to the host of the pane's open item, else local.
-In a linked worktree, it closes every pane that uses the worktree and the Herdr workspace that shows it. Then it runs the `remove` hook in the main checkout.
-The default hook, `agent:worktree-remove`, unlocks an `agent:worktree` lock, runs the repository's remove hooks, and deletes the branch only when it is merged. A pane outside a worktree is closed alone.
-A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a dirty or detached worktree, and any other lock.
+In a linked worktree, it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
+Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks an `agent:worktree` lock, and runs `git worktree remove` without force.
+It deletes the branch only when wrangle's integration check finds it integrated (see [Cleanup](#cleanup)). An unmerged branch, or a branch still at the base tip, stays.
+When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
+A pane outside a worktree is closed alone.
+A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a worktree outside the repository's worktree directory, a dirty or detached worktree, and any other lock.
 It also refuses a busy target or a busy pane that uses the worktree: an agent that is not `idle` or `done`, or a shell with a foreground command.
-Each refusal happens before a change. If the hook fails, the item stays open and the error names the worktree.
+Each refusal happens before a change. If a `teardown` command fails, the worktree, its panes, its lock, and the item stay, and the error shows the command's last lines of output.
 After removal, close drops the worktree's registration, as prune does.
-The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted}|null,pane_closed}`. A remote host runs the same steps over SSH.
+The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted,anchor_closed?}|null,pane_closed}`. A remote host runs the same steps over SSH.
 
 The service admits tickets in FIFO order using the same placement policy.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
@@ -214,7 +217,9 @@ wrangle prune --host netcup --yes panes
 ```
 
 Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `disk`, `processes`, and `repositories`.
-A removable worktree has a HEAD that has not moved more than 24 hours after Git made it and no commits beyond the base, or an integrated branch. A worktree whose HEAD has not moved is not integrated, even when its base moved past it. It also needs a clean tree, no foreign lock, and no pane that uses it.
+Doctor lists linked worktrees on a branch and detached ones.
+A removable worktree has a HEAD that has not moved more than 24 hours after Git made it and no commits beyond the base, or an integrated branch.
+A detached worktree is removable when it is clean, no pane holds it, and a remote branch holds its HEAD. Otherwise doctor reports its commits on no remote. A worktree whose HEAD has not moved is not integrated, even when its base moved past it. It also needs a clean tree, no foreign lock, and no pane that uses it.
 A worktree whose branch has unmerged commits and that no pane uses is report-only. Doctor shows the commits ahead, how many are on no remote, and the age of the last commit.
 A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when commits on that branch apply it.
 The branch's commits split into consecutive runs, and each run needs one commit that applies it. A commit applies a run when it changes every path the run changed, and merging the run into the commit's parent gives the commit's content on those paths.
@@ -236,11 +241,11 @@ Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune neve
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
 Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and unintegrated branches remain untouched.
 Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
-Worktree removal closes the panes that use the worktree and its workspace, then runs the `remove` hook, the same as `close`. Wrangle checks that the worktree is gone afterwards.
+Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when integrated, and the idle anchor. Wrangle checks that the worktree is gone afterwards.
 Each entry is independent. A failed or refused entry does not stop the others; prune reports each failure, then exits with status 2.
-`--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed hook's error includes its last lines of output.
+`--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
 
-Prepare records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
+Placement records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
 A configured path that is not a Git checkout is a report-only `repositories` entry.
 Wrangle never removes anything on a timer. A lead removes its finished children with `wrangle close`; everything else waits for a confirmed `prune`.
@@ -268,12 +273,12 @@ The selected host rechecks reservations under its own lock before it accepts the
 
 `place` writes a reservation with a default TTL of 90 seconds.
 It returns the host id and label. JSON also includes the reservation id.
-With `--branch`, it runs the prepare hook and returns the hook's `path` and `pane_id`, when present.
+With `--branch`, it creates or reuses the branch's worktree on that host and returns its `path` and `pane_id` (see [Repository configuration](#repository-configuration)).
 Then start the agent through Shepherdr, using that host and prepared pane or path.
 `place` does not start an agent or claim a repository lead. `run` and `agent` perform placement and launch together.
 
 A reservation ends only at its TTL, which covers the time until the new agent appears in `herdr agent list` and its first build appears in the busy fraction.
-Agent discovery and prepare failures do not end it early.
+Agent discovery and worktree failures do not end it early.
 
 ## Configuration
 
@@ -289,19 +294,36 @@ reservation_load = 1.0
 reservation_ttl_ms = 90000
 remote_command = ["mise", "x", "--", "wrangle"]
 
-[hooks]
-prepare = ["mise", "run", "-q", "agent:worktree", "--", "{branch}", "{base}"]
-remove = ["mise", "run", "-q", "agent:worktree-remove", "--", "{branch}"]
-
 [cleanup]
 repositories = []  # for example "~/.config/mise"; `~/` is the home directory
 ```
 
-The hooks belong only to host policy. Repository setup and remove hooks belong to the repository's own configuration.
-The `remove` hook takes `{branch}` and `{path}`. It must remove a worktree that carries an `agent:worktree` lock, and keep an unmerged branch.
-For example, `remove = ["git", "worktree", "remove", "{path}"]` works for unlocked worktrees without repository hooks.
+Host policy has no worktree hooks. A `[hooks]` table is an unknown key, so it is an error. Worktree setup and teardown belong to each repository.
 
-Both hooks run with the main checkout as their working directory, including calls from a linked worktree.
+### Repository configuration
+
+An optional `wrangle.toml` at the root of the repository's main checkout configures its worktrees. Without the file, the defaults apply.
+Unknown keys are errors.
+
+```toml
+[worktree]
+dir = ".worktrees"  # relative to the main checkout
+setup = []          # run in a new worktree after creation, in order
+teardown = []       # run in a worktree before removal, in order
+```
+
+Each command runs with `sh -c` in the worktree. `{main}` is the main checkout, `{path}` the worktree, and `{branch}` its branch (empty for a detached worktree).
+Wrangle quotes each value as one shell word. Any other `{…}` is an error, so the command text cannot use braces for anything else.
+Wrangle reads `wrangle.toml` from the main checkout, also for a worktree on an older branch.
+
+With `--branch`, `place`, `agent`, and `run` use the branch's worktree on the selected host:
+
+1. Wrangle refuses an invalid branch name, `--base` for a branch that exists, a branch checked out in the main checkout, and a worktree that has another lock. It needs a reachable Herdr server.
+2. A branch that has a worktree reuses it without `setup`. Otherwise `git worktree add` makes `<dir>/<branch>` with each `/` as `-`. A new branch starts from `--base`, else the remote default branch's local name (else `main`).
+3. The worktree is locked with the reason `agent:worktree`. The lock marks it as agent-owned, and `git worktree remove` refuses it until close or prune unlocks it.
+4. `setup` runs in a new worktree. If a command fails, wrangle removes the new worktree and the branch it made, and placement fails. The reservation stays.
+5. `herdr worktree open --no-focus` opens the worktree as a Herdr workspace linked to the repository. When the main checkout had no open workspace, Herdr opens one as the anchor, and wrangle records its id in the Git common directory as `agent-worktree-anchor`. A workspace that already showed the worktree may belong to a running child, so that is an error.
+
 Before repository work, wrangle verifies the selected host's checkout against the caller's `git remote get-url origin`.
 If the host has no checkout of the repository, wrangle clones it from the caller's origin into the same path relative to home first.
 An existing path with a different origin, or a non-repository path, is an error. Wrangle does not overwrite it.

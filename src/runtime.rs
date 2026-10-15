@@ -258,7 +258,6 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                 crate::close::local(
                     fleet.shell,
                     fleet.ledger,
-                    &fleet.policy.hooks,
                     &pane,
                     &crate::close::Caller::from_env(),
                 )?

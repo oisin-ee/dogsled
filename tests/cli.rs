@@ -9,6 +9,8 @@ mod context;
 mod jobs;
 #[path = "cli/lifecycle.rs"]
 mod lifecycle;
+#[path = "cli/place.rs"]
+mod place;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/review_fixes.rs"]
@@ -574,112 +576,6 @@ fn repository(path: &Path) {
 }
 
 #[test]
-fn prepare_runs_in_checkout_not_caller_and_returns_path_and_pane() {
-    let rig = Rig::new("prepare");
-    let repo = rig.dir.join("home/repo space's");
-    repository(&repo);
-    assert!(
-        isolated("git")
-            .arg("-C")
-            .arg(&repo)
-            .args([
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "initial"
-            ])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let worktree = rig.dir.join("linked");
-    assert!(
-        isolated("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["worktree", "add", "-qb", "caller"])
-            .arg(&worktree)
-            .status()
-            .unwrap()
-            .success()
-    );
-    fs::create_dir(worktree.join("subdir")).unwrap();
-    rig.config("[hooks]\nprepare = ['sh', 'prepare.sh', '{branch}', '{base}']\n");
-    fs::write(repo.join("prepare.sh"), "printf '%s' \"$PWD\" > cwd.txt\nprintf '%s' \"$1\" > branch.txt\nprintf '%s\\n' '{\"pane_id\":\"w9:p1\",\"path\":\"/work/tree\"}'\n").unwrap();
-    rig.snapshot("state/host.json", now(), 0.0, 8);
-    let (code, placed) = rig.json(&[
-        "place",
-        "--branch",
-        "feature;literal",
-        "--repo",
-        worktree.join("subdir").to_str().unwrap(),
-    ]);
-    assert_eq!(code, 0, "{placed}");
-    assert_eq!(placed["path"], "/work/tree");
-    assert_eq!(placed["pane_id"], "w9:p1");
-    assert_eq!(
-        fs::read_to_string(repo.join("cwd.txt")).unwrap(),
-        repo.canonicalize().unwrap().display().to_string()
-    );
-    assert_eq!(
-        fs::read_to_string(repo.join("branch.txt")).unwrap(),
-        "feature;literal"
-    );
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
-}
-
-#[test]
-fn base_and_branch_values_are_literal_and_omitted_base_drops_one_word() {
-    let rig = Rig::new("base");
-    let repo = rig.dir.join("home/repo");
-    repository(&repo);
-    rig.snapshot("state/host.json", now(), 0.0, 8);
-    rig.config("[hooks]\nprepare = ['sh', 'prepare.sh', '{branch}', '{base}']\n");
-    fs::write(repo.join("prepare.sh"), "printf '%s\\n' \"$#\" \"$1\" \"${2-}\" > args.txt\nprintf '%s\\n' '{\"path\":\"/work/tree\"}'\n").unwrap();
-    assert_eq!(
-        rig.json(&[
-            "place",
-            "--branch",
-            "feat/{base}",
-            "--base",
-            "main/{branch}",
-            "--repo",
-            repo.to_str().unwrap()
-        ])
-        .0,
-        0
-    );
-    assert_eq!(
-        fs::read_to_string(repo.join("args.txt")).unwrap(),
-        "2\nfeat/{base}\nmain/{branch}\n"
-    );
-    assert_eq!(
-        rig.json(&[
-            "place",
-            "--branch",
-            "feat/{base}",
-            "--repo",
-            repo.to_str().unwrap()
-        ])
-        .0,
-        0
-    );
-    assert_eq!(
-        fs::read_to_string(repo.join("args.txt")).unwrap(),
-        "1\nfeat/{base}\n\n"
-    );
-}
-
-#[test]
 fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     let rig = Rig::new("remote-prepare");
     let repo = rig.dir.join("home/repo space");
@@ -707,45 +603,6 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         "{ssh}"
     );
     assert!(!ssh.contains("host bind"));
-}
-
-#[test]
-fn prepare_failure_keeps_reservation_and_unknown_placeholder_fails_explicitly() {
-    let rig = Rig::new("prepare-failure");
-    let repo = rig.dir.join("home/repo");
-    repository(&repo);
-    rig.snapshot("state/host.json", now(), 0.0, 8);
-    rig.config("[hooks]\nprepare = ['false']\n");
-    assert_eq!(
-        rig.json(&[
-            "place",
-            "--branch",
-            "feature",
-            "--repo",
-            repo.to_str().unwrap()
-        ])
-        .0,
-        2
-    );
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
-    rig.config("[hooks]\nprepare = ['echo', '{unknown}']\n");
-    let (code, error) = rig.json(&[
-        "place",
-        "--branch",
-        "feature",
-        "--repo",
-        repo.to_str().unwrap(),
-    ]);
-    assert_eq!(code, 2);
-    assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("unknown hook placeholder {unknown}")
-    );
 }
 
 #[test]

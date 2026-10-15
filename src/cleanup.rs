@@ -165,13 +165,10 @@ fn trees(shell: &dyn Shell, repos: &BTreeSet<String>) -> Result<Vec<Tree>> {
     Ok(result)
 }
 
-/// Linked worktrees on a branch. The main checkout is never a cleanup candidate.
+/// Linked worktrees, on a branch or detached (an empty branch). The main checkout is never a
+/// cleanup candidate.
 fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
-    Ok(listed(shell, repo)?
-        .into_iter()
-        .skip(1)
-        .filter(|t| !t.branch.is_empty())
-        .collect())
+    Ok(listed(shell, repo)?.into_iter().skip(1).collect())
 }
 
 /// Every worktree of `repo`, the main checkout first. A detached worktree has no branch.
@@ -829,6 +826,9 @@ fn disposition(
     now: u64,
 ) -> Result<Option<Disposition>> {
     let usage = usage(node, tree, panes, stale)?;
+    if tree.branch.is_empty() {
+        return detached(node, tree, usage, now).map(Some);
+    }
     let base = crate::integration::base(node.shell, &tree.repo)?;
     let branch = format!("refs/heads/{}", tree.branch);
     // A worktree whose HEAD never moved, on a branch with no commits beyond the base, holds no
@@ -895,6 +895,40 @@ fn disposition(
         removable: eligible && refused.is_empty(),
         usage,
     }))
+}
+
+/// A detached worktree has no branch to integrate. Removing it loses nothing when it is clean,
+/// unheld, and a remote branch holds its HEAD.
+fn detached(node: &Node<'_>, tree: &Tree, usage: Usage, now: u64) -> Result<Disposition> {
+    let head = &tree.head[..tree.head.len().min(10)];
+    let unpushed = count(node.shell, &tree.repo, &[&tree.head, "--not", "--remotes"])?;
+    let finding = if unpushed == 0 {
+        format!("detached at {head}, which a remote branch holds")
+    } else {
+        format!(
+            "detached at {head} with {} on no remote, the last {} ago",
+            commits(unpushed),
+            since(last_commit(node.shell, &tree.repo, &tree.head, now)?)
+        )
+    };
+    let refused: Vec<String> = usage
+        .in_use
+        .iter()
+        .cloned()
+        .chain(blockers(node, tree)?)
+        .collect();
+    Ok(Disposition {
+        detail: format!(
+            "{finding}; {}",
+            if refused.is_empty() {
+                "clean and unused".into()
+            } else {
+                format!("refused: {}", refused.join("; "))
+            }
+        ),
+        removable: unpushed == 0 && refused.is_empty(),
+        usage,
+    })
 }
 
 /// Agent panes idle or done for more than a day, from a fresh service snapshot.
@@ -973,13 +1007,13 @@ fn remove_tree(node: &Node<'_>, tree: &Tree, now: u64) -> Result<String> {
         branch: tree.branch.clone(),
     };
     let holders: Vec<&Pane> = held.holders.iter().collect();
-    let deleted = crate::worktree::remove(
+    let removed = crate::worktree::remove(
         node.shell,
         node.ledger,
-        node.hooks,
         &linked,
         held.workspace.as_deref(),
         &holders,
+        std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
     )?;
     let closed = holders
         .iter()
@@ -987,14 +1021,21 @@ fn remove_tree(node: &Node<'_>, tree: &Tree, now: u64) -> Result<String> {
         .chain(held.workspace.as_deref())
         .collect::<Vec<_>>();
     Ok(format!(
-        "removed {}{}{}",
+        "removed {}{}{}{}",
         tree.path,
         if closed.is_empty() {
             String::new()
         } else {
             format!(" and closed {}", closed.join(", "))
         },
-        if deleted { "; branch deleted" } else { "" }
+        if removed.branch_deleted {
+            "; branch deleted"
+        } else {
+            ""
+        },
+        removed
+            .anchor_closed
+            .map_or(String::new(), |anchor| format!("; closed anchor {anchor}"))
     ))
 }
 

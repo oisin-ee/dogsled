@@ -48,7 +48,8 @@ this cache, so they cost one ssh read per peer per 10 s at most.
 
 `wrangle place [--host H] [--branch B] [--base B] [--repo R]` picks the host with the most headroom, writes a short
 reservation (default 90 s) on it, and prints the host. With `--branch` it also creates the worktree on that host
-(the prepare hook, now run in the checkout) and prints its path.
+with `git worktree add`, runs the repository's `wrangle.toml` `setup`, opens it as a Herdr workspace, and prints its
+path and pane.
 
 If the host has no checkout of the repository, wrangle clones it from the caller's origin into the same path relative to home first.
 An existing checkout must have the same origin. Clone failures stop admission rather than silently moving work to another host.
@@ -66,7 +67,7 @@ wrangle run [--host H] [--branch B] [--cwd D] [--timeout T] [--idle-timeout T] [
 wrangle ps | logs <id> | stop <id> | wait <id>
 ```
 
-- Placement as in part 2. With `--branch`, the prepare hook creates the worktree on the selected host.
+- Placement as in part 2. With `--branch`, wrangle creates the worktree on the selected host.
   Without a branch, remote work runs in `--cwd`. Non-repository directories must already exist there.
 - Wrangle opens a pane: a tab in the caller's workspace locally, or a workspace with the same name on the remote.
 - The pane runs `wrangle exec <id> -- <cmd>`, a small wrapper that:
@@ -95,7 +96,7 @@ Rule: an agent that owns an open child or job hears from wrangle at least every 
 - Pi children spawned with Shepherdr's `agents` tool: the wrangle Pi extension reads the spawn tool result and runs `wrangle track <machine> <pane>` with its own pane as owner.
 
 A job item closes when its job ends. An agent item closes when its pane closes. A finished (`idle` or `done`) agent stays open,
-so check-ins keep naming it until the owner runs `wrangle close <pane>`, which closes its panes and workspace and removes its worktree through the host's `remove` hook.
+so check-ins keep naming it until the owner runs `wrangle close <pane>`, which runs the repository's `teardown`, closes its panes and workspace, and removes its worktree.
 
 **Stall.** An agent is stalled when Herdr shows it `working` or `unknown` and its transcript (`transcript` in host.json) has not changed for 10 min. The screen is not a signal: spinners and elapsed timers redraw it while a tool call hangs. An agent with no transcript is never marked stalled. Unit 3 confirms where Claude Code and Codex transcripts are, because Herdr may report only a session id for them.
 
@@ -133,6 +134,7 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 
 - worktrees whose branch is merged, squashed, or deleted, or has had no commits for 24 h, and have no live pane;
 - unused worktrees with unmerged commits (report only);
+- detached worktrees, removable when clean, unheld, and their HEAD is on a remote branch;
 - local branches without a worktree that are integrated or fully on a remote, and the others (report only);
 - workspaces whose every pane is idle;
 - shells at an empty prompt in an ended job's tab or in a deleted directory, at once;
@@ -143,11 +145,11 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 
 Wrangle never removes anything on a timer. The lead that started a child closes it with `wrangle close` when it is finished.
 Every other class waits for `wrangle prune [--host H] [<class>…]`, which shows what it will remove, asks, then removes it. It never kills processes.
-Prepare registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
+Placement registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
 Prune compares current Git path, branch, HEAD, and repository with the approved plan immediately before removal.
-A branch-taking repository task cannot guarantee an exact path. Until a task exposes a verifiable path-bound contract, removal uses non-forced `git worktree remove -- <path>`.
+Removal runs the repository's `wrangle.toml` `teardown` in the worktree, then a non-forced `git worktree remove`. A teardown failure keeps the worktree. The branch is deleted only when the integration check finds it integrated.
 Missing or unreadable disk paths remain report-only findings without discarding other candidates.
 
 ### 7. Prompt context

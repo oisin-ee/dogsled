@@ -1,22 +1,36 @@
-//! A linked worktree, the Herdr panes that hold it, and its removal through the repository's
-//! `remove` hook. `close` and `prune` share these rules.
+//! A linked worktree, the Herdr panes that hold it, and its removal: the repository's
+//! `teardown`, `git worktree remove`, the branch when it is integrated, and the anchor workspace
+//! after the last child. `close` and `prune` share these rules.
 
-use crate::config::Hooks;
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 use crate::probe::Pane;
-use crate::shell::{Shell, quote};
+use crate::repository::{Settings, Values};
+use crate::shell::Shell;
 use std::path::{Path, PathBuf};
 
 /// The lock reason that marks an agent-owned worktree. Any other lock belongs to someone else.
 pub const AGENT_LOCK: &str = "agent:worktree";
+
+/// The file in the Git common directory that names the main checkout's Herdr workspace when
+/// `place` opened it. The last child's removal closes that workspace.
+pub const ANCHOR_FILE: &str = "agent-worktree-anchor";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Linked {
     /// The main checkout.
     pub checkout: PathBuf,
     pub path: String,
+    /// Empty for a detached worktree.
     pub branch: String,
+}
+
+/// One entry of `git worktree list --porcelain`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub path: String,
+    pub branch: Option<String>,
+    pub lock: Option<String>,
 }
 
 fn git(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<crate::shell::Output> {
@@ -82,7 +96,7 @@ pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     }
     if branch == "HEAD" {
         return Err(refuse(&format!(
-            "{top} is a detached worktree; the remove hook needs a branch"
+            "{top} is a detached worktree; `wrangle prune` removes it once its commit is on a remote"
         )));
     }
     Ok(Some(Linked {
@@ -92,23 +106,8 @@ pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     }))
 }
 
-/// The lock reason of `path`, if it is locked.
-pub fn lock_reason(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Option<String>> {
-    let out = git(shell, checkout, &["worktree", "list", "--porcelain"])?;
-    let mut current = None;
-    for line in out.stdout.lines() {
-        if let Some(found) = line.strip_prefix("worktree ") {
-            current = Some(found);
-        } else if current.is_some_and(|p| same(p, path))
-            && let Some(rest) = line.strip_prefix("locked")
-        {
-            return Ok(Some(rest.trim().to_string()));
-        }
-    }
-    Ok(None)
-}
-
-fn listed(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<bool> {
+/// Every worktree of the repository at `checkout`, the main checkout first.
+pub fn list(shell: &dyn Shell, checkout: &Path) -> Result<Vec<Listed>> {
     let out = git(shell, checkout, &["worktree", "list", "--porcelain"])?;
     if !out.ok() {
         return Err(Error::Invalid(format!(
@@ -117,15 +116,38 @@ fn listed(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<bool> {
             out.stderr.trim()
         )));
     }
-    Ok(out
-        .stdout
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
-        .any(|found| same(found, path)))
+    let mut result: Vec<Listed> = Vec::new();
+    for line in out.stdout.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            result.push(Listed {
+                path: path.into(),
+                ..Listed::default()
+            });
+        } else if let Some(current) = result.last_mut() {
+            if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+                current.branch = Some(branch.into());
+            } else if let Some(reason) = line.strip_prefix("locked") {
+                current.lock = Some(reason.trim().into());
+            }
+        }
+    }
+    Ok(result)
 }
 
-/// The Herdr workspace that shows `path`, if one is open.
-pub fn workspace(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Option<String>> {
+/// The lock reason of `path`, if it is locked. An empty reason is a lock without one.
+pub fn lock_reason(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Option<String>> {
+    Ok(list(shell, checkout)?
+        .into_iter()
+        .find(|w| same(&w.path, path))
+        .and_then(|w| w.lock))
+}
+
+fn listed(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<bool> {
+    Ok(list(shell, checkout)?.iter().any(|w| same(&w.path, path)))
+}
+
+/// Herdr's view of the repository's worktrees: each path and its open workspace.
+fn herdr_worktrees(shell: &dyn Shell, checkout: &Path) -> Result<Vec<serde_json::Value>> {
     let out = shell.run_ok(
         "herdr",
         &[
@@ -139,8 +161,14 @@ pub fn workspace(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Optio
     Ok(value
         .pointer("/result/worktrees")
         .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// The Herdr workspace that shows `path`, if one is open.
+pub fn workspace(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Option<String>> {
+    Ok(herdr_worktrees(shell, checkout)?
+        .iter()
         .find(|w| w["path"].as_str().is_some_and(|p| same(p, path)))
         .and_then(|w| w["open_workspace_id"].as_str())
         .map(ToString::to_string))
@@ -170,17 +198,57 @@ pub fn busy(shell: &dyn Shell, pane: &Pane) -> Result<Option<String>> {
     Ok(crate::probe::foreground(shell, &pane.pane_id)?.map(|name| format!("running {name}")))
 }
 
-/// Close the holders and the workspace, then run the remove hook in the main checkout.
-/// Returns whether the branch is gone afterwards.
+/// The Git common directory of the repository at `checkout`.
+pub fn common_dir(shell: &dyn Shell, checkout: &Path) -> Result<PathBuf> {
+    let out = git(
+        shell,
+        checkout,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let dir = out.stdout.trim();
+    if !out.ok() || dir.is_empty() {
+        return Err(Error::Invalid(format!(
+            "{} is not a Git checkout: {}",
+            checkout.display(),
+            out.stderr.trim()
+        )));
+    }
+    Ok(dir.into())
+}
+
+/// Record `workspace` as the anchor that `place` opened for the main checkout.
+pub fn record_anchor(shell: &dyn Shell, checkout: &Path, workspace: &str) -> Result<()> {
+    std::fs::write(
+        common_dir(shell, checkout)?.join(ANCHOR_FILE),
+        format!("{workspace}\n"),
+    )?;
+    Ok(())
+}
+
+/// What removal did besides removing the worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Removed {
+    /// The branch is gone: it was integrated, so removal deleted it, or it was already gone.
+    pub branch_deleted: bool,
+    /// The anchor workspace closed after its last child.
+    pub anchor_closed: Option<String>,
+}
+
+/// Remove `tree`: run the repository's `teardown` in it, close its holders and workspace,
+/// unlock it, and `git worktree remove` it without force. A teardown failure keeps everything.
+/// Then delete its branch when `integration::check` finds it integrated, and close the anchor
+/// workspace when no linked worktree shows in Herdr any more. The caller has already refused a
+/// dirty, foreign-locked, or busy worktree.
 pub fn remove(
     shell: &dyn Shell,
     ledger: &Ledger,
-    hooks: &Hooks,
     tree: &Linked,
     workspace: Option<&str>,
     holders: &[&Pane],
-) -> Result<bool> {
-    let argv = hooks.remove_argv(&tree.branch, &tree.path)?;
+    caller_workspace: Option<&str>,
+) -> Result<Removed> {
+    let settings = crate::repository::load(&tree.checkout)?;
+    teardown(shell, &settings, tree)?;
     let open = crate::cleanup::current_panes(shell)?;
     for pane in holders {
         let outside = workspace.is_none() || pane.workspace_id.as_deref() != workspace;
@@ -197,43 +265,141 @@ pub fn remove(
             &["workspace".into(), "close".into(), workspace.into()],
         )?;
     }
-    let command = format!(
-        "cd {} && exec {}",
-        quote(&tree.checkout.display().to_string()),
-        argv.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
-    );
-    let out = shell.run_setup("sh", &["-c".into(), command])?;
+    let lock = lock_reason(shell, &tree.checkout, &tree.path)?;
+    match lock.as_deref() {
+        None => (),
+        Some(AGENT_LOCK) => {
+            git_ok(shell, &tree.checkout, &["worktree", "unlock", &tree.path])?;
+        }
+        Some(other) => {
+            return Err(Error::Invalid(format!(
+                "{} is locked ({other}) after its panes closed; it is not an agent worktree",
+                tree.path
+            )));
+        }
+    }
+    let out = git(shell, &tree.checkout, &["worktree", "remove", &tree.path])?;
     if !out.ok() {
-        // The runner's summary is the last line; the cause is usually just above it.
-        let lines: Vec<&str> = out
-            .stderr
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-        let tail = lines[lines.len().saturating_sub(4)..].join(" | ");
+        if lock.is_some() && Path::new(&tree.path).exists() {
+            git_ok(
+                shell,
+                &tree.checkout,
+                &["worktree", "lock", "--reason", AGENT_LOCK, &tree.path],
+            )?;
+        }
         return Err(Error::Invalid(format!(
-            "remove hook failed for {} after its panes closed: {}",
+            "git worktree remove kept {} after its panes closed: {}",
             tree.path,
-            if tail.is_empty() { "no output" } else { &tail }
+            out.stderr.trim()
         )));
     }
     if listed(shell, &tree.checkout, &tree.path)? {
         return Err(Error::Invalid(format!(
-            "remove hook exited 0 but {} is still a worktree",
+            "git worktree remove exited 0 but {} is still a worktree",
             tree.path
         )));
     }
     crate::cleanup::forget(ledger, &tree.path)?;
-    Ok(git(
+    let branch_deleted = !tree.branch.is_empty() && delete_integrated(shell, tree)?;
+    let anchor_closed = close_anchor(shell, &tree.checkout, caller_workspace)?;
+    Ok(Removed {
+        branch_deleted,
+        anchor_closed,
+    })
+}
+
+fn git_ok(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<()> {
+    let out = git(shell, dir, args)?;
+    if out.ok() {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "git {} in {}: {}",
+            args.join(" "),
+            dir.display(),
+            out.stderr.trim()
+        )))
+    }
+}
+
+/// The repository's `teardown` commands, in the worktree.
+fn teardown(shell: &dyn Shell, settings: &Settings, tree: &Linked) -> Result<()> {
+    crate::repository::run(
         shell,
-        &tree.checkout,
-        &[
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{}", tree.branch),
-        ],
-    )?
-    .status
-        != 0)
+        "teardown",
+        &settings.worktree.teardown,
+        Values {
+            main: &tree.checkout,
+            path: &tree.path,
+            branch: &tree.branch,
+        },
+    )
+    .map_err(|e| Error::Invalid(format!("{e}; {} and its panes stay", tree.path)))
+}
+
+/// Delete the branch of a removed worktree when its work is in the default branch. A squash
+/// merge is not an ancestor, so this is `-D` after wrangle's own check, not `-d`.
+fn delete_integrated(shell: &dyn Shell, tree: &Linked) -> Result<bool> {
+    let checkout = tree.checkout.display().to_string();
+    match crate::integration::check(shell, &checkout, &tree.branch)? {
+        None => Ok(false),
+        Some(crate::integration::Integrated::Deleted) => Ok(true),
+        Some(_) => {
+            git_ok(shell, &tree.checkout, &["branch", "-D", &tree.branch])?;
+            Ok(true)
+        }
+    }
+}
+
+/// Close the anchor workspace that `place` recorded, once no linked worktree is open in Herdr,
+/// while it is unfocused, is not the caller's, and has one pane with no agent. A record that no
+/// longer names the main checkout's workspace is dropped.
+fn close_anchor(
+    shell: &dyn Shell,
+    checkout: &Path,
+    caller_workspace: Option<&str>,
+) -> Result<Option<String>> {
+    let file = common_dir(shell, checkout)?.join(ANCHOR_FILE);
+    let anchor = match std::fs::read_to_string(&file) {
+        Ok(text) => text.trim().to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let worktrees = herdr_worktrees(shell, checkout)?;
+    let main = worktrees
+        .iter()
+        .find(|w| w["is_linked_worktree"] == false)
+        .and_then(|w| w["open_workspace_id"].as_str());
+    if anchor.is_empty() || main != Some(anchor.as_str()) {
+        std::fs::remove_file(&file)?;
+        return Ok(None);
+    }
+    let children = worktrees
+        .iter()
+        .any(|w| w["is_linked_worktree"] == true && w["open_workspace_id"].is_string());
+    if children || caller_workspace == Some(anchor.as_str()) {
+        return Ok(None);
+    }
+    let out = shell.run_ok("herdr", &["workspace".into(), "list".into()])?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    let idle = value
+        .pointer("/result/workspaces")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|w| w["workspace_id"] == anchor.as_str())
+        .is_some_and(|w| w["focused"] == false && w["pane_count"] == 1);
+    let agentless = crate::cleanup::current_panes(shell)?
+        .iter()
+        .filter(|p| p.workspace_id.as_deref() == Some(anchor.as_str()))
+        .all(|p| p.agent.is_none());
+    if !idle || !agentless {
+        return Ok(None);
+    }
+    shell.run_ok(
+        "herdr",
+        &["workspace".into(), "close".into(), anchor.clone()],
+    )?;
+    std::fs::remove_file(&file)?;
+    Ok(Some(anchor))
 }
