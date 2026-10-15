@@ -4,6 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- Doctor also reports a branch as integrated when a clean `git merge-tree` result equals the default branch's tree. The detail names the merge-tree rule. Conflicts and changed trees do not satisfy this rule. Integration checks disable external diff tools and text conversion. The merge-tree check uses an isolated object store without user configuration or attributes.
 - Close each job tab after `exec` saves the final record and reports completion. `wait` and `logs` still work after the tab closes.
 - Log pane-close failures to stderr without changing the job result. Prune retains its ended-job-tab fallback.
 
