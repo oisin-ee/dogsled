@@ -89,6 +89,9 @@ Repository directories map to the same path relative to home. A linked-worktree 
 The pane runs `wrangle exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
 If the pane output closes, capture continues to the log and preserves the child exit code.
 The atomic `jobs/ID.json` contains the command, directory, host, owner, exit code, signal, reason, and millisecond timestamps.
+After the job ends, `exec` saves this final record, reports completion, then closes its own pane and tab.
+`wait` reads the final record, and `logs` reads the saved output after the tab closes.
+If the close fails, `exec` logs the error to stderr without changing the result. Prune can close the ended job tab later.
 `host.json` includes job records. `ps --all` includes completed jobs and reads remote records through the snapshot cache.
 `logs`, `stop`, and `wait` use the configured SSH transport for remote jobs.
 `stop` requests a process-group kill. Timeouts and wrapper termination also kill the process group.

@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Close each job tab after `exec` saves the final record and reports completion. `wait` and `logs` still work after the tab closes.
+- Log pane-close failures to stderr without changing the job result. Prune retains its ended-job-tab fallback.
+
 ## 0.8.2 - 2026-10-15
 
 - Prune closes an ended job's tab at once when its shell is at an empty prompt. The job log keeps the output. A shell in a directory that no longer exists also closes at once. Other idle shells still need a day.
