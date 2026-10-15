@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.8.1 - 2026-10-15
 
 - Doctor's process scan tolerates panes that close after the pane list. All process queries share the same closed-pane handling.
 
