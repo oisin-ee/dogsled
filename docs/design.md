@@ -131,8 +131,11 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 
 `wrangle doctor [--host H]` lists cruft and changes nothing:
 
-- worktrees whose branch is merged or deleted and have no live pane;
-- panes whose agent has been `done` or `idle` for more than 24 h;
+- worktrees whose branch is merged, squashed, or deleted, or has had no commits for 24 h, and have no live pane;
+- unused worktrees with unmerged commits (report only);
+- local branches without a worktree that are integrated or fully on a remote, and the others (report only);
+- workspaces whose every pane is idle;
+- panes whose agent has been `done` or `idle`, or whose shell has run no command, for more than 24 h;
 - wrangle jobs that ended more than 24 h ago, with their logs;
 - disk above 90 % used, with the largest wrangle-owned paths;
 - processes using more than one core that are not under any Herdr pane (report only).
@@ -140,7 +143,7 @@ wrangle status --brief    ≤ 6 lines, for the prompt hooks
 Wrangle never removes anything on a timer. The lead that started a child closes it with `wrangle close` when it is finished.
 Every other class waits for `wrangle prune [--host H] [<class>…]`, which shows what it will remove, asks, then removes it. It never kills processes.
 Prepare registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
-Doctor also discovers repositories from the caller and live pane directories. It never scans the whole home directory.
+Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
 Prune compares current Git path, branch, HEAD, and repository with the approved plan immediately before removal.
 A branch-taking repository task cannot guarantee an exact path. Until a task exposes a verifiable path-bound contract, removal uses non-forced `git worktree remove -- <path>`.

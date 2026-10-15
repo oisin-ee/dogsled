@@ -40,6 +40,7 @@ case "$*" in
   'agent list') cat "$RIG/agents.json" ;;
   'pane list') cat "$RIG/panes.json" ;;
   'worktree list --cwd'*) cat "$RIG/worktrees.json" ;;
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[]}}' ;;
   'workspace close w2') printf '%s\n' '{"result":{"panes":[]}}' > "$RIG/panes.json"; printf '{}\n' ;;
   'pane close'*) printf '{}\n' ;;
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;
@@ -392,4 +393,127 @@ esac
     assert_eq!(code, 0, "{closed}");
     assert!(rig.log("ssh.log").contains("netcup-dev"));
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+}
+
+#[test]
+fn doctor_removes_a_worktree_with_no_commits_a_day_after_it_was_made() {
+    let (rig, tree) = close_rig("close-empty");
+    // The configured repository is how doctor finds it: nothing registered, no pane in it.
+    rig.config(
+        "[hooks]\nremove = [\"remove-hook\", \"{branch}\", \"{path}\"]\n\
+         [cleanup]\nrepositories = [\"~/repo\", \"~/gone\"]\n",
+    );
+    let found = |rig: &Rig| {
+        let (_, plan) = rig.json(&["doctor"]);
+        plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["class"] == "worktrees")
+            .cloned()
+    };
+    // A new worktree is ordinary work.
+    assert_eq!(found(&rig), None);
+    fs::write(rig.dir.join("clock"), (now() + 2 * 86_400_000).to_string()).unwrap();
+    let entry = found(&rig).unwrap();
+    assert_eq!(
+        entry["detail"],
+        "branch feat/x has no commits since its worktree was made 48h ago; clean and unused"
+    );
+    assert_eq!(entry["removable"], true);
+    let (_, plan) = rig.json(&["doctor"]);
+    assert!(
+        plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["class"] == "repositories"
+                && e["id"] == rig.dir.join("home/gone").display().to_string()
+                && e["removable"] == false)
+    );
+    let out = rig.run(&["prune", "--yes", "worktrees"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(rig.log("hook.log"), hook_log(&rig, &tree));
+    assert!(!tree.exists());
+}
+
+#[test]
+fn doctor_finds_integrated_and_pushed_branches_without_a_worktree_and_prune_deletes_them() {
+    let (rig, _) = close_rig("close-branches");
+    let repo = rig.dir.join("home/repo");
+    rig.put("state/repositories.json", &json!([repo]));
+    let branch = |name: &str| {
+        let path = rig.dir.join(format!("home/{name}"));
+        git(
+            &repo,
+            &["worktree", "add", "-q", "-b", name, path.to_str().unwrap()],
+        );
+        fs::write(path.join(name), "work\n").unwrap();
+        git(&path, &["add", name]);
+        git(&path, &["commit", "-q", "-m", name]);
+        git(&repo, &["worktree", "remove", path.to_str().unwrap()]);
+    };
+    for name in ["done", "local", "pushed"] {
+        branch(name);
+    }
+    git(&repo, &["merge", "-q", "--squash", "done"]);
+    git(&repo, &["commit", "-q", "-m", "done (#1)"]);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/pushed", "pushed"],
+    );
+    let (_, plan) = rig.json(&["doctor"]);
+    let branches: Vec<_> = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["class"] == "branches")
+        .map(|e| {
+            let id = e["id"].as_str().unwrap();
+            (
+                id.rsplit_once(' ').unwrap().1.to_owned(),
+                e["detail"]
+                    .as_str()
+                    .unwrap()
+                    .split(", the last")
+                    .next()
+                    .unwrap()
+                    .to_owned(),
+                e["removable"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let done = git(&repo, &["rev-parse", "--short=10", "main"]);
+    assert_eq!(
+        branches,
+        [
+            (
+                "done".into(),
+                format!("applied to main by {}", done.trim()),
+                true
+            ),
+            ("local".into(), "1 commit on no remote".into(), false),
+            (
+                "pushed".into(),
+                "every commit is on a remote branch".into(),
+                true
+            ),
+        ],
+        "{plan}"
+    );
+    let out = rig.run(&["prune", "--yes", "branches"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let left = git(&repo, &["branch", "--format=%(refname:short)"]);
+    assert_eq!(
+        left.lines().collect::<Vec<_>>(),
+        ["feat/x", "local", "main"]
+    );
 }

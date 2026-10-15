@@ -48,6 +48,15 @@ pub struct Policy {
     /// PATH, but `mise` itself is, so the default goes through `mise x`.
     pub remote_command: Vec<String>,
     pub hooks: Hooks,
+    pub cleanup: Cleanup,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Cleanup {
+    /// Repositories doctor checks besides the registered ones, the Herdr workspaces, and the
+    /// caller's. A leading `~/` is the home directory.
+    pub repositories: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,6 +135,7 @@ impl Default for Policy {
                 .map(ToString::to_string)
                 .collect(),
             hooks: Hooks::default(),
+            cleanup: Cleanup::default(),
         }
     }
 }

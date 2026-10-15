@@ -6,11 +6,15 @@
 //! merging the run into that commit's parent reproduces the commit on every path the run
 //! changed. One run is a squash of the whole branch. Several runs are a stack whose lower
 //! branches merged first. Pull request hosts and merge styles do not matter.
+//!
+//! Each path merges on its own, from blob ids in `git log --raw`, with `git merge-file` only
+//! where both sides changed a file. A doubtful path is a conflict, so the error is to keep a
+//! branch, never to remove one.
 
 use crate::error::{Error, Result};
 use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
@@ -56,7 +60,7 @@ fn failed(repo: &str, what: &str, out: &crate::shell::Output) -> Error {
 }
 
 /// The remote default branch is authoritative; local `main` is the fallback.
-fn base(shell: &dyn Shell, repo: &str) -> Result<String> {
+pub fn base(shell: &dyn Shell, repo: &str) -> Result<String> {
     let remote = git(
         shell,
         repo,
@@ -69,7 +73,7 @@ fn base(shell: &dyn Shell, repo: &str) -> Result<String> {
     })
 }
 
-fn short(reference: &str) -> String {
+pub fn short(reference: &str) -> String {
     reference
         .strip_prefix("refs/remotes/")
         .or_else(|| reference.strip_prefix("refs/heads/"))
@@ -160,11 +164,13 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
     }))
 }
 
-/// One commit from `git log`, with the paths it changed (limited to the pathspec, if any).
+/// One commit from `git log`, with what it changed against its first parent (limited to the
+/// pathspec, if any).
 struct Commit {
     id: String,
     parent: String,
     paths: BTreeSet<String>,
+    changes: Changes,
 }
 
 /// Commits in `range`, oldest first, with their changed paths.
@@ -179,7 +185,9 @@ fn commits(
         "log",
         "--reverse",
         "--no-renames",
-        "--name-only",
+        "--raw",
+        "--no-abbrev",
+        "--diff-merges=first-parent",
         "-z",
         "--format=%x01%H %P",
     ];
@@ -197,14 +205,12 @@ fn commits(
         .filter_map(|record| {
             let mut fields = record.split('\0');
             let mut header = fields.next()?.split_whitespace();
+            let changes = raw(fields);
             Some(Commit {
                 id: header.next()?.to_string(),
                 parent: header.next().unwrap_or_default().to_string(),
-                paths: fields
-                    .map(|p| p.trim_start_matches('\n'))
-                    .filter(|p| !p.is_empty())
-                    .map(ToString::to_string)
-                    .collect(),
+                paths: changes.keys().cloned().collect(),
+                changes,
             })
         })
         .collect())
@@ -231,16 +237,31 @@ fn runs(
             if reached[end].is_some() {
                 continue;
             }
-            let paths: BTreeSet<&String> =
+            let touched: BTreeSet<&String> =
                 branch[start..end].iter().flat_map(|c| &c.paths).collect();
+            let mut net = None;
             // Newest candidate first, as `git log` lists them without --reverse.
             for candidate in candidates.iter().rev() {
                 if candidate.parent.is_empty()
-                    || !paths.iter().all(|p| candidate.paths.contains(*p))
+                    || !touched.iter().all(|p| candidate.paths.contains(*p))
                 {
                     continue;
                 }
-                if applies(shell, repo, &points[start], &points[end], candidate)? {
+                // A run that reverts itself changes nothing, so no commit applies it.
+                let net = match &net {
+                    Some(net) => net,
+                    None => net.insert(changes(
+                        shell,
+                        repo,
+                        &points[start],
+                        &points[end],
+                        &touched,
+                    )?),
+                };
+                if net.is_empty() {
+                    break;
+                }
+                if applies(shell, repo, net, candidate)? {
                     reached[end] = Some((start, candidate.id.clone()));
                     break;
                 }
@@ -263,58 +284,116 @@ fn runs(
     Ok(Some(applied))
 }
 
-/// `commit` applies the run `start..end` when it touches every path the run changed, and
-/// merging the run into its parent yields `commit`'s content on those paths.
-fn applies(shell: &dyn Shell, repo: &str, start: &str, end: &str, commit: &Commit) -> Result<bool> {
-    let changed = git(
-        shell,
-        repo,
-        &["diff", "--name-only", "-z", "--no-renames", start, end],
-    )?;
-    if !changed.ok() {
-        return Err(failed(
-            repo,
-            &format!("list changes {start}..{end}"),
-            &changed,
-        ));
+/// A path's mode and object before and after, from `git diff --raw`. Git's zero id is absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Change {
+    modes: (String, String),
+    objects: (String, String),
+}
+
+type Changes = BTreeMap<String, Change>;
+
+/// What `from..to` changed on `paths`.
+fn changes(
+    shell: &dyn Shell,
+    repo: &str,
+    from: &str,
+    to: &str,
+    paths: &BTreeSet<&String>,
+) -> Result<Changes> {
+    let pathspec: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
+    let mut args = vec![
+        "diff",
+        "--raw",
+        "-z",
+        "--no-renames",
+        "--no-abbrev",
+        from,
+        to,
+        "--",
+    ];
+    args.extend(pathspec.iter().map(String::as_str));
+    let out = git(shell, repo, &args)?;
+    if !out.ok() {
+        return Err(failed(repo, &format!("list changes {from}..{to}"), &out));
     }
-    let paths: Vec<String> = changed
-        .stdout
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(|p| format!(":(literal){p}"))
-        .collect();
-    // A run that reverts itself changes nothing, so it cannot name an applying commit.
-    if paths.is_empty() {
-        return Ok(false);
+    Ok(raw(out.stdout.split('\0')))
+}
+
+/// Parse `--raw -z` records: a `:modes objects status` field, then the path.
+fn raw<'a>(mut fields: impl Iterator<Item = &'a str>) -> Changes {
+    let mut result = Changes::new();
+    while let (Some(header), Some(path)) = (fields.next(), fields.next()) {
+        let words: Vec<&str> = header
+            .trim_start_matches('\n')
+            .trim_start_matches(':')
+            .split(' ')
+            .collect();
+        if let [old_mode, new_mode, old, new, _] = words[..] {
+            result.insert(
+                path.into(),
+                Change {
+                    modes: (old_mode.into(), new_mode.into()),
+                    objects: (old.into(), new.into()),
+                },
+            );
+        }
     }
-    let merge_base = format!("--merge-base={start}");
-    let merged = git(
-        shell,
-        repo,
-        &[
-            "merge-tree",
-            "--write-tree",
-            &merge_base,
-            &commit.parent,
-            end,
-        ],
-    )?;
-    match merged.status {
-        0 => (),
-        // A conflict means the run does not apply cleanly at this point.
-        1 => return Ok(false),
-        _ => return Err(failed(repo, "run git merge-tree --write-tree", &merged)),
+    result
+}
+
+/// `commit` applies a run when it touches every path the run changed, and merging the run into
+/// its parent yields `commit`'s content on those paths. Each path merges on its own: when the
+/// parent holds the run's start or end the result is known, and otherwise both sides must be
+/// files with one mode, merged with `git merge-file`. An addition, deletion, or mode change
+/// that both sides make differently is a conflict, so the run does not apply there.
+fn applies(shell: &dyn Shell, repo: &str, net: &Changes, commit: &Commit) -> Result<bool> {
+    for (path, change) in net {
+        // The commit does not change this path, so the merge result would have to be the
+        // parent's content, which the run changes.
+        let Some(theirs) = commit.changes.get(path) else {
+            return Ok(false);
+        };
+        let start = (&change.modes.0, &change.objects.0);
+        let end = (&change.modes.1, &change.objects.1);
+        let parent = (&theirs.modes.0, &theirs.objects.0);
+        let result = (&theirs.modes.1, &theirs.objects.1);
+        let merged = if parent == start {
+            end
+        } else if parent == end {
+            parent
+        } else if [start, end, parent].iter().any(|(_, o)| absent(o))
+            || start.0 != end.0
+            || parent.0 != start.0
+        {
+            return Ok(false);
+        } else {
+            let out = git(
+                shell,
+                repo,
+                &["merge-file", "--object-id", parent.1, start.1, end.1],
+            )?;
+            match out.status {
+                0 => {
+                    if (end.0, &out.stdout.trim().to_string()) != result {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+                // The number of conflicts, at most 127. An error is negative, so exit 255.
+                1..=127 => return Ok(false),
+                _ => return Err(failed(repo, &format!("merge {path}"), &out)),
+            }
+        };
+        if merged != result {
+            return Ok(false);
+        }
     }
-    let tree = merged.stdout.lines().next().unwrap_or_default().trim();
-    let mut args = vec!["diff", "--quiet", "--no-renames", &commit.id, tree, "--"];
-    args.extend(paths.iter().map(String::as_str));
-    let same = git(shell, repo, &args)?;
-    match same.status {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(failed(repo, &format!("compare {}", commit.id), &same)),
-    }
+    Ok(true)
+}
+
+fn absent(object: &str) -> bool {
+    object.bytes().all(|b| b == b'0')
 }
 
 #[cfg(test)]
@@ -476,6 +555,23 @@ mod tests {
         repo.commit("d", "later\n", "after both");
         repo.git(&["switch", "-q", "main"]);
         assert_eq!(repo.check("upper"), None);
+    }
+
+    #[test]
+    fn a_squashed_deletion_and_addition_apply_and_a_different_addition_does_not() {
+        let repo = Repo::new("added");
+        repo.git(&["switch", "-q", "-c", "feat"]);
+        repo.git(&["rm", "-q", "a"]);
+        repo.commit("b", "moved\n", "feat moves a to b");
+        repo.git(&["switch", "-q", "-c", "other", "main"]);
+        repo.commit("b", "different\n", "other adds b");
+        repo.git(&["switch", "-q", "main"]);
+        repo.commit("x", "unrelated\n", "base moves");
+        repo.git(&["merge", "-q", "--squash", "feat"]);
+        repo.git(&["commit", "-q", "-m", "squash feat"]);
+        assert!(applied(repo.check("feat").as_ref()));
+        // `other` adds the same path with other content: an add/add conflict, not applied.
+        assert_eq!(repo.check("other"), None);
     }
 
     #[test]

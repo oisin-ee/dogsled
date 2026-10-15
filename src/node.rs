@@ -37,6 +37,7 @@ pub struct Node<'a> {
     pub thresholds: Thresholds,
     pub home: &'a str,
     pub hooks: &'a crate::config::Hooks,
+    pub cleanup: &'a crate::config::Cleanup,
 }
 
 impl Node<'_> {
