@@ -245,20 +245,31 @@ fn last_commit(shell: &dyn Shell, repo: &str, reference: &str, now: u64) -> Resu
     Ok(now.saturating_sub(seconds.saturating_mul(1_000)))
 }
 
-/// When Git made a linked worktree: its administrative `commondir` file is written once.
-fn created(path: &str) -> Option<u64> {
+/// When Git made a linked worktree, and the commit it started on. Git writes the
+/// administrative `commondir` file once, and the first entry of the worktree's HEAD reflog
+/// records the starting commit.
+struct Origin {
+    made_ms: u64,
+    start: Option<String>,
+}
+
+fn origin(path: &str) -> Option<Origin> {
     let dotgit = std::fs::read_to_string(Path::new(path).join(".git")).ok()?;
     let admin = Path::new(path).join(dotgit.trim().strip_prefix("gitdir: ")?);
     let modified = std::fs::metadata(admin.join("commondir"))
         .ok()?
         .modified()
         .ok()?;
-    Some(
-        modified
+    let start = std::fs::read_to_string(admin.join("logs/HEAD"))
+        .ok()
+        .and_then(|log| log.split_whitespace().nth(1).map(str::to_string));
+    Some(Origin {
+        made_ms: modified
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
             .as_millis() as u64,
-    )
+        start,
+    })
 }
 
 fn clean(shell: &dyn Shell, tree: &Tree) -> Result<bool> {
@@ -780,9 +791,10 @@ struct Disposition {
     usage: Usage,
 }
 
-/// Doctor's finding for a worktree, or `None` when it is ordinary work. Removable: an integrated
-/// branch, or a branch with no commits a day after its worktree was made, when the worktree is
-/// clean and no pane uses it. An unused worktree with unmerged commits is reported.
+/// Doctor's finding for a worktree, or `None` when it is ordinary work. Removable: a worktree
+/// whose HEAD has not moved a day after Git made it and whose branch has no commits beyond the
+/// base, or an integrated branch, when the worktree
+/// is clean and no pane uses it. An unused worktree with unmerged commits is reported.
 fn disposition(
     node: &Node<'_>,
     tree: &Tree,
@@ -790,50 +802,54 @@ fn disposition(
     stale: &BTreeSet<String>,
     now: u64,
 ) -> Result<Option<Disposition>> {
-    let integrated = crate::integration::check(node.shell, &tree.repo, &tree.branch)?;
     let usage = usage(node, tree, panes, stale)?;
-    let (finding, eligible) = if let Some(integrated) = integrated {
+    let base = crate::integration::base(node.shell, &tree.repo)?;
+    let branch = format!("refs/heads/{}", tree.branch);
+    // A worktree whose HEAD never moved, on a branch with no commits beyond the base, holds no
+    // work. Its branch is an ancestor of the base once the base moves, but that is not a merge:
+    // it is a new worktree, or an abandoned one after a day. A worktree made on a branch that
+    // already had commits keeps them, so it goes through the integration check.
+    let untouched = match origin(&tree.path) {
+        Some(o) if o.start.as_deref() == Some(tree.head.as_str()) => {
+            (count(node.shell, &tree.repo, &[&format!("{base}..{branch}")])? == 0).then_some(o)
+        }
+        _ => None,
+    };
+    let (finding, eligible) = if let Some(origin) = untouched {
+        let made = now.saturating_sub(origin.made_ms);
+        if made <= DAY || !usage.in_use.is_empty() {
+            return Ok(None);
+        }
+        (
+            format!(
+                "branch {} has no commits since its worktree was made {} ago",
+                tree.branch,
+                crate::watchdog::age(made)
+            ),
+            true,
+        )
+    } else if let Some(integrated) =
+        crate::integration::check(node.shell, &tree.repo, &tree.branch)?
+    {
         (format!("branch {} {integrated}", tree.branch), true)
     } else if !usage.in_use.is_empty() {
         return Ok(None);
     } else {
-        let base = crate::integration::base(node.shell, &tree.repo)?;
-        let branch = format!("refs/heads/{}", tree.branch);
-        match count(node.shell, &tree.repo, &[&format!("{base}..{branch}")])? {
-            0 => {
-                let Some(made) = created(&tree.path).map(|t| now.saturating_sub(t)) else {
-                    return Ok(None);
-                };
-                if made <= DAY {
-                    return Ok(None);
-                }
-                (
-                    format!(
-                        "branch {} has no commits since its worktree was made {} ago",
-                        tree.branch,
-                        crate::watchdog::age(made)
-                    ),
-                    true,
-                )
-            }
-            ahead => {
-                let pushed = match count(node.shell, &tree.repo, &[&branch, "--not", "--remotes"])?
-                {
-                    0 => "all on a remote branch".to_string(),
-                    unpushed => format!("{unpushed} on no remote"),
-                };
-                (
-                    format!(
-                        "branch {} has {} not on {}, {pushed}, the last {} ago",
-                        tree.branch,
-                        commits(ahead),
-                        crate::integration::short(&base),
-                        since(last_commit(node.shell, &tree.repo, &branch, now)?)
-                    ),
-                    false,
-                )
-            }
-        }
+        let ahead = count(node.shell, &tree.repo, &[&format!("{base}..{branch}")])?;
+        let pushed = match count(node.shell, &tree.repo, &[&branch, "--not", "--remotes"])? {
+            0 => "all on a remote branch".to_string(),
+            unpushed => format!("{unpushed} on no remote"),
+        };
+        (
+            format!(
+                "branch {} has {} not on {}, {pushed}, the last {} ago",
+                tree.branch,
+                commits(ahead),
+                crate::integration::short(&base),
+                since(last_commit(node.shell, &tree.repo, &branch, now)?)
+            ),
+            false,
+        )
     };
     let refused: Vec<String> = usage
         .in_use
