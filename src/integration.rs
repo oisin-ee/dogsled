@@ -1,9 +1,11 @@
 //! Whether a branch's work is already in the repository's default branch, from Git alone.
 //!
 //! A merge makes the branch an ancestor. A squash, rebase-to-one, or cherry-pick does not, so
-//! the second rule looks for one commit on the default branch that applies the branch's work:
-//! merging the branch into that commit's parent reproduces the commit on every path the branch
-//! changed. Pull request hosts and merge styles do not matter.
+//! the second rule looks for commits on the default branch that apply the branch's work. The
+//! branch's commits split into consecutive runs, and each run has one commit that applies it:
+//! merging the run into that commit's parent reproduces the commit on every path the run
+//! changed. One run is a squash of the whole branch. Several runs are a stack whose lower
+//! branches merged first. Pull request hosts and merge styles do not matter.
 
 use crate::error::{Error, Result};
 use crate::shell::Shell;
@@ -19,6 +21,12 @@ pub enum Integrated {
     Ancestor { base: String },
     /// `commit` on `base` applies the branch's changes.
     Applied { base: String, commit: String },
+    /// Each of `commits` on `base` applies one consecutive run of the branch, in branch order.
+    Stacked { base: String, commits: Vec<String> },
+}
+
+fn abbreviated(commit: &str) -> &str {
+    &commit[..commit.len().min(10)]
 }
 
 impl std::fmt::Display for Integrated {
@@ -27,11 +35,11 @@ impl std::fmt::Display for Integrated {
             Self::Deleted => write!(f, "deleted"),
             Self::Ancestor { base } => write!(f, "merged into {base}"),
             Self::Applied { base, commit } => {
-                write!(
-                    f,
-                    "applied to {base} by {}",
-                    &commit[..commit.len().min(10)]
-                )
+                write!(f, "applied to {base} by {}", abbreviated(commit))
+            }
+            Self::Stacked { base, commits } => {
+                let commits: Vec<&str> = commits.iter().map(|c| abbreviated(c)).collect();
+                write!(f, "applied to {base} by {}", commits.join(", "))
             }
         }
     }
@@ -118,101 +126,194 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
         return Err(failed(repo, &format!("find the fork of {branch}"), &fork));
     }
     let fork = fork.stdout.trim().to_string();
+    let branch = commits(
+        shell,
+        repo,
+        &format!("{fork}..{reference}"),
+        &["--first-parent"],
+        &[],
+    )?;
+    let touched: BTreeSet<String> = branch.iter().flat_map(|c| c.paths.clone()).collect();
+    if touched.is_empty() {
+        return Ok(Some(Integrated::Ancestor { base: name }));
+    }
+    let pathspec: Vec<String> = touched.iter().map(|p| format!(":(literal){p}")).collect();
+    let candidates = commits(
+        shell,
+        repo,
+        &format!("{fork}..{base}"),
+        &["--no-merges"],
+        &pathspec,
+    )?;
+    // Branch positions: 0 is the fork, k is the branch's k-th commit.
+    let mut points = vec![fork];
+    points.extend(branch.iter().map(|c| c.id.clone()));
+    let Some(applied) = runs(shell, repo, &points, &branch, &candidates)? else {
+        return Ok(None);
+    };
+    Ok(Some(match <[String; 1]>::try_from(applied) {
+        Ok([commit]) => Integrated::Applied { base: name, commit },
+        Err(commits) => Integrated::Stacked {
+            base: name,
+            commits,
+        },
+    }))
+}
+
+/// One commit from `git log`, with the paths it changed (limited to the pathspec, if any).
+struct Commit {
+    id: String,
+    parent: String,
+    paths: BTreeSet<String>,
+}
+
+/// Commits in `range`, oldest first, with their changed paths.
+fn commits(
+    shell: &dyn Shell,
+    repo: &str,
+    range: &str,
+    options: &[&str],
+    pathspec: &[String],
+) -> Result<Vec<Commit>> {
+    let mut args = vec![
+        "log",
+        "--reverse",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        "--format=%x01%H %P",
+    ];
+    args.extend(options);
+    args.push(range);
+    args.push("--");
+    args.extend(pathspec.iter().map(String::as_str));
+    let out = git(shell, repo, &args)?;
+    if !out.ok() {
+        return Err(failed(repo, &format!("list commits {range}"), &out));
+    }
+    Ok(out
+        .stdout
+        .split('\u{1}')
+        .filter_map(|record| {
+            let mut fields = record.split('\0');
+            let mut header = fields.next()?.split_whitespace();
+            Some(Commit {
+                id: header.next()?.to_string(),
+                parent: header.next().unwrap_or_default().to_string(),
+                paths: fields
+                    .map(|p| p.trim_start_matches('\n'))
+                    .filter(|p| !p.is_empty())
+                    .map(ToString::to_string)
+                    .collect(),
+            })
+        })
+        .collect())
+}
+
+/// Splits the branch into consecutive runs that `candidates` apply, longest runs first.
+/// Returns the applying commits in branch order, or `None` when some part of the branch is
+/// not applied.
+fn runs(
+    shell: &dyn Shell,
+    repo: &str,
+    points: &[String],
+    branch: &[Commit],
+    candidates: &[Commit],
+) -> Result<Option<Vec<String>>> {
+    let last = points.len() - 1;
+    // reached[j] is the run start and the commit that reach position j.
+    let mut reached: Vec<Option<(usize, String)>> = vec![None; points.len()];
+    for start in 0..last {
+        if start > 0 && reached[start].is_none() {
+            continue;
+        }
+        for end in (start + 1..=last).rev() {
+            if reached[end].is_some() {
+                continue;
+            }
+            let paths: BTreeSet<&String> =
+                branch[start..end].iter().flat_map(|c| &c.paths).collect();
+            // Newest candidate first, as `git log` lists them without --reverse.
+            for candidate in candidates.iter().rev() {
+                if candidate.parent.is_empty()
+                    || !paths.iter().all(|p| candidate.paths.contains(*p))
+                {
+                    continue;
+                }
+                if applies(shell, repo, &points[start], &points[end], candidate)? {
+                    reached[end] = Some((start, candidate.id.clone()));
+                    break;
+                }
+            }
+        }
+        if reached[last].is_some() {
+            break;
+        }
+    }
+    let mut applied = Vec::new();
+    let mut position = last;
+    while position > 0 {
+        let Some((start, commit)) = reached[position].clone() else {
+            return Ok(None);
+        };
+        applied.push(commit);
+        position = start;
+    }
+    applied.reverse();
+    Ok(Some(applied))
+}
+
+/// `commit` applies the run `start..end` when it touches every path the run changed, and
+/// merging the run into its parent yields `commit`'s content on those paths.
+fn applies(shell: &dyn Shell, repo: &str, start: &str, end: &str, commit: &Commit) -> Result<bool> {
     let changed = git(
         shell,
         repo,
-        &[
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            &fork,
-            &reference,
-        ],
+        &["diff", "--name-only", "-z", "--no-renames", start, end],
     )?;
     if !changed.ok() {
-        return Err(failed(repo, &format!("list changes of {branch}"), &changed));
+        return Err(failed(
+            repo,
+            &format!("list changes {start}..{end}"),
+            &changed,
+        ));
     }
-    let paths: BTreeSet<String> = changed
+    let paths: Vec<String> = changed
         .stdout
         .split('\0')
         .filter(|p| !p.is_empty())
-        .map(ToString::to_string)
+        .map(|p| format!(":(literal){p}"))
         .collect();
+    // A run that reverts itself changes nothing, so it cannot name an applying commit.
     if paths.is_empty() {
-        return Ok(Some(Integrated::Ancestor { base: name }));
-    }
-    let pathspec: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
-    let range = format!("{fork}..{base}");
-    let mut args = vec!["log", "--no-merges", "--format=%H %P", &range, "--"];
-    args.extend(pathspec.iter().map(String::as_str));
-    let log = git(shell, repo, &args)?;
-    if !log.ok() {
-        return Err(failed(repo, &format!("list {name} commits"), &log));
-    }
-    for line in log.stdout.lines() {
-        let mut words = line.split_whitespace();
-        let (Some(commit), Some(parent), None) = (words.next(), words.next(), words.next()) else {
-            continue;
-        };
-        if applies(shell, repo, commit, parent, &reference, &paths, &pathspec)? {
-            return Ok(Some(Integrated::Applied {
-                base: name,
-                commit: commit.into(),
-            }));
-        }
-    }
-    Ok(None)
-}
-
-/// `commit` applies the branch when it touches every branch path and merging the branch into
-/// its parent yields `commit`'s content on those paths.
-fn applies(
-    shell: &dyn Shell,
-    repo: &str,
-    commit: &str,
-    parent: &str,
-    reference: &str,
-    paths: &BTreeSet<String>,
-    pathspec: &[String],
-) -> Result<bool> {
-    let mut args = vec![
-        "diff-tree",
-        "-r",
-        "-z",
-        "--name-only",
-        "--no-renames",
-        "--no-commit-id",
-        commit,
-        "--",
-    ];
-    args.extend(pathspec.iter().map(String::as_str));
-    let touched = git(shell, repo, &args)?;
-    if !touched.ok() {
-        return Err(failed(repo, &format!("list paths of {commit}"), &touched));
-    }
-    if touched.stdout.split('\0').filter(|p| !p.is_empty()).count() != paths.len() {
         return Ok(false);
     }
+    let merge_base = format!("--merge-base={start}");
     let merged = git(
         shell,
         repo,
-        &["merge-tree", "--write-tree", parent, reference],
+        &[
+            "merge-tree",
+            "--write-tree",
+            &merge_base,
+            &commit.parent,
+            end,
+        ],
     )?;
     match merged.status {
         0 => (),
-        // A conflict means the branch does not apply cleanly at this point.
+        // A conflict means the run does not apply cleanly at this point.
         1 => return Ok(false),
         _ => return Err(failed(repo, "run git merge-tree --write-tree", &merged)),
     }
     let tree = merged.stdout.lines().next().unwrap_or_default().trim();
-    let mut args = vec!["diff", "--quiet", "--no-renames", commit, tree, "--"];
-    args.extend(pathspec.iter().map(String::as_str));
+    let mut args = vec!["diff", "--quiet", "--no-renames", &commit.id, tree, "--"];
+    args.extend(paths.iter().map(String::as_str));
     let same = git(shell, repo, &args)?;
     match same.status {
         0 => Ok(true),
         1 => Ok(false),
-        _ => Err(failed(repo, &format!("compare {commit}"), &same)),
+        _ => Err(failed(repo, &format!("compare {}", commit.id), &same)),
     }
 }
 
@@ -334,6 +435,47 @@ mod tests {
         repo.commit("c", "later\n", "after squash");
         repo.git(&["switch", "-q", "main"]);
         assert_eq!(repo.check("feat"), None);
+    }
+
+    #[test]
+    fn a_stack_is_found_when_each_branch_landed_as_its_own_squash() {
+        let repo = Repo::new("stack");
+        repo.git(&["switch", "-q", "-c", "lower"]);
+        repo.commit("b", "lower\n", "lower");
+        repo.git(&["switch", "-q", "-c", "upper"]);
+        repo.commit("a", "1\n2\nupper\n", "upper one");
+        repo.commit("c", "upper\n", "upper two");
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["merge", "-q", "--squash", "lower"]);
+        repo.git(&["commit", "-q", "-m", "squash lower"]);
+        let lower = repo.git(&["rev-parse", "HEAD"]);
+        // Base edits a file of the upper branch between the two squashes.
+        repo.commit("a", "one\n2\n3\n", "base between");
+        // Before the upper squash lands, the lower run alone is applied.
+        assert_eq!(repo.check("upper"), None);
+        repo.git(&["merge", "-q", "--squash", "upper"]);
+        repo.git(&["commit", "-q", "-m", "squash upper"]);
+        let upper = repo.git(&["rev-parse", "HEAD"]);
+        repo.commit("a", "one\ntwo\nupper\n", "base after");
+        assert_eq!(
+            repo.check("upper"),
+            Some(Integrated::Stacked {
+                base: "main".into(),
+                commits: vec![lower.clone(), upper],
+            })
+        );
+        assert_eq!(
+            repo.check("lower"),
+            Some(Integrated::Applied {
+                base: "main".into(),
+                commit: lower,
+            })
+        );
+        // More work on top of the landed stack is not integrated.
+        repo.git(&["switch", "-q", "upper"]);
+        repo.commit("d", "later\n", "after both");
+        repo.git(&["switch", "-q", "main"]);
+        assert_eq!(repo.check("upper"), None);
     }
 
     #[test]

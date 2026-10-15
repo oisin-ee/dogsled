@@ -207,8 +207,9 @@ wrangle prune --host netcup --yes panes
 
 Doctor changes no candidates. It reports `worktrees`, `panes`, `jobs`, `disk`, and `processes`.
 Worktrees need an integrated branch, a clean tree, no foreign lock, and no pane that holds them.
-A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when one commit on that branch applies it.
-A commit applies the branch when it changes every path the branch changed, and merging the branch into the commit's parent gives the commit's content on those paths. This finds merge, squash, and cherry-pick results from Git alone.
+A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when commits on that branch apply it.
+The branch's commits split into consecutive runs, and each run needs one commit that applies it. A commit applies a run when it changes every path the run changed, and merging the run into the commit's parent gives the commit's content on those paths.
+One run is a merge, squash, or cherry-pick of the whole branch. Several runs are a stack: the branch holds an earlier branch's commits, and each branch landed as its own squash. Git alone decides this.
 A branch on the base tip has no work yet and is not a candidate. Results use the remote-tracking branch, so `git fetch` keeps them current.
 A pane holds a worktree when it works in it or sits in its workspace. A shell with no foreground command does not hold it.
 An agent holds it until it has been `idle` or `done` for 24 hours. Before that, its owner closes it with `wrangle close`.
