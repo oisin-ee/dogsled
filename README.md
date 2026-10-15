@@ -11,26 +11,26 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/wrangle@v0.7.2
+mise use github:oisin-ee/wrangle@v0.7.3
 ```
 
 Pi (extension and skill):
 
 ```sh
-pi install git:github.com/oisin-ee/wrangle@v0.7.2
+pi install git:github.com/oisin-ee/wrangle@v0.7.3
 ```
 
 Claude Code (hooks and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/wrangle#v0.7.2
+claude plugin marketplace add oisin-ee/wrangle#v0.7.3
 claude plugin install wrangle@wrangle
 ```
 
 Codex (hooks and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/wrangle --ref v0.7.2
+codex plugin marketplace add oisin-ee/wrangle --ref v0.7.3
 codex plugin add wrangle@wrangle
 ```
 
@@ -40,7 +40,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (status-board popup):
 
 ```sh
-herdr plugin install oisin-ee/wrangle --ref v0.7.2 --yes
+herdr plugin install oisin-ee/wrangle --ref v0.7.3 --yes
 ```
 
 Harness plugins use the binary on `PATH`. They do not install it or start host services.
@@ -213,16 +213,22 @@ wrangle prune worktrees jobs
 wrangle prune --host netcup --yes panes
 ```
 
-Doctor changes no candidates. It reports `worktrees`, `panes`, `jobs`, `disk`, and `processes`.
-Worktrees need an integrated branch, a clean tree, no foreign lock, and no pane that holds them.
-A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when one commit on that branch applies it.
-A commit applies the branch when it changes every path the branch changed, and merging the branch into the commit's parent gives the commit's content on those paths. This finds merge, squash, and cherry-pick results from Git alone.
-A branch on the base tip has no work yet and is not a candidate. Results use the remote-tracking branch, so `git fetch` keeps them current.
+Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `disk`, `processes`, and `repositories`.
+A removable worktree has an integrated branch, or a branch with no commits more than 24 hours after Git made the worktree. It also needs a clean tree, no foreign lock, and no pane that uses it.
+A worktree whose branch has unmerged commits and that no pane uses is report-only. Doctor shows the commits ahead, how many are on no remote, and the age of the last commit.
+A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when commits on that branch apply it.
+The branch's commits split into consecutive runs, and each run needs one commit that applies it. A commit applies a run when it changes every path the run changed, and merging the run into the commit's parent gives the commit's content on those paths.
+One run is a merge, squash, or cherry-pick of the whole branch. Several runs are a stack: the branch holds an earlier branch's commits, and each branch landed as its own squash. Git alone decides this.
+Each path merges on its own. An addition, deletion, or mode change on a path the base also changed differently is a conflict, and renames are not followed, so a doubtful run is not applied.
+Results use the remote-tracking branch, so `git fetch` keeps them current.
+A local branch with no worktree is removable when it is integrated or every commit is on a remote branch. Other branches are report-only. The default branch is never a candidate. Prune deletes a branch with `git branch -D` after it rechecks the planned commit.
 A pane holds a worktree when it works in it or sits in its workspace. A shell with no foreground command does not hold it.
 An agent holds it until it has been `idle` or `done` for 24 hours. Before that, its owner closes it with `wrangle close`.
 Held, dirty, and locked integrated worktrees are reported with the reason and are not removed.
 A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
 Panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
+A shell pane is idle when the service found no foreground command at each sample for more than 24 hours, and it still has none. Herdr reports no activity time, so a command that starts and ends between samples does not count.
+A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
 Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known wrangle-owned paths.
 Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune never kills processes or frees arbitrary disk paths.
 
@@ -234,7 +240,8 @@ Each entry is independent. A failed or refused entry does not stop the others; p
 `--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed hook's error includes its last lines of output.
 
 Prepare records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
-Doctor also discovers repositories from the caller and live pane directories. It never scans the whole home directory.
+Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
+A configured path that is not a Git checkout is a report-only `repositories` entry.
 Wrangle never removes anything on a timer. A lead removes its finished children with `wrangle close`; everything else waits for a confirmed `prune`.
 
 ## Placement
@@ -284,6 +291,9 @@ remote_command = ["mise", "x", "--", "wrangle"]
 [hooks]
 prepare = ["mise", "run", "-q", "agent:worktree", "--", "{branch}", "{base}"]
 remove = ["mise", "run", "-q", "agent:worktree-remove", "--", "{branch}"]
+
+[cleanup]
+repositories = []  # for example "~/.config/mise"; `~/` is the home directory
 ```
 
 The hooks belong only to host policy. Repository setup and remove hooks belong to the repository's own configuration.

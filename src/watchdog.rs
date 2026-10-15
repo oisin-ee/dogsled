@@ -26,6 +26,15 @@ fn stall_limit() -> u64 {
 }
 
 pub fn observe(probe: &mut Probe, previous: Option<&Probe>, now: u64) {
+    for pane in &mut probe.panes {
+        pane.idle_since_ms = pane.idle_shell.then(|| {
+            previous
+                .and_then(|p| p.panes.iter().find(|old| old.pane_id == pane.pane_id))
+                .filter(|old| old.idle_shell)
+                .and_then(|old| old.idle_since_ms)
+                .unwrap_or(now)
+        });
+    }
     for agent in &mut probe.agent_panes {
         let old = previous.and_then(|p| p.agent_panes.iter().find(|a| a.pane == agent.pane));
         agent.state_since_ms = Some(

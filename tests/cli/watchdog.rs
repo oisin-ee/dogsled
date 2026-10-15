@@ -14,6 +14,8 @@ case "$*" in
  'pane report-metadata'*|'notification show'*|'agent prompt'*|'pane close'*) printf '{}\n' ;;
  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[]}}}' ;;
  'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
+ 'workspace list') cat "$RIG/workspaces.json" 2>/dev/null || printf '%s\n' '{"result":{"workspaces":[]}}' ;;
+ 'workspace close'*) printf '{}\n' ;;
  *) echo unexpected >&2; exit 2 ;;
 esac
 "#);
@@ -50,8 +52,13 @@ case "$*" in
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
  *'rev-parse refs/heads/feature refs/remotes/origin/main') printf 'abc\nmain\n' ;;
  *'merge-base refs/remotes/origin/main refs/heads/feature') printf 'fork\n' ;;
- *'diff --name-only -z --no-renames fork refs/heads/feature') printf 'file\0' ;;
- *'log --no-merges --format=%H %P fork..refs/remotes/origin/main -- :(literal)file') ;;
+ *'log --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --first-parent fork..refs/heads/feature --')
+ printf '\001abc fork\0\n:100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0file\0' ;;
+ *'log --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --no-merges fork..refs/remotes/origin/main -- :(literal)file') ;;
+ *'for-each-ref --format=%(objectname) %(refname) refs/heads/') printf 'abc refs/heads/main\nabc refs/heads/feature\n' ;;
+ *'rev-list --count refs/remotes/origin/main..refs/heads/feature') printf '2\n' ;;
+ *'rev-list --count refs/heads/feature --not --remotes') printf '1\n' ;;
+ *'log -1 --format=%ct refs/heads/feature') printf '86400\n' ;;
  *'status --porcelain --untracked-files=all')
  if test -f "$RIG/change-during-plan"; then touch "$RIG/changed"; fi
  if test -f "$RIG/dirty"; then printf ' M file\n'; fi ;;
@@ -247,6 +254,159 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
     );
     assert!(rig.log("herdr.log").contains("pane close child"));
     assert!(rig.log("mise.log").contains("agent:worktree-remove"));
+}
+
+#[test]
+fn doctor_reports_an_unused_unmerged_worktree_and_prune_keeps_it() {
+    let rig = watchdog_rig("doctor-unmerged");
+    fs::write(rig.dir.join("unmerged"), "").unwrap();
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    let entry = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["class"] == "worktrees")
+        .unwrap_or_else(|| panic!("{plan}"))
+        .clone();
+    assert_eq!(entry["removable"], false, "{entry}");
+    assert_eq!(
+        entry["detail"],
+        "branch feature has 2 commits not on origin/main, 1 on no remote, the last 24h ago; \
+         clean and unused"
+    );
+    assert!(
+        rig.log("git.log")
+            .contains("--first-parent fork..refs/heads/feature")
+    );
+    assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
+    assert_eq!(rig.log("mise.log"), "");
+}
+
+/// Herdr whose `process-info` shows a foreground command for each pane named in `$RIG/busy`.
+fn shells_rig(name: &str) -> Rig {
+    let rig = watchdog_rig(name);
+    rig.script("herdr", r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+ 'machine list --json') cat "$RIG/machines.json" ;;
+ 'agent list') cat "$RIG/agents.json" ;;
+ 'pane list') cat "$RIG/panes.json" ;;
+ 'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w3","label":"done-work"}]}}' ;;
+ 'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
+ 'pane process-info --pane '*)
+ if grep -qx "$4" "$RIG/busy" 2>/dev/null; then fg='{"pid":11,"name":"vim"}'; else fg=''; fi
+ printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[%s]}}}\n' "$fg" ;;
+ 'pane close'*|'workspace close'*) printf '{}\n' ;;
+ *) echo unexpected >&2; exit 2 ;;
+esac
+"#);
+    rig
+}
+
+#[test]
+fn serve_keeps_an_idle_shell_start_until_the_shell_runs_a_command() {
+    let rig = shells_rig("idle-shell");
+    let tick = |clock: u64| {
+        fs::write(rig.dir.join("clock"), clock.to_string()).unwrap();
+        let out = rig.run(&["serve", "--once", "--interval", "1"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        rig.read("state/host.json")["probe"]["panes"][0].clone()
+    };
+    assert_eq!(tick(1_000)["idle_since_ms"], 1_000);
+    assert_eq!(tick(2_000)["idle_since_ms"], 1_000);
+    fs::write(rig.dir.join("busy"), "w1:p1\n").unwrap();
+    assert_eq!(tick(3_000)["idle_since_ms"], Value::Null);
+    fs::remove_file(rig.dir.join("busy")).unwrap();
+    assert_eq!(tick(4_000)["idle_since_ms"], 4_000);
+}
+
+#[test]
+fn doctor_closes_an_all_idle_workspace_whole_and_other_idle_panes_alone() {
+    let rig = shells_rig("idle-workspaces");
+    let tree = rig.dir.join("home/repo/tree");
+    let pane = |id: &str, workspace: &str| json!({"pane_id":id,"workspace_id":workspace,"cwd":rig.dir.join("home")});
+    let mut held = pane("w5:p1", "w5");
+    held["cwd"] = json!(tree);
+    // w3 is all idle; w4 has a busy pane; w1 is the caller's; w5's pane goes with the worktree.
+    let live = [
+        pane("w3:p1", "w3"),
+        pane("w3:p2", "w3"),
+        pane("w4:p1", "w4"),
+        pane("w4:p2", "w4"),
+        pane("w1:p1", "w1"),
+        held,
+    ];
+    rig.put("panes.json", &json!({"result":{"panes":live}}));
+    fs::write(rig.dir.join("busy"), "w4:p2\n").unwrap();
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
+    let mut snapshot = rig.read("state/host.json");
+    snapshot["probe"]["agent_panes"] = json!([]);
+    snapshot["probe"]["panes"] = json!(
+        live.iter()
+            .map(|p| {
+                let mut p = p.clone();
+                p["idle_shell"] = json!(true);
+                p["idle_since_ms"] = json!(1);
+                p
+            })
+            .collect::<Vec<_>>()
+    );
+    rig.put("state/host.json", &snapshot);
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    let idle: Vec<_> = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["class"] == "workspaces" || e["class"] == "panes")
+        .map(|e| {
+            (
+                e["class"].as_str().unwrap(),
+                e["id"].as_str().unwrap(),
+                e["detail"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        idle,
+        [
+            (
+                "workspaces",
+                "w3",
+                "done-work: w3:p1 shell idle for 48h; w3:p2 shell idle for 48h"
+            ),
+            ("panes", "w1:p1", "shell idle for 48h"),
+            ("panes", "w4:p1", "shell idle for 48h"),
+        ],
+        "{plan}"
+    );
+    let out = rig.run(&["prune", "--yes", "workspaces", "panes"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = rig.log("herdr.log");
+    for closed in ["workspace close w3", "pane close w1:p1", "pane close w4:p1"] {
+        assert!(log.contains(closed), "{log}");
+    }
+    assert!(
+        !log.contains("pane close w4:p2") && !log.contains("pane close w3:"),
+        "{log}"
+    );
+    // A shell that ran a command since doctor is kept.
+    fs::write(rig.dir.join("busy"), "w4:p1\nw4:p2\n").unwrap();
+    let plan = json!({"entries":[{"class":"panes","id":"w4:p1","detail":"","removable":true,"tree":null}]});
+    let (_, applied) = rig.json(&["host", "prune", "--plan", &plan.to_string()]);
+    assert_eq!(
+        applied["failures"][0],
+        "refuse panes w4:p1: no longer safe to remove"
+    );
 }
 
 #[test]

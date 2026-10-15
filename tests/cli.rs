@@ -68,6 +68,7 @@ case "$*" in
   'agent list') cat "$RIG/agents.json" ;;
   'pane list') cat "$RIG/panes.json" ;;
   'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
+  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;
   'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1"}}}' ;;
   'pane run'*) shift 3; sh -c "$*" > "$RIG/job-output" 2>&1; printf '{}\n' ;;
   'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
@@ -206,11 +207,22 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
     assert_eq!(snapshot["probe"]["agents"]["total"], 1);
     assert_eq!(snapshot["probe"]["agent_panes"][0]["pane"], "w1:p2");
     assert_eq!(snapshot["probe"]["panes"][0]["pane_id"], "w1:p1");
+    // The shell pane is at an empty prompt from this sample on.
+    assert_eq!(snapshot["probe"]["panes"][0]["idle_shell"], true);
+    assert!(
+        snapshot["probe"]["panes"][0]["idle_since_ms"]
+            .as_u64()
+            .unwrap()
+            <= snapshot["sampled_ms"].as_u64().unwrap()
+    );
     // `--once` keeps publishing while its action lanes run, so a slow host can
-    // add ticks. Every tick reads agents then panes, and nothing else.
+    // add ticks. Every tick reads agents, panes, and each shell's foreground, and nothing else.
     let herdr = rig.log("herdr.log");
     assert!(
-        !herdr.is_empty() && herdr.split("agent list\npane list\n").all(str::is_empty),
+        !herdr.is_empty()
+            && herdr
+                .split("agent list\npane list\npane process-info --pane w1:p1\n")
+                .all(str::is_empty),
         "{herdr}"
     );
     assert_eq!(rig.log("ssh.log"), "");
