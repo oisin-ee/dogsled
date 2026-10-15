@@ -36,6 +36,9 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     assert!(herdr.contains("tab create --workspace w1"));
     assert!(herdr.contains("--source custom:wrangle --agent wrangle-job --state working"));
     assert!(herdr.contains("--token wrangle=exit 3"));
+    assert_eq!(rig.read(&format!("at-close/{id}.json")), job);
+    assert!(job["ended_ms"].is_number());
+    assert!(herdr.ends_with("pane close w2:p1\n"));
     assert_eq!(
         rig.run(&["wait", id, "--max", "30s"]).status.code(),
         Some(3)
@@ -110,6 +113,49 @@ fn exec_signal_and_timeouts_persist_terminal_result_and_kill_descendants() {
         Some(2)
     );
     assert!(rig.read("state/jobs/bad.json")["ended_ms"].is_number());
+}
+
+#[test]
+fn exec_close_failure_preserves_final_record_exit_and_logs() {
+    let rig = Rig::new("exec-close-failure");
+    fs::write(rig.dir.join("fail-close"), "").unwrap();
+    for (id, command, code) in [
+        ("success", "echo kept", 0),
+        ("failure", "echo kept; exit 7", 7),
+    ] {
+        let output = rig.run(&["exec", id, "--", "sh", "-c", command]);
+        assert_eq!(output.status.code(), Some(code));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("wrangle pane close:"), "{stderr}");
+        assert!(stderr.contains("close-refused"), "{stderr}");
+        let job = rig.read(&format!("state/jobs/{id}.json"));
+        assert_eq!(job["exit"], code);
+        assert_eq!(job["reason"], Value::Null);
+        assert!(job["ended_ms"].is_number());
+        assert_eq!(rig.read(&format!("at-close/{id}.json")), job);
+        assert_eq!(rig.run(&["wait", id]).status.code(), Some(code));
+        assert_eq!(rig.run(&["logs", id]).stdout, b"kept\n");
+    }
+}
+
+#[test]
+fn exec_closes_after_a_spawn_error_and_skips_close_without_a_pane() {
+    let rig = Rig::new("exec-close-error");
+    let output = rig.run(&["exec", "spawn-error", "--", "missing-command-xyz"]);
+    assert_eq!(output.status.code(), Some(2));
+    let job = rig.read("state/jobs/spawn-error.json");
+    assert_eq!(rig.read("at-close/spawn-error.json"), job);
+    assert!(job["ended_ms"].is_number());
+    assert!(job["reason"].is_string());
+    assert!(rig.log("herdr.log").ends_with("pane close w1:p1\n"));
+    fs::remove_file(rig.dir.join("herdr.log")).unwrap();
+    let output = rig
+        .cmd(&["exec", "no-pane", "--", "true"])
+        .env_remove("HERDR_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!rig.log("herdr.log").contains("pane close"));
 }
 
 #[test]
