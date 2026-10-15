@@ -165,6 +165,23 @@ Codex declares its hooks inline and uses `$PLUGIN_ROOT`. Claude reads `hooks/hoo
 Pi, Claude Code, and Codex share the single skill under `plugins/wrangle/skills/wrangle`.
 The Pi extension and Herdr manifest stay at the repository root paths. Binary archives retain the service templates.
 
+### 8. Capacity: memory gates, CPU orders (planned, 0.8)
+
+The one-minute load average no longer decides admission. Each host publishes two measured values.
+
+- **Free memory** (hard gate). A host is eligible only when free memory is at least
+  `agent_memory × (live reservations + 1)`. `agent_memory` defaults to 1 GiB.
+  - Linux: the smaller of two values. The first is the governing cgroup limit minus the working set
+    (`memory.current − inactive_file`, as now). The second is the host `MemAvailable`.
+  - macOS: `kern.memorystatus_vm_pressure_level` must be normal (1). Free memory comes from `vm_stat`, as now.
+- **Free cores** (order only). The host with the most free cores wins. Ties use free memory, then live agents, then host id.
+  - Linux: the quota cores of the governing cgroup minus its CPU use since the previous tick (`cpu.stat` `usage_usec`).
+    Without a quota, the cores times the idle share from `/proc/stat` since the previous tick.
+  - macOS: cores minus `load1`. The xnu load average counts only runnable threads.
+- Disk stays a hard gate. A reservation holds `agent_memory` until its TTL ends.
+- `load_per_core_max` and `reservation_load` are removed. `agent_memory` is added.
+- Probe JSON keeps `load1`, for information only. New fields have serde defaults, so mixed-version peers still work.
+
 ## What is removed
 
 - Leads, the lead claim, `⌂`/`↳` marks, and the `$sub`, `$lead`, `$queue` sidebar tokens.
@@ -176,7 +193,7 @@ The Pi extension and Herdr manifest stay at the repository root paths. Binary ar
 ## What stays
 
 - Host policy in `~/.config/wrangle/config.toml` (thresholds, `remote_command`).
-- The headroom formula and the `prepare` hook (run in the checkout, from the pending 0.5.0 fix).
+- The `prepare` hook (run in the checkout, from the pending 0.5.0 fix).
 
 ## Units, in order
 
