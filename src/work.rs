@@ -276,6 +276,15 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
     })
 }
 
+/// A new request runs now only when no ticket waits ahead of it; otherwise the caller
+/// enqueues it, and admission serves the queue in order. `None` means queue it.
+pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    if queue(fleet.ledger)?.iter().any(|t| t.state == "pending") {
+        return Ok(None);
+    }
+    perform(fleet, request, now)
+}
+
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     let placed = commands::place(fleet, request.host.as_deref(), now)?;
     let Placement::Placed {

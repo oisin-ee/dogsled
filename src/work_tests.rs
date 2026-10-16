@@ -146,3 +146,64 @@ fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
     assert_eq!(items::list(&ledger).unwrap()[0].closed_ms, Some(201));
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
+
+fn place_request(id: &str) -> Request {
+    Request {
+        id: id.into(),
+        action: Action::Place,
+        host: None,
+        branch: None,
+        base: None,
+        cwd: "/".into(),
+        repository: None,
+        workspace: None,
+        workspace_name: None,
+        owner: "owner".into(),
+    }
+}
+
+#[test]
+fn submit_waits_behind_pending_tickets_even_with_room() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let shell = Fake::new();
+    let policy = Policy {
+        memory_reserve_bytes: 0,
+        ..Policy::default()
+    };
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local()],
+    };
+    ledger.write("host.json", &snapshot(100)).unwrap();
+    let ahead = work::enqueue(&ledger, place_request("ahead"), false, 100).unwrap();
+    // The host has room, but a ticket waits ahead: the new request must queue.
+    assert!(
+        work::submit(&fleet, &place_request("late"), 100)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        ledger
+            .reservations(100, policy.reservation_ttl_ms)
+            .unwrap()
+            .len(),
+        0
+    );
+    work::cancel(&ledger, &ahead).unwrap();
+    // With nothing ahead it is placed at once.
+    let placed = work::submit(&fleet, &place_request("next"), 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(placed["host"]["id"], "local");
+    assert_eq!(
+        ledger
+            .reservations(100, policy.reservation_ttl_ms)
+            .unwrap()
+            .len(),
+        1
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
