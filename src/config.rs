@@ -12,18 +12,21 @@ pub const DEFAULT_REMOTE_COMMAND: &[&str] = &["mise", "x", "--", "wrangle"];
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Policy {
-    /// Admit while free cores (`cores × (1 − busy) − reservations`) stay at or
-    /// above this fraction of the host's cores. 0.25 scored the lowest
+    /// Admit while free cores stay at or above this fraction of the host's cores.
+    /// Free cores are the smaller of measured (`cores × (1 − busy) − reservations`)
+    /// and declared (`cores − active agents − reservations`), each scaled by
+    /// `reservation_load`. 0.25 scored the lowest
     /// admission error on both sampled hosts (4 of 16, 3 of 12 cores).
     pub free_core_fraction_min: f64,
     /// Bytes that must be free for the new agent and for each unexpired
-    /// reservation: agent p90 RSS (0.4 GiB) plus build-tree p90 RSS
+    /// reservation, and that the host's total must hold for each active agent
+    /// besides: agent p90 RSS (0.4 GiB) plus build-tree p90 RSS
     /// (2.5–3.2 GiB) measured on the fleet.
     pub memory_reserve_bytes: u64,
     /// Admit while the home filesystem keeps at least this much free.
     pub disk_free_min_percent: f64,
-    /// Cores each unexpired reservation subtracts from the free cores. One
-    /// agent's mean demand is 0.5–0.9 cores (build duty cycle × median build
+    /// Cores each active agent and each unexpired reservation subtracts from the
+    /// free cores. One agent's mean demand is 0.5–0.9 cores (build duty cycle × median build
     /// tree), so one core each.
     pub reservation_load: f64,
     /// A reservation older than this is dropped on the next probe. It covers

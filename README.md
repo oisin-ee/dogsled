@@ -273,11 +273,16 @@ Everything else is for a confirmed `prune`: idle shells and agents after a day, 
 
 ## Placement
 
-Headroom is free cores:
+Headroom is free cores, the smaller of the measured and the declared value:
 
 ```text
-cores × (1 − busy) − reservation_load × reservations
+measured = cores × (1 − busy) − reservation_load × reservations
+declared = cores − reservation_load × (active agents + reservations)
 ```
+
+An active agent is a live agent that is not `idle`.
+It holds its demand while it waits on its model, because its next build starts within minutes.
+The measured value counts work that wrangle does not know about.
 
 A host is eligible when all of these hold:
 
@@ -285,6 +290,7 @@ A host is eligible when all of these hold:
 - at least `disk_free_min_percent` free on the home filesystem;
 - on macOS, memory pressure below critical;
 - free memory of at least `memory_reserve_bytes × (reservations + 1)`;
+- total memory of at least `memory_reserve_bytes × (active agents + reservations + 1)`;
 - free cores of at least `free_core_fraction_min × cores`.
 
 The host with most free cores wins. Ties use fewer live agents, then host id.
@@ -298,7 +304,8 @@ With `--branch`, it creates or reuses the branch's worktree on that host and ret
 Then start the agent through Shepherdr, using that host and prepared pane or path.
 `place` does not start an agent or claim a repository lead. `run` and `agent` perform placement and launch together.
 
-A reservation ends only at its TTL, which covers the time until the new agent appears in `herdr agent list` and its first build appears in the busy fraction.
+A reservation ends only at its TTL, which covers the time until the new agent appears in `herdr agent list`.
+Until the TTL ends, the new agent counts twice: as its reservation and as an active agent.
 Agent discovery and worktree failures do not end it early.
 
 ## Configuration
