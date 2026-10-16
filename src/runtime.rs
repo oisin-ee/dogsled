@@ -102,7 +102,7 @@ pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
 fn submit(fleet: &Fleet, args: &WorkArgs, action: Action, json_output: bool) -> Result<ExitCode> {
     let request = request(fleet, args, action)?;
     let job = matches!(request.action, Action::Job { .. });
-    let result = if let Some(result) = work::perform(fleet, &request, now_ms())? {
+    let result = if let Some(result) = work::submit(fleet, &request, now_ms())? {
         result
     } else {
         let ticket = work::enqueue(fleet.ledger, request, args.wait, now_ms())?;
