@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.9.1 - 2026-10-16
+
+- Admission counts every active agent (live and not `idle`) as declared demand for as long as it runs, not only for its 90 s reservation. A host now needs `cores − reservation_load × (active agents + reservations)` of at least `free_core_fraction_min × cores`, and total memory of at least `memory_reserve_bytes × (active agents + reservations + 1)`, as well as the measured CPU and free-memory rules. Headroom is the smaller of the measured and declared free cores. An agent waiting on its model used almost no CPU, so a host with many agents looked free between builds; netcup admitted 13 agents in 32 minutes and ran at busy p90 0.95. The refusal reason now names the active count.
+- `place`, `run`, and `agent` queue a new request when a ticket is already pending, so the service admits tickets in order. Before, a new request could take a host slot ahead of waiting tickets.
+
 ## 0.9.0 - 2026-10-15
 
 - `serve` sweeps on its own action worker, beside the watchdog and admission. Each pass builds the doctor plan in sweep scope and applies only entries whose removal loses nothing: ended job tabs and shells in deleted directories (and a workspace made only of them), clean integrated worktrees and clean detached worktrees whose HEAD is on a remote when no pane, workspace, or process holds them, and local branches with no worktree whose every commit is on a remote ref. It uses the same checks as `close` and `prune`, never touches the service's own pane, workspace, or directory, logs each removal as a `wrangle sweep:` line on stderr, and continues past a failed entry. Doctor and `prune` behave as before; everything else stays for `prune`.
