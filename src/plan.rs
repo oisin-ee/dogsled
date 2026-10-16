@@ -1,7 +1,15 @@
 //! The admission rule, with no I/O. `evaluate` scores one host; `choose`
 //! picks the host with the most free cores; `plan` combines both.
 //!
-//! The rule reads the CPU busy fraction over the last probe interval, not the
+//! A host must have room twice. Declared demand: every active agent and every
+//! reservation holds `reservation_load` cores and `memory_reserve_bytes` of the
+//! host's capacity for as long as it lives, as schedulers that admit on
+//! requests do (research note §6). Measured load: what the probe saw, so work
+//! that wrangle does not know about still counts. An agent waiting on its model
+//! uses almost no CPU, so measured load alone admits onto a host whose agents
+//! will all build again within minutes.
+//!
+//! The measured rule reads the CPU busy fraction over the last probe interval, not the
 //! load average: load1 is a two-minute trailing mean of runnable threads
 //! (63% of a step after 60 s, 95% after 180 s on Linux and xnu), and on the
 //! sampled fleet it refused the Mac while it was free 84% of the time.
@@ -17,7 +25,8 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Headroom {
     pub host: String,
-    /// Free cores: `cores × (1 − busy) − reservation_load × reservations`.
+    /// Free cores: the smaller of `cores × (1 − busy) − reservation_load × reservations`
+    /// and `cores − reservation_load × (active agents + reservations)`.
     /// Hosts are ordered by this value.
     pub headroom: f64,
     pub eligible: bool,
@@ -38,16 +47,21 @@ pub enum Plan {
 #[must_use]
 pub fn evaluate(p: &Probe, t: &Thresholds) -> Headroom {
     let reservations = p.reservations.len();
+    let active = p.agents.active();
     let reserved = t.reservation_load * reservations as f64;
     let cores = f64::from(p.cores);
+    let declared_free = cores - t.reservation_load * (active + reservations) as f64;
     let free_cores = p
         .busy
-        .map(|busy| cores * (1.0 - busy.clamp(0.0, 1.0)) - reserved);
+        .map(|busy| (cores * (1.0 - busy.clamp(0.0, 1.0)) - reserved).min(declared_free));
     let cores_min = t.free_core_fraction_min * cores;
     let memory_free = p.memory.total_bytes.saturating_sub(p.memory.used_bytes);
     let memory_need = t
         .memory_reserve_bytes
         .saturating_mul(reservations as u64 + 1);
+    let memory_declared = t
+        .memory_reserve_bytes
+        .saturating_mul((active + reservations) as u64 + 1);
     let reason = if p.disk_free_percent < t.disk_free_min_percent {
         Some(format!(
             "disk {:.1}% free < {:.1}%",
@@ -62,11 +76,17 @@ pub fn evaluate(p: &Probe, t: &Thresholds) -> Headroom {
             memory_need as f64 / GIB,
             reservations
         ))
+    } else if p.memory.total_bytes < memory_declared {
+        Some(format!(
+            "memory {:.1} GiB total < {:.1} GiB for {active} active + {reservations} reserved + 1",
+            p.memory.total_bytes as f64 / GIB,
+            memory_declared as f64 / GIB,
+        ))
     } else {
         match free_cores {
             None => Some("no CPU sample yet".into()),
             Some(free) if free < cores_min => Some(format!(
-                "{free:.1} free cores (busy {:.0}%, {reservations} reserved) < {cores_min:.1}",
+                "{free:.1} free cores (busy {:.0}%, {active} active, {reservations} reserved) < {cores_min:.1}",
                 p.busy.unwrap_or_default() * 100.0
             )),
             Some(_) => None,
@@ -169,7 +189,7 @@ mod tests {
         assert!(!h.eligible);
         assert_eq!(
             h.reason.unwrap(),
-            "1.6 free cores (busy 80%, 0 reserved) < 2.0"
+            "1.6 free cores (busy 80%, 0 active, 0 reserved) < 2.0"
         );
         // Exactly a quarter admits.
         assert!(evaluate(&probe("a", 0.75, 8, 50.0, 0), &thresholds()).eligible);
@@ -217,6 +237,84 @@ mod tests {
         assert!(!evaluate(&probe("a", 0.5, 8, 50.0, 3), &t).eligible);
     }
 
+    fn with_agents(mut p: Probe, states: &[(&str, usize)]) -> Probe {
+        p.agents = AgentCounts {
+            total: states.iter().map(|(_, n)| n).sum(),
+            by_status: states.iter().map(|(s, n)| ((*s).to_string(), *n)).collect(),
+        };
+        p
+    }
+
+    #[test]
+    fn active_agents_hold_cores_while_they_wait_on_the_model() {
+        // Memory for 14 agents, so the CPU rule decides.
+        let t = Thresholds {
+            memory_reserve_bytes: GIB as u64,
+            ..thresholds()
+        };
+        // Idle CPU, but 16 − 12 working = 4 declared free cores: the limit admits.
+        let h = evaluate(
+            &with_agents(probe("a", 0.05, 16, 50.0, 0), &[("working", 12)]),
+            &t,
+        );
+        assert!((h.headroom - 4.0).abs() < 1e-9);
+        assert!(h.eligible);
+        // One more active agent, or one reservation, leaves 3 < 4.
+        let busy = with_agents(
+            probe("a", 0.05, 16, 50.0, 0),
+            &[("working", 12), ("blocked", 1)],
+        );
+        assert_eq!(
+            evaluate(&busy, &t).reason.unwrap(),
+            "3.0 free cores (busy 5%, 13 active, 0 reserved) < 4.0"
+        );
+        let reserved = with_agents(probe("a", 0.05, 16, 50.0, 1), &[("working", 12)]);
+        assert!(!evaluate(&reserved, &t).eligible);
+    }
+
+    #[test]
+    fn idle_and_done_agents_hold_no_declared_demand() {
+        let t = thresholds();
+        let p = with_agents(
+            probe("a", 0.05, 16, 50.0, 0),
+            &[("idle", 10), ("done", 10), ("working", 2)],
+        );
+        assert_eq!(p.agents.active(), 2);
+        let h = evaluate(&p, &t);
+        assert!((h.headroom - 14.0).abs() < 1e-9);
+        assert_eq!(h.live_agents, 12);
+    }
+
+    #[test]
+    fn measured_load_still_refuses_when_declared_demand_fits() {
+        // Work wrangle does not know about: no agents, CPU 90% busy.
+        let h = evaluate(&probe("a", 0.9, 16, 50.0, 0), &thresholds());
+        assert!(!h.eligible);
+        assert!((h.headroom - 1.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn active_agents_hold_memory_against_the_host_total() {
+        let t = thresholds();
+        // 32 GiB total holds 3 GiB for 9 active + 1 new, not for 10 + 1,
+        // although 24 GiB is free right now.
+        assert!(
+            evaluate(
+                &with_agents(probe("a", 0.0, 64, 50.0, 0), &[("working", 9)]),
+                &t
+            )
+            .eligible
+        );
+        let h = evaluate(
+            &with_agents(probe("a", 0.0, 64, 50.0, 0), &[("working", 10)]),
+            &t,
+        );
+        assert_eq!(
+            h.reason.unwrap(),
+            "memory 32.0 GiB total < 33.0 GiB for 10 active + 0 reserved + 1"
+        );
+    }
+
     #[test]
     fn picks_most_headroom_then_fewer_agents_then_id() {
         let t = thresholds();
@@ -226,10 +324,8 @@ mod tests {
             probe("c", 0.5, 8, 50.0, 0),  // 4
         ];
         assert_eq!(plan(&probes, &t), Plan::Admit { host: "a".into() });
-        probes[1].agents = AgentCounts {
-            total: 3,
-            by_status: [("working".to_string(), 3)].into_iter().collect(),
-        };
+        // Idle agents hold no declared demand, so headroom ties and live agents decide.
+        probes[1] = with_agents(probes[1].clone(), &[("idle", 3)]);
         assert_eq!(plan(&probes, &t), Plan::Admit { host: "b".into() });
     }
 

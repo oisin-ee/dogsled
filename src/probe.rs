@@ -17,6 +17,14 @@ impl AgentCounts {
         self.total
             .saturating_sub(self.by_status.get("done").copied().unwrap_or(0))
     }
+
+    /// Agents that hold their declared demand: every live agent except `idle`.
+    /// An idle agent waits for a prompt and runs no build; any other state, including
+    /// one Herdr adds later, counts.
+    pub fn active(&self) -> usize {
+        self.live()
+            .saturating_sub(self.by_status.get("idle").copied().unwrap_or(0))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
