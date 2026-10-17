@@ -359,7 +359,7 @@ fn finished_child_prompts_its_owner_at_once_and_until_it_is_closed() {
     let reports = rig.reports(1, "working", "working", Some(1));
     tick(&rig.fleet(), &reports, 1).unwrap();
     assert_eq!(rig.prompts(), 0);
-    // The child finishes while its owner is idle: the owner hears at once, with the close command.
+    // The child finishes with work to land while its owner is idle: the owner hears at once.
     let reports = rig.reports(60_001, "idle", "done", Some(1));
     crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
     let item = &crate::items::list(&rig.ledger).unwrap()[0];
@@ -368,9 +368,13 @@ fn finished_child_prompts_its_owner_at_once_and_until_it_is_closed() {
     tick(&rig.fleet(), &reports, 60_001).unwrap();
     assert_eq!(rig.prompts(), 1);
     assert!(
-        rig.shell.calls.lock().unwrap().iter().any(
-            |s| s.contains("finished") && s.contains("run: `wrangle close child --host local`")
-        )
+        rig.shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("finished")
+                && s.contains("Still open with work to land: test-child."))
     );
     // Done and idle are one event: a flip does not prompt again before the check-in.
     let reports = rig.reports(120_001, "idle", "idle", Some(1));
@@ -385,6 +389,51 @@ fn finished_child_prompts_its_owner_at_once_and_until_it_is_closed() {
     let reports = rig.reports(5_000_001, "idle", "done", Some(1));
     tick(&rig.fleet(), &reports, 5_000_001).unwrap();
     assert_eq!(rig.prompts(), 2);
+}
+
+#[test]
+fn a_captured_reply_reaches_the_owner_once_even_after_the_sweep_closed_the_child() {
+    let rig = Rig::new();
+    rig.item("agent");
+    crate::items::set_reply(
+        &rig.ledger,
+        "child",
+        crate::items::Reply {
+            seq: 4,
+            text: "Found 3 bugs; see notes.md.".into(),
+            captured_ms: 1,
+            reported_ms: None,
+        },
+    )
+    .unwrap();
+    crate::items::close(&rig.ledger, "local", "child", 2).unwrap();
+    // The owner is busy: nothing yet, and the reply waits.
+    let reports = rig.reports(60_001, "working", "idle", Some(1));
+    tick(&rig.fleet(), &reports, 60_001).unwrap();
+    assert_eq!(rig.prompts(), 0);
+    let reports = rig.reports(120_001, "idle", "idle", Some(1));
+    tick(&rig.fleet(), &reports, 120_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
+    let calls = rig.shell.calls.lock().unwrap().join("\n");
+    assert!(
+        calls.contains("test-child on local: finished and closed"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("--- final reply ---\nFound 3 bugs; see notes.md.\n"),
+        "{calls}"
+    );
+    assert_eq!(
+        crate::items::list(&rig.ledger).unwrap()[0]
+            .reply
+            .as_ref()
+            .unwrap()
+            .reported_ms,
+        Some(120_001)
+    );
+    let reports = rig.reports(5_000_001, "idle", "idle", Some(1));
+    tick(&rig.fleet(), &reports, 5_000_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
 }
 
 #[test]

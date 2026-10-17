@@ -452,3 +452,115 @@ fn build_output_is_report_only_for_serve_and_removed_by_prune_when_unused() {
     assert!(!repo.join("target").exists());
     assert!(tree.join("target").exists() && repo.join("cache").exists());
 }
+
+/// A child with an owner that is alive, in workspace w2: its agent state, the completion Herdr
+/// numbered, and a Pi transcript whose last assistant message is `reply`.
+fn owned_child(rig: &Rig, status: &str, tree: &Path, seq: Option<u64>, role: &str) {
+    child(rig, status, tree);
+    let transcript = rig.dir.join("child.jsonl");
+    fs::write(
+        &transcript,
+        format!(
+            "{}\n{}\n",
+            json!({"type":"message","message":{"role":"user","content":"review it"}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Found 3 bugs; notes in review.md."}]}})
+        ),
+    )
+    .unwrap();
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[
+            {"pane_id":"w1:p1","agent":"pi","agent_status":"working"},
+            {"pane_id":"w2:p1","agent":"pi","agent_status":status,"cwd":tree,
+                "terminal_id":"term_child","completion_seq":seq,
+                "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":transcript}}
+        ]}}),
+    );
+    rig.put(
+        "state/items.json",
+        &json!([{"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
+            "name":"worker","created_ms":1,"closed_ms":null,"role":role}]),
+    );
+}
+
+fn item_open(rig: &Rig) -> bool {
+    rig.read("state/items.json")[0]["closed_ms"].is_null()
+}
+
+#[test]
+fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply() {
+    let (rig, tree) = close_rig("sweep-reader");
+    // Working, blocked, and idle before its first completed turn: open, nothing captured.
+    for (status, seq) in [("working", Some(1)), ("blocked", Some(1)), ("idle", None)] {
+        owned_child(&rig, status, &tree, seq, "reader");
+        serve(&rig);
+        assert!(item_open(&rig), "{status}");
+        assert!(
+            rig.read("state/items.json")[0]["reply"].is_null(),
+            "{status}"
+        );
+        assert!(!rig.log("herdr.log").contains("close"), "{status}");
+    }
+    // Finished but dirty: the reply is captured, and the child stays.
+    owned_child(&rig, "idle", &tree, Some(1), "reader");
+    fs::write(tree.join("scratch"), "x").unwrap();
+    let journal = serve(&rig);
+    assert!(item_open(&rig));
+    assert!(
+        journal.contains("wrangle sweep: keep w2:p1 on local: uncommitted changes"),
+        "{journal}"
+    );
+    let reply = &rig.read("state/items.json")[0]["reply"];
+    assert_eq!(reply["seq"], 1);
+    assert_eq!(reply["text"], "Found 3 bugs; notes in review.md.");
+    // The reason is journaled once, not on every pass.
+    assert!(!serve(&rig).contains("keep w2:p1"));
+    fs::remove_file(tree.join("scratch")).unwrap();
+    // Clean, with no commits: closed as `wrangle close` would, and the reply is kept.
+    let journal = serve(&rig);
+    assert!(
+        journal.contains("wrangle sweep: closed finished w2:p1 on local"),
+        "{journal}"
+    );
+    assert!(!item_open(&rig));
+    assert!(rig.log("herdr.log").contains("workspace close w2"));
+    assert_eq!(rig.log("hook.log"), hook_log(&rig, &tree));
+    assert!(!tree.exists());
+    assert_eq!(
+        rig.read("state/items.json")[0]["reply"]["text"],
+        "Found 3 bugs; notes in review.md."
+    );
+}
+
+#[test]
+fn serve_closes_a_finished_writer_once_its_branch_lands() {
+    let (rig, tree) = close_rig("sweep-writer");
+    let repo = rig.dir.join("home/repo");
+    owned_child(&rig, "done", &tree, Some(2), "writer");
+    // No commits yet: a writer has nothing landed.
+    let journal = serve(&rig);
+    assert!(item_open(&rig), "{journal}");
+    assert!(journal.contains("has no commits to land yet"), "{journal}");
+    // A commit on no remote and not in main: it stays, and says how much is left to land.
+    fs::write(tree.join("fix"), "fix\n").unwrap();
+    git(&tree, &["add", "fix"]);
+    git(&tree, &["commit", "-q", "-m", "fix"]);
+    let journal = serve(&rig);
+    assert!(item_open(&rig));
+    assert!(
+        journal.contains("wrangle sweep: keep w2:p1 on local: +1 commit to land"),
+        "{journal}"
+    );
+    let (_, board) = rig.json(&["board"]);
+    assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
+    // The branch merges: the next pass closes the child and deletes the landed branch.
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
+    let journal = serve(&rig);
+    assert!(
+        journal.contains("wrangle sweep: closed finished w2:p1 on local"),
+        "{journal}"
+    );
+    assert!(!item_open(&rig));
+    assert!(!tree.exists());
+    assert!(!branch_exists(&rig, "feat/x"));
+}

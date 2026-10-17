@@ -130,6 +130,56 @@ pub fn latest(agent: &str, values: &[Value]) -> Option<Step> {
     })
 }
 
+/// The agent's final reply: the text of its newest assistant message, in `values` (newest
+/// first). Tool calls and thinking are not part of it.
+pub fn reply(agent: &str, values: &[Value]) -> Option<String> {
+    let texts = |content: &Value| -> Vec<String> {
+        if let Some(text) = content.as_str() {
+            return vec![text.to_owned()];
+        }
+        content
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|b| matches!(b["type"].as_str(), Some("text" | "output_text")))
+            .filter_map(|b| b["text"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let join = |parts: Vec<String>| {
+        let text = parts.join("\n\n").trim().to_owned();
+        (!text.is_empty()).then_some(text)
+    };
+    match agent {
+        "pi" => values.iter().find_map(|v| {
+            (v["type"] == "message" && v["message"]["role"] == "assistant")
+                .then(|| join(texts(&v["message"]["content"])))
+                .flatten()
+        }),
+        "codex" => values.iter().find_map(|v| {
+            let p = &v["payload"];
+            (v["type"] == "response_item" && p["type"] == "message" && p["role"] == "assistant")
+                .then(|| join(texts(&p["content"])))
+                .flatten()
+        }),
+        // Claude writes one line per content block; the blocks of one message share its id.
+        "claude" => {
+            let newest = values.iter().position(|v| {
+                v["type"] == "assistant" && !texts(&v["message"]["content"]).is_empty()
+            })?;
+            let id = &values[newest]["message"]["id"];
+            let mut parts: Vec<String> = values[newest..]
+                .iter()
+                .take_while(|v| v["type"] != "user")
+                .filter(|v| v["type"] == "assistant" && (id.is_null() || v["message"]["id"] == *id))
+                .flat_map(|v| texts(&v["message"]["content"]))
+                .collect();
+            parts.reverse();
+            join(parts)
+        }
+        _ => None,
+    }
+}
+
 pub fn recent(agent: &str, path: &str) -> Option<String> {
     latest(agent, &tail(path)?).map(|step| step.detail())
 }
@@ -223,6 +273,34 @@ mod tests {
         let long = Step::Text(format!("\n  \x1b[1m{}\x1b[0m\nsecond", "x".repeat(200)));
         assert_eq!(long.line().chars().count(), 120);
         assert!(long.line().ends_with('…'));
+    }
+
+    #[test]
+    fn reply_is_the_newest_assistant_text_for_each_harness() {
+        let pi_lines = [
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Done: 3 bugs."}]}}),
+            json!({"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":"output"}]}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{}}]}}),
+        ];
+        assert_eq!(reply("pi", &pi_lines).as_deref(), Some("Done: 3 bugs."));
+        let codex_lines = [
+            json!({"type":"response_item","payload":{"type":"function_call","name":"exec","arguments":"{}"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"All green."}]}}),
+        ];
+        assert_eq!(reply("codex", &codex_lines).as_deref(), Some("All green."));
+        // Newest first: two blocks of message m2, then the user turn, then the older m1.
+        let claude_lines = [
+            json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"second part"}]}}),
+            json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"first part"}]}}),
+            json!({"type":"user","message":{"content":"next"}}),
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"old"}]}}),
+        ];
+        assert_eq!(
+            reply("claude", &claude_lines).as_deref(),
+            Some("first part\n\nsecond part")
+        );
+        assert_eq!(reply("pi", &pi_lines[1..]), None);
+        assert_eq!(reply("other", &pi_lines), None);
     }
 
     #[test]
