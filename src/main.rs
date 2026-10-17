@@ -1,6 +1,7 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
 mod activity;
+mod backoff;
 mod board;
 mod budget;
 mod checkout;
@@ -13,6 +14,7 @@ mod context;
 mod error;
 mod facts;
 mod hosts;
+mod inbox;
 mod integration;
 mod items;
 mod jobs;
@@ -34,12 +36,13 @@ mod work_tests;
 mod worktree;
 
 use clap::Parser;
-use cli::{Cli, Command, HookCommand, HostCommand};
+use cli::{Cli, Command, HookCommand, HostCommand, InboxCommand};
 use error::{Error, Result};
 use ledger::{Ledger, now_ms};
 use node::Node;
 use serde::Serialize;
 use shell::System;
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::process::ExitCode;
 
@@ -176,6 +179,19 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             let board = board::build(&status, owner.as_deref(), now_ms());
             print(cli.json, &board, || board.render())?;
         }
+        Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
+        Command::Send {
+            target,
+            host,
+            message_file,
+            message,
+            kind,
+        } => {
+            let text = inbox::message_text(message, message_file)?;
+            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
+            let sent = inbox::send_to(&fleet, &target, host.as_deref(), &kind, text, now_ms())?;
+            print(cli.json, &sent, || sent.line())?;
+        }
         Command::Hook(HookCommand::Context { harness, event }) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             let status = commands::status(&fleet)?;
@@ -192,8 +208,39 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool) -> Result<()> {
+    let now = now_ms();
+    match cmd {
+        InboxCommand::Claim { harness, pane } => {
+            let pane = inbox::own_pane(pane)?;
+            let records = inbox::claim_for(ledger, shell, &pane, &harness, now)?;
+            print(json, &records, || {
+                records.iter().fold(String::new(), |mut out, r| {
+                    let _ = write!(out, "{}\n{}\n\n", r.id, r.render());
+                    out
+                })
+            })
+        }
+        InboxCommand::Ack { ids, pane } => {
+            let pane = inbox::own_pane(pane)?;
+            let acked = inbox::ack_for(ledger, shell, &pane, &ids, now)?;
+            print(json, &serde_json::json!({ "acked": acked }), || {
+                format!("Acknowledged {acked}.\n")
+            })
+        }
+        InboxCommand::List { pane } => {
+            let pane = inbox::own_pane(pane)?;
+            let listing = inbox::list_for(ledger, shell, &pane)?;
+            print(json, &listing, || listing.render(now))
+        }
+    }
+}
+
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
+        HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
+            inbox::host(node.ledger, cmd)?;
+        }
         HostCommand::Launch { request } => print(
             true,
             &work::launch(
