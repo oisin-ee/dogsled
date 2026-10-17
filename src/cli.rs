@@ -153,12 +153,58 @@ pub enum Command {
     Cancel {
         ticket: String,
     },
+    /// Send a message to an agent on any host, through its inbox. Nothing types into its
+    /// terminal; an agent without an inbox reader gets nothing, and you hear so at once.
+    Send {
+        /// The agent's name or Herdr pane.
+        target: String,
+        #[arg(long)]
+        host: Option<String>,
+        /// A file with the message, or `-` for stdin.
+        #[arg(long, value_name = "PATH", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
+        /// The message text.
+        #[arg(long, required_unless_present = "message_file")]
+        message: Option<String>,
+        /// `message` for information, `task` for work to do.
+        #[arg(long, default_value = "message", value_parser = ["message", "task"])]
+        kind: String,
+    },
+    /// Read and acknowledge this agent's inbox.
+    #[command(subcommand)]
+    Inbox(InboxCommand),
     /// Add host status to a harness prompt without blocking it on failure.
     #[command(subcommand)]
     Hook(HookCommand),
     /// Internal local operations used by peers over SSH.
     #[command(subcommand, hide = true)]
     Host(HostCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InboxCommand {
+    /// Register as this pane's inbox reader and claim its deliverable records. A claimed
+    /// record is offered again, with backoff, until it is acknowledged.
+    Claim {
+        /// The reading harness: pi, claude, or codex.
+        #[arg(long)]
+        harness: String,
+        /// Defaults to `HERDR_PANE_ID`.
+        #[arg(long)]
+        pane: Option<String>,
+    },
+    /// Mark claimed records delivered.
+    Ack {
+        #[arg(required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        pane: Option<String>,
+    },
+    /// Records this pane received and sent, with their states.
+    List {
+        #[arg(long)]
+        pane: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -175,6 +221,16 @@ pub enum HookCommand {
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
     Snapshot,
+    /// Put one inbox record, sent from another host.
+    InboxPut {
+        #[arg(long)]
+        record: String,
+    },
+    /// The states of records in one terminal's inbox.
+    InboxState {
+        terminal: String,
+        ids: Vec<String>,
+    },
     Parent {
         pane: String,
     },

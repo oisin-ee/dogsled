@@ -5,6 +5,8 @@
 mod close;
 #[path = "cli/context.rs"]
 mod context;
+#[path = "cli/inbox.rs"]
+mod inbox;
 #[path = "cli/jobs.rs"]
 mod jobs;
 #[path = "cli/lifecycle.rs"]
@@ -188,6 +190,7 @@ esac
     fn expire_cache(&self) {
         let mut cache = self.read("state/peer-38313033.json");
         cache["fetched_ms"] = json!(0);
+        cache["retry"] = json!({});
         self.put("state/peer-38313033.json", &cache);
     }
 }

@@ -79,6 +79,10 @@ struct Cached {
     reachable: bool,
     available: bool,
     error: Option<String>,
+    /// Consecutive failed reads: an unreachable peer is asked again with backoff, not on
+    /// every cache expiry.
+    #[serde(default)]
+    retry: crate::backoff::Backoff,
 }
 
 #[derive(Debug)]
@@ -267,6 +271,7 @@ impl<'a> Fleet<'a> {
                     reachable: true,
                     available: true,
                     error: None,
+                    retry: crate::backoff::Backoff::default(),
                 })
         } else {
             self.cached_peer(host, now)
@@ -278,6 +283,7 @@ impl<'a> Fleet<'a> {
             reachable: false,
             available: false,
             error: Some(e.to_string()),
+            retry: crate::backoff::Backoff::default(),
         });
         let fresh = cached.available && cached.snapshot.as_ref().is_some_and(|s| s.fresh(now));
         let sampled_ms = cached.snapshot.as_ref().map(|s| s.sampled_ms);
@@ -341,6 +347,12 @@ impl<'a> Fleet<'a> {
             {
                 return Ok(cached.clone());
             }
+            if let Some(cached) = &previous
+                && !cached.retry.ready(now)
+            {
+                return Ok(cached.clone());
+            }
+            let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
             let (snapshot, reachable, available, error) =
                 match self.remote::<Option<Snapshot>>(host, &["snapshot".into()]) {
                     Ok(Some(snapshot)) => (Some(snapshot), true, true, None),
@@ -357,6 +369,11 @@ impl<'a> Fleet<'a> {
                         Some(e.to_string()),
                     ),
                 };
+            if reachable {
+                retry.reset();
+            } else {
+                retry.fail(now, &host.id);
+            }
             let cached = Cached {
                 fetched_ms: now,
                 source: source.clone(),
@@ -364,6 +381,7 @@ impl<'a> Fleet<'a> {
                 reachable,
                 available,
                 error,
+                retry,
             };
             self.ledger.write(&file, &cached)?;
             Ok(cached)
@@ -428,6 +446,57 @@ mod tests {
         shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
         assert_eq!(fleet.status(30_100).unwrap()[0].service, "up");
         assert_eq!(fleet.status(30_101).unwrap()[0].service, "down");
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreachable_peer_is_asked_again_with_backoff_and_at_once_after_it_answers() {
+        let shell = Fake::new();
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let policy = Policy::default();
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![host.clone()],
+        };
+        let reads = || {
+            shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.starts_with("ssh "))
+                .count()
+        };
+        // No scripted answer: every read fails.
+        assert!(!fleet.status(0).unwrap()[0].reachable);
+        assert_eq!(reads(), 1);
+        // A retry waits for both the cache and the backoff.
+        let first = crate::backoff::delay(1, "peer").max(CACHE_MS);
+        fleet.status(first - 1).unwrap();
+        assert_eq!(reads(), 1);
+        fleet.status(first).unwrap();
+        assert_eq!(reads(), 2);
+        let second = first + crate::backoff::delay(2, "peer");
+        fleet.status(second - 1).unwrap();
+        assert_eq!(reads(), 2);
+        let command = format!(
+            "ssh {}",
+            fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
+        );
+        shell.on(&command, "null");
+        fleet.status(second).unwrap();
+        assert_eq!(reads(), 3);
+        // Reachable again: the next read follows the plain cache.
+        fleet.status(second + CACHE_MS).unwrap();
+        assert_eq!(reads(), 4);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 }

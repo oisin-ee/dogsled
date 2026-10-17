@@ -18,13 +18,17 @@ enum Lane {
     Watchdog,
     Admission,
     Sweep,
+    Inbox,
 }
 
-const LANES: [Lane; 3] = [Lane::Watchdog, Lane::Admission, Lane::Sweep];
+const LANES: [Lane; 4] = [Lane::Watchdog, Lane::Admission, Lane::Sweep, Lane::Inbox];
 
 fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result<()> {
     let shell = System::default();
-    let fleet = if items::list(ledger)?.is_empty() && work::queue(ledger)?.is_empty() {
+    let fleet = if items::list(ledger)?.is_empty()
+        && work::queue(ledger)?.is_empty()
+        && !crate::inbox::pending(ledger)?
+    {
         Fleet {
             shell: &shell,
             ledger,
@@ -44,6 +48,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
         }
         Lane::Admission => work::tick(&fleet, now_ms()),
         Lane::Sweep => crate::sweep::pass(&fleet, now_ms()),
+        Lane::Inbox => crate::inbox::tick(&fleet, now_ms()),
     }
 }
 
