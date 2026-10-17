@@ -16,7 +16,7 @@ fn caller() -> Result<String> {
     std::env::var("HERDR_PANE_ID").map_err(|_| Error::Invalid("HERDR_PANE_ID is required".into()))
 }
 
-fn request(fleet: &Fleet, args: &WorkArgs, action: Action) -> Result<Request> {
+pub fn request(fleet: &Fleet, args: &WorkArgs, action: Action) -> Result<Request> {
     let cwd = args.cwd.clone().map_or_else(
         || std::env::current_dir().map(|p| p.display().to_string()),
         Ok,
@@ -99,32 +99,36 @@ pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
     }
 }
 
+/// Start `request` now, or queue it; never waits. A queued result is
+/// `{"queued":true,"ticket":…}`, with `retrying` when the first launch failed and the service
+/// retries it with backoff.
+pub fn start(fleet: &Fleet, request: Request, waiting: bool) -> Result<Value> {
+    match work::submit(fleet, &request, now_ms()) {
+        Ok(Some(result)) => Ok(result),
+        Ok(None) => {
+            let ticket = work::enqueue(fleet.ledger, request, waiting, now_ms())?;
+            Ok(json!({"queued":true,"ticket":ticket}))
+        }
+        Err(error @ Error::Launch(_)) => {
+            let ticket = work::enqueue_retry(fleet.ledger, request, waiting, &error, now_ms())?;
+            Ok(json!({"queued":true,"ticket":ticket,"retrying":error.to_string()}))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn submit(fleet: &Fleet, args: &WorkArgs, action: Action, json_output: bool) -> Result<ExitCode> {
     let request = request(fleet, args, action)?;
     let job = matches!(request.action, Action::Job { .. });
-    let submitted = match work::submit(fleet, &request, now_ms()) {
-        // A launch that failed on the way is retried with backoff by the service.
-        Err(error @ Error::Launch(_)) => {
-            let ticket = work::enqueue_retry(fleet.ledger, request.clone(), &error, now_ms())?;
-            crate::print(
-                true,
-                &json!({"queued":true,"ticket":ticket,"retrying":error.to_string()}),
-                String::new,
-            )?;
-            return Ok(ExitCode::from(1));
-        }
-        other => other?,
-    };
-    let result = if let Some(result) = submitted {
-        result
-    } else {
-        let ticket = work::enqueue(fleet.ledger, request, args.wait, now_ms())?;
-        crate::print(true, &json!({"queued":true,"ticket":ticket}), String::new)?;
+    let mut result = start(fleet, request, args.wait)?;
+    if result["queued"] == true {
+        crate::print(true, &result, String::new)?;
         if !args.wait {
             return Ok(ExitCode::from(1));
         }
-        wait_ticket(fleet, &ticket)?
-    };
+        let ticket = result["ticket"].as_str().unwrap_or_default().to_owned();
+        result = wait_ticket(fleet, &ticket)?;
+    }
     crate::print(
         json_output || !matches!(result["host"], Value::Object(_)),
         &result,
@@ -137,6 +141,127 @@ fn submit(fleet: &Fleet, args: &WorkArgs, action: Action, json_output: bool) -> 
         return Ok(ExitCode::from(wait_job(fleet, id)? as u8));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The launch of a `kind` child with `message`, checked before anything is placed: a profile
+/// is for Pi, and a local child's profile must load.
+pub fn agent_action(
+    fleet: &Fleet,
+    kind: String,
+    name: String,
+    message: String,
+    profile: Option<String>,
+    host: Option<&str>,
+) -> Result<Action> {
+    if !work::KINDS.contains(&kind.as_str()) {
+        return Err(Error::Invalid(format!(
+            "kind {kind} cannot take its task at launch; use one of {}",
+            work::KINDS.join(", ")
+        )));
+    }
+    if profile.is_some() && kind != "pi" {
+        return Err(Error::Invalid(
+            "profiles configure Pi children; omit the profile or use kind pi".into(),
+        ));
+    }
+    // A peer checks its own profiles.
+    if let Some(profile) = &profile
+        && host.is_none_or(|h| fleet.find(h).is_ok_and(crate::hosts::Host::is_local))
+    {
+        crate::profiles::load(profile)?;
+    }
+    if message.trim().is_empty() {
+        return Err(Error::Invalid("the task is empty".into()));
+    }
+    Ok(Action::Agent {
+        kind,
+        name,
+        message,
+        profile,
+    })
+}
+
+/// Close `pane` on `host`, or on the host of its open item.
+pub fn close(
+    fleet: &Fleet,
+    pane: &str,
+    host: Option<&str>,
+) -> Result<(crate::close::Closed, String)> {
+    let host = match host {
+        Some(host) => fleet.find(host)?,
+        None => close_host(fleet, pane)?,
+    };
+    let closed: crate::close::Closed = if host.is_local() {
+        crate::close::local(
+            fleet.shell,
+            fleet.ledger,
+            pane,
+            &crate::close::Caller::from_env(),
+            crate::close::Guard::Clean,
+        )?
+    } else {
+        fleet.remote_setup(host, &["close".into(), pane.into()])?
+    };
+    items::close(fleet.ledger, &host.id, pane, now_ms())?;
+    Ok((closed, host.label.clone()))
+}
+
+pub fn closed_line(closed: &crate::close::Closed, label: &str) -> String {
+    closed.worktree.as_ref().map_or_else(
+        || format!("closed pane {} on {label}\n", closed.pane),
+        |tree| {
+            format!(
+                "closed {} on {label}: removed {} ({})\n",
+                closed.pane, tree.path, tree.branch
+            )
+        },
+    )
+}
+
+pub fn stop(fleet: &Fleet, id: &str) -> Result<()> {
+    let host = work::job_host(fleet, id, now_ms())?;
+    if host.is_local() {
+        jobs::stop(fleet.ledger, id)
+    } else {
+        let _: Value = fleet.remote(host, &["stop".into(), id.into()])?;
+        Ok(())
+    }
+}
+
+/// The newest output of a child or job of the caller, by name, pane, or id, with its captured
+/// final reply. Without such an item, any agent on the fleet by name or pane.
+pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
+    let pinned = host.map(|h| fleet.find(h)).transpose()?;
+    let owner = std::env::var("HERDR_PANE_ID").ok();
+    let item = items::list(fleet.ledger)?
+        .into_iter()
+        .rev()
+        .filter(|i| owner.as_ref().is_none_or(|o| *o == i.owner_pane))
+        .filter(|i| pinned.is_none_or(|h| h.id == i.host))
+        .find(|i| i.id == target || i.pane == target || i.name.as_deref() == Some(target));
+    let item = if let Some(item) = item {
+        item
+    } else {
+        let found = crate::inbox::resolve(fleet, target, host, now_ms())?;
+        Item {
+            kind: "agent".into(),
+            host: found.host.id.clone(),
+            pane: found.agent.pane,
+            name: found.agent.name,
+            ..Item::default()
+        }
+    };
+    let host = fleet.find(&item.host)?;
+    let tail = crate::watchdog::item_tail(fleet, &item, host)?;
+    Ok(json!({
+        "name": item.name,
+        "kind": item.kind,
+        "host": host.label,
+        "pane": item.pane,
+        "closed": item.closed_ms.is_some(),
+        "reply": item.reply.map(|r| r.text),
+        "tail": tail,
+    }))
 }
 
 pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
@@ -184,32 +309,21 @@ pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<Ex
             profile,
             placement,
         } => {
-            if profile.is_some() && kind != "pi" {
-                return Err(Error::Invalid(
-                    "profiles configure Pi children; omit --profile or use --kind pi".into(),
-                ));
-            }
-            // A local child's profile is checked before placement; a peer checks its own.
-            if let Some(name) = &profile
-                && placement
-                    .host
-                    .as_deref()
-                    .is_none_or(|h| fleet.find(h).is_ok_and(crate::hosts::Host::is_local))
-            {
-                crate::profiles::load(name)?;
-            }
             let message = crate::inbox::message_text(message, message_file)?;
-            submit(
+            let action = agent_action(
                 fleet,
-                &placement,
-                Action::Agent {
-                    kind,
-                    name,
-                    message,
-                    profile,
-                },
-                true,
-            )
+                kind,
+                name,
+                message,
+                profile,
+                placement.host.as_deref(),
+            )?;
+            submit(fleet, &placement, action, true)
+        }
+        Command::Read { target, host } => {
+            let read = read(fleet, &target, host.as_deref())?;
+            crate::print(json_output, &read, || read_text(&read))?;
+            Ok(ExitCode::SUCCESS)
         }
         Command::Profiles => {
             let profiles = crate::profiles::list()?;
@@ -291,37 +405,35 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             crate::print(true, &item, String::new)?;
         }
         Command::Close { pane, host } => {
-            let host = match host {
-                Some(host) => fleet.find(&host)?,
-                None => close_host(fleet, &pane)?,
-            };
-            let closed: crate::close::Closed = if host.is_local() {
-                crate::close::local(
-                    fleet.shell,
-                    fleet.ledger,
-                    &pane,
-                    &crate::close::Caller::from_env(),
-                    crate::close::Guard::Clean,
-                )?
-            } else {
-                fleet.remote_setup(host, &["close".into(), pane.clone()])?
-            };
-            items::close(fleet.ledger, &host.id, &pane, now_ms())?;
-            crate::print(json_output, &closed, || {
-                closed.worktree.as_ref().map_or_else(
-                    || format!("closed pane {} on {}\n", closed.pane, host.label),
-                    |tree| {
-                        format!(
-                            "closed {} on {}: removed {} ({})\n",
-                            closed.pane, host.label, tree.path, tree.branch
-                        )
-                    },
-                )
-            })?;
+            let (closed, label) = close(fleet, &pane, host.as_deref())?;
+            crate::print(json_output, &closed, || closed_line(&closed, &label))?;
         }
         command => return inspect(fleet, command, json_output),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+pub fn read_text(read: &Value) -> String {
+    let text = |key: &str| read[key].as_str().unwrap_or_default().to_owned();
+    let mut out = format!(
+        "{} {} on {}{}\n",
+        read["name"].as_str().unwrap_or(&text("pane")),
+        text("pane"),
+        text("host"),
+        if read["closed"] == true {
+            " (closed)"
+        } else {
+            ""
+        }
+    );
+    if let Some(reply) = read["reply"].as_str() {
+        out.push_str("--- final reply ---\n");
+        out.push_str(reply);
+        out.push_str("\n--- end final reply ---\n");
+    }
+    out.push_str(&text("tail"));
+    out.push('\n');
+    out
 }
 
 /// The host of the open item for `pane`. Pane ids repeat across hosts, so more than one is ambiguous.
@@ -387,14 +499,7 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
             })?;
         }
         Command::Cancel { ticket } => work::cancel(fleet.ledger, &ticket)?,
-        Command::Stop { id } => {
-            let host = work::job_host(fleet, &id, now_ms())?;
-            if host.is_local() {
-                jobs::stop(fleet.ledger, &id)?;
-            } else {
-                let _: Value = fleet.remote(host, &["stop".into(), id])?;
-            }
-        }
+        Command::Stop { id } => stop(fleet, &id)?,
         Command::Wait { id, .. } => return Ok(ExitCode::from(wait_job(fleet, &id)? as u8)),
         Command::Logs { id, follow } => {
             let host = work::job_host(fleet, &id, now_ms())?;

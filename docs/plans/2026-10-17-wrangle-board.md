@@ -130,7 +130,7 @@ Rust owns all data and policy. `pi/` only draws. Every harness gets the same beh
     - **Registration in each harness:**
       - **Pi:** `pi.registerMcpServer("wrangle", {command: "wrangle", args: ["mcp"], exposure: "direct"})` in the `pi-wrangle` extension (`docs/extensions.md:195-204`). `direct` declares the tools like built-ins; the docs recommend it for "small, frequently used tool sets" (`docs/mcp.md:189-197`). They appear as `mcp__wrangle__<tool>`.
       - **Claude Code:** `plugins/wrangle/.mcp.json` with `{"wrangle": {"command": "wrangle", "args": ["mcp"]}}`. Claude Code loads `.mcp.json` at the plugin root (plugins reference, "mcpServers").
-      - **Codex:** `[mcp_servers.wrangle] command = "wrangle" args = ["mcp"]` in `~/.codex/config.toml`, written by dotfiles (developers.openai.com/codex/mcp).
+      - **Codex:** the plugin manifest's `mcpServers` names `codex-mcp.json`, which forwards the Herdr variables with `env_vars` (developers.openai.com/codex/plugins/build, codex/mcp).
     - **Guardrails.** The block in `harness-guardrails` names the `send` tool as the way to message another agent.
     - **Reversal.** This brings back an agent-facing tool. 4a8d5d2 removed the Pi `wrangle` spawn tool (`docs/design.md:193`). The difference now: the tool lives in Rust and serves all three harnesses, not a TS shim around Shepherdr.
     - **New dependency.** `rmcp` brings `tokio`. It stays inside `src/mcp.rs`, and every other command stays synchronous.
@@ -206,7 +206,8 @@ Rust owns all data and policy. `pi/` only draws. Every harness gets the same beh
   - A `tests/cli` test drives `wrangle mcp` over stdio with `initialize` and `tools/list`, and checks the ten names and their schemas.
   - A `tools/call send` against a fake herdr writes one inbox record owned by `HERDR_PANE_ID`.
   - `spawn` returns within 1 s with `queued` when every host is full.
-  - Live: `pi mcp list` shows `wrangle` with ten direct tools. `claude mcp list` and `codex mcp list` show `wrangle` connected.
+  - Live: `/mcp` in a Pi session shows `wrangle` with ten direct tools (`pi mcp list` reads only `mcp.json`, not extension registrations). `claude mcp list` and `codex mcp list` show `wrangle` connected.
+  - Codex gets the server from the plugin manifest (`mcpServers` → `codex-mcp.json`, with `env_vars` forwarding the Herdr variables), so dotfiles write no `[mcp_servers]` entry.
 - [ ] U4 Pi face:
   - `pi/board.ts` widget, `pi/panel.ts` `/wrangle`, `pi/inbox.ts` (steer or trigger, then ack), and the message renderer.
   - Remove the `agents` hooks.

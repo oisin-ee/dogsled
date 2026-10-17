@@ -11,6 +11,8 @@ mod inbox;
 mod jobs;
 #[path = "cli/lifecycle.rs"]
 mod lifecycle;
+#[path = "cli/mcp.rs"]
+mod mcp;
 #[path = "cli/place.rs"]
 mod place;
 #[path = "cli/profiles.rs"]

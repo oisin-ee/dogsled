@@ -9,12 +9,14 @@ function rig() {
 	const calls: string[][] = [];
 	const widgets: unknown[] = [];
 	const notices: unknown[] = [];
+	const servers: unknown[] = [];
 	let code = 0;
 	let context = "local 3/8\n";
 	let missing = false;
 	let items: unknown = { items: [], queue: [] };
 	const api = {
 		on(event: string, fn: Handler) { handlers.set(event, fn); },
+		registerMcpServer(name: string, config: unknown) { servers.push([name, config]); },
 		async exec(binary: string, args: string[], options?: { timeout: number }) {
 			calls.push([binary, ...args]);
 			if (missing) throw new Error("ENOENT");
@@ -24,11 +26,18 @@ function rig() {
 	};
 	wrangle(api as unknown as ExtensionAPI);
 	const ctx = { mode: "tui", ui: { setWidget: (...args: unknown[]) => widgets.push(args), notify: (...args: unknown[]) => notices.push(args) } };
-	return { calls, widgets, notices, ctx, context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, items: (value: unknown) => { items = value; },
+	return { calls, widgets, notices, servers, ctx, context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, items: (value: unknown) => { items = value; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler); return handler(event, ctx);
 		} };
 }
+
+test("registers the wrangle tools as a direct MCP server", () => {
+	const r = rig();
+	assert.deepEqual(r.servers.map(s => (s as [string, Record<string, unknown>])[0]), ["wrangle"]);
+	const config = (r.servers[0] as [string, Record<string, unknown>])[1];
+	assert.deepEqual([config["args"], config["exposure"]], [["mcp"], "direct"]);
+});
 
 test("uses the shared context hook and leaves prompts unchanged when unavailable", async () => {
 	const r = rig();

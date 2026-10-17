@@ -134,6 +134,40 @@ fn marketplaces_and_manifests_resolve_the_single_skill_and_hooks() {
 }
 
 #[test]
+fn claude_and_codex_plugins_start_wrangle_mcp_with_the_callers_pane() {
+    let codex = json("plugins/wrangle/.codex-plugin/plugin.json");
+    let path = codex["mcpServers"].as_str().unwrap();
+    for (servers, forwards) in [
+        (json("plugins/wrangle/.mcp.json"), false),
+        (
+            json(&format!(
+                "plugins/wrangle/{}",
+                path.trim_start_matches("./")
+            )),
+            true,
+        ),
+    ] {
+        let server = &servers["mcpServers"]["wrangle"];
+        assert_eq!(
+            (&server["command"], &server["args"]),
+            (&serde_json::json!("wrangle"), &serde_json::json!(["mcp"]))
+        );
+        // Codex forwards only the variables it names, and the server needs the caller's pane.
+        if forwards {
+            let forwarded = server["env_vars"].as_array().unwrap();
+            for name in [
+                "HERDR_ENV",
+                "HERDR_PANE_ID",
+                "HERDR_WORKSPACE_ID",
+                "HERDR_SOCKET_PATH",
+            ] {
+                assert!(forwarded.contains(&serde_json::json!(name)), "{name}");
+            }
+        }
+    }
+}
+
+#[test]
 fn dist_keeps_service_templates_and_herdr_keeps_its_board() {
     let dist = toml("dist-workspace.toml");
     let includes = dist["dist"]["include"].as_array().unwrap();

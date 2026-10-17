@@ -167,6 +167,15 @@ pub enum Command {
     Cancel {
         ticket: String,
     },
+    /// Show a child's or job's newest output and its captured final reply.
+    Read {
+        /// A child's name or pane, a job id, or any agent's name or pane.
+        target: String,
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Serve the wrangle tools to a harness over MCP on stdio.
+    Mcp,
     /// Send a message to an agent on any host, through its inbox. Nothing types into its
     /// terminal; an agent without an inbox reader gets nothing, and you hear so at once.
     Send {

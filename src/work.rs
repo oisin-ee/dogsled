@@ -121,8 +121,14 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
 }
 
 /// Queue `request` after its first launch failed, so the service retries it with backoff.
-pub fn enqueue_retry(ledger: &Ledger, request: Request, error: &Error, now: u64) -> Result<String> {
-    let id = enqueue(ledger, request, false, now)?;
+pub fn enqueue_retry(
+    ledger: &Ledger,
+    request: Request,
+    waiting: bool,
+    error: &Error,
+    now: u64,
+) -> Result<String> {
+    let id = enqueue(ledger, request, waiting, now)?;
     update_ticket(ledger, &id, |t| {
         t.retry.fail(now, &t.id);
         t.error = Some(format!("attempt 1: {error}"));
