@@ -236,6 +236,34 @@ fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool)
     }
 }
 
+/// The host commands that act on one child pane.
+fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
+    match cmd {
+        HostCommand::Reply { pane } => {
+            print(true, &sweep::local_reply(node.shell, &pane)?, String::new)?;
+        }
+        // Over SSH the caller has no pane or workspace on this host.
+        HostCommand::Close {
+            pane,
+            pushed,
+            landed,
+            writer,
+        } => {
+            let guard = close::Guard::from_flags(pushed, landed, writer);
+            let closed = close::local(
+                node.shell,
+                node.ledger,
+                &pane,
+                &close::Caller::default(),
+                guard,
+            )?;
+            print(true, &closed, String::new)?;
+        }
+        _ => unreachable!("only child commands"),
+    }
+    Ok(())
+}
+
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
@@ -282,18 +310,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             print(true, &tail, String::new)?;
         }
         HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
-        // Over SSH the caller has no pane or workspace on this host.
-        HostCommand::Close { pane, pushed } => print(
-            true,
-            &close::local(
-                node.shell,
-                node.ledger,
-                &pane,
-                &close::Caller::default(),
-                pushed,
-            )?,
-            String::new,
-        )?,
+        HostCommand::Reply { .. } | HostCommand::Close { .. } => child(cmd, node)?,
         HostCommand::Prune { plan } => print(
             true,
             &cleanup::apply(node, &serde_json::from_str(&plan)?, now_ms())?,

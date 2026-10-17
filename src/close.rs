@@ -49,16 +49,49 @@ impl Caller {
     }
 }
 
+/// What a worktree must show before it is removed. Uncommitted changes always refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guard {
+    /// `wrangle close`: the owner decided; only uncommitted changes refuse.
+    Clean,
+    /// An orphan: every commit is on some remote ref.
+    Pushed,
+    /// A finished reader: no commit outside the default branch, or its branch landed.
+    Reader,
+    /// A finished writer: its branch landed in the default branch.
+    Writer,
+}
+
+impl Guard {
+    /// The flags of `host close` for this guard.
+    pub fn flags(self) -> &'static [&'static str] {
+        match self {
+            Self::Clean => &[],
+            Self::Pushed => &["--pushed"],
+            Self::Reader => &["--landed"],
+            Self::Writer => &["--landed", "--writer"],
+        }
+    }
+
+    pub fn from_flags(pushed: bool, landed: bool, writer: bool) -> Self {
+        match (pushed, landed, writer) {
+            (_, true, true) => Self::Writer,
+            (_, true, false) => Self::Reader,
+            (true, false, _) => Self::Pushed,
+            _ => Self::Clean,
+        }
+    }
+}
+
 /// Every refusal happens before anything changes. A child tab in the caller's workspace is
 /// closed; the caller's own pane, and a worktree the caller works in or shows, are refused.
-/// With `pushed`, a worktree with a commit on no remote ref is refused too: the sweep closes an
-/// orphan only when that loses nothing.
+/// `guard` adds the checks that make an automatic close lose nothing.
 pub fn local(
     shell: &dyn crate::shell::Shell,
     ledger: &Ledger,
     pane: &str,
     caller: &Caller,
-    pushed: bool,
+    guard: Guard,
 ) -> Result<Closed> {
     let panes = crate::cleanup::current_panes(shell)?;
     let target = panes
@@ -88,7 +121,7 @@ pub fn local(
         });
     };
     outside(&tree, caller)?;
-    unsaved(shell, &tree.path, pushed)?;
+    unsaved(shell, &tree, guard)?;
     if let Some(lock) = worktree::lock_reason(shell, &tree.checkout, &tree.path)?
         && lock != AGENT_LOCK
     {
@@ -139,9 +172,9 @@ pub fn local(
     })
 }
 
-/// Refuse a worktree with uncommitted changes, and with `pushed`, one with a commit on no remote
-/// ref.
-fn unsaved(shell: &dyn crate::shell::Shell, path: &str, pushed: bool) -> Result<()> {
+/// Refuse a worktree with uncommitted changes, and whatever else `guard` forbids.
+fn unsaved(shell: &dyn crate::shell::Shell, tree: &worktree::Linked, guard: Guard) -> Result<()> {
+    let path = tree.path.as_str();
     let git = |args: &[&str]| {
         let mut words = vec!["-C".to_string(), path.to_string()];
         words.extend(args.iter().map(ToString::to_string));
@@ -151,8 +184,10 @@ fn unsaved(shell: &dyn crate::shell::Shell, path: &str, pushed: bool) -> Result<
     if status.status != 0 || !status.stdout.trim().is_empty() {
         return Err(refuse(&format!("{path} has uncommitted changes")));
     }
-    if !pushed {
-        return Ok(());
+    match guard {
+        Guard::Clean => return Ok(()),
+        Guard::Reader | Guard::Writer => return landed(shell, tree, guard),
+        Guard::Pushed => (),
     }
     let out = git(&["rev-list", "--count", "HEAD", "--not", "--remotes"])?;
     match out.stdout.trim().parse::<u64>() {
@@ -166,6 +201,52 @@ fn unsaved(shell: &dyn crate::shell::Shell, path: &str, pushed: bool) -> Result<
             out.stderr.trim()
         ))),
     }
+}
+
+/// A reader closes with no commit outside the default branch; either role closes once its
+/// branch landed there.
+fn landed(shell: &dyn crate::shell::Shell, tree: &worktree::Linked, guard: Guard) -> Result<()> {
+    let base = crate::integration::base(shell, &tree.path)?;
+    let out = shell.run(
+        "git",
+        &[
+            "-C".into(),
+            tree.path.clone(),
+            "rev-list".into(),
+            "--count".into(),
+            format!("{base}..HEAD"),
+        ],
+    )?;
+    let ahead: u64 = match out.stdout.trim().parse() {
+        Ok(n) if out.ok() => n,
+        _ => {
+            return Err(refuse(&format!(
+                "cannot count commits outside {} in {}: {}",
+                crate::integration::short(&base),
+                tree.path,
+                out.stderr.trim()
+            )));
+        }
+    };
+    if ahead == 0 && guard == Guard::Reader {
+        return Ok(());
+    }
+    // A fast-forwarded branch has no commits outside the base, yet it landed.
+    if !tree.branch.is_empty()
+        && crate::integration::check(shell, &tree.path, &tree.branch)?.is_some()
+    {
+        return Ok(());
+    }
+    Err(refuse(&if ahead == 0 {
+        format!("{} has no commits to land yet", tree.path)
+    } else {
+        format!(
+            "{} has {ahead} commit{} not in {}",
+            tree.path,
+            if ahead == 1 { "" } else { "s" },
+            crate::integration::short(&base)
+        )
+    }))
 }
 
 /// Refuse a worktree outside the repository's worktree directory, or one the caller is in.

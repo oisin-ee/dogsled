@@ -238,6 +238,10 @@ pub enum HostCommand {
         kind: String,
         id: String,
     },
+    /// The final reply of the finished agent in a pane.
+    Reply {
+        pane: String,
+    },
     Doctor,
     Prune {
         #[arg(long)]
@@ -248,6 +252,12 @@ pub enum HostCommand {
         /// Also refuse a worktree with a commit on no remote ref: the sweep's orphan close.
         #[arg(long)]
         pushed: bool,
+        /// Also refuse a worktree whose work is not in the default branch: the sweep's close
+        /// of a finished child. A reader with no commits passes; `--writer` needs a landed branch.
+        #[arg(long)]
+        landed: bool,
+        #[arg(long, requires = "landed")]
+        writer: bool,
     },
     Launch {
         #[arg(long)]

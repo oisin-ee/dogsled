@@ -25,6 +25,57 @@ pub struct Item {
     /// `reader` or `writer`: whether the child is expected to commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// The child's final reply, captured before the sweep closes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<Reply>,
+}
+
+/// A finished child's final reply, for the completion Herdr numbered `seq`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reply {
+    pub seq: u64,
+    pub text: String,
+    pub captured_ms: u64,
+    /// When the owner was told. A closed item with an untold reply still reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_ms: Option<u64>,
+}
+
+impl Item {
+    /// A captured reply the owner has not been told yet.
+    pub fn untold(&self) -> Option<&Reply> {
+        self.reply.as_ref().filter(|r| r.reported_ms.is_none())
+    }
+}
+
+fn change(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>)) -> Result<()> {
+    ledger.with_lock("items", || {
+        let mut items = list(ledger)?;
+        f(&mut items);
+        ledger.write("items.json", &items)
+    })
+}
+
+/// Keep `reply` as `id`'s final reply.
+pub fn set_reply(ledger: &Ledger, id: &str, reply: Reply) -> Result<()> {
+    change(ledger, |items| {
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            item.reply = Some(reply);
+        }
+    })
+}
+
+/// Mark the replies of `ids` told.
+pub fn told(ledger: &Ledger, ids: &[String], now: u64) -> Result<()> {
+    change(ledger, |items| {
+        for reply in items
+            .iter_mut()
+            .filter(|i| ids.contains(&i.id))
+            .filter_map(|i| i.reply.as_mut())
+        {
+            reply.reported_ms.get_or_insert(now);
+        }
+    })
 }
 
 pub fn list(ledger: &Ledger) -> Result<Vec<Item>> {
