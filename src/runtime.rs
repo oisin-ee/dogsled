@@ -240,6 +240,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                 name,
                 created_ms: now_ms(),
                 closed_ms: None,
+                ..Item::default()
             };
             items::record(fleet.ledger, item.clone())?;
             if host.is_local() {

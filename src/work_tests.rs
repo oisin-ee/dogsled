@@ -31,6 +31,7 @@ fn snapshot(now: u64) -> Snapshot {
                 transcript_modified: None,
                 stalled_since_ms: None,
                 state_since_ms: None,
+                ..Agent::default()
             }],
             reservations: Vec::new(),
             panes: vec![Pane {
@@ -130,6 +131,7 @@ fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
             name: None,
             created_ms: 200,
             closed_ms: None,
+            ..Item::default()
         },
     )
     .unwrap();

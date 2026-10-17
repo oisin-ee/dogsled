@@ -43,6 +43,14 @@ pub enum Command {
         #[arg(long, conflicts_with = "json")]
         brief: bool,
     },
+    /// What an owner started, grouped by what the owner must do next.
+    Board {
+        /// The owner's Herdr pane. Defaults to the caller's; `--all` shows every owner.
+        #[arg(long, conflicts_with = "all")]
+        owner: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
     /// List cleanup candidates without changing them.
     Doctor {
         #[arg(long)]

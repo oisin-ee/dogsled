@@ -116,10 +116,15 @@ fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
 }
 
 #[test]
-fn context_lists_close_commands_only_for_the_callers_finished_children() {
+fn context_names_only_the_callers_children_with_work_to_land() {
     let rig = Rig::new("context-close");
     rig.snapshot("state/host.json", now(), 1.0, 8);
     // The snapshot's idle agent is in pane w1:p1. Both items name it; only one is the caller's.
+    let mut host = rig.read("state/host.json");
+    host["probe"]["agent_panes"][0]["worktree"] = json!({
+        "path":"/t","branch":"feat/x","ahead":2,"dirty":false,"landed":false,"head":"h","base":"b"
+    });
+    rig.put("state/host.json", &host);
     rig.put(
         "state/items.json",
         &json!([
@@ -137,9 +142,29 @@ fn context_lists_close_commands_only_for_the_callers_finished_children() {
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
     assert!(
         out.ends_with(
-            "Your finished children: `wrangle close w1:p1 --host local` (worker). Close each one after you take or drop its result.\n"
+            "To land: worker (+2). Merge or drop each branch; wrangle closes the child once its work lands.\n"
         ),
         "{out}"
     );
-    assert!(!out.contains("(other)"), "{out}");
+    assert!(!out.contains("other"), "{out}");
+    let (code, board) = rig.json(&["board"]);
+    assert_eq!(code, 0);
+    assert_eq!(board["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(board["rows"][0]["group"], "to_land");
+    assert_eq!(board["rows"][0]["what"], "pi");
+    assert_eq!(board["rows"][0]["ahead"], 2);
+    assert_eq!(
+        rig.json(&["board", "--all"]).1["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    // A finished reader with nothing to land is not named.
+    host["probe"]["agent_panes"][0]["worktree"]["ahead"] = json!(0);
+    rig.put("state/host.json", &host);
+    let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
+    cmd.env("HERDR_ENV", "1");
+    let out = String::from_utf8(bounded(cmd).stdout).unwrap();
+    assert!(!out.contains("To land"), "{out}");
 }

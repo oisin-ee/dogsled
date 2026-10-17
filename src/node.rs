@@ -74,6 +74,10 @@ impl Node<'_> {
     /// Publication never waits for prompts, notifications, or cleanup.
     pub fn tick(&self, now: u64) -> Result<()> {
         let mut probe = probe::local(self.shell, self.home)?;
+        // Transcript and Git reads stay outside the lock, so a reservation never waits on them.
+        // Reading the last snapshot without the lock is safe: writes replace it atomically.
+        let last: Option<Snapshot> = self.ledger.read("host.json")?;
+        crate::facts::observe(self.shell, &mut probe, last.as_ref().map(|s| &s.probe));
         self.ledger.with_lock("host", || {
             let previous: Option<Snapshot> = self.ledger.read("host.json")?;
             crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);

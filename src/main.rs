@@ -1,6 +1,7 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
 mod activity;
+mod board;
 mod budget;
 mod checkout;
 mod cleanup;
@@ -10,6 +11,7 @@ mod commands;
 mod config;
 mod context;
 mod error;
+mod facts;
 mod hosts;
 mod integration;
 mod items;
@@ -155,6 +157,25 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         },
+        Command::Board { owner, all } => {
+            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
+            let status = commands::status(&fleet)?;
+            let owner = if all {
+                None
+            } else {
+                Some(
+                    owner
+                        .or_else(|| std::env::var("HERDR_PANE_ID").ok())
+                        .ok_or_else(|| {
+                            Error::Invalid(
+                                "HERDR_PANE_ID or --owner is required; or pass --all".into(),
+                            )
+                        })?,
+                )
+            };
+            let board = board::build(&status, owner.as_deref(), now_ms());
+            print(cli.json, &board, || board.render())?;
+        }
         Command::Hook(HookCommand::Context { harness, event }) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             let status = commands::status(&fleet)?;

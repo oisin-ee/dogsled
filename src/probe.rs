@@ -100,7 +100,7 @@ pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
 }
 
 /// Stable service contract, independent of Herdr's raw response fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
     pub pane: String,
     pub agent: Option<String>,
@@ -112,6 +112,20 @@ pub struct Agent {
     pub stalled_since_ms: Option<u64>,
     #[serde(default)]
     pub state_since_ms: Option<u64>,
+    /// Herdr's terminal identity: a reused pane id gets a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
+    /// Herdr's count of finished turns. A rise is a completion event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// What the transcript says: the model that answers, and the latest activity.
+    #[serde(default, skip_serializing_if = "crate::facts::Session::is_empty")]
+    pub session: crate::facts::Session,
+    /// The linked worktree the agent runs in, measured on this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::facts::Worktree>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +135,12 @@ struct RawAgent {
     agent_status: Option<String>,
     name: Option<String>,
     agent_session: Option<AgentSession>,
+    #[serde(default)]
+    terminal_id: Option<String>,
+    #[serde(default)]
+    completion_seq: Option<u64>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +252,11 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 transcript_modified,
                 stalled_since_ms: None,
                 state_since_ms: None,
+                terminal_id: raw.terminal_id,
+                completion_seq: raw.completion_seq,
+                cwd: raw.cwd,
+                session: crate::facts::Session::default(),
+                worktree: None,
             }
         })
         .collect())

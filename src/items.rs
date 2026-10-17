@@ -5,7 +5,7 @@ use crate::hosts::HostReport;
 use crate::ledger::Ledger;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
     pub kind: String,
@@ -15,6 +15,16 @@ pub struct Item {
     pub name: Option<String>,
     pub created_ms: u64,
     pub closed_ms: Option<u64>,
+    /// What was asked for. Records from before these fields load with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `reader` or `writer`: whether the child is expected to commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 pub fn list(ledger: &Ledger) -> Result<Vec<Item>> {
@@ -108,4 +118,27 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
         }
         ledger.write("items.json", &items)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn records_from_before_the_request_fields_still_load() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        std::fs::create_dir_all(&ledger.dir).unwrap();
+        std::fs::write(
+            ledger.dir.join("items.json"),
+            r#"[{"id":"a","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p2","name":null,"created_ms":1,"closed_ms":null}]"#,
+        )
+        .unwrap();
+        let items = list(&ledger).unwrap();
+        assert_eq!(items[0].pane, "w1:p1");
+        assert_eq!(items[0].harness, None);
+        assert_eq!(items[0].role, None);
+        let text = serde_json::to_string(&items[0]).unwrap();
+        assert!(!text.contains("harness"), "{text}");
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
 }
