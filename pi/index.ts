@@ -36,6 +36,15 @@ export default function wrangle(pi: ExtensionAPI) {
 	let generation = 0;
 	let refresh: Promise<void> | undefined;
 
+	// The wrangle commands as tools, declared to the model like built-ins (`mcp__wrangle__*`).
+	// The server reads HERDR_PANE_ID from this process's environment to know its caller.
+	pi.registerMcpServer("wrangle", {
+		command: binary,
+		args: ["mcp"],
+		exposure: "direct",
+		description: "Spawn Pi, Claude, and Codex children and jobs on Herdr hosts, and message any agent through its inbox.",
+	});
+
 	async function exec(args: string[]) {
 		const result = await pi.exec(binary, args);
 		if (result.code !== 0) throw new Error(`wrangle ${args[0]} failed: ${result.stderr.trim() || `exit ${result.code}`}`);

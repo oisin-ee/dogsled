@@ -9,6 +9,7 @@
   "repository": "https://github.com/oisin-ee/wrangle",
   "license": "MIT",
   "skills": "./skills/",
+  "mcpServers": "./codex-mcp.json",
   "hooks": {
     "hooks": {
       "SessionStart": [

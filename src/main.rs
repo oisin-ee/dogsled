@@ -19,6 +19,7 @@ mod integration;
 mod items;
 mod jobs;
 mod ledger;
+mod mcp;
 mod node;
 mod plan;
 mod prepare;
@@ -180,6 +181,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             let board = board::build(&status, owner.as_deref(), now_ms());
             print(cli.json, &board, || board.render())?;
         }
+        Command::Mcp => mcp::serve(policy, ledger, home)?,
         Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
         Command::Send {
             target,

@@ -338,29 +338,27 @@ pub fn job_tail(ledger: &Ledger, id: &str) -> Result<String> {
 
 /// The newest output of `item`, from its host.
 fn tail(fleet: &Fleet, item: &Item, host: Option<&HostReport>) -> Result<String> {
-    if let Some(host) = host {
-        if host.host.is_local() {
-            if item.kind == "job" {
-                job_tail(fleet.ledger, &item.id)
-            } else {
-                pane_tail(fleet.shell, &item.pane)
-            }
+    host.map_or_else(
+        || Ok("(host unavailable)".into()),
+        |host| item_tail(fleet, item, &host.host),
+    )
+}
+
+/// The newest output of `item` on `host`: a job's log or an agent's transcript or screen.
+pub fn item_tail(fleet: &Fleet, item: &Item, host: &crate::hosts::Host) -> Result<String> {
+    let id = if item.kind == "job" {
+        &item.id
+    } else {
+        &item.pane
+    };
+    if host.is_local() {
+        if item.kind == "job" {
+            job_tail(fleet.ledger, id)
         } else {
-            fleet.remote(
-                &host.host,
-                &[
-                    "tail".into(),
-                    item.kind.clone(),
-                    if item.kind == "job" {
-                        item.id.clone()
-                    } else {
-                        item.pane.clone()
-                    },
-                ],
-            )
+            pane_tail(fleet.shell, id)
         }
     } else {
-        Ok("(host unavailable)".into())
+        fleet.remote(host, &["tail".into(), item.kind.clone(), id.clone()])
     }
 }
 
