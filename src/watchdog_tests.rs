@@ -72,6 +72,7 @@ impl Rig {
                 name: Some("test-child".into()),
                 created_ms: 1,
                 closed_ms: None,
+                ..Item::default()
             },
         )
         .unwrap();
@@ -285,6 +286,7 @@ fn remote_stall_uses_report_state_and_bounded_remote_tail() {
             name: Some("remote-child".into()),
             created_ms: 1,
             closed_ms: None,
+            ..Item::default()
         },
     )
     .unwrap();
@@ -334,6 +336,7 @@ fn closed_item_does_not_observe_reused_or_retracked_pane() {
             name: Some("new-child-name".into()),
             created_ms: 660_001,
             closed_ms: None,
+            ..Item::default()
         },
     )
     .unwrap();
@@ -417,6 +420,7 @@ fn check_ins_report_orphans_the_sweep_keeps() {
             name: Some("lost-child".into()),
             created_ms: 1,
             closed_ms: None,
+            ..Item::default()
         },
     )
     .unwrap();

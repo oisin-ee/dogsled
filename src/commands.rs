@@ -202,35 +202,38 @@ pub fn brief(status: &Status) -> String {
     format!("{}\n", rows.join("\n"))
 }
 
-/// The exact close command for each of `owner`'s finished children, for that owner's prompt.
-/// Other owners' children are never listed, so an agent is never told to close work it did not start.
-pub fn close_line(status: &Status, owner: &str) -> Option<String> {
-    let commands: Vec<_> = status
-        .items
+/// `owner`'s finished children whose work is not in the default branch yet, for that owner's
+/// prompt. Other owners' children are never listed.
+pub fn land_line(status: &Status, owner: &str) -> Option<String> {
+    let board = crate::board::build(status, Some(owner), crate::ledger::now_ms());
+    let children: Vec<_> = board
+        .rows
         .iter()
-        .filter(|i| i.owner_pane == owner && crate::items::finished(i, &status.hosts))
-        .map(|i| {
-            format!(
-                "{}{}",
-                crate::items::close_command(i, &status.hosts),
-                i.name
-                    .as_deref()
-                    .map_or_else(String::new, |n| format!(" ({})", one_line(n)))
-            )
+        .filter(|r| r.group == crate::board::Group::ToLand)
+        .map(|r| {
+            let detail = [
+                r.ahead.map(|n| format!("+{n}")),
+                r.dirty.then(|| "uncommitted".to_owned()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+            format!("{} ({detail})", one_line(&r.name))
         })
         .collect();
-    if commands.is_empty() {
+    if children.is_empty() {
         return None;
     }
-    let shown = commands.len().min(5);
-    let more = commands.len() - shown;
+    let shown = children.len().min(5);
+    let more = children.len() - shown;
     Some(format!(
-        "Your finished children: {}{}. Close each one after you take or drop its result.\n",
-        commands[..shown].join(", "),
+        "To land: {}{}. Merge or drop each branch; wrangle closes the child once its work lands.\n",
+        children[..shown].join(", "),
         if more == 0 {
             String::new()
         } else {
-            format!(", and {more} more (see `wrangle status`)")
+            format!(", and {more} more (see `wrangle board`)")
         }
     ))
 }

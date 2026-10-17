@@ -1,6 +1,6 @@
 //! One prompt-context formatter for Pi, Claude Code, and Codex.
 
-use crate::commands::{Status, brief, close_line};
+use crate::commands::{Status, brief, land_line};
 use clap::ValueEnum;
 use serde::Serialize;
 
@@ -18,13 +18,13 @@ pub enum Event {
     UserPromptSubmit,
 }
 
-/// `owner` is the caller's Herdr pane. Its finished children get their close commands.
+/// `owner` is the caller's Herdr pane. Its children with work to land are named.
 pub fn format(harness: Harness, event: Event, status: &Status, owner: Option<&str>) -> String {
     if status.hosts.iter().all(|host| host.sampled_ms.is_none()) {
         return String::new();
     }
     let mut text = brief(status);
-    if let Some(line) = owner.and_then(|owner| close_line(status, owner)) {
+    if let Some(line) = owner.and_then(|owner| land_line(status, owner)) {
         text.push_str(&line);
     }
     match harness {

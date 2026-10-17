@@ -359,25 +359,38 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
     let pane = result["pane"]
         .as_str()
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;
-    let (kind, name) = match &request.action {
-        Action::Job { .. } => ("job", None),
-        Action::Agent { name, .. } => ("agent", Some(name.clone())),
+    items::record(fleet.ledger, item(request, host.id, pane, now)?)?;
+    Ok(Some(result))
+}
+
+/// The owner's record of what `request` started. A child with a branch is a writer.
+fn item(request: &Request, host: String, pane: &str, now: u64) -> Result<Item> {
+    let (kind, name, harness) = match &request.action {
+        Action::Job { .. } => ("job", None, None),
+        Action::Agent { name, kind, .. } => ("agent", Some(name.clone()), Some(kind.clone())),
         Action::Place => return Err(Error::Invalid("place cannot create an item".into())),
     };
-    items::record(
-        fleet.ledger,
-        Item {
-            id: request.id.clone(),
-            kind: kind.into(),
-            host: host.id,
-            pane: pane.into(),
-            owner_pane: request.owner.clone(),
-            name,
-            created_ms: now,
-            closed_ms: None,
-        },
-    )?;
-    Ok(Some(result))
+    let role = harness.as_ref().map(|_| {
+        if request.branch.is_some() {
+            "writer"
+        } else {
+            "reader"
+        }
+        .into()
+    });
+    Ok(Item {
+        id: request.id.clone(),
+        kind: kind.into(),
+        host,
+        pane: pane.into(),
+        owner_pane: request.owner.clone(),
+        name,
+        created_ms: now,
+        closed_ms: None,
+        harness,
+        role,
+        ..Item::default()
+    })
 }
 
 fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) -> Result<Ticket> {
