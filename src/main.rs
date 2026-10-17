@@ -23,6 +23,7 @@ mod node;
 mod plan;
 mod prepare;
 mod probe;
+mod profiles;
 mod repository;
 mod runtime;
 mod service;

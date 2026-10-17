@@ -39,6 +39,9 @@ pub enum Error {
     Invalid(String),
     #[error("deadline reached: {0}")]
     Deadline(String),
+    /// An agent launch failed after placement; admission retries it with backoff.
+    #[error("launch failed: {0}")]
+    Launch(String),
 }
 
 impl Error {

@@ -24,8 +24,16 @@ pub enum Action {
         kind: String,
         name: String,
         message: String,
+        /// A Pi profile, resolved on the launch host.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
 }
+
+/// The harnesses that take their first task as a launch argument.
+pub const KINDS: [&str; 3] = ["pi", "claude", "codex"];
+/// Launch attempts before a ticket fails.
+const LAUNCH_TRIES: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -64,6 +72,9 @@ pub struct Ticket {
     pub notified: bool,
     pub result: Option<Value>,
     pub error: Option<String>,
+    /// Failed launch attempts, and when the next may run.
+    #[serde(default)]
+    pub retry: crate::backoff::Backoff,
 }
 
 pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
@@ -102,10 +113,21 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             notified: false,
             result: None,
             error: None,
+            retry: crate::backoff::Backoff::default(),
         });
         ledger.write("queue.json", &tickets)?;
         Ok(id)
     })
+}
+
+/// Queue `request` after its first launch failed, so the service retries it with backoff.
+pub fn enqueue_retry(ledger: &Ledger, request: Request, error: &Error, now: u64) -> Result<String> {
+    let id = enqueue(ledger, request, false, now)?;
+    update_ticket(ledger, &id, |t| {
+        t.retry.fail(now, &t.id);
+        t.error = Some(format!("attempt 1: {error}"));
+    })?;
+    Ok(id)
 }
 
 pub fn cancel(ledger: &Ledger, id: &str) -> Result<()> {
@@ -244,36 +266,108 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                 kind,
                 name,
                 message,
+                profile,
             } => {
-                shell.run_setup_ok(
-                    "herdr",
-                    &[
-                        "agent".into(),
-                        "start".into(),
-                        name.clone(),
-                        "--kind".into(),
-                        kind.clone(),
-                        "--pane".into(),
-                        pane.clone(),
-                    ],
-                )?;
-                shell.run_ok(
-                    "herdr",
-                    &[
-                        "agent".into(),
-                        "prompt".into(),
-                        pane.clone(),
-                        message.clone(),
-                    ],
-                )?;
+                let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
+                let task = task_file(ledger, &launch.id, message)?;
+                let mut args = vec![
+                    "agent".into(),
+                    "start".into(),
+                    name.clone(),
+                    "--kind".into(),
+                    kind.clone(),
+                    "--pane".into(),
+                    pane.clone(),
+                    "--".into(),
+                ];
+                args.extend(agent_args(kind, name, message, &task, profile.as_ref())?);
+                if let Err(error) = shell.run_setup_ok("herdr", &args) {
+                    // A tab this launch created goes with it, so a retry starts clean.
+                    if launch.pane.is_none()
+                        && let Err(close) =
+                            shell.run_ok("herdr", &["pane".into(), "close".into(), pane.clone()])
+                    {
+                        return Err(Error::Invalid(format!(
+                            "{error}; closing its pane {pane} also failed: {close}"
+                        )));
+                    }
+                    return Err(error);
+                }
                 crate::watchdog::register_parent(ledger, shell, &pane)?;
-                json!({"host":launch.host,"pane":pane,"name":name})
+                let mut result = json!({"host":launch.host,"pane":pane,"name":name});
+                if let Some(profile) = &profile {
+                    result["profile"] = json!(profile.name);
+                    for (key, value) in [("model", &profile.model), ("role", &profile.role)] {
+                        if let Some(value) = value {
+                            result[key] = json!(value);
+                        }
+                    }
+                }
+                result
             }
             Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
         };
         receipts.write(&file, &result)?;
         Ok(result)
     })
+}
+
+/// Keep the task in a file on the launch host: Herdr refuses a launch argument with a newline,
+/// and the file outlives the pane for review.
+fn task_file(ledger: &Ledger, id: &str, message: &str) -> Result<String> {
+    let dir = ledger.child("launches").dir;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.task.md"));
+    std::fs::write(&path, message)?;
+    Ok(path.display().to_string())
+}
+
+/// The harness arguments after `--`: Pi's session name and profile flags, then the task. A
+/// one-line task that cannot be read as an option or a file goes inline; any other is read from
+/// `task` (Pi's `@file`, or a pointer for Claude and Codex).
+pub fn agent_args(
+    kind: &str,
+    name: &str,
+    message: &str,
+    task: &str,
+    profile: Option<&crate::profiles::Profile>,
+) -> Result<Vec<String>> {
+    let inline = !message.contains(['\n', '\r'])
+        && !message.starts_with(['-', '@'])
+        && message.len() <= 4_000;
+    let mut args = Vec::new();
+    match kind {
+        "pi" => {
+            args.extend(["--name".to_owned(), name.to_owned()]);
+            args.extend(
+                profile
+                    .map(crate::profiles::Profile::pi_flags)
+                    .unwrap_or_default(),
+            );
+            args.push(if inline {
+                message.to_owned()
+            } else {
+                format!("@{task}")
+            });
+        }
+        "claude" | "codex" if profile.is_none() => args.push(if inline {
+            message.to_owned()
+        } else {
+            format!("Your task is in {task}. Read that file and do the task.")
+        }),
+        "claude" | "codex" => {
+            return Err(Error::Invalid(
+                "profiles configure Pi children; omit --profile or use --kind pi".into(),
+            ));
+        }
+        other => {
+            return Err(Error::Invalid(format!(
+                "kind {other} cannot take its task at launch; use one of {}",
+                KINDS.join(", ")
+            )));
+        }
+    }
+    Ok(args)
 }
 
 /// A new request runs now only when no ticket waits ahead of it; otherwise the caller
@@ -344,8 +438,8 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         workspace_name: request.workspace_name.clone(),
         owner: request.owner.clone(),
     };
-    let result = if host.is_local() {
-        launch(fleet.ledger, fleet.shell, &launch_request, now)?
+    let launched = if host.is_local() {
+        launch(fleet.ledger, fleet.shell, &launch_request, now)
     } else {
         fleet.remote_setup(
             &host,
@@ -354,29 +448,40 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
                 "--request".into(),
                 serde_json::to_string(&launch_request)?,
             ],
-        )?
+        )
     };
+    let result = launched.map_err(|e| {
+        if retryable(&e) && matches!(request.action, Action::Agent { .. }) {
+            Error::Launch(e.to_string())
+        } else {
+            e
+        }
+    })?;
     let pane = result["pane"]
         .as_str()
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;
-    items::record(fleet.ledger, item(request, host.id, pane, now)?)?;
+    items::record(fleet.ledger, item(request, host.id, pane, &result, now)?)?;
     Ok(Some(result))
 }
 
-/// The owner's record of what `request` started. A child with a branch is a writer.
-fn item(request: &Request, host: String, pane: &str, now: u64) -> Result<Item> {
+/// The owner's record of what `request` started. The profile's role wins; otherwise a child
+/// with a branch is a writer.
+fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -> Result<Item> {
+    let text = |key: &str| result[key].as_str().map(str::to_owned);
     let (kind, name, harness) = match &request.action {
         Action::Job { .. } => ("job", None, None),
         Action::Agent { name, kind, .. } => ("agent", Some(name.clone()), Some(kind.clone())),
         Action::Place => return Err(Error::Invalid("place cannot create an item".into())),
     };
     let role = harness.as_ref().map(|_| {
-        if request.branch.is_some() {
-            "writer"
-        } else {
-            "reader"
-        }
-        .into()
+        text("role").unwrap_or_else(|| {
+            if request.branch.is_some() {
+                "writer"
+            } else {
+                "reader"
+            }
+            .into()
+        })
     });
     Ok(Item {
         id: request.id.clone(),
@@ -389,6 +494,8 @@ fn item(request: &Request, host: String, pane: &str, now: u64) -> Result<Item> {
         closed_ms: None,
         harness,
         role,
+        profile: text("profile"),
+        model: text("model"),
         ..Item::default()
     })
 }
@@ -415,7 +522,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 t.error = Some("service stopped during admission; inspect the selected host before resubmitting".into());
             })?;
         }
-        if ticket.state != "pending" {
+        if ticket.state != "pending" || !ticket.retry.ready(now) {
             continue;
         }
         let claimed = update_ticket(fleet.ledger, &ticket.id, |t| {
@@ -435,9 +542,19 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 t.result = Some(result);
             }
             Ok(None) => t.state = "pending".into(),
+            // A refused request fails at once; a failed launch, SSH, or Herdr call is retried.
+            Err(error @ Error::Launch(_)) if t.retry.attempts + 1 < LAUNCH_TRIES => {
+                t.state = "pending".into();
+                t.retry.fail(now, &t.id);
+                t.error = Some(format!("attempt {}: {error}", t.retry.attempts));
+            }
             Err(error) => {
                 t.state = "failed".into();
-                t.error = Some(error.to_string());
+                t.error = Some(if t.retry.attempts > 0 {
+                    format!("{error} (after {} attempts)", t.retry.attempts + 1)
+                } else {
+                    error.to_string()
+                });
             }
         })?;
         if full {
@@ -445,6 +562,15 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A launch that failed after placement: Herdr did not start the agent in time, or the SSH
+/// launch call failed. Refusals and deadlines are not retried.
+fn retryable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Command { .. } | Error::Ssh { .. } | Error::Io(_)
+    )
 }
 
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
@@ -479,18 +605,32 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
                 .error
                 .clone()
                 .unwrap_or_else(|| result.map_or_else(String::new, Value::to_string));
-            fleet.shell.run_ok(
-                "herdr",
-                &[
-                    "agent".into(),
-                    "prompt".into(),
-                    ticket.request.owner.clone(),
-                    format!(
-                        "wrangle: ticket {} {} on {host}: {summary}",
-                        ticket.id, ticket.state
-                    ),
-                ],
-            )?;
+            let text = format!(
+                "wrangle: ticket {} {} on {host}: {summary}",
+                ticket.id, ticket.state
+            );
+            // The owner's inbox reader shows it; an owner without one is still prompted until
+            // every harness reads its inbox.
+            let id = format!("ticket-{}", ticket.id);
+            if !crate::inbox::notify(
+                fleet.ledger,
+                &reports,
+                &ticket.request.owner,
+                &id,
+                "ticket",
+                text.clone(),
+                now,
+            )? {
+                fleet.shell.run_ok(
+                    "herdr",
+                    &[
+                        "agent".into(),
+                        "prompt".into(),
+                        ticket.request.owner.clone(),
+                        text,
+                    ],
+                )?;
+            }
             update_ticket(fleet.ledger, &ticket.id, |t| t.notified = true)?;
         }
         Ok(())
