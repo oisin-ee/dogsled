@@ -175,7 +175,7 @@ fn wait_max_and_stop_use_durable_local_job_state() {
 }
 
 #[test]
-fn agent_places_starts_prompts_and_tracks_any_kind() {
+fn agent_places_starts_with_its_task_and_tracks_any_kind() {
     let rig = Rig::new("agent");
     rig.snapshot("state/host.json", now(), 0.0, 8);
     let (code, result) = rig.json(&[
@@ -193,8 +193,12 @@ fn agent_places_starts_prompts_and_tracks_any_kind() {
         json!({"host":"local","pane":"w2:p1","name":"worker"})
     );
     let log = rig.log("herdr.log");
-    assert!(log.contains("agent start worker --kind codex --pane w2:p1"));
-    assert!(log.contains("agent prompt w2:p1 literal ' message"));
+    // The task is the harness's launch argument; nothing is typed into the pane.
+    assert!(
+        log.contains("agent start worker --kind codex --pane w2:p1 -- literal ' message\n"),
+        "{log}"
+    );
+    assert!(!log.contains("agent prompt"), "{log}");
     assert_eq!(rig.read("state/items.json")[0]["kind"], "agent");
     assert_eq!(
         rig.json(&["track", "local", "w3:p1", "--name", "other"]).0,

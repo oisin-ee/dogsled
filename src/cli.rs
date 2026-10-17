@@ -120,17 +120,31 @@ pub enum Command {
         #[arg(long, default_value = "30m", value_parser = crate::jobs::duration)]
         max: u64,
     },
-    /// Start any harness supported by Herdr.
+    /// Start a Pi, Claude, or Codex child with its task. With `--profile`, a Pi child gets the
+    /// profile's model, thinking, and system prompt from the host it runs on.
     Agent {
-        #[arg(long)]
+        #[arg(long, default_value = "pi", value_parser = crate::work::KINDS)]
         kind: String,
         #[arg(long)]
         name: String,
+        /// The task. Use `--message-file` for a long or multi-line task.
+        #[arg(
+            long,
+            required_unless_present = "message_file",
+            conflicts_with = "message_file"
+        )]
+        message: Option<String>,
+        /// A file with the task, or `-` for stdin.
+        #[arg(long, value_name = "PATH")]
+        message_file: Option<PathBuf>,
+        /// A profile in `~/.config/wrangle/profiles`; Pi only.
         #[arg(long)]
-        message: String,
+        profile: Option<String>,
         #[command(flatten)]
         placement: WorkArgs,
     },
+    /// List the agent profiles on this host.
+    Profiles,
     Track {
         host: String,
         pane: String,

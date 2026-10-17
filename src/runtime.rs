@@ -102,7 +102,20 @@ pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
 fn submit(fleet: &Fleet, args: &WorkArgs, action: Action, json_output: bool) -> Result<ExitCode> {
     let request = request(fleet, args, action)?;
     let job = matches!(request.action, Action::Job { .. });
-    let result = if let Some(result) = work::submit(fleet, &request, now_ms())? {
+    let submitted = match work::submit(fleet, &request, now_ms()) {
+        // A launch that failed on the way is retried with backoff by the service.
+        Err(error @ Error::Launch(_)) => {
+            let ticket = work::enqueue_retry(fleet.ledger, request.clone(), &error, now_ms())?;
+            crate::print(
+                true,
+                &json!({"queued":true,"ticket":ticket,"retrying":error.to_string()}),
+                String::new,
+            )?;
+            return Ok(ExitCode::from(1));
+        }
+        other => other?,
+    };
+    let result = if let Some(result) = submitted {
         result
     } else {
         let ticket = work::enqueue(fleet.ledger, request, args.wait, now_ms())?;
@@ -167,17 +180,44 @@ pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<Ex
             kind,
             name,
             message,
+            message_file,
+            profile,
             placement,
-        } => submit(
-            fleet,
-            &placement,
-            Action::Agent {
-                kind,
-                name,
-                message,
-            },
-            true,
-        ),
+        } => {
+            if profile.is_some() && kind != "pi" {
+                return Err(Error::Invalid(
+                    "profiles configure Pi children; omit --profile or use --kind pi".into(),
+                ));
+            }
+            // A local child's profile is checked before placement; a peer checks its own.
+            if let Some(name) = &profile
+                && placement
+                    .host
+                    .as_deref()
+                    .is_none_or(|h| fleet.find(h).is_ok_and(crate::hosts::Host::is_local))
+            {
+                crate::profiles::load(name)?;
+            }
+            let message = crate::inbox::message_text(message, message_file)?;
+            submit(
+                fleet,
+                &placement,
+                Action::Agent {
+                    kind,
+                    name,
+                    message,
+                    profile,
+                },
+                true,
+            )
+        }
+        Command::Profiles => {
+            let profiles = crate::profiles::list()?;
+            crate::print(json_output, &profiles, || {
+                crate::profiles::render(&profiles)
+            })?;
+            Ok(ExitCode::SUCCESS)
+        }
         command => cleanup_command(fleet, command, json_output),
     }
 }

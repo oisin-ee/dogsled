@@ -788,6 +788,47 @@ pub fn host(ledger: &Ledger, cmd: crate::cli::HostCommand) -> Result<()> {
     crate::print(true, &value, String::new)
 }
 
+/// Put a note from wrangle in the inbox of `owner`, an agent pane on this host. `id` makes it
+/// idempotent. `Ok(false)` when the owner is not running or has no reader: the caller keeps
+/// its other path.
+pub fn notify(
+    ledger: &Ledger,
+    reports: &[crate::hosts::HostReport],
+    owner: &str,
+    id: &str,
+    kind: &str,
+    text: String,
+    now: u64,
+) -> Result<bool> {
+    let Some(terminal) = reports
+        .iter()
+        .find(|h| h.host.is_local())
+        .and_then(|h| h.probe.as_ref())
+        .and_then(|p| p.agent_panes.iter().find(|a| a.pane == owner))
+        .and_then(|a| a.terminal_id.clone())
+    else {
+        return Ok(false);
+    };
+    let record = Record {
+        id: id.into(),
+        terminal,
+        pane: owner.into(),
+        from: Sender::wrangle(),
+        kind: kind.into(),
+        text,
+        created_ms: now,
+        state: State::Pending,
+        lease: Backoff::default(),
+        reason: None,
+        done_ms: None,
+    };
+    match put(ledger, record) {
+        Ok(_) => Ok(true),
+        Err(Error::Invalid(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Whether this host has sent records whose outcome it does not know yet.
 pub fn pending(ledger: &Ledger) -> Result<bool> {
     Ok(outbox(ledger)?.iter().any(|s| s.state.open()))

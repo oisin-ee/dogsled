@@ -13,6 +13,8 @@ mod jobs;
 mod lifecycle;
 #[path = "cli/place.rs"]
 mod place;
+#[path = "cli/profiles.rs"]
+mod profiles;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/review_fixes.rs"]

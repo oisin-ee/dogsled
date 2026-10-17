@@ -564,3 +564,45 @@ fn serve_closes_a_finished_writer_once_its_branch_lands() {
     assert!(!tree.exists());
     assert!(!branch_exists(&rig, "feat/x"));
 }
+
+#[test]
+fn a_finished_childs_reply_reaches_its_owners_inbox_once() {
+    let (rig, tree) = close_rig("sweep-reply-inbox");
+    owned_child(&rig, "idle", &tree, Some(3), "reader");
+    // The owner reads its inbox; the host's snapshot names both terminals.
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"][0]["terminal_id"] = json!("term_lead");
+    rig.put("agents.json", &agents);
+    let out = rig
+        .cmd(&["inbox", "claim", "--harness", "pi", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Dirty: it stays open, but the reply is told at once.
+    fs::write(tree.join("scratch"), "x").unwrap();
+    serve(&rig);
+    serve(&rig);
+    assert!(item_open(&rig));
+    let inbox = rig.read("state/inbox/term_lead.json");
+    assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
+    assert_eq!(inbox[0]["kind"], "reply");
+    assert_eq!(inbox[0]["from"]["name"], "wrangle");
+    let text = inbox[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("worker (w2:p1 on local) finished."),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("Found 3 bugs; notes in review.md."),
+        "{text}"
+    );
+    assert!(rig.read("state/items.json")[0]["reply"]["reported_ms"].is_u64());
+    // The claim delivers it; nothing was typed into the owner's pane.
+    let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
+    assert_eq!(claimed[0]["kind"], "reply");
+    assert!(!rig.log("herdr.log").contains("agent prompt"));
+}
