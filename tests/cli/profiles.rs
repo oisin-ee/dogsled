@@ -138,6 +138,8 @@ fn a_failed_launch_is_queued_and_retried_with_backoff() {
     // Before the backoff ends, admission leaves it.
     rig.run(&["serve", "--once", "--interval", "1"]);
     assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    // Admission is independent of the CI runner's real load and disk.
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let next = rig.read("state/queue.json")[0]["retry"]["next_ms"]
         .as_u64()
         .unwrap();
