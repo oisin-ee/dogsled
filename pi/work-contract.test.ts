@@ -14,7 +14,8 @@ test("real pi-todo and Wrangle exchange snapshots in either load order", { skip:
 	for (const providerFirst of [true, false]) {
 		const emitter = new EventEmitter();
 		const bus = { emit: (name: string, value: unknown) => { emitter.emit(name, value); }, on: (name: string, fn: (value: unknown) => void) => { emitter.on(name, fn); return () => { emitter.off(name, fn); }; } };
-		let leaf = "a", tasks = [{ content: "one", status: "in_progress" }];
+		let leaf = "a";
+		let tasks: { content: string; status: string; subtasks?: { content: string; status: string }[] }[] = [{ content: "one", status: "in_progress" }];
 		const widgets: unknown[][] = [];
 		const ctx = { mode: "tui", sessionManager: { getSessionId: () => "session", getLeafId: () => leaf,
 			getBranch: () => [{ type: "custom", customType: "todo-state", data: { tasks } }] },
@@ -43,6 +44,21 @@ test("real pi-todo and Wrangle exchange snapshots in either load order", { skip:
 		hosted?.dispose();
 		panel.update(data());
 		assert.match(panel.render(80).join("\n"), /two/);
+		leaf = "nested";
+		tasks = [{ content: "Outcome", status: "in_progress", subtasks: [
+			{ content: "First deliverable", status: "in_progress" },
+			{ content: "Second deliverable", status: "in_progress" },
+		] }];
+		provider.publish(ctx);
+		panel.update(data());
+		assert.match(panel.render(80).join("\n"), /  ● First deliverable/);
+		assert.match(panel.render(80).join("\n"), /  ● Second deliverable/);
+		assert.match(consumer.current?.display.summary ?? "", /0\/2 subtasks/);
+		tasks[0]!.subtasks!.forEach(child => { child.status = "completed"; });
+		provider.publish(ctx);
+		panel.update(data());
+		assert.match(panel.render(80).join("\n"), /Ready for review/);
+		assert.match(consumer.current?.display.summary ?? "", /0\/1 completed outcomes; 2\/2 subtasks/);
 		panel.dispose();
 		panel.dispose();
 		consumer.stop();
