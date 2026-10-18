@@ -269,7 +269,7 @@ pub enum InboxCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Copy, Subcommand)]
 pub enum HookCommand {
     Context {
         #[arg(long)]
@@ -277,6 +277,16 @@ pub enum HookCommand {
         /// The lifecycle event registered by the plugin; stdin is never read.
         #[arg(long, default_value = "UserPromptSubmit")]
         event: crate::context::Event,
+    },
+    /// Claim this pane's inbox for a Claude Code or Codex hook, print the records in the
+    /// event's output format, and acknowledge them. Prints nothing when the inbox is empty.
+    Inbox {
+        #[arg(long)]
+        harness: crate::context::Harness,
+        /// `Stop` continues the turn with the records as the next prompt; `UserPromptSubmit`
+        /// adds them as context beside the user's own text.
+        #[arg(long)]
+        event: crate::inbox::HookEvent,
     },
 }
 

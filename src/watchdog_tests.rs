@@ -11,7 +11,6 @@ use std::sync::Mutex;
 struct Commands {
     calls: Mutex<Vec<String>>,
     owner: Mutex<String>,
-    fail_prompt: Mutex<bool>,
 }
 impl Shell for Commands {
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
@@ -26,9 +25,6 @@ impl Shell for Commands {
         } else {
             "{}".into()
         };
-        if command.starts_with("herdr agent prompt") && *self.fail_prompt.lock().unwrap() {
-            return Err(crate::error::Error::Deadline(command));
-        }
         Ok(Output {
             status: 0,
             stdout,
@@ -49,7 +45,22 @@ impl Rig {
             policy: Policy::default(),
         };
         *rig.shell.owner.lock().unwrap() = "idle".into();
+        rig.reader();
         rig
+    }
+    /// The owner reads its inbox.
+    fn reader(&self) {
+        crate::inbox::claim(
+            &self.ledger,
+            "term_owner",
+            &crate::inbox::Reader {
+                harness: "pi".into(),
+                pane: "owner".into(),
+                registered_ms: 0,
+            },
+            0,
+        )
+        .unwrap();
     }
     fn fleet(&self) -> Fleet<'_> {
         Fleet {
@@ -88,21 +99,35 @@ impl Rig {
         let mut snapshot: Snapshot = serde_json::from_value(json!({"sampled_ms":now,"probe":{
             "host":"local","label":"local","load1":0.0,"cores":1,"memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":99.0,"agents":{"total":2,"by_status":{}},"reservations":[],
             "panes":[{"pane_id":"owner"},{"pane_id":"child"}],"agent_panes":[
-                {"pane":"owner","agent":"pi","state":owner,"name":"parent","transcript":null,"transcript_modified":null},
+                {"pane":"owner","agent":"pi","state":owner,"name":"parent","transcript":null,"transcript_modified":null,"terminal_id":"term_owner"},
                 {"pane":"child","agent":"pi","state":child,"name":"test-child","transcript":modified.map(|_|"/transcript"),"transcript_modified":modified}
             ]}})).unwrap();
         observe(&mut snapshot.probe, None, now);
         self.ledger.write("host.json", &snapshot).unwrap();
         self.fleet().status(now).unwrap()
     }
-    fn prompts(&self) -> usize {
-        self.shell
-            .calls
-            .lock()
+    /// The check-ins in the owner's inbox, oldest first.
+    fn check_ins(&self) -> Vec<String> {
+        let mut notes: Vec<_> = crate::inbox::received(&self.ledger, "term_owner")
             .unwrap()
-            .iter()
-            .filter(|s| s.starts_with("herdr agent prompt"))
-            .count()
+            .into_iter()
+            .filter(|r| r.kind == "check-in")
+            .collect();
+        notes.sort_by_key(|r| r.created_ms);
+        notes.into_iter().map(|r| r.text).collect()
+    }
+    fn prompts(&self) -> usize {
+        // Nothing is ever typed into the owner's terminal.
+        assert!(
+            !self
+                .shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.starts_with("herdr agent prompt"))
+        );
+        self.check_ins().len()
     }
 }
 impl Drop for Rig {
@@ -146,10 +171,10 @@ fn immediate_stall_waits_for_idle_and_survives_restart_without_repeat() {
         tick(&rig.fleet(), &reports, now).unwrap();
         assert_eq!(rig.prompts(), count);
     }
-    let log = rig.shell.calls.lock().unwrap().join("\n");
+    let log = rig.check_ins().join("\n");
     assert!(log.contains("test-child on local: stalled; age 12m; transcript changed 12m ago"));
     assert!(log.contains("line5"));
-    assert!(log.contains("agents send"));
+    assert!(log.contains("wrangle send"));
     // Unknown/working changes within the same stall do not rearm its event.
     let reports = rig.reports(840_001, "idle", "unknown", Some(1));
     tick(&rig.fleet(), &reports, 840_001).unwrap();
@@ -243,19 +268,18 @@ fn top_level_notification_once_per_stall_and_recovery() {
 }
 
 #[test]
-fn uncertain_delivery_is_durable_and_retried_after_thirty_minutes() {
+fn an_owner_without_an_inbox_reader_gets_no_check_in_until_it_has_one() {
     let rig = Rig::new();
+    std::fs::remove_file(rig.ledger.dir.join("inbox/term_owner.reader.json")).unwrap();
     rig.item("agent");
-    *rig.shell.fail_prompt.lock().unwrap() = true;
     let reports = rig.reports(600_001, "idle", "working", Some(1));
-    assert!(tick(&rig.fleet(), &reports, 600_001).is_err());
-    *rig.shell.fail_prompt.lock().unwrap() = false;
+    tick(&rig.fleet(), &reports, 600_001).unwrap();
+    assert_eq!(rig.prompts(), 0);
+    // The stall stays due, so the first scan after a reader registers delivers it.
+    rig.reader();
     let reports = rig.reports(660_001, "idle", "working", Some(1));
     tick(&rig.fleet(), &reports, 660_001).unwrap();
     assert_eq!(rig.prompts(), 1);
-    let reports = rig.reports(2_400_001, "idle", "working", Some(1));
-    tick(&rig.fleet(), &reports, 2_400_001).unwrap();
-    assert_eq!(rig.prompts(), 2);
 }
 
 #[test]
@@ -292,20 +316,10 @@ fn remote_stall_uses_report_state_and_bounded_remote_tail() {
     .unwrap();
     tick(&rig.fleet(), &reports, 600_001).unwrap();
     let log = rig.shell.calls.lock().unwrap().join("\n");
-    assert!(log.contains("remote-child on peer: stalled"));
+    assert!(rig.check_ins()[0].contains("remote-child on peer: stalled"));
     assert!(log.contains("host tail agent child"));
-    assert!(log.contains("peer log line"));
+    assert!(rig.check_ins()[0].contains("peer log line"));
     assert!(!log.contains("herdr notification"));
-}
-
-#[test]
-fn owner_must_still_be_idle_after_log_reads() {
-    let rig = Rig::new();
-    rig.item("agent");
-    let reports = rig.reports(600_001, "idle", "working", Some(1));
-    *rig.shell.owner.lock().unwrap() = "working".into();
-    tick(&rig.fleet(), &reports, 600_001).unwrap();
-    assert_eq!(rig.prompts(), 0);
 }
 
 #[test]
@@ -343,95 +357,32 @@ fn closed_item_does_not_observe_reused_or_retracked_pane() {
     let reports = rig.reports(720_001, "idle", "working", Some(60_001));
     tick(&rig.fleet(), &reports, 720_001).unwrap();
     assert_eq!(rig.prompts(), 1);
-    let calls = rig.shell.calls.lock().unwrap();
-    let prompt = calls
-        .iter()
-        .find(|s| s.starts_with("herdr agent prompt"))
-        .unwrap();
+    let prompt = &rig.check_ins()[0];
     assert!(prompt.contains("new-child-name"));
     assert!(!prompt.contains("test-child on"));
 }
 
 #[test]
-fn finished_child_prompts_its_owner_at_once_and_until_it_is_closed() {
+fn a_finished_child_is_left_to_the_sweep_and_named_at_the_regular_check_in() {
     let rig = Rig::new();
     rig.item("agent");
     let reports = rig.reports(1, "working", "working", Some(1));
     tick(&rig.fleet(), &reports, 1).unwrap();
-    assert_eq!(rig.prompts(), 0);
-    // The child finishes with work to land while its owner is idle: the owner hears at once.
+    // The child finishes with work to land: the sweep sends its reply, so no check-in now.
     let reports = rig.reports(60_001, "idle", "done", Some(1));
     crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
     let item = &crate::items::list(&rig.ledger).unwrap()[0];
-    assert_eq!(item.closed_ms, None);
     assert!(crate::items::finished(item, &reports));
     tick(&rig.fleet(), &reports, 60_001).unwrap();
-    assert_eq!(rig.prompts(), 1);
-    assert!(
-        rig.shell
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|s| s.contains("finished")
-                && s.contains("Still open with work to land: test-child."))
-    );
-    // Done and idle are one event: a flip does not prompt again before the check-in.
-    let reports = rig.reports(120_001, "idle", "idle", Some(1));
-    tick(&rig.fleet(), &reports, 120_001).unwrap();
-    assert_eq!(rig.prompts(), 1);
-    // The regular check-in repeats while the child stays open.
+    assert_eq!(rig.prompts(), 0);
+    // The regular check-in names it while it stays open.
     let reports = rig.reports(1_860_001, "idle", "done", Some(1));
     tick(&rig.fleet(), &reports, 1_860_001).unwrap();
-    assert_eq!(rig.prompts(), 2);
-    // After `wrangle close`, the owner hears nothing more about it.
+    assert_eq!(rig.prompts(), 1);
+    assert!(rig.check_ins()[0].contains("Still open with work to land: test-child."));
+    // After it closes, the owner hears nothing more about it.
     crate::items::close(&rig.ledger, "local", "child", 1_900_000).unwrap();
     let reports = rig.reports(5_000_001, "idle", "done", Some(1));
-    tick(&rig.fleet(), &reports, 5_000_001).unwrap();
-    assert_eq!(rig.prompts(), 2);
-}
-
-#[test]
-fn a_captured_reply_reaches_the_owner_once_even_after_the_sweep_closed_the_child() {
-    let rig = Rig::new();
-    rig.item("agent");
-    crate::items::set_reply(
-        &rig.ledger,
-        "child",
-        crate::items::Reply {
-            seq: 4,
-            text: "Found 3 bugs; see notes.md.".into(),
-            captured_ms: 1,
-            reported_ms: None,
-        },
-    )
-    .unwrap();
-    crate::items::close(&rig.ledger, "local", "child", 2).unwrap();
-    // The owner is busy: nothing yet, and the reply waits.
-    let reports = rig.reports(60_001, "working", "idle", Some(1));
-    tick(&rig.fleet(), &reports, 60_001).unwrap();
-    assert_eq!(rig.prompts(), 0);
-    let reports = rig.reports(120_001, "idle", "idle", Some(1));
-    tick(&rig.fleet(), &reports, 120_001).unwrap();
-    assert_eq!(rig.prompts(), 1);
-    let calls = rig.shell.calls.lock().unwrap().join("\n");
-    assert!(
-        calls.contains("test-child on local: finished and closed"),
-        "{calls}"
-    );
-    assert!(
-        calls.contains("--- final reply ---\nFound 3 bugs; see notes.md.\n"),
-        "{calls}"
-    );
-    assert_eq!(
-        crate::items::list(&rig.ledger).unwrap()[0]
-            .reply
-            .as_ref()
-            .unwrap()
-            .reported_ms,
-        Some(120_001)
-    );
-    let reports = rig.reports(5_000_001, "idle", "idle", Some(1));
     tick(&rig.fleet(), &reports, 5_000_001).unwrap();
     assert_eq!(rig.prompts(), 1);
 }
@@ -480,13 +431,9 @@ fn check_ins_report_orphans_the_sweep_keeps() {
                 "name":"lost-child","reason":"owner gone is gone; the child is working","since_ms":1}]),
         )
         .unwrap();
-    let reports = rig.reports(60_001, "idle", "done", Some(1));
-    tick(&rig.fleet(), &reports, 60_001).unwrap();
-    let calls = rig.shell.calls.lock().unwrap();
-    let prompt = calls
-        .iter()
-        .find(|s| s.starts_with("herdr agent prompt owner"))
-        .unwrap();
+    let reports = rig.reports(1_800_001, "idle", "done", Some(1));
+    tick(&rig.fleet(), &reports, 1_800_001).unwrap();
+    let prompt = &rig.check_ins()[0];
     assert!(
         prompt.contains(
             "Orphaned children the sweep keeps: lost-child on local (owner gone is gone; the child is working)."

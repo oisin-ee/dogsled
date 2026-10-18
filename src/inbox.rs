@@ -127,6 +127,58 @@ impl<'a> From<&'a Record> for Claimed<'a> {
     }
 }
 
+/// The hook event a Claude Code or Codex inbox reader runs at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "PascalCase")]
+pub enum HookEvent {
+    Stop,
+    UserPromptSubmit,
+}
+
+/// The hook output that hands `records` to Claude Code or Codex, or `None` when there are
+/// none. At `Stop`, `decision: block` continues the turn with the reason as the next prompt;
+/// at `UserPromptSubmit`, `additionalContext` sits beside the user's text and never replaces it.
+pub fn hook_output(records: &[Record], event: HookEvent) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+    let text = records
+        .iter()
+        .map(Record::render)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let value = match event {
+        HookEvent::Stop => serde_json::json!({ "decision": "block", "reason": text }),
+        HookEvent::UserPromptSubmit => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": text,
+            }
+        }),
+    };
+    Some(format!("{value}\n"))
+}
+
+/// Run the inbox hook for this pane: claim its records, print them in the event's format,
+/// and acknowledge them. The harness has the text once it is written; a failed write leaves
+/// the records claimed, and they are offered again when the lease ends.
+pub fn hook(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    harness: &str,
+    event: HookEvent,
+    now: u64,
+) -> Result<()> {
+    let pane = own_pane(None)?;
+    let records = claim_for(ledger, shell, &pane, harness, now)?;
+    if let Some(output) = hook_output(&records, event) {
+        crate::print(false, &(), || output)?;
+        let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+        ack_for(ledger, shell, &pane, &ids, now)?;
+    }
+    Ok(())
+}
+
 /// The harness that reads a terminal's inbox. Registered on the reader's first claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reader {
@@ -366,6 +418,9 @@ pub struct Sent {
     pub pane: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The target's harness, as Herdr reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     pub from: Sender,
     pub kind: String,
     pub created_ms: u64,
@@ -483,6 +538,7 @@ pub fn send(
         terminal,
         pane: target.agent.pane.clone(),
         name: target.agent.name.clone(),
+        harness: target.agent.agent.clone(),
         from,
         kind: kind.into(),
         created_ms: now,
@@ -730,6 +786,18 @@ fn state_text(state: State, lease: &Backoff, reason: Option<&str>, now: u64) -> 
     }
 }
 
+/// A sent record's state. Claude Code and Codex read their inbox only from a hook, so an
+/// open record to one waits for the target's next prompt or stop.
+fn sent_text(sent: &Sent, now: u64) -> String {
+    if sent.state.open() && matches!(sent.harness.as_deref(), Some("claude" | "codex")) {
+        return format!(
+            "waiting for {}'s next turn",
+            sent.name.as_deref().unwrap_or(&sent.pane)
+        );
+    }
+    state_text(sent.state, &Backoff::default(), sent.reason.as_deref(), now)
+}
+
 pub fn list_for(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
@@ -764,7 +832,7 @@ pub fn list_for(
                 s.name.as_deref().unwrap_or(&s.pane),
                 s.host_label
             ),
-            state: state_text(s.state, &Backoff::default(), s.reason.as_deref(), now),
+            state: sent_text(s, now),
             open: s.state.open(),
             summary: String::new(),
             created_ms: s.created_ms,
@@ -879,9 +947,27 @@ pub fn host(ledger: &Ledger, cmd: crate::cli::HostCommand) -> Result<()> {
     crate::print(true, &value, String::new)
 }
 
+/// The terminal of `owner`, an agent pane on this host, when a reader reads its inbox.
+pub fn readable(
+    ledger: &Ledger,
+    reports: &[crate::hosts::HostReport],
+    owner: &str,
+) -> Result<Option<String>> {
+    let Some(terminal) = reports
+        .iter()
+        .find(|h| h.host.is_local())
+        .and_then(|h| h.probe.as_ref())
+        .and_then(|p| p.agent_panes.iter().find(|a| a.pane == owner))
+        .and_then(|a| a.terminal_id.clone())
+    else {
+        return Ok(None);
+    };
+    Ok(reader(ledger, &terminal)?.map(|_| terminal))
+}
+
 /// Put a note from wrangle in the inbox of `owner`, an agent pane on this host. `id` makes it
-/// idempotent. `Ok(false)` when the owner is not running or has no reader: the caller keeps
-/// its other path.
+/// idempotent. `Ok(false)` when the owner is not running or has no reader: nothing would
+/// deliver it, so the caller keeps it for later.
 pub fn notify(
     ledger: &Ledger,
     reports: &[crate::hosts::HostReport],
@@ -891,13 +977,7 @@ pub fn notify(
     text: String,
     now: u64,
 ) -> Result<bool> {
-    let Some(terminal) = reports
-        .iter()
-        .find(|h| h.host.is_local())
-        .and_then(|h| h.probe.as_ref())
-        .and_then(|p| p.agent_panes.iter().find(|a| a.pane == owner))
-        .and_then(|a| a.terminal_id.clone())
-    else {
+    let Some(terminal) = readable(ledger, reports, owner)? else {
         return Ok(false);
     };
     let record = Record {

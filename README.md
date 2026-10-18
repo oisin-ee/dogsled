@@ -166,7 +166,7 @@ The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted,anchor_
 The service admits tickets in FIFO order using the same placement policy.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
 A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
-For non-waiting callers, admission tells the owner through its inbox. An owner without an inbox reader still gets a `herdr agent prompt` until the Claude and Codex readers ship.
+For non-waiting callers, admission tells the owner through its inbox. An owner without an inbox reader hears once it has one; nothing is typed into its terminal.
 `status` lists open items per owner and pending tickets. `--brief` includes their counts. Prompt context adds the caller's own `To land:` line.
 
 ## Inbox
@@ -186,7 +186,9 @@ A reader claims records with `inbox claim`, which is a lease. A claimed record i
 Readers:
 
 - **Pi:** the extension watches its inbox file, injects each batch as one `wrangle` message (`steer` while the agent runs, a new turn when it is idle), and acknowledges it when Pi has written the message to the session.
-- **Claude Code and Codex:** none yet. Until their hooks read the inbox, records to them fail at once.
+- **Claude Code and Codex:** `wrangle hook inbox --harness claude|codex --event Stop|UserPromptSubmit`, registered by the plugin. The first hook run registers the reader. At `Stop`, records continue the turn as `{"decision":"block","reason":…}`; at `UserPromptSubmit`, they go beside the user's text as `additionalContext`. Records printed are acknowledged. An empty inbox prints nothing, so a stop ends as usual.
+
+A hook runs only when its harness acts, so an idle Claude Code or Codex agent sees a record at its next prompt or stop. Pi has no such delay.
 
 `inbox list --json` gives `{pane,terminal,received,sent,lines}`; `lines` is the display form the Pi panel shows.
 
@@ -260,20 +262,18 @@ A `working` or `unknown` agent stalls after ten minutes without a transcript cha
 An agent without a readable transcript never stalls. Recovery clears its `$wrangle` sidebar token.
 Status lists stalled panes. Brief status and prompt context include a stall count within six lines.
 
-The owner's service checks every minute. It prompts only `idle` or `done` owners, never `working` or `blocked` owners.
-A check-in still reaches the owner through `herdr agent prompt`; it moves to the inbox in a later release.
-A stall, a completed job, or a final reply the inbox could not deliver makes a check-in due. Other open work gets a check-in after 30 minutes without a check-in or lifecycle event.
+The owner's service checks every minute. It checks in only with `idle` or `done` owners, never `working` or `blocked` owners.
+A check-in is a `check-in` record in the owner's inbox. An owner without an inbox reader gets none; a due check-in stays due until it has one.
+A stall or a completed job makes a check-in due. Other open work gets a check-in after 30 minutes without a check-in or lifecycle event. A finished child's reply comes from the sweep, not a check-in.
 Transcript writes alone do not postpone regular check-ins. Pending job-completion events survive item closure.
 The note includes names, hosts, states, ages, transcript silence, and bounded recent activity.
 Known Pi, Claude, and Codex transcripts supply the latest tool call or message. Unknown formats fall back to plain pane text.
 Job notes use the last five log lines. All note content has terminal escape codes removed.
-It asks the owner to wait, nudge, or stop the item. Output in the note is untrusted data.
+It asks the owner to wait, message a child with `wrangle send`, close it, or stop a job. Output in the note is untrusted data.
 A stalled top-level pane gets one Herdr notification per stall episode.
 
-Locked `watchdog.json` records events and delivery attempts. `parents.json` identifies tracked children on their own host.
-A normal service restart does not repeat a delivered check-in. Herdr offers no delivery idempotency key.
-An interrupted or failed prompt remains `pending` or `uncertain` on disk and retries after 30 minutes, not every tick.
-A crash between Herdr acceptance and local confirmation can therefore duplicate one delayed check-in.
+Locked `watchdog.json` records events and last check-ins. `parents.json` identifies tracked children on their own host.
+A normal service restart does not repeat a delivered check-in. The inbox lease carries delivery from there.
 Notification attempts are recorded before delivery and never repeat within that stall; a crash can lose that notification.
 
 For authorized live tests only, `WRANGLE_TEST_STALL_MS` overrides the ten-minute threshold with a positive millisecond value.
@@ -445,8 +445,8 @@ The removed lead ledger and event log are not read or migrated.
 ## Prompt context and integrations
 
 `wrangle hook context --harness claude|codex|pi` formats the same text as `status --brief`.
-Claude Code and Codex register `SessionStart` and `UserPromptSubmit` hooks in `plugins/wrangle`.
-Each registration supplies `--event SessionStart` or `--event UserPromptSubmit`. The default event is `UserPromptSubmit`.
+Claude Code and Codex register `SessionStart` and `UserPromptSubmit` context hooks, and `UserPromptSubmit` and `Stop` inbox hooks (see [Inbox](#inbox)), in `plugins/wrangle`.
+Each registration supplies `--event`. The default context event is `UserPromptSubmit`.
 The CLI never reads stdin. Claude Code and Codex receive `hookSpecificOutput` JSON with `hookEventName` and `additionalContext`.
 Pi receives plain text through its `before_agent_start` extension. All three use the same snapshot reader and formatter.
 

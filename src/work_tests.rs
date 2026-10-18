@@ -26,6 +26,7 @@ fn snapshot(now: u64) -> Snapshot {
                 pane: "owner".into(),
                 agent: None,
                 state: "working".into(),
+                terminal_id: Some("term_owner".into()),
                 name: None,
                 transcript: None,
                 transcript_modified: None,
@@ -43,7 +44,7 @@ fn snapshot(now: u64) -> Snapshot {
 }
 
 #[test]
-fn fifo_admission_rechecks_reservations_and_retries_notification_on_next_tick() {
+fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_inbox() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     let shell = Fake::new();
     let policy = Policy {
@@ -82,23 +83,38 @@ fn fifo_admission_rechecks_reservations_and_retries_notification_on_next_tick() 
     let tickets = work::queue(&ledger).unwrap();
     assert_eq!(tickets[0].state, "admitted");
     assert_eq!(tickets[1].state, "pending");
+    // Without an inbox reader the owner is not told yet, and nothing is typed into it.
     assert!(!tickets[0].notified);
-    let mut current: Snapshot = ledger.read("host.json").unwrap().unwrap();
-    current.probe.agent_panes[0].state = "idle".into();
-    ledger.write("host.json", &current).unwrap();
-    let result = tickets[0].result.as_ref().unwrap();
-    shell.on(
-        &format!(
-            "herdr agent prompt owner wrangle: ticket {} admitted on local: {result}",
-            tickets[0].id
-        ),
-        "{}",
-    );
+    crate::inbox::claim(
+        &ledger,
+        "term_owner",
+        &crate::inbox::Reader {
+            harness: "claude".into(),
+            pane: "owner".into(),
+            registered_ms: 100,
+        },
+        100,
+    )
+    .unwrap();
+    // A working owner hears too: its reader delivers at the next step.
     work::tick(&fleet, 101).unwrap();
     assert!(work::queue(&ledger).unwrap()[0].notified);
-    assert_eq!(shell.calls.lock().unwrap().len(), 1);
+    let told = crate::inbox::received(&ledger, "term_owner").unwrap();
+    assert_eq!(told.len(), 1);
+    let result = tickets[0].result.as_ref().unwrap();
+    assert_eq!(
+        told[0].text,
+        format!(
+            "wrangle: ticket {} admitted on local: {result}",
+            tickets[0].id
+        )
+    );
     work::tick(&fleet, 102).unwrap();
-    assert_eq!(shell.calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        crate::inbox::received(&ledger, "term_owner").unwrap().len(),
+        1
+    );
+    assert_eq!(shell.calls.lock().unwrap().len(), 0);
     // Exactly at TTL, a fresh sample admits the second ticket without a sleep.
     let mut refreshed = snapshot(90_100);
     refreshed.probe.agent_panes[0].state = "working".into();

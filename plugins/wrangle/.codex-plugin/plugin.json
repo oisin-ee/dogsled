@@ -30,6 +30,22 @@
               "type": "command",
               "command": "sh \"$PLUGIN_ROOT/hooks/context.sh\" --harness codex --event UserPromptSubmit || true",
               "timeout": 6
+            },
+            {
+              "type": "command",
+              "command": "sh \"$PLUGIN_ROOT/hooks/inbox.sh\" --harness codex --event UserPromptSubmit || true",
+              "timeout": 6
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "sh \"$PLUGIN_ROOT/hooks/inbox.sh\" --harness codex --event Stop || true",
+              "timeout": 6
             }
           ]
         }

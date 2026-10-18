@@ -104,16 +104,14 @@ A job item closes when its job ends. An agent item closes when its pane closes, 
 
 **Stall.** An agent is stalled when Herdr shows it `working` or `unknown` and its transcript (`transcript` in host.json) has not changed for 10 min. The screen is not a signal: spinners and elapsed timers redraw it while a tool call hangs. An agent with no transcript is never marked stalled. Unit 3 confirms where Claude Code and Codex transcripts are, because Herdr may report only a session id for them.
 
-**Check-in.** `wrangle serve` on the owner's host checks every minute. It reads the state of remote items from the peers' host.json through the status cache. For each owner on its host that is `idle` or `done` and has open items, it runs `herdr agent prompt <owner> "<note>"`:
+**Check-in.** `wrangle serve` on the owner's host checks every minute. It reads the state of remote items from the peers' host.json through the status cache. For each owner on its host that is `idle` or `done`, has open items, and has an inbox reader, it puts a `check-in` record in the owner's inbox:
 - at once when an item stalls or a job ends;
 - otherwise 30 min after the last check-in or item event.
 
-The note lists each item (name, host, state, age, time since its transcript changed, last 5 lines) and asks the owner to keep waiting, nudge the item, or stop it. Serve skips owners that are `working` (the note waits until they are idle) and owners that are `blocked` (the user is in the loop). It sets `$wrangle = "stalled 10m"` on a stalled pane.
+The note lists each item (name, host, state, age, time since its transcript changed, last 5 lines) and asks the owner to keep waiting, message the item, close it, or stop it. Serve skips owners that are `working` (the note waits until they are idle) and owners that are `blocked` (the user is in the loop). It sets `$wrangle = "stalled 10m"` on a stalled pane.
 
 **Durability.** Events are captured before reconciliation, including between one-minute check-in deadlines. Transcript writes alone are not lifecycle events.
-Normal restarts retain delivered events and last-send times. Herdr has no prompt idempotency key, so crash-safe exactly-once delivery is unavailable.
-Each prompt attempt is persisted before submission. Interrupted or failed attempts remain visible and retry after 30 minutes.
-This can duplicate one delayed check-in after an ambiguous acceptance, but avoids restart spam and silent permanent loss.
+Normal restarts retain delivered events and last-send times. The inbox lease carries each check-in until the reader acknowledges it; nothing is typed into the owner's terminal.
 Top-level notification attempts are at-most-once per stall; a crash during submission can lose that notification.
 Watchdog, admission, and the sweep have separate action workers, so slow setup or cleanup cannot block check-ins or publication.
 
@@ -222,7 +220,7 @@ Units 1–3 are sequential. Unit 4 builds on units 1 and 2. Unit 5 follows each 
 ## Decisions
 
 1. Stall: Herdr shows `working` or `unknown` and the transcript is unchanged for 10 min.
-2. Wake mechanism: check-ins through `herdr agent prompt` (part 4); test A proves them in unit 3. Replies, blocked reports, ticket notices, and peer messages go through the inbox instead, and check-ins follow (board plan, U5b), because typing into a pane merged check-ins into the user's drafts.
+2. Wake mechanism: check-ins through `herdr agent prompt` (part 4); test A proves them in unit 3. Since 0.11, check-ins, replies, blocked reports, ticket notices, and peer messages all go through the inbox (board plan, U5b), because typing into a pane merged check-ins into the user's drafts.
 3. Cleanup: the sweep closes a finished child after it captures the reply (board plan, decision 1); `wrangle close` ends one early. The `serve` sweep is the last resort: it removes only what loses nothing (part 6). Everything else waits for `wrangle prune`, which asks first.
 4. Service install: dotfiles installs the launchd agent (macOS) and the systemd user unit (Linux) on every host.
 5. The old 0.5.0 `prepare` PR was never pushed. Unit 1 carries its fix: the hook runs in the checkout, with no `{repo}`.

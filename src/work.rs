@@ -596,19 +596,6 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
             {
                 continue;
             }
-            let ready = reports
-                .iter()
-                .find(|h| h.host.is_local())
-                .and_then(|h| h.probe.as_ref())
-                .is_some_and(|p| {
-                    p.agent_panes.iter().any(|a| {
-                        a.pane == ticket.request.owner
-                            && matches!(a.state.as_str(), "idle" | "done")
-                    })
-                });
-            if !ready {
-                continue;
-            }
             let result = ticket.result.as_ref();
             let host = result
                 .and_then(|r| r["host"].as_str().or_else(|| r["host"]["id"].as_str()))
@@ -621,8 +608,8 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
                 "wrangle: ticket {} {} on {host}: {summary}",
                 ticket.id, ticket.state
             );
-            // The owner's inbox reader shows it; an owner without one is still prompted until
-            // every harness reads its inbox.
+            // The owner's inbox reader shows it. An owner without a reader hears nothing until
+            // it has one; nothing types into its terminal.
             let id = format!("ticket-{}", ticket.id);
             if !crate::inbox::notify(
                 fleet.ledger,
@@ -630,18 +617,10 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
                 &ticket.request.owner,
                 &id,
                 "ticket",
-                text.clone(),
+                text,
                 now,
             )? {
-                fleet.shell.run_ok(
-                    "herdr",
-                    &[
-                        "agent".into(),
-                        "prompt".into(),
-                        ticket.request.owner.clone(),
-                        text,
-                    ],
-                )?;
+                continue;
             }
             update_ticket(fleet.ledger, &ticket.id, |t| t.notified = true)?;
         }
