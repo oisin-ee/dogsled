@@ -76,6 +76,26 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
     assert_eq!(claimed.as_array().unwrap().len(), 1);
     assert_eq!(claimed[0]["text"], "please review");
     assert_eq!(claimed[0]["state"], "claimed");
+    // The reader shows `message`; the sender and kind come from wrangle, not the harness.
+    assert_eq!(
+        claimed[0]["message"],
+        "wrangle message from lead (w1:p1 on ".to_owned()
+            + sent["from"]["host"].as_str().unwrap()
+            + "):\nplease review"
+    );
+    assert!(
+        claimed[0]["sender"]
+            .as_str()
+            .unwrap()
+            .starts_with("lead (w1:p1 on ")
+    );
+    let (_, path) = as_pane(&rig, "w1:p2", &["inbox", "path"]);
+    assert_eq!(path["file"], "term_work.json");
+    assert!(
+        std::path::Path::new(path["dir"].as_str().unwrap())
+            .join("term_work.json")
+            .is_file()
+    );
     // The lease holds the record while the reader shows it.
     let (_, again) = as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
     assert_eq!(again, json!([]));
@@ -84,6 +104,11 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
     assert_eq!((code, acked), (0, json!({"acked":1})));
     let (_, listing) = as_pane(&rig, "w1:p2", &["inbox", "list"]);
     assert_eq!(listing["received"][0]["state"], "delivered");
+    // The panel shows these lines as they are; wrangle owns the state wording.
+    assert_eq!(listing["lines"][0]["direction"], "received");
+    assert_eq!(listing["lines"][0]["state"], "delivered");
+    assert_eq!(listing["lines"][0]["summary"], "please review");
+    assert_eq!(listing["lines"][0]["open"], false);
     let (_, listing) = rig.json(&["inbox", "list"]);
     assert_eq!(listing["sent"][0]["id"], id);
     // Nothing typed into any pane.

@@ -106,6 +106,27 @@ impl Record {
     }
 }
 
+/// A claimed record with the text its reader shows the agent, so no harness rebuilds it.
+#[derive(Debug, Serialize)]
+pub struct Claimed<'a> {
+    #[serde(flatten)]
+    pub record: &'a Record,
+    /// What the agent reads: the sender, the kind, and the text.
+    pub message: String,
+    /// The sender as one label, for a reader's card.
+    pub sender: String,
+}
+
+impl<'a> From<&'a Record> for Claimed<'a> {
+    fn from(record: &'a Record) -> Self {
+        Self {
+            record,
+            message: record.render(),
+            sender: record.from.describe(),
+        }
+    }
+}
+
 /// The harness that reads a terminal's inbox. Registered on the reader's first claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reader {
@@ -153,9 +174,13 @@ fn update<T>(
     validate_terminal(terminal)?;
     let store = store(ledger);
     store.with_lock(terminal, || {
-        let mut all = records(ledger, terminal)?;
+        let before = records(ledger, terminal)?;
+        let mut all = before.clone();
         let result = change(&mut all)?;
-        store.write(&format!("{terminal}.json"), &all)?;
+        // A reader watches this file, so an empty claim must not touch it.
+        if all != before {
+            store.write(&format!("{terminal}.json"), &all)?;
+        }
         Ok(result)
     })
 }
@@ -651,6 +676,21 @@ pub fn ack_for(
     ack(ledger, &terminal_of(&local_agent(shell, pane)?)?, ids, now)
 }
 
+/// The directory and file name of `pane`'s inbox. A reader watches the directory, because
+/// each write replaces the file.
+pub fn path_for(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    pane: &str,
+) -> Result<(String, String)> {
+    let terminal = terminal_of(&local_agent(shell, pane)?)?;
+    validate_terminal(&terminal)?;
+    Ok((
+        store(ledger).dir.display().to_string(),
+        format!("{terminal}.json"),
+    ))
+}
+
 /// What `pane` received and sent.
 #[derive(Debug, Serialize)]
 pub struct Listing {
@@ -658,58 +698,109 @@ pub struct Listing {
     pub terminal: String,
     pub received: Vec<Record>,
     pub sent: Vec<Sent>,
+    /// Both lists as display lines, newest first within each direction.
+    pub lines: Vec<Line>,
 }
 
-pub fn list_for(ledger: &Ledger, shell: &dyn crate::shell::Shell, pane: &str) -> Result<Listing> {
+/// One record as a reader shows it.
+#[derive(Debug, Serialize)]
+pub struct Line {
+    /// `received` or `sent`.
+    pub direction: &'static str,
+    pub id: String,
+    pub kind: String,
+    /// The sender of a received record, the target of a sent one.
+    pub peer: String,
+    /// `pending`, `claimed, offered again in 40s`, `delivered`, or `failed: <reason>`.
+    pub state: String,
+    pub open: bool,
+    /// The first line of the text; sent records keep no text.
+    pub summary: String,
+    pub created_ms: u64,
+}
+
+fn state_text(state: State, lease: &Backoff, reason: Option<&str>, now: u64) -> String {
+    match state {
+        State::Claimed if !lease.ready(now) => format!(
+            "claimed, offered again in {}s",
+            lease.next_ms.saturating_sub(now).div_ceil(1000)
+        ),
+        State::Failed => format!("failed: {}", reason.unwrap_or("unknown")),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
+
+pub fn list_for(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    pane: &str,
+    now: u64,
+) -> Result<Listing> {
     let terminal = terminal_of(&local_agent(shell, pane)?)?;
     let mut sent: Vec<Sent> = outbox(ledger)?
         .into_iter()
         .filter(|s| s.from.pane.as_deref() == Some(pane))
         .collect();
     sent.reverse();
+    let received = received(ledger, &terminal)?;
+    let lines = received
+        .iter()
+        .map(|r| Line {
+            direction: "received",
+            id: r.id.clone(),
+            kind: r.kind.clone(),
+            peer: r.from.describe(),
+            state: state_text(r.state, &r.lease, r.reason.as_deref(), now),
+            open: r.state.open(),
+            summary: r.text.lines().next().unwrap_or_default().to_owned(),
+            created_ms: r.created_ms,
+        })
+        .chain(sent.iter().map(|s| Line {
+            direction: "sent",
+            id: s.id.clone(),
+            kind: s.kind.clone(),
+            peer: format!(
+                "{} on {}",
+                s.name.as_deref().unwrap_or(&s.pane),
+                s.host_label
+            ),
+            state: state_text(s.state, &Backoff::default(), s.reason.as_deref(), now),
+            open: s.state.open(),
+            summary: String::new(),
+            created_ms: s.created_ms,
+        }))
+        .collect();
     Ok(Listing {
         pane: pane.into(),
-        received: received(ledger, &terminal)?,
         terminal,
+        received,
         sent,
+        lines,
     })
 }
 
 impl Listing {
-    pub fn render(&self, now: u64) -> String {
+    pub fn render(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
-        let state = |state: State, lease: &Backoff, reason: Option<&str>| match state {
-            State::Claimed if !lease.ready(now) => format!(
-                "claimed, offered again in {}s",
-                lease.next_ms.saturating_sub(now).div_ceil(1000)
-            ),
-            State::Failed => format!("failed: {}", reason.unwrap_or("unknown")),
-            other => format!("{other:?}").to_lowercase(),
-        };
-        let _ = writeln!(out, "Received ({}):", self.received.len());
-        for r in &self.received {
-            let first = r.text.lines().next().unwrap_or_default();
-            let _ = writeln!(
-                out,
-                "  {} {} from {} [{}]: {first}",
-                r.id,
-                r.kind,
-                r.from.describe(),
-                state(r.state, &r.lease, r.reason.as_deref())
-            );
-        }
-        let _ = writeln!(out, "Sent ({}):", self.sent.len());
-        for s in &self.sent {
-            let _ = writeln!(
-                out,
-                "  {} {} to {} on {} [{}]",
-                s.id,
-                s.kind,
-                s.name.as_deref().unwrap_or(&s.pane),
-                s.host_label,
-                state(s.state, &Backoff::default(), s.reason.as_deref())
-            );
+        for (direction, title, count) in [
+            ("received", "Received", self.received.len()),
+            ("sent", "Sent", self.sent.len()),
+        ] {
+            let _ = writeln!(out, "{title} ({count}):");
+            for l in self.lines.iter().filter(|l| l.direction == direction) {
+                let to = if direction == "sent" { "to" } else { "from" };
+                let summary = if l.summary.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", l.summary)
+                };
+                let _ = writeln!(
+                    out,
+                    "  {} {} {to} {} [{}]{summary}",
+                    l.id, l.kind, l.peer, l.state
+                );
+            }
         }
         out
     }

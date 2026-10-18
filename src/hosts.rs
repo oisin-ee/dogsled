@@ -44,6 +44,9 @@ pub struct HostReport {
     pub headroom: Option<Headroom>,
     pub error: Option<String>,
     pub jobs: Vec<crate::jobs::Job>,
+    /// When an unreachable peer is read again, after backoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -317,10 +320,29 @@ impl<'a> Fleet<'a> {
             headroom,
             error: cached.error,
             jobs,
+            retry_ms: (!cached.reachable && cached.retry.attempts > 0)
+                .then_some(cached.retry.next_ms),
         }
     }
 
-    fn cached_peer(&self, host: &Host, now: u64) -> Result<Cached> {
+    /// Clear `host`'s backoff and cache so the next status reads it at once ("retry now").
+    pub fn retry_now(&self, host: &Host) -> Result<()> {
+        if host.is_local() {
+            return Ok(());
+        }
+        let name = Self::peer_file(host);
+        self.ledger.with_lock(&name, || {
+            let file = format!("{name}.json");
+            if let Some(mut cached) = self.ledger.read::<Cached>(&file)? {
+                cached.retry.reset();
+                cached.fetched_ms = 0;
+                self.ledger.write(&file, &cached)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn peer_file(host: &Host) -> String {
         // Hex encoding prevents host ids from becoming path components.
         let key = host
             .id
@@ -334,7 +356,11 @@ impl<'a> Fleet<'a> {
                 ]
             })
             .collect::<String>();
-        let name = format!("peer-{key}");
+        format!("peer-{key}")
+    }
+
+    fn cached_peer(&self, host: &Host, now: u64) -> Result<Cached> {
+        let name = Self::peer_file(host);
         let file = format!("{name}.json");
         let source = self.remote_argv(host, &["snapshot".into()]);
         self.ledger.with_lock(&name, || {

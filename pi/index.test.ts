@@ -4,39 +4,71 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import wrangle from "./index.ts";
 
 type Handler = (event: any, ctx: any) => Promise<any> | void;
+const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
+
 function rig() {
 	const handlers = new Map<string, Handler>();
 	const calls: string[][] = [];
-	const widgets: unknown[] = [];
+	const widgets: any[] = [];
 	const notices: unknown[] = [];
 	const servers: unknown[] = [];
+	const commands = new Map<string, any>();
+	const renderers = new Map<string, any>();
+	const sent: any[] = [];
 	let code = 0;
 	let context = "local 3/8\n";
 	let missing = false;
-	let items: unknown = { items: [], queue: [] };
+	let board: unknown = { hosts: [], rows: [] };
 	const api = {
 		on(event: string, fn: Handler) { handlers.set(event, fn); },
 		registerMcpServer(name: string, config: unknown) { servers.push([name, config]); },
+		registerCommand(name: string, options: unknown) { commands.set(name, options); },
+		registerMessageRenderer(type: string, fn: unknown) { renderers.set(type, fn); },
+		sendMessage(message: unknown, options: unknown) { sent.push([message, options]); },
 		async exec(binary: string, args: string[], options?: { timeout: number }) {
 			calls.push([binary, ...args]);
 			if (missing) throw new Error("ENOENT");
 			if (args[0] === "hook") assert.equal(options?.timeout, 6_000);
-			return { code, stdout: args[0] === "hook" ? context : JSON.stringify(items), stderr: "failure", killed: false };
+			const stdout = args[0] === "hook" ? context
+				: args[0] === "board" ? JSON.stringify(board)
+				: args[1] === "claim" ? "[]"
+				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-wrangle-inbox", file: "t.json" })
+				: "{}";
+			return { code, stdout, stderr: "failure", killed: false };
 		},
 	};
 	wrangle(api as unknown as ExtensionAPI);
-	const ctx = { mode: "tui", ui: { setWidget: (...args: unknown[]) => widgets.push(args), notify: (...args: unknown[]) => notices.push(args) } };
-	return { calls, widgets, notices, servers, ctx, context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, items: (value: unknown) => { items = value; },
+	let drawn: () => void = () => {};
+	const ctx = { mode: "tui", hasUI: true, isIdle: () => true, ui: { setWidget: (...args: unknown[]) => { widgets.push(args); drawn(); }, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
+	/** Resolves at the next widget or notice: the end of a timer refresh. */
+	const next = () => new Promise<void>(resolve => { drawn = resolve; });
+	return { calls, widgets, notices, servers, commands, renderers, sent, ctx, next,
+		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; },
 		async invoke(name: string, event: unknown = {}) {
-			const handler = handlers.get(name); assert.ok(handler); return handler(event, ctx);
+			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
 		} };
 }
 
-test("registers the wrangle tools as a direct MCP server", () => {
+function withPane(t: { after: (fn: () => void) => void }) {
+	const previous = process.env["HERDR_PANE_ID"];
+	process.env["HERDR_PANE_ID"] = "w1:p1";
+	t.after(() => { if (previous === undefined) delete process.env["HERDR_PANE_ID"]; else process.env["HERDR_PANE_ID"] = previous; });
+}
+
+test("registers the wrangle tools, the panel command, and the message renderer", () => {
 	const r = rig();
 	assert.deepEqual(r.servers.map(s => (s as [string, Record<string, unknown>])[0]), ["wrangle"]);
 	const config = (r.servers[0] as [string, Record<string, unknown>])[1];
 	assert.deepEqual([config["args"], config["exposure"]], [["mcp"], "direct"]);
+	assert.ok(r.commands.has("wrangle"));
+	// The card names the sender and kind and shows the text, folded past 12 lines.
+	const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+	const message = { content: "x", details: { records: [{ id: "m", kind: "reply", sender: "web (w2:p1 on netcup)", text: long, created_ms: 0 }] } };
+	const lines = r.renderers.get("wrangle")(message, { expanded: false, outputPad: 1 }, plain).render(60).map((l: string) => l.trim());
+	assert.ok(lines.includes("wrangle reply from web (w2:p1 on netcup)"), lines.join("\n"));
+	assert.ok(lines.includes("line 11") && !lines.includes("line 12") && lines.includes("… 8 more lines"));
+	const open = r.renderers.get("wrangle")(message, { expanded: true, outputPad: 1 }, plain).render(60).map((l: string) => l.trim());
+	assert.ok(open.includes("line 19"));
 });
 
 test("uses the shared context hook and leaves prompts unchanged when unavailable", async () => {
@@ -52,60 +84,71 @@ test("uses the shared context hook and leaves prompts unchanged when unavailable
 	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
 });
 
-test("tracks structured and text spawn results, filters widget, and cleans up timer", async (t) => {
-	const previous = process.env["HERDR_PANE_ID"];
-	process.env["HERDR_PANE_ID"] = "w1:p1";
-	t.after(() => { if (previous === undefined) delete process.env["HERDR_PANE_ID"]; else process.env["HERDR_PANE_ID"] = previous; });
+test("the board widget follows wrangle board, refreshes every 10 s, and stops at shutdown", async (t) => {
+	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
 	await r.invoke("session_start");
+	// Claims first, so this pane is a registered reader before anyone sends to it.
+	assert.deepEqual(r.calls[0]?.slice(1, 3), ["inbox", "claim"]);
 	assert.deepEqual(r.widgets.at(-1), ["wrangle", undefined, { placement: "aboveEditor" }]);
-	r.items({ items: [
-		{ id: "j1", kind: "job", host: "peer", pane: "w2:p1", closed_ms: null },
-		{ id: "j2", kind: "job", closed_ms: 100 },
-		{ id: "a1", kind: "agent", name: "worker", host: "peer", pane: "w3:p1", closed_ms: null },
-		{ id: "a2", kind: "agent", name: "closed", closed_ms: 100 },
-	], queue: [{ id: "t1", state: "pending" }, { id: "t2", state: "admitted" }] });
-	const spawn = { spawned: true, machine: "peer", target: "w2:p1", name: "worker" };
-	await r.invoke("tool_result", { toolName: "agents", isError: false, details: spawn, content: [] });
-	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "track peer w2:p1 --name worker"));
-	assert.deepEqual(r.widgets.at(-1), ["wrangle", ["job j1 · peer · w2:p1", "child worker · peer · w3:p1 · wrangle close when done", "queued t1"], { placement: "aboveEditor" }]);
-	await r.invoke("tool_result", { toolName: "agents", isError: false, content: [{ type: "text", text: JSON.stringify(spawn) }] });
-	assert.equal(r.calls.filter(call => call[1] === "track").length, 2);
-	await r.invoke("tool_result", { toolName: "agents", isError: false, content: [{ type: "text", text: "not a spawn" }] });
-	const before = r.calls.length;
+	r.board({ hosts: [{ label: "local", service: "up", reachable: true, busy: 1, cores: 8, eligible: true }],
+		rows: [{ group: "running", kind: "job", id: "j1", name: "cargo test", what: "job", host: "local", state: "running", activity: "cargo test", age_ms: 60_000 }] });
+	const drawn = r.next();
 	t.mock.timers.tick(10_000);
-	await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
-	assert.equal(r.calls.length, before + 1);
+	await drawn;
+	const [key, factory, options] = r.widgets.at(-1);
+	assert.deepEqual([key, options], ["wrangle", { placement: "aboveEditor" }]);
+	const lines: string[] = factory(undefined, plain).render(80);
+	assert.ok(lines.some(l => l.includes("▸ cargo test")), lines.join("\n"));
 	await r.invoke("session_shutdown");
+	const after = r.calls.length;
 	t.mock.timers.tick(10_000);
-	assert.equal(r.calls.length, before + 1);
+	assert.equal(r.calls.length, after);
 	assert.deepEqual(r.widgets.at(-1), ["wrangle", undefined]);
 });
 
-test("tool_call places agents spawns and ignores other tools", async () => {
-	const r = rig();
-	assert.equal(await r.invoke("tool_call", { toolName: "bash", input: { command: "ls" } }), undefined);
-	const input = { action: "spawn", pane: "w8M:p1", cwd: "/x" };
-	assert.equal(await r.invoke("tool_call", { toolName: "agents", input }), undefined);
-	assert.deepEqual(input, { action: "spawn", pane: "w8M:p1", placement: "pane" });
-	assert.equal(r.calls.length, 0);
-});
-
-test("startup refresh failure notifies and the timer recovers", async (t) => {
-	const previous = process.env["HERDR_PANE_ID"];
-	process.env["HERDR_PANE_ID"] = "w1:p1";
-	t.after(() => { if (previous === undefined) delete process.env["HERDR_PANE_ID"]; else process.env["HERDR_PANE_ID"] = previous; });
+test("a failing board refresh is reported once and the timer recovers", async (t) => {
+	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
 	r.fail();
 	await r.invoke("session_start");
-	assert.equal(r.notices.length, 1);
-	assert.equal(r.widgets.length, 0);
+	const boardFailures = () => r.notices.filter(n => String((n as unknown[])[0]).includes("wrangle board failed")).length;
+	assert.equal(boardFailures(), 1);
 	r.recover();
-	r.items({ items: [{ id: "j1", kind: "job", host: "local", pane: "w2:p1", closed_ms: null }], queue: [] });
+	r.board({ hosts: [], rows: [{ group: "waiting", kind: "agent", id: "t1", name: "lints", what: "pi · sol", host: "any", state: "queued", activity: "for a host with room", age_ms: 0 }] });
+	const drawn = r.next();
 	t.mock.timers.tick(10_000);
-	await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
-	assert.deepEqual(r.widgets.at(-1), ["wrangle", ["job j1 · local · w2:p1"], { placement: "aboveEditor" }]);
+	await drawn;
+	assert.equal(typeof r.widgets.at(-1)[1], "function");
+	assert.equal(boardFailures(), 1);
 	await r.invoke("session_shutdown");
+});
+
+test("the board widget steps aside while /wrangle is open, so no row shows twice", async (t) => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "make", what: "job", host: "local", state: "running", activity: "make", age_ms: 0 }] });
+	await r.invoke("session_start");
+	assert.equal(typeof r.widgets.at(-1)[1], "function");
+	let during: unknown;
+	const ctx = { ...r.ctx, ui: { ...r.ctx.ui, custom: async () => { during = r.widgets.at(-1)[1]; return undefined; } } };
+	await r.commands.get("wrangle").handler("", ctx);
+	assert.equal(during, undefined);
+	assert.equal(typeof r.widgets.at(-1)[1], "function");
+	await r.invoke("session_shutdown");
+});
+
+test("without a Herdr pane the extension starts nothing", async () => {
+	const previous = process.env["HERDR_PANE_ID"];
+	delete process.env["HERDR_PANE_ID"];
+	try {
+		const r = rig();
+		await r.invoke("session_start");
+		assert.deepEqual(r.calls, []);
+	} finally {
+		if (previous !== undefined) process.env["HERDR_PANE_ID"] = previous;
+	}
 });

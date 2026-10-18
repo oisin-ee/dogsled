@@ -72,6 +72,9 @@ pub struct HostLine {
     pub eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// When an unreachable host is tried again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -212,10 +215,11 @@ fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         },
         kind: "job".into(),
         id: item.id.clone(),
-        name: job.and_then(|j| j.cmd.first()).map_or_else(
-            || item.id.clone(),
-            |c| c.rsplit('/').next().unwrap_or(c).into(),
-        ),
+        name: job
+            .and_then(|j| j.cmd.first())
+            .map(|c| c.rsplit('/').next().unwrap_or(c).to_owned())
+            .or_else(|| item.name.clone())
+            .unwrap_or_else(|| item.id.clone()),
         what: "job".into(),
         host: label(hosts, &item.host),
         pane: Some(item.pane.clone()),
@@ -305,7 +309,12 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
                     .and_then(|p| p.busy.map(|b| b * f64::from(p.cores))),
                 cores: h.probe.as_ref().map_or(0, |p| p.cores),
                 eligible: h.headroom.as_ref().is_some_and(|h| h.eligible),
-                reason: h.headroom.as_ref().and_then(|h| h.reason.clone()),
+                reason: h
+                    .headroom
+                    .as_ref()
+                    .and_then(|h| h.reason.clone())
+                    .or_else(|| (!h.reachable).then(|| h.error.clone()).flatten()),
+                retry_ms: h.retry_ms,
             })
             .collect(),
         rows,
@@ -414,6 +423,7 @@ mod tests {
             headroom: None,
             error: None,
             jobs: Vec::new(),
+            retry_ms: None,
         }
     }
 

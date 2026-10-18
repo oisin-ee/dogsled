@@ -19,6 +19,7 @@ mod integration;
 mod items;
 mod jobs;
 mod ledger;
+mod machines;
 mod mcp;
 mod node;
 mod plan;
@@ -217,7 +218,8 @@ fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool)
         InboxCommand::Claim { harness, pane } => {
             let pane = inbox::own_pane(pane)?;
             let records = inbox::claim_for(ledger, shell, &pane, &harness, now)?;
-            print(json, &records, || {
+            let claimed: Vec<inbox::Claimed> = records.iter().map(inbox::Claimed::from).collect();
+            print(json, &claimed, || {
                 records.iter().fold(String::new(), |mut out, r| {
                     let _ = write!(out, "{}\n{}\n\n", r.id, r.render());
                     out
@@ -233,8 +235,16 @@ fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool)
         }
         InboxCommand::List { pane } => {
             let pane = inbox::own_pane(pane)?;
-            let listing = inbox::list_for(ledger, shell, &pane)?;
-            print(json, &listing, || listing.render(now))
+            let listing = inbox::list_for(ledger, shell, &pane, now)?;
+            print(json, &listing, || listing.render())
+        }
+        InboxCommand::Path { pane } => {
+            let pane = inbox::own_pane(pane)?;
+            let (dir, file) = inbox::path_for(ledger, shell, &pane)?;
+            let value = serde_json::json!({ "dir": dir, "file": file });
+            print(json, &value, || {
+                format!("{}\n", std::path::Path::new(&dir).join(&file).display())
+            })
         }
     }
 }

@@ -11,6 +11,8 @@ mod inbox;
 mod jobs;
 #[path = "cli/lifecycle.rs"]
 mod lifecycle;
+#[path = "cli/machines.rs"]
+mod machines;
 #[path = "cli/mcp.rs"]
 mod mcp;
 #[path = "cli/place.rs"]
@@ -87,6 +89,7 @@ case "$*" in
     if test -f "$RIG/fail-close"; then echo close-refused >&2; exit 1; fi
     printf '{}\n' ;;
   'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
+  'machine rename'*|'machine enable'*|'machine disable'*) printf '{}\n' ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
@@ -356,12 +359,24 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["hosts"][1]["reachable"], false);
     assert_eq!(status["hosts"][1]["probe"]["load1"], 6.0);
+    // The panel shows when the next read happens; the board carries the same time.
+    let retry = status["hosts"][1]["retry_ms"].as_u64().unwrap();
+    assert!(retry > now(), "{retry}");
+    let (_, board) = rig.json(&["board", "--all"]);
+    assert_eq!(board["hosts"][1]["retry_ms"], retry);
     assert!(
         String::from_utf8(rig.run(&["status", "--line"]).stdout)
             .unwrap()
             .contains("netcup 4/7 ?")
     );
+    // "Retry now" reads the peer at once instead of waiting out the backoff.
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
+    let reads = rig.log("ssh.log").lines().count();
+    let (code, report) = rig.json(&["retry", "netcup"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["reachable"], true);
+    assert!(report["retry_ms"].is_null());
+    assert_eq!(rig.log("ssh.log").lines().count(), reads + 1);
     rig.expire_cache();
     rig.put("remote.json", &Value::Null);
     let (_, status) = rig.json(&["status"]);

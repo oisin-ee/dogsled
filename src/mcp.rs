@@ -270,6 +270,7 @@ impl Server {
                 fleet.ledger,
                 fleet.shell,
                 &pane,
+                now_ms(),
             )?)?)
         })
         .await
