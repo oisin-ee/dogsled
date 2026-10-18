@@ -12,8 +12,8 @@ Any agent (Pi, Claude Code, Codex) and the user can:
 4. Get a reliable wake-up when a child agent or job ends, stalls, or fails.
 5. Find and remove cruft on a host (stale panes, orphaned worktrees, full disks).
 
-Wrangle does not replace Shepherdr. Shepherdr keeps agent spawn and parent/child messages.
-Wrangle does placement, jobs, the queue, the stall watchdog, status, and cleanup.
+Wrangle replaces Shepherdr for delegation. It starts Pi, Claude, and Codex children, carries every message between agents through an inbox, closes children on events, and does placement, jobs, the queue, the stall watchdog, status, and cleanup.
+The board, inbox, and event-driven close are specified in `docs/plans/2026-10-17-wrangle-board.md`.
 
 ## Where the user and agents see it
 
@@ -23,8 +23,8 @@ Wrangle does placement, jobs, the queue, the stall watchdog, status, and cleanup
 | Jobs | Herdr sidebar, one row per job | wrangle `report-agent` |
 | Notes on a pane ("stalled 10m", "exit 1 · 3m") | Sidebar `$wrangle` token | wrangle `report-metadata` |
 | Load per host | Tab-row status area | `wrangle status --line` (dotfiles #31 uses `--json` + jq until then) |
-| Agents this session started | Shepherdr widget in Pi | Shepherdr |
-| Jobs and queue tickets this session started | wrangle widget in Pi | wrangle |
+| Children, jobs, and queue tickets this session started | the board widget in Pi, and `/wrangle` | `wrangle board --json` |
+| Messages to this agent | a `wrangle` message in Pi | `wrangle inbox` |
 | Everything, for agents | `wrangle status [--json]` and a short block added to each prompt | wrangle |
 
 ## Parts
@@ -98,10 +98,9 @@ Rule: an agent that owns an open child or job hears from wrangle at least every 
 **Owners.** Wrangle records the owner (host and pane) of each item:
 - `wrangle run`: the caller's `$HERDR_PANE_ID`.
 - `wrangle agent` (spawn for Claude Code, Codex, and scripts): the caller's pane.
-- Pi children spawned with Shepherdr's `agents` tool: the wrangle Pi extension reads the spawn tool result and runs `wrangle track <machine> <pane>` with its own pane as owner.
+- Children from elsewhere: `wrangle track <host> <pane>`.
 
-A job item closes when its job ends. An agent item closes when its pane closes. A finished (`idle` or `done`) agent stays open,
-so check-ins keep naming it until the owner runs `wrangle close <pane>`, which runs the repository's `teardown`, closes its panes and workspace, and removes its worktree.
+A job item closes when its job ends. An agent item closes when its pane closes, or when the sweep closes it: once its turn completes, the sweep captures the final reply, puts it in the owner's inbox, and closes a clean reader or a writer whose branch landed. A writer with commits to land stays open under TO LAND.
 
 **Stall.** An agent is stalled when Herdr shows it `working` or `unknown` and its transcript (`transcript` in host.json) has not changed for 10 min. The screen is not a signal: spinners and elapsed timers redraw it while a tool call hangs. An agent with no transcript is never marked stalled. Unit 3 confirms where Claude Code and Codex transcripts are, because Herdr may report only a session id for them.
 
@@ -223,7 +222,7 @@ Units 1–3 are sequential. Unit 4 builds on units 1 and 2. Unit 5 follows each 
 ## Decisions
 
 1. Stall: Herdr shows `working` or `unknown` and the transcript is unchanged for 10 min.
-2. Wake mechanism: check-ins through `herdr agent prompt` (part 4); test A proves them in unit 3.
-3. Cleanup: the lead that started a child closes it with `wrangle close` when it finishes. Wrangle prompts that lead at once, then at each check-in until it does. The `serve` sweep is the last resort: it removes only what loses nothing (part 6). Everything else waits for `wrangle prune`, which asks first.
+2. Wake mechanism: check-ins through `herdr agent prompt` (part 4); test A proves them in unit 3. Replies, blocked reports, ticket notices, and peer messages go through the inbox instead, and check-ins follow (board plan, U5b), because typing into a pane merged check-ins into the user's drafts.
+3. Cleanup: the sweep closes a finished child after it captures the reply (board plan, decision 1); `wrangle close` ends one early. The `serve` sweep is the last resort: it removes only what loses nothing (part 6). Everything else waits for `wrangle prune`, which asks first.
 4. Service install: dotfiles installs the launchd agent (macOS) and the systemd user unit (Linux) on every host.
 5. The old 0.5.0 `prepare` PR was never pushed. Unit 1 carries its fix: the hook runs in the checkout, with no `{repo}`.

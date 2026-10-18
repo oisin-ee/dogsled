@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.10.0 - 2026-10-18
+
+Wrangle replaces Shepherdr for delegation: one board, one inbox, and children that close on events.
+
+- `wrangle agent --kind pi|claude|codex` passes the task as a launch argument, or as `launches/<id>.task.md` when it has a newline, a leading `-` or `@`, or more than 4000 characters. `--message-file` reads it from a file or stdin. Nothing is typed into the new pane. A failed `herdr agent start` is retried with backoff, three tries in all, then the owner's inbox reports the failure.
+- `--profile NAME` (Pi) reads `~/.config/wrangle/profiles/NAME/profile.json` on the child's host and passes `--model`, `--thinking`, `--append-system-prompt`, and `pi_args`. Shepherdr profiles load unchanged. `wrangle profiles` lists them.
+- The inbox: `wrangle send TARGET [--host H] --message|--message-file`, `inbox claim|ack|list|path`. Records live per Herdr terminal on the target's host; a claim is a lease, offered again with backoff until acknowledged. A target without a reader fails at once and the sender hears so. The service gains an inbox lane.
+- Event-driven close: when a child's turn completes and it is idle or done, the sweep captures its final reply, puts it in the owner's inbox, and closes a clean reader or a writer whose branch has landed. A writer with commits waits under TO LAND; blocked and working children never close; nothing closes on a timer. A blocked child sends one `blocked` record per episode.
+- `wrangle board [--owner|--all] [--json]`: an owner's children, jobs, and tickets grouped TO LAND, ATTENTION, RUNNING, and WAITING, with harness, model, and activity. The prompt context's close commands become one `To land:` line.
+- `wrangle read TARGET`: a child's or job's newest output and its captured reply.
+- `wrangle mcp` serves `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `stop`, `cancel`, and `place` as MCP tools over stdio. The Pi extension, the Claude plugin (`.mcp.json`), and the Codex plugin (`codex-mcp.json`) register it. No tool waits.
+- One backoff (10 s, doubling with jitter, 5 min cap) for inbox leases, follow-up, peer reads, and launch retries. Host reports gain `retry_ms`; `wrangle retry HOST` reads a host again now.
+- `wrangle machine list|rename|enable|disable|reconnect|add` manages Herdr's saved machines; `reconnect` and `add` open a tab for SSH prompts.
+- Pi: a board widget replaces the items widget; `/wrangle` opens a control panel (Status, Hosts, Profiles, Inbox); the extension reads its inbox, injects records as `wrangle` messages (steer while running, a new turn when idle), and acknowledges them once Pi has saved them. `@earendil-works/pi-tui` is a peer dependency.
+- Breaking: the Pi extension no longer tracks or places Shepherdr `agents spawn` calls, and `pi/placement.ts` is gone. Use `wrangle agent` or the `spawn` tool.
+- `close` removes only agent worktrees (locked `agent:worktree`). A child in any other checkout, such as its owner's, loses only its pane. Before, closing such a child removed the owner's worktree.
+- Probe agents gain `terminal_id`, `completion_seq`, `cwd`, the session's model and activity, and worktree facts (branch, ahead, dirty, landed). Items gain `harness`, `profile`, `model`, `role`, and `reply`; old `items.json` still loads.
+
 ## 0.9.1 - 2026-10-16
 
 - Admission counts every active agent (live and not `idle`) as declared demand for as long as it runs, not only for its 90 s reservation. A host now needs `cores − reservation_load × (active agents + reservations)` of at least `free_core_fraction_min × cores`, and total memory of at least `memory_reserve_bytes × (active agents + reservations + 1)`, as well as the measured CPU and free-memory rules. Headroom is the smaller of the measured and declared free cores. An agent waiting on its model used almost no CPU, so a host with many agents looked free between builds; netcup admitted 13 agents in 32 minutes and ran at busy p90 0.95. The refusal reason now names the active count.
