@@ -2,7 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
-## 0.12.0 - 2026-10-18
+## 0.12.1 - 2026-10-18
+
+The 0.12.0 release was cancelled before publication to synchronize the Cargo lockfile.
+The shared work UI ships in 0.12.1.
 
 - Pi shows one WORK strip for branch-backed todos and owner-pane agents and jobs. Compatible pi-todo providers retain standalone display when the shared presenter is absent.
 - `/work` opens a bounded keyboard-operated overlay. Inspect read-only todos, agent output, and retained job tails; confirm job stops and queued cancellations, or send inbox messages. `/wrangle` retains administration.

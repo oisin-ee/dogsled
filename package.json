@@ -1,6 +1,6 @@
 {
   "name": "@oisin-ee/pi-wrangle",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Pi extension for wrangle: the board, the /wrangle panel, the inbox reader, and the wrangle tools. Needs the wrangle binary of the same version.",
   "type": "module",
   "license": "MIT",
