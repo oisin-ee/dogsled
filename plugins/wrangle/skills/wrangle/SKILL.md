@@ -18,7 +18,7 @@ wrangle read NAME_OR_PANE [--host H]
 ```
 
 The board groups what you started by what you must do: TO LAND (a finished child with commits), ATTENTION (blocked, stalled, failed), RUNNING, and WAITING (queued for a host). Each agent row shows its harness and model; each job row its command.
-Your prompt context carries host status and a `To land:` line. In Pi, the board widget sits above the editor and `/wrangle` opens the control panel.
+Your prompt context carries host status and a `To land:` line. In Pi, the one-row `WORK` strip sits above the editor. `/work` opens read-only todos and agent/job inspection. Todos follow the Pi branch; agents and jobs follow the owner pane. `/wrangle` retains host, profile, and inbox administration.
 
 ## Delegate
 
@@ -66,14 +66,16 @@ It refuses, before it changes anything, a busy agent, a dirty or detached worktr
 ## Run a job
 
 ```sh
-wrangle run --wait --max 30m --timeout 1h --idle-timeout 10m -- cargo test
+wrangle run --host local --timeout 1h --idle-timeout 10m -- cargo test
+wrangle read JOB
 wrangle ps --all
-wrangle logs JOB --follow
-wrangle wait JOB --max 30m
+wrangle logs JOB
 wrangle stop JOB
 ```
 
-Run long waits through the harness's background-task tool. A completed wait returns the job's exit code. At the wait deadline, wrangle prints `still running` and exits 124; the job continues.
+Use `run` without `--wait` so the conversation stays usable. Continue other work; Wrangle delivers owner check-ins for job completion. Use `read` for a bounded output tail. Use `logs` when you need the full retained log, not as a polling loop. Do not run `wait` or `logs --follow` in a foreground agent tool call.
+
+Pin `--host local` when a job needs your working tree, local environment, or ports. Choose a remote host explicitly when required. Without a host, Wrangle selects one with room. Stop only jobs you own or have permission to stop.
 Job timeouts kill the process group. Both timeout defaults are unlimited. Durations accept `ms`, `s`, `m`, and `h`.
 When the job ends, `exec` saves the final record, then closes its own tab. `logs` and `wait` still work after that.
 Jobs use a tab in your workspace. Remote work uses a workspace with the same name.
