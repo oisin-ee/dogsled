@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { type Board, clean, parseBoard, renderBoard } from "./board.ts";
@@ -5,6 +6,16 @@ import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
 
 const REFRESH_MS = 10_000;
+
+/** The version this extension ships with; the wrangle binary on PATH must match it. */
+export const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
+/** Why `output` of `wrangle --version` does not match this extension, or undefined when it does. */
+export function versionMismatch(output: string): string | undefined {
+	const found = /^wrangle (\S+)/.exec(output.trim())?.[1];
+	if (found === VERSION) return undefined;
+	return `wrangle ${found ?? "(unknown version)"} is on PATH, but this extension is ${VERSION}. Install wrangle ${VERSION} on every host so the two match.`;
+}
 
 export default function wrangle(pi: ExtensionAPI) {
 	const binary = process.env["WRANGLE_BIN"] ?? "wrangle";
@@ -85,6 +96,12 @@ export default function wrangle(pi: ExtensionAPI) {
 		timer = setInterval(() => { void update(ctx); }, REFRESH_MS);
 		timer.unref();
 		await inbox.start(ctx);
+		try {
+			const mismatch = versionMismatch(await exec(["--version"]));
+			if (mismatch) ctx.ui.notify(mismatch, "warning");
+		} catch (error) {
+			ctx.ui.notify(String(error), "error");
+		}
 		await update(ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
