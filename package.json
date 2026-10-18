@@ -1,13 +1,24 @@
 {
-  "name": "wrangle",
+  "name": "@oisin-ee/pi-wrangle",
   "version": "0.10.0",
-  "description": "Host status and placement for Herdr agents. CLI, Pi prompt context, and skill.",
+  "description": "Pi extension for wrangle: the board, the /wrangle panel, the inbox reader, and the wrangle tools. Needs the wrangle binary of the same version.",
   "type": "module",
   "license": "MIT",
-  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/oisin-ee/wrangle.git"
+  },
+  "homepage": "https://github.com/oisin-ee/wrangle#readme",
+  "files": [
+    "pi/",
+    "!pi/**/*.test.ts",
+    "plugins/wrangle/skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "keywords": [
     "pi-package",

@@ -14,11 +14,13 @@ Binary:
 mise use github:oisin-ee/wrangle@v0.10.0
 ```
 
-Pi (extension, tools, and skill):
+Pi (extension, tools, and skill), from npm or as part of `@oisin-ee/oisinpi`:
 
 ```sh
-pi install git:github.com/oisin-ee/wrangle@v0.10.0
+pi install npm:@oisin-ee/pi-wrangle@0.10.0
 ```
+
+At session start the extension compares its version with `wrangle --version` and warns when they differ.
 
 Claude Code (hooks, tools, and skill):
 

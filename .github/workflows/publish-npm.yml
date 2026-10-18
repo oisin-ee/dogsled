@@ -1,0 +1,39 @@
+# Publishes @oisin-ee/pi-wrangle, the Pi extension, for the tagged version. dist calls it from
+# release.yml once the binaries are built, so the extension never ships without its binary.
+# npm trusted publishing (OIDC): the package's trusted publisher names release.yml, the
+# calling workflow, and the job has no npm token. Provenance comes from publishConfig.
+name: Publish npm
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check the tag matches package.json
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          tag=$(jq -r '.announcement_tag' <<<"$PLAN")
+          test "$tag" = "v$version" || { echo "tag $tag does not match package.json $version"; exit 1; }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm publish

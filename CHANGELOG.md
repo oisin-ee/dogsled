@@ -9,6 +9,7 @@ Nothing types into an agent's terminal any more.
 - `wrangle hook inbox --harness claude|codex --event Stop|UserPromptSubmit` reads the inbox for Claude Code and Codex. The plugin registers it on both events. At `Stop` records continue the turn (`decision: block`); at `UserPromptSubmit` they are `additionalContext` beside the user's text. An idle Claude or Codex agent sees a record at its next prompt or stop.
 - Watchdog check-ins are `check-in` inbox records, not `herdr agent prompt`. An owner without an inbox reader gets none until it has one. A finished child's reply comes only from the sweep; its check-in is no longer immediate. `watchdog.json` drops `deliveries`.
 - Admission notices go only through the inbox, to working owners too.
+- The Pi extension is published to npm as `@oisin-ee/pi-wrangle` with each release, after the binaries; `pi install npm:@oisin-ee/pi-wrangle@<version>`. The package holds only `pi/` and the skill. At session start it warns when `wrangle --version` differs from its own version.
 
 ## 0.10.0 - 2026-10-18
 

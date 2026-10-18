@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import wrangle from "./index.ts";
+import wrangle, { VERSION, versionMismatch } from "./index.ts";
 
 type Handler = (event: any, ctx: any) => Promise<any> | void;
 const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
@@ -19,6 +19,7 @@ function rig() {
 	let context = "local 3/8\n";
 	let missing = false;
 	let board: unknown = { hosts: [], rows: [] };
+	let version = `wrangle ${VERSION}\n`;
 	const api = {
 		on(event: string, fn: Handler) { handlers.set(event, fn); },
 		registerMcpServer(name: string, config: unknown) { servers.push([name, config]); },
@@ -33,6 +34,7 @@ function rig() {
 				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
 				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-wrangle-inbox", file: "t.json" })
+				: args[0] === "--version" ? version
 				: "{}";
 			return { code, stdout, stderr: "failure", killed: false };
 		},
@@ -43,7 +45,7 @@ function rig() {
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
 	return { calls, widgets, notices, servers, commands, renderers, sent, ctx, next,
-		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; },
+		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
 		} };
@@ -151,4 +153,22 @@ test("without a Herdr pane the extension starts nothing", async () => {
 	} finally {
 		if (previous !== undefined) process.env["HERDR_PANE_ID"] = previous;
 	}
+});
+
+test("the extension's version is the package's, and a different wrangle binary is named once at start", async (t) => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const pkg = JSON.parse(await import("node:fs").then(f => f.readFileSync(new URL("../package.json", import.meta.url), "utf8")));
+	assert.equal(VERSION, pkg.version);
+	assert.equal(versionMismatch(`wrangle ${VERSION}\n`), undefined);
+	assert.match(versionMismatch("wrangle 0.9.1\n") ?? "", new RegExp(`^wrangle 0\\.9\\.1 is on PATH, but this extension is ${VERSION.replaceAll(".", "\\.")}\\.`));
+	const r = rig();
+	await r.invoke("session_start");
+	assert.equal(r.notices.length, 0);
+	await r.invoke("session_shutdown");
+	const old = rig();
+	old.version("wrangle 0.9.1\n");
+	await old.invoke("session_start");
+	assert.deepEqual(old.notices.map(n => (n as unknown[])[1]), ["warning"]);
+	await old.invoke("session_shutdown");
 });
