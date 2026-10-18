@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.12.0 - 2026-10-18
+
+- Pi shows one WORK strip for branch-backed todos and owner-pane agents and jobs. Compatible pi-todo providers retain standalone display when the shared presenter is absent.
+- `/work` opens a bounded keyboard-operated overlay. Inspect read-only todos, agent output, and retained job tails; confirm job stops and queued cancellations, or send inbox messages. `/wrangle` retains administration.
+- Job guidance uses non-blocking Wrangle commands instead of background-task tools. Execution and completion delivery retain their existing owners.
+
 ## 0.11.0 - 2026-10-18
 
 Nothing types into an agent's terminal any more.
