@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { EventEmitter } from "node:events";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import wrangle, { VERSION, versionMismatch } from "./index.ts";
 
@@ -20,7 +21,9 @@ function rig() {
 	let missing = false;
 	let board: unknown = { hosts: [], rows: [] };
 	let version = `wrangle ${VERSION}\n`;
+	const events = new EventEmitter();
 	const api = {
+		events: { emit: (name: string, data: unknown) => { events.emit(name, data); }, on: (name: string, fn: (data: unknown) => void) => { events.on(name, fn); return () => { events.off(name, fn); }; } },
 		on(event: string, fn: Handler) { handlers.set(event, fn); },
 		registerMcpServer(name: string, config: unknown) { servers.push([name, config]); },
 		registerCommand(name: string, options: unknown) { commands.set(name, options); },
@@ -41,7 +44,7 @@ function rig() {
 	};
 	wrangle(api as unknown as ExtensionAPI);
 	let drawn: () => void = () => {};
-	const ctx = { mode: "tui", hasUI: true, isIdle: () => true, ui: { setWidget: (...args: unknown[]) => { widgets.push(args); drawn(); }, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
+	const ctx = { mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session", getLeafId: () => null }, isIdle: () => true, ui: { setWidget: (...args: unknown[]) => { widgets.push(args); drawn(); }, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
 	return { calls, widgets, notices, servers, commands, renderers, sent, ctx, next,
@@ -102,7 +105,8 @@ test("the board widget follows wrangle board, refreshes every 10 s, and stops at
 	const [key, factory, options] = r.widgets.at(-1);
 	assert.deepEqual([key, options], ["wrangle", { placement: "aboveEditor" }]);
 	const lines: string[] = factory(undefined, plain).render(80);
-	assert.ok(lines.some(l => l.includes("▸ cargo test")), lines.join("\n"));
+	assert.equal(lines.length, 1);
+	assert.ok(lines[0]?.includes("1 job"), lines.join("\n"));
 	await r.invoke("session_shutdown");
 	const after = r.calls.length;
 	t.mock.timers.tick(10_000);
@@ -143,13 +147,16 @@ test("the board widget steps aside while /wrangle is open, so no row shows twice
 	await r.invoke("session_shutdown");
 });
 
-test("without a Herdr pane the extension starts nothing", async () => {
+test("without a Herdr pane the extension starts no commands and explains unavailable jobs", async () => {
 	const previous = process.env["HERDR_PANE_ID"];
 	delete process.env["HERDR_PANE_ID"];
 	try {
 		const r = rig();
 		await r.invoke("session_start");
 		assert.deepEqual(r.calls, []);
+		const lines: string[] = r.widgets.at(-1)[1](undefined, plain).render(100);
+		assert.match(lines.join(""), /Herdr owner pane/);
+		await r.invoke("session_shutdown");
 	} finally {
 		if (previous !== undefined) process.env["HERDR_PANE_ID"] = previous;
 	}

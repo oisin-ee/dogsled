@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { type Board, clean, parseBoard, renderBoard } from "./board.ts";
+import { type Board, clean, parseBoard } from "./board.ts";
+import { WorkTodo } from "./work-todo.ts";
+import { workStrip, workText, type WorkState } from "./work.ts";
 import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
 
@@ -57,11 +59,20 @@ export default function wrangle(pi: ExtensionAPI) {
 	});
 
 	let panelOpen = false;
+	let context: ExtensionContext | undefined;
+	const todos = new WorkTodo(pi.events, () => { if (context) draw(context); }, () => {
+		if (context) context.ui.notify(workText(state()), "info");
+	});
+
+	function state(): WorkState {
+		return { board, todo: todos.current, error: failure ?? todos.error };
+	}
 
 	function draw(ctx: ExtensionContext) {
-		// The panel lists the same rows; while it is open the widget steps aside.
-		ctx.ui.setWidget("wrangle", panelOpen || board.rows.length === 0 ? undefined : (_tui, theme) => ({
-			render: (width: number) => renderBoard(board, width, theme),
+		if (ctx.mode !== "tui") return;
+		const data = state();
+		ctx.ui.setWidget("wrangle", panelOpen || (!data.board.rows.length && !data.todo?.tasks.length && !data.error) ? undefined : (_tui, theme) => ({
+			render: (width: number) => workStrip(data, width, theme),
 			invalidate: () => {},
 		}), { placement: "aboveEditor" });
 	}
@@ -82,8 +93,10 @@ export default function wrangle(pi: ExtensionAPI) {
 			} catch (error) {
 				// Say so once, not on every refresh; the last board stays on screen.
 				const text = String(error);
+				if (current !== generation) return;
 				if (text !== failure) ctx.ui.notify(text, "error");
 				failure = text;
+				draw(ctx);
 			}
 		})().finally(() => { refresh = undefined; });
 		return refresh;
@@ -92,7 +105,11 @@ export default function wrangle(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (timer) clearInterval(timer);
 		generation++;
-		if (!owner) return;
+		context = ctx;
+		board = { hosts: [], rows: [] };
+		failure = owner ? undefined : "Wrangle needs a Herdr owner pane";
+		todos.start(ctx);
+		if (!owner) { draw(ctx); return; }
 		timer = setInterval(() => { void update(ctx); }, REFRESH_MS);
 		timer.unref();
 		await inbox.start(ctx);
@@ -109,6 +126,8 @@ export default function wrangle(pi: ExtensionAPI) {
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		inbox.stop();
+		todos.stop();
+		context = undefined;
 		if (ctx.mode === "tui") ctx.ui.setWidget("wrangle", undefined);
 	});
 	// A delivered message is in the transcript once Pi ends it: only then is it acknowledged.
@@ -123,6 +142,13 @@ export default function wrangle(pi: ExtensionAPI) {
 		} catch {
 			return;
 		}
+	});
+	pi.registerCommand("work", {
+		description: "Read todos on this branch and this owner's agents and jobs",
+		handler: async (_args, ctx) => {
+			await update(ctx);
+			ctx.ui.notify(workText(state()), "info");
+		},
 	});
 	pi.registerCommand("wrangle", {
 		description: "Hosts, your children and jobs, profiles, and messages",
