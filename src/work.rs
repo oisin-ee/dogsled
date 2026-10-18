@@ -475,7 +475,13 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
 fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -> Result<Item> {
     let text = |key: &str| result[key].as_str().map(str::to_owned);
     let (kind, name, harness) = match &request.action {
-        Action::Job { .. } => ("job", None, None),
+        // A job is named for its program, so the board shows it before any snapshot has it.
+        Action::Job { cmd, .. } => (
+            "job",
+            cmd.first()
+                .map(|c| c.rsplit('/').next().unwrap_or(c).to_owned()),
+            None,
+        ),
         Action::Agent { name, kind, .. } => ("agent", Some(name.clone()), Some(kind.clone())),
         Action::Place => return Err(Error::Invalid("place cannot create an item".into())),
     };

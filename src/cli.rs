@@ -176,6 +176,13 @@ pub enum Command {
     },
     /// Serve the wrangle tools to a harness over MCP on stdio.
     Mcp,
+    /// Read an unreachable host again now, without waiting out its backoff.
+    Retry {
+        host: String,
+    },
+    /// The saved Herdr machines wrangle uses as hosts.
+    #[command(subcommand)]
+    Machine(MachineCommand),
     /// Send a message to an agent on any host, through its inbox. Nothing types into its
     /// terminal; an agent without an inbox reader gets nothing, and you hear so at once.
     Send {
@@ -205,6 +212,33 @@ pub enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum MachineCommand {
+    /// Every saved machine, enabled or not.
+    List,
+    Rename {
+        machine: String,
+        label: String,
+    },
+    Enable {
+        machine: String,
+    },
+    /// Stop using a machine as a host. Herdr keeps it saved.
+    Disable {
+        machine: String,
+    },
+    /// Authenticate in a new tab, for the user to answer SSH prompts.
+    Reconnect {
+        machine: String,
+    },
+    /// Save an SSH machine; runs `herdr machine add` in a new tab.
+    Add {
+        target: String,
+        #[arg(long)]
+        label: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum InboxCommand {
     /// Register as this pane's inbox reader and claim its deliverable records. A claimed
     /// record is offered again, with backoff, until it is acknowledged.
@@ -225,6 +259,11 @@ pub enum InboxCommand {
     },
     /// Records this pane received and sent, with their states.
     List {
+        #[arg(long)]
+        pane: Option<String>,
+    },
+    /// The directory and file name of this pane's inbox, for a reader that watches it.
+    Path {
         #[arg(long)]
         pane: Option<String>,
     },

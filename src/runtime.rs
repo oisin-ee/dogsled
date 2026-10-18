@@ -325,6 +325,10 @@ pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<Ex
             crate::print(json_output, &read, || read_text(&read))?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Machine(command) => {
+            machine(fleet.shell, command, json_output)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Profiles => {
             let profiles = crate::profiles::list()?;
             crate::print(json_output, &profiles, || {
@@ -499,6 +503,27 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
             })?;
         }
         Command::Cancel { ticket } => work::cancel(fleet.ledger, &ticket)?,
+        Command::Retry { host } => {
+            let host = fleet.find(&host)?;
+            fleet.retry_now(host)?;
+            let report = fleet
+                .status(now_ms())?
+                .into_iter()
+                .find(|r| r.host.id == host.id);
+            crate::print(json_output, &report, || {
+                report.as_ref().map_or_else(String::new, |r| {
+                    format!(
+                        "{}: {}\n",
+                        r.host.label,
+                        if r.reachable {
+                            "reachable".to_owned()
+                        } else {
+                            r.error.clone().unwrap_or_else(|| "unreachable".into())
+                        }
+                    )
+                })
+            })?;
+        }
         Command::Stop { id } => stop(fleet, &id)?,
         Command::Wait { id, .. } => return Ok(ExitCode::from(wait_job(fleet, &id)? as u8)),
         Command::Logs { id, follow } => {
@@ -570,4 +595,54 @@ pub fn exec(
         },
     };
     Ok(ExitCode::from(jobs::exec(ledger, shell, job)? as u8))
+}
+
+fn machine(
+    shell: &dyn crate::shell::Shell,
+    command: crate::cli::MachineCommand,
+    json_output: bool,
+) -> Result<()> {
+    use crate::cli::MachineCommand as M;
+    use crate::machines;
+    let line = |m: &machines::Machine| {
+        format!(
+            "{} {} {}{}\n",
+            m.label,
+            m.target,
+            m.id,
+            if m.enabled { "" } else { " (disabled)" }
+        )
+    };
+    match command {
+        M::List => {
+            let all = machines::list(shell)?;
+            crate::print(json_output, &all, || all.iter().map(line).collect())
+        }
+        M::Rename { machine, label } => {
+            let m = machines::rename(shell, &machine, &label)?;
+            crate::print(json_output, &m, || line(&m))
+        }
+        M::Enable { machine } => {
+            let m = machines::set_enabled(shell, &machine, true)?;
+            crate::print(json_output, &m, || line(&m))
+        }
+        M::Disable { machine } => {
+            let m = machines::set_enabled(shell, &machine, false)?;
+            crate::print(json_output, &m, || line(&m))
+        }
+        M::Reconnect { machine } => {
+            let pane = machines::reconnect(shell, &machine)?;
+            let value = serde_json::json!({ "pane": pane });
+            crate::print(json_output, &value, || {
+                format!("Reconnecting {machine} in {pane}; answer its prompts there.\n")
+            })
+        }
+        M::Add { target, label } => {
+            let pane = machines::add(shell, &target, label.as_deref())?;
+            let value = serde_json::json!({ "pane": pane });
+            crate::print(json_output, &value, || {
+                format!("Adding {target} in {pane}; answer its prompts there.\n")
+            })
+        }
+    }
 }
