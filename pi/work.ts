@@ -11,15 +11,12 @@ export interface WorkState {
 /** A small, persistent readout: names and current work, not just counts. */
 export function workStrip(state: WorkState, width: number, paint: Paint): string[] {
 	const { board, todo, error } = state;
-	if (!board.rows.length && !todo?.tasks.length && !error) return [];
+	if (!board.rows.length && (!todo || todo.display.empty) && !error) return [];
 	const lines = [paint.fg("dim", "WORK · Alt+W expand")];
 	if (error) lines.push(paint.fg("warning", `! unavailable · ${clean(error)}`));
-	const tasks = todo?.tasks ?? [];
-	const active = tasks.find(task => task.status === "in_progress");
-	const next = tasks.find(task => task.status === "pending");
-	const current = active ?? next;
-	if (current) lines.push(`${paint.fg("accent", active ? "→ Task" : "· Next")}  ${clean(current.content)}`);
-	else if (tasks.length) lines.push(paint.fg("muted", `Tasks · ${tasks.filter(task => task.status === "completed").length}/${tasks.length} completed`));
+	if (todo && !todo.display.empty) {
+		lines.push(todo.display.current ? `${paint.fg("accent", "→ Task")}  ${clean(todo.display.current)}` : paint.fg("muted", clean(todo.display.summary)));
+	}
 	const priority = (row: Row) => row.group === "attention" || row.group === "to_land" ? 0 : row.group === "running" ? 1 : 2;
 	for (const [label, members] of [
 		["Agents", board.rows.filter(row => row.kind !== "job")],
@@ -50,7 +47,7 @@ export function workStrip(state: WorkState, width: number, paint: Paint): string
 export function workText(state: WorkState): string {
 	const lines = ["WORK · todos: Pi branch · agents/jobs: Herdr owner pane"];
 	if (state.error) lines.push(state.error);
-	for (const task of state.todo?.tasks ?? []) lines.push(`${task.status}: ${clean(task.content)}`);
+	if (state.todo && !state.todo.display.empty) lines.push(...state.todo.display.text.split("\n").map(clean));
 	for (const row of state.board.rows) lines.push(`${clean(row.name)} · ${clean(row.state)} · ${clean(row.host)}`);
 	if (lines.length === 1) lines.push("No work.");
 	return lines.join("\n");

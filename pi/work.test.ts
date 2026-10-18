@@ -5,6 +5,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { WorkTodo, snapshot, type TodoSnapshot } from "./work-todo.ts";
 import { workStrip } from "./work.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { todoDisplay } from "./todo-fixture.test.ts";
 
 const plain = { fg: (_: string, text: string) => text, bold: (text: string) => text };
 const task = { content: "Verify changes", status: "in_progress" as const };
@@ -12,21 +13,21 @@ function rig() {
 	const emitter = new EventEmitter();
 	const bus = { emit(name: string, value: unknown) { emitter.emit(name, value); }, on(name: string, fn: (value: unknown) => void) { emitter.on(name, fn); return () => { emitter.off(name, fn); }; } };
 	let leaf: string | null = "branch";
-	const ctx = { mode: "tui", sessionManager: { getSessionId: () => "session", getLeafId: () => leaf }, ui: { notify() {} } } as unknown as ExtensionContext;
+	const ctx = { mode: "tui", sessionManager: { getSessionId: () => "session", getLeafId: () => leaf }, ui: { notify() {}, theme: plain } } as unknown as ExtensionContext;
 	const requests: any[] = [], claims: any[] = [], releases: any[] = [];
 	let draws = 0, opens = 0;
 	bus.on("oisin.work.request", value => requests.push(value));
 	bus.on("oisin.work.claim", value => claims.push(value));
 	bus.on("oisin.work.release", value => releases.push(value));
 	const consumer = new WorkTodo(bus, () => { draws++; }, () => { opens++; });
-	const data = (extra = {}): TodoSnapshot => ({ ...requests.at(-1), publisher: "provider", session: "session", branch: leaf, revision: 1, tasks: [task], ...extra });
+	const data = (extra = {}): TodoSnapshot => ({ ...requests.at(-1), publisher: "provider", session: "session", branch: leaf, revision: 1, display: todoDisplay(), ...extra });
 	return { bus, consumer, ctx, requests, claims, releases, data, branch: (next: string) => { leaf = next; }, draws: () => draws, opens: () => opens };
 }
 
 test("todo data is validated at the integration boundary", () => {
 	const r = rig(); r.consumer.start(r.ctx);
-	assert.deepEqual(snapshot(r.data())?.tasks, [task]);
-	for (const bad of [null, {}, r.data({ version: 2 }), r.data({ revision: -1 }), r.data({ tasks: [{ ...task, status: "done" }] })]) assert.equal(snapshot(bad), undefined);
+	assert.equal(snapshot(r.data())?.display.current, task.content);
+	for (const bad of [null, {}, r.data({ version: 1 }), r.data({ revision: -1 }), r.data({ display: { createView: false } })]) assert.equal(snapshot(bad), undefined);
 	r.consumer.stop();
 });
 
@@ -35,7 +36,7 @@ test("consumer requests an already started provider and acknowledges only after 
 	r.bus.on("oisin.work.request", () => r.bus.emit("oisin.todo.snapshot", r.data()));
 	r.bus.on("oisin.work.claim", () => assert.equal(r.draws(), 1));
 	r.consumer.start(r.ctx);
-	assert.equal(r.consumer.current?.tasks[0]?.content, task.content);
+	assert.equal(r.consumer.current?.display.current, task.content);
 	assert.equal(r.claims.length, 1);
 	r.consumer.stop(); assert.equal(r.releases.length, 1);
 });
@@ -43,7 +44,7 @@ test("consumer requests an already started provider and acknowledges only after 
 test("provider starting later requests a fresh handshake and can open the todo view", () => {
 	const r = rig(); r.consumer.start(r.ctx);
 	const first = r.requests.at(-1);
-	r.bus.emit("oisin.todo.ready", { publisher: "provider", version: 1 });
+	r.bus.emit("oisin.todo.ready", { publisher: "provider", version: 2 });
 	assert.notEqual(r.requests.at(-1).request, first.request);
 	r.bus.emit("oisin.todo.snapshot", r.data());
 	r.bus.emit("oisin.work.open", { ...r.requests.at(-1), view: "todos" });
@@ -56,17 +57,17 @@ test("provider starting later requests a fresh handshake and can open the todo v
 test("delayed contexts, duplicate revisions and retired publishers cannot replace current data", () => {
 	const r = rig(); r.consumer.start(r.ctx);
 	r.bus.emit("oisin.todo.snapshot", r.data());
-	r.bus.emit("oisin.todo.snapshot", r.data({ tasks: [] }));
-	assert.equal(r.consumer.current?.tasks.length, 1);
+	r.bus.emit("oisin.todo.snapshot", r.data({ display: todoDisplay({ empty: true }) }));
+	assert.equal(r.consumer.current?.display.empty, false);
 	r.branch("other");
 	r.bus.emit("oisin.todo.snapshot", r.data({ branch: "branch", revision: 2 }));
 	assert.equal(r.consumer.current?.revision, 1);
-	r.bus.emit("oisin.todo.snapshot", r.data({ revision: 3, tasks: [] }));
+	r.bus.emit("oisin.todo.snapshot", r.data({ revision: 3, display: todoDisplay({ empty: true }) }));
 	assert.equal(r.consumer.current?.branch, "other");
 	r.bus.emit("oisin.todo.snapshot", r.data({ publisher: "new-provider" }));
 	r.bus.emit("oisin.todo.snapshot", r.data({ revision: 99 }));
 	assert.equal(r.consumer.current?.publisher, "new-provider");
-	r.bus.emit("oisin.todo.stop", { version: 1, publisher: "new-provider" });
+	r.bus.emit("oisin.todo.stop", { version: 2, publisher: "new-provider" });
 	assert.equal(r.consumer.current, undefined);
 	r.consumer.stop();
 });
@@ -74,7 +75,7 @@ test("delayed contexts, duplicate revisions and retired publishers cannot replac
 test("malformed payload releases presentation; shutdown unsubscribes and non-TUI does not claim", () => {
 	const r = rig(); r.consumer.start(r.ctx);
 	r.bus.emit("oisin.todo.snapshot", r.data());
-	r.bus.emit("oisin.todo.snapshot", r.data({ tasks: false }));
+	r.bus.emit("oisin.todo.snapshot", r.data({ display: false }));
 	assert.equal(r.consumer.current, undefined);
 	assert.match(r.consumer.error ?? "", /unavailable/);
 	assert.equal(r.releases.length, 1);
@@ -88,7 +89,7 @@ test("malformed payload releases presentation; shutdown unsubscribes and non-TUI
 
 test("compact widget shows current task and named work with bounded widths and attention", () => {
 	const r = rig(); r.consumer.start(r.ctx);
-	const todo = r.data({ tasks: [task, { content: "done", status: "completed" }, { content: "dropped", status: "abandoned" }] });
+	const todo = r.data();
 	const board = { hosts: [], rows: [{ id: "a", group: "attention" as const, kind: "agent", name: "界".repeat(100), what: "pi", host: "local", state: "blocked", activity: "", age_ms: 0 }] };
 	for (const width of [1, 8, 20, 40, 80, 160]) {
 		const lines = workStrip({ board, todo, error: undefined }, width, plain);
@@ -97,11 +98,73 @@ test("compact widget shows current task and named work with bounded widths and a
 		if (width >= 20) assert.match(lines[2]!, /!/);
 	}
 	assert.match(workStrip({ board, todo, error: undefined }, 160, plain)[1]!, /Task  Verify changes/);
-	const closed = { ...todo, tasks: todo.tasks.filter(task => task.status !== "in_progress") };
+	const closed = { ...todo, display: todoDisplay({ current: "", summary: "Todo list: 1/2 completed" }) };
 	assert.match(workStrip({ board, todo: closed, error: undefined }, 160, plain).join("\n"), /1\/2 completed/);
 	assert.deepEqual(workStrip({ board: { hosts: [], rows: [] }, todo: undefined, error: undefined }, 80, plain), []);
 	assert.match(workStrip({ board: { hosts: [], rows: [] }, todo: undefined, error: "host offline" }, 80, plain).join("\n"), /unavailable/);
 	r.consumer.stop();
+});
+
+test("hosted render failure restores standalone ownership after a successful claim", () => {
+	const r = rig(); r.consumer.start(r.ctx);
+	let created = 0, disposed = 0;
+	const display = todoDisplay({ createView: () => {
+		const preflight = created++ === 0;
+		return { render: () => { if (!preflight) throw new Error("live render"); return []; },
+			update() {}, invalidate() {}, handleInput() {}, dispose() { disposed++; } };
+	} });
+	r.bus.emit("oisin.todo.snapshot", r.data({ display }));
+	const component = r.consumer.createView({ theme: plain, height: () => 10, requestRender() {} });
+	assert.equal(r.claims.length, 1);
+	assert.deepEqual(component?.render(80), []);
+	assert.equal(r.consumer.current, undefined);
+	assert.equal(r.releases.length, 1);
+	assert.equal(disposed, 2);
+	r.consumer.stop();
+});
+
+test("incompatible providers keep the host unclaimed", () => {
+	const r = rig(); r.consumer.start(r.ctx);
+	r.bus.emit("oisin.todo.ready", { version: 1, publisher: "old" });
+	assert.equal(r.consumer.current, undefined);
+	assert.equal(r.claims.length, 0);
+	assert.match(r.consumer.error ?? "", /unavailable/);
+	r.consumer.stop();
+});
+
+test("provider failures release ownership and dispose hosted components once", () => {
+	for (const failure of ["create", "render", "update", "invalidate", "input"] as const) {
+		const r = rig(); r.consumer.start(r.ctx);
+		let disposed = 0;
+		const display = todoDisplay({ createView: () => {
+			if (failure === "create") throw new Error("create failed");
+			return { render: () => { if (failure === "render") throw new Error("render failed"); return []; },
+				update() {}, invalidate() {}, handleInput() {}, dispose() { disposed++; } };
+		} });
+		r.bus.emit("oisin.todo.snapshot", r.data({ display }));
+		if (failure === "create" || failure === "render") {
+			assert.equal(r.claims.length, 0);
+			assert.equal(r.consumer.current, undefined);
+		} else {
+			const next = todoDisplay({ createView: () => ({ render: () => [],
+				update() { if (failure === "update") throw new Error("update failed"); },
+				invalidate() { if (failure === "invalidate") throw new Error("invalidate failed"); },
+				handleInput() { if (failure === "input") throw new Error("input failed"); }, dispose() { disposed++; } }) });
+			// The live factory can fail after the successful preflight.
+			r.consumer.current!.display = next;
+			const component = r.consumer.createView({ theme: plain, height: () => 10, requestRender() {} })!;
+			if (failure === "update") component.update({});
+			if (failure === "invalidate") component.invalidate();
+			if (failure === "input") component.handleInput("x");
+			assert.equal(r.consumer.current, undefined);
+			assert.equal(r.releases.length, 1);
+			const count = disposed;
+			component.dispose();
+			assert.equal(disposed, count);
+		}
+		assert.match(r.consumer.error ?? "", /unavailable/);
+		r.consumer.stop();
+	}
 });
 
 test("compact work includes both categories and exposes overflow without hiding the current task", () => {

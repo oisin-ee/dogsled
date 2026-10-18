@@ -69,6 +69,7 @@ export default function wrangle(pi: ExtensionAPI) {
 	let cursor: WorkCursor = { tab: "all", selected: undefined, history: false };
 	let workAbort: AbortController | undefined;
 	let context: ExtensionContext | undefined;
+	let requestWorkRender: (() => void) | undefined;
 	const todos = new WorkTodo(pi.events, () => { if (context) draw(context); }, () => {
 		if (context) void openWork(context, "todos").catch(error => context?.ui.notify(String(error), "error"));
 	});
@@ -83,6 +84,7 @@ export default function wrangle(pi: ExtensionAPI) {
 		workAbort?.abort();
 		workAbort = undefined;
 		workOpen = false;
+		workPanel?.dispose();
 		workPanel = undefined;
 		workDetail = undefined;
 		detail = undefined;
@@ -97,6 +99,7 @@ export default function wrangle(pi: ExtensionAPI) {
 		detail = undefined;
 		workDetail = undefined;
 		cursor = { tab, selected: undefined, history: false };
+		workPanel?.dispose();
 		workPanel = undefined;
 		const current = generation;
 		draw(ctx);
@@ -132,18 +135,30 @@ export default function wrangle(pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 		workPanel?.update(workData());
 		const data = state();
-		ctx.ui.setWidget("wrangle", panelOpen || (!workOpen && !data.board.rows.length && !data.todo?.tasks.length && !data.error) ? undefined : (tui, theme) => {
-			if (workOpen) {
-				if (detail) {
-					workDetail ??= new WorkDetail(detail.title, detail.body, theme, () => tui.terminal.rows, () => tui.requestRender());
-					workDetail.setTheme(theme);
-					return workDetail;
-				}
-				workDetail = undefined;
-				workPanel = new WorkPanel(workData(), cursor, theme, action => { void act(ctx, action); }, () => tui.requestRender(), () => tui.terminal.rows);
-				return workPanel;
-			}
-			return { render: (width: number) => workStrip(data, width, theme), invalidate() {} };
+		if (panelOpen || (!workOpen && !data.board.rows.length && (!data.todo || data.todo.display.empty) && !data.error)) {
+			ctx.ui.setWidget("wrangle", undefined);
+			return;
+		}
+		if (requestWorkRender) { requestWorkRender(); return; }
+		ctx.ui.setWidget("wrangle", tui => {
+			requestWorkRender = () => tui.requestRender();
+			return {
+				render(width: number): string[] {
+					const theme = ctx.ui.theme;
+					if (!workOpen) return workStrip(state(), width, theme);
+					if (detail) {
+						workDetail ??= new WorkDetail(detail.title, detail.body, theme, () => tui.terminal.rows, () => tui.requestRender());
+						workDetail.setTheme(theme);
+						return workDetail.render(width);
+					}
+					workDetail = undefined;
+					workPanel ??= new WorkPanel(workData(), cursor, theme, action => { void act(ctx, action); }, () => tui.requestRender(), () => tui.terminal.rows, todos);
+					workPanel.setTheme(theme);
+					return workPanel.render(width);
+				},
+				invalidate() { workPanel?.invalidate(); workDetail?.invalidate(); },
+				dispose() { workPanel?.dispose(); workPanel = undefined; requestWorkRender = undefined; },
+			};
 		}, { placement: "aboveEditor" });
 	}
 
@@ -178,6 +193,9 @@ export default function wrangle(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.mode === "tui") ctx.ui.setWidget("wrangle", undefined);
+		requestWorkRender = undefined;
+		workPanel?.dispose();
 		if (timer) clearInterval(timer);
 		generation++;
 		workAbort?.abort();
@@ -204,6 +222,7 @@ export default function wrangle(pi: ExtensionAPI) {
 		await update(ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		workPanel?.dispose();
 		generation++;
 		workAbort?.abort();
 		workAbort = undefined;

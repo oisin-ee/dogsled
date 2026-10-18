@@ -2,6 +2,7 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, SelectList, Text, ScrollView, truncateToWidth } from "@earendil-works/pi-tui";
 import { clean } from "./board.ts";
 import type { WorkState } from "./work.ts";
+import type { TodoView, WorkTodo } from "./work-todo.ts";
 import type { JobHistory, WorkExec } from "./work-history.ts";
 
 export type WorkTab = "all" | "todos" | "agents" | "jobs";
@@ -17,10 +18,10 @@ export interface WorkAction { action: "inspect" | "stop" | "cancel" | "send" | "
 
 /** The same content in every tab, without task mutation or duplicate job rows. */
 export function workEntries(data: WorkData, tab: WorkTab, history: boolean): WorkEntry[] {
-	const todos: WorkEntry[] = (data.todo?.tasks ?? []).map(task => ({ value: `todo:${task.content}`, label: `${task.status === "in_progress" ? "→" : task.status === "completed" ? "✓" : task.status === "abandoned" ? "−" : "·"} ${clean(task.content)}`, description: task.status, kind: "todo", detail: task.content }));
+	const todos: WorkEntry[] = data.todo && !data.todo.display.empty ? [{ value: "todos", label: clean(data.todo.display.summary), description: clean(data.todo.display.current), kind: "todo" }] : [];
 	const canonicalHost = (label: string) => data.history.hosts?.find(host => host.label === label)?.id ?? label;
 	const rows: WorkEntry[] = data.board.rows.map(row => ({ value: `${row.kind}:${canonicalHost(row.host)}:${row.id}`, id: row.id, host: canonicalHost(row.host), ...(row.pane ? { pane: row.pane } : {}), kind: row.group === "waiting" ? "queued" : row.kind === "job" ? "job" : "agent", label: `${row.group === "attention" || row.group === "to_land" ? "!" : "●"} ${clean(row.name)} · ${clean(row.state)}`, description: clean(row.host), running: row.group === "running" }));
-	const visible = tab === "todos" ? todos : tab === "agents" ? rows.filter(row => row.value.startsWith("agent:")) : tab === "jobs" ? rows.filter(row => row.value.startsWith("job:")) : [...rows.filter(row => row.label.startsWith("!")), ...todos.filter(row => row.description === "in_progress"), ...rows.filter(row => !row.label.startsWith("!")), ...todos.filter(row => row.description === "pending")];
+	const visible = tab === "todos" ? todos : tab === "agents" ? rows.filter(row => row.value.startsWith("agent:")) : tab === "jobs" ? rows.filter(row => row.value.startsWith("job:")) : [...rows.filter(row => row.label.startsWith("!")), ...todos, ...rows.filter(row => !row.label.startsWith("!"))];
 	if (tab === "all" || tab === "jobs") {
 		const known = new Set(rows.map(row => row.value));
 		const done = data.history.jobs.filter(job => job.ended_ms !== null && !known.has(`job:${job.host}:${job.id}`));
@@ -38,17 +39,39 @@ export class WorkPanel {
 	private entries: WorkEntry[] = [];
 	private data: WorkData;
 	readonly cursor: WorkCursor;
-	private readonly theme: Theme;
+	private theme: Theme;
+	private todoView: TodoView | undefined;
+	private publisher: string | undefined;
+	private readonly todos: WorkTodo | undefined;
 	private readonly done: (action: WorkAction | undefined) => void;
 	private readonly renderRequest: () => void;
 	private readonly rows: () => number;
 	private height = 0;
 
-	constructor(data: WorkData, cursor: WorkCursor, theme: Theme, done: (action: WorkAction | undefined) => void, request: () => void, rows: () => number) {
+	constructor(data: WorkData, cursor: WorkCursor, theme: Theme, done: (action: WorkAction | undefined) => void, request: () => void, rows: () => number, todos?: WorkTodo) {
+		this.todos = todos;
 		this.data = data; this.cursor = cursor; this.theme = theme; this.done = done; this.renderRequest = request; this.rows = rows;
 		this.rebuild();
 	}
-	update(data: WorkData): void { this.data = data; this.rebuild(); this.renderRequest(); }
+	update(data: WorkData): void {
+		this.data = data;
+		if (this.publisher !== data.todo?.publisher) { this.todoView?.dispose(); this.todoView = undefined; }
+		this.publisher = data.todo?.publisher;
+		this.rebuild(); this.renderRequest();
+	}
+	setTheme(theme: Theme): void { this.theme = theme; this.invalidate(); }
+	dispose(): void { this.todoView?.dispose(); this.todoView = undefined; }
+	private hosted(): TodoView | undefined {
+		if (!this.todoView && this.data.todo && this.todos) {
+			const panel = this;
+			this.publisher = this.data.todo.publisher;
+			this.todoView = this.todos.createView({
+				theme: { fg: (color, text) => panel.theme.fg(color, text), bold: text => panel.theme.bold(text) },
+				height: () => panel.listHeight(), requestRender: this.renderRequest,
+			});
+		}
+		return this.todoView;
+	}
 	private listHeight(): number { return Math.max(1, Math.min(12, Math.floor(this.rows() / 2) - 4)); }
 	private rebuild(preserveSelection = true): void {
 		if (preserveSelection) this.cursor.selected = this.list?.getSelectedItem()?.value ?? this.cursor.selected;
@@ -66,6 +89,7 @@ export class WorkPanel {
 		const selected = this.list.getSelectedItem();
 		const entry = this.entries.find(item => item.value === selected?.value);
 		if (!entry) return;
+		if (entry.kind === "todo" && action === "inspect") { this.cursor.tab = "todos"; this.rebuild(false); this.renderRequest(); return; }
 		if (entry.kind === "history" && action === "inspect") { this.cursor.history = !this.cursor.history; this.rebuild(); this.renderRequest(); return; }
 		if (entry.kind === "empty" && action !== "refresh") return;
 		if (action === "stop" && (entry.kind !== "job" || !entry.running)) return;
@@ -77,6 +101,7 @@ export class WorkPanel {
 	handleInput(input: string): void {
 		const step = matchesKey(input, Key.tab) ? 1 : matchesKey(input, Key.shift("tab")) ? -1 : 0;
 		if (step) { this.cursor.tab = tabs[(tabs.indexOf(this.cursor.tab) + step + tabs.length) % tabs.length]!; this.cursor.selected = undefined; this.rebuild(false); this.renderRequest(); return; }
+		if (this.cursor.tab === "todos" && input !== "r") { this.hosted()?.handleInput(input); return; }
 		if (input === "r") this.act("refresh");
 		else if (input === "s") this.act("stop");
 		else if (input === "c") this.act("cancel");
@@ -84,11 +109,11 @@ export class WorkPanel {
 		else this.list.handleInput(input);
 		this.renderRequest();
 	}
-	invalidate(): void { this.list.invalidate(); }
+	invalidate(): void { this.list.invalidate(); this.todoView?.invalidate(); }
 	render(width: number): string[] {
 		if (this.height !== this.listHeight()) this.rebuild();
 		const tabbar = tabs.map(tab => tab === this.cursor.tab ? `[${tab.toUpperCase()}]` : tab).join(" · ");
-		return [this.theme.fg("accent", `WORK  ${tabbar}`), ...this.list.render(width), this.theme.fg("dim", "Alt+W collapse · Alt+J/K select · Alt+] view · Alt+I inspect"), this.theme.fg("dim", "Alt+S stop · Alt+C cancel · Alt+M message · Alt+R refresh")].map(line => truncateToWidth(line, width));
+		return [this.theme.fg("accent", `WORK  ${tabbar}`), ...(this.cursor.tab === "todos" ? this.hosted()?.render(width) ?? ["Todo view unavailable"] : this.list.render(width)), this.theme.fg("dim", "Alt+W collapse · Alt+J/K select · Alt+] view · Alt+I inspect"), this.theme.fg("dim", "Alt+S stop · Alt+C cancel · Alt+M message · Alt+R refresh")].map(line => truncateToWidth(line, width));
 	}
 }
 

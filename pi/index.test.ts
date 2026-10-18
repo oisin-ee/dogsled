@@ -48,11 +48,19 @@ function rig() {
 	};
 	wrangle(api as unknown as ExtensionAPI);
 	let drawn: () => void = () => {};
-	const ctx = { mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session", getLeafId: () => null }, isIdle: () => true, ui: { setWidget: (...args: unknown[]) => { widgets.push(args); drawn(); }, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
+	let component: any;
+	const ctx = { mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session", getLeafId: () => null }, isIdle: () => true, ui: { theme: plain,
+		setWidget: (...args: any[]) => {
+			component?.dispose?.();
+			widgets.push(args);
+			component = typeof args[1] === "function" ? args[1]({ terminal: { rows: 24 }, requestRender() { drawn(); } }, plain) : undefined;
+				component?.render(100);
+			drawn();
+		}, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
 	return { calls, widgets, notices, servers, commands, shortcuts, renderers, sent, ctx, next,
-		widget() { return widgets.at(-1)[1]({ terminal: { rows: 24 }, requestRender() {} }, plain); },
+		widget() { return component; },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
@@ -101,15 +109,15 @@ test("the board widget follows wrangle board, refreshes every 10 s, and stops at
 	await r.invoke("session_start");
 	// Claims first, so this pane is a registered reader before anyone sends to it.
 	assert.deepEqual(r.calls[0]?.slice(1, 3), ["inbox", "claim"]);
-	assert.deepEqual(r.widgets.at(-1), ["wrangle", undefined, { placement: "aboveEditor" }]);
+	assert.deepEqual(r.widgets.at(-1), ["wrangle", undefined]);
 	r.board({ hosts: [{ label: "local", service: "up", reachable: true, busy: 1, cores: 8, eligible: true }],
 		rows: [{ group: "running", kind: "job", id: "j1", name: "cargo test", what: "job", host: "local", state: "running", activity: "cargo test", age_ms: 60_000 }] });
 	const drawn = r.next();
 	t.mock.timers.tick(10_000);
 	await drawn;
-	const [key, factory, options] = r.widgets.at(-1);
+	const [key, , options] = r.widgets.at(-1);
 	assert.deepEqual([key, options], ["wrangle", { placement: "aboveEditor" }]);
-	const lines: string[] = factory(undefined, plain).render(80);
+	const lines: string[] = r.widget().render(80);
 	assert.equal(lines.length, 2);
 	assert.match(lines.join("\n"), /Jobs  cargo test · running/);
 	await r.invoke("session_shutdown");
@@ -187,7 +195,7 @@ test("work navigation uses modified keys and resets on session replacement", asy
 	await r.shortcuts.get("alt+w").handler(r.ctx);
 	const panel = r.widget();
 	await r.shortcuts.get("alt+]").handler(r.ctx);
-	assert.equal(panel.cursor.tab, "todos");
+	assert.match(panel.render(100).join("\n"), /\[TODOS\]/);
 	assert.ok([...r.shortcuts.keys()].every(key => key.startsWith("alt+")));
 	await r.invoke("session_start");
 	assert.equal(r.widgets.at(-1)[1], undefined);
@@ -226,7 +234,7 @@ test("without a Herdr pane the extension starts no commands and explains unavail
 		const r = rig();
 		await r.invoke("session_start");
 		assert.deepEqual(r.calls, []);
-		const lines: string[] = r.widgets.at(-1)[1](undefined, plain).render(100);
+		const lines: string[] = r.widget().render(100);
 		assert.match(lines.join(""), /Herdr owner pane/);
 		await r.invoke("session_shutdown");
 	} finally {

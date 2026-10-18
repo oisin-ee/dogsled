@@ -1,45 +1,97 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 
-export interface WorkTask { content: string; status: "pending" | "in_progress" | "completed" | "abandoned" }
+/** The provider owns rendering and state interpretation; this is an in-process capability. */
+export interface TodoViewHost {
+	theme: Pick<Theme, "fg" | "bold">;
+	height: () => number;
+	requestRender: () => void;
+}
+export interface TodoView {
+	render(width: number): string[];
+	handleInput(input: string): void;
+	invalidate(): void;
+	update(state: unknown): void;
+	dispose(): void;
+}
+export interface TodoDisplay {
+	empty: boolean;
+	summary: string;
+	current: string;
+	text: string;
+	state: unknown;
+	createView(host: TodoViewHost): TodoView;
+}
 export interface TodoSnapshot {
-	version: 1;
+	version: 2;
 	presenter: string;
 	request: string;
 	publisher: string;
 	revision: number;
 	session: string;
 	branch: string | null;
-	tasks: WorkTask[];
+	display: TodoDisplay;
 }
 
 type Bus = ExtensionAPI["events"];
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
+function isDisplay(value: unknown): boolean {
+	return record(value) && typeof value["empty"] === "boolean" && typeof value["summary"] === "string"
+		&& typeof value["current"] === "string" && typeof value["text"] === "string" && "state" in value && typeof value["createView"] === "function";
+}
+function isView(value: unknown): value is TodoView {
+	return record(value) && ["render", "handleInput", "invalidate", "update", "dispose"].every(key => typeof value[key] === "function");
+}
 
-/** Validate the independently installed provider's wire envelope, not rendered widget text. */
+/** Validate the independently installed provider's capability, never its task schema. */
 export function snapshot(value: unknown): TodoSnapshot | undefined {
-	if (!record(value) || value["version"] !== 1 || typeof value["presenter"] !== "string" || typeof value["request"] !== "string"
+	if (!record(value) || value["version"] !== 2 || typeof value["presenter"] !== "string" || typeof value["request"] !== "string"
 		|| typeof value["publisher"] !== "string" || typeof value["session"] !== "string"
 		|| (value["branch"] !== null && typeof value["branch"] !== "string")
-		|| !Number.isSafeInteger(value["revision"]) || Number(value["revision"]) < 1 || !Array.isArray(value["tasks"])) return undefined;
-	if (!value["tasks"].every((task: unknown) => record(task) && typeof task["content"] === "string"
-		&& ["pending", "in_progress", "completed", "abandoned"].includes(String(task["status"])))) return undefined;
+		|| !Number.isSafeInteger(value["revision"]) || Number(value["revision"]) < 1 || !isDisplay(value["display"])) return undefined;
 	return value as unknown as TodoSnapshot;
+}
+
+/** A view lease catches provider failures on every path and disposes exactly once. */
+class HostedTodo implements TodoView {
+	private disposed = false;
+	private readonly view: TodoView;
+	private readonly failed: (error: unknown) => void;
+	private readonly closed: () => void;
+	constructor(view: TodoView, failed: (error: unknown) => void, closed: () => void) {
+		this.view = view; this.failed = failed; this.closed = closed;
+	}
+	private call<T>(action: () => T, fallback: T): T {
+		if (this.disposed) return fallback;
+		try { return action(); } catch (error) { this.failed(error); return fallback; }
+	}
+	render(width: number): string[] { return this.call(() => this.view.render(width), []); }
+	handleInput(input: string): void { this.call(() => this.view.handleInput(input), undefined); }
+	invalidate(): void { this.call(() => this.view.invalidate(), undefined); }
+	update(state: unknown): void { this.call(() => this.view.update(state), undefined); }
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.closed();
+		try { this.view.dispose(); } catch (error) { this.failed(error); }
+	}
 }
 
 /** A session-scoped display lease. The provider remains the only task-state writer. */
 export class WorkTodo {
-	private readonly bus: Bus;
-	private readonly changed: () => void;
-	private readonly open: () => void;
 	private subscriptions: (() => void)[] = [];
 	private ctx: ExtensionContext | undefined;
 	private presenter = "";
 	private request = "";
 	private retired = new Set<string>();
+	private views = new Set<HostedTodo>();
+	private rejecting = false;
 	current: TodoSnapshot | undefined;
 	error: string | undefined;
 
+	private readonly bus: Bus;
+	private readonly changed: () => void;
+	private readonly open: () => void;
 	constructor(bus: Bus, changed: () => void, open: () => void) { this.bus = bus; this.changed = changed; this.open = open; }
 
 	start(ctx: ExtensionContext): void {
@@ -50,7 +102,7 @@ export class WorkTodo {
 		this.retired.clear();
 		this.subscriptions = [
 			this.bus.on("oisin.todo.ready", value => {
-				if (!record(value) || value["version"] !== 1 || typeof value["publisher"] !== "string") { this.reject(); return; }
+				if (!record(value) || value["version"] !== 2 || typeof value["publisher"] !== "string") { this.reject(); return; }
 				if (this.retired.has(value["publisher"])) return;
 				this.ask();
 			}),
@@ -58,25 +110,42 @@ export class WorkTodo {
 			this.bus.on("oisin.todo.stop", value => {
 				if (!record(value) || !this.current || value["publisher"] !== this.current.publisher) return;
 				this.retired.add(this.current.publisher);
-				this.current = undefined;
+				this.release();
 				this.changed();
 			}),
 			this.bus.on("oisin.work.open", value => {
-				if (record(value) && value["version"] === 1 && value["presenter"] === this.presenter && value["request"] === this.request) this.open();
+				if (record(value) && value["version"] === 2 && value["presenter"] === this.presenter && value["request"] === this.request) this.open();
 			}),
 		];
 		this.ask();
 	}
 
 	private ask(): void {
+		this.release();
 		this.request = randomUUID();
-		this.bus.emit("oisin.work.request", { version: 1, presenter: this.presenter, request: this.request });
+		this.bus.emit("oisin.work.request", { version: 2, presenter: this.presenter, request: this.request });
 	}
 
-	private reject(): void {
-		this.error = "Todo integration unavailable";
-		this.release();
-		this.changed();
+	private reject(error?: unknown): void {
+		if (this.rejecting) return;
+		this.rejecting = true;
+		try {
+			this.error = "Todo integration unavailable";
+			this.release();
+			if (error !== undefined) this.ctx?.ui.notify(`Work display unavailable: ${String(error)}`, "error");
+			this.changed();
+		} finally { this.rejecting = false; }
+	}
+
+	private preflight(next: TodoSnapshot): void {
+		if (!this.ctx) return;
+		const view: unknown = next.display.createView({ theme: this.ctx.ui.theme, height: () => 1, requestRender() {} });
+		if (!isView(view)) throw new Error("Invalid todo component");
+		try {
+			view.update(next.display.state);
+			const lines: unknown = view.render(1);
+			if (!Array.isArray(lines) || !lines.every(line => typeof line === "string")) throw new Error("Invalid todo render output");
+		} finally { view.dispose(); }
 	}
 
 	private receive(value: unknown): void {
@@ -85,23 +154,40 @@ export class WorkTodo {
 		if (!next) { this.reject(); return; }
 		if (!this.ctx || next.session !== this.ctx.sessionManager.getSessionId() || next.branch !== this.ctx.sessionManager.getLeafId() || this.retired.has(next.publisher)) return;
 		if (this.current?.publisher === next.publisher && next.revision <= this.current.revision) return;
-		if (this.current && this.current.publisher !== next.publisher) this.retired.add(this.current.publisher);
-		this.current = next;
-		this.error = undefined;
 		try {
-			// The strip must render successfully before its provider relinquishes the widget.
+			this.preflight(next);
+			if (this.current && this.current.publisher !== next.publisher) {
+				this.retired.add(this.current.publisher);
+				this.disposeViews();
+			}
+			this.current = next;
+			this.error = undefined;
+			for (const view of this.views) view.update(next.display.state);
+			if (this.current !== next) return;
 			this.changed();
-			this.bus.emit("oisin.work.claim", { version: 1, presenter: this.presenter, request: this.request, publisher: next.publisher, revision: next.revision });
-		} catch (error) {
-			this.error = "Todo integration unavailable";
-			this.release();
-			this.ctx.ui.notify(`Work display unavailable: ${String(error)}`, "error");
-		}
+			if (this.current !== next) return;
+			this.bus.emit("oisin.work.claim", { version: 2, presenter: this.presenter, request: this.request, publisher: next.publisher, revision: next.revision });
+		} catch (error) { this.reject(error); }
 	}
 
+	/** An inline expansion owns this instance until it collapses or its lease ends. */
+	createView(host: TodoViewHost): TodoView | undefined {
+		if (!this.current) return undefined;
+		try {
+			const created: unknown = this.current.display.createView(host);
+			if (!isView(created)) throw new Error("Invalid todo component");
+			const view = new HostedTodo(created, error => this.reject(error), () => this.views.delete(view));
+			this.views.add(view);
+			return view;
+		} catch (error) { this.reject(error); return undefined; }
+	}
+
+	private disposeViews(): void { for (const view of [...this.views]) view.dispose(); }
 	private release(): void {
-		if (this.presenter) this.bus.emit("oisin.work.release", { version: 1, presenter: this.presenter, request: this.request });
+		const claimed = this.current !== undefined;
 		this.current = undefined;
+		this.disposeViews();
+		if (claimed) this.bus.emit("oisin.work.release", { version: 2, presenter: this.presenter, request: this.request });
 	}
 
 	stop(): void {

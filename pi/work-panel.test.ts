@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { loadJobHistory } from "./work-history.ts";
+import { todoDisplay } from "./todo-fixture.test.ts";
 import { WorkPanel, workEntries, inspectEntry, runWorkAction, WorkDetail, type WorkAction, type WorkData, type WorkEntry } from "./work-panel.ts";
 
 const plain = { fg: (_: string, text: string) => text, bold: (text: string) => text } as Theme;
@@ -11,9 +12,7 @@ function data(): WorkData {
 		{ id: "agent", host: "netcup", pane: "w2:p1", name: "reviewer", kind: "agent", what: "pi", group: "attention", state: "blocked", age_ms: 0, activity: "needs input" },
 		{ id: "job", host: "local", name: "tests", kind: "job", what: "job", group: "running", state: "running", age_ms: 0, activity: "tests" },
 		{ id: "ticket", host: "any", name: "queued", kind: "job", what: "job", group: "waiting", state: "queued", age_ms: 0, activity: "waiting" },
-	] }, todo: { version: 1, presenter: "p", request: "r", publisher: "t", revision: 1, session: "s", branch: null, tasks: [
-		{ content: "Verify changes", status: "in_progress" }, { content: "Done", status: "completed" }, { content: "Dropped", status: "abandoned" },
-	] }, error: undefined, history: { jobs: [{ id: "done", host: "local", owner: "w1:p1", cmd: ["test"], state: "exited", ended_ms: 1, exit: 0 }] } };
+	] }, todo: { version: 2, presenter: "p", request: "r", publisher: "t", revision: 1, session: "s", branch: null, display: todoDisplay() }, error: undefined, history: { jobs: [{ id: "done", host: "local", owner: "w1:p1", cmd: ["test"], state: "exited", ended_ms: 1, exit: 0 }] } };
 }
 
 test("history joins both recorded host and job id and rejects unrelated owners", async () => {
@@ -31,7 +30,7 @@ test("history joins both recorded host and job id and rejects unrelated owners",
 test("tabs preserve todo status and collapse completed job history without duplicate active rows", () => {
 	const d = data();
 	assert.equal(workEntries(d, "all", false)[0]?.id, "agent");
-	assert.deepEqual(workEntries(d, "todos", false).map(row => row.description), ["in_progress", "completed", "abandoned"]);
+	assert.deepEqual(workEntries(d, "all", false).filter(row => row.kind === "todo").map(row => row.label), ["Todo list: 1/3 completed"]);
 	assert.equal(workEntries(d, "agents", false).length, 1);
 	assert.equal(workEntries(d, "jobs", false).some(row => row.id === "done"), false);
 	assert.equal(workEntries(d, "jobs", true).filter(row => row.id === "done").length, 1);
