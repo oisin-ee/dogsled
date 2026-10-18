@@ -198,6 +198,33 @@ fn close_finishes_a_child_tab_in_the_callers_workspace_but_not_the_callers_workt
 }
 
 #[test]
+fn a_child_in_an_unlocked_worktree_loses_its_pane_and_never_the_checkout() {
+    // The checkout belongs to someone else, such as the owner; the child only ran in it.
+    let (rig, tree) = close_rig("close-unlocked");
+    let repo = rig.dir.join("home/repo");
+    git(&repo, &["worktree", "unlock", tree.to_str().unwrap()]);
+    fs::write(tree.join("draft"), "the owner's work").unwrap();
+    item(&rig, "local");
+    panes(&rig, "idle", &tree);
+    let out = rig.run(&["close", "w2:p1", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let closed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(closed["worktree"], Value::Null);
+    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
+    assert!(!rig.log("herdr.log").contains("workspace close"));
+    assert_eq!(rig.log("hook.log"), "");
+    assert_eq!(
+        fs::read_to_string(tree.join("draft")).unwrap(),
+        "the owner's work"
+    );
+    assert!(git(&repo, &["worktree", "list"]).contains(".worktrees/x"));
+}
+
+#[test]
 fn close_refuses_active_dirty_foreign_locked_or_own_work_without_changes() {
     let (rig, tree) = close_rig("close-refuse");
     item(&rig, "local");

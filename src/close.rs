@@ -85,6 +85,8 @@ impl Guard {
 
 /// Every refusal happens before anything changes. A child tab in the caller's workspace is
 /// closed; the caller's own pane, and a worktree the caller works in or shows, are refused.
+/// Only an agent worktree (locked `agent:worktree`) is removed; a child in any other checkout
+/// loses only its pane.
 /// `guard` adds the checks that make an automatic close lose nothing.
 pub fn local(
     shell: &dyn crate::shell::Shell,
@@ -106,13 +108,19 @@ pub fn local(
             "{pane} is busy ({reason}); close only an idle or done child"
         )));
     }
-    let Some(tree) = target
+    let tree = target
         .cwd
         .as_deref()
         .map(|cwd| worktree::linked(shell, cwd))
         .transpose()?
-        .flatten()
-    else {
+        .flatten();
+    // Wrangle locks every worktree it makes. An unlocked one is someone's own checkout that
+    // the child only ran in, such as its owner's: closing the child closes its pane alone.
+    let lock = match &tree {
+        Some(tree) => worktree::lock_reason(shell, &tree.checkout, &tree.path)?,
+        None => None,
+    };
+    let Some(tree) = tree.filter(|_| lock.is_some()) else {
         shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
         return Ok(Closed {
             pane: pane.into(),
@@ -122,7 +130,7 @@ pub fn local(
     };
     outside(&tree, caller)?;
     unsaved(shell, &tree, guard)?;
-    if let Some(lock) = worktree::lock_reason(shell, &tree.checkout, &tree.path)?
+    if let Some(lock) = lock
         && lock != AGENT_LOCK
     {
         return Err(refuse(&format!(
