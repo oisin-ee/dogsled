@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.11.0 - 2026-10-18
 
 Nothing types into an agent's terminal any more.
 
