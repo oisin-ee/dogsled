@@ -466,11 +466,16 @@ The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its ex
 
 The extension adds host status before each prompt, registers the tools, and draws:
 
-- **The board widget** above the editor: `wrangle board --json` for this pane, every ten seconds. The header counts each group and shows a meter per host. On a narrow terminal the activity column goes first, then the host. An empty board removes the widget.
+- **The `WORK` strip** above the editor: one row for todo progress, agents, jobs, and attention. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately. Empty providers hide the strip; unavailable providers show an error instead of false zero counts.
+- **`/work`**, a bounded overlay with All, Todos, Agents, and Jobs views. Tab changes views; Enter opens details. Todos are read-only. Explicit actions stop jobs, cancel queued tickets, or message agents through the inbox. Stop and cancel require confirmation. Escape returns to the unchanged editor draft. Completed job history stays collapsed until selected.
 - **`/wrangle`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
 - **The inbox reader** and a renderer that shows each record's kind, sender, and text, folded past twelve lines.
 
-Without `HERDR_PANE_ID` the extension starts nothing. `$WRANGLE_BIN` selects the binary.
+Without `HERDR_PANE_ID`, the extension starts no Wrangle polling or jobs. The shared display can still show todos and reports Wrangle unavailable. `$WRANGLE_BIN` selects the binary.
+
+Todos follow the active Pi session branch. Agents and jobs follow the calling Herdr owner pane, including after a Pi session change. `/todos` and Alt+T open the Todos view when compatible pi-todo is active. `/todos list` remains a plain readout. The [display contract](docs/pi-work.md) keeps task state and reminders in pi-todo. Wrangle retains execution, logs, cancellation, and completion delivery.
+
+The Jobs view joins retained records to the current owner's ledger by host and job ID. It does not show unrelated fleet jobs. Job inspection uses `wrangle read` for a bounded log tail and shows the `wrangle logs` command for full output. Expired records and unavailable hosts produce explicit errors. The panel never starts a new process manager, edits todos, or writes into an agent terminal.
 
 The Herdr plugin keeps only the status-board popup:
 

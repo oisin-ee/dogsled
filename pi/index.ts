@@ -6,6 +6,8 @@ import { WorkTodo } from "./work-todo.ts";
 import { workStrip, workText, type WorkState } from "./work.ts";
 import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
+import { loadJobHistory, type JobHistory } from "./work-history.ts";
+import { WorkPanel, runWorkAction, showWorkDetail, type WorkAction, type WorkCursor, type WorkData, type WorkTab } from "./work-panel.ts";
 
 const REFRESH_MS = 10_000;
 
@@ -59,17 +61,66 @@ export default function wrangle(pi: ExtensionAPI) {
 	});
 
 	let panelOpen = false;
+	let workOpen = false;
+	let history: JobHistory = { jobs: [] };
+	let workPanel: WorkPanel | undefined;
+	let closeWork: (() => void) | undefined;
+	let workAbort: AbortController | undefined;
 	let context: ExtensionContext | undefined;
 	const todos = new WorkTodo(pi.events, () => { if (context) draw(context); }, () => {
-		if (context) context.ui.notify(workText(state()), "info");
+		if (context) void openWork(context, "todos").catch(error => context?.ui.notify(String(error), "error"));
 	});
 
 	function state(): WorkState {
 		return { board, todo: todos.current, error: failure ?? todos.error };
 	}
 
+	function workData(): WorkData { return { ...state(), history }; }
+
+	async function openWork(ctx: ExtensionContext, tab: WorkTab): Promise<void> {
+		if (ctx.mode !== "tui") { ctx.ui.notify(workText(state()), "info"); return; }
+		if (workOpen || panelOpen) return;
+		workOpen = true;
+		const interaction = new AbortController();
+		workAbort = interaction;
+		const current = generation;
+		let cursor: WorkCursor = { tab, selected: undefined, history: false };
+		try {
+			// An older refresh may predate history demand; finish it before the panel refresh.
+			if (refresh) await refresh;
+			if (interaction.signal.aborted || current !== generation) return;
+			await update(ctx);
+			while (current === generation && workOpen) {
+				const action = await ctx.ui.custom<WorkAction | undefined>((tui, theme, keys, done) => {
+					closeWork = () => done(undefined);
+					workPanel = new WorkPanel(workData(), cursor, theme, keys, done, () => tui.requestRender(), () => tui.terminal.rows);
+					return workPanel;
+				}, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center" } });
+				workPanel = undefined;
+				closeWork = undefined;
+				if (!action || current !== generation) break;
+				cursor = action.cursor;
+				try {
+					const detail = await runWorkAction(action, ctx, exec, interaction.signal);
+					if (detail !== undefined && current === generation) await showWorkDetail(ctx, action.entry.label, detail, interaction.signal);
+				} catch (error) {
+					if (current === generation) await showWorkDetail(ctx, "Work action unavailable", String(error), interaction.signal);
+				}
+				if (current === generation) await update(ctx);
+			}
+		} finally {
+			interaction.abort();
+			if (workAbort === interaction) workAbort = undefined;
+			workPanel = undefined;
+			closeWork = undefined;
+			workOpen = false;
+			history = { jobs: [] };
+		}
+	}
+
 	function draw(ctx: ExtensionContext) {
 		if (ctx.mode !== "tui") return;
+		workPanel?.update(workData());
 		const data = state();
 		ctx.ui.setWidget("wrangle", panelOpen || (!data.board.rows.length && !data.todo?.tasks.length && !data.error) ? undefined : (_tui, theme) => ({
 			render: (width: number) => workStrip(data, width, theme),
@@ -86,9 +137,14 @@ export default function wrangle(pi: ExtensionAPI) {
 			if (ctx.mode !== "tui") return;
 			try {
 				const next = parseBoard(JSON.parse(await exec(["board", "--json"])));
-				failure = undefined;
 				if (current !== generation) return;
+				failure = undefined;
 				board = next;
+				if (workOpen) {
+					const loaded = await loadJobHistory(exec, owner);
+					if (current !== generation) return;
+					history = loaded;
+				}
 				draw(ctx);
 			} catch (error) {
 				// Say so once, not on every refresh; the last board stays on screen.
@@ -105,6 +161,8 @@ export default function wrangle(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (timer) clearInterval(timer);
 		generation++;
+		workAbort?.abort();
+		closeWork?.();
 		context = ctx;
 		board = { hosts: [], rows: [] };
 		failure = owner ? undefined : "Wrangle needs a Herdr owner pane";
@@ -123,6 +181,8 @@ export default function wrangle(pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		generation++;
+		workAbort?.abort();
+		closeWork?.();
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		inbox.stop();
@@ -146,8 +206,7 @@ export default function wrangle(pi: ExtensionAPI) {
 	pi.registerCommand("work", {
 		description: "Read todos on this branch and this owner's agents and jobs",
 		handler: async (_args, ctx) => {
-			await update(ctx);
-			ctx.ui.notify(workText(state()), "info");
+			await openWork(ctx, "all");
 		},
 	});
 	pi.registerCommand("wrangle", {
@@ -157,6 +216,7 @@ export default function wrangle(pi: ExtensionAPI) {
 				ctx.ui.notify(await exec(["board"]), "info");
 				return;
 			}
+			if (workOpen || panelOpen) return;
 			panelOpen = true;
 			draw(ctx);
 			try {

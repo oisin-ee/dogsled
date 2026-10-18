@@ -37,6 +37,8 @@ function rig() {
 				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
 				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-wrangle-inbox", file: "t.json" })
+				: args[0] === "items" ? '{"items":[]}'
+				: args[0] === "ps" || args[0] === "machine" ? '[]'
 				: args[0] === "--version" ? version
 				: "{}";
 			return { code, stdout, stderr: "failure", killed: false };
@@ -145,6 +147,43 @@ test("the board widget steps aside while /wrangle is open, so no row shows twice
 	assert.equal(during, undefined);
 	assert.equal(typeof r.widgets.at(-1)[1], "function");
 	await r.invoke("session_shutdown");
+});
+
+test("/work opens an overlay without changing the editor and reads history only while open", async (t) => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	await r.invoke("session_start");
+	assert.equal(r.calls.some(args => args.includes("ps")), false);
+	let options: unknown;
+	const ctx = { ...r.ctx, ui: { ...r.ctx.ui, custom: async (_factory: unknown, opts: unknown) => { options = opts; return undefined; } } };
+	await r.commands.get("work").handler("", ctx);
+	assert.equal((options as { overlay: boolean }).overlay, true);
+	assert.equal(r.calls.filter(args => args.includes("ps")).length, 1);
+	const drawn = r.next();
+	t.mock.timers.tick(10_000);
+	await drawn;
+	assert.equal(r.calls.filter(args => args.includes("ps")).length, 1);
+	await r.invoke("session_shutdown");
+});
+
+test("shutdown aborts a pending work confirmation before it can mutate a job", async t => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	await r.invoke("session_start");
+	let signal: AbortSignal | undefined;
+	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,
+		custom: async () => ({ action: "stop", entry: { kind: "job", id: "j", running: true, label: "tests" }, cursor: { tab: "jobs", history: false } }),
+		confirm: async (_title: string, _body: string, options: { signal: AbortSignal }) => {
+			signal = options.signal;
+			await r.invoke("session_shutdown");
+			return true;
+		},
+	} };
+	await r.commands.get("work").handler("", ctx);
+	assert.equal(signal?.aborted, true);
+	assert.equal(r.calls.some(args => args[1] === "stop"), false);
 });
 
 test("without a Herdr pane the extension starts no commands and explains unavailable jobs", async () => {
