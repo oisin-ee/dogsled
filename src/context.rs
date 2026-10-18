@@ -11,6 +11,17 @@ pub enum Harness {
     Pi,
 }
 
+impl Harness {
+    /// The name an inbox reader registers with.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Pi => "pi",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
 #[value(rename_all = "PascalCase")]
 pub enum Event {

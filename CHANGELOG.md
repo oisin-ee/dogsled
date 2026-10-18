@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+Nothing types into an agent's terminal any more.
+
+- `wrangle hook inbox --harness claude|codex --event Stop|UserPromptSubmit` reads the inbox for Claude Code and Codex. The plugin registers it on both events. At `Stop` records continue the turn (`decision: block`); at `UserPromptSubmit` they are `additionalContext` beside the user's text. An idle Claude or Codex agent sees a record at its next prompt or stop.
+- Watchdog check-ins are `check-in` inbox records, not `herdr agent prompt`. An owner without an inbox reader gets none until it has one. A finished child's reply comes only from the sweep; its check-in is no longer immediate. `watchdog.json` drops `deliveries`.
+- Admission notices go only through the inbox, to working owners too.
+
 ## 0.10.0 - 2026-10-18
 
 Wrangle replaces Shepherdr for delegation: one board, one inbox, and children that close on events.

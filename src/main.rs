@@ -196,20 +196,36 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             let sent = inbox::send_to(&fleet, &target, host.as_deref(), &kind, text, now_ms())?;
             print(cli.json, &sent, || sent.line())?;
         }
-        Command::Hook(HookCommand::Context { harness, event }) => {
-            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            let status = commands::status(&fleet)?;
-            let owner = std::env::var("HERDR_PANE_ID").ok();
-            print(false, &(), || {
-                context::format(harness, event, &status, owner.as_deref())
-            })?;
-        }
+        Command::Hook(cmd) => hook(cmd, &ledger, &shell, &policy, home)?,
         command => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             return runtime::dispatch(&fleet, command, cli.json);
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The harness hooks: prompt context, and the inbox for Claude Code and Codex.
+fn hook(
+    cmd: HookCommand,
+    ledger: &Ledger,
+    shell: &System,
+    policy: &config::Policy,
+    home: String,
+) -> Result<()> {
+    match cmd {
+        HookCommand::Inbox { harness, event } => {
+            inbox::hook(ledger, shell, harness.name(), event, now_ms())
+        }
+        HookCommand::Context { harness, event } => {
+            let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
+            let status = commands::status(&fleet)?;
+            let owner = std::env::var("HERDR_PANE_ID").ok();
+            print(false, &(), || {
+                context::format(harness, event, &status, owner.as_deref())
+            })
+        }
+    }
 }
 
 fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool) -> Result<()> {

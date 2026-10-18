@@ -188,3 +188,86 @@ esac
     let (_, listing) = rig.json(&["inbox", "list"]);
     assert_eq!(listing["sent"][0]["state"], "failed");
 }
+
+/// Run `wrangle hook inbox` as the hook would: with Herdr, as pane `w1:p2`.
+fn hook(rig: &Rig, harness: &str, event: &str) -> String {
+    let out = rig
+        .cmd(&["hook", "inbox", "--harness", harness, "--event", event])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn claude_and_codex_hooks_hand_over_the_inbox_without_typing() {
+    let rig = Rig::new("inbox-hooks");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_work", "worker"),
+        ],
+    );
+    // The worker is a Claude Code agent.
+    let mut listed: Value =
+        serde_json::from_slice(&fs::read(rig.dir.join("agents.json")).unwrap()).unwrap();
+    listed["result"]["agents"][1]["agent"] = json!("claude");
+    rig.put("agents.json", &listed);
+    let mut host: Value =
+        serde_json::from_slice(&fs::read(rig.dir.join("state/host.json")).unwrap()).unwrap();
+    host["probe"]["agent_panes"][1]["agent"] = json!("claude");
+    rig.put("state/host.json", &host);
+    // The first hook registers the reader; an empty inbox prints nothing, so a `Stop` with
+    // `stop_hook_active` ends the turn as it would.
+    assert_eq!(hook(&rig, "claude", "Stop"), "");
+    assert_eq!(
+        rig.json(&["send", "worker", "--message", "please review"])
+            .0,
+        0
+    );
+    // Until the worker's next prompt or stop, the sender sees why the record waits.
+    let (_, mine) = as_pane(&rig, "w1:p1", &["inbox", "list"]);
+    assert_eq!(mine["lines"][0]["state"], "waiting for worker's next turn");
+    // `Stop` continues the turn with the record as the next prompt, and acknowledges it.
+    let stop: Value = serde_json::from_str(&hook(&rig, "claude", "Stop")).unwrap();
+    assert_eq!(stop["decision"], "block");
+    let reason = stop["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("wrangle message from lead (w1:p1"),
+        "{reason}"
+    );
+    assert!(reason.ends_with(":\nplease review"), "{reason}");
+    assert_eq!(hook(&rig, "claude", "Stop"), "");
+    let (_, listing) = as_pane(&rig, "w1:p2", &["inbox", "list"]);
+    assert_eq!(listing["received"][0]["state"], "delivered");
+    // `UserPromptSubmit` adds records beside the user's text and never replaces it.
+    assert_eq!(rig.json(&["send", "worker", "--message", "one more"]).0, 0);
+    let prompt: Value = serde_json::from_str(&hook(&rig, "codex", "UserPromptSubmit")).unwrap();
+    assert_eq!(
+        prompt["hookSpecificOutput"]["hookEventName"],
+        "UserPromptSubmit"
+    );
+    assert!(
+        prompt["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .ends_with(":\none more")
+    );
+    assert!(prompt.get("decision").is_none());
+    assert!(!rig.log("herdr.log").contains("agent prompt"));
+    // Without Herdr the hook does nothing at all.
+    let out = rig
+        .cmd(&["hook", "inbox", "--harness", "claude", "--event", "Stop"])
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success() && out.stdout.is_empty());
+}

@@ -215,7 +215,7 @@ fn settle(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
 }
 
 /// Put each untold final reply, and each new blocked state, in the owner's inbox. A reply the
-/// owner cannot read yet stays untold, and the watchdog's check-in carries it.
+/// owner cannot read yet stays untold until it has a reader; `wrangle read` shows it meanwhile.
 fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
     let mut told = Vec::new();
     for item in crate::items::list(fleet.ledger)? {

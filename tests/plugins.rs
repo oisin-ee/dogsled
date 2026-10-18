@@ -86,26 +86,33 @@ fn marketplaces_and_manifests_resolve_the_single_skill_and_hooks() {
         assert!(skills.join("wrangle/SKILL.md").is_file());
         assert_eq!(std::fs::read_dir(&skills).unwrap().count(), 1);
         assert!(plugin.join("hooks/context.sh").is_file());
+        assert!(plugin.join("hooks/inbox.sh").is_file());
         let hooks = if codex {
             metadata["hooks"].clone()
         } else {
             json("plugins/wrangle/hooks/hooks.json")
         };
-        assert_eq!(hooks["hooks"].as_object().unwrap().len(), 2);
-        for event in ["SessionStart", "UserPromptSubmit"] {
-            let handler = &hooks["hooks"][event][0]["hooks"][0];
+        assert_eq!(hooks["hooks"].as_object().unwrap().len(), 3);
+        let (harness, variable) = if codex {
+            ("codex", "$PLUGIN_ROOT")
+        } else {
+            ("claude", "$CLAUDE_PLUGIN_ROOT")
+        };
+        // Context at session start and each prompt; the inbox at each prompt and each stop.
+        for (event, index, script) in [
+            ("SessionStart", 0, "context"),
+            ("UserPromptSubmit", 0, "context"),
+            ("UserPromptSubmit", 1, "inbox"),
+            ("Stop", 0, "inbox"),
+        ] {
+            let handler = &hooks["hooks"][event][0]["hooks"][index];
             assert_eq!(handler["type"], "command");
             assert_eq!(handler["timeout"], 6);
             let command = handler["command"].as_str().unwrap();
-            let (harness, variable) = if codex {
-                ("codex", "$PLUGIN_ROOT")
-            } else {
-                ("claude", "$CLAUDE_PLUGIN_ROOT")
-            };
             assert_eq!(
                 command,
                 format!(
-                    "sh \"{variable}/hooks/context.sh\" --harness {harness} --event {event} || true"
+                    "sh \"{variable}/hooks/{script}.sh\" --harness {harness} --event {event} || true"
                 )
             );
             // Empty PATH means no wrangle. An absolute shell path lets the

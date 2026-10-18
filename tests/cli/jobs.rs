@@ -239,7 +239,7 @@ fn concurrent_item_and_queue_writers_keep_every_record() {
 }
 
 #[test]
-fn queue_admission_is_fifo_and_owner_wake_waits_for_idle() {
+fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     let rig = Rig::new("queue-admit");
     rig.config("free_core_fraction_min = 2\n");
     rig.snapshot("state/host.json", now(), 0.0, 8);
@@ -276,27 +276,30 @@ fn queue_admission_is_fifo_and_owner_wake_waits_for_idle() {
     // Admission behavior is independent of the CI runner's real probe load/disk.
     // Exact capacity thresholds and FIFO blocking use the injected-time unit fixture.
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    rig.put(
-        "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":"working"}]}}),
-    );
+    let owner = json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi",
+        "agent_status":"working","terminal_id":"term_owner"}]}});
+    rig.put("agents.json", &owner);
     assert!(rig.run(&["serve", "--once"]).status.success());
     let tickets = rig.read("state/queue.json");
     assert_eq!(tickets[0]["id"], first["ticket"]);
     assert_eq!(tickets[0]["state"], "admitted");
     assert_eq!(tickets[1]["state"], "cancelled");
     assert_eq!(tickets[2]["state"], "admitted");
+    // The owner has no inbox reader yet, so nothing tells it, and nothing types into it.
     assert_eq!(tickets[0]["notified"], false);
-    rig.put(
-        "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":"idle"}]}}),
-    );
+    // Once it reads its inbox, the notice arrives there, while the owner still works.
+    assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.read("state/queue.json")[0]["notified"], true);
-    assert!(rig.log("herdr.log").contains(&format!(
-        "wrangle: ticket {} admitted on local",
-        first["ticket"].as_str().unwrap()
-    )));
+    let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
+    assert!(
+        claimed[0]["text"].as_str().unwrap().starts_with(&format!(
+            "wrangle: ticket {} admitted on local",
+            first["ticket"].as_str().unwrap()
+        )),
+        "{claimed}"
+    );
+    assert!(!rig.log("herdr.log").contains("agent prompt"));
     assert_eq!(
         rig.run(&["cancel", first["ticket"].as_str().unwrap()])
             .status
