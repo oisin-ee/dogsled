@@ -2,7 +2,7 @@
 
 Host status and placement for coding agents across [Herdr](https://herdr.dev) hosts.
 
-Wrangle measures hosts, places jobs and agents, and queues work. Shepherdr keeps parent/child messages.
+Wrangle measures hosts, starts Pi, Claude, and Codex children and jobs on the host with room, queues work when every host is full, and carries every message between agents through an inbox. Nothing types into an agent's terminal.
 
 ## Install
 
@@ -11,26 +11,26 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/wrangle@v0.9.1
+mise use github:oisin-ee/wrangle@v0.10.0
 ```
 
-Pi (extension and skill):
+Pi (extension, tools, and skill):
 
 ```sh
-pi install git:github.com/oisin-ee/wrangle@v0.9.1
+pi install git:github.com/oisin-ee/wrangle@v0.10.0
 ```
 
-Claude Code (hooks and skill):
+Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/wrangle#v0.9.1
+claude plugin marketplace add oisin-ee/wrangle#v0.10.0
 claude plugin install wrangle@wrangle
 ```
 
-Codex (hooks and skill):
+Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/wrangle --ref v0.9.1
+codex plugin marketplace add oisin-ee/wrangle --ref v0.10.0
 codex plugin add wrangle@wrangle
 ```
 
@@ -40,7 +40,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (status-board popup):
 
 ```sh
-herdr plugin install oisin-ee/wrangle --ref v0.9.1 --yes
+herdr plugin install oisin-ee/wrangle --ref v0.10.0 --yes
 ```
 
 Harness plugins use the binary on `PATH`. They do not install it or start host services.
@@ -76,6 +76,10 @@ wrangle logs JOB --follow
 wrangle stop JOB
 wrangle wait JOB --max 30m
 wrangle agent --kind codex --name reviewer --message 'Review the change' --branch feat/review --base main
+wrangle agent --profile general --name api-dups --message-file task.md --branch feat/api-dups
+wrangle board
+wrangle read api-dups
+wrangle send api-dups --message 'Also cover the empty case.'
 wrangle track netcup w1:p2 --name child
 wrangle items --owner "$HERDR_PANE_ID" --json
 wrangle cancel TICKET
@@ -106,24 +110,53 @@ A non-waiting action reports the operation that exceeded its deadline.
 Run long waits through the harness's background-task facility.
 A wait deadline does not cancel its job or ticket. `cancel` only cancels pending tickets.
 
+### Agents and profiles
+
+`wrangle agent` starts a child with `herdr agent start <name> --kind pi|claude|codex --pane <pane> -- <args>`. The task is a launch argument, so nothing is typed into the new pane.
+A task with a newline, a leading `-` or `@`, or more than 4000 characters goes to `launches/<id>.task.md`. Pi reads it as `@<file>`; Claude and Codex get a one-line pointer to it.
+`--message-file PATH` (or `-` for stdin) reads the task from a file.
+A failed `herdr agent start` is retried with backoff, three tries in all. After the last, the ticket fails and the owner's inbox says so. A refusal or a deadline fails at once.
+
+`--profile NAME` (Pi only) reads `~/.config/wrangle/profiles/NAME/profile.json` on the host that runs the child:
+
+```json
+{"description": "Ordinary units", "model": "alias/sol", "thinking": "medium", "prompt": "prompt.md", "role": "writer", "pi_args": []}
+```
+
+The child gets `--model`, `--thinking`, `--append-system-prompt <prompt>`, then `pi_args`. Unknown keys are ignored, so Shepherdr profiles load as they are.
+`role` is `reader` or `writer`. Without it, a child with `--branch` is a writer, and any other child a reader.
+`wrangle profiles` lists them; a broken profile shows as `broken: <reason>`.
+
+### Items and closing
+
 The owner's host stores locked `items.json` and `queue.json` files.
-An item records its host, pane, owner pane, creation time, and closure time.
+An item records its host, pane, owner pane, creation time, closure time, and for an agent its harness, profile, model, role, and captured final reply.
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
 The service closes a job item after job completion, and any item after pane removal.
-An agent item that is `idle` or `done` stays open. The service prompts its owner at once with the exact `wrangle close` command, then at each check-in until the child is closed.
-The service ignores stale snapshots and snapshots older than the item's creation.
+
+Closing is driven by events. When a child's turn completes (Herdr's `completion_seq` goes up) and it is `idle` or `done`, the sweep:
+
+1. reads its final reply from the transcript and keeps it in the item;
+2. puts the reply in the owner's inbox (see [Inbox](#inbox));
+3. closes a reader whose worktree is clean with no commits outside the default branch, and any child whose branch has landed.
+
+A child with commits to land stays open and shows under TO LAND on the board, and the prompt line says `To land: web-tests (+2)`. Merge or drop the branch; the next sweep closes it.
+A `blocked` child stays open, and the owner's inbox gets one `blocked` record per episode. A `working` child, or one that has never completed a turn, is never closed. Nothing closes on a timer.
+
+`wrangle board` groups an owner's children, jobs, and queued tickets by what the owner must do: TO LAND, ATTENTION, RUNNING, and WAITING. Each agent row names the harness and model; each job row names its command. `--json` is what the Pi widget draws.
+`wrangle read TARGET [--host H]` shows a child's or job's newest output and the captured final reply.
 
 ```sh
 wrangle close w2:p1
 wrangle close w9:p1 --host netcup --json
 ```
 
-`close` ends a finished child. `--host` defaults to the host of the pane's open item, else local.
-In a linked worktree, it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
-Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks an `agent:worktree` lock, and runs `git worktree remove` without force.
+`close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
+In an agent worktree (locked `agent:worktree`, as wrangle makes them), it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
+Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks the worktree, and runs `git worktree remove` without force.
 It deletes the branch only when wrangle's integration check finds it integrated (see [Cleanup](#cleanup)). An unmerged branch, or a branch still at the base tip, stays.
 When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
-A pane outside a worktree is closed alone.
+A pane outside a worktree, or in an unlocked worktree (someone's own checkout), is closed alone; the checkout stays.
 A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a worktree outside the repository's worktree directory, a dirty or detached worktree, and any other lock.
 It also refuses a busy target or a busy pane that uses the worktree: an agent that is not `idle` or `done`, or a shell with a foreground command.
 Each refusal happens before a change. If a `teardown` command fails, the worktree, its panes, its lock, and the item stay, and the error shows the command's last lines of output.
@@ -133,18 +166,44 @@ The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted,anchor_
 The service admits tickets in FIFO order using the same placement policy.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
 A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
-For non-waiting callers, admission prompts the owner only in `idle` or `done`. Other states defer the prompt.
-`status` lists open items per owner and pending tickets, and prints the close command for each finished child. `--brief` includes their counts and the number of finished children. Prompt context adds the close commands for the caller's own finished children only.
+For non-waiting callers, admission tells the owner through its inbox. An owner without an inbox reader still gets a `herdr agent prompt` until the Claude and Codex readers ship.
+`status` lists open items per owner and pending tickets. `--brief` includes their counts. Prompt context adds the caller's own `To land:` line.
+
+## Inbox
+
+Every message to an agent goes through one inbox on the agent's host: a child's final reply, a blocked report, an admitted ticket, a launch failure, and a message from another agent.
+
+```sh
+wrangle send api-dups --message 'Also cover the empty case.'
+wrangle send w9:p1 --host netcup --kind task --message-file note.md
+wrangle inbox list
+```
+
+`send` resolves a name or pane on any host and writes the record there, over SSH for a peer. A target with no inbox reader fails at once, and the sender hears so; a record never waits where nothing reads it.
+Records live in `inbox/<terminal>.json`, keyed by Herdr's terminal id, so a record follows the terminal and not a reused pane id.
+A reader claims records with `inbox claim`, which is a lease. A claimed record is offered again with backoff until `inbox ack` marks it delivered. When the terminal is gone, the record fails and the sender's own inbox says so.
+
+Readers:
+
+- **Pi:** the extension watches its inbox file, injects each batch as one `wrangle` message (`steer` while the agent runs, a new turn when it is idle), and acknowledges it when Pi has written the message to the session.
+- **Claude Code and Codex:** none yet. Until their hooks read the inbox, records to them fail at once.
+
+`inbox list --json` gives `{pane,terminal,received,sent,lines}`; `lines` is the display form the Pi panel shows.
+
+### Backoff
+
+One schedule is used for inbox leases, the sender's follow-up, peer reads, and launch retries: 10 seconds, doubling with jitter, capped at 5 minutes.
+A host that cannot be read shows `retry in 40s` on the board. `wrangle retry HOST` reads it again now.
 
 ## Host service and status
 
 Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
 The measurement step uses no SSH. It reads CPU busy time, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
-Separate watchdog, admission, and sweep workers keep prompts, slow setup, and cleanup independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
+Separate watchdog, admission, sweep, and inbox workers keep check-ins, slow setup, cleanup, and delivery independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
 An admission timeout records a failed ticket. The service continues publication and later actions.
 It writes `~/.local/state/wrangle/host.json` through atomic replacement.
-Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, and `transcript_modified`.
+Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, `transcript_modified`, `terminal_id`, `completion_seq`, `cwd`, the session's model and latest activity, and the worktree's branch, commits ahead, dirty state, and whether it landed.
 Transcript paths come from Herdr path sessions. Exact Claude and Codex session IDs also resolve against their standard session directories.
 Ambiguous, absent, or unreadable transcripts remain unstalled. Modification times use Unix milliseconds.
 Each pane also has `stalled_since_ms` and `state_since_ms`. The latter records the start of the observed state.
@@ -170,7 +229,17 @@ Status never probes peers itself.
 
 A missing snapshot, failed read, or snapshot older than 30 seconds shows `service: down`.
 The last peer measurement remains visible when available. Every discovered host stays in the output.
-The JSON output contains `hosts`, with service state, reachability, sample time, probe, headroom, and errors.
+The JSON output contains `hosts`, with service state, reachability, sample time, probe, headroom, errors, and `retry_ms` while a peer read backs off.
+
+```sh
+wrangle machine list
+wrangle machine rename ID LABEL
+wrangle machine disable ID
+wrangle machine reconnect ID   # a new tab, for SSH prompts
+wrangle machine add user@host --label name
+```
+
+Hosts are Herdr's saved machines. `machine` runs the matching `herdr machine` command; `reconnect` and `add` run it in a new focused tab, so the user can answer SSH prompts.
 
 Example tab-row output:
 
@@ -192,7 +261,8 @@ An agent without a readable transcript never stalls. Recovery clears its `$wrang
 Status lists stalled panes. Brief status and prompt context include a stall count within six lines.
 
 The owner's service checks every minute. It prompts only `idle` or `done` owners, never `working` or `blocked` owners.
-A stall or completed job makes a check-in due. Other open work gets a check-in after 30 minutes without a check-in or lifecycle event.
+A check-in still reaches the owner through `herdr agent prompt`; it moves to the inbox in a later release.
+A stall, a completed job, or a final reply the inbox could not deliver makes a check-in due. Other open work gets a check-in after 30 minutes without a check-in or lifecycle event.
 Transcript writes alone do not postpone regular check-ins. Pending job-completion events survive item closure.
 The note includes names, hosts, states, ages, transcript silence, and bounded recent activity.
 Known Pi, Claude, and Codex transcripts supply the latest tool call or message. Unknown formats fall back to plain pane text.
@@ -232,7 +302,7 @@ Each path merges on its own. An addition, deletion, or mode change on a path the
 Results use the remote-tracking branch, so `git fetch` keeps them current.
 A local branch with no worktree is removable when it is integrated or every commit is on a remote branch. Other branches are report-only. The default branch is never a candidate. Prune deletes a branch with `git branch -D` after it rechecks the planned commit.
 A pane holds a worktree when it works in it or sits in its workspace. A shell with no foreground command does not hold it.
-An agent holds it until it has been `idle` or `done` for 24 hours. Before that, its owner closes it with `wrangle close`.
+An agent holds it until it has been `idle` or `done` for 24 hours. Before that, the sweep closes a finished child that has nothing left to land.
 Held, dirty, and locked integrated worktrees are reported with the reason and are not removed.
 A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
 A shell with no foreground command in an ended job's tab is idle at once: the job log keeps its output. So is a shell whose directory no longer exists.
@@ -257,7 +327,7 @@ Doctor also discovers repositories from the caller, live pane directories, Herdr
 A configured path that is not a Git checkout is a report-only `repositories` entry.
 ### The sweep in `serve`
 
-A lead removes its finished children with `wrangle close`, and a job closes its own tab. That closed loop ends most work.
+The sweep closes finished children (see [Items and closing](#items-and-closing)), and a job closes its own tab. That closed loop ends most work.
 The sweep catches what a broken loop leaves behind: a crashed owner, a killed process, or a worktree that something else made.
 On each pass, the service's sweep worker builds the doctor plan in sweep scope. It applies only entries whose removal loses nothing:
 
@@ -301,8 +371,7 @@ The selected host rechecks reservations under its own lock before it accepts the
 `place` writes a reservation with a default TTL of 90 seconds.
 It returns the host id and label. JSON also includes the reservation id.
 With `--branch`, it creates or reuses the branch's worktree on that host and returns its `path` and `pane_id` (see [Repository configuration](#repository-configuration)).
-Then start the agent through Shepherdr, using that host and prepared pane or path.
-`place` does not start an agent or claim a repository lead. `run` and `agent` perform placement and launch together.
+`place` does not start an agent. `run` and `agent` perform placement and launch together.
 
 A reservation ends only at its TTL, which covers the time until the new agent appears in `herdr agent list`.
 Until the TTL ends, the new agent counts twice: as its reservation and as an active agent.
@@ -385,12 +454,21 @@ Without `HERDR_ENV`, service snapshots, or a usable binary, the hooks add nothin
 A hook has a five-second command budget. Hook failures exit successfully without output.
 Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the binary fails.
 
-The Pi extension calls `wrangle hook context --harness pi` before each prompt.
-It tracks successful Shepherdr `agents` spawn results through `wrangle track`.
-It gives every `agents spawn` without a `placement` its own worktree workspace, placed through `wrangle place` when none is open.
-An above-editor widget lists this session's open jobs, unclosed children, and pending tickets. It refreshes every ten seconds and after tool results.
-An empty list removes the widget. Shutdown stops the timer. Widget and tracking failures still appear as extension errors.
-`$WRANGLE_BIN` selects the binary used by the extension.
+### Tools
+
+`wrangle mcp` serves the wrangle commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `stop`, `cancel`, and `place`.
+Each tool calls the same code as its CLI command and returns the same JSON. No tool waits: `spawn` and `run` return the item or the queued ticket at once.
+The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its extension (tools `mcp__wrangle__*`); Claude Code reads `plugins/wrangle/.mcp.json`; Codex reads `plugins/wrangle/codex-mcp.json`, which forwards the Herdr and `WRANGLE_*` variables.
+
+### Pi
+
+The extension adds host status before each prompt, registers the tools, and draws:
+
+- **The board widget** above the editor: `wrangle board --json` for this pane, every ten seconds. The header counts each group and shows a meter per host. On a narrow terminal the activity column goes first, then the host. An empty board removes the widget.
+- **`/wrangle`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
+- **The inbox reader** and a renderer that shows each record's kind, sender, and text, folded past twelve lines.
+
+Without `HERDR_PANE_ID` the extension starts nothing. `$WRANGLE_BIN` selects the binary.
 
 The Herdr plugin keeps only the status-board popup:
 
@@ -399,7 +477,7 @@ herdr plugin pane open --plugin wrangle --entrypoint board
 ```
 
 The popup runs `wrangle status --watch`. The pane-close release hooks and sidebar token configuration are removed.
-All three harness packages share `plugins/wrangle/skills/wrangle/SKILL.md`. It describes placement, jobs, and queue admission.
+All three harness packages share `plugins/wrangle/skills/wrangle/SKILL.md`. It describes delegation, jobs, messages, and the queue.
 
 ## Build and development
 
