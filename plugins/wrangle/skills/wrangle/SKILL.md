@@ -18,7 +18,7 @@ wrangle read NAME_OR_PANE [--host H]
 ```
 
 The board groups what you started by what you must do: TO LAND (a finished child with commits), ATTENTION (blocked, stalled, failed), RUNNING, and WAITING (queued for a host). Each agent row shows its harness and model; each job row its command.
-Your prompt context carries host status and a `To land:` line. In Pi, the one-row `WORK` strip sits above the editor. `/work` opens read-only todos and agent/job inspection. Todos follow the Pi branch; agents and jobs follow the owner pane. `/wrangle` retains host, profile, and inbox administration.
+Your prompt context carries host status and a `To land:` line. In Pi, the compact `WORK` widget shows the current task and named agents and jobs above the editor. Alt+W or `/work` expands it in place. Work inspection stays inline, not in a popup. Todos follow the Pi branch; agents and jobs follow the owner pane. `/wrangle` retains host, profile, and inbox administration.
 
 ## Delegate
 

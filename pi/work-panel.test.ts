@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
-import { visibleWidth, matchesKey, Key } from "@earendil-works/pi-tui";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { loadJobHistory } from "./work-history.ts";
-import { WorkPanel, workEntries, inspectEntry, runWorkAction, showWorkDetail, type WorkAction, type WorkData, type WorkEntry } from "./work-panel.ts";
+import { WorkPanel, workEntries, inspectEntry, runWorkAction, WorkDetail, type WorkAction, type WorkData, type WorkEntry } from "./work-panel.ts";
 
 const plain = { fg: (_: string, text: string) => text, bold: (text: string) => text } as Theme;
-const keys = { getKeys: () => ["esc"], matches: (input: string) => matchesKey(input, Key.escape) } as unknown as KeybindingsManager;
 function data(): WorkData {
 	return { board: { hosts: [], rows: [
 		{ id: "agent", host: "netcup", pane: "w2:p1", name: "reviewer", kind: "agent", what: "pi", group: "attention", state: "blocked", age_ms: 0, activity: "needs input" },
@@ -61,21 +60,15 @@ test("aborted interactions cannot stop, cancel, or send after a dialog resolves"
 	}
 });
 
-test("aborting an interaction closes its detail overlay", async () => {
-	const controller = new AbortController();
-	let closed = false;
-	const ctx = { ui: { custom: async (factory: any) => {
-		const component = factory({ terminal: { rows: 24 }, requestRender() {} }, plain, keys, () => { closed = true; });
-		controller.abort();
-		component.dispose();
-	} } } as unknown as ExtensionContext;
-	await showWorkDetail(ctx, "Detail", "text", controller.signal);
-	assert.equal(closed, true);
+test("inline details fit the widget and sanitize terminal output", () => {
+	const detail = new WorkDetail("Detail", "\u001b[31mtext\u001b[0m", plain, () => 24, () => {});
+	assert.match(detail.render(80).join("\n"), /text/);
+	assert.ok(detail.render(80).length <= 12);
 });
 
 test("refresh keeps stable selection and terminal geometry stays bounded", () => {
 	const d = data(); let selected: WorkAction | undefined;
-	const panel = new WorkPanel(d, { tab: "jobs", selected: "job:local:job", history: false }, plain, keys, action => { selected = action; }, () => {}, () => 24);
+	const panel = new WorkPanel(d, { tab: "jobs", selected: "job:local:job", history: false }, plain, action => { selected = action; }, () => {}, () => 24);
 	panel.update({ ...d, board: { ...d.board, rows: [...d.board.rows].reverse() } });
 	panel.handleInput("\r");
 	assert.equal(selected?.entry.id, "job");
@@ -90,9 +83,9 @@ test("refresh keeps stable selection and terminal geometry stays bounded", () =>
 
 test("history toggle stays inside the panel and todo rows never offer mutation actions", () => {
 	const d = data(); let closed = false;
-	const panel = new WorkPanel(d, { tab: "jobs", selected: "history", history: false }, plain, keys, () => { closed = true; }, () => {}, () => 30);
+	const panel = new WorkPanel(d, { tab: "jobs", selected: "history", history: false }, plain, () => { closed = true; }, () => {}, () => 30);
 	panel.handleInput("\r"); assert.equal(panel.cursor.history, true); assert.equal(closed, false);
-	const todo = new WorkPanel(d, { tab: "todos", selected: undefined, history: false }, plain, keys, () => { closed = true; }, () => {}, () => 30);
+	const todo = new WorkPanel(d, { tab: "todos", selected: undefined, history: false }, plain, () => { closed = true; }, () => {}, () => 30);
 	for (const input of ["s", "c", "m"]) todo.handleInput(input);
 	assert.equal(closed, false);
 });
@@ -107,21 +100,17 @@ test("inspection uses existing commands and sanitizes output without losing line
 	assert.deepEqual(calls, [["read", "job", "--host", "local"], ["read", "w2:p1", "--host", "netcup"]]);
 });
 
-test("detail viewport scrolls and Escape returns through Pi's completion callback", async () => {
-	let completed = false;
-	const ctx = { ui: { custom: async (factory: any, options: any) => {
-		assert.equal(options.overlay, true);
-		const component = factory({ terminal: { rows: 15 }, requestRender() {} }, plain, keys, () => { completed = true; });
-		const before = component.render(45);
-		assert.ok(before.length <= 15);
-		component.handleInput("\u001b[6~");
-		const after = component.render(45);
-		assert.notDeepEqual(before, after);
-		assert.ok(after.every((line: string) => visibleWidth(line) <= 45));
-		component.handleInput("\u001b");
-	} } } as unknown as ExtensionContext;
-	await showWorkDetail(ctx, "Logs", Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n"), new AbortController().signal);
-	assert.equal(completed, true);
+test("inline detail viewport scrolls, resizes, and leaves room for the editor", () => {
+	let rows = 24;
+	const component = new WorkDetail("Logs", Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n"), plain, () => rows, () => {});
+	const before = component.render(45);
+	assert.ok(before.length <= 12);
+	component.handleInput("\u001b[B");
+	const after = component.render(45);
+	assert.notDeepEqual(before, after);
+	rows = 15;
+	assert.ok(component.render(45).length <= 7);
+	assert.ok(after.every(line => visibleWidth(line) <= 45));
 });
 
 test("stop and cancel require confirmation; messaging uses inbox arguments, never terminal input", async () => {

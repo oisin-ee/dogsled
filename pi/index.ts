@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Box, Text, Key } from "@earendil-works/pi-tui";
 import { type Board, clean, parseBoard } from "./board.ts";
 import { WorkTodo } from "./work-todo.ts";
 import { workStrip, workText, type WorkState } from "./work.ts";
 import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
 import { loadJobHistory, type JobHistory } from "./work-history.ts";
-import { WorkPanel, runWorkAction, showWorkDetail, type WorkAction, type WorkCursor, type WorkData, type WorkTab } from "./work-panel.ts";
+import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor, type WorkData, type WorkTab } from "./work-panel.ts";
 
 const REFRESH_MS = 10_000;
 
@@ -64,7 +64,9 @@ export default function wrangle(pi: ExtensionAPI) {
 	let workOpen = false;
 	let history: JobHistory = { jobs: [] };
 	let workPanel: WorkPanel | undefined;
-	let closeWork: (() => void) | undefined;
+	let workDetail: WorkDetail | undefined;
+	let detail: { title: string; body: string } | undefined;
+	let cursor: WorkCursor = { tab: "all", selected: undefined, history: false };
 	let workAbort: AbortController | undefined;
 	let context: ExtensionContext | undefined;
 	const todos = new WorkTodo(pi.events, () => { if (context) draw(context); }, () => {
@@ -77,44 +79,52 @@ export default function wrangle(pi: ExtensionAPI) {
 
 	function workData(): WorkData { return { ...state(), history }; }
 
+	function collapseWork(ctx: ExtensionContext): void {
+		workAbort?.abort();
+		workAbort = undefined;
+		workOpen = false;
+		workPanel = undefined;
+		workDetail = undefined;
+		detail = undefined;
+		history = { jobs: [] };
+		draw(ctx);
+	}
+
 	async function openWork(ctx: ExtensionContext, tab: WorkTab): Promise<void> {
 		if (ctx.mode !== "tui") { ctx.ui.notify(workText(state()), "info"); return; }
-		if (workOpen || panelOpen) return;
+		if (panelOpen) return;
 		workOpen = true;
+		detail = undefined;
+		workDetail = undefined;
+		cursor = { tab, selected: undefined, history: false };
+		workPanel = undefined;
+		const current = generation;
+		draw(ctx);
+		// Draw immediately; remote history must not delay expansion or typing.
+		if (refresh) await refresh;
+		if (current === generation && workOpen) await update(ctx);
+	}
+
+	async function act(ctx: ExtensionContext, action: WorkAction | undefined): Promise<void> {
+		if (!action) { collapseWork(ctx); return; }
+		if (workAbort) return;
 		const interaction = new AbortController();
 		workAbort = interaction;
 		const current = generation;
-		let cursor: WorkCursor = { tab, selected: undefined, history: false };
 		try {
-			// An older refresh may predate history demand; finish it before the panel refresh.
-			if (refresh) await refresh;
-			if (interaction.signal.aborted || current !== generation) return;
+			const body = await runWorkAction(action, ctx, exec, interaction.signal);
+			if (current !== generation || interaction.signal.aborted) return;
+			if (body !== undefined) { detail = { title: action.entry.label, body }; workDetail = undefined; }
+			draw(ctx);
 			await update(ctx);
-			while (current === generation && workOpen) {
-				const action = await ctx.ui.custom<WorkAction | undefined>((tui, theme, keys, done) => {
-					closeWork = () => done(undefined);
-					workPanel = new WorkPanel(workData(), cursor, theme, keys, done, () => tui.requestRender(), () => tui.terminal.rows);
-					return workPanel;
-				}, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center" } });
-				workPanel = undefined;
-				closeWork = undefined;
-				if (!action || current !== generation) break;
-				cursor = action.cursor;
-				try {
-					const detail = await runWorkAction(action, ctx, exec, interaction.signal);
-					if (detail !== undefined && current === generation) await showWorkDetail(ctx, action.entry.label, detail, interaction.signal);
-				} catch (error) {
-					if (current === generation) await showWorkDetail(ctx, "Work action unavailable", String(error), interaction.signal);
-				}
-				if (current === generation) await update(ctx);
+		} catch (error) {
+			if (current === generation && !interaction.signal.aborted) {
+				detail = { title: "Work action unavailable", body: String(error) };
+				workDetail = undefined;
+				draw(ctx);
 			}
 		} finally {
-			interaction.abort();
 			if (workAbort === interaction) workAbort = undefined;
-			workPanel = undefined;
-			closeWork = undefined;
-			workOpen = false;
-			history = { jobs: [] };
 		}
 	}
 
@@ -122,10 +132,19 @@ export default function wrangle(pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 		workPanel?.update(workData());
 		const data = state();
-		ctx.ui.setWidget("wrangle", panelOpen || (!data.board.rows.length && !data.todo?.tasks.length && !data.error) ? undefined : (_tui, theme) => ({
-			render: (width: number) => workStrip(data, width, theme),
-			invalidate: () => {},
-		}), { placement: "aboveEditor" });
+		ctx.ui.setWidget("wrangle", panelOpen || (!workOpen && !data.board.rows.length && !data.todo?.tasks.length && !data.error) ? undefined : (tui, theme) => {
+			if (workOpen) {
+				if (detail) {
+					workDetail ??= new WorkDetail(detail.title, detail.body, theme, () => tui.terminal.rows, () => tui.requestRender());
+					workDetail.setTheme(theme);
+					return workDetail;
+				}
+				workDetail = undefined;
+				workPanel = new WorkPanel(workData(), cursor, theme, action => { void act(ctx, action); }, () => tui.requestRender(), () => tui.terminal.rows);
+				return workPanel;
+			}
+			return { render: (width: number) => workStrip(data, width, theme), invalidate() {} };
+		}, { placement: "aboveEditor" });
 	}
 
 	function update(ctx: ExtensionContext): Promise<void> {
@@ -143,7 +162,7 @@ export default function wrangle(pi: ExtensionAPI) {
 				if (workOpen) {
 					const loaded = await loadJobHistory(exec, owner);
 					if (current !== generation) return;
-					history = loaded;
+					if (workOpen) history = loaded;
 				}
 				draw(ctx);
 			} catch (error) {
@@ -162,7 +181,12 @@ export default function wrangle(pi: ExtensionAPI) {
 		if (timer) clearInterval(timer);
 		generation++;
 		workAbort?.abort();
-		closeWork?.();
+		workAbort = undefined;
+		workOpen = false;
+		workPanel = undefined;
+		workDetail = undefined;
+		detail = undefined;
+		history = { jobs: [] };
 		context = ctx;
 		board = { hosts: [], rows: [] };
 		failure = owner ? undefined : "Wrangle needs a Herdr owner pane";
@@ -182,7 +206,11 @@ export default function wrangle(pi: ExtensionAPI) {
 	pi.on("session_shutdown", (_event, ctx) => {
 		generation++;
 		workAbort?.abort();
-		closeWork?.();
+		workAbort = undefined;
+		workOpen = false;
+		workPanel = undefined;
+		workDetail = undefined;
+		detail = undefined;
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		inbox.stop();
@@ -203,12 +231,29 @@ export default function wrangle(pi: ExtensionAPI) {
 			return;
 		}
 	});
+	async function toggleWork(ctx: ExtensionContext): Promise<void> {
+		if (workOpen) collapseWork(ctx);
+		else await openWork(ctx, "all");
+	}
 	pi.registerCommand("work", {
-		description: "Read todos on this branch and this owner's agents and jobs",
-		handler: async (_args, ctx) => {
-			await openWork(ctx, "all");
-		},
+		description: "Expand or collapse work above the editor (Alt+W)",
+		handler: async (_args, ctx) => { await toggleWork(ctx); },
 	});
+	pi.registerShortcut(Key.alt("w"), { description: "Expand or collapse work above the editor", handler: toggleWork });
+	for (const [key, input, description] of [
+		["j", "\u001b[B", "Next work item / scroll down"], ["k", "\u001b[A", "Previous work item / scroll up"],
+		["]", "\t", "Next work view"], ["i", "\r", "Inspect work / return to list"],
+		["s", "s", "Stop selected job"], ["c", "c", "Cancel selected queued work"],
+		["m", "m", "Message selected agent"], ["r", "r", "Refresh work"],
+	] as const) {
+		pi.registerShortcut(Key.alt(key), { description, handler: async (_ctx) => {
+			if (!workOpen || panelOpen || workAbort || !context) return;
+			if (detail) {
+				if (key === "i") { detail = undefined; draw(context); }
+				else if (key === "j" || key === "k") workDetail?.handleInput(input);
+			} else workPanel?.handleInput(input);
+		} });
+	}
 	pi.registerCommand("wrangle", {
 		description: "Hosts, your children and jobs, profiles, and messages",
 		handler: async (_args, ctx) => {
@@ -216,7 +261,7 @@ export default function wrangle(pi: ExtensionAPI) {
 				ctx.ui.notify(await exec(["board"]), "info");
 				return;
 			}
-			if (workOpen || panelOpen) return;
+			if (panelOpen || workAbort) return;
 			panelOpen = true;
 			draw(ctx);
 			try {

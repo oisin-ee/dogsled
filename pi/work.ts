@@ -1,5 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { clean, type Board, type Paint } from "./board.ts";
+import { age, clean, type Board, type Paint, type Row } from "./board.ts";
 import type { TodoSnapshot } from "./work-todo.ts";
 
 export interface WorkState {
@@ -8,33 +8,45 @@ export interface WorkState {
 	error: string | undefined;
 }
 
-/** One bounded row. Attention survives before progress and descriptive labels. */
+/** A small, persistent readout: names and current work, not just counts. */
 export function workStrip(state: WorkState, width: number, paint: Paint): string[] {
 	const { board, todo, error } = state;
 	if (!board.rows.length && !todo?.tasks.length && !error) return [];
-	const attention = board.rows.filter(row => row.group === "attention" || row.group === "to_land");
-	const urgent = attention.length ? `!${attention.length}` : error ? "!" : "";
-	const prefix = `WORK${urgent ? ` ${urgent}` : ""}`;
-	const counts: string[] = [];
-	if (todo?.tasks.length) counts.push(`${todo.tasks.filter(task => task.status === "completed").length}/${todo.tasks.length} todos`);
-	const jobs = board.rows.filter(row => row.kind === "job").length;
-	const agents = board.rows.filter(row => row.kind !== "job").length;
-	if (agents) counts.push(`${agents} agent${agents === 1 ? "" : "s"}`);
-	if (jobs) counts.push(`${jobs} job${jobs === 1 ? "" : "s"}`);
-	const item = attention[0];
-	const detail = error ? `unavailable · ${clean(error)}` : item ? `${clean(item.name)} · ${clean(item.state)}`
-		: todo?.tasks.find(task => task.status === "in_progress")?.content;
-	let line = prefix;
-	for (const count of counts) {
-		const next = `${line} · ${count}`;
-		if (visibleWidth(next) + 8 <= width) line = next;
+	const lines = [paint.fg("dim", "WORK · Alt+W expand")];
+	if (error) lines.push(paint.fg("warning", `! unavailable · ${clean(error)}`));
+	const tasks = todo?.tasks ?? [];
+	const active = tasks.find(task => task.status === "in_progress");
+	const next = tasks.find(task => task.status === "pending");
+	const current = active ?? next;
+	if (current) lines.push(`${paint.fg("accent", active ? "→ Task" : "· Next")}  ${clean(current.content)}`);
+	else if (tasks.length) lines.push(paint.fg("muted", `Tasks · ${tasks.filter(task => task.status === "completed").length}/${tasks.length} completed`));
+	const priority = (row: Row) => row.group === "attention" || row.group === "to_land" ? 0 : row.group === "running" ? 1 : 2;
+	for (const [label, members] of [
+		["Agents", board.rows.filter(row => row.kind !== "job")],
+		["Jobs", board.rows.filter(row => row.kind === "job")],
+	] as const) {
+		const rows = [...members].sort((a, b) => priority(a) - priority(b));
+		if (!rows.length) continue;
+		let line = `${label}  `;
+		let shown = 0;
+		for (const row of rows) {
+			const warning = priority(row) === 0;
+			const entry = `${warning ? "! " : ""}${clean(row.name)} · ${clean(row.state)} · ${age(row.age_ms)}`;
+			const remaining = rows.length - shown - 1;
+			const suffix = remaining ? `  +${remaining} more` : "";
+			const join = shown ? "  |  " : "";
+			if (shown && visibleWidth(line + join + entry + suffix) > width) break;
+			const room = Math.max(0, width - visibleWidth(line + join + suffix));
+			line += join + paint.fg(warning ? "warning" : "muted", truncateToWidth(entry, room));
+			shown++;
+		}
+		if (shown < rows.length) line += paint.fg("dim", `  +${rows.length - shown} more`);
+		lines.push(line);
 	}
-	if (detail && width - visibleWidth(line) > 12) line += ` · ${truncateToWidth(clean(detail), width - visibleWidth(line) - 11)}`;
-	if (visibleWidth(line) + 8 <= width) line += "  /work";
-	return [truncateToWidth(paint.fg(urgent ? "warning" : "accent", line), width)];
+	return lines.map(line => truncateToWidth(line, width));
 }
 
-/** A plain readout also works in modes where custom terminal UI is unavailable. */
+/** A plain readout also works in modes where terminal UI is unavailable. */
 export function workText(state: WorkState): string {
 	const lines = ["WORK · todos: Pi branch · agents/jobs: Herdr owner pane"];
 	if (state.error) lines.push(state.error);

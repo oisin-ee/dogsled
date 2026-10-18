@@ -14,6 +14,7 @@ function rig() {
 	const notices: unknown[] = [];
 	const servers: unknown[] = [];
 	const commands = new Map<string, any>();
+	const shortcuts = new Map<string, any>();
 	const renderers = new Map<string, any>();
 	const sent: any[] = [];
 	let code = 0;
@@ -27,6 +28,7 @@ function rig() {
 		on(event: string, fn: Handler) { handlers.set(event, fn); },
 		registerMcpServer(name: string, config: unknown) { servers.push([name, config]); },
 		registerCommand(name: string, options: unknown) { commands.set(name, options); },
+		registerShortcut(key: string, options: unknown) { shortcuts.set(key, options); },
 		registerMessageRenderer(type: string, fn: unknown) { renderers.set(type, fn); },
 		sendMessage(message: unknown, options: unknown) { sent.push([message, options]); },
 		async exec(binary: string, args: string[], options?: { timeout: number }) {
@@ -49,7 +51,8 @@ function rig() {
 	const ctx = { mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session", getLeafId: () => null }, isIdle: () => true, ui: { setWidget: (...args: unknown[]) => { widgets.push(args); drawn(); }, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
-	return { calls, widgets, notices, servers, commands, renderers, sent, ctx, next,
+	return { calls, widgets, notices, servers, commands, shortcuts, renderers, sent, ctx, next,
+		widget() { return widgets.at(-1)[1]({ terminal: { rows: 24 }, requestRender() {} }, plain); },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
@@ -107,8 +110,8 @@ test("the board widget follows wrangle board, refreshes every 10 s, and stops at
 	const [key, factory, options] = r.widgets.at(-1);
 	assert.deepEqual([key, options], ["wrangle", { placement: "aboveEditor" }]);
 	const lines: string[] = factory(undefined, plain).render(80);
-	assert.equal(lines.length, 1);
-	assert.ok(lines[0]?.includes("1 job"), lines.join("\n"));
+	assert.equal(lines.length, 2);
+	assert.match(lines.join("\n"), /Jobs  cargo test · running/);
 	await r.invoke("session_shutdown");
 	const after = r.calls.length;
 	t.mock.timers.tick(10_000);
@@ -149,21 +152,45 @@ test("the board widget steps aside while /wrangle is open, so no row shows twice
 	await r.invoke("session_shutdown");
 });
 
-test("/work opens an overlay without changing the editor and reads history only while open", async (t) => {
+test("Alt+W and /work expand the same above-editor widget without an overlay or editor changes", async (t) => {
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
 	await r.invoke("session_start");
+	const compact = r.widget().render(100);
 	assert.equal(r.calls.some(args => args.includes("ps")), false);
-	let options: unknown;
-	const ctx = { ...r.ctx, ui: { ...r.ctx.ui, custom: async (_factory: unknown, opts: unknown) => { options = opts; return undefined; } } };
-	await r.commands.get("work").handler("", ctx);
-	assert.equal((options as { overlay: boolean }).overlay, true);
+	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,
+		custom: async () => assert.fail("work must never open a custom screen"),
+		setEditorText: () => assert.fail("draft must remain untouched"),
+	} };
+	await r.shortcuts.get("alt+w").handler(ctx);
+	assert.deepEqual(r.widgets.at(-1)[2], { placement: "aboveEditor" });
+	const panel = r.widget();
+	assert.ok(panel.render(100).length > compact.length);
+	assert.match(panel.render(100).join("\n"), /tests/);
 	assert.equal(r.calls.filter(args => args.includes("ps")).length, 1);
+	await r.commands.get("work").handler("", ctx);
+	assert.deepEqual(r.widget().render(100), compact);
 	const drawn = r.next();
 	t.mock.timers.tick(10_000);
 	await drawn;
 	assert.equal(r.calls.filter(args => args.includes("ps")).length, 1);
+	await r.invoke("session_shutdown");
+});
+
+test("work navigation uses modified keys and resets on session replacement", async t => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	await r.invoke("session_start");
+	await r.shortcuts.get("alt+w").handler(r.ctx);
+	const panel = r.widget();
+	await r.shortcuts.get("alt+]").handler(r.ctx);
+	assert.equal(panel.cursor.tab, "todos");
+	assert.ok([...r.shortcuts.keys()].every(key => key.startsWith("alt+")));
+	await r.invoke("session_start");
+	assert.equal(r.widgets.at(-1)[1], undefined);
 	await r.invoke("session_shutdown");
 });
 
@@ -173,15 +200,21 @@ test("shutdown aborts a pending work confirmation before it can mutate a job", a
 	const r = rig();
 	await r.invoke("session_start");
 	let signal: AbortSignal | undefined;
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
+	let confirmed!: () => void;
+	const finished = new Promise<void>(resolve => { confirmed = resolve; });
 	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,
-		custom: async () => ({ action: "stop", entry: { kind: "job", id: "j", running: true, label: "tests" }, cursor: { tab: "jobs", history: false } }),
 		confirm: async (_title: string, _body: string, options: { signal: AbortSignal }) => {
 			signal = options.signal;
 			await r.invoke("session_shutdown");
+			confirmed();
 			return true;
 		},
 	} };
 	await r.commands.get("work").handler("", ctx);
+	r.widget().render(100);
+	await r.shortcuts.get("alt+s").handler(ctx);
+	await finished;
 	assert.equal(signal?.aborted, true);
 	assert.equal(r.calls.some(args => args[1] === "stop"), false);
 });

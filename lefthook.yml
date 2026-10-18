@@ -3,5 +3,9 @@
 
 pre-commit:
   commands:
-    check:
-      run: mise run check
+    rust:
+      glob: ["*.rs", "**/*.rs", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "mise.toml", "lefthook.yml", ".cargo/*", "tests/**"]
+      run: mise run check:rust
+    pi:
+      glob: ["pi/**", "package.json", "package-lock.json", "tsconfig.json", "mise.toml", "lefthook.yml"]
+      run: mise run check:pi

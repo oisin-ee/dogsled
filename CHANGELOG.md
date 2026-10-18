@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.12.2 - 2026-10-18
+
+- The compact Pi widget shows the current task and named agents and jobs above the editor.
+- Alt+W and `/work` expand or collapse the same widget. Work details stay inline. The editor draft stays unchanged.
+- Modified shortcuts navigate work and run explicit actions without taking ordinary typing from the editor.
+- Pre-commit checks select Rust and Pi verification from staged paths. Changes to shared check configuration still run both gates.
+
 ## 0.12.1 - 2026-10-18
 
 The 0.12.0 release was cancelled before publication to synchronize the Cargo lockfile.

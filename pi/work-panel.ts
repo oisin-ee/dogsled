@@ -1,4 +1,4 @@
-import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, SelectList, Text, ScrollView, truncateToWidth } from "@earendil-works/pi-tui";
 import { clean } from "./board.ts";
 import type { WorkState } from "./work.ts";
@@ -19,7 +19,7 @@ export interface WorkAction { action: "inspect" | "stop" | "cancel" | "send" | "
 export function workEntries(data: WorkData, tab: WorkTab, history: boolean): WorkEntry[] {
 	const todos: WorkEntry[] = (data.todo?.tasks ?? []).map(task => ({ value: `todo:${task.content}`, label: `${task.status === "in_progress" ? "→" : task.status === "completed" ? "✓" : task.status === "abandoned" ? "−" : "·"} ${clean(task.content)}`, description: task.status, kind: "todo", detail: task.content }));
 	const canonicalHost = (label: string) => data.history.hosts?.find(host => host.label === label)?.id ?? label;
-	const rows: WorkEntry[] = data.board.rows.map(row => ({ value: `${row.kind}:${canonicalHost(row.host)}:${row.id}`, id: row.id, host: canonicalHost(row.host), ...(row.pane ? { pane: row.pane } : {}), kind: row.group === "waiting" ? "queued" : row.kind === "job" ? "job" : "agent", label: `${row.group === "attention" || row.group === "to_land" ? "!" : "●"} ${clean(row.name)}`, description: `${clean(row.state)} · ${clean(row.host)}`, running: row.group === "running" }));
+	const rows: WorkEntry[] = data.board.rows.map(row => ({ value: `${row.kind}:${canonicalHost(row.host)}:${row.id}`, id: row.id, host: canonicalHost(row.host), ...(row.pane ? { pane: row.pane } : {}), kind: row.group === "waiting" ? "queued" : row.kind === "job" ? "job" : "agent", label: `${row.group === "attention" || row.group === "to_land" ? "!" : "●"} ${clean(row.name)} · ${clean(row.state)}`, description: clean(row.host), running: row.group === "running" }));
 	const visible = tab === "todos" ? todos : tab === "agents" ? rows.filter(row => row.value.startsWith("agent:")) : tab === "jobs" ? rows.filter(row => row.value.startsWith("job:")) : [...rows.filter(row => row.label.startsWith("!")), ...todos.filter(row => row.description === "in_progress"), ...rows.filter(row => !row.label.startsWith("!")), ...todos.filter(row => row.description === "pending")];
 	if (tab === "all" || tab === "jobs") {
 		const known = new Set(rows.map(row => row.value));
@@ -39,21 +39,21 @@ export class WorkPanel {
 	private data: WorkData;
 	readonly cursor: WorkCursor;
 	private readonly theme: Theme;
-	private readonly keys: KeybindingsManager;
 	private readonly done: (action: WorkAction | undefined) => void;
 	private readonly renderRequest: () => void;
 	private readonly rows: () => number;
 	private height = 0;
 
-	constructor(data: WorkData, cursor: WorkCursor, theme: Theme, keys: KeybindingsManager, done: (action: WorkAction | undefined) => void, request: () => void, rows: () => number) {
-		this.data = data; this.cursor = cursor; this.theme = theme; this.keys = keys; this.done = done; this.renderRequest = request; this.rows = rows;
+	constructor(data: WorkData, cursor: WorkCursor, theme: Theme, done: (action: WorkAction | undefined) => void, request: () => void, rows: () => number) {
+		this.data = data; this.cursor = cursor; this.theme = theme; this.done = done; this.renderRequest = request; this.rows = rows;
 		this.rebuild();
 	}
 	update(data: WorkData): void { this.data = data; this.rebuild(); this.renderRequest(); }
+	private listHeight(): number { return Math.max(1, Math.min(12, Math.floor(this.rows() / 2) - 4)); }
 	private rebuild(preserveSelection = true): void {
 		if (preserveSelection) this.cursor.selected = this.list?.getSelectedItem()?.value ?? this.cursor.selected;
 		this.entries = workEntries(this.data, this.cursor.tab, this.cursor.history);
-		this.height = Math.max(1, Math.min(14, Math.floor(this.rows() * 0.8) - 5));
+		this.height = this.listHeight();
 		this.list = new SelectList(this.entries, this.height, {
 			selectedPrefix: text => this.theme.fg("accent", text), selectedText: text => this.theme.fg("accent", text),
 			description: text => this.theme.fg("muted", text), scrollInfo: text => this.theme.fg("dim", text), noMatch: text => this.theme.fg("muted", text),
@@ -82,12 +82,13 @@ export class WorkPanel {
 		else if (input === "c") this.act("cancel");
 		else if (input === "m") this.act("send");
 		else this.list.handleInput(input);
+		this.renderRequest();
 	}
 	invalidate(): void { this.list.invalidate(); }
 	render(width: number): string[] {
-		if (this.height !== Math.max(1, Math.min(14, Math.floor(this.rows() * 0.8) - 5))) this.rebuild();
+		if (this.height !== this.listHeight()) this.rebuild();
 		const tabbar = tabs.map(tab => tab === this.cursor.tab ? `[${tab.toUpperCase()}]` : tab).join(" · ");
-		return [this.theme.fg("accent", `WORK  ${tabbar}`), this.theme.fg("dim", "Todos: Pi branch · Agents/jobs: Herdr owner pane"), ...this.list.render(width), this.theme.fg("dim", "Tab view · Enter inspect · s stop · c cancel · m message"), this.theme.fg("dim", `r refresh · ${this.keys.getKeys("tui.select.cancel").join("/")} close`)].map(line => truncateToWidth(line, width));
+		return [this.theme.fg("accent", `WORK  ${tabbar}`), ...this.list.render(width), this.theme.fg("dim", "Alt+W collapse · Alt+J/K select · Alt+] view · Alt+I inspect"), this.theme.fg("dim", "Alt+S stop · Alt+C cancel · Alt+M message · Alt+R refresh")].map(line => truncateToWidth(line, width));
 	}
 }
 
@@ -105,7 +106,7 @@ export async function inspectEntry(entry: WorkEntry, exec: WorkExec): Promise<st
 	return hint + safeOutput(output);
 }
 
-/** Actions run after closing the list, so confirmation/input dialogs own focus. */
+/** Explicit actions may open confirmation/input dialogs; the work widget stays inline. */
 export async function runWorkAction(action: WorkAction, ctx: ExtensionContext, exec: WorkExec, signal: AbortSignal): Promise<string | undefined> {
 	if (signal.aborted) return undefined;
 	const entry = action.entry;
@@ -119,29 +120,29 @@ export async function runWorkAction(action: WorkAction, ctx: ExtensionContext, e
 	return undefined;
 }
 
-export async function showWorkDetail(ctx: ExtensionContext, title: string, body: string, signal: AbortSignal): Promise<void> {
-	if (signal.aborted) return;
-	await ctx.ui.custom<void>((tui, theme, keys, done) => {
-		const abort = () => done();
-		signal.addEventListener("abort", abort, { once: true });
-		const text = new Text(safeOutput(body) || "No output yet.", 0, 0);
-		const scroll = new ScrollView(text, { overscroll: "contain", scrollbar: "hidden" });
-		return {
-			dispose() { signal.removeEventListener("abort", abort); },
-			render(width: number) {
-				const height = Math.max(1, Math.min(24, Math.floor(tui.terminal.rows * 0.8) - 3));
-				scroll.updateLayout(text.render(width).length, height, () => tui.requestRender());
-				return [theme.fg("accent", truncateToWidth(title, width)), ...scroll.render(width).slice(scroll.scrollTop, scroll.scrollTop + height), theme.fg("dim", truncateToWidth("↑↓ / PageUp / PageDown scroll · Esc back", width))];
-			},
-			invalidate() { text.invalidate(); scroll.invalidate(); },
-			handleInput(input: string) {
-				if (keys.matches(input, "tui.select.cancel")) { done(); return; }
-				if (matchesKey(input, Key.up)) scroll.scrollBy(-1);
-				if (matchesKey(input, Key.down)) scroll.scrollBy(1);
-				if (matchesKey(input, Key.pageUp)) scroll.scrollBy(-scroll.viewportHeight);
-				if (matchesKey(input, Key.pageDown)) scroll.scrollBy(scroll.viewportHeight);
-				tui.requestRender();
-			},
-		};
-	}, { overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center" } });
+/** Details occupy the same above-editor widget, never an overlay. */
+export class WorkDetail {
+	private readonly text: Text;
+	private readonly scroll: ScrollView;
+	private readonly title: string;
+	private theme: Theme;
+	private readonly rows: () => number;
+	private readonly request: () => void;
+	constructor(title: string, body: string, theme: Theme, rows: () => number, request: () => void) {
+		this.title = title; this.theme = theme; this.rows = rows; this.request = request;
+		this.text = new Text(safeOutput(body) || "No output yet.", 0, 0);
+		this.scroll = new ScrollView(this.text, { overscroll: "contain", scrollbar: "hidden" });
+	}
+	render(width: number): string[] {
+		const height = Math.max(1, Math.min(12, Math.floor(this.rows() / 2) - 2));
+		this.scroll.updateLayout(this.text.render(width).length, height, this.request);
+		return [this.theme.fg("accent", truncateToWidth(this.title, width)), ...this.scroll.render(width).slice(this.scroll.scrollTop, this.scroll.scrollTop + height), this.theme.fg("dim", truncateToWidth("Alt+J/K scroll · Alt+I back · Alt+W collapse", width))];
+	}
+	setTheme(theme: Theme): void { this.theme = theme; this.invalidate(); }
+	invalidate(): void { this.text.invalidate(); this.scroll.invalidate(); }
+	handleInput(input: string): void {
+		if (matchesKey(input, Key.up)) this.scroll.scrollBy(-1);
+		if (matchesKey(input, Key.down)) this.scroll.scrollBy(1);
+		this.request();
+	}
 }

@@ -1,6 +1,6 @@
 # Pi work display contract
 
-Wrangle owns the work strip. pi-todo owns the tasks and their session-branch history.
+Wrangle owns the above-editor work widget. pi-todo owns the tasks and their session-branch history.
 The two extensions communicate through `pi.events`. Neither imports the other package.
 
 ## Version 1 events
@@ -26,23 +26,31 @@ Thus either session-handler order works. Wrangle validates snapshots and draws b
 Only then does pi-todo remove its widget. Shutdown, reload, and rejected snapshots release presentation ownership.
 The provider restores its standalone widget on release. Todo commands remain the only task-state writers.
 
-The strip uses Wrangle's existing board refresh. The inbox reader remains the only completion-delivery owner.
+The widget uses Wrangle's existing board refresh. The inbox reader remains the only completion-delivery owner.
 Todos follow the Pi branch. Agent and job rows follow the calling Herdr owner pane.
 The display does not create a new job database or imply that a new Pi session resets pane-owned jobs.
 
-## Work panel
+## Inline work widget
 
-`/work` opens All, Todos, Agents, and Jobs tabs. Tab and Shift+Tab change tabs.
-Arrow keys move selection. Enter opens details. Escape returns to the editor.
-Todos are read-only. `/todos` and Alt+T open the Todos tab when the provider is claimed.
+The compact widget shows the current task and named agents and jobs above the editor.
+Attention items come first within each work category. Hidden items have a `+N more` label.
+Alt+W and `/work` expand or collapse the same widget. Neither opens a popup or replaces the editor.
+The expanded widget uses at most half the terminal height, except on terminals shorter than eight rows.
+Typing and ordinary editor keys remain with the editor.
 
-Job history uses the existing refresh coordinator while the panel is open.
+Alt+J/K moves the selection. Alt+] changes between All, Todos, Agents, and Jobs.
+Alt+I shows details in the same widget, or returns to the list. Alt+J/K scrolls details.
+Alt+S stops a job, Alt+C cancels queued work, and Alt+M sends an agent message.
+Alt+R refreshes the work data. Stop and cancel still require confirmation.
+Todos are read-only. `/todos` and Alt+T expand the Todos view when the provider is claimed.
+
+Job history uses the existing refresh coordinator while the widget is expanded.
 It joins `items --owner` and `ps --all` by host ID and job ID.
 `machine list` maps board host labels to IDs for selection and deduplication.
 Completed history starts collapsed. No extra timer or execution store is created.
 
 Job details use the bounded tail from `read`. The full `logs` command is shown separately.
-The panel does not run `logs --follow` or wait for jobs.
+The widget does not run `logs --follow` or wait for jobs.
 Stop and cancel need confirmation. Agent messages use the inbox, not terminal input.
 Session shutdown cancels open interactions and prevents late dialog responses from executing actions.
 
