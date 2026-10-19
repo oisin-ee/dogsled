@@ -206,6 +206,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dogsled"
+version = "0.13.0"
+dependencies = [
+ "clap",
+ "nix",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -973,21 +988,6 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
-
-[[package]]
-name = "dogsled"
-version = "0.12.3"
-dependencies = [
- "clap",
- "nix",
- "rmcp",
- "serde",
- "serde_json",
- "signal-hook",
- "thiserror",
- "tokio",
- "toml",
-]
 
 [[package]]
 name = "zmij"

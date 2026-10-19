@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.13.0 - 2026-10-19
+
+wrangle is now dogsled. The old name was too close to Cloudflare's wrangler. Nothing reads the old names, so update every host at once.
+
+- The binary, crate, and repository are `dogsled` (`oisin-ee/dogsled`). The Pi package is `@oisin-ee/pi-dogsled`.
+- The Claude and Codex plugin is `dogsled@dogsled`, the Herdr plugin is `dogsled`, and the MCP server is `dogsled` (`mcp__dogsled__*`).
+- The environment variables are `DOGSLED_CONFIG`, `DOGSLED_STATE`, and `DOGSLED_BIN`. A repository's worktree file is `dogsled.toml`.
+- Configuration and state live in `~/.config/dogsled` and `~/.local/state/dogsled`. Move the old directories while the service is stopped. The service units are `dev.dogsled.plist` and `dogsled.service`.
+
 ## 0.12.3 - 2026-10-19
 
 - The Pi work widget uses the wrangle board design again: a header with counts and a load meter for each host, then the current task, then agents, jobs, and queued work grouped TO LAND, ATTENTION, RUNNING, and WAITING with aligned harness·model, host, activity, and age columns. This replaces the compact WORK strip from 0.12.1.
