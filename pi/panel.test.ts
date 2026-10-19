@@ -56,7 +56,7 @@ test("tabs cycle both ways, Enter returns the row's action, and every line fits"
 });
 
 test("openPanel runs the chosen action and reopens on the same tab until closed", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "wrangle-panel-"));
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-panel-"));
 	const prompt = join(dir, "prompt.md");
 	writeFileSync(prompt, "old\n");
 	const calls: string[][] = [];

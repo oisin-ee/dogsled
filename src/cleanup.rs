@@ -46,7 +46,7 @@ pub enum Scope {
 }
 
 /// The working directory of every process this user can see, resolved, or `None` when the
-/// process table cannot be read. Linux reads `/proc/<pid>/cwd`; macOS asks `lsof`. Wrangle's
+/// process table cannot be read. Linux reads `/proc/<pid>/cwd`; macOS asks `lsof`. Dogsled's
 /// own process is included, so the caller's directory counts as used.
 pub fn process_cwds(shell: &dyn Shell) -> Option<Vec<std::path::PathBuf>> {
     let proc = Path::new("/proc");
@@ -425,7 +425,7 @@ fn disk(node: &Node<'_>, trees: &[Tree], plan: &mut Plan) -> Result<()> {
         "disk",
         node.home.into(),
         format!(
-            "{:.1}% used; largest wrangle-owned paths: {largest}",
+            "{:.1}% used; largest dogsled-owned paths: {largest}",
             100.0 - free
         ),
         false,
@@ -499,7 +499,7 @@ pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
 /// The cleanup plan for `scope`. In `Sweep` scope a worktree that cannot be checked is skipped,
 /// so one broken entry does not stop the sweep of the others.
 pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
-    // Process directories first: wrangle's own Git calls below run with `-C`, not `cd`.
+    // Process directories first: dogsled's own Git calls below run with `-C`, not `cd`.
     let cwds = process_cwds(node.shell);
     let panes = current_panes(node.shell)?;
     let workspaces = workspaces(node.shell)?;
@@ -526,7 +526,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
             (Ok(Some(found)), _) => found,
             (Ok(None), _) => continue,
             (Err(error), Scope::Sweep) => {
-                eprintln!("wrangle sweep: skip {}: {error}", tree.path);
+                eprintln!("dogsled sweep: skip {}: {error}", tree.path);
                 continue;
             }
             (Err(error), Scope::Prune) => return Err(error),
@@ -551,7 +551,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
         match (branches(node.shell, repo, scope, now, &mut plan), scope) {
             (Ok(()), _) => (),
             (Err(error), Scope::Sweep) => {
-                eprintln!("wrangle sweep: skip branches in {repo}: {error}");
+                eprintln!("dogsled sweep: skip branches in {repo}: {error}");
             }
             (Err(error), Scope::Prune) => return Err(error),
         }
@@ -591,7 +591,7 @@ fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result
             ));
         }
     }
-    // Only registered worktrees are wrangle-owned disk paths.
+    // Only registered worktrees are dogsled-owned disk paths.
     let owned = node
         .ledger
         .read::<Vec<Tree>>("worktrees.json")?
@@ -1028,7 +1028,7 @@ fn usage(node: &Node<'_>, tree: &Tree, seen: &Seen) -> Result<Usage> {
             in_use.push(format!("{} is busy ({reason})", pane.pane_id));
         } else if pane.agent.is_some() && !seen.stale.contains(&pane.pane_id) {
             in_use.push(format!(
-                "{} has an agent that is {}; its owner closes it with `wrangle close`",
+                "{} has an agent that is {}; its owner closes it with `dogsled close`",
                 pane.pane_id,
                 pane.agent_status.as_deref().unwrap_or("quiet")
             ));

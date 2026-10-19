@@ -8,7 +8,7 @@ import { WorkPanel } from "./work-panel.ts";
 
 const source = process.env["PI_TODO_SOURCE"];
 /** Release acceptance supplies the first-party provider source, never an undeclared package import. */
-test("real pi-todo and Wrangle exchange snapshots in either load order", { skip: !source }, async () => {
+test("real pi-todo and Dogsled exchange snapshots in either load order", { skip: !source }, async () => {
 	const { TodoWork } = await import(pathToFileURL(`${source}/work.ts`).href);
 	const { TodoPresentation } = await import(pathToFileURL(`${source}/presentation.ts`).href);
 	for (const providerFirst of [true, false]) {

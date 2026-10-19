@@ -5,7 +5,7 @@
 //! reservation holds `reservation_load` cores and `memory_reserve_bytes` of the
 //! host's capacity for as long as it lives, as schedulers that admit on
 //! requests do (research note §6). Measured load: what the probe saw, so work
-//! that wrangle does not know about still counts. An agent waiting on its model
+//! that dogsled does not know about still counts. An agent waiting on its model
 //! uses almost no CPU, so measured load alone admits onto a host whose agents
 //! will all build again within minutes.
 //!
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn measured_load_still_refuses_when_declared_demand_fits() {
-        // Work wrangle does not know about: no agents, CPU 90% busy.
+        // Work dogsled does not know about: no agents, CPU 90% busy.
         let h = evaluate(&probe("a", 0.9, 16, 50.0, 0), &thresholds());
         assert!(!h.eligible);
         assert!((h.headroom - 1.6).abs() < 1e-9);

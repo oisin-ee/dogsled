@@ -167,7 +167,7 @@ export async function inspectEntry(entry: WorkEntry, exec: WorkExec): Promise<st
 	if (entry.kind === "queued") return `${entry.label}\n${entry.description ?? ""}\nWaiting for placement. Cancel explicitly to remove this ticket.`;
 	if (!entry.id) return "This record is unavailable.";
 	const output = await exec(["read", entry.kind === "job" ? entry.id : entry.pane ?? entry.id, "--host", entry.host ?? "local"]);
-	const hint = entry.kind === "job" ? `Recent job output (Wrangle's bounded tail).\nFull log: wrangle logs ${clean(entry.id)}\n\n` : "";
+	const hint = entry.kind === "job" ? `Recent job output (Dogsled's bounded tail).\nFull log: dogsled logs ${clean(entry.id)}\n\n` : "";
 	return hint + safeOutput(output);
 }
 

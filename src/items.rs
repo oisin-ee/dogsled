@@ -95,7 +95,7 @@ pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
     })
 }
 
-/// End every open item on `host`'s `pane`, after `wrangle close` removed it.
+/// End every open item on `host`'s `pane`, after `dogsled close` removed it.
 pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize> {
     ledger.with_lock("items", || {
         let mut items = list(ledger)?;
@@ -113,7 +113,7 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
 }
 
 /// An open agent item whose agent is idle or done: its result is ready, and its
-/// pane and worktree wait for `wrangle close`.
+/// pane and worktree wait for `dogsled close`.
 pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
     item.closed_ms.is_none()
         && item.kind == "agent"
@@ -132,14 +132,14 @@ pub fn close_command(item: &Item, hosts: &[HostReport]) -> String {
         .find(|h| h.host.id == item.host)
         .map_or(item.host.as_str(), |h| h.host.label.as_str());
     format!(
-        "`wrangle close {} --host {}`",
+        "`dogsled close {} --host {}`",
         crate::shell::quote(&item.pane),
         crate::shell::quote(host)
     )
 }
 
 /// A job item ends with its job. An agent item stays open while its pane exists, so the
-/// owner keeps hearing about a finished child until `wrangle close` removes it.
+/// owner keeps hearing about a finished child until `dogsled close` removes it.
 pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> {
     ledger.with_lock("items", || {
         let mut items = list(ledger)?;

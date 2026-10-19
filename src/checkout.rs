@@ -279,7 +279,7 @@ mod tests {
     fn different_repositories_and_local_paths_stay_distinct() {
         let https = "https://github.com/oisin-ee/rondo.git";
         for other in [
-            "git@github.com:oisin-ee/wrangle.git",
+            "git@github.com:oisin-ee/dogsled.git",
             "git@github.com:someone/rondo.git",
             "git@gitlab.com:oisin-ee/rondo.git",
             "/srv/git/oisin-ee/rondo.git",

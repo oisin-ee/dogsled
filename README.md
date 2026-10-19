@@ -1,8 +1,8 @@
-# wrangle
+# dogsled
 
 Host status and placement for coding agents across [Herdr](https://herdr.dev) hosts.
 
-Wrangle measures hosts, starts Pi, Claude, and Codex children and jobs on the host with room, queues work when every host is full, and carries every message between agents through an inbox. Nothing types into an agent's terminal.
+Dogsled measures hosts, starts Pi, Claude, and Codex children and jobs on the host with room, queues work when every host is full, and carries every message between agents through an inbox. Nothing types into an agent's terminal.
 
 ## Install
 
@@ -11,29 +11,29 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/wrangle@v0.11.0
+mise use github:oisin-ee/dogsled@v0.11.0
 ```
 
 Pi (extension, tools, and skill), from npm or as part of `@oisin-ee/oisinpi`:
 
 ```sh
-pi install npm:@oisin-ee/pi-wrangle@0.11.0
+pi install npm:@oisin-ee/pi-dogsled@0.11.0
 ```
 
-At session start the extension compares its version with `wrangle --version` and warns when they differ.
+At session start the extension compares its version with `dogsled --version` and warns when they differ.
 
 Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/wrangle#v0.11.0
-claude plugin install wrangle@wrangle
+claude plugin marketplace add oisin-ee/dogsled#v0.11.0
+claude plugin install dogsled@dogsled
 ```
 
 Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/wrangle --ref v0.11.0
-codex plugin add wrangle@wrangle
+codex plugin marketplace add oisin-ee/dogsled --ref v0.11.0
+codex plugin add dogsled@dogsled
 ```
 
 Codex requires review and trust before it runs plugin hooks. See the [Codex hooks documentation](https://developers.openai.com/codex/hooks#plugin-hooks).
@@ -42,7 +42,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (status-board popup):
 
 ```sh
-herdr plugin install oisin-ee/wrangle --ref v0.11.0 --yes
+herdr plugin install oisin-ee/dogsled --ref v0.11.0 --yes
 ```
 
 Harness plugins use the binary on `PATH`. They do not install it or start host services.
@@ -50,17 +50,17 @@ Harness plugins use the binary on `PATH`. They do not install it or start host s
 ## Commands
 
 ```sh
-wrangle serve                     # local measurements every 10 seconds
-wrangle serve --interval 20        # change the interval, in seconds
-wrangle serve --once               # publish and run each action lane once
-wrangle status                    # hosts, agents, and reservations
-wrangle status --json
-wrangle status --line              # one line for the tab row
-wrangle status --brief             # at most six lines for prompt hooks
-wrangle status --watch             # refresh until interrupted
-wrangle place --json               # reserve the host with the most headroom
-wrangle place --host netcup --json # pin by host id or label
-wrangle place --branch feat/unit-a --base main --repo /path/to/repo --json
+dogsled serve                     # local measurements every 10 seconds
+dogsled serve --interval 20        # change the interval, in seconds
+dogsled serve --once               # publish and run each action lane once
+dogsled status                    # hosts, agents, and reservations
+dogsled status --json
+dogsled status --line              # one line for the tab row
+dogsled status --brief             # at most six lines for prompt hooks
+dogsled status --watch             # refresh until interrupted
+dogsled place --json               # reserve the host with the most headroom
+dogsled place --host netcup --json # pin by host id or label
+dogsled place --branch feat/unit-a --base main --repo /path/to/repo --json
 ```
 
 Exit codes: 0 success, 1 queued without waiting, 2 error. Job waits return the job's exit code.
@@ -70,21 +70,21 @@ When every host is full, `place`, `agent`, and `run` print `{"queued":true,"tick
 ## Jobs, agents, and owners
 
 ```sh
-wrangle run --wait -- sh -c 'echo hi; exit 3'
-wrangle run --host netcup --cwd /tmp --timeout 1h --idle-timeout 10m -- make test
-wrangle run --branch feat/job --base main --cwd /path/to/repo -- cargo test
-wrangle ps --all
-wrangle logs JOB --follow
-wrangle stop JOB
-wrangle wait JOB --max 30m
-wrangle agent --kind codex --name reviewer --message 'Review the change' --branch feat/review --base main
-wrangle agent --profile general --name api-dups --message-file task.md --branch feat/api-dups
-wrangle board
-wrangle read api-dups
-wrangle send api-dups --message 'Also cover the empty case.'
-wrangle track netcup w1:p2 --name child
-wrangle items --owner "$HERDR_PANE_ID" --json
-wrangle cancel TICKET
+dogsled run --wait -- sh -c 'echo hi; exit 3'
+dogsled run --host netcup --cwd /tmp --timeout 1h --idle-timeout 10m -- make test
+dogsled run --branch feat/job --base main --cwd /path/to/repo -- cargo test
+dogsled ps --all
+dogsled logs JOB --follow
+dogsled stop JOB
+dogsled wait JOB --max 30m
+dogsled agent --kind codex --name reviewer --message 'Review the change' --branch feat/review --base main
+dogsled agent --profile general --name api-dups --message-file task.md --branch feat/api-dups
+dogsled board
+dogsled read api-dups
+dogsled send api-dups --message 'Also cover the empty case.'
+dogsled track netcup w1:p2 --name child
+dogsled items --owner "$HERDR_PANE_ID" --json
+dogsled cancel TICKET
 ```
 
 Jobs use a new tab in the caller's workspace. With `--branch`, an agent uses the pane of the worktree's new Herdr workspace.
@@ -92,7 +92,7 @@ Remote work uses a workspace with the same name as the caller's workspace, creat
 Without a branch, a remote non-repository `--cwd` must exist there.
 Repository directories map to the same path relative to home. A linked-worktree caller needs `--branch` to preserve its branch remotely.
 
-The pane runs `wrangle exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
+The pane runs `dogsled exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
 If the pane output closes, capture continues to the log and preserves the child exit code.
 The atomic `jobs/ID.json` contains the command, directory, host, owner, exit code, signal, reason, and millisecond timestamps.
 After the job ends, `exec` saves this final record, reports completion, then closes its own pane and tab.
@@ -102,7 +102,7 @@ If the close fails, `exec` logs the error to stderr without changing the result.
 `logs`, `stop`, and `wait` use the configured SSH transport for remote jobs.
 `stop` requests a process-group kill. Timeouts and wrapper termination also kill the process group.
 Both timeout defaults are unlimited. Durations accept integer `ms`, `s`, `m`, and `h` suffixes.
-The sidebar shows `working`, then `idle` for success or `blocked` for failure, with a `wrangle` exit or timeout token.
+The sidebar shows `working`, then `idle` for success or `blocked` for failure, with a `dogsled` exit or timeout token.
 
 `--max` sets one deadline from command startup, including discovery, placement, admission, and job completion. It defaults to 30 minutes.
 Operations use the remaining command budget, capped at 30 seconds for routine calls and locks, or 10 minutes for setup.
@@ -114,12 +114,12 @@ A wait deadline does not cancel its job or ticket. `cancel` only cancels pending
 
 ### Agents and profiles
 
-`wrangle agent` starts a child with `herdr agent start <name> --kind pi|claude|codex --pane <pane> -- <args>`. The task is a launch argument, so nothing is typed into the new pane.
+`dogsled agent` starts a child with `herdr agent start <name> --kind pi|claude|codex --pane <pane> -- <args>`. The task is a launch argument, so nothing is typed into the new pane.
 A task with a newline, a leading `-` or `@`, or more than 4000 characters goes to `launches/<id>.task.md`. Pi reads it as `@<file>`; Claude and Codex get a one-line pointer to it.
 `--message-file PATH` (or `-` for stdin) reads the task from a file.
 A failed `herdr agent start` is retried with backoff, three tries in all. After the last, the ticket fails and the owner's inbox says so. A refusal or a deadline fails at once.
 
-`--profile NAME` (Pi only) reads `~/.config/wrangle/profiles/NAME/profile.json` on the host that runs the child:
+`--profile NAME` (Pi only) reads `~/.config/dogsled/profiles/NAME/profile.json` on the host that runs the child:
 
 ```json
 {"description": "Ordinary units", "model": "alias/sol", "thinking": "medium", "prompt": "prompt.md", "role": "writer", "pi_args": []}
@@ -127,7 +127,7 @@ A failed `herdr agent start` is retried with backoff, three tries in all. After 
 
 The child gets `--model`, `--thinking`, `--append-system-prompt <prompt>`, then `pi_args`. Unknown keys are ignored, so Shepherdr profiles load as they are.
 `role` is `reader` or `writer`. Without it, a child with `--branch` is a writer, and any other child a reader.
-`wrangle profiles` lists them; a broken profile shows as `broken: <reason>`.
+`dogsled profiles` lists them; a broken profile shows as `broken: <reason>`.
 
 ### Items and closing
 
@@ -145,18 +145,18 @@ Closing is driven by events. When a child's turn completes (Herdr's `completion_
 A child with commits to land stays open and shows under TO LAND on the board, and the prompt line says `To land: web-tests (+2)`. Merge or drop the branch; the next sweep closes it.
 A `blocked` child stays open, and the owner's inbox gets one `blocked` record per episode. A `working` child, or one that has never completed a turn, is never closed. Nothing closes on a timer.
 
-`wrangle board` groups an owner's children, jobs, and queued tickets by what the owner must do: TO LAND, ATTENTION, RUNNING, and WAITING. Each agent row names the harness and model; each job row names its command. `--json` is what the Pi widget draws.
-`wrangle read TARGET [--host H]` shows a child's or job's newest output and the captured final reply.
+`dogsled board` groups an owner's children, jobs, and queued tickets by what the owner must do: TO LAND, ATTENTION, RUNNING, and WAITING. Each agent row names the harness and model; each job row names its command. `--json` is what the Pi widget draws.
+`dogsled read TARGET [--host H]` shows a child's or job's newest output and the captured final reply.
 
 ```sh
-wrangle close w2:p1
-wrangle close w9:p1 --host netcup --json
+dogsled close w2:p1
+dogsled close w9:p1 --host netcup --json
 ```
 
 `close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
-In an agent worktree (locked `agent:worktree`, as wrangle makes them), it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
+In an agent worktree (locked `agent:worktree`, as dogsled makes them), it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
 Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks the worktree, and runs `git worktree remove` without force.
-It deletes the branch only when wrangle's integration check finds it integrated (see [Cleanup](#cleanup)). An unmerged branch, or a branch still at the base tip, stays.
+It deletes the branch only when dogsled's integration check finds it integrated (see [Cleanup](#cleanup)). An unmerged branch, or a branch still at the base tip, stays.
 When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
 A pane outside a worktree, or in an unlocked worktree (someone's own checkout), is closed alone; the checkout stays.
 A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a worktree outside the repository's worktree directory, a dirty or detached worktree, and any other lock.
@@ -176,9 +176,9 @@ For non-waiting callers, admission tells the owner through its inbox. An owner w
 Every message to an agent goes through one inbox on the agent's host: a child's final reply, a blocked report, an admitted ticket, a launch failure, and a message from another agent.
 
 ```sh
-wrangle send api-dups --message 'Also cover the empty case.'
-wrangle send w9:p1 --host netcup --kind task --message-file note.md
-wrangle inbox list
+dogsled send api-dups --message 'Also cover the empty case.'
+dogsled send w9:p1 --host netcup --kind task --message-file note.md
+dogsled inbox list
 ```
 
 `send` resolves a name or pane on any host and writes the record there, over SSH for a peer. A target with no inbox reader fails at once, and the sender hears so; a record never waits where nothing reads it.
@@ -187,8 +187,8 @@ A reader claims records with `inbox claim`, which is a lease. A claimed record i
 
 Readers:
 
-- **Pi:** the extension watches its inbox file, injects each batch as one `wrangle` message (`steer` while the agent runs, a new turn when it is idle), and acknowledges it when Pi has written the message to the session.
-- **Claude Code and Codex:** `wrangle hook inbox --harness claude|codex --event Stop|UserPromptSubmit`, registered by the plugin. The first hook run registers the reader. At `Stop`, records continue the turn as `{"decision":"block","reason":…}`; at `UserPromptSubmit`, they go beside the user's text as `additionalContext`. Records printed are acknowledged. An empty inbox prints nothing, so a stop ends as usual.
+- **Pi:** the extension watches its inbox file, injects each batch as one `dogsled` message (`steer` while the agent runs, a new turn when it is idle), and acknowledges it when Pi has written the message to the session.
+- **Claude Code and Codex:** `dogsled hook inbox --harness claude|codex --event Stop|UserPromptSubmit`, registered by the plugin. The first hook run registers the reader. At `Stop`, records continue the turn as `{"decision":"block","reason":…}`; at `UserPromptSubmit`, they go beside the user's text as `additionalContext`. Records printed are acknowledged. An empty inbox prints nothing, so a stop ends as usual.
 
 A hook runs only when its harness acts, so an idle Claude Code or Codex agent sees a record at its next prompt or stop. Pi has no such delay.
 
@@ -197,16 +197,16 @@ A hook runs only when its harness acts, so an idle Claude Code or Codex agent se
 ### Backoff
 
 One schedule is used for inbox leases, the sender's follow-up, peer reads, and launch retries: 10 seconds, doubling with jitter, capped at 5 minutes.
-A host that cannot be read shows `retry in 40s` on the board. `wrangle retry HOST` reads it again now.
+A host that cannot be read shows `retry in 40s` on the board. `dogsled retry HOST` reads it again now.
 
 ## Host service and status
 
-Run `wrangle serve` on every host. Dotfiles owns launchd and systemd user-service installation.
+Run `dogsled serve` on every host. Dotfiles owns launchd and systemd user-service installation.
 The measurement step uses no SSH. It reads CPU busy time, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
 Separate watchdog, admission, sweep, and inbox workers keep check-ins, slow setup, cleanup, and delivery independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
 An admission timeout records a failed ticket. The service continues publication and later actions.
-It writes `~/.local/state/wrangle/host.json` through atomic replacement.
+It writes `~/.local/state/dogsled/host.json` through atomic replacement.
 Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, `transcript_modified`, `terminal_id`, `completion_seq`, `cwd`, the session's model and latest activity, and the worktree's branch, commits ahead, dirty state, and whether it landed.
 Transcript paths come from Herdr path sessions. Exact Claude and Codex session IDs also resolve against their standard session directories.
 Ambiguous, absent, or unreadable transcripts remain unstalled. Modification times use Unix milliseconds.
@@ -224,7 +224,7 @@ On Linux the probe records cumulative `/proc/stat` ticks (`cpu_ticks`); the serv
 On macOS `busy` comes from a one-second `iostat -c 2 -w 1` window.
 `load1` stays in the probe for display. It no longer takes part in admission.
 
-Every tick appends one line to `~/.local/state/wrangle/samples.jsonl`: time, cores, busy, load1, memory, pressure level, disk, reservations, live agents, free cores, and the admission verdict. Lines older than seven days are dropped on append.
+Every tick appends one line to `~/.local/state/dogsled/samples.jsonl`: time, cores, busy, load1, memory, pressure level, disk, reservations, live agents, free cores, and the admission verdict. Lines older than seven days are dropped on append.
 
 `status` reads the local snapshot and each enabled Herdr peer's snapshot.
 Peer reads run in parallel through SSH and the configured `remote_command`.
@@ -236,11 +236,11 @@ The last peer measurement remains visible when available. Every discovered host 
 The JSON output contains `hosts`, with service state, reachability, sample time, probe, headroom, errors, and `retry_ms` while a peer read backs off.
 
 ```sh
-wrangle machine list
-wrangle machine rename ID LABEL
-wrangle machine disable ID
-wrangle machine reconnect ID   # a new tab, for SSH prompts
-wrangle machine add user@host --label name
+dogsled machine list
+dogsled machine rename ID LABEL
+dogsled machine disable ID
+dogsled machine reconnect ID   # a new tab, for SSH prompts
+dogsled machine add user@host --label name
 ```
 
 Hosts are Herdr's saved machines. `machine` runs the matching `herdr machine` command; `reconnect` and `add` run it in a new focused tab, so the user can answer SSH prompts.
@@ -254,14 +254,14 @@ local 11/12 ▲ · netcup 3/16 · momokaya-2 1/7
 `▲` means not eligible. `?` means the snapshot is missing, stale, or unavailable.
 A host without measurements prints `momokaya-2 ?`. A stale host keeps its last numbers, followed by ` ?`.
 The numbers are busy cores over cores. A host without a CPU sample shows `load N/cores` instead.
-`--brief` includes busy/cores, memory, disk, agent counts, and a hint to run `wrangle status`.
+`--brief` includes busy/cores, memory, disk, agent counts, and a hint to run `dogsled status`.
 Fleets larger than five hosts share lines to preserve both the six-line limit and visibility of every host.
 `--watch --interval N` changes the refresh interval. Its default is five seconds.
 
 ## Stalls and check-ins
 
 A `working` or `unknown` agent stalls after ten minutes without a transcript change. Screen redraws do not reset this clock.
-An agent without a readable transcript never stalls. Recovery clears its `$wrangle` sidebar token.
+An agent without a readable transcript never stalls. Recovery clears its `$dogsled` sidebar token.
 Status lists stalled panes. Brief status and prompt context include a stall count within six lines.
 
 The owner's service checks every minute. It checks in only with `idle` or `done` owners, never `working` or `blocked` owners.
@@ -271,25 +271,25 @@ Transcript writes alone do not postpone regular check-ins. Pending job-completio
 The note includes names, hosts, states, ages, transcript silence, and bounded recent activity.
 Known Pi, Claude, and Codex transcripts supply the latest tool call or message. Unknown formats fall back to plain pane text.
 Job notes use the last five log lines. All note content has terminal escape codes removed.
-It asks the owner to wait, message a child with `wrangle send`, close it, or stop a job. Output in the note is untrusted data.
+It asks the owner to wait, message a child with `dogsled send`, close it, or stop a job. Output in the note is untrusted data.
 A stalled top-level pane gets one Herdr notification per stall episode.
 
 Locked `watchdog.json` records events and last check-ins. `parents.json` identifies tracked children on their own host.
 A normal service restart does not repeat a delivered check-in. The inbox lease carries delivery from there.
 Notification attempts are recorded before delivery and never repeat within that stall; a crash can lose that notification.
 
-For authorized live tests only, `WRANGLE_TEST_STALL_MS` overrides the ten-minute threshold with a positive millisecond value.
-It does not shorten check-in cadence. Use private `WRANGLE_STATE` and stop the test service afterward.
-Debug binaries also accept `WRANGLE_TEST_NOW_MS` for deterministic integration tests. Release binaries ignore this test clock.
+For authorized live tests only, `DOGSLED_TEST_STALL_MS` overrides the ten-minute threshold with a positive millisecond value.
+It does not shorten check-in cadence. Use private `DOGSLED_STATE` and stop the test service afterward.
+Debug binaries also accept `DOGSLED_TEST_NOW_MS` for deterministic integration tests. Release binaries ignore this test clock.
 
 ## Cleanup
 
 ```sh
-wrangle doctor --json
-wrangle doctor --host netcup
-wrangle prune worktrees jobs
-wrangle prune --host netcup --yes panes
-wrangle prune targets
+dogsled doctor --json
+dogsled doctor --host netcup
+dogsled prune worktrees jobs
+dogsled prune --host netcup --yes panes
+dogsled prune targets
 ```
 
 Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `targets`, `disk`, `processes`, and `repositories`.
@@ -311,7 +311,7 @@ A shell with no foreground command in an ended job's tab is idle at once: the jo
 Other panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
 A shell pane is idle when the service found no foreground command at each sample for more than 24 hours, and it still has none. Herdr reports no activity time, so a command that starts and ends between samples does not count.
 A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
-Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known wrangle-owned paths.
+Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known dogsled-owned paths.
 A `targets` entry is build output: a directory with a `CACHEDIR.TAG` that starts with the cache-directory signature, directly under a main checkout or a linked worktree, such as Rust's `target/`.
 It is removable when no Herdr workspace shows the checkout and no pane or process works in it. Work in a linked worktree inside the main checkout uses that worktree, not the main checkout.
 Prune removes it after it checks the tag again. A worktree that the same plan removes takes its build output with it, so that output is not listed.
@@ -320,7 +320,7 @@ Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune neve
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
 Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and unintegrated branches remain untouched.
 Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
-Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when integrated, and the idle anchor. Wrangle checks that the worktree is gone afterwards.
+Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when integrated, and the idle anchor. Dogsled checks that the worktree is gone afterwards.
 Each entry is independent. A failed or refused entry does not stop the others; prune reports each failure, then exits with status 2.
 `--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
 
@@ -336,10 +336,10 @@ On each pass, the service's sweep worker builds the doctor plan in sweep scope. 
 - `panes` and `workspaces`: a shell at an empty prompt in an ended job's tab, or in a directory that no longer exists. A workspace closes whole when every pane in it is one of these.
 - `worktrees`: a clean worktree whose branch is integrated, or a clean detached worktree whose HEAD is on a remote branch. Nothing may hold it: no pane works in it, no workspace shows it, and no process works in it. An idle shell holds it too.
 - `branches`: a local branch with no worktree whose every commit is on a remote ref. An integrated branch with commits on no remote waits for `prune`.
-- Orphaned children: an open agent item whose owner pane no longer exists, whose child is `idle` or `done`, whose worktree is clean, and whose every commit is on a remote ref. The sweep closes it as `wrangle close` does: `teardown`, the workspace, the worktree, and the item. A remote child closes over SSH with `host close --pushed`.
+- Orphaned children: an open agent item whose owner pane no longer exists, whose child is `idle` or `done`, whose worktree is clean, and whose every commit is on a remote ref. The sweep closes it as `dogsled close` does: `teardown`, the workspace, the worktree, and the item. A remote child closes over SSH with `host close --pushed`.
 
 The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
-Each removal is a `wrangle sweep:` line on stderr, the service journal.
+Each removal is a `dogsled sweep:` line on stderr, the service journal.
 An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
 Everything else is for a confirmed `prune`: idle shells and agents after a day, a worktree with no commits a day after it was made, integrated branches with unpushed commits, ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
 
@@ -354,7 +354,7 @@ declared = cores − reservation_load × (active agents + reservations)
 
 An active agent is a live agent that is not `idle`.
 It holds its demand while it waits on its model, because its next build starts within minutes.
-The measured value counts work that wrangle does not know about.
+The measured value counts work that dogsled does not know about.
 
 A host is eligible when all of these hold:
 
@@ -381,8 +381,8 @@ Agent discovery and worktree failures do not end it early.
 
 ## Configuration
 
-The optional host policy lives in `~/.config/wrangle/config.toml`.
-`--config PATH` or `$WRANGLE_CONFIG` selects another file.
+The optional host policy lives in `~/.config/dogsled/config.toml`.
+`--config PATH` or `$DOGSLED_CONFIG` selects another file.
 Unknown keys are errors.
 
 ```toml
@@ -391,7 +391,7 @@ memory_reserve_bytes = 3221225472
 disk_free_min_percent = 15
 reservation_load = 1.0
 reservation_ttl_ms = 90000
-remote_command = ["mise", "x", "--", "wrangle"]
+remote_command = ["mise", "x", "--", "dogsled"]
 
 [cleanup]
 repositories = []  # for example "~/.config/mise"; `~/` is the home directory
@@ -401,7 +401,7 @@ Host policy has no worktree hooks. A `[hooks]` table is an unknown key, so it is
 
 ### Repository configuration
 
-An optional `wrangle.toml` at the root of the repository's main checkout configures its worktrees. Without the file, the defaults apply.
+An optional `dogsled.toml` at the root of the repository's main checkout configures its worktrees. Without the file, the defaults apply.
 Unknown keys are errors.
 
 ```toml
@@ -412,22 +412,22 @@ teardown = []       # run in a worktree before removal, in order
 ```
 
 Each command runs with `sh -c` in the worktree. `{main}` is the main checkout, `{path}` the worktree, and `{branch}` its branch (empty for a detached worktree).
-Wrangle quotes each value as one shell word. Any other `{…}` is an error, so the command text cannot use braces for anything else.
-Wrangle reads `wrangle.toml` from the main checkout, also for a worktree on an older branch.
+Dogsled quotes each value as one shell word. Any other `{…}` is an error, so the command text cannot use braces for anything else.
+Dogsled reads `dogsled.toml` from the main checkout, also for a worktree on an older branch.
 
 With `--branch`, `place`, `agent`, and `run` use the branch's worktree on the selected host:
 
-1. Wrangle refuses an invalid branch name, `--base` for a branch that exists, a branch checked out in the main checkout, and a worktree that has another lock. It needs a reachable Herdr server.
+1. Dogsled refuses an invalid branch name, `--base` for a branch that exists, a branch checked out in the main checkout, and a worktree that has another lock. It needs a reachable Herdr server.
 2. A branch that has a worktree reuses it without `setup`. Otherwise `git worktree add` makes `<dir>/<branch>` with each `/` as `-`. A new branch starts from `--base`, else the remote default branch's local name (else `main`).
 3. The worktree is locked with the reason `agent:worktree`. The lock marks it as agent-owned, and `git worktree remove` refuses it until close or prune unlocks it.
-4. `setup` runs in a new worktree. If a command fails, wrangle removes the new worktree and the branch it made, and placement fails. The reservation stays.
-5. `herdr worktree open --no-focus` opens the worktree as a Herdr workspace linked to the repository. When the main checkout had no open workspace, Herdr opens one as the anchor, and wrangle records its id in the Git common directory as `agent-worktree-anchor`. A workspace that already showed the worktree may belong to a running child, so that is an error.
+4. `setup` runs in a new worktree. If a command fails, dogsled removes the new worktree and the branch it made, and placement fails. The reservation stays.
+5. `herdr worktree open --no-focus` opens the worktree as a Herdr workspace linked to the repository. When the main checkout had no open workspace, Herdr opens one as the anchor, and dogsled records its id in the Git common directory as `agent-worktree-anchor`. A workspace that already showed the worktree may belong to a running child, so that is an error.
 
-Before repository work, wrangle verifies the selected host's checkout against the caller's `git remote get-url origin`.
-If the host has no checkout of the repository, wrangle clones it from the caller's origin into the same path relative to home first.
-An existing path with a different origin, or a non-repository path, is an error. Wrangle does not overwrite it.
-Clone errors identify the host and origin. Wrangle does not silently move the work elsewhere.
-After a fresh clone, wrangle checks mise configuration. If mise reports missing trust, wrangle trusts only that new checkout's configuration.
+Before repository work, dogsled verifies the selected host's checkout against the caller's `git remote get-url origin`.
+If the host has no checkout of the repository, dogsled clones it from the caller's origin into the same path relative to home first.
+An existing path with a different origin, or a non-repository path, is an error. Dogsled does not overwrite it.
+Clone errors identify the host and origin. Dogsled does not silently move the work elsewhere.
+After a fresh clone, dogsled checks mise configuration. If mise reports missing trust, dogsled trusts only that new checkout's configuration.
 For peers, a checkout under the local home maps to the same relative path under the peer's home.
 The peer reads its own host policy.
 Checkouts outside the home keep their absolute path.
@@ -438,16 +438,16 @@ Prefer an argument list over shell interpolation.
 The hook must print JSON with `pane_id`, `path`, or both. `workspace_id` is optional.
 Progress text can precede a final JSON line.
 
-State defaults to `$XDG_STATE_HOME/wrangle`, or `~/.local/state/wrangle`.
-`$WRANGLE_STATE` selects a complete state-directory path.
+State defaults to `$XDG_STATE_HOME/dogsled`, or `~/.local/state/dogsled`.
+`$DOGSLED_STATE` selects a complete state-directory path.
 Host snapshots use `host.json`. New placement reservations use `placements.json`.
 Jobs use `jobs/`, owner items use `items.json`, and FIFO tickets use `queue.json`.
 The removed lead ledger and event log are not read or migrated.
 
 ## Prompt context and integrations
 
-`wrangle hook context --harness claude|codex|pi` formats the same text as `status --brief`.
-Claude Code and Codex register `SessionStart` and `UserPromptSubmit` context hooks, and `UserPromptSubmit` and `Stop` inbox hooks (see [Inbox](#inbox)), in `plugins/wrangle`.
+`dogsled hook context --harness claude|codex|pi` formats the same text as `status --brief`.
+Claude Code and Codex register `SessionStart` and `UserPromptSubmit` context hooks, and `UserPromptSubmit` and `Stop` inbox hooks (see [Inbox](#inbox)), in `plugins/dogsled`.
 Each registration supplies `--event`. The default context event is `UserPromptSubmit`.
 The CLI never reads stdin. Claude Code and Codex receive `hookSpecificOutput` JSON with `hookEventName` and `additionalContext`.
 Pi receives plain text through its `before_agent_start` extension. All three use the same snapshot reader and formatter.
@@ -458,9 +458,9 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 ### Tools
 
-`wrangle mcp` serves the wrangle commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `stop`, `cancel`, and `place`.
+`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `stop`, `cancel`, and `place`.
 Each tool calls the same code as its CLI command and returns the same JSON. No tool waits: `spawn` and `run` return the item or the queued ticket at once.
-The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its extension (tools `mcp__wrangle__*`); Claude Code reads `plugins/wrangle/.mcp.json`; Codex reads `plugins/wrangle/codex-mcp.json`, which forwards the Herdr and `WRANGLE_*` variables.
+The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its extension (tools `mcp__dogsled__*`); Claude Code reads `plugins/dogsled/.mcp.json`; Codex reads `plugins/dogsled/codex-mcp.json`, which forwards the Herdr and `DOGSLED_*` variables.
 
 ### Pi
 
@@ -468,23 +468,23 @@ The extension adds host status before each prompt, registers the tools, and draw
 
 - **The board widget** above the editor shows host meters, the current task, and agents and jobs grouped TO LAND, ATTENTION, RUNNING, and WAITING. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately. Empty providers hide the widget. Unavailable providers show an error.
 - **Alt+W or `/work`** expands or collapses that widget in place, without a popup or editor replacement. Alt+J/K moves selection, Alt+] changes views, and Alt+I shows inline details. Typing stays in the editor. Alt+S stops jobs, Alt+C cancels queued work, and Alt+M sends agent messages. Stop and cancel require confirmation. Completed job history starts collapsed.
-- **`/wrangle`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
+- **`/dogsled`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
 - **The inbox reader** and a renderer that shows each record's kind, sender, and text, folded past twelve lines.
 
-Without `HERDR_PANE_ID`, the extension starts no Wrangle polling or jobs. The shared display can still show todos and reports Wrangle unavailable. `$WRANGLE_BIN` selects the binary.
+Without `HERDR_PANE_ID`, the extension starts no Dogsled polling or jobs. The shared display can still show todos and reports Dogsled unavailable. `$DOGSLED_BIN` selects the binary.
 
-Todos follow the active Pi session branch. Agents and jobs follow the calling Herdr owner pane, including after a Pi session change. `/todos` and Alt+T open the Todos view when compatible pi-todo is active. `/todos list` remains a plain readout. The [display contract](docs/pi-work.md) keeps task state and reminders in pi-todo. Wrangle retains execution, logs, cancellation, and completion delivery.
+Todos follow the active Pi session branch. Agents and jobs follow the calling Herdr owner pane, including after a Pi session change. `/todos` and Alt+T open the Todos view when compatible pi-todo is active. `/todos list` remains a plain readout. The [display contract](docs/pi-work.md) keeps task state and reminders in pi-todo. Dogsled retains execution, logs, cancellation, and completion delivery.
 
-The Jobs view joins retained records to the current owner's ledger by host and job ID. It does not show unrelated fleet jobs. Job inspection uses `wrangle read` for a bounded log tail and shows the `wrangle logs` command for full output. Expired records and unavailable hosts produce explicit errors. The panel never starts a new process manager, edits todos, or writes into an agent terminal.
+The Jobs view joins retained records to the current owner's ledger by host and job ID. It does not show unrelated fleet jobs. Job inspection uses `dogsled read` for a bounded log tail and shows the `dogsled logs` command for full output. Expired records and unavailable hosts produce explicit errors. The panel never starts a new process manager, edits todos, or writes into an agent terminal.
 
 The Herdr plugin keeps only the status-board popup:
 
 ```sh
-herdr plugin pane open --plugin wrangle --entrypoint board
+herdr plugin pane open --plugin dogsled --entrypoint board
 ```
 
-The popup runs `wrangle status --watch`. The pane-close release hooks and sidebar token configuration are removed.
-All three harness packages share `plugins/wrangle/skills/wrangle/SKILL.md`. It describes delegation, jobs, messages, and the queue.
+The popup runs `dogsled status --watch`. The pane-close release hooks and sidebar token configuration are removed.
+All three harness packages share `plugins/dogsled/skills/dogsled/SKILL.md`. It describes delegation, jobs, messages, and the queue.
 
 ## Build and development
 
@@ -495,12 +495,12 @@ cargo build --release
 npm ci
 ```
 
-The executable is `target/release/wrangle`.
-Release archives include the binary, `wrangle.service`, and `dev.wrangle.plist` from `plugin/services/`.
+The executable is `target/release/dogsled`.
+Release archives include the binary, `dogsled.service`, and `dev.dogsled.plist` from `plugin/services/`.
 Harness installers read their manifests and skill from Git, not the binary archive. The skill move does not change the archive contents.
-Both run `wrangle serve` through `~/.local/bin/mise`, restart on failure, and log to the wrangle state directory.
+Both run `dogsled serve` through `~/.local/bin/mise`, restart on failure, and log to the dogsled state directory.
 Dotfiles installs the systemd user unit or renders the launchd template with an absolute, XML-escaped `@HOME@` path.
-For launchd, dotfiles creates `~/.local/state/wrangle` before loading the agent. Systemd creates it through `StateDirectory`.
+For launchd, dotfiles creates `~/.local/state/dogsled` before loading the agent. Systemd creates it through `StateDirectory`.
 If mise has a different installation path, dotfiles adjusts the executable path.
 Install the same release on every host before enabling its service. This PR does not install or start host services.
 

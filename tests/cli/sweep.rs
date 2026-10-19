@@ -91,7 +91,7 @@ fn serve_closes_ended_job_tabs_and_shells_in_deleted_directories_and_nothing_els
     for (kind, id) in [("pane", "w4:p1"), ("pane", "w4:p4"), ("workspace", "w5")] {
         assert!(log.contains(&format!("{kind} close {id}\n")), "{log}");
         assert!(
-            journal.contains(&format!("wrangle sweep: closed {kind} {id}\n")),
+            journal.contains(&format!("dogsled sweep: closed {kind} {id}\n")),
             "{journal}"
         );
     }
@@ -167,7 +167,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     assert!(!git.contains("remove -f"), "{git}");
     assert!(
         journal.contains(&format!(
-            "wrangle sweep: removed {}; branch deleted",
+            "dogsled sweep: removed {}; branch deleted",
             tree.display()
         )),
         "{journal}"
@@ -229,7 +229,7 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     let journal = serve(&rig);
     assert!(!branch_exists(&rig, "pushed"), "{journal}");
     assert!(
-        journal.contains("wrangle sweep: deleted branch pushed in"),
+        journal.contains("dogsled sweep: deleted branch pushed in"),
         "{journal}"
     );
     for kept in ["done", "local", "feat/x"] {
@@ -237,7 +237,7 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     }
     assert!(!pushed.exists(), "{journal}");
     assert!(
-        journal.contains(&format!("wrangle sweep: removed {}", pushed.display())),
+        journal.contains(&format!("dogsled sweep: removed {}", pushed.display())),
         "{journal}"
     );
     // Unpushed, dirty, and a fresh worktree with no commits yet are not the sweep's to take.
@@ -311,7 +311,7 @@ fn serve_closes_an_orphan_only_when_it_is_idle_clean_and_pushed() {
         assert_eq!(kept_reason(&rig), reason);
         assert!(
             journal.contains(&format!(
-                "wrangle sweep: keep orphan w2:p1 on local: {reason}"
+                "dogsled sweep: keep orphan w2:p1 on local: {reason}"
             )),
             "{journal}"
         );
@@ -342,11 +342,11 @@ fn serve_closes_an_orphan_only_when_it_is_idle_clean_and_pushed() {
     let brief = String::from_utf8_lossy(&rig.run(&["status", "--brief"]).stdout).into_owned();
     assert!(brief.contains("1 orphaned"), "{brief}");
     untouched(&rig, "unpushed");
-    // Idle, clean, and pushed: closed exactly as `wrangle close` would.
+    // Idle, clean, and pushed: closed exactly as `dogsled close` would.
     git(&repo, &["update-ref", "refs/remotes/origin/main", "feat/x"]);
     let journal = serve(&rig);
     assert!(
-        journal.contains("wrangle sweep: closed orphan w2:p1 on local (owner w9:p1 is gone)"),
+        journal.contains("dogsled sweep: closed orphan w2:p1 on local (owner w9:p1 is gone)"),
         "{journal}"
     );
     assert!(rig.log("herdr.log").contains("workspace close w2"));
@@ -507,7 +507,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     let journal = serve(&rig);
     assert!(item_open(&rig));
     assert!(
-        journal.contains("wrangle sweep: keep w2:p1 on local: uncommitted changes"),
+        journal.contains("dogsled sweep: keep w2:p1 on local: uncommitted changes"),
         "{journal}"
     );
     let reply = &rig.read("state/items.json")[0]["reply"];
@@ -516,10 +516,10 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     // The reason is journaled once, not on every pass.
     assert!(!serve(&rig).contains("keep w2:p1"));
     fs::remove_file(tree.join("scratch")).unwrap();
-    // Clean, with no commits: closed as `wrangle close` would, and the reply is kept.
+    // Clean, with no commits: closed as `dogsled close` would, and the reply is kept.
     let journal = serve(&rig);
     assert!(
-        journal.contains("wrangle sweep: closed finished w2:p1 on local"),
+        journal.contains("dogsled sweep: closed finished w2:p1 on local"),
         "{journal}"
     );
     assert!(!item_open(&rig));
@@ -548,7 +548,7 @@ fn serve_closes_a_finished_writer_once_its_branch_lands() {
     let journal = serve(&rig);
     assert!(item_open(&rig));
     assert!(
-        journal.contains("wrangle sweep: keep w2:p1 on local: +1 commit to land"),
+        journal.contains("dogsled sweep: keep w2:p1 on local: +1 commit to land"),
         "{journal}"
     );
     let (_, board) = rig.json(&["board"]);
@@ -557,7 +557,7 @@ fn serve_closes_a_finished_writer_once_its_branch_lands() {
     git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
     let journal = serve(&rig);
     assert!(
-        journal.contains("wrangle sweep: closed finished w2:p1 on local"),
+        journal.contains("dogsled sweep: closed finished w2:p1 on local"),
         "{journal}"
     );
     assert!(!item_open(&rig));
@@ -590,7 +590,7 @@ fn a_finished_childs_reply_reaches_its_owners_inbox_once() {
     let inbox = rig.read("state/inbox/term_lead.json");
     assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
     assert_eq!(inbox[0]["kind"], "reply");
-    assert_eq!(inbox[0]["from"]["name"], "wrangle");
+    assert_eq!(inbox[0]["from"]["name"], "dogsled");
     let text = inbox[0]["text"].as_str().unwrap();
     assert!(
         text.starts_with("worker (w2:p1 on local) finished."),

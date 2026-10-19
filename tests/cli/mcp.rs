@@ -3,7 +3,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-/// A `wrangle mcp` client: one JSON-RPC line in, one response line out.
+/// A `dogsled mcp` client: one JSON-RPC line in, one response line out.
 struct Client {
     child: std::process::Child,
     out: BufReader<std::process::ChildStdout>,
@@ -29,7 +29,7 @@ impl Client {
             &json!({"protocolVersion":"2025-06-18","capabilities":{},
                 "clientInfo":{"name":"test","version":"0"}}),
         );
-        assert_eq!(init["serverInfo"]["name"], "wrangle", "{init}");
+        assert_eq!(init["serverInfo"]["name"], "dogsled", "{init}");
         client.notify("notifications/initialized");
         client
     }

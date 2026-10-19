@@ -25,7 +25,7 @@ pub struct Closed {
     pub pane: String,
     /// The linked worktree that was removed, if the pane was in one.
     pub worktree: Option<Worktree>,
-    /// True when wrangle closed the pane itself, because no workspace close covered it.
+    /// True when dogsled closed the pane itself, because no workspace close covered it.
     pub pane_closed: bool,
 }
 
@@ -52,7 +52,7 @@ impl Caller {
 /// What a worktree must show before it is removed. Uncommitted changes always refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Guard {
-    /// `wrangle close`: the owner decided; only uncommitted changes refuse.
+    /// `dogsled close`: the owner decided; only uncommitted changes refuse.
     Clean,
     /// An orphan: every commit is on some remote ref.
     Pushed,
@@ -114,7 +114,7 @@ pub fn local(
         .map(|cwd| worktree::linked(shell, cwd))
         .transpose()?
         .flatten();
-    // Wrangle locks every worktree it makes. An unlocked one is someone's own checkout that
+    // Dogsled locks every worktree it makes. An unlocked one is someone's own checkout that
     // the child only ran in, such as its owner's: closing the child closes its pane alone.
     let lock = match &tree {
         Some(tree) => worktree::lock_reason(shell, &tree.checkout, &tree.path)?,

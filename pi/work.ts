@@ -23,7 +23,7 @@ export function taskLines(todo: TodoSnapshot | undefined, width: number, paint: 
 	return [title, truncateToWidth(line, width)];
 }
 
-/** The persistent board above the editor: the wrangle board with the current task on top. */
+/** The persistent board above the editor: the dogsled board with the current task on top. */
 export function workBoard(state: WorkState, width: number, paint: Paint): string[] {
 	const { board, todo, error } = state;
 	const task = taskLines(todo, width, paint);

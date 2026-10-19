@@ -1,5 +1,5 @@
 //! One view of what an owner started: rows grouped by what the owner must do next, with each
-//! row's harness, model, host, and activity. `wrangle board`, the status text, the prompt
+//! row's harness, model, host, and activity. `dogsled board`, the status text, the prompt
 //! context, and the Pi panel all read this, so they never disagree.
 
 use crate::commands::Status;
@@ -338,7 +338,7 @@ impl Board {
             .join(" · ")
     }
 
-    /// Plain text, one row per line, for `wrangle board` without `--json`.
+    /// Plain text, one row per line, for `dogsled board` without `--json`.
     pub fn render(&self) -> String {
         if self.rows.is_empty() {
             return "nothing running\n".into();

@@ -9,15 +9,15 @@ teardown = [
 ]
 "#;
 
-/// A real repository with a `wrangle.toml` teardown and a locked linked worktree on `feat/x`.
+/// A real repository with a `dogsled.toml` teardown and a locked linked worktree on `feat/x`.
 /// Fake Herdr serves `panes.json` and `worktrees.json`, which shows the worktree in workspace w2.
 pub(super) fn close_rig(name: &str) -> (Rig, PathBuf) {
     let rig = Rig::new(name);
     let repo = rig.dir.join("home/repo");
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
-    fs::write(repo.join("wrangle.toml"), TEARDOWN).unwrap();
-    git(&repo, &["add", "wrangle.toml"]);
+    fs::write(repo.join("dogsled.toml"), TEARDOWN).unwrap();
+    git(&repo, &["add", "dogsled.toml"]);
     git(&repo, &["commit", "-q", "-m", "init"]);
     git(
         &repo,
@@ -486,7 +486,7 @@ fn doctor_finds_a_squashed_branch_held_only_by_an_idle_shell_and_prune_removes_i
             .unwrap()
             .contains("applied to main by")
     );
-    // The child is closed by its owner's `wrangle close`; only its shell tab remains.
+    // The child is closed by its owner's `dogsled close`; only its shell tab remains.
     rig.put(
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":"w2:p2","workspace_id":"w2","agent":null,"cwd":tree}]}}),
@@ -502,7 +502,7 @@ fn doctor_finds_a_squashed_branch_held_only_by_an_idle_shell_and_prune_removes_i
     assert!(rig.log("herdr.log").contains("workspace close w2"));
     assert_eq!(rig.log("hook.log"), hook_log(&rig, &tree));
     assert!(!tree.exists());
-    // The squashed branch is not an ancestor, but wrangle's integration check finds it applied.
+    // The squashed branch is not an ancestor, but dogsled's integration check finds it applied.
     assert!(!branch_exists(&rig, "feat/x"));
     assert!(String::from_utf8_lossy(&out.stdout).contains("branch deleted"));
 }
@@ -746,7 +746,7 @@ fn doctor_lists_a_detached_worktree_and_prune_removes_it_once_a_remote_holds_its
         &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","agent":"pi","agent_status":"idle","cwd":probe}]}}),
     );
     let out = rig.run(&["close", "w3:p1"]);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("wrangle prune"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("dogsled prune"));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     let stdout = String::from_utf8_lossy(&out.stdout);

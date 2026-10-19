@@ -174,7 +174,7 @@ fn immediate_stall_waits_for_idle_and_survives_restart_without_repeat() {
     let log = rig.check_ins().join("\n");
     assert!(log.contains("test-child on local: stalled; age 12m; transcript changed 12m ago"));
     assert!(log.contains("line5"));
-    assert!(log.contains("wrangle send"));
+    assert!(log.contains("dogsled send"));
     // Unknown/working changes within the same stall do not rearm its event.
     let reports = rig.reports(840_001, "idle", "unknown", Some(1));
     tick(&rig.fleet(), &reports, 840_001).unwrap();
@@ -187,7 +187,7 @@ fn immediate_stall_waits_for_idle_and_survives_restart_without_repeat() {
             .lock()
             .unwrap()
             .iter()
-            .any(|s| s.contains("--clear-token wrangle"))
+            .any(|s| s.contains("--clear-token dogsled"))
     );
     let reports = rig.reports(1_500_001, "idle", "working", Some(900_001));
     tick(&rig.fleet(), &reports, 1_500_001).unwrap();

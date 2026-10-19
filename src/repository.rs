@@ -1,4 +1,4 @@
-//! A repository's own `wrangle.toml`: where its linked worktrees go, and the commands that set
+//! A repository's own `dogsled.toml`: where its linked worktrees go, and the commands that set
 //! one up after creation and tear it down before removal.
 
 use crate::error::{Error, Result};
@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::path::{Component, Path};
 
 /// The file at the root of the main checkout.
-pub const FILE: &str = "wrangle.toml";
+pub const FILE: &str = "dogsled.toml";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]

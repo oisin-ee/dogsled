@@ -1,4 +1,4 @@
-//! Host policy. Worktree setup and teardown belong to each repository's `wrangle.toml`.
+//! Host policy. Worktree setup and teardown belong to each repository's `dogsled.toml`.
 
 use std::path::{Path, PathBuf};
 
@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// Default way to run `wrangle` on a remote host.
-pub const DEFAULT_REMOTE_COMMAND: &[&str] = &["mise", "x", "--", "wrangle"];
+/// Default way to run `dogsled` on a remote host.
+pub const DEFAULT_REMOTE_COMMAND: &[&str] = &["mise", "x", "--", "dogsled"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -33,7 +33,7 @@ pub struct Policy {
     /// the time until the new agent shows in `herdr agent list` and its first
     /// build shows in the busy fraction.
     pub reservation_ttl_ms: u64,
-    /// argv prefix that reaches `wrangle` on a remote host over
+    /// argv prefix that reaches `dogsled` on a remote host over
     /// `ssh -T -o BatchMode=yes`. mise shims are not on the non-interactive
     /// PATH, but `mise` itself is, so the default goes through `mise x`.
     pub remote_command: Vec<String>,
@@ -66,7 +66,7 @@ impl Default for Policy {
 }
 
 /// The subset of the policy a remote host needs to re-check admission under
-/// its own lock. Serialised on the command line of `wrangle host reserve`.
+/// its own lock. Serialised on the command line of `dogsled host reserve`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Thresholds {
     pub free_core_fraction_min: f64,
@@ -88,18 +88,18 @@ impl From<&Policy> for Thresholds {
     }
 }
 
-/// `$WRANGLE_CONFIG`, else `$XDG_CONFIG_HOME/wrangle/config.toml`, else
-/// `~/.config/wrangle/config.toml`.
+/// `$DOGSLED_CONFIG`, else `$XDG_CONFIG_HOME/dogsled/config.toml`, else
+/// `~/.config/dogsled/config.toml`.
 #[must_use]
 pub fn default_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("WRANGLE_CONFIG") {
+    if let Some(p) = std::env::var_os("DOGSLED_CONFIG") {
         return PathBuf::from(p);
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("wrangle").join("config.toml")
+    base.join("dogsled").join("config.toml")
 }
 
 /// A missing file means defaults. A present but invalid file is an error, so a
@@ -139,13 +139,13 @@ mod tests {
     #[test]
     fn unknown_key_is_rejected() {
         assert!(parse("max_agents = 3\n").is_err());
-        // Worktree setup and teardown moved to the repository's `wrangle.toml`.
+        // Worktree setup and teardown moved to the repository's `dogsled.toml`.
         assert!(parse("[hooks]\nprepare = [\"true\"]\n").is_err());
     }
 
     #[test]
     fn missing_file_is_defaults() {
-        let p = load(Path::new("/nonexistent/wrangle/config.toml")).unwrap();
+        let p = load(Path::new("/nonexistent/dogsled/config.toml")).unwrap();
         assert_eq!(p, Policy::default());
     }
 }

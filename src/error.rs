@@ -31,7 +31,7 @@ pub enum Error {
     Ssh { target: String, detail: String },
     #[error("unexpected output from {origin}: {detail}")]
     Parse { origin: String, detail: String },
-    #[error("unknown host {0}; see `wrangle status`")]
+    #[error("unknown host {0}; see `dogsled status`")]
     UnknownMachine(String),
     #[error("every eligible host is full")]
     Full,

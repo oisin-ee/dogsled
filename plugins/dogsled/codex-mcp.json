@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "wrangle": {
-      "command": "wrangle",
+    "dogsled": {
+      "command": "dogsled",
       "args": ["mcp"],
       "env_vars": [
         "HERDR_ENV",
@@ -10,8 +10,8 @@
         "HERDR_WORKSPACE_ID",
         "HERDR_SOCKET_PATH",
         "HERDR_BIN_PATH",
-        "WRANGLE_CONFIG",
-        "WRANGLE_STATE"
+        "DOGSLED_CONFIG",
+        "DOGSLED_STATE"
       ]
     }
   }

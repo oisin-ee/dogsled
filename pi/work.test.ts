@@ -98,7 +98,7 @@ test("the board widget shows the current task above the board groups at bounded 
 		if (width >= 20) assert.match(lines[4]!, /!/);
 	}
 	const wide = workBoard({ board, todo, error: undefined }, 160, plain);
-	assert.match(wide[0]!, /^ wrangle {2}1 need attention/);
+	assert.match(wide[0]!, /^ dogsled {2}1 need attention/);
 	assert.deepEqual(wide.slice(1, 4).map(line => line.trim().split(/ {2,}/)), [["TASK"], ["◆ Verify changes", "Todo list: 1/3 completed"], ["ATTENTION"]]);
 	const closed = { ...todo, display: todoDisplay({ current: "", summary: "Todo list: 1/2 completed" }) };
 	assert.match(workBoard({ board, todo: closed, error: undefined }, 160, plain).join("\n"), /1\/2 completed/);
@@ -174,7 +174,7 @@ test("the board widget keeps agents and jobs in action groups with the task firs
 	const row = { id: "a", group: "running" as const, kind: "agent", name: "builder", what: "pi", host: "local", state: "working", activity: "", age_ms: 120000 };
 	const state = { board: { hosts: [], rows: [row, { ...row, id: "b", name: "reviewer", group: "attention" as const, state: "blocked" }, { ...row, id: "c", kind: "job", name: "tests", state: "running" }] }, todo: r.data(), error: undefined };
 	const lines = workBoard(state, 48, plain);
-	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)[0]), ["wrangle", "TASK", "◆ Verify changes", "ATTENTION", "! reviewer", "RUNNING", "◐ builder", "▸ tests"]);
+	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)[0]), ["dogsled", "TASK", "◆ Verify changes", "ATTENTION", "! reviewer", "RUNNING", "◐ builder", "▸ tests"]);
 	assert.ok(lines.every(line => visibleWidth(line) <= 48));
 	r.consumer.stop();
 });

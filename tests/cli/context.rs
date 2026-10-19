@@ -136,13 +136,13 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     );
     let status = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     assert!(status.contains("(2 finished)"), "{status}");
-    assert!(!status.contains("wrangle close"), "{status}");
+    assert!(!status.contains("dogsled close"), "{status}");
     let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
     cmd.env("HERDR_ENV", "1");
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
     assert!(
         out.ends_with(
-            "To land: worker (+2). Merge or drop each branch; wrangle closes the child once its work lands.\n"
+            "To land: worker (+2). Merge or drop each branch; dogsled closes the child once its work lands.\n"
         ),
         "{out}"
     );

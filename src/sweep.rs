@@ -100,10 +100,10 @@ pub fn pass(fleet: &Fleet, now: u64) -> Result<()> {
     let doctor = crate::cleanup::sweep(&fleet.node(), now);
     if let Ok(applied) = &doctor {
         for result in &applied.results {
-            eprintln!("wrangle sweep: {result}");
+            eprintln!("dogsled sweep: {result}");
         }
         for failure in &applied.failures {
-            eprintln!("wrangle sweep: failed: {failure}");
+            eprintln!("dogsled sweep: failed: {failure}");
         }
     }
     let children = children(fleet, now);
@@ -111,7 +111,7 @@ pub fn pass(fleet: &Fleet, now: u64) -> Result<()> {
 }
 
 /// Settle each open agent item: an owned child that finished, and an orphan that is idle or
-/// done, clean, and pushed, close exactly as `wrangle close` would. Orphans that stay are
+/// done, clean, and pushed, close exactly as `dogsled close` would. Orphans that stay are
 /// recorded for status and check-ins.
 fn children(fleet: &Fleet, now: u64) -> Result<()> {
     let items: Vec<Item> = crate::items::list(fleet.ledger)?
@@ -144,7 +144,7 @@ fn children(fleet: &Fleet, now: u64) -> Result<()> {
             let since_ms = previous.get(&item.id).map_or(now, |o| o.since_ms);
             if previous.get(&item.id).is_none_or(|o| o.reason != reason) {
                 eprintln!(
-                    "wrangle sweep: keep orphan {} on {}: {reason}",
+                    "dogsled sweep: keep orphan {} on {}: {reason}",
                     item.pane, item.host
                 );
             }
@@ -196,10 +196,10 @@ fn settle(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
     match close(fleet, item, &report.host, Guard::Pushed) {
         Ok(closed) => {
             if let Err(error) = crate::items::close(fleet.ledger, &item.host, &item.pane, now) {
-                eprintln!("wrangle sweep: failed: close item {}: {error}", item.id);
+                eprintln!("dogsled sweep: failed: close item {}: {error}", item.id);
             }
             eprintln!(
-                "wrangle sweep: closed orphan {} on {} (owner {} is gone){}",
+                "dogsled sweep: closed orphan {} on {} (owner {} is gone){}",
                 item.pane,
                 report.host.label,
                 item.owner_pane,
@@ -215,7 +215,7 @@ fn settle(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
 }
 
 /// Put each untold final reply, and each new blocked state, in the owner's inbox. A reply the
-/// owner cannot read yet stays untold until it has a reader; `wrangle read` shows it meanwhile.
+/// owner cannot read yet stays untold until it has a reader; `dogsled read` shows it meanwhile.
 fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
     let mut told = Vec::new();
     for item in crate::items::list(fleet.ledger)? {
@@ -262,7 +262,7 @@ fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             continue;
         };
         let text = format!(
-            "{name} ({} on {host}) is blocked and waits for an answer. Look at its pane, or answer with `wrangle send {} --host {host}`.{}",
+            "{name} ({} on {host}) is blocked and waits for an answer. Look at its pane, or answer with `dogsled send {} --host {host}`.{}",
             item.pane,
             item.pane,
             agent
@@ -302,7 +302,7 @@ fn landing(fleet: &Fleet, owned: &[&Item], reports: &[HostReport], now: u64) -> 
         };
         if previous.get(&item.id) != Some(&reason) {
             eprintln!(
-                "wrangle sweep: keep {} on {}: {reason}",
+                "dogsled sweep: keep {} on {}: {reason}",
                 item.pane, item.host
             );
         }
@@ -370,10 +370,10 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
     match close(fleet, item, &report.host, guard) {
         Ok(closed) => {
             if let Err(error) = crate::items::close(fleet.ledger, &item.host, &item.pane, now) {
-                eprintln!("wrangle sweep: failed: close item {}: {error}", item.id);
+                eprintln!("dogsled sweep: failed: close item {}: {error}", item.id);
             }
             eprintln!(
-                "wrangle sweep: closed finished {} on {}{}",
+                "dogsled sweep: closed finished {} on {}{}",
                 item.pane,
                 report.host.label,
                 closed.worktree.map_or_else(String::new, |tree| format!(

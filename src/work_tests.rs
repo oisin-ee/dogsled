@@ -105,7 +105,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     assert_eq!(
         told[0].text,
         format!(
-            "wrangle: ticket {} admitted on local: {result}",
+            "dogsled: ticket {} admitted on local: {result}",
             tickets[0].id
         )
     );

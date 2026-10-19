@@ -1,13 +1,13 @@
 {
-  "name": "wrangle",
-  "description": "Wrangle host status, placement, jobs, and prompt context for Herdr agents.",
+  "name": "dogsled",
+  "description": "Dogsled host status, placement, jobs, and prompt context for Herdr agents.",
   "owner": {
     "name": "oisin-ee"
   },
   "plugins": [
     {
-      "name": "wrangle",
-      "source": "./plugins/wrangle"
+      "name": "dogsled",
+      "source": "./plugins/dogsled"
     }
   ]
 }

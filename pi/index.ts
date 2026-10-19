@@ -11,18 +11,18 @@ import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor,
 
 const REFRESH_MS = 10_000;
 
-/** The version this extension ships with; the wrangle binary on PATH must match it. */
+/** The version this extension ships with; the dogsled binary on PATH must match it. */
 export const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
-/** Why `output` of `wrangle --version` does not match this extension, or undefined when it does. */
+/** Why `output` of `dogsled --version` does not match this extension, or undefined when it does. */
 export function versionMismatch(output: string): string | undefined {
-	const found = /^wrangle (\S+)/.exec(output.trim())?.[1];
+	const found = /^dogsled (\S+)/.exec(output.trim())?.[1];
 	if (found === VERSION) return undefined;
-	return `wrangle ${found ?? "(unknown version)"} is on PATH, but this extension is ${VERSION}. Install wrangle ${VERSION} on every host so the two match.`;
+	return `dogsled ${found ?? "(unknown version)"} is on PATH, but this extension is ${VERSION}. Install dogsled ${VERSION} on every host so the two match.`;
 }
 
-export default function wrangle(pi: ExtensionAPI) {
-	const binary = process.env["WRANGLE_BIN"] ?? "wrangle";
+export default function dogsled(pi: ExtensionAPI) {
+	const binary = process.env["DOGSLED_BIN"] ?? "dogsled";
 	const owner = process.env["HERDR_PANE_ID"];
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let generation = 0;
@@ -30,9 +30,9 @@ export default function wrangle(pi: ExtensionAPI) {
 	let board: Board = { hosts: [], rows: [] };
 	let failure: string | undefined;
 
-	// The wrangle commands as tools, declared to the model like built-ins (`mcp__wrangle__*`).
+	// The dogsled commands as tools, declared to the model like built-ins (`mcp__dogsled__*`).
 	// The server reads HERDR_PANE_ID from this process's environment to know its caller.
-	pi.registerMcpServer("wrangle", {
+	pi.registerMcpServer("dogsled", {
 		command: binary,
 		args: ["mcp"],
 		exposure: "direct",
@@ -41,7 +41,7 @@ export default function wrangle(pi: ExtensionAPI) {
 
 	async function exec(args: string[]) {
 		const result = await pi.exec(binary, args);
-		if (result.code !== 0) throw new Error(`wrangle ${args[0]} failed: ${result.stderr.trim() || `exit ${result.code}`}`);
+		if (result.code !== 0) throw new Error(`dogsled ${args[0]} failed: ${result.stderr.trim() || `exit ${result.code}`}`);
 		return result.stdout;
 	}
 
@@ -51,7 +51,7 @@ export default function wrangle(pi: ExtensionAPI) {
 		const records = message.details?.records ?? [];
 		const box = new Box(outputPad, 1, text => theme.bg("customMessageBg", text));
 		const body = records.map(r => {
-			const head = `${theme.fg("customMessageLabel", theme.bold(`wrangle ${clean(r.kind)}`))} ${theme.fg("muted", `from ${clean(r.sender)}`)}`;
+			const head = `${theme.fg("customMessageLabel", theme.bold(`dogsled ${clean(r.kind)}`))} ${theme.fg("muted", `from ${clean(r.sender)}`)}`;
 			const lines = r.text.split("\n");
 			const shown = expanded || lines.length <= 12 ? r.text : `${lines.slice(0, 12).join("\n")}\n${theme.fg("dim", `… ${lines.length - 12} more lines`)}`;
 			return `${head}\n${shown}`;
@@ -136,11 +136,11 @@ export default function wrangle(pi: ExtensionAPI) {
 		workPanel?.update(workData());
 		const data = state();
 		if (panelOpen || (!workOpen && !data.board.rows.length && (!data.todo || data.todo.display.empty) && !data.error)) {
-			ctx.ui.setWidget("wrangle", undefined);
+			ctx.ui.setWidget("dogsled", undefined);
 			return;
 		}
 		if (requestWorkRender) { requestWorkRender(); return; }
-		ctx.ui.setWidget("wrangle", tui => {
+		ctx.ui.setWidget("dogsled", tui => {
 			requestWorkRender = () => tui.requestRender();
 			return {
 				render(width: number): string[] {
@@ -193,7 +193,7 @@ export default function wrangle(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (ctx.mode === "tui") ctx.ui.setWidget("wrangle", undefined);
+		if (ctx.mode === "tui") ctx.ui.setWidget("dogsled", undefined);
 		requestWorkRender = undefined;
 		workPanel?.dispose();
 		if (timer) clearInterval(timer);
@@ -207,7 +207,7 @@ export default function wrangle(pi: ExtensionAPI) {
 		history = { jobs: [] };
 		context = ctx;
 		board = { hosts: [], rows: [] };
-		failure = owner ? undefined : "Wrangle needs a Herdr owner pane";
+		failure = owner ? undefined : "Dogsled needs a Herdr owner pane";
 		todos.start(ctx);
 		if (!owner) { draw(ctx); return; }
 		timer = setInterval(() => { void update(ctx); }, REFRESH_MS);
@@ -235,7 +235,7 @@ export default function wrangle(pi: ExtensionAPI) {
 		inbox.stop();
 		todos.stop();
 		context = undefined;
-		if (ctx.mode === "tui") ctx.ui.setWidget("wrangle", undefined);
+		if (ctx.mode === "tui") ctx.ui.setWidget("dogsled", undefined);
 	});
 	// A delivered message is in the transcript once Pi ends it: only then is it acknowledged.
 	pi.on("message_end", async event => { await inbox.ended(event.message); });
@@ -273,7 +273,7 @@ export default function wrangle(pi: ExtensionAPI) {
 			} else workPanel?.handleInput(input);
 		} });
 	}
-	pi.registerCommand("wrangle", {
+	pi.registerCommand("dogsled", {
 		description: "Hosts, your children and jobs, profiles, and messages",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") {

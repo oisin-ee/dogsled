@@ -1,12 +1,12 @@
-// The Pi reader of this pane's wrangle inbox. Wrangle never types into a terminal: this
+// The Pi reader of this pane's dogsled inbox. Dogsled never types into a terminal: this
 // extension claims records, adds them to the session as one custom message, and
 // acknowledges them when Pi ends that message, after it is in the transcript. A record that
-// is claimed and never acknowledged is offered again by wrangle with backoff, so a crash or
+// is claimed and never acknowledged is offered again by dogsled with backoff, so a crash or
 // an aborted run repeats a message and never loses it.
 import { watch, type FSWatcher } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const MESSAGE_TYPE = "wrangle";
+export const MESSAGE_TYPE = "dogsled";
 
 export interface Delivered {
 	id: string;
@@ -29,13 +29,13 @@ type Exec = (args: string[]) => Promise<string>;
 
 function parseClaimed(stdout: string): Claimed[] {
 	const value: unknown = JSON.parse(stdout);
-	if (!Array.isArray(value)) throw new Error("wrangle inbox claim returned no list");
+	if (!Array.isArray(value)) throw new Error("dogsled inbox claim returned no list");
 	return value.map(item => {
 		const r = item as Partial<Claimed> | null;
 		if (typeof r?.id !== "string" || typeof r.message !== "string" || typeof r.kind !== "string") {
-			throw new Error("wrangle inbox claim returned a record without id, kind, or message");
+			throw new Error("dogsled inbox claim returned a record without id, kind, or message");
 		}
-		return { id: r.id, kind: r.kind, sender: String(r.sender ?? "wrangle"), text: String(r.text ?? ""), created_ms: Number(r.created_ms ?? 0), message: r.message };
+		return { id: r.id, kind: r.kind, sender: String(r.sender ?? "dogsled"), text: String(r.text ?? ""), created_ms: Number(r.created_ms ?? 0), message: r.message };
 	});
 }
 
@@ -71,7 +71,7 @@ export class InboxReader {
 		await this.drain(ctx);
 		try {
 			const where = JSON.parse(await this.exec(["inbox", "path", "--json"])) as { dir?: unknown; file?: unknown };
-			if (typeof where.dir !== "string" || typeof where.file !== "string") throw new Error("wrangle inbox path returned no dir or file");
+			if (typeof where.dir !== "string" || typeof where.file !== "string") throw new Error("dogsled inbox path returned no dir or file");
 			const file = where.file;
 			// Each write replaces the file, so the directory is watched, not the file.
 			this.watcher = watch(where.dir, { persistent: false }, (_event, name) => {
@@ -127,8 +127,8 @@ export class InboxReader {
 			records = parseClaimed(await this.exec(["inbox", "claim", "--harness", "pi", "--json"]));
 			this.failure = undefined;
 		} catch (error) {
-			// Say so once, not on every refresh; wrangle keeps the records until a claim succeeds.
-			const text = `wrangle inbox: ${error instanceof Error ? error.message : String(error)}`;
+			// Say so once, not on every refresh; dogsled keeps the records until a claim succeeds.
+			const text = `dogsled inbox: ${error instanceof Error ? error.message : String(error)}`;
 			if (text !== this.failure && ctx.hasUI) ctx.ui.notify(text, "warning");
 			this.failure = text;
 			return;

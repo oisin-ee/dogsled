@@ -1,9 +1,9 @@
-# Replacing load1 in wrangle admission: evidence note v2
+# Replacing load1 in dogsled admission: evidence note v2
 
 Date: 2026-10-15. Hosts: local Mac (Mac14,10, M2 Pro 8P+4E, 12 CPUs, 32 GiB, macOS 26.6.2, xnu-12377.121.6), netcup (NixOS, Linux 6.18.37, 16 CPUs, slice `user-1001.slice` cpu.max 16 cores, cpu.weight 30, memory.max 48 GiB), momokaya-2 (Linux 6.12.63, 7 CPUs, slice cpu.max 7, memory.max 8 GiB, zram swap 8 GiB).
 Current rule: `src/plan.rs evaluate`: eligible when `1.5 × cores − load1 − 1.0 × reservations > 0`; disk gate 15%. No `config.toml` exists on any host.
 
-Every number has its source in brackets: [K] = kernel/xnu source (child report "metric-kernel", permalinks at v6.18/v6.12/xnu-12377.121.6), [P] = prior art (child report "metric-priorart"), [S] = my sampler (`/tmp/wr-sample-linux.sh`, `/tmp/wr-sample-mac.sh`, 10 s / 8 s intervals, netcup 29 min, Mac 23 min as of writing, still running), [L] = pi session logs (`/tmp/wr_local.jsonl`, `/tmp/wr_netcup.jsonl`, `/tmp/wr_bg_*.jsonl`, `/tmp/wr_act_*.jsonl`; 2,478 sessions 07-19 → 10-14), [J] = kernel journal / JetsamEvent reports, [Q] = wrangle queue and launch ledgers.
+Every number has its source in brackets: [K] = kernel/xnu source (child report "metric-kernel", permalinks at v6.18/v6.12/xnu-12377.121.6), [P] = prior art (child report "metric-priorart"), [S] = my sampler (`/tmp/wr-sample-linux.sh`, `/tmp/wr-sample-mac.sh`, 10 s / 8 s intervals, netcup 29 min, Mac 23 min as of writing, still running), [L] = pi session logs (`/tmp/wr_local.jsonl`, `/tmp/wr_netcup.jsonl`, `/tmp/wr_bg_*.jsonl`, `/tmp/wr_act_*.jsonl`; 2,478 sessions 07-19 → 10-14), [J] = kernel journal / JetsamEvent reports, [Q] = dogsled queue and launch ledgers.
 
 ## 1. What load1 measures, and how it fails here
 
@@ -18,7 +18,7 @@ Measured [S]:
 |---|---|---|
 | corr(load1/cores, busy fraction now) | 0.58 | 0.14 |
 | corr(load1/cores, trailing-mean busy 120–190 s) | 0.82 | 0.76 |
-| samples where wrangle says full (load1/cores ≥ 1.5) | 72% | 82% |
+| samples where dogsled says full (load1/cores ≥ 1.5) | 72% | 82% |
 | …of those, CPU busy < 80% | 21% | 55% |
 | iowait fraction median / p90 | 0.8% / 6.6% | n/a |
 | D-state processes seen | jbd2, occasional cargo | n/a |
@@ -57,14 +57,14 @@ Caveat: `ps %cpu` is lifetime-averaged; build trees are short-lived so the figur
 Timeout rate (0 / 1–2 / 3+ concurrent): netcup 4.4% / 7.6% / 13.2%; Mac 6.2% / 7.4% / 9.5%.
 Per class on netcup: JS/pnpm slope 0.32 per extra build, moon 0.12, Rust 0.10; Mac Rust 0.16, JS 0.08, moon ≈ 0. "Timeout" = text match; the main matches are tool deadlines (`[Hypa command timed out]` 436, `Command timed out after N seconds` 168, `Execution timed out` 113, `Test timed out` 96), i.e. real failed calls. No SIGKILL/OOM text occurred in any build result.
 
-Since 10-09: 17 `wrangle run` calls vs 712 foreground + 1,211 `bg_task` builds. A slot limit on `wrangle run` would govern < 1% of builds.
+Since 10-09: 17 `dogsled run` calls vs 712 foreground + 1,211 `bg_task` builds. A slot limit on `dogsled run` would govern < 1% of builds.
 
 ## 4. Memory: where it failed and where it did not
 
 - momokaya-2 [J]: 5 OOM kills 2026-10-09 01:00–01:03 in `user-1001.slice` (8 GiB): rustc 3.7 GB + nix 2.7 GB + docker/postgres/openfga; killed openfga, postgres ×3. Earlier kills (08-11 → 08-18) were CI runner tasks at 2–4 GiB limits. The slice today: 6.9 GiB used with 0 agents; `memory.peak` = the 8 GiB limit.
 - netcup [J][S]: slice `memory.events` hierarchical `oom 19 oom_kill 12`, but `memory.events.local` `oom_kill 0` and no `Memory cgroup out of memory` in the journal since boot 09-17: the kills were inside child cgroups (containers), none attributable to an agent. Working set median 13.9 GiB, max 20.9 of 48; memory PSI `some avg10` max 0.18. Memory is not a limit on netcup today.
 - Mac [S][J][K]: pressure WARN 51% of samples, swap 47.6 of 49 GiB, compressor 10.7–13.8 GiB, swap-ins median 2.9 MiB/min NORMAL vs 5.6 WARN (p90 31 vs 76). WARN = non-compressed available < 50% of available (`vm_compressor.c` divisors 20/25/35; `vm_pageout.c` predicates). Agents hold 3.6 of 29.6 GiB total RSS; the big consumers are OrbStack (1.6 GB), browsers, simulators. The one JetsamEvent (10-11) was a per-process-limit kill of `knowledgeconstructiond`; `kill_on_sustained_pressure_count` = 0. macOS has not killed an agent. `kern.memorystatus_level` is `available_memory × 100 / total_pages` (`vm_pageout.c:5277`), not a pressure enum; the earlier proposal confused the two.
-- Wrangle's Mac "available" (`free + inactive + speculative`, `src/probe.rs parse_vm_stat`) was 7–10 GiB during NORMAL and 5–8.6 GiB during WARN: the ranges overlap, so it is not a usable gate alone.
+- Dogsled's Mac "available" (`free + inactive + speculative`, `src/probe.rs parse_vm_stat`) was 7–10 GiB during NORMAL and 5–8.6 GiB during WARN: the ranges overlap, so it is not a usable gate alone.
 
 ## 5. Scoring candidate rules on the sample [S]
 
@@ -94,8 +94,8 @@ Limits: 29 + 23 minutes, one weekday morning, netcup contended 71% of the time; 
 1. CPU measure: busy fraction over the probe interval. Linux: governing-cgroup `cpu.stat usage_usec` delta ÷ quota cores (netcup slice: median 12.9 of 16 used, 0 throttled periods; quota-aware also excludes pods, which hold cpu.weight priority), fallback `/proc/stat` `1 − (idle+iowait)/total` [K §4]. macOS: `host_statistics(HOST_CPU_LOAD_INFO)` tick deltas, what `top`/`iostat` use [K §5]. `free_cores = cores × (1 − busy) − 1.0 × reservations`. Reservation = 1.0 because one agent's mean demand is 0.585 × 1.6 ≈ 0.9 cores on netcup, 0.35 × 1.5 ≈ 0.5 on the Mac (§2).
 2. CPU gate: `free_cores ≥ 4` on netcup, `≥ 2` on the Mac: lowest total error in §5 per host (19% and 18%, vs 28% and 55% today). The single formula `cores/4` gives 4 and 3 (19% / 24%); take it only if one formula is worth 6 points on the Mac. Hosts are ordered by `free_cores` (Icecream/Bazel pattern). The 90 s reservation TTL no longer covers load lag; it covers spawn latency (0.3–0.5 min measured [Q]), so 90 s stays.
 3. Memory gate: `free ≥ 3 GiB × (reservations + 1)`; 3 GiB = agent p90 (0.4) + build-tree p90 (2.5–3.2) (§2). Linux: `min(memory.max − working set, MemAvailable)`, working set = `memory.current − inactive_file` as `src/probe.rs` does now (kubelet convention [P]). momokaya-2 would admit at most one agent (6.9 of 8 GiB already used) and would have refused the 10-09 placement that OOM-killed postgres (§4). macOS: refuse while `kern.memorystatus_vm_pressure_level` ≠ 1; consequence: the Mac is ineligible ~50% of the time, caused by the user's apps, not agents (§4). The 1 GiB value in the earlier proposal is withdrawn: it measured idle pi panes only.
-4. Per-host build limit: the harm is real (§3) but wrangle launches < 1% of builds. The limit belongs where builds start (the harness `bg_task`/exec path or a repo-level `agent:*` task wrapper); 3 on netcup and 2 on the Mac are where CPU busy crosses 0.87–0.95 (§2) and the duration ratio exceeds 1.5 / 1.15. Outside wrangle's scope; raise separately.
-5. Resource log: the 10 s sampler produced the evidence this note rests on in under an hour. `wrangle serve` should append its probe (busy, free cores, working set, pressure level, build-tree count, reservations) to `~/.local/state/wrangle/samples.jsonl` with 7-day rotation, so §5 can be re-scored on weeks, not minutes.
+4. Per-host build limit: the harm is real (§3) but dogsled launches < 1% of builds. The limit belongs where builds start (the harness `bg_task`/exec path or a repo-level `agent:*` task wrapper); 3 on netcup and 2 on the Mac are where CPU busy crosses 0.87–0.95 (§2) and the duration ratio exceeds 1.5 / 1.15. Outside dogsled's scope; raise separately.
+5. Resource log: the 10 s sampler produced the evidence this note rests on in under an hour. `dogsled serve` should append its probe (busy, free cores, working set, pressure level, build-tree count, reservations) to `~/.local/state/dogsled/samples.jsonl` with 7-day rotation, so §5 can be re-scored on weeks, not minutes.
 
 ## 8. Rejected
 

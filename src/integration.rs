@@ -176,7 +176,7 @@ struct MergeRepo(std::path::PathBuf);
 
 impl MergeRepo {
     fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("wrangle-merge-{}", crate::ledger::new_id()));
+        let path = std::env::temp_dir().join(format!("dogsled-merge-{}", crate::ledger::new_id()));
         std::fs::create_dir(&path)?;
         Ok(Self(path))
     }
@@ -562,7 +562,7 @@ mod tests {
     impl Repo {
         fn new(name: &str) -> Self {
             let dir = std::env::temp_dir()
-                .join(format!("wrangle-integration-{}-{name}", std::process::id()));
+                .join(format!("dogsled-integration-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let repo = Self(dir);
@@ -720,11 +720,11 @@ mod tests {
         repo.commit("b", "new\n", "apply b separately");
         // No single commit applies the branch, but merging it changes nothing. The
         // text merge must work even if a configured driver is missing or dishonest.
-        repo.git(&["config", "diff.external", "wrangle-missing-diff"]);
-        repo.git(&["config", "diff.custom.command", "wrangle-missing-diff"]);
-        repo.git(&["config", "diff.custom.textconv", "wrangle-missing-diff"]);
+        repo.git(&["config", "diff.external", "dogsled-missing-diff"]);
+        repo.git(&["config", "diff.custom.command", "dogsled-missing-diff"]);
+        repo.git(&["config", "diff.custom.textconv", "dogsled-missing-diff"]);
         repo.git(&["config", "merge.default", "custom"]);
-        for driver in ["wrangle-missing-merge", "false", "true"] {
+        for driver in ["dogsled-missing-merge", "false", "true"] {
             repo.git(&["config", "merge.custom.driver", driver]);
             let found = repo.check("feat").unwrap();
             assert_eq!(

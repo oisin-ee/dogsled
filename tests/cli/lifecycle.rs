@@ -81,7 +81,7 @@ fn waiting_queue_caller_observes_service_admission_without_sleep() {
     assert_eq!(child.wait().unwrap().code(), Some(3));
     assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
     assert_eq!(rig.read("state/queue.json")[0]["waiting"], true);
-    assert!(!rig.log("herdr.log").contains("wrangle: ticket"));
+    assert!(!rig.log("herdr.log").contains("dogsled: ticket"));
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
             .contains("workspace create --label new-name")
     );
     next["id"] = json!("launch-three");
-    next["cwd"] = json!("/missing-wrangle-cwd");
+    next["cwd"] = json!("/missing-dogsled-cwd");
     assert_eq!(
         rig.json(&["host", "launch", "--request", &next.to_string()])
             .0,

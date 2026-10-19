@@ -82,7 +82,7 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
                     }
                     completed[lane] = true;
                     if let Err(error) = result {
-                        eprintln!("wrangle service lane {:?}: {error}", LANES[lane]);
+                        eprintln!("dogsled service lane {:?}: {error}", LANES[lane]);
                     }
                     if once && completed.iter().all(|done| *done) {
                         return Ok(());

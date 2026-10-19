@@ -34,8 +34,8 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     assert_eq!(rig.read("state/items.json")[0]["owner_pane"], "w1:p1");
     let herdr = rig.log("herdr.log");
     assert!(herdr.contains("tab create --workspace w1"));
-    assert!(herdr.contains("--source custom:wrangle --agent wrangle-job --state working"));
-    assert!(herdr.contains("--token wrangle=exit 3"));
+    assert!(herdr.contains("--source custom:dogsled --agent dogsled-job --state working"));
+    assert!(herdr.contains("--token dogsled=exit 3"));
     assert_eq!(rig.read(&format!("at-close/{id}.json")), job);
     assert!(job["ended_ms"].is_number());
     assert!(herdr.ends_with("pane close w2:p1\n"));
@@ -98,7 +98,7 @@ fn exec_signal_and_timeouts_persist_terminal_result_and_kill_descendants() {
         assert!(
             !ps.status.success() || String::from_utf8_lossy(&ps.stdout).trim().starts_with('Z')
         );
-        assert!(rig.log("herdr.log").contains(&format!("wrangle={reason}")));
+        assert!(rig.log("herdr.log").contains(&format!("dogsled={reason}")));
     }
     assert!(rig.run(&["exec", "ok", "--", "true"]).status.success());
     assert_eq!(rig.read("state/jobs/ok.json")["exit"], 0);
@@ -126,7 +126,7 @@ fn exec_close_failure_preserves_final_record_exit_and_logs() {
         let output = rig.run(&["exec", id, "--", "sh", "-c", command]);
         assert_eq!(output.status.code(), Some(code));
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("wrangle pane close:"), "{stderr}");
+        assert!(stderr.contains("dogsled pane close:"), "{stderr}");
         assert!(stderr.contains("close-refused"), "{stderr}");
         let job = rig.read(&format!("state/jobs/{id}.json"));
         assert_eq!(job["exit"], code);
@@ -294,7 +294,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert!(
         claimed[0]["text"].as_str().unwrap().starts_with(&format!(
-            "wrangle: ticket {} admitted on local",
+            "dogsled: ticket {} admitted on local",
             first["ticket"].as_str().unwrap()
         )),
         "{claimed}"
@@ -312,7 +312,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
 fn remote_job_controls_use_configured_transport_and_owner_records() {
     let rig = Rig::new("remote-controls");
     rig.peer();
-    rig.config("remote_command = ['custom-wrangle']\n");
+    rig.config("remote_command = ['custom-dogsled']\n");
     let mut job = complete("remote-job");
     job["host"] = json!("8103");
     job["exit"] = json!(3);
@@ -340,7 +340,7 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
     assert_eq!(rig.json(&["ps", "--all"]).1[0]["host"], "8103");
     assert!(
         rig.log("ssh.log")
-            .contains("custom-wrangle host job remote-job --budget-ms")
+            .contains("custom-dogsled host job remote-job --budget-ms")
     );
 }
 

@@ -4,13 +4,13 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>dev.wrangle</string>
+  <string>dev.dogsled</string>
   <key>ProgramArguments</key>
   <array>
     <string>@HOME@/.local/bin/mise</string>
     <string>x</string>
     <string>--</string>
-    <string>wrangle</string>
+    <string>dogsled</string>
     <string>serve</string>
   </array>
   <key>RunAtLoad</key>
@@ -26,12 +26,12 @@
   <dict>
     <key>HOME</key>
     <string>@HOME@</string>
-    <key>WRANGLE_STATE</key>
-    <string>@HOME@/.local/state/wrangle</string>
+    <key>DOGSLED_STATE</key>
+    <string>@HOME@/.local/state/dogsled</string>
   </dict>
   <key>StandardOutPath</key>
-  <string>@HOME@/.local/state/wrangle/serve.stdout.log</string>
+  <string>@HOME@/.local/state/dogsled/serve.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>@HOME@/.local/state/wrangle/serve.stderr.log</string>
+  <string>@HOME@/.local/state/dogsled/serve.stderr.log</string>
 </dict>
 </plist>

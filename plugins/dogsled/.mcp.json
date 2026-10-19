@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "wrangle": {
-      "command": "wrangle",
+    "dogsled": {
+      "command": "dogsled",
       "args": ["mcp"]
     }
   }

@@ -1,4 +1,4 @@
-//! `wrangle mcp`: the wrangle commands as MCP tools on stdio, for Pi, Claude Code, and Codex.
+//! `dogsled mcp`: the dogsled commands as MCP tools on stdio, for Pi, Claude Code, and Codex.
 //!
 //! Each tool calls the function its CLI subcommand calls and returns the same JSON. No tool
 //! waits: `spawn`, `run`, and `place` return `placed` or `queued` at once. The caller is the
@@ -46,7 +46,7 @@ pub struct SpawnArgs {
     pub task: String,
     /// A short name for the child; `send`, `read`, and `close` accept it.
     pub name: String,
-    /// A profile from `wrangle profiles` (Pi only): it sets model, thinking, and system prompt.
+    /// A profile from `dogsled profiles` (Pi only): it sets model, thinking, and system prompt.
     #[serde(default)]
     pub profile: Option<String>,
     /// `pi` (default), `claude`, or `codex`.
@@ -288,7 +288,7 @@ impl Server {
 
     #[tool(
         description = "Close a finished child now: its pane, its worktree, and its item. \
-        Refuses busy or dirty work. Wrangle closes finished children itself once their work \
+        Refuses busy or dirty work. Dogsled closes finished children itself once their work \
         lands; use this to drop one.",
         annotations(destructive_hint = true)
     )]
@@ -337,8 +337,8 @@ impl Server {
 // rmcp's macro generates `list_tools` and `get_tool` as async without an await.
 #[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(
-    name = "wrangle",
-    instructions = "Wrangle places Pi, Claude, and Codex children and shell jobs on the Herdr \
+    name = "dogsled",
+    instructions = "Dogsled places Pi, Claude, and Codex children and shell jobs on the Herdr \
     hosts with room, and is the only way to message another agent. `spawn` starts a child with \
     its task; its final reply reaches your inbox when it finishes, so do not poll. `send` reaches \
     any agent through its inbox; nothing is typed into its terminal. `status` shows your \

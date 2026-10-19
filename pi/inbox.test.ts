@@ -7,10 +7,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deliveredIds, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 
 function record(id: string, text = `text ${id}`) {
-	return { id, kind: "reply", text, created_ms: 1, message: `wrangle reply from w (w1:p2 on m):\n${text}`, sender: "w (w1:p2 on m)", state: "claimed" };
+	return { id, kind: "reply", text, created_ms: 1, message: `dogsled reply from w (w1:p2 on m):\n${text}`, sender: "w (w1:p2 on m)", state: "claimed" };
 }
 
-function rig(dir = mkdtempSync(join(tmpdir(), "wrangle-inbox-"))) {
+function rig(dir = mkdtempSync(join(tmpdir(), "dogsled-inbox-"))) {
 	const sent: Array<{ message: any; options: any }> = [];
 	const calls: string[][] = [];
 	const notices: string[] = [];
@@ -20,7 +20,7 @@ function rig(dir = mkdtempSync(join(tmpdir(), "wrangle-inbox-"))) {
 	const exec = async (args: string[]) => {
 		calls.push(args);
 		if (args[1] === "claim") {
-			if (claimFails) throw new Error("wrangle inbox failed: offline");
+			if (claimFails) throw new Error("dogsled inbox failed: offline");
 			const out = pending; pending = []; return JSON.stringify(out);
 		}
 		if (args[1] === "path") return JSON.stringify({ dir, file: "term_a.json" });
@@ -89,7 +89,7 @@ test("a failing claim is reported once and delivery resumes when it recovers", a
 	r.failClaims(true);
 	await r.reader.start(r.ctx);
 	await r.reader.drain(r.ctx);
-	assert.deepEqual(r.notices, ["wrangle inbox: wrangle inbox failed: offline"]);
+	assert.deepEqual(r.notices, ["dogsled inbox: dogsled inbox failed: offline"]);
 	r.failClaims(false);
 	r.queue(record("m1"));
 	await r.reader.drain(r.ctx);

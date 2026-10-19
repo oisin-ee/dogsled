@@ -1,4 +1,4 @@
-# Publishes @oisin-ee/pi-wrangle, the Pi extension, for the tagged version. dist calls it from
+# Publishes @oisin-ee/pi-dogsled, the Pi extension, for the tagged version. dist calls it from
 # release.yml once the binaries are built, so the extension never ships without its binary.
 # npm trusted publishing (OIDC): the package's trusted publisher names release.yml, the
 # calling workflow, and the job has no npm token. Provenance comes from publishConfig.
