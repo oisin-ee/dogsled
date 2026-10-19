@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.12.3 - 2026-10-19
+
+- The Pi work widget uses the wrangle board design again: a header with counts and a load meter for each host, then the current task, then agents, jobs, and queued work grouped TO LAND, ATTENTION, RUNNING, and WAITING with aligned harness·model, host, activity, and age columns. This replaces the compact WORK strip from 0.12.1.
+- Alt+W and `/work` still expand the widget in place. The expanded widget keeps the board's header, groups, and columns, and adds a view line, a selection marker, and key hints.
+- The Todos view hosts the provider-owned pi-todo view inline.
+
 ## 0.12.2 - 2026-10-18
 
 - The compact Pi widget shows the current task and named agents and jobs above the editor.

@@ -1,6 +1,6 @@
 {
   "name": "wrangle",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "description": "Host status, placement, jobs, and queue admission for Herdr agents.",
   "author": {
     "name": "oisin-ee",
