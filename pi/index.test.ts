@@ -125,6 +125,22 @@ test("stop gate continues with a visible reminder and preserves prior boundary e
 	await assert.rejects(r.invoke("agent_before_settle", event), /ENOENT/);
 });
 
+test("stop gate shows cleanup warnings, dirty worktrees, and failures without interpreting them", async t => {
+	withPane(t);
+	const r = rig();
+	for (const content of [
+		"Cleanup repository warnings:\n/missing: repository entry /missing in repositories.json. Hand the fix to a dogsled agent.",
+		"Landed worktrees still have dirty files:\n/repo/.worktrees/x (branch feat/x): its commits are already in the default branch. Dirty paths: notes.txt.",
+		"Cleanup pass at 123 ms failed:\nworkspace list: survey unavailable",
+	]) {
+		r.gate(`${content}\n`);
+		const result = await r.invoke("agent_before_settle", { outcome: "completed", context: { canContinue: true }, entries: [] });
+		assert.deepEqual(result, { entries: [{ type: "custom_message", customType: "dogsled", content, display: true }], continue: true });
+		r.gate("");
+		assert.equal(await r.invoke("agent_before_settle", { outcome: "completed", context: { canContinue: true } }), undefined);
+	}
+});
+
 test("the stop gate does not query fleet-wide work without an owner", async t => {
 	const previous = process.env["HERDR_PANE_ID"];
 	delete process.env["HERDR_PANE_ID"];

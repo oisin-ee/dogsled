@@ -14,6 +14,21 @@ fn serve(rig: &Rig) -> String {
     journal
 }
 
+/// Doctor cleanup is requested by Stop, not by the publication interval.
+fn requested_sweep(rig: &Rig) -> String {
+    let out = rig
+        .cmd(&["hook", "gate"])
+        .env("HERDR_ENV", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serve(rig)
+}
+
 /// A process that works in `dir` until it is dropped.
 struct Worker(std::process::Child);
 impl Worker {
@@ -86,7 +101,7 @@ fn serve_closes_ended_job_tabs_and_shells_in_deleted_directories_and_nothing_els
     snapshot["probe"]["panes"] = json!([{"pane_id":"w4:p3","workspace_id":"w4","cwd":home,
         "idle_shell":true,"idle_since_ms":1}]);
     rig.put("state/host.json", &snapshot);
-    let journal = serve(&rig);
+    let journal = requested_sweep(&rig);
     let log = rig.log("herdr.log");
     for (kind, id) in [("pane", "w4:p1"), ("pane", "w4:p4"), ("workspace", "w5")] {
         assert!(log.contains(&format!("{kind} close {id}\n")), "{log}");
@@ -122,7 +137,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     let rig = watchdog_rig("sweep-worktree");
     let tree = rig.dir.join("home/repo/tree");
     let kept = |rig: &Rig, why: &str| {
-        let journal = serve(rig);
+        let journal = requested_sweep(rig);
         assert!(
             !rig.log("git.log").contains("worktree remove"),
             "{why}: {journal}"
@@ -197,7 +212,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     kept(&rig, "unmerged");
     fs::remove_file(rig.dir.join("unmerged")).unwrap();
     // Clean, integrated, and unheld: the sweep removes it as `prune` would, and journals it.
-    let journal = serve(&rig);
+    let journal = requested_sweep(&rig);
     let git = rig.log("git.log");
     assert!(
         git.contains(&format!("worktree unlock {}", tree.display())),
@@ -269,7 +284,7 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     git(&local, &["commit", "-q", "-m", "local only"]);
     let dirty = detached("dirty");
     fs::write(dirty.join("scratch"), "x").unwrap();
-    let journal = serve(&rig);
+    let journal = requested_sweep(&rig);
     assert!(!branch_exists(&rig, "pushed"), "{journal}");
     assert!(
         journal.contains("dogsled sweep: deleted branch pushed in"),

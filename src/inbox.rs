@@ -179,8 +179,13 @@ pub fn hook(
         }
         Ok(())
     };
-    if let Some(board) = board {
-        crate::gate::deliver(ledger, board, &pane, emit)?;
+    if event == HookEvent::Stop {
+        let notices = crate::gate::notices(ledger, shell, &pane)?;
+        let empty = crate::board::Board {
+            hosts: Vec::new(),
+            rows: Vec::new(),
+        };
+        crate::gate::deliver(ledger, board.unwrap_or(&empty), &pane, &notices, emit)?;
     } else {
         emit(None)?;
     }
