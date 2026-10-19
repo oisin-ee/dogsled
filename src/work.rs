@@ -11,7 +11,7 @@ use crate::shell::{Shell, quote};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Action {
     Place,
@@ -49,13 +49,16 @@ pub struct Request {
     pub owner: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launch {
     pub id: String,
     pub action: Action,
     pub host: String,
     pub cwd: String,
     pub pane: Option<String>,
+    /// Terminal identity captured by preparation, before transport to this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
     pub workspace: Option<String>,
     pub workspace_name: Option<String>,
     pub owner: String,
@@ -167,7 +170,7 @@ fn herdr(shell: &dyn Shell, args: &[String]) -> Result<Value> {
     Ok(serde_json::from_str(&out.stdout)?)
 }
 
-fn pane(shell: &dyn Shell, launch: &Launch) -> Result<String> {
+pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option<String>)> {
     if !std::path::Path::new(&launch.cwd).is_dir() {
         return Err(Error::Invalid(format!(
             "{}: cwd does not exist: {}",
@@ -175,7 +178,7 @@ fn pane(shell: &dyn Shell, launch: &Launch) -> Result<String> {
         )));
     }
     if let Some(pane) = &launch.pane {
-        return Ok(pane.clone());
+        return Ok((pane.clone(), launch.terminal.clone()));
     }
     let workspace = if let Some(id) = &launch.workspace {
         Some(id.clone())
@@ -207,22 +210,31 @@ fn pane(shell: &dyn Shell, launch: &Launch) -> Result<String> {
     };
     args.extend(["--cwd".into(), launch.cwd.clone(), "--no-focus".into()]);
     let value = herdr(shell, &args)?;
-    value
+    let pane = value
         .pointer("/result/root_pane/pane_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))
+        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))?;
+    let terminal = value
+        .pointer("/result/root_pane/terminal_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    Ok((pane, terminal))
 }
 
 pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
+    if matches!(launch.action, Action::Agent { .. }) {
+        return crate::launch::agent(ledger, shell, launch);
+    }
     let receipts = ledger.child("launches");
     receipts.with_lock(&launch.id, || {
         let file = format!("{}.json", launch.id);
         if let Some(value) = receipts.read::<Value>(&file)? {
             return Ok(value);
         }
-        let pane = pane(shell, launch)?;
+        let (pane, _) = pane(shell, launch)?;
         let result = match &launch.action {
             Action::Job {
                 cmd,
@@ -268,48 +280,10 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                 }
                 json!({"id":launch.id,"host":launch.host,"pane":pane})
             }
-            Action::Agent {
-                kind,
-                name,
-                message,
-                profile,
-            } => {
-                let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
-                let task = task_file(ledger, &launch.id, message)?;
-                let mut args = vec![
-                    "agent".into(),
-                    "start".into(),
-                    name.clone(),
-                    "--kind".into(),
-                    kind.clone(),
-                    "--pane".into(),
-                    pane.clone(),
-                    "--".into(),
-                ];
-                args.extend(agent_args(kind, name, message, &task, profile.as_ref())?);
-                if let Err(error) = shell.run_setup_ok("herdr", &args) {
-                    // A tab this launch created goes with it, so a retry starts clean.
-                    if launch.pane.is_none()
-                        && let Err(close) =
-                            shell.run_ok("herdr", &["pane".into(), "close".into(), pane.clone()])
-                    {
-                        return Err(Error::Invalid(format!(
-                            "{error}; closing its pane {pane} also failed: {close}"
-                        )));
-                    }
-                    return Err(error);
-                }
-                crate::watchdog::register_parent(ledger, shell, &pane)?;
-                let mut result = json!({"host":launch.host,"pane":pane,"name":name});
-                if let Some(profile) = &profile {
-                    result["profile"] = json!(profile.name);
-                    for (key, value) in [("model", &profile.model), ("role", &profile.role)] {
-                        if let Some(value) = value {
-                            result[key] = json!(value);
-                        }
-                    }
-                }
-                result
+            Action::Agent { .. } => {
+                return Err(Error::Invalid(
+                    "agent launch must use its receipt owner".into(),
+                ));
             }
             Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
         };
@@ -320,7 +294,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
 
 /// Keep the task in a file on the launch host: Herdr refuses a launch argument with a newline,
 /// and the file outlives the pane for review.
-fn task_file(ledger: &Ledger, id: &str, message: &str) -> Result<String> {
+pub(crate) fn task_file(ledger: &Ledger, id: &str, message: &str) -> Result<String> {
     let dir = ledger.child("launches").dir;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{id}.task.md"));
@@ -385,33 +359,101 @@ pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value
     perform(fleet, request, now)
 }
 
+/// Caller-owned progress is durable before any preparation or launch side effect. An
+/// interrupted preparation cannot be adopted: only a saved launch may be resumed.
+#[derive(Debug, Serialize, Deserialize)]
+struct Attempt {
+    request: Value,
+    host: Host,
+    launch: Option<Launch>,
+    error: Option<String>,
+}
+
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    jobs::validate_id(&request.id)?;
+    if matches!(request.action, Action::Place) {
+        let Placement::Placed {
+            host, reservation, ..
+        } = commands::place(fleet, request.host.as_deref(), now)?
+        else {
+            return Ok(None);
+        };
+        let launch = prepare_launch(fleet, request, &host)?;
+        return Ok(Some(
+            json!({"host":host,"reservation":reservation,"path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane}),
+        ));
+    }
+    let attempts = fleet.ledger.child("admissions");
+    attempts.with_lock(&request.id, || {
+        let file = format!("{}.json", request.id);
+        if let Some(attempt) = attempts.read::<Attempt>(&file)? {
+            if attempt.request != serde_json::to_value(request)? {
+                return Err(Error::Invalid(format!("request {} changed after placement", request.id)));
+            }
+            if !matches!(request.action, Action::Agent { .. }) {
+                return Err(Error::Invalid(format!(
+                    "request {} already attempted a non-reconcilable launch; inspect before resubmitting",
+                    request.id
+                )));
+            }
+            let launch = attempt.launch.ok_or_else(|| Error::Invalid(format!(
+                "request {} stopped during preparation on {}; inspect that host before resubmitting: {}",
+                request.id, attempt.host.label,
+                attempt.error.as_deref().unwrap_or("preparation outcome is unknown")
+            )))?;
+            return finish(fleet, request, &attempt.host, &launch, now).map(Some);
+        }
+        begin(fleet, request, &attempts, &file, now)
+    })
+}
+
+fn begin(
+    fleet: &Fleet,
+    request: &Request,
+    attempts: &Ledger,
+    file: &str,
+    now: u64,
+) -> Result<Option<Value>> {
     let placed = commands::place(fleet, request.host.as_deref(), now)?;
-    let Placement::Placed {
-        host, reservation, ..
-    } = placed
-    else {
+    let Placement::Placed { host, .. } = placed else {
         return Ok(None);
     };
+    let mut attempt = Attempt {
+        request: serde_json::to_value(request)?,
+        host: host.clone(),
+        launch: None,
+        error: None,
+    };
+    attempts.write(file, &attempt)?;
+    let prepared = prepare_launch(fleet, request, &host);
+    let launch_request = match prepared {
+        Ok(launch) => launch,
+        Err(error) => {
+            attempt.error = Some(error.to_string());
+            attempts.write(file, &attempt)?;
+            return Err(error);
+        }
+    };
+    attempt.launch = Some(launch_request.clone());
+    attempts.write(file, &attempt)?;
+    finish(fleet, request, &host, &launch_request, now).map(Some)
+}
+
+fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launch> {
     let checkout = request
         .repository
         .as_ref()
-        .map(|repo| crate::checkout::ensure(fleet, &host, repo))
+        .map(|repo| crate::checkout::ensure(fleet, host, repo))
         .transpose()?;
     let prepared = if let Some(branch) = &request.branch {
         let repo = request
             .repository
             .as_ref()
             .ok_or_else(|| Error::Invalid("branch requires repository".into()))?;
-        crate::prepare::run(fleet, &host, &repo.path, branch, request.base.as_deref())?
+        crate::prepare::run(fleet, host, &repo.path, branch, request.base.as_deref())?
     } else {
         crate::prepare::Prepared::default()
     };
-    if matches!(request.action, Action::Place) {
-        return Ok(Some(
-            json!({"host":host,"reservation":reservation,"path":prepared.path,"pane_id":prepared.pane_id}),
-        ));
-    }
     let cwd = if request.branch.is_some() {
         prepared
             .path
@@ -430,29 +472,43 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
     } else {
         request.cwd.clone()
     };
-    let launch_request = Launch {
+    Ok(Launch {
         id: request.id.clone(),
         action: request.action.clone(),
         host: host.id.clone(),
         cwd,
-        pane: if matches!(request.action, Action::Agent { .. }) {
+        pane: if matches!(request.action, Action::Agent { .. } | Action::Place) {
             prepared.pane_id
+        } else {
+            None
+        },
+        terminal: if matches!(request.action, Action::Agent { .. }) {
+            prepared.terminal_id
         } else {
             None
         },
         workspace: host.is_local().then(|| request.workspace.clone()).flatten(),
         workspace_name: request.workspace_name.clone(),
         owner: request.owner.clone(),
-    };
+    })
+}
+
+fn finish(
+    fleet: &Fleet,
+    request: &Request,
+    host: &Host,
+    launch_request: &Launch,
+    now: u64,
+) -> Result<Value> {
     let launched = if host.is_local() {
-        launch(fleet.ledger, fleet.shell, &launch_request, now)
+        launch(fleet.ledger, fleet.shell, launch_request, now)
     } else {
         fleet.remote_setup(
-            &host,
+            host,
             &[
                 "launch".into(),
                 "--request".into(),
-                serde_json::to_string(&launch_request)?,
+                serde_json::to_string(launch_request)?,
             ],
         )
     };
@@ -466,8 +522,11 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
     let pane = result["pane"]
         .as_str()
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;
-    items::record(fleet.ledger, item(request, host.id, pane, &result, now)?)?;
-    Ok(Some(result))
+    items::record(
+        fleet.ledger,
+        item(request, host.id.clone(), pane, &result, now)?,
+    )?;
+    Ok(result)
 }
 
 /// The owner's record of what `request` started. The profile's role wins; otherwise a child
@@ -528,9 +587,16 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
 
 fn admit(fleet: &Fleet, now: u64) -> Result<()> {
     for ticket in queue(fleet.ledger)? {
+        let mut ticket = ticket;
         if ticket.state == "admitting" {
-            update_ticket(fleet.ledger, &ticket.id, |t| {
-                t.state = "failed".into();
+            let saved = fleet
+                .ledger
+                .child("admissions")
+                .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
+            let recoverable = matches!(ticket.request.action, Action::Agent { .. })
+                && saved.is_some_and(|a| a.launch.is_some());
+            ticket = update_ticket(fleet.ledger, &ticket.id, |t| {
+                t.state = if recoverable { "pending" } else { "failed" }.into();
                 t.error = Some("service stopped during admission; inspect the selected host before resubmitting".into());
             })?;
         }

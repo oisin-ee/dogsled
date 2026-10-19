@@ -19,6 +19,7 @@ mod inbox;
 mod integration;
 mod items;
 mod jobs;
+mod launch;
 mod ledger;
 mod machines;
 mod mcp;

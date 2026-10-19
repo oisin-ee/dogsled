@@ -26,7 +26,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 /// A real repository with a `dogsled.toml` setup, and a fake Herdr whose `worktree open`
 /// opens the main checkout's workspace w7 as the anchor on first use.
-fn place_rig(name: &str) -> (Rig, PathBuf) {
+pub(super) fn place_rig(name: &str) -> (Rig, PathBuf) {
     let rig = Rig::new(name);
     let repo = rig.dir.join("home/repo space");
     fs::create_dir_all(&repo).unwrap();
@@ -50,7 +50,13 @@ fn place_rig(name: &str) -> (Rig, PathBuf) {
 printf '%s\n' "$*" >> "$RIG/herdr.log"
 case "$*" in
   'machine list --json') cat "$RIG/machines.json" ;;
-  'workspace list') printf '%s\n' '{"result":{"workspaces":[]}}' ;;
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
+  'agent list') cat "$RIG/agents.json" ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[{"pane_id":"w8:p1","terminal_id":"term_tree"}]}}' ;;
+  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;
+  'agent start'*)
+    if test -f "$RIG/start-fails"; then echo 'original startup failed' >&2; exit 1; fi
+    printf '{}\n' ;;
   'worktree list --cwd'*)
     if test -f "$RIG/anchor"; then main='"w7"'; else main=null; fi
     printf '{"result":{"worktrees":[{"path":"%s","open_workspace_id":%s,"is_linked_worktree":false}]}}\n' "$4" "$main" ;;
@@ -58,7 +64,7 @@ case "$*" in
     while test "$#" -gt 0; do if test "$1" = --path; then path="$2"; fi; shift; done
     touch "$RIG/anchor"
     if test -f "$RIG/already-open"; then open=true; else open=false; fi
-    printf '{"result":{"already_open":%s,"workspace":{"workspace_id":"w8"},"root_pane":{"pane_id":"w8:p1"},"worktree":{"path":"%s"}}}\n' "$open" "$path" ;;
+    printf '{"result":{"already_open":%s,"workspace":{"workspace_id":"w8"},"root_pane":{"pane_id":"w8:p1","terminal_id":"term_tree"},"worktree":{"path":"%s"}}}\n' "$open" "$path" ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,

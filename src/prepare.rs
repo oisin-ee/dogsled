@@ -13,6 +13,8 @@ pub struct Prepared {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -264,8 +266,18 @@ fn open(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Prepared> {
             detail: out.stdout.trim().into(),
         });
     }
+    let terminal_id = opened
+        .pointer("/result/root_pane/terminal_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| Error::Parse {
+            origin: "herdr worktree open".into(),
+            detail: "created pane has no terminal identity".into(),
+        })?
+        .to_owned();
     Ok(Prepared {
         pane_id,
+        terminal_id: Some(terminal_id),
         workspace_id,
         path: Some(
             opened
