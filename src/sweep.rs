@@ -98,9 +98,12 @@ pub fn list(ledger: &Ledger) -> Result<Vec<Orphan>> {
 const REQUEST: &str = "sweep-request.json";
 const LAST: &str = "sweep.json";
 pub const SOCKET: &str = "sweep.sock";
+const KEEP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
+    #[serde(default)]
+    pub ts_ms: u64,
     pub started_ms: u64,
     pub finished_ms: u64,
     #[serde(flatten)]
@@ -109,6 +112,17 @@ pub struct Report {
 
 pub fn latest(ledger: &Ledger) -> Result<Option<Report>> {
     ledger.read(LAST)
+}
+
+pub fn pending(ledger: &Ledger) -> Result<bool> {
+    Ok(ledger.read::<String>(REQUEST)?.is_some())
+}
+
+/// Request cleanup without preventing either Stop hook from delivering existing messages.
+pub fn request_at_stop(ledger: &Ledger) {
+    if let Err(error) = request(ledger) {
+        eprintln!("dogsled hook: warning: cleanup request failed: {error}");
+    }
 }
 
 /// Durable first, wake second. A stopped service consumes the request when it starts.
@@ -170,12 +184,15 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
     for warning in &applied.repositories {
         eprintln!("dogsled sweep: warning: {}: {}", warning.id, warning.detail);
     }
+    let finished_ms = crate::ledger::now_ms();
     let report = Report {
+        ts_ms: finished_ms,
         started_ms: now,
-        finished_ms: crate::ledger::now_ms(),
+        finished_ms,
         applied,
     };
-    node.ledger.append_line("sweeps.jsonl", &report, 0)?;
+    node.ledger
+        .append_line("sweeps.jsonl", &report, finished_ms.saturating_sub(KEEP_MS))?;
     node.ledger.write(LAST, &report)
 }
 

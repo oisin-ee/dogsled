@@ -222,7 +222,7 @@ fn hook(
         HookCommand::Inbox { harness, event } => {
             // Keep inbox delivery working even when fleet status is unavailable.
             let board = if event == inbox::HookEvent::Stop {
-                sweep::request(ledger)?;
+                sweep::request_at_stop(ledger);
                 owner_board(ledger, shell, policy, home).ok()
             } else {
                 None
@@ -238,7 +238,7 @@ fn hook(
         }
         HookCommand::Gate => {
             let owner = inbox::own_pane(None)?;
-            sweep::request(ledger)?;
+            sweep::request_at_stop(ledger);
             let notices = gate::notices(ledger, shell, &owner)?;
             let board = owner_board(ledger, shell, policy, home)?;
             gate::deliver(ledger, &board, &owner, &notices, |reminder| {

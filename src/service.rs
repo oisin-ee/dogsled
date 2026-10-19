@@ -118,13 +118,22 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
 
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
-    let _listener = Listener::start(node.ledger, send.clone())?;
+    let _listener = match Listener::start(node.ledger, send.clone()) {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            eprintln!("dogsled service: warning: cleanup wake socket unavailable: {error}");
+            None
+        }
+    };
     let mut sweep: Option<std::thread::JoinHandle<()>> = None;
-    let mut requested = true; // Recover a durable request left while the service was down.
+    let mut requested = false;
     let mut workers: [Option<std::thread::JoinHandle<()>>; LANES.len()] = Default::default();
     let mut completed = [false; LANES.len()];
     let mut next = Instant::now();
     loop {
+        // The socket only reduces latency. Recover pending requests on every publication
+        // iteration, including when the socket cannot bind or a notification was lost.
+        requested |= crate::sweep::pending(node.ledger)?;
         node.tick(now_ms())?;
         for (lane, worker) in workers.iter_mut().enumerate() {
             if worker.is_none() && (!once || !completed[lane]) {

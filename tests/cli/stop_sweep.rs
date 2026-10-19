@@ -60,6 +60,10 @@ fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
     assert_eq!(rig.read("state/sweep.json"), report);
     let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
     assert_eq!(history.lines().count(), 1);
+    // Successful removals remain visible in status, but never continue an agent turn.
+    assert_eq!(gate(&rig, "w1:p1"), "");
+    let (_, status) = rig.json(&["status"]);
+    assert_eq!(status["sweep"]["results"], report["results"]);
 }
 
 #[test]
@@ -262,4 +266,146 @@ fn stop_wakes_the_service_without_waiting_for_the_publication_interval() {
     let first = rig.read("state/sweep.json");
     gate(&rig, "w1:p1");
     until(|| rig.read("state/sweep.json") != first);
+}
+
+#[test]
+fn long_state_path_without_a_socket_still_consumes_stop_requests() {
+    let rig = Rig::new("stop-long-path");
+    let state = rig
+        .dir
+        .join("state")
+        .join("long-state-directory-".repeat(8));
+    fs::create_dir_all(&state).unwrap();
+    let journal_path = rig.dir.join("service.log");
+    let journal = fs::File::create(&journal_path).unwrap();
+    let _service = Service(
+        rig.cmd(&["serve", "--interval", "1"])
+            .env("DOGSLED_STATE", &state)
+            .stdout(Stdio::null())
+            .stderr(journal)
+            .spawn()
+            .unwrap(),
+    );
+    until(|| state.join("host.json").exists());
+    assert!(!state.join("sweep.sock").exists());
+    assert!(!state.join("sweep.json").exists());
+    assert!(
+        fs::read_to_string(&journal_path)
+            .unwrap()
+            .contains("cleanup wake socket unavailable")
+    );
+    // Requests arrive after startup, and again after a completed pass. Neither can rely
+    // on the socket or on service restart to reach the worker.
+    for count in 1..=2 {
+        let out = rig
+            .cmd(&["hook", "gate"])
+            .env("HERDR_ENV", "1")
+            .env("DOGSLED_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cleanup request failed"));
+        until(|| state.join("sweep.json").exists() && !state.join("sweep-request.json").exists());
+        assert_eq!(
+            fs::read_to_string(state.join("sweeps.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            count
+        );
+    }
+}
+
+#[test]
+fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
+    for harness in ["pi", "claude", "codex"] {
+        let rig = Rig::new(&format!("stop-write-failure-{harness}"));
+        rig.put(
+            "agents.json",
+            &json!({"result":{"agents":[
+                {"pane_id":"w1:p1","agent":harness,"agent_status":"idle","terminal_id":"term_owner"}
+            ]}}),
+        );
+        rig.put("state/sweep.json", &json!({"started_ms":1,"finished_ms":2,"results":[],"failures":["previous survey failed"],"repositories":[],"landed_dirty":[]}));
+        if harness != "pi" {
+            rig.snapshot("state/host.json", now(), 0.0, 8);
+            let mut snapshot = rig.read("state/host.json");
+            snapshot["probe"]["agent_panes"][0]["terminal_id"] = json!("term_owner");
+            rig.put("state/host.json", &snapshot);
+            let registered = rig
+                .cmd(&[
+                    "hook",
+                    "inbox",
+                    "--harness",
+                    harness,
+                    "--event",
+                    "UserPromptSubmit",
+                ])
+                .env("HERDR_ENV", "1")
+                .output()
+                .unwrap();
+            assert!(registered.status.success());
+            assert_eq!(
+                rig.json(&["send", "w1:p1", "--message", "inbox delivery survives"])
+                    .0,
+                0
+            );
+        }
+        // A directory at the request file path makes atomic replacement fail while
+        // the inbox, latest report, and gate history remain writable.
+        fs::create_dir(rig.dir.join("state/sweep-request.json")).unwrap();
+        let args = if harness == "pi" {
+            vec!["hook", "gate"]
+        } else {
+            vec!["hook", "inbox", "--harness", harness, "--event", "Stop"]
+        };
+        let out = rig.cmd(&args).env("HERDR_ENV", "1").output().unwrap();
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cleanup request failed"));
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("previous survey failed"), "{harness}: {text}");
+        if harness != "pi" {
+            let output: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(output["decision"], "block");
+            assert!(text.contains("inbox delivery survives"));
+            assert_eq!(
+                rig.read("state/inbox/term_owner.json")[0]["state"],
+                "delivered"
+            );
+        }
+        let repeated = rig.cmd(&args).env("HERDR_ENV", "1").output().unwrap();
+        assert_eq!(repeated.stdout, [] as [u8; 0]);
+    }
+}
+
+#[test]
+fn pass_history_keeps_only_seven_days_including_the_boundary() {
+    let rig = Rig::new("stop-history-window");
+    let week = 7 * 24 * 60 * 60 * 1000u64;
+    // Legacy entries without timestamps also leave the retained window.
+    fs::write(
+        rig.dir.join("state/sweeps.jsonl"),
+        "{\"started_ms\":0,\"finished_ms\":0}\n",
+    )
+    .unwrap();
+    for time in [1, 2, week + 1, week + 2] {
+        fs::write(rig.dir.join("clock"), time.to_string()).unwrap();
+        gate(&rig, "w1:p1");
+        serve(&rig);
+    }
+    let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
+    let reports: Vec<Value> = history
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        reports
+            .iter()
+            .map(|r| r["ts_ms"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [2, week + 1, week + 2]
+    );
+    let latest = rig.read("state/sweep.json");
+    assert_eq!(latest["ts_ms"], latest["finished_ms"]);
+    assert_eq!(latest["ts_ms"], week + 2);
 }

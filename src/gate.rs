@@ -28,18 +28,7 @@ pub fn notices(
         return Ok(Vec::new());
     };
     let mut notices = Vec::new();
-    if !report.applied.results.is_empty() {
-        let results: BTreeSet<_> = report.applied.results.iter().cloned().collect();
-        notices.push(Notice {
-            key: "results",
-            signature: results.iter().map(|s| (s.clone(), None, false)).collect(),
-            text: format!(
-                "Cleanup pass at {} ms completed these removals:\n{}",
-                report.finished_ms,
-                results.into_iter().collect::<Vec<_>>().join("\n")
-            ),
-        });
-    }
+
     if !report.applied.failures.is_empty() {
         let failures: BTreeSet<_> = report.applied.failures.iter().cloned().collect();
         notices.push(Notice {

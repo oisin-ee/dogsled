@@ -145,9 +145,11 @@ The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `pan
 Every removal rechecks identity and safety. Worktree removal runs teardown, closes holders, unlocks, removes without force, and deletes a held branch. A failed entry does not stop the others. Completion-event behavior remains independent of doctor cleanup.
 
 Stop writes a durable `sweep-request.json` and sends a local datagram to `sweep.sock`. The hook does not wait for cleanup.
-The service consumes pending requests at startup and on notification, never on the publication interval.
+The service checks the durable request at startup, on notification, and on each publication iteration. It surveys only when a request exists.
+A socket bind failure produces a warning instead of stopping the service. Stop request failures do not prevent gate or inbox delivery.
 Requests during a pass remain pending until the worker completes another pass. A service lock prevents concurrent service instances.
 Each pass records its times, removals, failures, repository warnings, and landed-dirty findings in `sweeps.jsonl` and `sweep.json`.
+History entries include `ts_ms`; each new pass removes entries older than seven days. Successful removals never trigger a gate reminder.
 Status exposes the latest report. Prompt context summarizes failures and warnings on one line.
 The gate delivers warnings and failures once per distinct set through `gate.json`.
 Landed-dirty messages require equal resolved main-repository paths for the owner pane and the finding.

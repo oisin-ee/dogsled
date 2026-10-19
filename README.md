@@ -336,7 +336,9 @@ Repository registrations stay unchanged.
 The sweep closes finished children (see [Items and closing](#items-and-closing)), and a job closes its own tab. That closed loop ends most work.
 The sweep catches what a broken loop leaves behind: a crashed owner, a killed process, or a worktree that something else made.
 The Stop gate writes `sweep-request.json` and wakes the local service through `sweep.sock`. It never runs the survey inside the hook.
-The service consumes pending requests at startup and on notification, not on its 10-second publication interval.
+The service checks the durable request at startup, on notification, and on each publication iteration. No request means no survey.
+The socket is optional. A bind failure produces a warning, and pending requests still reach the worker on the publication interval.
+A Stop request failure produces a warning without preventing existing gate or inbox messages from reaching the agent.
 Each requested pass builds the doctor plan in sweep scope. It applies only entries whose removal loses nothing:
 
 - `panes` and `workspaces`: a shell at an empty prompt in an ended job's tab, or in a directory that no longer exists. A workspace closes whole when every pane in it is one of these.
@@ -344,7 +346,8 @@ Each requested pass builds the doctor plan in sweep scope. It applies only entri
 - Orphaned children: an idle or done child whose owner is gone and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
 The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
-The service records each completed pass in `sweeps.jsonl` and the latest pass in `sweep.json`.
+The service keeps seven days of completed passes in `sweeps.jsonl` and the latest pass in `sweep.json`.
+Each history entry has a `ts_ms` timestamp; each new pass removes entries older than seven days.
 The report includes start and finish times, removals, failures, repository warnings, and landed-dirty findings.
 `dogsled status` and `status --json` show the latest pass. Prompt context adds one summary line when that pass has errors or warnings.
 The service also writes removals, failures, and repository warnings to stderr.
@@ -469,7 +472,8 @@ Claude Code and Codex include the reminder in their existing `Stop` inbox respon
 The reminder requests a review, a commit from dirty children, integration, or an explicit blocker or deferral.
 It never commits, merges, closes, or discards work itself. Clean readers and working children do not trigger it.
 
-The gate also reports the most recent completed cleanup pass, without waiting for the requested pass.
+The gate reports failures, repository warnings, and landed-dirty findings from the latest completed pass, without waiting for the requested pass.
+Successful removals remain in status and the journal; they do not continue an agent turn.
 Repository warnings name the repository and state entries, and request delegation to a dogsled agent instead of manual state edits.
 Landed-dirty findings reach only panes in the same main repository, including linked worktrees and symlink paths.
 The message asks the owner to read and preserve wanted changes, or obtain user approval before discarding abandoned work.
