@@ -56,6 +56,9 @@ pub struct Launch {
     pub host: String,
     pub cwd: String,
     pub pane: Option<String>,
+    /// Terminal identity captured by preparation, before transport to this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
     pub workspace: Option<String>,
     pub workspace_name: Option<String>,
     pub owner: String,
@@ -167,7 +170,7 @@ fn herdr(shell: &dyn Shell, args: &[String]) -> Result<Value> {
     Ok(serde_json::from_str(&out.stdout)?)
 }
 
-pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<String> {
+pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option<String>)> {
     if !std::path::Path::new(&launch.cwd).is_dir() {
         return Err(Error::Invalid(format!(
             "{}: cwd does not exist: {}",
@@ -175,7 +178,7 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<String> {
         )));
     }
     if let Some(pane) = &launch.pane {
-        return Ok(pane.clone());
+        return Ok((pane.clone(), launch.terminal.clone()));
     }
     let workspace = if let Some(id) = &launch.workspace {
         Some(id.clone())
@@ -207,11 +210,17 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<String> {
     };
     args.extend(["--cwd".into(), launch.cwd.clone(), "--no-focus".into()]);
     let value = herdr(shell, &args)?;
-    value
+    let pane = value
         .pointer("/result/root_pane/pane_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))
+        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))?;
+    let terminal = value
+        .pointer("/result/root_pane/terminal_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    Ok((pane, terminal))
 }
 
 pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {
@@ -225,7 +234,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
         if let Some(value) = receipts.read::<Value>(&file)? {
             return Ok(value);
         }
-        let pane = pane(shell, launch)?;
+        let (pane, _) = pane(shell, launch)?;
         let result = match &launch.action {
             Action::Job {
                 cmd,
@@ -381,6 +390,12 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
             if attempt.request != serde_json::to_value(request)? {
                 return Err(Error::Invalid(format!("request {} changed after placement", request.id)));
             }
+            if !matches!(request.action, Action::Agent { .. }) {
+                return Err(Error::Invalid(format!(
+                    "request {} already attempted a non-reconcilable launch; inspect before resubmitting",
+                    request.id
+                )));
+            }
             let launch = attempt.launch.ok_or_else(|| Error::Invalid(format!(
                 "request {} stopped during preparation on {}; inspect that host before resubmitting: {}",
                 request.id, attempt.host.label,
@@ -464,6 +479,11 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
         cwd,
         pane: if matches!(request.action, Action::Agent { .. } | Action::Place) {
             prepared.pane_id
+        } else {
+            None
+        },
+        terminal: if matches!(request.action, Action::Agent { .. }) {
+            prepared.terminal_id
         } else {
             None
         },
@@ -573,7 +593,8 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 .ledger
                 .child("admissions")
                 .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
-            let recoverable = saved.is_some_and(|a| a.launch.is_some());
+            let recoverable = matches!(ticket.request.action, Action::Agent { .. })
+                && saved.is_some_and(|a| a.launch.is_some());
             ticket = update_ticket(fleet.ledger, &ticket.id, |t| {
                 t.state = if recoverable { "pending" } else { "failed" }.into();
                 t.error = Some("service stopped during admission; inspect the selected host before resubmitting".into());

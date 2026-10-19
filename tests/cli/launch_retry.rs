@@ -203,4 +203,64 @@ fn remote_retry_keeps_selected_host_and_skips_checkout_and_prepare() {
     }
     assert_eq!(log.matches("host launch").count(), 2);
     assert!(!rig.log("herdr.log").contains("agent start"));
+    let request_id = ticket["request"]["id"].as_str().unwrap();
+    let attempt = rig.read(&format!("state/admissions/{request_id}.json"));
+    assert_eq!(attempt["launch"]["terminal"], "term_remote");
+}
+
+#[test]
+fn interrupted_job_admission_preserves_running_record_without_relaunch() {
+    let rig = Rig::new("interrupted-job-admission");
+    let action = json!({"type":"job","cmd":["true"],"timeout_ms":null,"idle_timeout_ms":null});
+    let request = json!({"id":"interrupted-job","action":action,"host":null,"branch":null,"base":null,
+        "cwd":rig.dir.join("home"),"repository":null,"workspace":"w1","workspace_name":"caller","owner":"w1:p1"});
+    let launch = json!({"id":"interrupted-job","action":action,"host":"local","cwd":rig.dir.join("home"),
+        "pane":null,"workspace":"w1","workspace_name":"caller","owner":"w1:p1"});
+    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    rig.put("state/admissions/interrupted-job.json", &json!({"request":request,"host":{"id":"local","label":"local"},"launch":launch,"error":null}));
+    let job = json!({"id":"interrupted-job","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"running","exit":null,"signal":null,"reason":null,"started_ms":123,"ended_ms":null,
+        "timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/interrupted-job.json", &job);
+    rig.put("state/queue.json", &json!([{"id":"interrupted-ticket","request":request,"created_ms":100,"state":"admitting",
+        "waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":100}}]));
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    assert_eq!(rig.read("state/jobs/interrupted-job.json"), job);
+    assert!(!rig.dir.join("state/launches/interrupted-job.json").exists());
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
+}
+
+#[test]
+fn first_host_launch_refuses_a_terminal_replaced_after_preparation() {
+    let rig = Rig::new("replaced-before-first-launch");
+    let mut request = host_request(&rig);
+    request["pane"] = json!("w2:p1");
+    request["terminal"] = json!("prepared_terminal");
+    // No launch receipt: the first transport never reached the host. Its pane
+    // now names a different terminal, even though the replacement shell is idle.
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("terminal for w2:p1 changed")
+    );
+    assert!(!rig.log("herdr.log").contains("agent start"));
+    assert!(!rig.log("herdr.log").contains("tab create"));
+    request["id"] = json!("missing-terminal");
+    request.as_object_mut().unwrap().remove("terminal");
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("prepared pane has no terminal identity")
+    );
+    assert!(!rig.log("herdr.log").contains("agent start"));
 }

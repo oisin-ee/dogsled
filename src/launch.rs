@@ -72,6 +72,12 @@ fn allocate(
     else {
         return Err(Error::Invalid("not an agent launch".into()));
     };
+    if request.pane.is_some() && request.terminal.as_deref().is_none_or(str::is_empty) {
+        return Err(Error::Invalid(format!(
+            "launch {}: prepared pane has no terminal identity; refusing to take it over",
+            request.id
+        )));
+    }
     // Validate profile/argv before creating a pane. An allocating state without a
     // pane is deliberately not retried after a crash: its ownership is uncertain.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
@@ -88,24 +94,17 @@ fn allocate(
     let mut progress = Progress {
         request: request.clone(),
         pane: None,
-        terminal: None,
+        terminal: request.terminal.clone(),
         attempted: false,
         confirmed: false,
         result,
         error: None,
     };
     receipts.write(file, &progress)?;
-    let pane = work::pane(shell, request)?;
+    let (pane, terminal) = work::pane(shell, request)?;
     progress.pane = Some(pane.clone());
     progress.result["pane"] = json!(pane);
-    receipts.write(file, &progress)?;
-    progress.terminal = Some(terminal(
-        shell,
-        progress
-            .pane
-            .as_deref()
-            .ok_or_else(|| Error::Invalid("missing allocated pane".into()))?,
-    )?);
+    progress.terminal = terminal;
     receipts.write(file, &progress)?;
     Ok(progress)
 }

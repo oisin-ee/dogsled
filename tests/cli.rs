@@ -83,7 +83,7 @@ case "$*" in
   'pane list') cat "$RIG/panes.json" ;;
   'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;
-  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1"}}}' ;;
+  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
   'pane run'*) shift 3; sh -c "$*" > "$RIG/job-output" 2>&1; printf '{}\n' ;;
   'pane close '*)
     mkdir -p "$RIG/at-close"
@@ -111,7 +111,7 @@ case "$*" in
   *'host job '*) cat "$RIG/job.json" ;;
   *'host logs'*) cat "$RIG/logs.json" ;;
   *'host stop'*) printf '{}\n' ;;
-  *'host prepare'*) printf '%s\n' '{"pane_id":"w9:p1","path":"/remote/tree"}' ;;
+  *'host prepare'*) printf '%s\n' '{"pane_id":"w9:p1","terminal_id":"term_remote","path":"/remote/tree"}' ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,

@@ -64,7 +64,7 @@ case "$*" in
     while test "$#" -gt 0; do if test "$1" = --path; then path="$2"; fi; shift; done
     touch "$RIG/anchor"
     if test -f "$RIG/already-open"; then open=true; else open=false; fi
-    printf '{"result":{"already_open":%s,"workspace":{"workspace_id":"w8"},"root_pane":{"pane_id":"w8:p1"},"worktree":{"path":"%s"}}}\n' "$open" "$path" ;;
+    printf '{"result":{"already_open":%s,"workspace":{"workspace_id":"w8"},"root_pane":{"pane_id":"w8:p1","terminal_id":"term_tree"},"worktree":{"path":"%s"}}}\n' "$open" "$path" ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
