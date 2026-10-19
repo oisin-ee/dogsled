@@ -160,7 +160,8 @@ fn start_or_reconcile(
                 .unwrap_or("startup response was interrupted")
         )));
     }
-    idle(shell, pane)?;
+    // Herdr owns shell readiness and refuses busy panes at the start boundary.
+    // A separate process snapshot here races login-shell initialization.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
     let task = work::task_file(ledger, &request.id, message)?;
     let mut args = vec![
@@ -187,26 +188,6 @@ fn start_or_reconcile(
         progress.error = Some(error.to_string());
         receipts.write(file, progress)?;
         return Err(error);
-    }
-    Ok(())
-}
-
-fn idle(shell: &dyn Shell, pane: &str) -> Result<()> {
-    let info = crate::probe::process_info(shell, pane)?
-        .ok_or_else(|| Error::Invalid(format!("pane {pane} disappeared before startup")))?;
-    let shell_pid = info["shell_pid"]
-        .as_u64()
-        .ok_or_else(|| Error::Invalid(format!("{pane}: no shell process identity")))?;
-    let foreground = info["foreground_processes"]
-        .as_array()
-        .ok_or_else(|| Error::Invalid(format!("{pane}: no foreground process information")))?;
-    if foreground
-        .iter()
-        .any(|p| p["pid"].as_u64() != Some(shell_pid))
-    {
-        return Err(Error::Invalid(format!(
-            "{pane} is busy; refusing to start another process"
-        )));
     }
     Ok(())
 }

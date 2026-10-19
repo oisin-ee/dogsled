@@ -168,6 +168,54 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
 }
 
 #[test]
+fn first_start_delegates_shell_readiness_to_herdr_without_a_racy_precheck() {
+    let rig = Rig::new("native-shell-readiness");
+    let request = host_request(&rig);
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "[{\"pid\":10,\"name\":\"zsh\"}]",
+                "[{\"pid\":10,\"name\":\"zsh\"},{\"pid\":11,\"name\":\"mise\"}]",
+            ),
+    );
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    let log = rig.log("herdr.log");
+    assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
+    assert!(!log.contains("pane process-info"), "{log}");
+    assert_eq!(log.matches("tab create").count(), 1, "{log}");
+}
+
+#[test]
+fn native_busy_refusal_is_preserved_without_repeating_the_start() {
+    let rig = Rig::new("native-busy-refusal");
+    let request = host_request(&rig);
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "  'agent start'*|",
+                "  'agent start'*) echo 'agent_pane_busy: not an available shell' >&2; exit 1 ;;\n  ",
+            ),
+    );
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(error["error"].as_str().unwrap().contains("agent_pane_busy"));
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    let error = error["error"].as_str().unwrap();
+    assert!(error.contains("startup outcome is unknown"), "{error}");
+    assert!(error.contains("agent_pane_busy"), "{error}");
+    let log = rig.log("herdr.log");
+    assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
+    assert_eq!(log.matches("tab create").count(), 1, "{log}");
+    assert!(!log.contains("pane close"), "{log}");
+}
+
+#[test]
 fn remote_retry_keeps_selected_host_and_skips_checkout_and_prepare() {
     let rig = Rig::new("remote-retry-owned");
     let repo = rig.dir.join("home/repo");
