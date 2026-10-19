@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.13.1 - 2026-10-19
+
+- Agent admission retries retain the selected host, prepared workspace, and original terminal identity. They do not prepare the branch again.
+- Interrupted starts reconcile a matching agent or a saved success receipt. Unknown outcomes fail without sending the task again.
+- Replaced terminals and foreign agents are refused. Interrupted jobs remain inspection-required instead of being restarted.
+- Existing partial placements are preserved and are not adopted automatically.
+
 ## 0.13.0 - 2026-10-19
 
 wrangle is now dogsled. The old name was too close to Cloudflare's wrangler. Nothing reads the old names, so update every host at once.
