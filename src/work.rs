@@ -226,7 +226,9 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
 pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
     if matches!(launch.action, Action::Agent { .. }) {
-        return crate::launch::agent(ledger, shell, launch);
+        let result = crate::launch::agent(ledger, shell, launch)?;
+        crate::prepare::used(ledger, &launch.cwd)?;
+        return Ok(result);
     }
     let receipts = ledger.child("launches");
     receipts.with_lock(&launch.id, || {
@@ -288,6 +290,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
             Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
         };
         receipts.write(&file, &result)?;
+        crate::prepare::used(ledger, &launch.cwd)?;
         Ok(result)
     })
 }
@@ -379,6 +382,14 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
             return Ok(None);
         };
         let launch = prepare_launch(fleet, request, &host)?;
+        if host.is_local() {
+            crate::prepare::used(fleet.ledger, &launch.cwd)?;
+        } else {
+            let _: Value = fleet.remote_setup(
+                &host,
+                &["prepared".into(), "--path".into(), launch.cwd.clone()],
+            )?;
+        }
         return Ok(Some(
             json!({"host":host,"reservation":reservation,"path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane}),
         ));

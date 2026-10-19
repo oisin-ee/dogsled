@@ -21,6 +21,9 @@ mod items;
 mod jobs;
 mod launch;
 mod ledger;
+mod loss;
+#[cfg(test)]
+mod loss_tests;
 mod machines;
 mod mcp;
 mod node;
@@ -398,12 +401,17 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
                 return Ok(Error::Full.exit_code());
             }
         }
+        HostCommand::Prepared { path } => {
+            prepare::used(node.ledger, &path)?;
+            print(true, &serde_json::json!({"prepared": true}), String::new)?;
+        }
         HostCommand::Prepare { repo, branch, base } => {
             let repo = std::path::Path::new(node.home)
                 .join(repo)
                 .display()
                 .to_string();
-            let prepared = prepare::local(node.shell, &repo, &branch, base.as_deref())?;
+            let prepared =
+                prepare::local(node.shell, node.ledger, &repo, &branch, base.as_deref())?;
             if let Some(path) = &prepared.path {
                 cleanup::remember(
                     node.ledger,

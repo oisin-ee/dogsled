@@ -180,7 +180,7 @@ fn close_finishes_a_child_tab_in_the_callers_workspace_but_not_the_callers_workt
     );
     let out = rig.run(&["close", "w1:p2"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("the caller works in"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("the caller uses this checkout"));
     assert_eq!(rig.log("hook.log"), "");
     rig.put(
         "panes.json",
@@ -255,7 +255,8 @@ fn close_refuses_active_dirty_foreign_locked_or_own_work_without_changes() {
     let out = rig.run(&["close", "w2:p1"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("locked (mine)"));
     assert_eq!(rig.log("hook.log"), "");
-    assert!(!rig.log("herdr.log").contains("close"));
+    let herdr = rig.log("herdr.log");
+    assert!(!herdr.contains("pane close") && !herdr.contains("workspace close"));
     assert!(tree.exists());
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
 }
@@ -285,24 +286,24 @@ fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
 }
 
 #[test]
-fn close_keeps_an_unmerged_branch_after_removing_its_worktree() {
+fn close_keeps_local_only_work_and_deletes_a_branch_at_the_default_tip() {
     let (rig, tree) = close_rig("close-unmerged");
     fs::write(tree.join("work"), "unmerged\n").unwrap();
     git(&tree, &["add", "work"]);
     git(&tree, &["commit", "-q", "-m", "unmerged work"]);
     panes(&rig, "idle", &tree);
-    let (code, closed) = rig.json(&["close", "w2:p1"]);
-    assert_eq!(code, 0, "{closed}");
-    assert_eq!(closed["worktree"]["branch_deleted"], false);
-    assert!(!tree.exists());
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("commits are not held"));
+    assert!(tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
-    // A branch still at main's tip has no work yet, so it is not integrated either.
+    // A branch at the default tip loses nothing without a preparation hold.
     let (rig, tree) = close_rig("close-new-branch");
     panes(&rig, "idle", &tree);
     let (code, closed) = rig.json(&["close", "w2:p1"]);
     assert_eq!(code, 0, "{closed}");
-    assert_eq!(closed["worktree"]["branch_deleted"], false);
-    assert!(branch_exists(&rig, "feat/x"));
+    assert_eq!(closed["worktree"]["branch_deleted"], true);
+    assert!(!branch_exists(&rig, "feat/x"));
 }
 
 #[test]
@@ -340,6 +341,7 @@ fn close_shuts_the_anchor_after_its_last_child_only_when_idle() {
     assert!(!rig.log("herdr.log").contains("workspace close w5"));
     assert!(repo.join(".git/agent-worktree-anchor").exists());
     // An idle anchor with one agentless pane closes after the last child.
+    git(&repo, &["branch", "feat/x"]);
     git(
         &repo,
         &[
@@ -479,7 +481,7 @@ fn doctor_finds_a_squashed_branch_held_only_by_an_idle_shell_and_prune_removes_i
             .cloned()
             .unwrap_or_else(|| panic!("{plan}"))
     };
-    assert_eq!(entry(&plan)["removable"], false);
+    assert_eq!(entry(&plan)["removable"], true);
     assert!(
         entry(&plan)["detail"]
             .as_str()
@@ -564,14 +566,14 @@ fn doctor_reports_a_worktree_made_on_a_branch_that_already_had_commits() {
         entry["detail"]
             .as_str()
             .unwrap()
-            .starts_with("branch feat/y has 1 commit not on main,"),
+            .contains("commits are not held"),
         "{entry}"
     );
     assert_eq!(entry["removable"], false);
 }
 
 #[test]
-fn doctor_removes_a_worktree_with_no_commits_a_day_after_it_was_made() {
+fn doctor_removes_a_worktree_with_no_commits_without_an_age_rule() {
     let (rig, tree) = close_rig("close-empty");
     // The configured repository is how doctor finds it: nothing registered, no pane in it.
     rig.config("[cleanup]\nrepositories = [\"~/repo\", \"~/gone\"]\n");
@@ -590,13 +592,10 @@ fn doctor_removes_a_worktree_with_no_commits_a_day_after_it_was_made() {
         &rig.dir.join("home/repo"),
         &["commit", "-q", "--allow-empty", "-m", "main moves on"],
     );
-    assert_eq!(found(&rig), None);
+    assert_eq!(found(&rig).unwrap()["removable"], true);
     fs::write(rig.dir.join("clock"), (now() + 2 * 86_400_000).to_string()).unwrap();
     let entry = found(&rig).unwrap();
-    assert_eq!(
-        entry["detail"],
-        "branch feat/x has no commits since its worktree was made 48h ago; clean and unused"
-    );
+    assert_eq!(entry["detail"], "branch feat/x merged into main; no holds");
     assert_eq!(entry["removable"], true);
     let (_, plan) = rig.json(&["doctor"]);
     assert!(
@@ -673,10 +672,14 @@ fn doctor_finds_integrated_and_pushed_branches_without_a_worktree_and_prune_dele
                 format!("applied to main by {}", done.trim()),
                 true
             ),
-            ("local".into(), "1 commit on no remote".into(), false),
+            (
+                "local".into(),
+                "commits are not held by the default branch or a refreshed remote ref".into(),
+                false
+            ),
             (
                 "pushed".into(),
-                "every commit is on a remote branch".into(),
+                "every commit is on a refreshed remote ref".into(),
                 true
             ),
         ],
@@ -706,7 +709,10 @@ fn doctor_lists_a_detached_worktree_and_prune_removes_it_once_a_remote_holds_its
         &["worktree", "add", "-q", "--detach", ".worktrees/probe"],
     );
     let probe = repo.join(".worktrees/probe").canonicalize().unwrap();
-    let head = git(&repo, &["rev-parse", "--short=10", "HEAD"]);
+    fs::write(probe.join("work"), "detached work").unwrap();
+    git(&probe, &["add", "work"]);
+    git(&probe, &["commit", "-q", "-m", "detached work"]);
+    let head = git(&probe, &["rev-parse", "--short=10", "HEAD"]);
     let entry = |rig: &Rig| {
         let (_, plan) = rig.json(&["doctor"]);
         plan["entries"]
@@ -720,20 +726,23 @@ fn doctor_lists_a_detached_worktree_and_prune_removes_it_once_a_remote_holds_its
     let found = entry(&rig);
     assert_eq!(found["tree"]["branch"], "");
     assert!(
-        found["detail"].as_str().unwrap().starts_with(&format!(
-            "detached at {} with 1 commit on no remote",
-            head.trim()
-        )),
+        found["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("detached at {} commits are not held", head.trim())),
         "{found}"
     );
     assert_eq!(found["removable"], false);
-    git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/feature", head.trim()],
+    );
     fs::write(probe.join("scratch"), "x").unwrap();
     let found = entry(&rig);
     assert_eq!(
         found["detail"],
         format!(
-            "detached at {}, which a remote branch holds; refused: uncommitted changes",
+            "detached at {} every commit is on a refreshed remote ref; uncommitted changes (1 paths): scratch; no holds",
             head.trim()
         )
     );

@@ -19,6 +19,29 @@ struct Progress {
     error: Option<String>,
 }
 
+/// Incomplete host-owned receipts protect their checkout, including interrupted starts.
+pub fn pending_paths(ledger: &Ledger) -> Result<Vec<String>> {
+    let receipts = ledger.child("launches");
+    let entries = match std::fs::read_dir(&receipts.dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".progress.json") else {
+            continue;
+        };
+        if receipts.read::<Value>(&format!("{id}.json"))?.is_none()
+            && let Some(progress) = receipts.read::<Progress>(&name)?
+        {
+            paths.push(progress.request.cwd);
+        }
+    }
+    Ok(paths)
+}
+
 pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {
     let receipts = ledger.child("launches");
     receipts.with_lock(&request.id, || {

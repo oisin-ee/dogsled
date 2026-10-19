@@ -149,12 +149,7 @@ pub fn worktree(shell: &dyn Shell, cwd: &str, previous: Option<&Worktree>) -> Op
     let tips = git(shell, &tree.path, &["rev-parse", "HEAD", &base_ref])?;
     let mut tips = tips.lines();
     let (head, base) = (tips.next()?.to_owned(), tips.next()?.to_owned());
-    let dirty = !git(
-        shell,
-        &tree.path,
-        &["status", "--porcelain", "--untracked-files=all"],
-    )?
-    .is_empty();
+    let dirty = !crate::loss::dirty_paths(shell, &tree.path).ok()?.is_empty();
     if let Some(previous) = previous.filter(|p| {
         p.path == tree.path && p.branch == tree.branch && p.head == head && p.base == base
     }) {
@@ -170,11 +165,10 @@ pub fn worktree(shell: &dyn Shell, cwd: &str, previous: Option<&Worktree>) -> Op
     )?
     .parse()
     .ok()?;
-    let landed = ahead > 0
-        && crate::integration::check(shell, &tree.path, &tree.branch)
-            .ok()
-            .flatten()
-            .is_some();
+    let landed = crate::loss::Evidence::default_only(&tree.path)
+        .assess(shell, &format!("refs/heads/{}", tree.branch), None)
+        .ok()?
+        .landed();
     Some(Worktree {
         path: tree.path,
         branch: tree.branch,
@@ -295,7 +289,7 @@ mod tests {
                 "git -C /t rev-parse HEAD refs/remotes/origin/main",
                 &format!("{head}\n{base}\n"),
             )
-            .on("git -C /t status --porcelain --untracked-files=all", "");
+            .on("git -C /t status --porcelain --untracked-files=all -z", "");
     }
 
     #[test]
@@ -329,8 +323,8 @@ mod tests {
         assert_eq!((first.ahead, first.landed, first.dirty), (2, true, false));
         let calls = shell.calls.lock().unwrap().len();
         shell.on(
-            "git -C /t status --porcelain --untracked-files=all",
-            " M a\n",
+            "git -C /t status --porcelain --untracked-files=all -z",
+            " M a\0",
         );
         let second = worktree(&shell, &cwd, Some(&first)).unwrap();
         assert!(second.dirty);

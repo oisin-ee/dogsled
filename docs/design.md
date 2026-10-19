@@ -132,32 +132,18 @@ dogsled status --brief    ≤ 6 lines, for the prompt hooks
 
 ### 6. Cleanup: `dogsled doctor` and `dogsled prune`
 
-`dogsled doctor [--host H]` lists cruft and changes nothing:
+Doctor never removes candidates. It refreshes remote refs and builds a plan shared with prune and the sweep.
 
-- worktrees whose branch is merged, squashed, or deleted, or has had no commits for 24 h, and have no live pane;
-- unused worktrees with unmerged commits (report only);
-- detached worktrees, removable when clean, unheld, and their HEAD is on a remote branch;
-- local branches without a worktree that are integrated or fully on a remote, and the others (report only);
-- workspaces whose every pane is idle;
-- shells at an empty prompt in an ended job's tab or in a deleted directory, at once;
-- panes whose agent has been `done` or `idle`, or whose shell has run no command, for more than 24 h;
-- dogsled jobs that ended more than 24 h ago, with their logs;
-- build output (`targets`): a directory tagged with `CACHEDIR.TAG` directly under a checkout or worktree that no workspace, pane, or process uses, such as Rust's `target/`;
-- disk above 90 % used, with the largest dogsled-owned paths;
-- processes using more than one core that are not under any Herdr pane (report only).
+The loss rule has one owner, `src/loss.rs`. A checkout must be clean, with ignored files excluded. Every commit must be held by the default branch or remote refs refreshed in this pass. A ref without a checkout skips the cleanliness condition. A failed fetch produces a warning and disables remote-ref evidence for that repository. Integration recognizes ancestry, squash, stack, and unchanged merge-tree results.
 
-Cleanup is a closed loop first. The lead that started a child closes it with `dogsled close` when it is finished, and a job closes its own tab.
-`serve` runs a last-resort sweep on its own action worker, beside the watchdog and admission. Publication stays measurement only.
-Each pass builds the doctor plan in sweep scope and applies only entries whose removal loses nothing:
+Prune and the sweep use the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches. An open agent item holds its checkout in prune and the sweep, so only `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until its work lands. Idle shells, idle or done agents without open items, and workspaces alone are not holds. The process check skips each holder pane's shell, and every descendant of an agent pane's shell; a shell's background job still holds. Foreign locks prevent removal.
 
-- ended job tabs and shells in deleted directories (the immediate pane rules), and a workspace made only of them;
-- clean worktrees that nothing holds (no pane, workspace, or process) whose branch is integrated, and clean, unheld detached worktrees whose HEAD is on a remote;
-- local branches without a worktree whose every commit is on a remote ref;
-- orphaned children: an open agent item whose owner pane is gone, whose child is idle or done, and whose worktree is clean and pushed. The sweep closes it as `dogsled close` would (teardown, workspace, worktree, item); a remote child closes through `host close --pushed`.
+An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Missing or unreadable repositories produce warnings without stopping other repositories. Registrations remain unchanged.
 
-A dirty, unpushed, working, or blocked orphan stays. Status, the brief, and each check-in on the host report it from `orphans.json`.
-The sweep never touches the service's own pane, workspace, or working directory. It takes the same per-worktree checks as `close` and `prune`, journals each removal on stderr, and continues past a failed entry.
-Every other class waits for `dogsled prune [--host H] [<class>…]`, which shows what it will remove, asks, then removes it: idle shells and agents after a day, worktrees with no commits after a day, integrated but unpushed branches, jobs, stale registrations, and `targets`. Disk and processes are report-only. Prune never kills processes.
+The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `panes`. Orphan close uses the same loss rule. Prune also shows non-removable findings, stale-agent panes, expired jobs, stale registrations, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
+
+Every removal rechecks identity and safety. Worktree removal runs teardown, closes holders, unlocks, removes without force, and deletes a held branch. A failed entry does not stop the others. The service schedule and completion-event behavior are unchanged.
+
 Placement registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.

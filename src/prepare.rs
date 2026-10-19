@@ -53,7 +53,13 @@ pub fn run(
 ) -> Result<Prepared> {
     let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
-        let prepared = local(fleet.shell, &checkout.display().to_string(), branch, base)?;
+        let prepared = local(
+            fleet.shell,
+            fleet.ledger,
+            &checkout.display().to_string(),
+            branch,
+            base,
+        )?;
         if let Some(path) = &prepared.path {
             crate::cleanup::remember(
                 fleet.ledger,
@@ -97,7 +103,13 @@ pub fn run(
 /// agent worktree, run the repository's `setup` in a new one, and open it as a Herdr workspace
 /// linked to the repository. Records the main checkout's workspace as the anchor when the
 /// repository had none open.
-pub fn local(shell: &dyn Shell, repo: &str, branch: &str, base: Option<&str>) -> Result<Prepared> {
+pub fn local(
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    repo: &str,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<Prepared> {
     let invalid = branch.is_empty()
         || branch.starts_with('-')
         || !shell
@@ -136,6 +148,29 @@ pub fn local(shell: &dyn Shell, repo: &str, branch: &str, base: Option<&str>) ->
             "branch {branch} exists; omit --base"
         )));
     }
+    // Publish the intended path before creating or reusing it. Cleanup must not race setup
+    // or the transport gap before launch has recorded its receipt.
+    let pending = crate::cleanup::Tree {
+        repo: checkout.display().to_string(),
+        path: existing.as_ref().map_or_else(
+            || {
+                checkout
+                    .join(&settings.worktree.dir)
+                    .join(branch.replace(['/', '\\'], "-"))
+                    .display()
+                    .to_string()
+            },
+            |tree| tree.path.clone(),
+        ),
+        branch: branch.into(),
+        head: String::new(),
+    };
+    ledger.with_lock("preparations", || {
+        let mut preparations = pending_trees(ledger)?;
+        preparations.retain(|tree| tree.path != pending.path);
+        preparations.push(pending);
+        ledger.write("preparations.json", &preparations)
+    })?;
     let (path, created) = if let Some(found) = existing {
         (reuse(shell, &checkout, found)?, false)
     } else {
@@ -167,12 +202,26 @@ pub fn local(shell: &dyn Shell, repo: &str, branch: &str, base: Option<&str>) ->
         if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
         {
             discard(shell, &checkout, &path, (!has_branch).then_some(branch))?;
+            used(ledger, &path)?;
             return Err(Error::Invalid(format!(
                 "{error}; the new worktree was removed"
             )));
         }
     }
     open(shell, &checkout, &path)
+}
+
+/// Preparations stay pending until the host has confirmed the launch or returned a placement.
+pub fn pending_trees(ledger: &crate::ledger::Ledger) -> Result<Vec<crate::cleanup::Tree>> {
+    Ok(ledger.read("preparations.json")?.unwrap_or_default())
+}
+
+pub fn used(ledger: &crate::ledger::Ledger, path: &str) -> Result<()> {
+    ledger.with_lock("preparations", || {
+        let mut preparations = pending_trees(ledger)?;
+        preparations.retain(|tree| !worktree::same(&tree.path, path));
+        ledger.write("preparations.json", &preparations)
+    })
 }
 
 /// The branch's existing linked worktree, locked as an agent worktree. Another lock, or the

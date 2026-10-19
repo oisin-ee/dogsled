@@ -363,6 +363,10 @@ pub enum HostCommand {
         #[command(flatten)]
         thresholds: ThresholdArgs,
     },
+    Prepared {
+        #[arg(long)]
+        path: String,
+    },
     Prepare {
         #[arg(long)]
         repo: String,

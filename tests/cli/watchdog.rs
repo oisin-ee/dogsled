@@ -13,7 +13,7 @@ case "$*" in
  'pane read'*) printf '1\n2\n3\n4\n5\n' ;;
  'pane report-metadata'*|'notification show'*|'agent prompt'*|'pane close'*) printf '{}\n' ;;
  'pane process-info --pane gone') printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane not found"}}' >&2; exit 1 ;;
- 'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[]}}}' ;;
+ 'pane process-info'*) printf '{"result":{"process_info":{"shell_pid":%s,"foreground_processes":[]}}}\n' "$(cat "$RIG/shell_pid" 2>/dev/null || echo 10)" ;;
  'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
  'workspace list') cat "$RIG/workspaces.json" 2>/dev/null || printf '%s\n' '{"result":{"workspaces":[]}}' ;;
  'workspace close'*) printf '{}\n' ;;
@@ -22,7 +22,8 @@ esac
 "#);
     rig.script(
         "ps",
-        "#!/bin/sh\nprintf '10 1 0 shell\n11 10 150 pane-child\n20 1 110 orphan\n'\n",
+        // The process-table parents are real, so pane ownership sees real processes.
+        "#!/bin/sh\ntest \"$2\" = pid=,ppid= && exec /bin/ps \"$@\"\nprintf '10 1 0 shell\n11 10 150 pane-child\n20 1 110 orphan\n'\n",
     );
     rig.script("df", "#!/bin/sh\nprintf 'FS 1000 950 50 95%% /\n'\n");
     rig.script("du", "#!/bin/sh\nprintf '42 path\n'\n");
@@ -58,9 +59,10 @@ case "$*" in
  *'rev-list --count refs/remotes/origin/main..refs/heads/feature') printf '2\n' ;;
  *'rev-list --count refs/heads/feature --not --remotes') printf '1\n' ;;
  *'log -1 --format=%ct refs/heads/feature') printf '86400\n' ;;
- *'status --porcelain --untracked-files=all')
+ *'fetch --all --prune') ;;
+ *'status --porcelain --untracked-files=all -z')
  if test -f "$RIG/change-during-plan"; then touch "$RIG/changed"; fi
- if test -f "$RIG/dirty"; then printf ' M file\n'; fi ;;
+ if test -f "$RIG/dirty"; then printf ' M file\0'; fi ;;
  *) echo unexpected >&2; exit 2 ;;
 esac
 "#);
@@ -246,30 +248,35 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
     let tree = rig.dir.join("home/repo/tree");
     rig.put(
         "panes.json",
-        &json!({"result":{"panes":[{"pane_id":"child","agent":"pi","agent_status":"done","cwd":tree}]}}),
+        &json!({"result":{"panes":[
+            {"pane_id":"owner","agent":"pi","agent_status":"working","cwd":rig.dir},
+            {"pane_id":"child","agent":"pi","agent_status":"done","cwd":tree}
+        ]}}),
     );
-    let (_, plan) = rig.json(&["doctor"]);
-    let entry = plan["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["class"] == "worktrees")
-        .unwrap()
-        .clone();
+    // An open item holds its checkout: its owner closes it, keeping the reply.
+    rig.put(
+        "state/items.json",
+        &json!([{"id":"i1","kind":"agent","host":"local","pane":"child","owner_pane":"owner",
+            "name":"worker","created_ms":1,"closed_ms":null}]),
+    );
+    let worktree = |rig: &Rig| {
+        let (_, plan) = rig.json(&["doctor"]);
+        plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["class"] == "worktrees")
+            .unwrap()
+            .clone()
+    };
+    let entry = worktree(&rig);
     assert_eq!(entry["removable"], false, "{entry}");
     assert!(entry["detail"].as_str().unwrap().contains("dogsled close"));
     assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
     assert!(!rig.log("git.log").contains("worktree remove"));
-    // A stale agent no longer holds it.
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
-    snapshot["probe"]["agent_panes"][0]["pane"] = json!("child");
-    snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
-    rig.put("state/host.json", &snapshot);
-    rig.put(
-        "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"child","agent":"pi","agent_status":"idle"}]}}),
-    );
+    // A done agent without an open item does not hold it; removal closes the pane.
+    rig.put("state/items.json", &json!([]));
+    assert_eq!(worktree(&rig)["removable"], true);
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert!(
         out.status.success(),
@@ -296,8 +303,8 @@ fn doctor_reports_an_unused_unmerged_worktree_and_prune_keeps_it() {
     assert_eq!(entry["removable"], false, "{entry}");
     assert_eq!(
         entry["detail"],
-        "branch feature has 2 commits not on origin/main, 1 on no remote, the last 24h ago; \
-         clean and unused"
+        "branch feature commits are not held by the default branch or a refreshed remote ref; \
+         no holds"
     );
     assert!(
         rig.log("git.log")
