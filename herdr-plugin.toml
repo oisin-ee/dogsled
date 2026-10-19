@@ -3,7 +3,7 @@
 
 id = "dogsled"
 name = "dogsled"
-version = "0.12.3"
+version = "0.13.0"
 min_herdr_version = "0.9.1"
 description = "Opens the dogsled host status board."
 platforms = ["macos", "linux"]
