@@ -111,7 +111,7 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
 }
 
 #[test]
-fn a_failed_launch_is_queued_and_retried_with_backoff() {
+fn an_ambiguous_launch_is_reconciled_with_backoff_without_repeating_the_task() {
     let rig = Rig::new("launch-retry");
     rig.snapshot("state/host.json", now(), 0.0, 8);
     fs::write(rig.dir.join("clock"), now().to_string()).unwrap();
@@ -130,8 +130,8 @@ fn a_failed_launch_is_queued_and_retried_with_backoff() {
         queued["retrying"].as_str().unwrap().contains("timed out"),
         "{queued}"
     );
-    // The failed tab is closed, so the retry starts clean.
-    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
+    // Its request owns this terminal across retries; never close or allocate another.
+    assert!(!rig.log("herdr.log").contains("pane close w2:p1"));
     let ticket = &rig.read("state/queue.json")[0];
     assert_eq!(ticket["state"], "pending");
     assert_eq!(ticket["retry"]["attempts"], 1);
@@ -146,6 +146,18 @@ fn a_failed_launch_is_queued_and_retried_with_backoff() {
     fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
     rig.run(&["serve", "--once", "--interval", "1"]);
     let ticket = &rig.read("state/queue.json")[0];
-    assert_eq!(ticket["state"], "admitted", "{ticket}");
-    assert_eq!(rig.log("herdr.log").matches("agent start w ").count(), 2);
+    assert_eq!(ticket["state"], "pending", "{ticket}");
+    let next = ticket["retry"]["next_ms"].as_u64().unwrap();
+    fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
+    rig.run(&["serve", "--once", "--interval", "1"]);
+    let ticket = &rig.read("state/queue.json")[0];
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    let error = ticket["error"].as_str().unwrap();
+    assert!(error.contains("startup outcome is unknown"), "{error}");
+    assert!(
+        error.contains("timed out waiting for agent startup"),
+        "{error}"
+    );
+    assert_eq!(rig.log("herdr.log").matches("agent start w ").count(), 1);
+    assert_eq!(rig.log("herdr.log").matches("tab create").count(), 1);
 }
