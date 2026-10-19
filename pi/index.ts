@@ -240,12 +240,23 @@ export default function dogsled(pi: ExtensionAPI) {
 	// A delivered message is in the transcript once Pi ends it: only then is it acknowledged.
 	pi.on("message_end", async event => { await inbox.ended(event.message); });
 	pi.on("agent_settled", () => { inbox.settled(); });
+	pi.on("agent_before_settle", async event => {
+		if (!owner || event.outcome !== "completed" || !event.context.canContinue || event.continue) return;
+		// The Rust gate owns selection and durable deduplication across all harnesses.
+		const result = await pi.exec(binary, ["hook", "gate"], { timeout: 6_000 });
+		if (result.code !== 0) throw new Error(`dogsled stop gate failed: ${result.stderr.trim() || `exit ${result.code}`}`);
+		if (!result.stdout.trim()) return;
+		return {
+			entries: [...event.entries, { type: "custom_message" as const, customType: MESSAGE_TYPE, content: result.stdout.trim(), display: true }],
+			continue: true,
+		};
+	});
 	pi.on("before_agent_start", async (event) => {
 		// Context is optional, including when the binary is absent or fails.
 		try {
 			const result = await pi.exec(binary, ["hook", "context", "--harness", "pi"], { timeout: 6_000 });
 			if (result.code !== 0 || !result.stdout.trim()) return;
-			return { systemPrompt: `${event.systemPrompt}\n\n## Host status\n${result.stdout.trim()}\n` };
+			return { systemPrompt: `${event.systemPrompt}\n\n## Your work and fleet status\n${result.stdout.trim()}\n` };
 		} catch {
 			return;
 		}

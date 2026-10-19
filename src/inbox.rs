@@ -135,16 +135,17 @@ pub enum HookEvent {
     UserPromptSubmit,
 }
 
-/// The hook output that hands `records` to Claude Code or Codex, or `None` when there are
-/// none. At `Stop`, `decision: block` continues the turn with the reason as the next prompt;
+/// The hook output that hands a stop reminder and `records` to Claude Code or Codex, or
+/// `None` when both are absent. At `Stop`, `decision: block` continues the turn with the reason as the next prompt;
 /// at `UserPromptSubmit`, `additionalContext` sits beside the user's text and never replaces it.
-pub fn hook_output(records: &[Record], event: HookEvent) -> Option<String> {
-    if records.is_empty() {
+pub fn hook_output(records: &[Record], event: HookEvent, reminder: Option<&str>) -> Option<String> {
+    if records.is_empty() && reminder.is_none() {
         return None;
     }
-    let text = records
-        .iter()
-        .map(Record::render)
+    let text = reminder
+        .map(str::to_owned)
+        .into_iter()
+        .chain(records.iter().map(Record::render))
         .collect::<Vec<_>>()
         .join("\n\n");
     let value = match event {
@@ -168,11 +169,22 @@ pub fn hook(
     harness: &str,
     event: HookEvent,
     now: u64,
+    board: Option<&crate::board::Board>,
 ) -> Result<()> {
     let pane = own_pane(None)?;
     let records = claim_for(ledger, shell, &pane, harness, now)?;
-    if let Some(output) = hook_output(&records, event) {
-        crate::print(false, &(), || output)?;
+    let emit = |reminder: Option<&str>| {
+        if let Some(output) = hook_output(&records, event, reminder) {
+            crate::print(false, &(), || output)?;
+        }
+        Ok(())
+    };
+    if let Some(board) = board {
+        crate::gate::deliver(ledger, board, &pane, emit)?;
+    } else {
+        emit(None)?;
+    }
+    if !records.is_empty() {
         let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
         ack_for(ledger, shell, &pane, &ids, now)?;
     }

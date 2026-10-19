@@ -202,42 +202,6 @@ pub fn brief(status: &Status) -> String {
     format!("{}\n", rows.join("\n"))
 }
 
-/// `owner`'s finished children whose work is not in the default branch yet, for that owner's
-/// prompt. Other owners' children are never listed.
-pub fn land_line(status: &Status, owner: &str) -> Option<String> {
-    let board = crate::board::build(status, Some(owner), crate::ledger::now_ms());
-    let children: Vec<_> = board
-        .rows
-        .iter()
-        .filter(|r| r.group == crate::board::Group::ToLand)
-        .map(|r| {
-            let detail = [
-                r.ahead.map(|n| format!("+{n}")),
-                r.dirty.then(|| "uncommitted".to_owned()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(", ");
-            format!("{} ({detail})", one_line(&r.name))
-        })
-        .collect();
-    if children.is_empty() {
-        return None;
-    }
-    let shown = children.len().min(5);
-    let more = children.len() - shown;
-    Some(format!(
-        "To land: {}{}. Merge or drop each branch; dogsled closes the child once its work lands.\n",
-        children[..shown].join(", "),
-        if more == 0 {
-            String::new()
-        } else {
-            format!(", and {more} more (see `dogsled board`)")
-        }
-    ))
-}
-
 pub fn render(status: &Status) -> String {
     let mut lines = Vec::new();
     for host in &status.hosts {

@@ -271,6 +271,8 @@ pub enum InboxCommand {
 
 #[derive(Debug, Clone, Copy, Subcommand)]
 pub enum HookCommand {
+    /// Remind the owner once about finished children with work to land (plain text for Pi).
+    Gate,
     Context {
         #[arg(long)]
         harness: crate::context::Harness,
@@ -279,7 +281,7 @@ pub enum HookCommand {
         event: crate::context::Event,
     },
     /// Claim this pane's inbox for a Claude Code or Codex hook, print the records in the
-    /// event's output format, and acknowledge them. Prints nothing when the inbox is empty.
+    /// event's output format, and acknowledge them. Stop also reminds about unlanded children.
     Inbox {
         #[arg(long)]
         harness: crate::context::Harness,

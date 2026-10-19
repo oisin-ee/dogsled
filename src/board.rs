@@ -10,6 +10,10 @@ use crate::watchdog::age;
 use serde::Serialize;
 use std::fmt::Write as _;
 
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// What the owner must do about a row, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -338,6 +342,74 @@ impl Board {
             .join(" · ")
     }
 
+    /// The finished children with work to land, as `worker (+2), web (uncommitted)`: at most
+    /// five, then a count of the rest. `None` when there are none.
+    pub fn land_names(&self) -> Option<String> {
+        let children: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.group == Group::ToLand)
+            .map(|r| {
+                let detail = [
+                    r.ahead.map(|n| format!("+{n}")),
+                    r.dirty.then(|| "uncommitted".to_owned()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                format!("{} ({detail})", one_line(&r.name))
+            })
+            .collect();
+        if children.is_empty() {
+            return None;
+        }
+        let shown = children.len().min(5);
+        let more = children.len() - shown;
+        Some(format!(
+            "{}{}",
+            children[..shown].join(", "),
+            if more == 0 {
+                String::new()
+            } else {
+                format!(", and {more} more (see `dogsled board`)")
+            }
+        ))
+    }
+
+    /// The owner's own lines for prompt context, before the fleet's: what it started, by
+    /// group, and the children with work to land. Empty when the owner started nothing.
+    pub fn owner_lines(&self) -> String {
+        if self.rows.is_empty() {
+            return String::new();
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        for row in &self.rows {
+            let label = match (row.group, row.state.as_str()) {
+                (Group::ToLand, _) => (0, "to land"),
+                (Group::Attention, _) => (1, "attention"),
+                (Group::Running, "idle") => (2, "idle"),
+                (Group::Running, "done") => (3, "done"),
+                (Group::Running, _) => (4, "running"),
+                (Group::Waiting, _) => (5, "waiting"),
+            };
+            *counts.entry(label).or_insert(0) += 1;
+        }
+        let summary = counts
+            .iter()
+            .map(|((_, label), n)| format!("{n} {label}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let mut out = format!("Your children and jobs: {summary}\n");
+        if let Some(names) = self.land_names() {
+            let _ = writeln!(
+                out,
+                "To land: {names}. Review and integrate finished work. Ask dirty children to commit. Dogsled closes children after their work lands."
+            );
+        }
+        out
+    }
+
     /// Plain text, one row per line, for `dogsled board` without `--json`.
     pub fn render(&self) -> String {
         if self.rows.is_empty() {
@@ -512,6 +584,8 @@ mod tests {
         assert_eq!(board.rows[4].what, "codex · gpt-5.6-sol");
         assert_eq!(board.rows[4].activity, "cargo test -p auth");
         assert_eq!(board.summary(), "1 to land · 2 attention · 2 running");
+        assert!(board.owner_lines().starts_with("Your children and jobs: 1 to land · 2 attention · 1 idle · 1 running\nTo land: web-tests (+2)."));
+        assert!(!board.owner_lines().contains("theirs"));
         assert_eq!(build(&status, None, NOW).rows.len(), 6);
     }
 

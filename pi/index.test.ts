@@ -19,6 +19,7 @@ function rig() {
 	const sent: any[] = [];
 	let code = 0;
 	let context = "local 3/8\n";
+	let gate = "";
 	let missing = false;
 	let board: unknown = { hosts: [], rows: [] };
 	let version = `dogsled ${VERSION}\n`;
@@ -35,7 +36,7 @@ function rig() {
 			calls.push([binary, ...args]);
 			if (missing) throw new Error("ENOENT");
 			if (args[0] === "hook") assert.equal(options?.timeout, 6_000);
-			const stdout = args[0] === "hook" ? context
+			const stdout = args[0] === "hook" ? (args[1] === "gate" ? gate : context)
 				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
 				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-dogsled-inbox", file: "t.json" })
@@ -61,6 +62,7 @@ function rig() {
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
 	return { calls, widgets, notices, servers, commands, shortcuts, renderers, sent, ctx, next,
 		widget() { return component; },
+		gate: (text: string) => { gate = text; },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
@@ -92,7 +94,7 @@ test("registers the dogsled tools, the panel command, and the message renderer",
 test("uses the shared context hook and leaves prompts unchanged when unavailable", async () => {
 	const r = rig();
 	assert.equal(r.calls.length, 0);
-	assert.deepEqual(await r.invoke("before_agent_start", { systemPrompt: "base" }), { systemPrompt: "base\n\n## Host status\nlocal 3/8\n" });
+	assert.deepEqual(await r.invoke("before_agent_start", { systemPrompt: "base" }), { systemPrompt: "base\n\n## Your work and fleet status\nlocal 3/8\n" });
 	assert.deepEqual(r.calls[0]?.slice(1), ["hook", "context", "--harness", "pi"]);
 	r.context("");
 	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
@@ -100,6 +102,36 @@ test("uses the shared context hook and leaves prompts unchanged when unavailable
 	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
 	r.missing();
 	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
+});
+
+test("stop gate continues with a visible reminder and preserves prior boundary entries", async t => {
+	withPane(t);
+	const r = rig();
+	const event = { outcome: "completed", context: { canContinue: true }, continue: false, entries: [{ type: "custom", customType: "other", data: 1 }] };
+	r.gate("Before you stop: child (uncommitted).\n");
+	const result = await r.invoke("agent_before_settle", event);
+	assert.deepEqual(result, { entries: [...event.entries, { type: "custom_message", customType: "dogsled", content: "Before you stop: child (uncommitted).", display: true }], continue: true });
+	assert.deepEqual(r.calls[0]?.slice(1), ["hook", "gate"]);
+	r.gate("");
+	assert.equal(await r.invoke("agent_before_settle", event), undefined);
+	const count = r.calls.length;
+	for (const patch of [{ outcome: "aborted" }, { outcome: "error" }, { context: { canContinue: false } }, { continue: true }]) {
+		assert.equal(await r.invoke("agent_before_settle", { ...event, ...patch }), undefined);
+	}
+	assert.equal(r.calls.length, count);
+	r.fail();
+	await assert.rejects(r.invoke("agent_before_settle", event), /stop gate failed/);
+	r.missing();
+	await assert.rejects(r.invoke("agent_before_settle", event), /ENOENT/);
+});
+
+test("the stop gate does not query fleet-wide work without an owner", async t => {
+	const previous = process.env["HERDR_PANE_ID"];
+	delete process.env["HERDR_PANE_ID"];
+	t.after(() => { if (previous !== undefined) process.env["HERDR_PANE_ID"] = previous; });
+	const r = rig();
+	assert.equal(await r.invoke("agent_before_settle", { outcome: "completed", context: { canContinue: true } }), undefined);
+	assert.equal(r.calls.length, 0);
 });
 
 test("the board widget follows dogsled board, refreshes every 10 s, and stops at shutdown", async (t) => {

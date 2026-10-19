@@ -1,6 +1,6 @@
 //! One prompt-context formatter for Pi, Claude Code, and Codex.
 
-use crate::commands::{Status, brief, land_line};
+use crate::commands::{Status, brief};
 use clap::ValueEnum;
 use serde::Serialize;
 
@@ -29,15 +29,16 @@ pub enum Event {
     UserPromptSubmit,
 }
 
-/// `owner` is the caller's Herdr pane. Its children with work to land are named.
+/// `owner` is the caller's Herdr pane. Its own children and jobs come first, with those that
+/// have work to land named; the fleet's hosts and counts follow.
 pub fn format(harness: Harness, event: Event, status: &Status, owner: Option<&str>) -> String {
     if status.hosts.iter().all(|host| host.sampled_ms.is_none()) {
         return String::new();
     }
-    let mut text = brief(status);
-    if let Some(line) = owner.and_then(|owner| land_line(status, owner)) {
-        text.push_str(&line);
-    }
+    let mut text = owner.map_or_else(String::new, |owner| {
+        crate::board::build(status, Some(owner), crate::ledger::now_ms()).owner_lines()
+    });
+    text.push_str(&brief(status));
     match harness {
         Harness::Pi => text,
         Harness::Claude | Harness::Codex => format!(

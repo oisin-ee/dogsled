@@ -188,7 +188,7 @@ A reader claims records with `inbox claim`, which is a lease. A claimed record i
 Readers:
 
 - **Pi:** the extension watches its inbox file, injects each batch as one `dogsled` message (`steer` while the agent runs, a new turn when it is idle), and acknowledges it when Pi has written the message to the session.
-- **Claude Code and Codex:** `dogsled hook inbox --harness claude|codex --event Stop|UserPromptSubmit`, registered by the plugin. The first hook run registers the reader. At `Stop`, records continue the turn as `{"decision":"block","reason":…}`; at `UserPromptSubmit`, they go beside the user's text as `additionalContext`. Records printed are acknowledged. An empty inbox prints nothing, so a stop ends as usual.
+- **Claude Code and Codex:** `dogsled hook inbox --harness claude|codex --event Stop|UserPromptSubmit`, registered by the plugin. The first hook run registers the reader. At `Stop`, records continue the turn as `{"decision":"block","reason":…}`; at `UserPromptSubmit`, they go beside the user's text as `additionalContext`. Records printed are acknowledged. At `Stop`, the same response also includes a new reminder about finished children with work to land. It prints nothing when neither is pending.
 
 A hook runs only when its harness acts, so an idle Claude Code or Codex agent sees a record at its next prompt or stop. Pi has no such delay.
 
@@ -446,11 +446,25 @@ The removed lead ledger and event log are not read or migrated.
 
 ## Prompt context and integrations
 
-`dogsled hook context --harness claude|codex|pi` formats the same text as `status --brief`.
+`dogsled hook context --harness claude|codex|pi` leads with your own children and jobs, then shows the fleet totals from `status --brief`.
+The owner summary separates work to land, attention, idle, done, running, and queued work.
+The `To land:` line names finished children with unmerged commits or uncommitted changes.
 Claude Code and Codex register `SessionStart` and `UserPromptSubmit` context hooks, and `UserPromptSubmit` and `Stop` inbox hooks (see [Inbox](#inbox)), in `plugins/dogsled`.
 Each registration supplies `--event`. The default context event is `UserPromptSubmit`.
 The CLI never reads stdin. Claude Code and Codex receive `hookSpecificOutput` JSON with `hookEventName` and `additionalContext`.
 Pi receives plain text through its `before_agent_start` extension. All three use the same snapshot reader and formatter.
+
+Before an orchestrator stops, the stop gate checks its own TO LAND children.
+Pi calls `dogsled hook gate` from `agent_before_settle` and adds a visible message that continues the run.
+Claude Code and Codex include the reminder in their existing `Stop` inbox response.
+The reminder requests a review, a commit from dirty children, integration, or an explicit blocker or deferral.
+It never commits, merges, closes, or discards work itself. Clean readers and working children do not trigger it.
+
+The gate records each set of child item IDs, commit counts, and dirty states in `gate.json`.
+It continues once per distinct set, across process restarts. Row order and idle/done transitions do not cause another reminder.
+New states can trigger another reminder. Closing all owner items clears the history.
+Pi skips the gate on errors, aborts, and boundaries that already request continuation.
+This is a bounded reminder, not a permanent prohibition on stopping.
 
 Without `HERDR_ENV`, service snapshots, or a usable binary, the hooks add nothing.
 A hook has a five-second command budget. Hook failures exit successfully without output.

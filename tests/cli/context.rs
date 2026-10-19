@@ -23,6 +23,80 @@ fn bounded(mut command: Command) -> Output {
 }
 
 #[test]
+fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
+    let rig = Rig::new("stop-gate");
+    rig.snapshot("state/host.json", now(), 1.0, 8);
+    let mut host = rig.read("state/host.json");
+    host["probe"]["agent_panes"][0]["worktree"] = json!({
+        "path":"/t","branch":"feat/x","ahead":0,"dirty":true,"landed":true,"head":"h","base":"b"
+    });
+    rig.put("state/host.json", &host);
+    let mut items = json!([
+        {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
+         "name":"worker","created_ms":1,"closed_ms":null},
+        {"id":"theirs","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w9:p9",
+         "name":"other","created_ms":1,"closed_ms":null}
+    ]);
+    rig.put("state/items.json", &items);
+    let gate = || {
+        let mut cmd = rig.cmd(&["hook", "gate"]);
+        cmd.env("HERDR_ENV", "1");
+        let out = bounded(cmd);
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let first = gate();
+    assert!(first.contains("worker (uncommitted)"), "{first}");
+    assert!(!first.contains("other"), "{first}");
+    // A fresh process must not repeat an unchanged reminder.
+    assert_eq!(gate(), "");
+    let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
+    cmd.env("HERDR_ENV", "1");
+    assert!(
+        String::from_utf8(bounded(cmd).stdout)
+            .unwrap()
+            .starts_with("Your children and jobs: 1 to land\nTo land: worker (uncommitted)")
+    );
+    // Committing the work changes the signature, so the owner gets an integration reminder.
+    host["probe"]["agent_panes"][0]["worktree"]["dirty"] = json!(false);
+    host["probe"]["agent_panes"][0]["worktree"]["ahead"] = json!(1);
+    host["probe"]["agent_panes"][0]["worktree"]["landed"] = json!(false);
+    host["probe"]["agent_panes"][0]["state"] = json!("done");
+    rig.put("state/host.json", &host);
+    assert!(gate().contains("worker (+1)"));
+    assert_eq!(gate(), "");
+    // Closed children, working writers and clean landed writers do not block.
+    items[0]["closed_ms"] = json!(2);
+    rig.put("state/items.json", &items);
+    assert_eq!(gate(), "");
+    items[0]["closed_ms"] = Value::Null;
+    rig.put("state/items.json", &items);
+    for state in ["working", "blocked", "unknown"] {
+        host["probe"]["agent_panes"][0]["state"] = json!(state);
+        rig.put("state/host.json", &host);
+        assert_eq!(gate(), "");
+    }
+    host["probe"]["agent_panes"][0]["state"] = json!("idle");
+    host["probe"]["agent_panes"][0]["worktree"]["landed"] = json!(true);
+    rig.put("state/host.json", &host);
+    assert_eq!(gate(), "");
+    // A missing owner never falls back to the fleet's children.
+    let out = rig
+        .cmd(&["hook", "gate"])
+        .env("HERDR_ENV", "1")
+        .env_remove("HERDR_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(out.status.success() && out.stdout.is_empty());
+    let out = rig
+        .cmd(&["hook", "gate"])
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success() && out.stdout.is_empty());
+}
+
+#[test]
 fn context_without_herdr_exits_silently_before_config_or_discovery() {
     let rig = Rig::new("context-no-herdr");
     rig.config("invalid = [");
@@ -141,12 +215,11 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     cmd.env("HERDR_ENV", "1");
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
     assert!(
-        out.ends_with(
-            "To land: worker (+2). Merge or drop each branch; dogsled closes the child once its work lands.\n"
-        ),
+        out.starts_with("Your children and jobs: 1 to land\nTo land: worker (+2)."),
         "{out}"
     );
     assert!(!out.contains("other"), "{out}");
+    assert!(out.ends_with(&status), "{out}");
     let (code, board) = rig.json(&["board"]);
     assert_eq!(code, 0);
     assert_eq!(board["rows"].as_array().unwrap().len(), 1);

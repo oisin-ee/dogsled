@@ -18,7 +18,10 @@ dogsled read NAME_OR_PANE [--host H]
 ```
 
 The board groups what you started by what you must do: TO LAND (a finished child with commits), ATTENTION (blocked, stalled, failed), RUNNING, and WAITING (queued for a host). Each agent row shows its harness and model; each job row its command.
-Your prompt context carries host status and a `To land:` line. In Pi, the board widget above the editor shows host meters, the current task, and grouped agents and jobs. Alt+W or `/work` expands it in place. Work inspection stays inline, not in a popup. Todos follow the Pi branch; agents and jobs follow the owner pane. `/dogsled` retains host, profile, and inbox administration.
+Your prompt context leads with your own children and jobs, then a `To land:` line, then fleet status.
+Before you stop, a gate reminds you once per distinct set of finished children with unmerged commits or uncommitted changes.
+Read each result. Ask dirty children to finish and commit. Integrate approved work, or report its blocker or deferral.
+Never discard dirty work to satisfy the reminder. The gate does not close or merge anything. In Pi, the board widget above the editor shows host meters, the current task, and grouped agents and jobs. Alt+W or `/work` expands it in place. Work inspection stays inline, not in a popup. Todos follow the Pi branch; agents and jobs follow the owner pane. `/dogsled` retains host, profile, and inbox administration.
 
 ## Delegate
 

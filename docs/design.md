@@ -173,7 +173,7 @@ Missing or unreadable disk paths remain report-only findings without discarding 
 | Claude Code | `SessionStart`, `UserPromptSubmit` (dogsled plugin) | `dogsled hook context --harness claude` |
 | Codex | `SessionStart`, `UserPromptSubmit` (dogsled plugin) | `dogsled hook context --harness codex` |
 
-The CLI reads status through the existing peer cache and formats `status --brief` for each harness.
+The CLI reads status through the existing peer cache. It shows the owner summary before the fleet totals from `status --brief`.
 Claude Code and Codex receive `hookSpecificOutput` JSON with the event name and `additionalContext`. Pi receives plain text.
 Plugin registrations pass `--event` explicitly. The default is `UserPromptSubmit`. No hook reads stdin.
 Without `HERDR_ENV` or snapshots, the hook prints nothing. Its total command budget is five seconds.

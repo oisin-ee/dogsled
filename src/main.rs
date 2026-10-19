@@ -13,6 +13,7 @@ mod config;
 mod context;
 mod error;
 mod facts;
+mod gate;
 mod hosts;
 mod inbox;
 mod integration;
@@ -215,7 +216,27 @@ fn hook(
 ) -> Result<()> {
     match cmd {
         HookCommand::Inbox { harness, event } => {
-            inbox::hook(ledger, shell, harness.name(), event, now_ms())
+            // Keep inbox delivery working even when fleet status is unavailable.
+            let board = if event == inbox::HookEvent::Stop {
+                owner_board(ledger, shell, policy, home).ok()
+            } else {
+                None
+            };
+            inbox::hook(
+                ledger,
+                shell,
+                harness.name(),
+                event,
+                now_ms(),
+                board.as_ref(),
+            )
+        }
+        HookCommand::Gate => {
+            let owner = inbox::own_pane(None)?;
+            let board = owner_board(ledger, shell, policy, home)?;
+            gate::deliver(ledger, &board, &owner, |reminder| {
+                print(false, &(), || reminder.unwrap_or_default().to_owned())
+            })
         }
         HookCommand::Context { harness, event } => {
             let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
@@ -226,6 +247,21 @@ fn hook(
             })
         }
     }
+}
+
+fn owner_board(
+    ledger: &Ledger,
+    shell: &System,
+    policy: &config::Policy,
+    home: String,
+) -> Result<board::Board> {
+    let owner = inbox::own_pane(None)?;
+    let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
+    Ok(board::build(
+        &commands::status(&fleet)?,
+        Some(&owner),
+        now_ms(),
+    ))
 }
 
 fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool) -> Result<()> {

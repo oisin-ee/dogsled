@@ -206,6 +206,60 @@ fn hook(rig: &Rig, harness: &str, event: &str) -> String {
 }
 
 #[test]
+fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
+    for harness in ["claude", "codex"] {
+        let rig = Rig::new(&format!("stop-inbox-{harness}"));
+        agents(
+            &rig,
+            "state",
+            &[
+                ("w1:p1", "lead", "lead"),
+                ("w1:p2", "owner", "owner"),
+                ("w1:p3", "child", "child"),
+            ],
+        );
+        assert_eq!(hook(&rig, harness, "UserPromptSubmit"), "");
+        let mut host = rig.read("state/host.json");
+        host["probe"]["agent_panes"][2]["worktree"] = json!({"path":"/t","branch":"feat/x","ahead":0,"dirty":true,"landed":false,"head":"h","base":"b"});
+        rig.put("state/host.json", &host);
+        rig.put("state/items.json", &json!([{"id":"child","kind":"agent","host":"local","pane":"w1:p3","owner_pane":"w1:p2","name":"child","created_ms":1,"closed_ms":null}]));
+        assert_eq!(
+            rig.json(&["send", "owner", "--message", "please review"]).0,
+            0
+        );
+        let value: Value = serde_json::from_str(&hook(&rig, harness, "Stop")).unwrap();
+        assert_eq!(value["decision"], "block");
+        let reason = value["reason"].as_str().unwrap();
+        assert!(reason.contains("child (uncommitted)"), "{reason}");
+        assert!(reason.contains("please review"), "{reason}");
+        assert_eq!(hook(&rig, harness, "Stop"), "");
+        // New inbox messages are not suppressed by an already delivered gate reminder.
+        assert_eq!(
+            rig.json(&["send", "owner", "--message", "new message"]).0,
+            0
+        );
+        let value: Value = serde_json::from_str(&hook(&rig, harness, "Stop")).unwrap();
+        assert!(value["reason"].as_str().unwrap().contains("new message"));
+        assert!(
+            !value["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Before you stop")
+        );
+        // A different child state produces a reminder even with an empty inbox.
+        host["probe"]["agent_panes"][2]["worktree"]["ahead"] = json!(1);
+        rig.put("state/host.json", &host);
+        let value: Value = serde_json::from_str(&hook(&rig, harness, "Stop")).unwrap();
+        assert!(
+            value["reason"]
+                .as_str()
+                .unwrap()
+                .contains("child (+1, uncommitted)")
+        );
+    }
+}
+
+#[test]
 fn claude_and_codex_hooks_hand_over_the_inbox_without_typing() {
     let rig = Rig::new("inbox-hooks");
     agents(
