@@ -121,7 +121,7 @@ esac
             .unwrap()
             .contains("clone https://example.invalid/repo.git failed: credentials")
     );
-    assert_eq!(rig.log("ssh.log").matches("host prepare").count(), 1);
+    assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
     assert!(!rig.dir.join("state/placements.json").exists());
 }
 

@@ -100,21 +100,19 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
         1 => return Ok(Some(Integrated::Deleted)),
         _ => return Err(failed(repo, &format!("inspect branch {branch}"), &exists)),
     }
+    check_ref(shell, repo, &reference)
+}
+
+/// The same integration proof for a branch, detached HEAD, or immutable commit ID.
+/// Equality is ancestry too: pending preparation is a hold, not unheld work.
+pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Option<Integrated>> {
+    let branch = reference;
     let base = base(shell, repo)?;
     let name = short(&base);
-    // A branch on the base tip has no work yet: a new worktree looks the same as a merged one.
-    let tips = git(shell, repo, &["rev-parse", &reference, &base])?;
-    if !tips.ok() {
-        return Err(failed(repo, &format!("resolve {branch} and {name}"), &tips));
-    }
-    let mut tips = tips.stdout.lines();
-    if tips.next() == tips.next() {
-        return Ok(None);
-    }
     let ancestor = git(
         shell,
         repo,
-        &["merge-base", "--is-ancestor", &reference, &base],
+        &["merge-base", "--is-ancestor", reference, &base],
     )?;
     match ancestor.status {
         0 => return Ok(Some(Integrated::Ancestor { base: name })),
@@ -127,7 +125,7 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
             ));
         }
     }
-    let fork = git(shell, repo, &["merge-base", &base, &reference])?;
+    let fork = git(shell, repo, &["merge-base", &base, reference])?;
     // Unrelated histories share no fork point, so nothing on base can apply the branch.
     if fork.status == 1 {
         return Ok(None);
@@ -159,7 +157,7 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
     let mut points = vec![fork];
     points.extend(branch.iter().map(|c| c.id.clone()));
     let Some(applied) = runs(shell, repo, &points, &branch, &candidates)? else {
-        return Ok(merge_tree_unchanged(shell, repo, &base, &reference)?
+        return Ok(merge_tree_unchanged(shell, repo, &base, reference)?
             .then_some(Integrated::MergeTree { base: name }));
     };
     Ok(Some(match <[String; 1]>::try_from(applied) {
@@ -611,7 +609,10 @@ mod tests {
     fn merge_and_missing_branch_are_integrated_and_new_work_is_not() {
         let repo = Repo::new("merge");
         repo.git(&["branch", "fresh"]);
-        assert_eq!(repo.check("fresh"), None);
+        assert!(matches!(
+            repo.check("fresh"),
+            Some(Integrated::Ancestor { .. })
+        ));
         repo.git(&["switch", "-q", "-c", "feat"]);
         repo.commit("b", "new\n", "feat");
         repo.git(&["switch", "-q", "main"]);

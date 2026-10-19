@@ -246,6 +246,7 @@ pub fn remove(
     workspace: Option<&str>,
     holders: &[&Pane],
     caller_workspace: Option<&str>,
+    evidence: &crate::loss::Evidence,
 ) -> Result<Removed> {
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
@@ -300,7 +301,7 @@ pub fn remove(
         )));
     }
     crate::cleanup::forget(ledger, &tree.path)?;
-    let branch_deleted = !tree.branch.is_empty() && delete_integrated(shell, tree)?;
+    let branch_deleted = !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
     let anchor_closed = close_anchor(shell, &tree.checkout, caller_workspace)?;
     Ok(Removed {
         branch_deleted,
@@ -339,16 +340,13 @@ fn teardown(shell: &dyn Shell, settings: &Settings, tree: &Linked) -> Result<()>
 
 /// Delete the branch of a removed worktree when its work is in the default branch. A squash
 /// merge is not an ancestor, so this is `-D` after dogsled's own check, not `-d`.
-fn delete_integrated(shell: &dyn Shell, tree: &Linked) -> Result<bool> {
-    let checkout = tree.checkout.display().to_string();
-    match crate::integration::check(shell, &checkout, &tree.branch)? {
-        None => Ok(false),
-        Some(crate::integration::Integrated::Deleted) => Ok(true),
-        Some(_) => {
-            git_ok(shell, &tree.checkout, &["branch", "-D", &tree.branch])?;
-            Ok(true)
-        }
+fn delete_held(shell: &dyn Shell, tree: &Linked, evidence: &crate::loss::Evidence) -> Result<bool> {
+    let loss = evidence.assess(shell, &format!("refs/heads/{}", tree.branch), None)?;
+    if !loss.loses_nothing() {
+        return Ok(false);
     }
+    git_ok(shell, &tree.checkout, &["branch", "-D", &tree.branch])?;
+    Ok(true)
 }
 
 /// Close the anchor workspace that `place` recorded, once no linked worktree is open in Herdr,

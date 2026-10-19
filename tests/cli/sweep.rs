@@ -133,13 +133,11 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     fs::write(rig.dir.join("dirty"), "").unwrap();
     kept(&rig, "dirty");
     fs::remove_file(rig.dir.join("dirty")).unwrap();
-    // Held by an idle shell, which `prune` would close, or by a working agent.
+    // A working agent holds it; idle holders alone do not.
     let holder = |agent: Value, status: &str| {
         json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","agent":agent,
             "agent_status":status,"cwd":tree}]}})
     };
-    rig.put("panes.json", &holder(Value::Null, "unknown"));
-    kept(&rig, "idle shell");
     rig.put("panes.json", &holder(json!("pi"), "working"));
     kept(&rig, "working agent");
     // A process with no pane works in it.
@@ -148,6 +146,52 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
         let _worker = Worker::start(&tree);
         kept(&rig, "process");
     }
+    // A pane's own processes are decided by its status, not by the process table.
+    {
+        // The shell starts its child before it reads stdin, so the table shows both.
+        let mut shell = Command::new("sh")
+            .args(["-c", "sleep 60 & echo ready; wait"])
+            .current_dir(&tree)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(shell.stdout.take().unwrap()),
+            &mut ready,
+        )
+        .unwrap();
+        let shell = Worker(shell);
+        let pid = shell.0.id().to_string();
+        fs::write(rig.dir.join("shell_pid"), &pid).unwrap();
+        let worktree = |rig: &Rig| {
+            let (_, plan) = rig.json(&["doctor"]);
+            plan["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["class"] == "worktrees")
+                .unwrap()
+                .clone()
+        };
+        // An idle agent owns its descendants: closing the pane loses nothing.
+        rig.put("panes.json", &holder(json!("pi"), "idle"));
+        let entry = worktree(&rig);
+        assert_eq!(entry["removable"], true, "{entry}");
+        // A shell owns only itself: a job it left in the background still holds the checkout.
+        rig.put("panes.json", &holder(Value::Null, "unknown"));
+        let entry = worktree(&rig);
+        assert_eq!(entry["removable"], false, "{entry}");
+        assert!(
+            entry["detail"]
+                .as_str()
+                .unwrap()
+                .contains("a process works in")
+        );
+        fs::remove_file(rig.dir.join("shell_pid")).unwrap();
+        let _ = Command::new("pkill").args(["-P", &pid]).status();
+    }
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
     // Not integrated.
     fs::write(rig.dir.join("unmerged"), "").unwrap();
     kept(&rig, "unmerged");
@@ -195,7 +239,7 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     for name in ["done", "local", "pushed"] {
         branch(name);
     }
-    // `done` is squash-merged but on no remote: integrated, which only `prune` takes.
+    // `done` is squash-merged but on no remote: both scopes remove it.
     git(&repo, &["merge", "-q", "--squash", "done"]);
     git(&repo, &["commit", "-q", "-m", "done (#1)"]);
     git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
@@ -220,10 +264,9 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     };
     let pushed = detached("pushed");
     let local = detached("local");
-    git(
-        &local,
-        &["commit", "-q", "--allow-empty", "-m", "local only"],
-    );
+    fs::write(local.join("local-only"), "work").unwrap();
+    git(&local, &["add", "local-only"]);
+    git(&local, &["commit", "-q", "-m", "local only"]);
     let dirty = detached("dirty");
     fs::write(dirty.join("scratch"), "x").unwrap();
     let journal = serve(&rig);
@@ -232,16 +275,21 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
         journal.contains("dogsled sweep: deleted branch pushed in"),
         "{journal}"
     );
-    for kept in ["done", "local", "feat/x"] {
-        assert!(branch_exists(&rig, kept), "{kept}: {journal}");
+    assert!(branch_exists(&rig, "local"), "{journal}");
+    for removed in ["done", "feat/x"] {
+        assert!(!branch_exists(&rig, removed), "{removed}: {journal}");
     }
     assert!(!pushed.exists(), "{journal}");
     assert!(
         journal.contains(&format!("dogsled sweep: removed {}", pushed.display())),
         "{journal}"
     );
-    // Unpushed, dirty, and a fresh worktree with no commits yet are not the sweep's to take.
-    for kept in [&local, &dirty, &tree] {
+    assert!(
+        !tree.exists(),
+        "a fresh worktree without a preparation hold loses nothing"
+    );
+    // Local-only commits and dirty files stay.
+    for kept in [&local, &dirty] {
         assert!(kept.exists(), "{}: {journal}", kept.display());
     }
 }
@@ -322,7 +370,7 @@ fn serve_closes_an_orphan_only_when_it_is_idle_clean_and_pushed() {
     fs::write(tree.join("note"), "x").unwrap();
     serve(&rig);
     assert!(
-        kept_reason(&rig).ends_with("has uncommitted changes"),
+        kept_reason(&rig).contains("uncommitted changes"),
         "{}",
         kept_reason(&rig)
     );
@@ -332,7 +380,7 @@ fn serve_closes_an_orphan_only_when_it_is_idle_clean_and_pushed() {
     git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
     serve(&rig);
     assert!(
-        kept_reason(&rig).ends_with("has 1 commit on no remote"),
+        kept_reason(&rig).contains("commits are not held"),
         "{}",
         kept_reason(&rig)
     );
@@ -537,10 +585,15 @@ fn serve_closes_a_finished_writer_once_its_branch_lands() {
     let (rig, tree) = close_rig("sweep-writer");
     let repo = rig.dir.join("home/repo");
     owned_child(&rig, "done", &tree, Some(2), "writer");
-    // No commits yet: a writer has nothing landed.
+    // At the default tip, only a pending preparation holds a fresh checkout.
+    rig.put(
+        "state/preparations.json",
+        &json!([{ "repo":repo,"path":tree,"branch":"feat/x","head":"" }]),
+    );
     let journal = serve(&rig);
     assert!(item_open(&rig), "{journal}");
-    assert!(journal.contains("has no commits to land yet"), "{journal}");
+    assert!(journal.contains("pending preparation"), "{journal}");
+    rig.put("state/preparations.json", &json!([]));
     // A commit on no remote and not in main: it stays, and says how much is left to land.
     fs::write(tree.join("fix"), "fix\n").unwrap();
     git(&tree, &["add", "fix"]);

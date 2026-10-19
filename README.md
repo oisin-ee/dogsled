@@ -156,7 +156,7 @@ dogsled close w9:p1 --host netcup --json
 `close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
 In an agent worktree (locked `agent:worktree`, as dogsled makes them), it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
 Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks the worktree, and runs `git worktree remove` without force.
-It deletes the branch only when dogsled's integration check finds it integrated (see [Cleanup](#cleanup)). An unmerged branch, or a branch still at the base tip, stays.
+Close uses the same loss rule as cleanup: a clean checkout and every commit held by the default branch or freshly fetched remote refs. It deletes the branch under that same rule. Local-only work refuses close, including an explicit owner close.
 When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
 A pane outside a worktree, or in an unlocked worktree (someone's own checkout), is closed alone; the checkout stays.
 A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a worktree outside the repository's worktree directory, a dirty or detached worktree, and any other lock.
@@ -294,18 +294,21 @@ dogsled prune targets
 
 Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `targets`, `disk`, `processes`, and `repositories`.
 Doctor lists linked worktrees on a branch and detached ones.
-A removable worktree has a HEAD that has not moved more than 24 hours after Git made it and no commits beyond the base, or an integrated branch.
-A detached worktree is removable when it is clean, no pane holds it, and a remote branch holds its HEAD. Otherwise doctor reports its commits on no remote. A worktree whose HEAD has not moved is not integrated, even when its base moved past it. It also needs a clean tree, no foreign lock, and no pane that uses it.
-A worktree whose branch has unmerged commits and that no pane uses is report-only. Doctor shows the commits ahead, how many are on no remote, and the age of the last commit.
+One loss rule in `src/loss.rs` governs worktrees, detached HEADs, branches, close, and board facts.
+A checkout must have no tracked or untracked changes. Ignored files do not count. A ref without a checkout skips this condition.
+Every commit must be held by the default branch or remote-tracking refs. Each cleanup pass runs `git fetch --all --prune` before remote refs count.
+A failed fetch produces a repository warning. Only the default branch counts for that repository. Deleted upstream branches receive no special treatment.
 A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when commits on that branch apply it.
 The branch's commits split into consecutive runs, and each run needs one commit that applies it. A commit applies a run when it changes every path the run changed, and merging the run into the commit's parent gives the commit's content on those paths.
 One run is a merge, squash, or cherry-pick of the whole branch. Several runs are a stack: the branch holds an earlier branch's commits, and each branch landed as its own squash. Git alone decides this.
 Each path merges on its own. An addition, deletion, or mode change on a path the base also changed differently is a conflict, and renames are not followed, so a doubtful run is not applied.
 Results use the remote-tracking branch, so `git fetch` keeps them current.
 A local branch with no worktree is removable when it is integrated or every commit is on a remote branch. Other branches are report-only. The default branch is never a candidate. Prune deletes a branch with `git branch -D` after it rechecks the planned commit.
-A pane holds a worktree when it works in it or sits in its workspace. A shell with no foreground command does not hold it.
-An agent holds it until it has been `idle` or `done` for 24 hours. Before that, the sweep closes a finished child that has nothing left to land.
-Held, dirty, and locked integrated worktrees are reported with the reason and are not removed.
+Prune and the sweep share the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches.
+An open agent item holds its checkout in prune and the sweep; `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until the default branch holds its work.
+An idle shell, an idle or done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
+A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
+The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
 A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
 A shell with no foreground command in an ended job's tab is idle at once: the job log keeps its output. So is a shell whose directory no longer exists.
 Other panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
@@ -318,15 +321,16 @@ Prune removes it after it checks the tag again. A worktree that the same plan re
 Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune never kills processes or frees arbitrary disk paths.
 
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
-Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and unintegrated branches remain untouched.
+Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and local-only commits remain untouched.
 Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
-Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when integrated, and the idle anchor. Dogsled checks that the worktree is gone afterwards.
+Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when its commits are held, and the idle anchor. Dogsled checks that the worktree is gone afterwards.
 Each entry is independent. A failed or refused entry does not stop the others; prune reports each failure, then exits with status 2.
 `--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
 
 Placement records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
-A configured path that is not a Git checkout is a report-only `repositories` entry.
+A missing or unreadable repository produces a report-only `repositories` warning. The warning names its registration or configuration, and the survey continues.
+Repository registrations stay unchanged.
 ### The sweep in `serve`
 
 The sweep closes finished children (see [Items and closing](#items-and-closing)), and a job closes its own tab. That closed loop ends most work.
@@ -334,14 +338,13 @@ The sweep catches what a broken loop leaves behind: a crashed owner, a killed pr
 On each pass, the service's sweep worker builds the doctor plan in sweep scope. It applies only entries whose removal loses nothing:
 
 - `panes` and `workspaces`: a shell at an empty prompt in an ended job's tab, or in a directory that no longer exists. A workspace closes whole when every pane in it is one of these.
-- `worktrees`: a clean worktree whose branch is integrated, or a clean detached worktree whose HEAD is on a remote branch. Nothing may hold it: no pane works in it, no workspace shows it, and no process works in it. An idle shell holds it too.
-- `branches`: a local branch with no worktree whose every commit is on a remote ref. An integrated branch with commits on no remote waits for `prune`.
-- Orphaned children: an open agent item whose owner pane no longer exists, whose child is `idle` or `done`, whose worktree is clean, and whose every commit is on a remote ref. The sweep closes it as `dogsled close` does: `teardown`, the workspace, the worktree, and the item. A remote child closes over SSH with `host close --pushed`.
+- `worktrees` and `branches`: the shared loss rule and holds described above, identical to prune.
+- Orphaned children: an idle or done child whose owner is gone and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
 The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
 Each removal is a `dogsled sweep:` line on stderr, the service journal.
 An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
-Everything else is for a confirmed `prune`: idle shells and agents after a day, a worktree with no commits a day after it was made, integrated branches with unpushed commits, ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
+Prune also handles idle panes after a day, ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
 
 ## Placement
 
