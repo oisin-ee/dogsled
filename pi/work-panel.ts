@@ -1,7 +1,7 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, SelectList, Text, ScrollView, truncateToWidth } from "@earendil-works/pi-tui";
-import { clean } from "./board.ts";
-import type { WorkState } from "./work.ts";
+import { getKeybindings, Key, matchesKey, Text, ScrollView, truncateToWidth } from "@earendil-works/pi-tui";
+import { boardColumns, boardHeader, boardRow, clean, cleanRow, groupTitle, GROUPS, type Group, type Row } from "./board.ts";
+import { taskLines, type WorkState } from "./work.ts";
 import type { TodoView, WorkTodo } from "./work-todo.ts";
 import type { JobHistory, WorkExec } from "./work-history.ts";
 
@@ -11,6 +11,8 @@ export interface WorkEntry {
 	value: string; label: string; description?: string;
 	kind: "todo" | "agent" | "job" | "queued" | "history" | "empty";
 	id?: string; host?: string; pane?: string; detail?: string; running?: boolean;
+	/** The cleaned board row this entry draws, for agents, jobs, and queued work. */
+	row?: Row;
 }
 export interface WorkData extends WorkState { history: JobHistory }
 export interface WorkCursor { tab: WorkTab; selected: string | undefined; history: boolean }
@@ -20,8 +22,12 @@ export interface WorkAction { action: "inspect" | "stop" | "cancel" | "send" | "
 export function workEntries(data: WorkData, tab: WorkTab, history: boolean): WorkEntry[] {
 	const todos: WorkEntry[] = data.todo && !data.todo.display.empty ? [{ value: "todos", label: clean(data.todo.display.summary), description: clean(data.todo.display.current), kind: "todo" }] : [];
 	const canonicalHost = (label: string) => data.history.hosts?.find(host => host.label === label)?.id ?? label;
-	const rows: WorkEntry[] = data.board.rows.map(row => ({ value: `${row.kind}:${canonicalHost(row.host)}:${row.id}`, id: row.id, host: canonicalHost(row.host), ...(row.pane ? { pane: row.pane } : {}), kind: row.group === "waiting" ? "queued" : row.kind === "job" ? "job" : "agent", label: `${row.group === "attention" || row.group === "to_land" ? "!" : "●"} ${clean(row.name)} · ${clean(row.state)}`, description: clean(row.host), running: row.group === "running" }));
-	const visible = tab === "todos" ? todos : tab === "agents" ? rows.filter(row => row.value.startsWith("agent:")) : tab === "jobs" ? rows.filter(row => row.value.startsWith("job:")) : [...rows.filter(row => row.label.startsWith("!")), ...todos, ...rows.filter(row => !row.label.startsWith("!"))];
+	// Board order: the task, then the groups in action order, as the collapsed board draws them.
+	const rows: WorkEntry[] = GROUPS.flatMap(group => data.board.rows.filter(row => row.group === group)).map(raw => {
+		const row = cleanRow(raw);
+		return { value: `${raw.kind}:${canonicalHost(raw.host)}:${raw.id}`, id: raw.id, host: canonicalHost(raw.host), ...(raw.pane ? { pane: raw.pane } : {}), kind: raw.group === "waiting" ? "queued" : raw.kind === "job" ? "job" : "agent", label: `${raw.group === "attention" || raw.group === "to_land" ? "!" : "●"} ${row.name} · ${row.state}`, description: row.host, running: raw.group === "running", row };
+	});
+	const visible = tab === "todos" ? todos : tab === "agents" ? rows.filter(row => row.value.startsWith("agent:")) : tab === "jobs" ? rows.filter(row => row.value.startsWith("job:")) : [...todos, ...rows];
 	if (tab === "all" || tab === "jobs") {
 		const known = new Set(rows.map(row => row.value));
 		const done = data.history.jobs.filter(job => job.ended_ms !== null && !known.has(`job:${job.host}:${job.id}`));
@@ -35,7 +41,7 @@ export function workEntries(data: WorkData, tab: WorkTab, history: boolean): Wor
 
 /** One interaction. The existing refresh coordinator supplies changes without another timer. */
 export class WorkPanel {
-	private list!: SelectList;
+	private selected = 0;
 	private entries: WorkEntry[] = [];
 	private data: WorkData;
 	readonly cursor: WorkCursor;
@@ -72,22 +78,21 @@ export class WorkPanel {
 		}
 		return this.todoView;
 	}
-	private listHeight(): number { return Math.max(1, Math.min(12, Math.floor(this.rows() / 2) - 4)); }
+	// Half the terminal: the header, the view line, this list, its scroll line, and two hint lines.
+	private listHeight(): number { return Math.max(1, Math.min(12, Math.floor(this.rows() / 2) - 5)); }
 	private rebuild(preserveSelection = true): void {
-		if (preserveSelection) this.cursor.selected = this.list?.getSelectedItem()?.value ?? this.cursor.selected;
+		if (preserveSelection) this.cursor.selected = this.entries[this.selected]?.value ?? this.cursor.selected;
 		this.entries = workEntries(this.data, this.cursor.tab, this.cursor.history);
 		this.height = this.listHeight();
-		this.list = new SelectList(this.entries, this.height, {
-			selectedPrefix: text => this.theme.fg("accent", text), selectedText: text => this.theme.fg("accent", text),
-			description: text => this.theme.fg("muted", text), scrollInfo: text => this.theme.fg("dim", text), noMatch: text => this.theme.fg("muted", text),
-		}, { minPrimaryColumnWidth: 8, maxPrimaryColumnWidth: 60 });
-		this.list.setSelectedIndex(Math.max(0, this.entries.findIndex(entry => entry.value === this.cursor.selected)));
-		this.list.onCancel = () => this.done(undefined);
-		this.list.onSelect = () => this.act("inspect");
+		this.selected = Math.max(0, this.entries.findIndex(entry => entry.value === this.cursor.selected));
+	}
+	private move(step: number): void {
+		const count = this.entries.length;
+		this.selected = (this.selected + step + count) % count;
+		this.cursor.selected = this.entries[this.selected]?.value;
 	}
 	private act(action: WorkAction["action"]): void {
-		const selected = this.list.getSelectedItem();
-		const entry = this.entries.find(item => item.value === selected?.value);
+		const entry = this.entries[this.selected];
 		if (!entry) return;
 		if (entry.kind === "todo" && action === "inspect") { this.cursor.tab = "todos"; this.rebuild(false); this.renderRequest(); return; }
 		if (entry.kind === "history" && action === "inspect") { this.cursor.history = !this.cursor.history; this.rebuild(); this.renderRequest(); return; }
@@ -106,14 +111,49 @@ export class WorkPanel {
 		else if (input === "s") this.act("stop");
 		else if (input === "c") this.act("cancel");
 		else if (input === "m") this.act("send");
-		else this.list.handleInput(input);
+		else {
+			const keys = getKeybindings();
+			if (keys.matches(input, "tui.select.up")) this.move(-1);
+			else if (keys.matches(input, "tui.select.down")) this.move(1);
+			else if (keys.matches(input, "tui.select.confirm")) this.act("inspect");
+			else if (keys.matches(input, "tui.select.cancel")) this.done(undefined);
+		}
 		this.renderRequest();
 	}
-	invalidate(): void { this.list.invalidate(); this.todoView?.invalidate(); }
+	invalidate(): void { this.todoView?.invalidate(); }
+	/** The entries in the collapsed board's style, each selectable line tagged with its entry. */
+	private lines(width: number): { text: string; entry?: number }[] {
+		const lines: { text: string; entry?: number }[] = [];
+		const columns = boardColumns(this.entries.flatMap(entry => entry.row ? [entry.row] : []), width);
+		let group: Group | undefined;
+		this.entries.forEach((entry, index) => {
+			const mark = index === this.selected ? this.theme.fg("accent", "→ ") : "  ";
+			if (entry.row) {
+				if (entry.row.group !== group) { group = entry.row.group; lines.push({ text: groupTitle(group, this.theme) }); }
+				lines.push({ text: boardRow(entry.row, columns, width, this.theme, mark), entry: index });
+				return;
+			}
+			group = undefined;
+			const task = entry.kind === "todo" ? taskLines(this.data.todo, width, this.theme, mark) : [];
+			if (task.length) { lines.push({ text: task[0]! }, ...task.slice(1).map(text => ({ text, entry: index }))); return; }
+			const label = entry.kind === "empty" ? this.theme.fg("muted", entry.label) : entry.label;
+			lines.push({ text: `${mark}${label}${entry.description ? `  ${this.theme.fg("dim", entry.description)}` : ""}`, entry: index });
+		});
+		return lines;
+	}
+	/** At most `height` lines around the selection, with a position line when some are hidden. */
+	private visible(width: number): string[] {
+		const lines = this.lines(width);
+		if (lines.length <= this.height) return lines.map(line => line.text);
+		const at = lines.findIndex(line => line.entry === this.selected);
+		const start = Math.max(0, Math.min(at - Math.floor(this.height / 2), lines.length - this.height));
+		return [...lines.slice(start, start + this.height).map(line => line.text), this.theme.fg("dim", `  (${this.selected + 1}/${this.entries.length})`)];
+	}
 	render(width: number): string[] {
 		if (this.height !== this.listHeight()) this.rebuild();
-		const tabbar = tabs.map(tab => tab === this.cursor.tab ? `[${tab.toUpperCase()}]` : tab).join(" · ");
-		return [this.theme.fg("accent", `WORK  ${tabbar}`), ...(this.cursor.tab === "todos" ? this.hosted()?.render(width) ?? ["Todo view unavailable"] : this.list.render(width)), this.theme.fg("dim", "Alt+W collapse · Alt+J/K select · Alt+] view · Alt+I inspect"), this.theme.fg("dim", "Alt+S stop · Alt+C cancel · Alt+M message · Alt+R refresh")].map(line => truncateToWidth(line, width));
+		const views = tabs.map(tab => tab === this.cursor.tab ? this.theme.fg("accent", `[${tab.toUpperCase()}]`) : this.theme.fg("muted", tab)).join(this.theme.fg("dim", " · "));
+		const body = this.cursor.tab === "todos" ? this.hosted()?.render(width) ?? ["Todo view unavailable"] : this.visible(width);
+		return [boardHeader(this.data.board, width, this.theme), ` ${views}`, ...body, this.theme.fg("dim", " Alt+W collapse · Alt+J/K select · Alt+] view · Alt+I inspect"), this.theme.fg("dim", " Alt+S stop · Alt+C cancel · Alt+M message · Alt+R refresh")].map(line => truncateToWidth(line, width));
 	}
 }
 

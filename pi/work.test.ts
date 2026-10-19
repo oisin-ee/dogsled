@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { WorkTodo, snapshot, type TodoSnapshot } from "./work-todo.ts";
-import { workStrip } from "./work.ts";
+import { workBoard } from "./work.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { todoDisplay } from "./todo-fixture.test.ts";
 
@@ -87,21 +87,23 @@ test("malformed payload releases presentation; shutdown unsubscribes and non-TUI
 	assert.equal(r.claims.length, 1);
 });
 
-test("compact widget shows current task and named work with bounded widths and attention", () => {
+test("the board widget shows the current task above the board groups at bounded widths", () => {
 	const r = rig(); r.consumer.start(r.ctx);
 	const todo = r.data();
 	const board = { hosts: [], rows: [{ id: "a", group: "attention" as const, kind: "agent", name: "界".repeat(100), what: "pi", host: "local", state: "blocked", activity: "", age_ms: 0 }] };
 	for (const width of [1, 8, 20, 40, 80, 160]) {
-		const lines = workStrip({ board, todo, error: undefined }, width, plain);
-		assert.equal(lines.length, 3);
+		const lines = workBoard({ board, todo, error: undefined }, width, plain);
+		assert.equal(lines.length, 5);
 		assert.ok(lines.every(line => visibleWidth(line) <= width));
-		if (width >= 20) assert.match(lines[2]!, /!/);
+		if (width >= 20) assert.match(lines[4]!, /!/);
 	}
-	assert.match(workStrip({ board, todo, error: undefined }, 160, plain)[1]!, /Task  Verify changes/);
+	const wide = workBoard({ board, todo, error: undefined }, 160, plain);
+	assert.match(wide[0]!, /^ wrangle {2}1 need attention/);
+	assert.deepEqual(wide.slice(1, 4).map(line => line.trim().split(/ {2,}/)), [["TASK"], ["◆ Verify changes", "Todo list: 1/3 completed"], ["ATTENTION"]]);
 	const closed = { ...todo, display: todoDisplay({ current: "", summary: "Todo list: 1/2 completed" }) };
-	assert.match(workStrip({ board, todo: closed, error: undefined }, 160, plain).join("\n"), /1\/2 completed/);
-	assert.deepEqual(workStrip({ board: { hosts: [], rows: [] }, todo: undefined, error: undefined }, 80, plain), []);
-	assert.match(workStrip({ board: { hosts: [], rows: [] }, todo: undefined, error: "host offline" }, 80, plain).join("\n"), /unavailable/);
+	assert.match(workBoard({ board, todo: closed, error: undefined }, 160, plain).join("\n"), /1\/2 completed/);
+	assert.deepEqual(workBoard({ board: { hosts: [], rows: [] }, todo: undefined, error: undefined }, 80, plain), []);
+	assert.match(workBoard({ board: { hosts: [], rows: [] }, todo: undefined, error: "host offline" }, 80, plain).join("\n"), /unavailable/);
 	r.consumer.stop();
 });
 
@@ -167,16 +169,12 @@ test("provider failures release ownership and dispose hosted components once", (
 	}
 });
 
-test("compact work includes both categories and exposes overflow without hiding the current task", () => {
+test("the board widget keeps agents and jobs in action groups with the task first", () => {
 	const r = rig(); r.consumer.start(r.ctx);
 	const row = { id: "a", group: "running" as const, kind: "agent", name: "builder", what: "pi", host: "local", state: "working", activity: "", age_ms: 120000 };
 	const state = { board: { hosts: [], rows: [row, { ...row, id: "b", name: "reviewer", group: "attention" as const, state: "blocked" }, { ...row, id: "c", kind: "job", name: "tests", state: "running" }] }, todo: r.data(), error: undefined };
-	const lines = workStrip(state, 48, plain);
-	assert.equal(lines.length, 4);
-	assert.match(lines[1]!, /Verify changes/);
-	assert.match(lines[2]!, /! reviewer · blocked/);
-	assert.match(lines[2]!, /\+1 more/);
-	assert.match(lines[3]!, /Jobs  tests · running/);
+	const lines = workBoard(state, 48, plain);
+	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)[0]), ["wrangle", "TASK", "◆ Verify changes", "ATTENTION", "! reviewer", "RUNNING", "◐ builder", "▸ tests"]);
 	assert.ok(lines.every(line => visibleWidth(line) <= 48));
 	r.consumer.stop();
 });

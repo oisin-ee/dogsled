@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Box, Text, Key } from "@earendil-works/pi-tui";
 import { type Board, clean, parseBoard } from "./board.ts";
 import { WorkTodo } from "./work-todo.ts";
-import { workStrip, workText, type WorkState } from "./work.ts";
+import { workBoard, workText, type WorkState } from "./work.ts";
 import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
 import { loadJobHistory, type JobHistory } from "./work-history.ts";
@@ -145,7 +145,7 @@ export default function wrangle(pi: ExtensionAPI) {
 			return {
 				render(width: number): string[] {
 					const theme = ctx.ui.theme;
-					if (!workOpen) return workStrip(state(), width, theme);
+					if (!workOpen) return workBoard(state(), width, theme);
 					if (detail) {
 						workDetail ??= new WorkDetail(detail.title, detail.body, theme, () => tui.terminal.rows, () => tui.requestRender());
 						workDetail.setTheme(theme);

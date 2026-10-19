@@ -29,7 +29,8 @@ test("history joins both recorded host and job id and rejects unrelated owners",
 
 test("tabs preserve todo status and collapse completed job history without duplicate active rows", () => {
 	const d = data();
-	assert.equal(workEntries(d, "all", false)[0]?.id, "agent");
+	// Board order: the task first, then the groups in action order.
+	assert.deepEqual(workEntries(d, "all", false).slice(0, 4).map(row => row.kind === "todo" ? "todo" : row.id), ["todo", "agent", "job", "ticket"]);
 	assert.deepEqual(workEntries(d, "all", false).filter(row => row.kind === "todo").map(row => row.label), ["Todo list: 1/3 completed"]);
 	assert.equal(workEntries(d, "agents", false).length, 1);
 	assert.equal(workEntries(d, "jobs", false).some(row => row.id === "done"), false);
@@ -78,6 +79,19 @@ test("refresh keeps stable selection and terminal geometry stays bounded", () =>
 	}
 	panel.handleInput("\t");
 	assert.equal(panel.cursor.tab, "all");
+});
+
+test("expanded work keeps the board's header, groups, glyphs, and aligned columns", () => {
+	const d = data();
+	d.board.hosts = [{ label: "local", service: "up", reachable: true, busy: 3, cores: 12, eligible: true }];
+	const panel = new WorkPanel(d, { tab: "all", selected: undefined, history: false }, plain, () => {}, () => {}, () => 40);
+	const lines = panel.render(120).map(line => line.trimEnd());
+	assert.match(lines[0]!, /^ wrangle {2}1 need attention · 1 running · 1 waiting +local ▰▱▱▱ 3\/12$/);
+	assert.deepEqual(lines.slice(2, 10).map(line => line.trim().split(/ {2,}/)[0]), ["TASK", "→ ◆ Verify changes", "ATTENTION", "! reviewer", "RUNNING", "▸ tests", "WAITING", "⋯ queued"]);
+	const rows = lines.filter(line => /reviewer|tests|queued/.test(line) && !/^ [A-Z]/.test(line));
+	assert.equal(new Set(rows.map(line => line.indexOf(line.includes("reviewer") ? "pi" : "job"))).size, 1);
+	panel.handleInput("\u001b[B");
+	assert.match(panel.render(120).find(line => line.includes("reviewer"))!, /^→ ! reviewer/);
 });
 
 test("history toggle stays inside the panel and todo rows never offer mutation actions", () => {

@@ -44,9 +44,11 @@ The display does not create a new job database or imply that a new Pi session re
 
 ## Inline work widget
 
-The compact widget shows the current task and named agents and jobs above the editor.
-Attention items come first within each work category. Hidden items have a `+N more` label.
+The widget above the editor is the wrangle board: a header with counts and a load meter for each host,
+then the current task, then agents, jobs, and queued work grouped TO LAND, ATTENTION, RUNNING, and WAITING.
+Each row shows the harness and model, host, activity, and age in aligned columns.
 Alt+W and `/work` expand or collapse the same widget. Neither opens a popup or replaces the editor.
+The expanded widget keeps the board's header, groups, and columns, and adds a view line, a selection marker, and key hints.
 The expanded widget uses at most half the terminal height, except on terminals shorter than eight rows.
 Typing and ordinary editor keys remain with the editor.
 

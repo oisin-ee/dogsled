@@ -466,7 +466,7 @@ The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its ex
 
 The extension adds host status before each prompt, registers the tools, and draws:
 
-- **The `WORK` widget** above the editor shows the current task and named agents and jobs. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately. Empty providers hide the widget. Unavailable providers show an error.
+- **The board widget** above the editor shows host meters, the current task, and agents and jobs grouped TO LAND, ATTENTION, RUNNING, and WAITING. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately. Empty providers hide the widget. Unavailable providers show an error.
 - **Alt+W or `/work`** expands or collapses that widget in place, without a popup or editor replacement. Alt+J/K moves selection, Alt+] changes views, and Alt+I shows inline details. Typing stays in the editor. Alt+S stops jobs, Alt+C cancels queued work, and Alt+M sends agent messages. Stop and cancel require confirmation. Completed job history starts collapsed.
 - **`/wrangle`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
 - **The inbox reader** and a renderer that shows each record's kind, sender, and text, folded past twelve lines.

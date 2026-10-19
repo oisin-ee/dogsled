@@ -44,7 +44,9 @@ export interface Paint {
 }
 
 const TITLES: Record<Group, string> = { to_land: "TO LAND", attention: "ATTENTION", running: "RUNNING", waiting: "WAITING" };
-const ORDER: Group[] = ["to_land", "attention", "running", "waiting"];
+/** Groups in action order: what the owner must do first comes first. */
+export const GROUPS: readonly Group[] = ["to_land", "attention", "running", "waiting"];
+const ORDER = GROUPS;
 const COUNTS: Record<Group, string> = { to_land: "to land", attention: "need attention", running: "running", waiting: "waiting" };
 
 export function parseBoard(value: unknown): Board {
@@ -90,44 +92,77 @@ function pad(text: string, width: number): string {
 	return truncateToWidth(text, width, "…", true);
 }
 
-/** The board as lines no wider than `width`. Activity goes first on a narrow terminal, then
- * the host column, so the name and the harness stay readable. */
-export function renderBoard(board: Board, width: number, paint: Paint): string[] {
-	if (board.rows.length === 0) return [];
+/** A row whose transcript text is safe to draw. */
+export function cleanRow(row: Row): Row {
+	return { ...row, name: clean(row.name), what: clean(row.what), host: clean(row.host), state: clean(row.state), activity: clean(row.activity || row.state) };
+}
+
+/** Column widths shared by every row drawn together, so the columns line up. */
+export interface Columns {
+	name: number;
+	what: number;
+	host: number;
+	activity: number;
+	showHost: boolean;
+	showActivity: boolean;
+}
+
+function right(row: Row): string {
+	return row.group === "to_land" ? `${row.state} ${age(row.age_ms)}` : age(row.age_ms);
+}
+
+/** Activity goes first on a narrow terminal, then the host column, so the name and the
+ * harness stay readable. */
+export function boardColumns(rows: Row[], width: number): Columns {
+	if (rows.length === 0) return { name: 0, what: 0, host: 0, activity: 0, showHost: false, showActivity: false };
+	const name = Math.min(24, Math.max(...rows.map(r => visibleWidth(r.name))));
+	const what = Math.min(22, Math.max(...rows.map(r => visibleWidth(r.what))));
+	const host = Math.min(14, Math.max(...rows.map(r => visibleWidth(r.host))));
+	const rightW = Math.max(...rows.map(r => visibleWidth(right(r))));
+	const fixed = 4 + name + 2 + what + 2 + rightW;
+	const showHost = fixed + host + 2 <= width;
+	const activity = width - fixed - (showHost ? host + 2 : 0) - 2;
+	return { name, what, host, activity, showHost, showActivity: activity >= 16 };
+}
+
+/** `wrangle  <counts>` on the left and one load meter per host on the right. */
+export function boardHeader(board: Board, width: number, paint: Paint): string {
 	const counts = ORDER.map(g => [g, board.rows.filter(r => r.group === g).length] as const)
 		.filter(([, n]) => n > 0)
 		.map(([g, n]) => `${n} ${COUNTS[g]}`)
 		.join(" · ");
-	const left = ` ${paint.bold(paint.fg("accent", "wrangle"))}  ${counts}`;
+	const left = ` ${paint.bold(paint.fg("accent", "wrangle"))}${counts ? `  ${counts}` : ""}`;
 	const meters = board.hosts.map(h => meter(h, paint)).join("  ");
 	const gap = width - visibleWidth(left) - visibleWidth(meters) - 1;
-	const lines = [gap >= 2 ? `${left}${" ".repeat(gap)}${meters}` : left];
+	return truncateToWidth(gap >= 2 ? `${left}${" ".repeat(gap)}${meters}` : left, width);
+}
 
-	const rows = board.rows.map(r => ({ ...r, name: clean(r.name), what: clean(r.what), host: clean(r.host), activity: clean(r.activity || r.state) }));
-	const nameW = Math.min(24, Math.max(...rows.map(r => visibleWidth(r.name))));
-	const whatW = Math.min(22, Math.max(...rows.map(r => visibleWidth(r.what))));
-	const hostW = Math.min(14, Math.max(...rows.map(r => visibleWidth(r.host))));
-	const right = (r: Row) => r.group === "to_land" ? `${r.state} ${age(r.age_ms)}` : age(r.age_ms);
-	const rightW = Math.max(...rows.map(r => visibleWidth(right(r))));
-	const fixed = 4 + nameW + 2 + whatW + 2 + rightW;
-	const showHost = fixed + hostW + 2 <= width;
-	const activityW = width - fixed - (showHost ? hostW + 2 : 0) - 2;
-	const showActivity = activityW >= 16;
+export function groupTitle(group: Group, paint: Paint): string {
+	return ` ${paint.fg(group === "attention" ? "warning" : "muted", TITLES[group])}`;
+}
 
+/** One cleaned row. `prefix` is two columns wide: blank, or a selection marker. */
+export function boardRow(row: Row, columns: Columns, width: number, paint: Paint, prefix = "  "): string {
+	const [glyph, color] = icon(row);
+	let line = `${prefix}${paint.fg(color, glyph)} ${pad(row.name, columns.name)}  ${paint.fg("muted", pad(row.what, columns.what))}`;
+	if (columns.showHost) line += `  ${pad(row.host, columns.host)}`;
+	if (columns.showActivity) line += `  ${paint.fg("dim", pad(row.activity, columns.activity))}`;
+	const tail = right(row);
+	line += " ".repeat(Math.max(2, width - visibleWidth(line) - visibleWidth(tail))) + paint.fg("dim", tail);
+	return truncateToWidth(line, width);
+}
+
+/** The board as lines no wider than `width`. */
+export function renderBoard(board: Board, width: number, paint: Paint): string[] {
+	if (board.rows.length === 0) return [];
+	const rows = board.rows.map(cleanRow);
+	const columns = boardColumns(rows, width);
+	const lines = [boardHeader(board, width, paint)];
 	for (const group of ORDER) {
 		const members = rows.filter(r => r.group === group);
 		if (members.length === 0) continue;
-		lines.push(` ${paint.fg(group === "attention" ? "warning" : "muted", TITLES[group])}`);
-		for (const row of members) {
-			const [glyph, color] = icon(row);
-			let line = `  ${paint.fg(color, glyph)} ${pad(row.name, nameW)}  ${paint.fg("muted", pad(row.what, whatW))}`;
-			if (showHost) line += `  ${pad(row.host, hostW)}`;
-			if (showActivity) line += `  ${paint.fg("dim", pad(row.activity, activityW))}`;
-			const used = visibleWidth(line);
-			const tail = right(row);
-			line += " ".repeat(Math.max(2, width - used - visibleWidth(tail))) + paint.fg("dim", tail);
-			lines.push(line);
-		}
+		lines.push(groupTitle(group, paint));
+		for (const row of members) lines.push(boardRow(row, columns, width, paint));
 	}
 	return lines.map(line => truncateToWidth(line, width));
 }

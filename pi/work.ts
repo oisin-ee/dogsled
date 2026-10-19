@@ -1,5 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { age, clean, type Board, type Paint, type Row } from "./board.ts";
+import { clean, renderBoard, boardHeader, type Board, type Paint } from "./board.ts";
 import type { TodoSnapshot } from "./work-todo.ts";
 
 export interface WorkState {
@@ -8,38 +8,30 @@ export interface WorkState {
 	error: string | undefined;
 }
 
-/** A small, persistent readout: names and current work, not just counts. */
-export function workStrip(state: WorkState, width: number, paint: Paint): string[] {
+/** The current task in board style: a TASK title, then the task with pi-todo's summary at the right. */
+export function taskLines(todo: TodoSnapshot | undefined, width: number, paint: Paint, prefix = "  "): string[] {
+	if (!todo || todo.display.empty) return [];
+	const summary = clean(todo.display.summary);
+	const current = clean(todo.display.current);
+	const title = ` ${paint.fg("muted", "TASK")}`;
+	if (!current) return [title, truncateToWidth(`${prefix}${paint.fg("muted", summary)}`, width)];
+	const tail = paint.fg("dim", summary);
+	const room = width - visibleWidth(prefix) - 2 - 2 - visibleWidth(tail);
+	const line = room >= 12
+		? `${prefix}${paint.fg("accent", "◆")} ${truncateToWidth(current, room, "…", true)}  ${tail}`
+		: `${prefix}${paint.fg("accent", "◆")} ${current}`;
+	return [title, truncateToWidth(line, width)];
+}
+
+/** The persistent board above the editor: the wrangle board with the current task on top. */
+export function workBoard(state: WorkState, width: number, paint: Paint): string[] {
 	const { board, todo, error } = state;
-	if (!board.rows.length && (!todo || todo.display.empty) && !error) return [];
-	const lines = [paint.fg("dim", "WORK · Alt+W expand")];
-	if (error) lines.push(paint.fg("warning", `! unavailable · ${clean(error)}`));
-	if (todo && !todo.display.empty) {
-		lines.push(todo.display.current ? `${paint.fg("accent", "→ Task")}  ${clean(todo.display.current)}` : paint.fg("muted", clean(todo.display.summary)));
-	}
-	const priority = (row: Row) => row.group === "attention" || row.group === "to_land" ? 0 : row.group === "running" ? 1 : 2;
-	for (const [label, members] of [
-		["Agents", board.rows.filter(row => row.kind !== "job")],
-		["Jobs", board.rows.filter(row => row.kind === "job")],
-	] as const) {
-		const rows = [...members].sort((a, b) => priority(a) - priority(b));
-		if (!rows.length) continue;
-		let line = `${label}  `;
-		let shown = 0;
-		for (const row of rows) {
-			const warning = priority(row) === 0;
-			const entry = `${warning ? "! " : ""}${clean(row.name)} · ${clean(row.state)} · ${age(row.age_ms)}`;
-			const remaining = rows.length - shown - 1;
-			const suffix = remaining ? `  +${remaining} more` : "";
-			const join = shown ? "  |  " : "";
-			if (shown && visibleWidth(line + join + entry + suffix) > width) break;
-			const room = Math.max(0, width - visibleWidth(line + join + suffix));
-			line += join + paint.fg(warning ? "warning" : "muted", truncateToWidth(entry, room));
-			shown++;
-		}
-		if (shown < rows.length) line += paint.fg("dim", `  +${rows.length - shown} more`);
-		lines.push(line);
-	}
+	const task = taskLines(todo, width, paint);
+	if (!board.rows.length && !task.length && !error) return [];
+	const rows = renderBoard(board, width, paint);
+	const lines = [rows[0] ?? boardHeader(board, width, paint)];
+	if (error) lines.push(truncateToWidth(` ${paint.fg("warning", `! unavailable · ${clean(error)}`)}`, width));
+	lines.push(...task, ...rows.slice(1));
 	return lines.map(line => truncateToWidth(line, width));
 }
 

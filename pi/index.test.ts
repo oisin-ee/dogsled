@@ -118,8 +118,7 @@ test("the board widget follows wrangle board, refreshes every 10 s, and stops at
 	const [key, , options] = r.widgets.at(-1);
 	assert.deepEqual([key, options], ["wrangle", { placement: "aboveEditor" }]);
 	const lines: string[] = r.widget().render(80);
-	assert.equal(lines.length, 2);
-	assert.match(lines.join("\n"), /Jobs  cargo test · running/);
+	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)), [["wrangle", "1 running", "local ▰▱▱▱ 1/8"], ["RUNNING"], ["▸ cargo test", "job", "local", "cargo test", "1m"]]);
 	await r.invoke("session_shutdown");
 	const after = r.calls.length;
 	t.mock.timers.tick(10_000);
