@@ -1,0 +1,15 @@
+[Unit]
+Description=Dogsled host status service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mise x -- dogsled serve
+Restart=on-failure
+RestartSec=10
+StateDirectory=dogsled
+Environment=DOGSLED_STATE=%S/dogsled
+StandardOutput=append:%S/dogsled/serve.stdout.log
+StandardError=append:%S/dogsled/serve.stderr.log
+
+[Install]
+WantedBy=default.target

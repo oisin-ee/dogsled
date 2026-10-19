@@ -24,7 +24,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// A real repository with a `wrangle.toml` setup, and a fake Herdr whose `worktree open`
+/// A real repository with a `dogsled.toml` setup, and a fake Herdr whose `worktree open`
 /// opens the main checkout's workspace w7 as the anchor on first use.
 fn place_rig(name: &str) -> (Rig, PathBuf) {
     let rig = Rig::new(name);
@@ -40,8 +40,8 @@ fn place_rig(name: &str) -> (Rig, PathBuf) {
             "https://example.invalid/repo.git",
         ],
     );
-    fs::write(repo.join("wrangle.toml"), SETUP).unwrap();
-    git(&repo, &["add", "wrangle.toml"]);
+    fs::write(repo.join("dogsled.toml"), SETUP).unwrap();
+    git(&repo, &["add", "dogsled.toml"]);
     git(&repo, &["commit", "-q", "-m", "init"]);
     rig.snapshot("state/host.json", now(), 0.0, 8);
     rig.script(
@@ -241,16 +241,16 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
 fn repository_and_host_config_errors_are_explicit() {
     let (rig, repo) = place_rig("place-config");
     fs::write(
-        repo.join("wrangle.toml"),
+        repo.join("dogsled.toml"),
         "[worktree]\nsetup = [\"echo {base}\"]\n",
     )
     .unwrap();
     let (code, error) = place(&rig, &repo, "feat/x", None);
     assert_eq!(code, 2);
     let message = error["error"].as_str().unwrap();
-    assert!(message.contains("wrangle.toml"), "{message}");
+    assert!(message.contains("dogsled.toml"), "{message}");
     assert!(message.contains("unknown placeholder {base}"), "{message}");
-    fs::write(repo.join("wrangle.toml"), "[worktree]\nhooks = []\n").unwrap();
+    fs::write(repo.join("dogsled.toml"), "[worktree]\nhooks = []\n").unwrap();
     let (_, error) = place(&rig, &repo, "feat/x", None);
     assert!(error["error"].as_str().unwrap().contains("unknown field"));
     assert!(!repo.join(".worktrees/feat-x").exists());

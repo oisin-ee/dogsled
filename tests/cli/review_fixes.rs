@@ -37,7 +37,7 @@ fn low_disk_missing_and_unreadable_paths_preserve_other_candidates() {
             .any(|e| e["class"] == "worktrees" && e["id"] == json!(missing))
     );
     assert!(plan.to_string().contains("unreadable"));
-    assert!(plan.to_string().contains("largest wrangle-owned paths"));
+    assert!(plan.to_string().contains("largest dogsled-owned paths"));
     assert!(!rig.log("du.log").contains(missing.to_str().unwrap()));
     assert!(rig.run(&["prune", "--yes", "processes"]).status.success());
     // A missing registered worktree is a stale registration; prune drops only the record.

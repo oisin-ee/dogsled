@@ -27,7 +27,7 @@ pub fn now_ms() -> u64 {
     // Debug binaries only: deterministic CLI integration tests. Release clocks
     // cannot be replaced by an environment variable.
     #[cfg(debug_assertions)]
-    if let Ok(value) = std::env::var("WRANGLE_TEST_NOW_MS")
+    if let Ok(value) = std::env::var("DOGSLED_TEST_NOW_MS")
         && let Ok(now) = value.parse()
     {
         return now;
@@ -38,14 +38,14 @@ pub fn now_ms() -> u64 {
 }
 
 pub fn default_dir() -> PathBuf {
-    if let Some(p) = std::env::var_os("WRANGLE_STATE") {
+    if let Some(p) = std::env::var_os("DOGSLED_STATE") {
         return PathBuf::from(p);
     }
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"));
-    base.join("wrangle")
+    base.join("dogsled")
 }
 
 pub fn new_id() -> String {

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "wrangle",
+    name = "dogsled",
     version,
     about = "Host status and placement for Herdr agents",
     propagate_version = true
@@ -137,7 +137,7 @@ pub enum Command {
         /// A file with the task, or `-` for stdin.
         #[arg(long, value_name = "PATH")]
         message_file: Option<PathBuf>,
-        /// A profile in `~/.config/wrangle/profiles`; Pi only.
+        /// A profile in `~/.config/dogsled/profiles`; Pi only.
         #[arg(long)]
         profile: Option<String>,
         #[command(flatten)]
@@ -174,13 +174,13 @@ pub enum Command {
         #[arg(long)]
         host: Option<String>,
     },
-    /// Serve the wrangle tools to a harness over MCP on stdio.
+    /// Serve the dogsled tools to a harness over MCP on stdio.
     Mcp,
     /// Read an unreachable host again now, without waiting out its backoff.
     Retry {
         host: String,
     },
-    /// The saved Herdr machines wrangle uses as hosts.
+    /// The saved Herdr machines dogsled uses as hosts.
     #[command(subcommand)]
     Machine(MachineCommand),
     /// Send a message to an agent on any host, through its inbox. Nothing types into its

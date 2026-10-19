@@ -1,4 +1,4 @@
-//! The saved Herdr machines that wrangle uses as hosts. Rename, enable, and disable run at
+//! The saved Herdr machines that dogsled uses as hosts. Rename, enable, and disable run at
 //! once. Add and reconnect can ask for SSH authentication, so they run in a new Herdr tab
 //! that the user answers; nothing types into an agent's pane.
 

@@ -138,9 +138,9 @@ fn report(shell: &dyn Shell, job: &Job, state: &str, token: Option<&str>) -> Res
             "report-agent".into(),
             job.pane.clone(),
             "--source".into(),
-            "custom:wrangle".into(),
+            "custom:dogsled".into(),
             "--agent".into(),
-            "wrangle-job".into(),
+            "dogsled-job".into(),
             "--state".into(),
             state.into(),
         ],
@@ -150,12 +150,12 @@ fn report(shell: &dyn Shell, job: &Job, state: &str, token: Option<&str>) -> Res
         "report-metadata".into(),
         job.pane.clone(),
         "--source".into(),
-        "custom:wrangle".into(),
+        "custom:dogsled".into(),
         "--display-agent".into(),
         job.cmd.join(" ").chars().take(60).collect(),
     ];
     if let Some(token) = token {
-        args.extend(["--token".into(), format!("wrangle={token}")]);
+        args.extend(["--token".into(), format!("dogsled={token}")]);
     }
     shell.run_ok("herdr", &args)?;
     Ok(())
@@ -315,7 +315,7 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
         job.state = "working".into();
         save(ledger, &job)?;
         if let Err(error) = report(shell, &job, "working", None) {
-            eprintln!("wrangle pane report: {error}");
+            eprintln!("dogsled pane report: {error}");
         }
         let outcome = capture(ledger, &job);
         match &outcome {
@@ -358,7 +358,7 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
             age
         );
         if let Err(error) = report(shell, &job, &job.state, Some(&token)) {
-            eprintln!("wrangle pane report: {error}");
+            eprintln!("dogsled pane report: {error}");
         }
         // Closing our own foreground pane can terminate this wrapper. Keep all
         // durable writes and completion reports above this final best-effort call.
@@ -366,7 +366,7 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
             && let Err(error) =
                 shell.run_ok("herdr", &["pane".into(), "close".into(), job.pane.clone()])
         {
-            eprintln!("wrangle pane close: {error}");
+            eprintln!("dogsled pane close: {error}");
         }
         outcome?;
         Ok(code)

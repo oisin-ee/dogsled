@@ -1,6 +1,6 @@
-// `/wrangle`: the control panel. It takes the board widget's place while open, so each row
+// `/dogsled`: the control panel. It takes the board widget's place while open, so each row
 // shows once. Status (the default), Hosts, Profiles, and Inbox, all from
-// `wrangle board|machine|profiles|inbox --json`. The panel only shows choices. Each choice
+// `dogsled board|machine|profiles|inbox --json`. The panel only shows choices. Each choice
 // closes it with an action that the command runs, so dialogs never open inside the panel.
 import { readFile, writeFile } from "node:fs/promises";
 import type { ExtensionCommandContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
@@ -72,7 +72,7 @@ export function items(tab: Tab, data: PanelData): Item[] {
 			return [...list, { value: "add", label: "Add a machine", description: "Runs herdr machine add in a new tab", action: { tab, do: "add" } }];
 		}
 		case "profiles":
-			if (data.profiles.length === 0) return [{ value: "none", label: "No profiles", description: "Add one under ~/.config/wrangle/profiles/<name>/" }];
+			if (data.profiles.length === 0) return [{ value: "none", label: "No profiles", description: "Add one under ~/.config/dogsled/profiles/<name>/" }];
 			return data.profiles.map(p => ({
 				value: `profile:${p.name}`,
 				label: `${clean(p.name)}  ${clean(p.model ?? "default model")}${p.thinking ? ` · ${clean(p.thinking)}` : ""}${p.role ? ` · ${clean(p.role)}` : ""}`,
@@ -142,7 +142,7 @@ export class Panel {
 	render(width: number): string[] {
 		const t = this.theme;
 		const bar = TABS.map(tab => tab === this.tab ? t.bold(t.fg("accent", `[${TITLES[tab]}]`)) : t.fg("muted", ` ${TITLES[tab]} `)).join(" ");
-		const lines = [` ${t.bold("wrangle")}  ${bar}`, ""];
+		const lines = [` ${t.bold("dogsled")}  ${bar}`, ""];
 		lines.push(...this.list.render(width), "", t.fg("dim", ` tab/shift+tab switch · enter act · r refresh · ${this.keys.getKeys("tui.select.cancel").join("/")} close`));
 		return lines.map(line => truncateToWidth(line, width));
 	}
@@ -194,7 +194,7 @@ async function run(action: NonNullable<Action>, ctx: ExtensionCommandContext, ex
 		}
 		case "enable":
 		case "disable":
-			if (action.do === "disable" && !await ctx.ui.confirm(`Disable ${action.machine.label}?`, "Wrangle stops placing work there. Herdr keeps the machine saved.")) return undefined;
+			if (action.do === "disable" && !await ctx.ui.confirm(`Disable ${action.machine.label}?`, "Dogsled stops placing work there. Herdr keeps the machine saved.")) return undefined;
 			await exec(["machine", action.do, action.machine.id, "--json"]);
 			return `${action.do === "enable" ? "Enabled" : "Disabled"} ${action.machine.label}`;
 		case "add": {

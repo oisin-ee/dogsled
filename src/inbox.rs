@@ -40,7 +40,7 @@ impl State {
     }
 }
 
-/// Who sent a record. `wrangle` itself sends replies, reports, and check-ins.
+/// Who sent a record. `dogsled` itself sends replies, reports, and check-ins.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sender {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,9 +54,9 @@ pub struct Sender {
 }
 
 impl Sender {
-    pub fn wrangle() -> Self {
+    pub fn dogsled() -> Self {
         Self {
-            name: Some("wrangle".into()),
+            name: Some("dogsled".into()),
             host: hostname(),
             ..Self::default()
         }
@@ -80,7 +80,7 @@ pub struct Record {
     pub pane: String,
     pub from: Sender,
     /// `message` or `task` from an agent; `reply`, `blocked`, `check-in`, or `failed` from
-    /// wrangle.
+    /// dogsled.
     pub kind: String,
     pub text: String,
     pub created_ms: u64,
@@ -98,7 +98,7 @@ impl Record {
     /// What the agent sees: who sent it, what kind it is, and the text.
     pub fn render(&self) -> String {
         format!(
-            "wrangle {} from {}:\n{}",
+            "dogsled {} from {}:\n{}",
             self.kind,
             self.from.describe(),
             self.text
@@ -268,7 +268,7 @@ pub fn put(ledger: &Ledger, record: Record) -> Result<Record> {
     }
     if reader(ledger, &record.terminal)?.is_none() {
         return Err(Error::Invalid(format!(
-            "{} has no wrangle inbox reader, so nothing would deliver the message; nothing was sent",
+            "{} has no dogsled inbox reader, so nothing would deliver the message; nothing was sent",
             record.pane
         )));
     }
@@ -467,14 +467,14 @@ pub fn resolve<'a>(
     }
     match found.len() {
         0 => Err(Error::Invalid(format!(
-            "no agent named or in pane {target}{}; see `wrangle status`",
+            "no agent named or in pane {target}{}; see `dogsled status`",
             pinned.map_or_else(String::new, |h| format!(" on {}", h.label))
         ))),
         1 => {
             let (host, agent) = found.remove(0);
             if agent.terminal_id.is_none() {
                 return Err(Error::Invalid(format!(
-                    "{} on {} has no terminal id yet; its host runs an older wrangle",
+                    "{} on {} has no terminal id yet; its host runs an older dogsled",
                     agent.pane, host.label
                 )));
             }
@@ -640,7 +640,7 @@ fn report(ledger: &Ledger, s: &Sent, now: u64) -> Result<()> {
         id: format!("failed-{}", s.id),
         terminal: terminal.clone(),
         pane: pane.clone(),
-        from: Sender::wrangle(),
+        from: Sender::dogsled(),
         kind: "failed".into(),
         text: format!(
             "Your {} to {} ({} on {}) was not delivered: {}.",
@@ -704,7 +704,7 @@ pub fn own_pane(pane: Option<String>) -> Result<String> {
         .ok_or_else(|| Error::Invalid("HERDR_PANE_ID or --pane is required".into()))
 }
 
-/// `wrangle inbox claim`: register `harness` as the reader of `pane`'s inbox and claim its
+/// `dogsled inbox claim`: register `harness` as the reader of `pane`'s inbox and claim its
 /// deliverable records.
 pub fn claim_for(
     ledger: &Ledger,
@@ -894,7 +894,7 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     reconcile(fleet, now)
 }
 
-/// The text of `wrangle send`: `--message`, or `--message-file` (`-` is stdin).
+/// The text of `dogsled send`: `--message`, or `--message-file` (`-` is stdin).
 pub fn message_text(message: Option<String>, file: Option<std::path::PathBuf>) -> Result<String> {
     let text = match (message, file) {
         (Some(text), _) => text,
@@ -908,7 +908,7 @@ pub fn message_text(message: Option<String>, file: Option<std::path::PathBuf>) -
     Ok(text)
 }
 
-/// `wrangle send`: resolve `target`, then send from the calling agent.
+/// `dogsled send`: resolve `target`, then send from the calling agent.
 pub fn send_to(
     fleet: &Fleet,
     target: &str,
@@ -965,7 +965,7 @@ pub fn readable(
     Ok(reader(ledger, &terminal)?.map(|_| terminal))
 }
 
-/// Put a note from wrangle in the inbox of `owner`, an agent pane on this host. `id` makes it
+/// Put a note from dogsled in the inbox of `owner`, an agent pane on this host. `id` makes it
 /// idempotent. `Ok(false)` when the owner is not running or has no reader: nothing would
 /// deliver it, so the caller keeps it for later.
 pub fn notify(
@@ -984,7 +984,7 @@ pub fn notify(
         id: id.into(),
         terminal,
         pane: owner.into(),
-        from: Sender::wrangle(),
+        from: Sender::dogsled(),
         kind: kind.into(),
         text,
         created_ms: now,
@@ -1076,7 +1076,7 @@ mod tests {
         let rig = Rig::new(&["term_a"]);
         let error = put(&rig.ledger, Rig::record("term_a", "r1")).unwrap_err();
         assert!(
-            error.to_string().contains("no wrangle inbox reader"),
+            error.to_string().contains("no dogsled inbox reader"),
             "{error}"
         );
         let error = put(&rig.ledger, Rig::record("term_gone", "r1")).unwrap_err();
@@ -1101,7 +1101,7 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(
             first[0].render(),
-            "wrangle message from lead (w9:p1 on mac):\nhello"
+            "dogsled message from lead (w9:p1 on mac):\nhello"
         );
         // The lease holds it while the reader works.
         assert_eq!(

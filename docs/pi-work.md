@@ -1,6 +1,6 @@
 # Pi work display contract
 
-Wrangle owns the above-editor work widget. pi-todo owns the tasks and their session-branch history.
+Dogsled owns the above-editor work widget. pi-todo owns the tasks and their session-branch history.
 The two extensions communicate through `pi.events`. Neither imports the other package.
 
 ## Version 2 events
@@ -8,10 +8,10 @@ The two extensions communicate through `pi.events`. Neither imports the other pa
 | Event | Sender | Data |
 | --- | --- | --- |
 | `oisin.todo.ready` | pi-todo | `version`, `publisher` |
-| `oisin.work.request` | Wrangle | `version`, `presenter`, `request` |
+| `oisin.work.request` | Dogsled | `version`, `presenter`, `request` |
 | `oisin.todo.snapshot` | pi-todo | Request identity, `publisher`, `revision`, `session`, `branch`, `display` |
-| `oisin.work.claim` | Wrangle | Request identity, `publisher`, `revision` |
-| `oisin.work.release` | Wrangle | Request identity |
+| `oisin.work.claim` | Dogsled | Request identity, `publisher`, `revision` |
+| `oisin.work.release` | Dogsled | Request identity |
 | `oisin.todo.stop` | pi-todo | `version`, `publisher` |
 | `oisin.work.open` | pi-todo | Request identity and `view: "todos"` |
 
@@ -20,31 +20,31 @@ Each presenter and publisher has a new identifier for each session lifecycle.
 A new request invalidates earlier replies. Revisions increase within a publisher lifecycle.
 The snapshot identifies the current Pi session and active branch leaf, including a null leaf.
 `display` contains `empty`, `summary`, `current`, `text`, opaque `state`, and a `createView` function.
-Pi-todo owns these projections. Wrangle does not interpret task records or reproduce todo rendering.
+Pi-todo owns these projections. Dogsled does not interpret task records or reproduce todo rendering.
 The capability is in-process only. Never serialize functions or components into session state.
 
 `createView({ theme, height, requestRender })` creates a view for one inline expansion.
 The view exposes `render(width)`, `handleInput(input)`, `invalidate()`, `update(state)`, and idempotent `dispose()`.
-Wrangle forwards navigation, opaque state updates, theme invalidation, and cleanup.
+Dogsled forwards navigation, opaque state updates, theme invalidation, and cleanup.
 The same pi-todo renderer supplies standalone and hosted rows. All shows one summary entry that opens Todos.
 
-Before claiming a snapshot, Wrangle creates, updates, renders, and disposes a preflight view.
+Before claiming a snapshot, Dogsled creates, updates, renders, and disposes a preflight view.
 A live view survives ordinary refreshes and ends on collapse, publisher replacement, release, or shutdown.
 Factory, render, update, and input failures release the claim and restore standalone todos.
 Version 1 peers do not receive flattened data. Incompatible versions leave standalone todos available.
 
-Both extensions subscribe during `session_start`. Wrangle requests a snapshot at startup and when a provider announces readiness.
-Thus either session-handler order works. Wrangle validates snapshots and draws before acknowledging presentation ownership.
+Both extensions subscribe during `session_start`. Dogsled requests a snapshot at startup and when a provider announces readiness.
+Thus either session-handler order works. Dogsled validates snapshots and draws before acknowledging presentation ownership.
 Only then does pi-todo remove its widget. Shutdown, reload, and rejected snapshots release presentation ownership.
 The provider restores its standalone widget on release. Todo commands remain the only task-state writers.
 
-The widget uses Wrangle's existing board refresh. The inbox reader remains the only completion-delivery owner.
+The widget uses Dogsled's existing board refresh. The inbox reader remains the only completion-delivery owner.
 Todos follow the Pi branch. Agent and job rows follow the calling Herdr owner pane.
 The display does not create a new job database or imply that a new Pi session resets pane-owned jobs.
 
 ## Inline work widget
 
-The widget above the editor is the wrangle board: a header with counts and a load meter for each host,
+The widget above the editor is the dogsled board: a header with counts and a load meter for each host,
 then the current task, then agents, jobs, and queued work grouped TO LAND, ATTENTION, RUNNING, and WAITING.
 Each row shows the harness and model, host, activity, and age in aligned columns.
 Alt+W and `/work` expand or collapse the same widget. Neither opens a popup or replaces the editor.
@@ -71,7 +71,7 @@ Session shutdown cancels open interactions and prevents late dialog responses fr
 
 ## Contract acceptance
 
-From the Wrangle source checkout, run the real provider/consumer integration test:
+From the Dogsled source checkout, run the real provider/consumer integration test:
 
 ```sh
 PI_TODO_SOURCE=/path/to/oisinpi/packages/pi-todo/src node --test pi/work-contract.test.ts

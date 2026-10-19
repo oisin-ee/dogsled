@@ -18,7 +18,7 @@ const CHECK_IN: u64 = 30 * MINUTE;
 
 fn stall_limit() -> u64 {
     // Live proof only. Never changes owner cadence or production defaults.
-    std::env::var("WRANGLE_TEST_STALL_MS")
+    std::env::var("DOGSLED_TEST_STALL_MS")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|n| *n > 0)
@@ -159,9 +159,9 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
                         "report-metadata".into(),
                         agent.pane.clone(),
                         "--source".into(),
-                        "custom:wrangle".into(),
+                        "custom:dogsled".into(),
                         "--token".into(),
-                        format!("wrangle={token}"),
+                        format!("dogsled={token}"),
                     ],
                 )?;
                 state.marks.insert(agent.pane.clone(), token);
@@ -180,7 +180,7 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
                     &[
                         "notification".into(),
                         "show".into(),
-                        "wrangle: stalled agent".into(),
+                        "dogsled: stalled agent".into(),
                         "--body".into(),
                         format!(
                             "{} ({}) stalled {}",
@@ -200,9 +200,9 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
                         "report-metadata".into(),
                         agent.pane.clone(),
                         "--source".into(),
-                        "custom:wrangle".into(),
+                        "custom:dogsled".into(),
                         "--clear-token".into(),
-                        "wrangle".into(),
+                        "dogsled".into(),
                     ],
                 )?;
                 state.marks.remove(&agent.pane);
@@ -392,7 +392,7 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
     if !finished.is_empty() {
         let _ = writeln!(
             note,
-            "Still open with work to land: {}. Merge or drop each branch; wrangle closes the child once its work lands, or run `wrangle close` to drop it.",
+            "Still open with work to land: {}. Merge or drop each branch; dogsled closes the child once its work lands, or run `dogsled close` to drop it.",
             finished.join(", ")
         );
     }
@@ -402,7 +402,7 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
     {
         let _ = writeln!(
             note,
-            "Orphaned children the sweep keeps: {}. See `wrangle status`.",
+            "Orphaned children the sweep keeps: {}. See `dogsled status`.",
             orphans
                 .iter()
                 .map(|o| format!(
@@ -415,7 +415,7 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
                 .join("; ")
         );
     }
-    note.push_str("Decide whether to keep waiting, message a child (`wrangle send`), close one (`wrangle close`), or stop a job (`wrangle stop`).\n");
+    note.push_str("Decide whether to keep waiting, message a child (`dogsled send`), close one (`dogsled close`), or stop a job (`dogsled stop`).\n");
     crate::activity::plain(&note)
 }
 

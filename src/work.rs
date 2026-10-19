@@ -248,7 +248,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                 jobs::save(ledger, &job)?;
                 let executable = std::env::current_exe()?.display().to_string();
                 let command = format!(
-                    "WRANGLE_STATE={} {} exec {} -- {}",
+                    "DOGSLED_STATE={} {} exec {} -- {}",
                     quote(&ledger.dir.display().to_string()),
                     quote(&executable),
                     quote(&launch.id),
@@ -605,7 +605,7 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
                 .clone()
                 .unwrap_or_else(|| result.map_or_else(String::new, Value::to_string));
             let text = format!(
-                "wrangle: ticket {} {} on {host}: {summary}",
+                "dogsled: ticket {} {} on {host}: {summary}",
                 ticket.id, ticket.state
             );
             // The owner's inbox reader shows it. An owner without a reader hears nothing until

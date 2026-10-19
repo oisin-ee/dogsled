@@ -21,7 +21,7 @@ const board: Board = {
 
 test("groups rows in action order with one header and meters for each host", () => {
 	const lines = renderBoard(board, 160, plain);
-	assert.match(lines[0]!, /^ wrangle {2}1 to land · 1 need attention · 2 running · 1 waiting +local ▰▱▱▱ 1\/12 {2}netcup ▰▱▱▱ 2\/16 {2}momokaya-2 \?$/);
+	assert.match(lines[0]!, /^ dogsled {2}1 to land · 1 need attention · 2 running · 1 waiting +local ▰▱▱▱ 1\/12 {2}netcup ▰▱▱▱ 2\/16 {2}momokaya-2 \?$/);
 	const titles = lines.filter(l => /^ [A-Z]/.test(l)).map(l => l.trim());
 	assert.deepEqual(titles, ["TO LAND", "ATTENTION", "RUNNING", "WAITING"]);
 	assert.ok(lines.some(l => l.includes("● web-tests") && l.includes("done 3m")));

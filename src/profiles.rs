@@ -30,7 +30,7 @@ pub struct Profile {
     pub prompt_path: Option<String>,
 }
 
-/// `~/.config/wrangle/profiles`, beside the config file.
+/// `~/.config/dogsled/profiles`, beside the config file.
 pub fn dir() -> PathBuf {
     crate::config::default_path()
         .parent()
@@ -53,7 +53,7 @@ pub fn load_from(dir: &Path, name: &str) -> Result<Profile> {
     let file = home.join("profile.json");
     let text = std::fs::read_to_string(&file).map_err(|e| {
         Error::Invalid(format!(
-            "profile {name}: cannot read {}: {e}; see `wrangle profiles`",
+            "profile {name}: cannot read {}: {e}; see `dogsled profiles`",
             file.display()
         ))
     })?;

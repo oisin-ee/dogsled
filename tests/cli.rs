@@ -59,7 +59,7 @@ struct Rig {
 }
 impl Rig {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("wrangle-cli-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dogsled-cli-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         for child in ["bin", "state", "home"] {
             fs::create_dir_all(dir.join(child)).unwrap();
@@ -85,7 +85,7 @@ case "$*" in
   'pane run'*) shift 3; sh -c "$*" > "$RIG/job-output" 2>&1; printf '{}\n' ;;
   'pane close '*)
     mkdir -p "$RIG/at-close"
-    cp "$WRANGLE_STATE"/jobs/*.json "$RIG/at-close/"
+    cp "$DOGSLED_STATE"/jobs/*.json "$RIG/at-close/"
     if test -f "$RIG/fail-close"; then echo close-refused >&2; exit 1; fi
     printf '{}\n' ;;
   'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
@@ -133,7 +133,7 @@ esac
         fs::write(self.dir.join("config.toml"), text).unwrap();
     }
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut cmd = isolated(env!("CARGO_BIN_EXE_wrangle"));
+        let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
         cmd.args(args)
             .env(
                 "PATH",
@@ -148,10 +148,10 @@ esac
             .env("HERDR_WORKSPACE_ID", "w1")
             .env("RIG", &self.dir)
             .env("HOME", self.dir.join("home"))
-            .env("WRANGLE_CONFIG", self.dir.join("config.toml"))
-            .env("WRANGLE_STATE", self.dir.join("state"));
+            .env("DOGSLED_CONFIG", self.dir.join("config.toml"))
+            .env("DOGSLED_STATE", self.dir.join("state"));
         if let Ok(now) = fs::read_to_string(self.dir.join("clock")) {
-            cmd.env("WRANGLE_TEST_NOW_MS", now.trim());
+            cmd.env("DOGSLED_TEST_NOW_MS", now.trim());
         }
         cmd
     }
@@ -312,7 +312,7 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     let rig = Rig::new("status-cache");
     rig.peer();
     rig.snapshot("state/host.json", now(), 50.0, 12);
-    rig.config("remote_command = ['custom-wrangle', 'argument with spaces']\n");
+    rig.config("remote_command = ['custom-dogsled', 'argument with spaces']\n");
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0);
     assert_eq!(status["hosts"].as_array().unwrap().len(), 2);
@@ -327,11 +327,11 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     assert_eq!(brief.lines().count(), 3);
     assert!(brief.contains("mem 1.0/8.0GiB disk 50% free agents 1"));
-    assert!(brief.contains("Run `wrangle status`"));
+    assert!(brief.contains("Run `dogsled status`"));
     assert_eq!(rig.log("ssh.log").lines().count(), 1);
     assert!(
         rig.log("ssh.log")
-            .contains("custom-wrangle 'argument with spaces' host snapshot --json")
+            .contains("custom-dogsled 'argument with spaces' host snapshot --json")
     );
     assert!(!rig.log("herdr.log").contains("agent list"));
     rig.expire_cache();
@@ -615,7 +615,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     let repo = rig.dir.join("home/repo space");
     repository(&repo);
     rig.peer();
-    rig.config("remote_command = ['custom', 'wrangle']\n");
+    rig.config("remote_command = ['custom', 'dogsled']\n");
     let (code, placed) = rig.json(&[
         "place",
         "--host",
@@ -632,7 +632,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     let ssh = rig.log("ssh.log");
     assert!(
         ssh.contains(
-            "custom wrangle host prepare --repo 'repo space' --branch feature --base main --budget-ms"
+            "custom dogsled host prepare --repo 'repo space' --branch feature --base main --budget-ms"
         ),
         "{ssh}"
     );

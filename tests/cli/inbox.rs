@@ -61,7 +61,7 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
         refused["error"]
             .as_str()
             .unwrap()
-            .contains("no wrangle inbox reader"),
+            .contains("no dogsled inbox reader"),
         "{refused}"
     );
     let (code, claimed) = as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
@@ -76,10 +76,10 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
     assert_eq!(claimed.as_array().unwrap().len(), 1);
     assert_eq!(claimed[0]["text"], "please review");
     assert_eq!(claimed[0]["state"], "claimed");
-    // The reader shows `message`; the sender and kind come from wrangle, not the harness.
+    // The reader shows `message`; the sender and kind come from dogsled, not the harness.
     assert_eq!(
         claimed[0]["message"],
-        "wrangle message from lead (w1:p1 on ".to_owned()
+        "dogsled message from lead (w1:p1 on ".to_owned()
             + sent["from"]["host"].as_str().unwrap()
             + "):\nplease review"
     );
@@ -104,7 +104,7 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
     assert_eq!((code, acked), (0, json!({"acked":1})));
     let (_, listing) = as_pane(&rig, "w1:p2", &["inbox", "list"]);
     assert_eq!(listing["received"][0]["state"], "delivered");
-    // The panel shows these lines as they are; wrangle owns the state wording.
+    // The panel shows these lines as they are; dogsled owns the state wording.
     assert_eq!(listing["lines"][0]["direction"], "received");
     assert_eq!(listing["lines"][0]["state"], "delivered");
     assert_eq!(listing["lines"][0]["summary"], "please review");
@@ -121,7 +121,7 @@ fn remote_put_goes_through_ssh_and_a_remote_failure_returns_to_the_sender() {
     rig.peer();
     rig.config(&format!(
         "remote_command = ['{}']\n",
-        env!("CARGO_BIN_EXE_wrangle")
+        env!("CARGO_BIN_EXE_dogsled")
     ));
     // The peer runs the real binary against its own state directory.
     rig.script(
@@ -131,7 +131,7 @@ printf '%s\n' "$*" >> "$RIG/ssh.log"
 shift 7
 case "$1" in
   *'host snapshot'*) cat "$RIG/remote.json" ;;
-  *) WRANGLE_STATE="$RIG/remote-state" sh -c "$1" ;;
+  *) DOGSLED_STATE="$RIG/remote-state" sh -c "$1" ;;
 esac
 "#,
     );
@@ -146,7 +146,7 @@ esac
         refused["error"]
             .as_str()
             .unwrap()
-            .contains("no wrangle inbox reader"),
+            .contains("no dogsled inbox reader"),
         "{refused}"
     );
     fs::create_dir_all(rig.dir.join("remote-state/inbox")).unwrap();
@@ -189,7 +189,7 @@ esac
     assert_eq!(listing["sent"][0]["state"], "failed");
 }
 
-/// Run `wrangle hook inbox` as the hook would: with Herdr, as pane `w1:p2`.
+/// Run `dogsled hook inbox` as the hook would: with Herdr, as pane `w1:p2`.
 fn hook(rig: &Rig, harness: &str, event: &str) -> String {
     let out = rig
         .cmd(&["hook", "inbox", "--harness", harness, "--event", event])
@@ -241,7 +241,7 @@ fn claude_and_codex_hooks_hand_over_the_inbox_without_typing() {
     assert_eq!(stop["decision"], "block");
     let reason = stop["reason"].as_str().unwrap();
     assert!(
-        reason.starts_with("wrangle message from lead (w1:p1"),
+        reason.starts_with("dogsled message from lead (w1:p1"),
         "{reason}"
     );
     assert!(reason.ends_with(":\nplease review"), "{reason}");

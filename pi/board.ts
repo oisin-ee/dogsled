@@ -1,5 +1,5 @@
 // The board widget: what this agent started, grouped by what it must do next. All data comes
-// from `wrangle board --json`; this file only lays it out for a terminal width.
+// from `dogsled board --json`; this file only lays it out for a terminal width.
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -51,7 +51,7 @@ const COUNTS: Record<Group, string> = { to_land: "to land", attention: "need att
 
 export function parseBoard(value: unknown): Board {
 	const data = value as Partial<Board> | null;
-	if (!data || !Array.isArray(data.hosts) || !Array.isArray(data.rows)) throw new Error("wrangle board returned an invalid board");
+	if (!data || !Array.isArray(data.hosts) || !Array.isArray(data.rows)) throw new Error("dogsled board returned an invalid board");
 	return data as Board;
 }
 
@@ -64,7 +64,7 @@ export function age(ms: number): string {
 	return `${Math.floor(s / 86_400)}d`;
 }
 
-/** Terminal text from wrangle is data: control characters never reach the screen. */
+/** Terminal text from dogsled is data: control characters never reach the screen. */
 export function clean(text: string): string {
 	return text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 }
@@ -125,13 +125,13 @@ export function boardColumns(rows: Row[], width: number): Columns {
 	return { name, what, host, activity, showHost, showActivity: activity >= 16 };
 }
 
-/** `wrangle  <counts>` on the left and one load meter per host on the right. */
+/** `dogsled  <counts>` on the left and one load meter per host on the right. */
 export function boardHeader(board: Board, width: number, paint: Paint): string {
 	const counts = ORDER.map(g => [g, board.rows.filter(r => r.group === g).length] as const)
 		.filter(([, n]) => n > 0)
 		.map(([g, n]) => `${n} ${COUNTS[g]}`)
 		.join(" · ");
-	const left = ` ${paint.bold(paint.fg("accent", "wrangle"))}${counts ? `  ${counts}` : ""}`;
+	const left = ` ${paint.bold(paint.fg("accent", "dogsled"))}${counts ? `  ${counts}` : ""}`;
 	const meters = board.hosts.map(h => meter(h, paint)).join("  ");
 	const gap = width - visibleWidth(left) - visibleWidth(meters) - 1;
 	return truncateToWidth(gap >= 2 ? `${left}${" ".repeat(gap)}${meters}` : left, width);

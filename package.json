@@ -1,18 +1,18 @@
 {
-  "name": "@oisin-ee/pi-wrangle",
+  "name": "@oisin-ee/pi-dogsled",
   "version": "0.12.3",
-  "description": "Pi extension for wrangle: the board, the /wrangle panel, the inbox reader, and the wrangle tools. Needs the wrangle binary of the same version.",
+  "description": "Pi extension for dogsled: the board, the /dogsled panel, the inbox reader, and the dogsled tools. Needs the dogsled binary of the same version.",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/oisin-ee/wrangle.git"
+    "url": "git+https://github.com/oisin-ee/dogsled.git"
   },
-  "homepage": "https://github.com/oisin-ee/wrangle#readme",
+  "homepage": "https://github.com/oisin-ee/dogsled#readme",
   "files": [
     "pi/",
     "!pi/**/*.test.ts",
-    "plugins/wrangle/skills/",
+    "plugins/dogsled/skills/",
     "README.md",
     "LICENSE"
   ],
@@ -40,7 +40,7 @@
       "./pi/index.ts"
     ],
     "skills": [
-      "./plugins/wrangle/skills/wrangle"
+      "./plugins/dogsled/skills/dogsled"
     ]
   },
   "peerDependencies": {

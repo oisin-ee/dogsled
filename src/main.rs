@@ -92,7 +92,7 @@ fn main() -> ExitCode {
                     serde_json::json!({ "error": error.to_string(), "deadline": matches!(error, Error::Deadline(_)) })
                 );
             } else {
-                eprintln!("wrangle: {error}");
+                eprintln!("dogsled: {error}");
             }
             error.exit_code()
         }

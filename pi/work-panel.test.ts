@@ -86,7 +86,7 @@ test("expanded work keeps the board's header, groups, glyphs, and aligned column
 	d.board.hosts = [{ label: "local", service: "up", reachable: true, busy: 3, cores: 12, eligible: true }];
 	const panel = new WorkPanel(d, { tab: "all", selected: undefined, history: false }, plain, () => {}, () => {}, () => 40);
 	const lines = panel.render(120).map(line => line.trimEnd());
-	assert.match(lines[0]!, /^ wrangle {2}1 need attention · 1 running · 1 waiting +local ▰▱▱▱ 3\/12$/);
+	assert.match(lines[0]!, /^ dogsled {2}1 need attention · 1 running · 1 waiting +local ▰▱▱▱ 3\/12$/);
 	assert.deepEqual(lines.slice(2, 10).map(line => line.trim().split(/ {2,}/)[0]), ["TASK", "→ ◆ Verify changes", "ATTENTION", "! reviewer", "RUNNING", "▸ tests", "WAITING", "⋯ queued"]);
 	const rows = lines.filter(line => /reviewer|tests|queued/.test(line) && !/^ [A-Z]/.test(line));
 	assert.equal(new Set(rows.map(line => line.indexOf(line.includes("reviewer") ? "pi" : "job"))).size, 1);
@@ -108,7 +108,7 @@ test("inspection uses existing commands and sanitizes output without losing line
 	const exec = async (args: string[]) => { calls.push(args); return "\x1b[31mline one\x1b[0m\nline two"; };
 	assert.equal(await inspectEntry({ kind: "todo", value: "t", label: "t", detail: "Full\ntodo" }, exec), "Full\ntodo");
 	assert.equal(calls.length, 0);
-	assert.match(await inspectEntry({ kind: "job", value: "j", label: "j", id: "job" }, exec), /Full log: wrangle logs job\n\nline one\nline two/);
+	assert.match(await inspectEntry({ kind: "job", value: "j", label: "j", id: "job" }, exec), /Full log: dogsled logs job\n\nline one\nline two/);
 	await inspectEntry({ kind: "agent", value: "a", label: "a", id: "agent", pane: "w2:p1", host: "netcup" }, exec);
 	assert.deepEqual(calls, [["read", "job", "--host", "local"], ["read", "w2:p1", "--host", "netcup"]]);
 });

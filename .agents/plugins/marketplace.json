@@ -1,14 +1,14 @@
 {
-  "name": "wrangle",
+  "name": "dogsled",
   "interface": {
-    "displayName": "Wrangle"
+    "displayName": "Dogsled"
   },
   "plugins": [
     {
-      "name": "wrangle",
+      "name": "dogsled",
       "source": {
         "source": "local",
-        "path": "./plugins/wrangle"
+        "path": "./plugins/dogsled"
       },
       "policy": {
         "installation": "AVAILABLE",

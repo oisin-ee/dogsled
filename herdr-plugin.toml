@@ -1,17 +1,17 @@
-# Herdr plugin manifest. Install: herdr plugin install oisin-ee/wrangle --ref vX.Y.Z --yes
-# The plugin only calls the wrangle binary; install that with mise or cargo first (see README).
+# Herdr plugin manifest. Install: herdr plugin install oisin-ee/dogsled --ref vX.Y.Z --yes
+# The plugin only calls the dogsled binary; install that with mise or cargo first (see README).
 
-id = "wrangle"
-name = "wrangle"
+id = "dogsled"
+name = "dogsled"
 version = "0.12.3"
 min_herdr_version = "0.9.1"
-description = "Opens the wrangle host status board."
+description = "Opens the dogsled host status board."
 platforms = ["macos", "linux"]
 
 # Every host, its agents, and its reservations. Refreshes until Ctrl-C.
 [[panes]]
 id = "board"
-title = "wrangle"
+title = "dogsled"
 placement = "popup"
 width = "90%"
 height = "70%"

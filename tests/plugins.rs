@@ -34,8 +34,8 @@ fn all_package_versions_match_cargo_without_a_release_bump() {
     for manifest in [
         "package.json",
         "package-lock.json",
-        "plugins/wrangle/.claude-plugin/plugin.json",
-        "plugins/wrangle/.codex-plugin/plugin.json",
+        "plugins/dogsled/.claude-plugin/plugin.json",
+        "plugins/dogsled/.codex-plugin/plugin.json",
     ] {
         assert_eq!(json(manifest)["version"], version, "{manifest}");
     }
@@ -64,33 +64,33 @@ fn marketplaces_and_manifests_resolve_the_single_skill_and_hooks() {
         ),
     ] {
         let market = json(marketplace);
-        assert_eq!(market["name"], "wrangle");
+        assert_eq!(market["name"], "dogsled");
         let plugins = market["plugins"].as_array().unwrap();
         assert_eq!(plugins.len(), 1);
         let entry = &plugins[0];
-        assert_eq!(entry["name"], "wrangle");
+        assert_eq!(entry["name"], "dogsled");
         let source = if codex {
             &entry["source"]["path"]
         } else {
             &entry["source"]
         };
-        assert_eq!(source, "./plugins/wrangle");
+        assert_eq!(source, "./plugins/dogsled");
         let plugin = relative(&root(), source);
-        let metadata = json(&format!("plugins/wrangle/{manifest}"));
+        let metadata = json(&format!("plugins/dogsled/{manifest}"));
         assert_eq!(metadata["name"], entry["name"]);
         let skills = if codex {
             relative(&plugin, &metadata["skills"])
         } else {
             plugin.join("skills")
         };
-        assert!(skills.join("wrangle/SKILL.md").is_file());
+        assert!(skills.join("dogsled/SKILL.md").is_file());
         assert_eq!(std::fs::read_dir(&skills).unwrap().count(), 1);
         assert!(plugin.join("hooks/context.sh").is_file());
         assert!(plugin.join("hooks/inbox.sh").is_file());
         let hooks = if codex {
             metadata["hooks"].clone()
         } else {
-            json("plugins/wrangle/hooks/hooks.json")
+            json("plugins/dogsled/hooks/hooks.json")
         };
         assert_eq!(hooks["hooks"].as_object().unwrap().len(), 3);
         let (harness, variable) = if codex {
@@ -115,7 +115,7 @@ fn marketplaces_and_manifests_resolve_the_single_skill_and_hooks() {
                     "sh \"{variable}/hooks/{script}.sh\" --harness {harness} --event {event} || true"
                 )
             );
-            // Empty PATH means no wrangle. An absolute shell path lets the
+            // Empty PATH means no dogsled. An absolute shell path lets the
             // registered command run, including its missing-binary guard.
             let command = command.replacen("sh ", "/bin/sh ", 1);
             let output = Command::new("/bin/sh")
@@ -134,30 +134,30 @@ fn marketplaces_and_manifests_resolve_the_single_skill_and_hooks() {
     let skills = package["pi"]["skills"].as_array().unwrap();
     assert_eq!(skills.len(), 1);
     assert!(relative(&root(), &skills[0]).join("SKILL.md").is_file());
-    assert!(!root().join("skills/wrangle").exists());
+    assert!(!root().join("skills/dogsled").exists());
     for extension in package["pi"]["extensions"].as_array().unwrap() {
         relative(&root(), extension);
     }
 }
 
 #[test]
-fn claude_and_codex_plugins_start_wrangle_mcp_with_the_callers_pane() {
-    let codex = json("plugins/wrangle/.codex-plugin/plugin.json");
+fn claude_and_codex_plugins_start_dogsled_mcp_with_the_callers_pane() {
+    let codex = json("plugins/dogsled/.codex-plugin/plugin.json");
     let path = codex["mcpServers"].as_str().unwrap();
     for (servers, forwards) in [
-        (json("plugins/wrangle/.mcp.json"), false),
+        (json("plugins/dogsled/.mcp.json"), false),
         (
             json(&format!(
-                "plugins/wrangle/{}",
+                "plugins/dogsled/{}",
                 path.trim_start_matches("./")
             )),
             true,
         ),
     ] {
-        let server = &servers["mcpServers"]["wrangle"];
+        let server = &servers["mcpServers"]["dogsled"];
         assert_eq!(
             (&server["command"], &server["args"]),
-            (&serde_json::json!("wrangle"), &serde_json::json!(["mcp"]))
+            (&serde_json::json!("dogsled"), &serde_json::json!(["mcp"]))
         );
         // Codex forwards only the variables it names, and the server needs the caller's pane.
         if forwards {
@@ -179,14 +179,14 @@ fn dist_keeps_service_templates_and_herdr_keeps_its_board() {
     let dist = toml("dist-workspace.toml");
     let includes = dist["dist"]["include"].as_array().unwrap();
     for path in [
-        "plugin/services/wrangle.service",
-        "plugin/services/dev.wrangle.plist",
+        "plugin/services/dogsled.service",
+        "plugin/services/dev.dogsled.plist",
     ] {
         assert!(includes.iter().any(|value| value.as_str() == Some(path)));
         assert!(root().join(path).is_file());
     }
     let herdr = toml("herdr-plugin.toml");
-    assert_eq!(herdr["id"].as_str(), Some("wrangle"));
+    assert_eq!(herdr["id"].as_str(), Some("dogsled"));
     assert!(
         root()
             .join(herdr["panes"][0]["command"][1].as_str().unwrap())

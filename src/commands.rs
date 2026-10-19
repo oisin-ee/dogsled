@@ -179,7 +179,7 @@ pub fn brief(status: &Status) -> String {
         format!(" · {} orphaned", status.orphans.len())
     };
     rows.push(format!(
-        "{} open items{}{orphans} · {} queued · {} stalls. Run `wrangle status` for details.",
+        "{} open items{}{orphans} · {} queued · {} stalls. Run `dogsled status` for details.",
         status
             .items
             .iter()
@@ -228,12 +228,12 @@ pub fn land_line(status: &Status, owner: &str) -> Option<String> {
     let shown = children.len().min(5);
     let more = children.len() - shown;
     Some(format!(
-        "To land: {}{}. Merge or drop each branch; wrangle closes the child once its work lands.\n",
+        "To land: {}{}. Merge or drop each branch; dogsled closes the child once its work lands.\n",
         children[..shown].join(", "),
         if more == 0 {
             String::new()
         } else {
-            format!(", and {more} more (see `wrangle board`)")
+            format!(", and {more} more (see `dogsled board`)")
         }
     ))
 }

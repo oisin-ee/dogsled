@@ -94,7 +94,7 @@ fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
     assert!(rig.read("state/host.json")["probe"]["agent_panes"][0]["stalled_since_ms"].is_number());
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("notification show").count(), 1);
-    assert!(log.contains("--token wrangle=stalled 48h"));
+    assert!(log.contains("--token dogsled=stalled 48h"));
     let out = rig.run(&["status", "--brief"]);
     let brief = String::from_utf8(out.stdout).unwrap();
     assert!(brief.contains("1 stalls"));
@@ -257,7 +257,7 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
         .unwrap()
         .clone();
     assert_eq!(entry["removable"], false, "{entry}");
-    assert!(entry["detail"].as_str().unwrap().contains("wrangle close"));
+    assert!(entry["detail"].as_str().unwrap().contains("dogsled close"));
     assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
     assert!(!rig.log("git.log").contains("worktree remove"));
     // A stale agent no longer holds it.

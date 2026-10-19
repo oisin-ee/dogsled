@@ -96,7 +96,7 @@ pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     }
     if branch == "HEAD" {
         return Err(refuse(&format!(
-            "{top} is a detached worktree; `wrangle prune` removes it once its commit is on a remote"
+            "{top} is a detached worktree; `dogsled prune` removes it once its commit is on a remote"
         )));
     }
     Ok(Some(Linked {
@@ -338,7 +338,7 @@ fn teardown(shell: &dyn Shell, settings: &Settings, tree: &Linked) -> Result<()>
 }
 
 /// Delete the branch of a removed worktree when its work is in the default branch. A squash
-/// merge is not an ancestor, so this is `-D` after wrangle's own check, not `-d`.
+/// merge is not an ancestor, so this is `-D` after dogsled's own check, not `-d`.
 fn delete_integrated(shell: &dyn Shell, tree: &Linked) -> Result<bool> {
     let checkout = tree.checkout.display().to_string();
     match crate::integration::check(shell, &checkout, &tree.branch)? {
