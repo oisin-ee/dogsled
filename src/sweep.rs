@@ -1,10 +1,11 @@
-//! The sweep in `serve` ends finished work. When a child completes a turn (Herdr's
+//! Stop requests drive doctor cleanup in `serve`; child completion is independent.
+//! When a child completes a turn (Herdr's
 //! `completion_seq`), the sweep captures its final reply into its item, then closes it once that
 //! loses nothing: a reader with no commits outside the default branch, or a child whose branch
 //! landed there. A child with work to land stays open. Blocked and working children never close,
 //! and nothing closes on a timer. The sweep also applies doctor entries whose removal loses
 //! nothing, and closes an orphaned child only when it is idle or done, clean, and pushed. Each
-//! removal is logged to stderr, the service journal.
+//! removal is logged to stderr, the service journal. Doctor passes also persist their results.
 
 use crate::close::Guard;
 use crate::error::Result;
@@ -94,26 +95,111 @@ pub fn list(ledger: &Ledger) -> Result<Vec<Orphan>> {
         .collect())
 }
 
-/// One sweep pass. The doctor entries and the orphans are independent: a failure in one still
-/// sweeps the other.
-pub fn pass(fleet: &Fleet, now: u64) -> Result<()> {
-    let doctor = crate::cleanup::sweep(&fleet.node(), now);
-    if let Ok(applied) = &doctor {
-        for result in &applied.results {
-            eprintln!("dogsled sweep: {result}");
-        }
-        for failure in &applied.failures {
-            eprintln!("dogsled sweep: failed: {failure}");
-        }
+const REQUEST: &str = "sweep-request.json";
+const LAST: &str = "sweep.json";
+pub const SOCKET: &str = "sweep.sock";
+const KEEP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Report {
+    #[serde(default)]
+    pub ts_ms: u64,
+    pub started_ms: u64,
+    pub finished_ms: u64,
+    #[serde(flatten)]
+    pub applied: crate::cleanup::Applied,
+}
+
+pub fn latest(ledger: &Ledger) -> Result<Option<Report>> {
+    ledger.read(LAST)
+}
+
+pub fn pending(ledger: &Ledger) -> Result<bool> {
+    Ok(ledger.read::<String>(REQUEST)?.is_some())
+}
+
+/// Request cleanup without preventing either Stop hook from delivering existing messages.
+pub fn request_at_stop(ledger: &Ledger) {
+    if let Err(error) = request(ledger) {
+        eprintln!("dogsled hook: warning: cleanup request failed: {error}");
     }
-    let children = children(fleet, now);
-    doctor.and(children)
+}
+
+/// Durable first, wake second. A stopped service consumes the request when it starts.
+/// The hook never waits for the survey or a reply from the service.
+pub fn request(ledger: &Ledger) -> Result<()> {
+    ledger.with_lock("sweep-request", || {
+        ledger.write(REQUEST, &crate::ledger::new_id())
+    })?;
+    let socket = std::os::unix::net::UnixDatagram::unbound()?;
+    socket.set_nonblocking(true)?;
+    match socket.send_to(b"sweep", ledger.dir.join(SOCKET)) {
+        Ok(_) => Ok(()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Consume all requests that arrived before or during a pass. Never hold the request lock
+/// during cleanup: hooks must remain fast, and a concurrent request must not be lost.
+pub fn requested(node: &crate::node::Node<'_>) -> Result<()> {
+    loop {
+        let Some(id) = node.ledger.read::<String>(REQUEST)? else {
+            return Ok(());
+        };
+        pass(node, crate::ledger::now_ms())?;
+        node.ledger.with_lock("sweep-request", || {
+            if node.ledger.read::<String>(REQUEST)?.as_ref() == Some(&id) {
+                std::fs::remove_file(node.ledger.dir.join(REQUEST))?;
+            }
+            Ok(())
+        })?;
+    }
+}
+
+/// Record both successful removals and a failed survey. Child completion is independent.
+pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
+    let applied = match crate::cleanup::sweep(node, now) {
+        Ok(applied) => applied,
+        Err(error) => crate::cleanup::Applied {
+            failures: vec![error.to_string()],
+            ..Default::default()
+        },
+    };
+    for result in &applied.results {
+        eprintln!("dogsled sweep: {result}");
+    }
+    for failure in &applied.failures {
+        eprintln!("dogsled sweep: failed: {failure}");
+    }
+    for warning in &applied.repositories {
+        eprintln!("dogsled sweep: warning: {}: {}", warning.id, warning.detail);
+    }
+    let finished_ms = crate::ledger::now_ms();
+    let report = Report {
+        ts_ms: finished_ms,
+        started_ms: now,
+        finished_ms,
+        applied,
+    };
+    node.ledger
+        .append_line("sweeps.jsonl", &report, finished_ms.saturating_sub(KEEP_MS))?;
+    node.ledger.write(LAST, &report)
 }
 
 /// Settle each open agent item: an owned child that finished, and an orphan that is idle or
 /// done, clean, and pushed, close exactly as `dogsled close` would. Orphans that stay are
 /// recorded for status and check-ins.
-fn children(fleet: &Fleet, now: u64) -> Result<()> {
+pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
     let items: Vec<Item> = crate::items::list(fleet.ledger)?
         .into_iter()
         .filter(|i| i.closed_ms.is_none() && i.kind == "agent")

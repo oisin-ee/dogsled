@@ -25,6 +25,8 @@ mod profiles;
 mod review;
 #[path = "cli/review_fixes.rs"]
 mod review_fixes;
+#[path = "cli/stop_sweep.rs"]
+mod stop_sweep;
 #[path = "cli/sweep.rs"]
 mod sweep;
 #[path = "cli/transcripts.rs"]
@@ -237,8 +239,8 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
             <= snapshot["sampled_ms"].as_u64().unwrap()
     );
     // `--once` keeps publishing while its action lanes run, so a slow host can
-    // add ticks. Every tick reads agents, panes, and each shell's foreground. The sweep reads
-    // panes and workspaces, and finds nothing to close: the caller's own shell is never swept.
+    // add ticks. Every tick reads agents, panes, and each shell's foreground.
+    // No Stop request means no doctor survey or workspace list.
     let herdr = rig.log("herdr.log");
     assert!(herdr.contains("agent list\npane list\npane process-info --pane w1:p1\n"));
     assert!(
@@ -246,8 +248,7 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
             "agent list",
             "pane list",
             "pane process-info --pane w1:p1",
-            "pane process-info --pane w2:p1",
-            "workspace list"
+            "pane process-info --pane w2:p1"
         ]
         .contains(&line)),
         "{herdr}"

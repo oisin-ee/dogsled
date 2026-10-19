@@ -234,7 +234,7 @@ fn workspaces(shell: &dyn Shell) -> Result<Vec<Workspace>> {
 }
 
 /// The main checkout of the repository that holds `path`, or `None` outside a repository.
-fn main_root(shell: &dyn Shell, path: &str) -> Result<Option<String>> {
+pub(crate) fn main_root(shell: &dyn Shell, path: &str) -> Result<Option<String>> {
     let root = git(
         shell,
         path,
@@ -1456,6 +1456,10 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
 pub struct Applied {
     pub results: Vec<String>,
     pub failures: Vec<String>,
+    #[serde(default)]
+    pub repositories: Vec<Entry>,
+    #[serde(default)]
+    pub landed_dirty: Vec<Entry>,
 }
 
 impl Applied {
@@ -1488,8 +1492,22 @@ pub const SWEPT: [&str; 4] = ["worktrees", "branches", "workspaces", "panes"];
 /// The `serve` sweep: survey in `Sweep` scope and apply each removable entry with the same
 /// checks as `prune`. Each entry is independent, so one failure does not stop the others.
 pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
-    let mut applied = Applied::default();
     let plan = survey(node, Scope::Sweep, now)?;
+    let mut applied = Applied {
+        repositories: plan
+            .entries
+            .iter()
+            .filter(|e| e.class == "repositories")
+            .cloned()
+            .collect(),
+        landed_dirty: plan
+            .entries
+            .iter()
+            .filter(|e| e.kind.as_deref() == Some("landed_dirty"))
+            .cloned()
+            .collect(),
+        ..Applied::default()
+    };
     for entry in plan
         .entries
         .iter()

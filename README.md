@@ -204,7 +204,7 @@ A host that cannot be read shows `retry in 40s` on the board. `dogsled retry HOS
 Run `dogsled serve` on every host. Dotfiles owns launchd and systemd user-service installation.
 The measurement step uses no SSH. It reads CPU busy time, cores, memory, home disk space, Herdr agents, and Herdr panes.
 When it has owned items or tickets, the service reads peers through the status cache and can launch admitted work through SSH.
-Separate watchdog, admission, sweep, and inbox workers keep check-ins, slow setup, cleanup, and delivery independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
+Separate watchdog, admission, child-completion, inbox, and requested-cleanup workers keep slow actions independent from snapshot publication. Routine calls and lock waits have 30-second limits. Setup calls have a 10-minute limit.
 An admission timeout records a failed ticket. The service continues publication and later actions.
 It writes `~/.local/state/dogsled/host.json` through atomic replacement.
 Each `probe.agent_panes` entry contains `pane`, `agent`, `state`, `name`, `transcript`, `transcript_modified`, `terminal_id`, `completion_seq`, `cwd`, the session's model and latest activity, and the worktree's branch, commits ahead, dirty state, and whether it landed.
@@ -335,14 +335,23 @@ Repository registrations stay unchanged.
 
 The sweep closes finished children (see [Items and closing](#items-and-closing)), and a job closes its own tab. That closed loop ends most work.
 The sweep catches what a broken loop leaves behind: a crashed owner, a killed process, or a worktree that something else made.
-On each pass, the service's sweep worker builds the doctor plan in sweep scope. It applies only entries whose removal loses nothing:
+The Stop gate writes `sweep-request.json` and wakes the local service through `sweep.sock`. It never runs the survey inside the hook.
+The service checks the durable request at startup, on notification, and on each publication iteration. No request means no survey.
+The socket is optional. A bind failure produces a warning, and pending requests still reach the worker on the publication interval.
+A Stop request failure produces a warning without preventing existing gate or inbox messages from reaching the agent.
+Each requested pass builds the doctor plan in sweep scope. It applies only entries whose removal loses nothing:
 
 - `panes` and `workspaces`: a shell at an empty prompt in an ended job's tab, or in a directory that no longer exists. A workspace closes whole when every pane in it is one of these.
 - `worktrees` and `branches`: the shared loss rule and holds described above, identical to prune.
 - Orphaned children: an idle or done child whose owner is gone and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
 The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
-Each removal is a `dogsled sweep:` line on stderr, the service journal.
+The service keeps seven days of completed passes in `sweeps.jsonl` and the latest pass in `sweep.json`.
+Each history entry has a `ts_ms` timestamp; each new pass removes entries older than seven days.
+The report includes start and finish times, removals, failures, repository warnings, and landed-dirty findings.
+`dogsled status` and `status --json` show the latest pass. Prompt context adds one summary line when that pass has errors or warnings.
+The service also writes removals, failures, and repository warnings to stderr.
+Child completion and orphan checks remain independent of requested doctor cleanup.
 An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
 Prune also handles idle panes after a day, ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
 
@@ -462,6 +471,14 @@ Pi calls `dogsled hook gate` from `agent_before_settle` and adds a visible messa
 Claude Code and Codex include the reminder in their existing `Stop` inbox response.
 The reminder requests a review, a commit from dirty children, integration, or an explicit blocker or deferral.
 It never commits, merges, closes, or discards work itself. Clean readers and working children do not trigger it.
+
+The gate reports failures, repository warnings, and landed-dirty findings from the latest completed pass, without waiting for the requested pass.
+Successful removals remain in status and the journal; they do not continue an agent turn.
+Repository warnings name the repository and state entries, and request delegation to a dogsled agent instead of manual state edits.
+Landed-dirty findings reach only panes in the same main repository, including linked worktrees and symlink paths.
+The message asks the owner to read and preserve wanted changes, or obtain user approval before discarding abandoned work.
+It forbids forced worktree removal, `git clean`, and `rm -rf` on the checkout.
+Cleanup reminders use separate, once-per-set histories in `gate.json`, so an unchanged warning cannot cause a continuation loop.
 
 The gate records each set of child item IDs, commit counts, and dirty states in `gate.json`.
 It continues once per distinct set, across process restarts. Row order and idle/done transitions do not cause another reminder.

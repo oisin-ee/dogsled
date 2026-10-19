@@ -113,7 +113,7 @@ The note lists each item (name, host, state, age, time since its transcript chan
 **Durability.** Events are captured before reconciliation, including between one-minute check-in deadlines. Transcript writes alone are not lifecycle events.
 Normal restarts retain delivered events and last-send times. The inbox lease carries each check-in until the reader acknowledges it; nothing is typed into the owner's terminal.
 Top-level notification attempts are at-most-once per stall; a crash during submission can lose that notification.
-Watchdog, admission, and the sweep have separate action workers, so slow setup or cleanup cannot block check-ins or publication.
+Watchdog, admission, child completion, inbox delivery, and requested cleanup have separate workers. Slow cleanup cannot block check-ins or publication.
 
 **Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
 
@@ -142,7 +142,19 @@ An unheld dirty checkout whose work is in the default branch produces a `landed_
 
 The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `panes`. Orphan close uses the same loss rule. Prune also shows non-removable findings, stale-agent panes, expired jobs, stale registrations, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
 
-Every removal rechecks identity and safety. Worktree removal runs teardown, closes holders, unlocks, removes without force, and deletes a held branch. A failed entry does not stop the others. The service schedule and completion-event behavior are unchanged.
+Every removal rechecks identity and safety. Worktree removal runs teardown, closes holders, unlocks, removes without force, and deletes a held branch. A failed entry does not stop the others. Completion-event behavior remains independent of doctor cleanup.
+
+Stop writes a durable `sweep-request.json` and sends a local datagram to `sweep.sock`. The hook does not wait for cleanup.
+The service checks the durable request at startup, on notification, and on each publication iteration. It surveys only when a request exists.
+A socket bind failure produces a warning instead of stopping the service. Stop request failures do not prevent gate or inbox delivery.
+Requests during a pass remain pending until the worker completes another pass. A service lock prevents concurrent service instances.
+Each pass records its times, removals, failures, repository warnings, and landed-dirty findings in `sweeps.jsonl` and `sweep.json`.
+History entries include `ts_ms`; each new pass removes entries older than seven days. Successful removals never trigger a gate reminder.
+Status exposes the latest report. Prompt context summarizes failures and warnings on one line.
+The gate delivers warnings and failures once per distinct set through `gate.json`.
+Landed-dirty messages require equal resolved main-repository paths for the owner pane and the finding.
+Repository warnings request a dogsled agent to repair the registration, not manual state edits.
+Dirty-worktree guidance preserves wanted changes and requires user approval before discarding abandoned work.
 
 Placement registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.

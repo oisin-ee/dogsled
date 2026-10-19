@@ -518,6 +518,7 @@ mod tests {
             items,
             queue: Vec::new(),
             orphans: Vec::new(),
+            sweep: None,
         }
     }
 

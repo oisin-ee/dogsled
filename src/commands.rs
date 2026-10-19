@@ -14,6 +14,7 @@ pub struct Status {
     pub queue: Vec<crate::work::Ticket>,
     /// Open children whose owner is gone and that the sweep keeps, with the reason.
     pub orphans: Vec<crate::sweep::Orphan>,
+    pub sweep: Option<crate::sweep::Report>,
 }
 
 pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
@@ -22,6 +23,7 @@ pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
         items: crate::items::list(fleet.ledger)?,
         queue: crate::work::queue(fleet.ledger)?,
         orphans: crate::sweep::list(fleet.ledger)?,
+        sweep: crate::sweep::latest(fleet.ledger)?,
     })
 }
 
@@ -199,11 +201,39 @@ pub fn brief(status: &Status) -> String {
             .filter(|a| a.stalled_since_ms.is_some())
             .count()
     ));
+    if let Some(sweep) = &status.sweep
+        && (!sweep.applied.failures.is_empty() || !sweep.applied.repositories.is_empty())
+    {
+        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len()));
+    }
     format!("{}\n", rows.join("\n"))
 }
 
 pub fn render(status: &Status) -> String {
     let mut lines = Vec::new();
+    if let Some(sweep) = &status.sweep {
+        lines.push(format!(
+            "Last cleanup: {} ms (started {} ms)",
+            sweep.finished_ms, sweep.started_ms
+        ));
+        lines.extend(sweep.applied.results.iter().map(|r| format!("  {r}")));
+        lines.extend(
+            sweep
+                .applied
+                .failures
+                .iter()
+                .map(|f| format!("  failed: {f}")),
+        );
+        lines.extend(
+            sweep
+                .applied
+                .repositories
+                .iter()
+                .map(|w| format!("  warning: {}: {}", w.id, w.detail)),
+        );
+    } else {
+        lines.push("Last cleanup: none".into());
+    }
     for host in &status.hosts {
         lines.push(summary(host));
         if let Some(reason) = host

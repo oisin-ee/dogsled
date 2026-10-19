@@ -32,7 +32,7 @@ pub enum Event {
 /// `owner` is the caller's Herdr pane. Its own children and jobs come first, with those that
 /// have work to land named; the fleet's hosts and counts follow.
 pub fn format(harness: Harness, event: Event, status: &Status, owner: Option<&str>) -> String {
-    if status.hosts.iter().all(|host| host.sampled_ms.is_none()) {
+    if status.hosts.iter().all(|host| host.sampled_ms.is_none()) && status.sweep.is_none() {
         return String::new();
     }
     let mut text = owner.map_or_else(String::new, |owner| {
@@ -74,6 +74,7 @@ mod tests {
             items: Vec::new(),
             queue: Vec::new(),
             orphans: Vec::new(),
+            sweep: None,
         }
     }
 
