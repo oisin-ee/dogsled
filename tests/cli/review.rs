@@ -73,18 +73,22 @@ fn deadline_includes_discovery_and_placement_ssh() {
         rig.script("ssh", "#!/bin/sh\nexec sleep 30\n");
         let start = Instant::now();
         let out = rig.run(&args);
-        assert!(start.elapsed() < Duration::from_secs(2));
+        let diagnostic = format!(
+            "{name}: status={:?}, stdout={:?}, stderr={:?}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(start.elapsed() < Duration::from_secs(2), "{diagnostic}");
         if name == "agent-placement" {
-            assert_eq!(out.status.code(), Some(2));
-            assert!(String::from_utf8_lossy(&out.stderr).contains("deadline reached"));
-        } else {
-            assert_eq!(
-                out.status.code(),
-                Some(124),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
+            assert_eq!(out.status.code(), Some(2), "{diagnostic}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("deadline reached"),
+                "{diagnostic}"
             );
-            assert_eq!(out.stdout, b"still running\n");
+        } else {
+            assert_eq!(out.status.code(), Some(124), "{diagnostic}");
+            assert_eq!(out.stdout, b"still running\n", "{diagnostic}");
         }
     }
 }

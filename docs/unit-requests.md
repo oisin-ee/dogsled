@@ -141,13 +141,29 @@ After a fresh runtime boundary, the adapter abandons only current-session prepar
 Recovery uses the existing refresh lifecycle and also runs before the first task request or managed spawn. It never commits or redispatches work and needs no model setup call.
 Commit and abandonment retain their request lock: a concurrent committed request cannot be abandoned. Unknown outcomes remain pending.
 
-The loaded worker guard registers the seed flag even if pi-todo is missing. It validates `imported()` synchronously in `before_agent_start` and calls `ctx.abort()` on failure.
+Dogsled alone registers `--todo-unit-file`, including when pi-todo is missing. Pi scopes `getFlag()` to its registering extension and rejects duplicate flag registration.
+During extension loading, Dogsled registers `oisin.tasks.seed-source.v1`. Pi-todo queries it synchronously at startup with `{version:1,reply}`.
+The response is `{version:1,path}`, where a null path means no managed launch. Pi-todo rejects malformed or ambiguous responses and owns file parsing and import validation.
+All extension factories finish before startup handlers run, so the query works in either extension order. The capability transports no task mutation or dispatch operation.
+The loaded worker guard validates the import even if pi-todo is missing. It validates `imported()` synchronously in `before_agent_start` and calls `ctx.abort()` on failure.
 Fresh receipts must match the launch execution, origin, digest, and current request/session ID. On resume or reload, pi-todo’s recorded receipt owns progress.
 A recorded import does not require the original seed artifact or launch flag. Sealed workers cannot begin another model task.
 Only a correlated seal at `agent_settled` causes terminal acknowledgement. Dogsled still validates the final transcript ancestry.
 
 Settlement delivery runs through the existing refresh and settled lifecycle. Provider failure or a wrong branch leaves the event pending.
 Successful duplicate application acknowledges the same event. Inbox text delivery remains independent. No model turn starts solely for bookkeeping.
+
+## Cross-repository acceptance
+
+With a built first-party pi-todo checkout, run:
+
+```sh
+PI_TODO_SOURCE=/path/to/oisinpi/packages/pi-todo/src npm test
+```
+
+`pi/unit-contract.test.ts` loads both actual extensions through `DefaultResourceLoader` in both orders. It also loads Dogsled alone and checks zero initial model requests for a managed seed without a provider.
+The flow tests use the real provider, WASM core, importer, bridge, and Pi runtime. One unit spawn exports the contract, activates the worker, seals completion, and delivers evidence without accepting the lead task.
+Executor transport is simulated in these tests; they do not prove managed launch, deployed packages, or live terminal receipt discovery. The separate live scenario remains required.
 
 ## Proof limits
 
