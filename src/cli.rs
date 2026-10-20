@@ -415,6 +415,8 @@ pub enum HostCommand {
     Prepared {
         #[arg(long)]
         path: String,
+        #[arg(long)]
+        request_id: Option<String>,
     },
     Prepare {
         #[arg(long)]
@@ -423,6 +425,8 @@ pub enum HostCommand {
         branch: String,
         #[arg(long)]
         base: Option<String>,
+        #[arg(long)]
+        request_id: Option<String>,
     },
 }
 

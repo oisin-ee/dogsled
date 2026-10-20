@@ -200,7 +200,7 @@ pub fn commit(fleet: &Fleet, input: &CommitInput) -> Result<Value> {
     })
 }
 
-fn crash_point(point: &str) {
+pub(crate) fn crash_point(point: &str) {
     // Debug CLI fixtures terminate at real persistence boundaries. Release has no failpoint.
     #[cfg(debug_assertions)]
     if std::env::var("DOGSLED_TEST_UNIT_CRASH").as_deref() == Ok(point) {
@@ -356,7 +356,7 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
         let Some(unit) = attempt.unit.as_ref() else {
             continue;
         };
-        if unit.committed.is_none() || unit.abandoned.is_some() {
+        if unit.committed.is_none() {
             continue;
         }
         let Some(host) = attempt.host.as_ref() else {
@@ -374,26 +374,100 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
                 ],
             )
         };
-        let receipt: crate::unit_reply::Receipt = match receipt {
+        let receipt: crate::unit_reply::HostEvidence = match receipt {
             Ok(Some(receipt)) => receipt,
             Ok(None) => match &unit.terminal_receipt {
-                Some(saved) => saved.clone(),
+                Some(saved) => crate::unit_reply::HostEvidence::Returned(Box::new(saved.clone())),
                 None => continue,
             },
+            Err(error @ crate::error::Error::Invalid(_)) => return Err(error),
             Err(error) => {
                 eprintln!(
                     "dogsled unit evidence {}: {error}",
                     unit.execution.request_id
                 );
                 match &unit.terminal_receipt {
-                    Some(saved) => saved.clone(),
+                    Some(saved) => {
+                        crate::unit_reply::HostEvidence::Returned(Box::new(saved.clone()))
+                    }
                     None => continue,
                 }
             }
         };
-        import_receipt(fleet.ledger, &file, receipt)?;
+        match receipt {
+            crate::unit_reply::HostEvidence::Returned(receipt) => {
+                import_receipt(fleet.ledger, &file, *receipt)?;
+            }
+            crate::unit_reply::HostEvidence::Refused(receipt) => {
+                import_refusal(fleet.ledger, &file, *receipt)?;
+            }
+        }
     }
     Ok(())
+}
+
+fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refusal) -> Result<()> {
+    let attempts = ledger.child("admissions");
+    let id = &receipt.launch.id;
+    crate::jobs::validate_id(id)?;
+    if file != format!("{id}.json") {
+        return Err(conflict("refusal belongs to another admission"));
+    }
+    attempts.with_lock(id, || {
+        let mut current = attempts
+            .read::<Attempt>(file)?
+            .ok_or_else(|| conflict("admission disappeared"))?;
+        if current.launch.as_ref() != Some(&receipt.launch)
+            || current
+                .host
+                .as_ref()
+                .is_none_or(|host| host.id != receipt.launch.host)
+            || current.result.is_some()
+            || receipt.failed.is_empty()
+        {
+            return Err(conflict("host refusal does not match selected launch"));
+        }
+        let unit = current
+            .unit
+            .as_mut()
+            .ok_or_else(|| conflict("unit admission disappeared"))?;
+        let committed = unit
+            .committed
+            .as_ref()
+            .ok_or_else(|| conflict("unit is not committed"))?;
+        let seed = receipt
+            .launch
+            .unit
+            .as_ref()
+            .ok_or_else(|| conflict("refusal seed missing"))?;
+        seed.validate(&receipt.launch.id, &receipt.launch.owner)?;
+        if seed != &crate::unit_transport::Seed::from(committed.clone())
+            || seed.execution != unit.execution
+            || seed.binding.contract != unit.origin
+            || unit.returned.is_some()
+            || unit.terminal_receipt.is_some()
+        {
+            return Err(conflict("contradictory or mismatched refusal evidence"));
+        }
+        let event = NotStarted {
+            version: 1,
+            event_id: format!("{}-not-started", unit.execution.request_id),
+            origin: unit.origin.clone(),
+            execution: unit.execution.clone(),
+            result: NotStartedResult::NotStarted {
+                reason: receipt.failed,
+            },
+        };
+        if unit.abandoned.as_ref().is_some_and(|saved| saved != &event) {
+            return Err(conflict("contradictory refusal evidence"));
+        }
+        if unit.abandoned.is_none() {
+            unit.abandoned = Some(event);
+            attempts.write(file, &current)?;
+        }
+        crash_point("refusal-settlement-persisted");
+        Ok(())
+    })
 }
 
 fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Receipt) -> Result<()> {
@@ -411,7 +485,8 @@ fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Recei
             .committed
             .as_ref()
             .ok_or_else(|| conflict("unit is not committed"))?;
-        if receipt.ack.execution != unit.execution
+        if unit.abandoned.is_some()
+            || receipt.ack.execution != unit.execution
             || receipt.ack.unit_ref != unit.origin
             || receipt.ack.digest != committed.exported.digest
             || receipt.session_id != unit.execution.request_id

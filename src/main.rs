@@ -434,28 +434,18 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
                 return Ok(Error::Full.exit_code());
             }
         }
-        HostCommand::Prepared { path } => {
-            prepare::used(node.ledger, &path)?;
+        HostCommand::Prepared { path, request_id } => {
+            prepare::used(node.ledger, &path, request_id.as_deref())?;
             print(true, &serde_json::json!({"prepared": true}), String::new)?;
         }
-        HostCommand::Prepare { repo, branch, base } => {
-            let repo = std::path::Path::new(node.home)
-                .join(repo)
-                .display()
-                .to_string();
+        HostCommand::Prepare {
+            repo,
+            branch,
+            base,
+            request_id,
+        } => {
             let prepared =
-                prepare::local(node.shell, node.ledger, &repo, &branch, base.as_deref())?;
-            if let Some(path) = &prepared.path {
-                cleanup::remember(
-                    node.ledger,
-                    cleanup::Tree {
-                        repo,
-                        path: path.clone(),
-                        branch,
-                        head: String::new(),
-                    },
-                )?;
-            }
+                prepare::on_host(node, &repo, branch, base.as_deref(), request_id.as_deref())?;
             print(true, &prepared, String::new)?;
         }
     }

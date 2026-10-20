@@ -24,6 +24,28 @@ pub struct Receipt {
     pub text: String,
 }
 
+/// Additive host evidence: the existing returned JSON object remains unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HostEvidence {
+    Refused(Box<Refusal>),
+    Returned(Box<Receipt>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Refusal {
+    pub kind: RefusalKind,
+    pub launch: Launch,
+    pub failed: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalKind {
+    Refused,
+}
+
 pub fn capture(
     ledger: &Ledger,
     launch: &Launch,

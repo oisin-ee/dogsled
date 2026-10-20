@@ -652,12 +652,35 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["path"], "/remote/tree");
     let ssh = rig.log("ssh.log");
+    let prepares: Vec<_> = ssh
+        .lines()
+        .filter(|line| line.contains("host prepare "))
+        .collect();
+    assert_eq!(prepares.len(), 1, "{ssh}");
+    assert_eq!(prepares[0].matches("--request-id ").count(), 1, "{ssh}");
+    let id = prepares[0]
+        .split_once("--request-id ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let parts: Vec<_> = id.split('-').collect();
+    assert_eq!(parts.len(), 4, "{id}");
+    assert_eq!(parts[0], "r", "{id}");
     assert!(
-        ssh.contains(
-            "custom dogsled host prepare --repo 'repo space' --branch feature --base main --budget-ms"
-        ),
-        "{ssh}"
+        parts[1..]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
+        "{id}"
     );
+    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --repo 'repo space' --branch feature --request-id {id} --base main --budget-ms 600000 --json")), "{ssh}");
+    let releases: Vec<_> = ssh
+        .lines()
+        .filter(|line| line.contains("host prepared "))
+        .collect();
+    assert_eq!(releases.len(), 1, "{ssh}");
+    assert!(releases[0].ends_with(&format!("custom dogsled host prepared --path /remote/tree --request-id {id} --budget-ms 600000 --json")), "{ssh}");
     assert!(!ssh.contains("host bind"));
 }
 

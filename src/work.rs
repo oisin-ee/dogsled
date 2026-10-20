@@ -259,7 +259,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
     }
     if matches!(launch.action, Action::Agent { .. }) {
         let result = crate::launch::agent(ledger, shell, launch)?;
-        crate::prepare::used(ledger, &launch.cwd)?;
+        crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
         return Ok(result);
     }
     let receipts = ledger.child("launches");
@@ -322,7 +322,7 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
             Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
         };
         receipts.write(&file, &result)?;
-        crate::prepare::used(ledger, &launch.cwd)?;
+        crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
         Ok(result)
     })
 }
@@ -469,11 +469,17 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         };
         let launch = prepare_launch(fleet, request, &host)?;
         if host.is_local() {
-            crate::prepare::used(fleet.ledger, &launch.cwd)?;
+            crate::prepare::used(fleet.ledger, &launch.cwd, Some(&launch.id))?;
         } else {
             let _: Value = fleet.remote_setup(
                 &host,
-                &["prepared".into(), "--path".into(), launch.cwd.clone()],
+                &[
+                    "prepared".into(),
+                    "--path".into(),
+                    launch.cwd.clone(),
+                    "--request-id".into(),
+                    launch.id.clone(),
+                ],
             )?;
         }
         return Ok(Some(
@@ -582,7 +588,14 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
             .repository
             .as_ref()
             .ok_or_else(|| Error::Invalid("branch requires repository".into()))?;
-        crate::prepare::run(fleet, host, &repo.path, branch, request.base.as_deref())?
+        crate::prepare::run(
+            fleet,
+            host,
+            &repo.path,
+            branch,
+            request.base.as_deref(),
+            &request.id,
+        )?
     } else {
         crate::prepare::Prepared::default()
     };

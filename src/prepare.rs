@@ -20,6 +20,14 @@ pub struct Prepared {
     pub path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Pending {
+    #[serde(flatten)]
+    tree: crate::cleanup::Tree,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+}
+
 pub fn main_checkout(shell: &dyn Shell, repo: &str) -> Result<PathBuf> {
     let out = shell.run_ok(
         "git",
@@ -50,7 +58,9 @@ pub fn run(
     repo: &str,
     branch: &str,
     base: Option<&str>,
+    request_id: &str,
 ) -> Result<Prepared> {
+    crate::jobs::validate_id(request_id)?;
     let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
         let prepared = local(
@@ -59,6 +69,7 @@ pub fn run(
             &checkout.display().to_string(),
             branch,
             base,
+            Some(request_id),
         )?;
         if let Some(path) = &prepared.path {
             crate::cleanup::remember(
@@ -92,6 +103,8 @@ pub fn run(
         remote,
         "--branch".into(),
         branch.into(),
+        "--request-id".into(),
+        request_id.into(),
     ];
     if let Some(base) = base {
         args.extend(["--base".into(), base.into()]);
@@ -109,7 +122,11 @@ pub fn local(
     repo: &str,
     branch: &str,
     base: Option<&str>,
+    request_id: Option<&str>,
 ) -> Result<Prepared> {
+    if let Some(id) = request_id {
+        crate::jobs::validate_id(id)?;
+    }
     let invalid = branch.is_empty()
         || branch.starts_with('-')
         || !shell
@@ -165,12 +182,7 @@ pub fn local(
         branch: branch.into(),
         head: String::new(),
     };
-    ledger.with_lock("preparations", || {
-        let mut preparations = pending_trees(ledger)?;
-        preparations.retain(|tree| tree.path != pending.path);
-        preparations.push(pending);
-        ledger.write("preparations.json", &preparations)
-    })?;
+    record(ledger, pending, request_id)?;
     let (path, created) = if let Some(found) = existing {
         (reuse(shell, &checkout, found)?, false)
     } else {
@@ -202,7 +214,7 @@ pub fn local(
         if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
         {
             discard(shell, &checkout, &path, (!has_branch).then_some(branch))?;
-            used(ledger, &path)?;
+            used(ledger, &path, request_id)?;
             return Err(Error::Invalid(format!(
                 "{error}; the new worktree was removed"
             )));
@@ -211,15 +223,64 @@ pub fn local(
     open(shell, &checkout, &path)
 }
 
-/// Preparations stay pending until the host has confirmed the launch or returned a placement.
-pub fn pending_trees(ledger: &crate::ledger::Ledger) -> Result<Vec<crate::cleanup::Tree>> {
-    Ok(ledger.read("preparations.json")?.unwrap_or_default())
+fn record(
+    ledger: &crate::ledger::Ledger,
+    pending: crate::cleanup::Tree,
+    request_id: Option<&str>,
+) -> Result<()> {
+    ledger.with_lock("preparations", || {
+        let mut preparations: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+        preparations.retain(|record| {
+            record.tree.path != pending.path || record.request_id.as_deref() != request_id
+        });
+        preparations.push(Pending {
+            tree: pending,
+            request_id: request_id.map(str::to_owned),
+        });
+        ledger.write("preparations.json", &preparations)
+    })
 }
 
-pub fn used(ledger: &crate::ledger::Ledger, path: &str) -> Result<()> {
+/// Internal remote preparation applies host-relative checkout routing and remembers cleanup.
+pub fn on_host(
+    node: &crate::node::Node<'_>,
+    repo: &str,
+    branch: String,
+    base: Option<&str>,
+    request_id: Option<&str>,
+) -> Result<Prepared> {
+    let repo = Path::new(node.home).join(repo).display().to_string();
+    let prepared = local(node.shell, node.ledger, &repo, &branch, base, request_id)?;
+    if let Some(path) = &prepared.path {
+        crate::cleanup::remember(
+            node.ledger,
+            crate::cleanup::Tree {
+                repo,
+                path: path.clone(),
+                branch,
+                head: String::new(),
+            },
+        )?;
+    }
+    Ok(prepared)
+}
+
+/// Preparations stay pending until the host has confirmed the launch or returned a placement.
+pub fn pending_trees(ledger: &crate::ledger::Ledger) -> Result<Vec<crate::cleanup::Tree>> {
+    let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    Ok(records.into_iter().map(|record| record.tree).collect())
+}
+
+/// Release only this preparation owner. Legacy path-only callers cannot clear identified holds.
+pub fn used(ledger: &crate::ledger::Ledger, path: &str, request_id: Option<&str>) -> Result<()> {
+    if let Some(id) = request_id {
+        crate::jobs::validate_id(id)?;
+    }
     ledger.with_lock("preparations", || {
-        let mut preparations = pending_trees(ledger)?;
-        preparations.retain(|tree| !worktree::same(&tree.path, path));
+        let mut preparations: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+        preparations.retain(|record| {
+            !worktree::same(&record.tree.path, path) || record.request_id.as_deref() != request_id
+        });
         ledger.write("preparations.json", &preparations)
     })
 }
