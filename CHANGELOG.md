@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.16.2 - 2026-10-20
+
+- Managed workers use deterministic 32-character agent names derived from their full task and execution references. UUID-shaped task identifiers now fit Herdr’s native name limit. Full binding checks remain unchanged; name collisions still produce a final refusal.
+- Previously committed launch names are not migrated or replayed automatically.
+
 ## 0.16.1 - 2026-10-20
 
 - Agent launches use Herdr’s native shell-readiness handling. Dogsled no longer rejects a newly opened shell while its initialization commands run. Terminal identity, foreign-agent checks, and unknown-outcome protection remain enforced.
