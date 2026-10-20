@@ -191,23 +191,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         }
         Command::Unit(command) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            let result = unit_request::dispatch(&fleet, command);
-            match result {
-                Ok(value) => print(true, &value, String::new)?,
-                Err(error) => {
-                    let message = error.to_string();
-                    let code = ["REQUEST_CONFLICT", "PROFILE_INVALID", "LAUNCH_UNRESOLVED"]
-                        .into_iter()
-                        .find(|code| message.starts_with(code))
-                        .unwrap_or("LAUNCH_UNRESOLVED");
-                    print(
-                        true,
-                        &serde_json::json!({"error":{"code":code,"message":message}}),
-                        String::new,
-                    )?;
-                    return Ok(error.exit_code());
-                }
-            }
+            return unit_request::run(&fleet, command);
         }
         Command::Mcp => mcp::serve(policy, ledger, home)?,
         Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,

@@ -144,11 +144,18 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
         operation(&rig, "commit", &commit_input(&executions[0], 1)).1["error"]["code"],
         "REQUEST_CONFLICT"
     );
-    assert!(rig.run(&["cancel", receipts[0].1["ticket"].as_str().unwrap()]).status.success());
+    assert!(
+        rig.run(&["cancel", receipts[0].1["ticket"].as_str().unwrap()])
+            .status
+            .success()
+    );
     let (_, state) = operation(&rig, "observe", &execution_input(&executions[0]));
     assert_eq!(state["phase"], "unresolved");
     assert!(state["settlement"].is_null());
-    assert_eq!(operation(&rig, "commit", &input).1["disposition"], "unresolved");
+    assert_eq!(
+        operation(&rig, "commit", &input).1["disposition"],
+        "unresolved"
+    );
 }
 
 #[test]
@@ -339,12 +346,13 @@ fn task_domain_policy_is_not_validated_by_dogsled() {
             "\"owns\":[\"/outside\",\"../parent\"]",
         )
         .replace("\"dependsOn\":[]", "\"dependsOn\":[\"uncompleted\"]");
-    let digest = Sha256::digest(canonical.as_bytes())
-        .iter()
-        .fold(String::new(), |mut hex, byte| {
-            write!(hex, "{byte:02x}").unwrap();
-            hex
-        });
+    let digest =
+        Sha256::digest(canonical.as_bytes())
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                write!(hex, "{byte:02x}").unwrap();
+                hex
+            });
     let mut input = commit_input(&execution, 0);
     input["exported"] = serde_json::from_str(&canonical).unwrap();
     input["exported"]["digest"] = json!(digest);

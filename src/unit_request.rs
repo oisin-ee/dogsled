@@ -41,7 +41,7 @@ fn records(ledger: &Ledger) -> Result<Vec<String>> {
         let entry = entry?;
         if entry.file_type()?.is_file() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".json") {
+            if entry.path().extension().is_some_and(|ext| ext == "json") {
                 files.push(name);
             }
         }
@@ -60,7 +60,10 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
     }
     let owner = owner()?;
     let attempts = fleet.ledger.child("admissions");
-    let lock = format!("owner-{}", crate::unit_transport::digest_hex(owner.as_bytes()));
+    let lock = format!(
+        "owner-{}",
+        crate::unit_transport::digest_hex(owner.as_bytes())
+    );
     attempts.with_lock(&lock, || {
         for file in records(&attempts)? {
             if let Some(attempt) = attempts.read::<Attempt>(&file)?
@@ -136,7 +139,7 @@ fn load(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
     Ok(attempt)
 }
 
-pub fn commit(fleet: &Fleet, input: CommitInput) -> Result<Value> {
+pub fn commit(fleet: &Fleet, input: &CommitInput) -> Result<Value> {
     crate::jobs::validate_id(&input.execution.request_id)?;
     let attempts = fleet.ledger.child("admissions");
     attempts.with_lock(&input.execution.request_id, || {
@@ -149,7 +152,7 @@ pub fn commit(fleet: &Fleet, input: CommitInput) -> Result<Value> {
             return Err(conflict("prepared request was permanently abandoned"));
         }
         if let Some(committed) = &unit.committed {
-            if committed != &input {
+            if committed != input {
                 return Err(conflict("committed payload changed"));
             }
         } else {
@@ -325,7 +328,29 @@ fn decode<T: serde::de::DeserializeOwned>(input: &str) -> Result<T> {
         .map_err(|error| conflict(&format!("invalid unit envelope: {error}")))
 }
 
-pub fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
+pub fn run(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<std::process::ExitCode> {
+    match dispatch(fleet, command) {
+        Ok(value) => {
+            crate::print(true, &value, String::new)?;
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let code = ["REQUEST_CONFLICT", "PROFILE_INVALID", "LAUNCH_UNRESOLVED"]
+                .into_iter()
+                .find(|code| message.starts_with(code))
+                .unwrap_or("LAUNCH_UNRESOLVED");
+            crate::print(
+                true,
+                &json!({"error":{"code":code,"message":message}}),
+                String::new,
+            )?;
+            Ok(error.exit_code())
+        }
+    }
+}
+
+fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
     use crate::cli::UnitCommand;
     match command {
         UnitCommand::Prepare {
@@ -336,7 +361,7 @@ pub fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value
             decode(&input)?,
             tool_call_id,
         )?)?),
-        UnitCommand::Commit { input } => commit(fleet, decode(&input)?),
+        UnitCommand::Commit { input } => commit(fleet, &decode(&input)?),
         UnitCommand::Observe { input } => observe(
             fleet.ledger,
             &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,

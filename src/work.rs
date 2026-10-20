@@ -410,7 +410,7 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
 }
 
 /// The caller owns the request's admission lock. Commit uses this path so the lock is
-/// never reacquired while runtime::start enters admission.
+/// never reacquired while `runtime::start` enters admission.
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     let attempts = fleet.ledger.child("admissions");
     let file = format!("{}.json", request.id);
