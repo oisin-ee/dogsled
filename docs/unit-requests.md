@@ -2,7 +2,7 @@
 
 Dogsled owns execution. Pi-todo owns task policy, claims, and acceptance. These commands do not validate scope, dependency completion, or acceptance criteria.
 
-This implementation follows sections 4, 5, and 8 of the approved `oisinpi` plan at `f3334e3`, with the approved `not_started` correction below.
+This implementation follows sections 4–8 of the approved `oisinpi` plan at `c20b8e2`, including its `not_started` correction.
 
 ## CLI
 
@@ -23,7 +23,7 @@ Prepare returns `{executor:"dogsled",ownerId,requestId}`. Commit returns `{execu
 
 Observe returns `{execution,origin,phase,receipt,settlement}`. It reads existing execution facts without dispatch. A launch receipt with an open item and no captured reply projects `running`.
 
-A captured reply is prose, not terminal evidence. A reply, closed item, or missing item projects `unresolved` with no settlement. This unit never projects `returned`. That phase requires the future execution-specific terminal-evidence protocol.
+A captured reply is prose, not terminal evidence. Without a terminal receipt, a reply, closed item, or missing item projects `unresolved`. Only the execution-specific protocol below permits `returned`.
 
 Errors contain `{error:{code,message}}`. Transport conflicts use `REQUEST_CONFLICT`; local profile refusals use `PROFILE_INVALID`. Other executor failures use `LAUNCH_UNRESOLVED` and never release a claim.
 
@@ -71,8 +71,56 @@ Encoding uses compact UTF-8 JSON and lowercase SHA-256 hex. Ordered Rust transpo
 
 `tests/fixtures/unit-exports.json` contains shared encoding fixtures. Both fixtures include Unicode and escaped quotes. The review fixture also includes escaped controls. They exercise both acceptance variants, not the production brief template.
 
+## Seeded launch and MCP
+
+The existing MCP spawn accepts exactly one shape:
+
+- `{unit:{id},host?,branch?,base?}` requires the future Pi bridge. Without that bridge, the handler returns `PROVIDER_UNAVAILABLE`.
+- `{preparedUnit:{execution,binding,exported}}` calls commit in the handler. Placement comes from prepare.
+- The existing explicit `{name,task,profile?,kind?,host?,branch?,base?,cwd?}` remains available.
+
+Mixed shapes and unknown keys fail. No interception hook launches a process. The future bridge must match prepared envelopes to actual tool-call IDs.
+
+The selected host writes `launches/<requestId>.unit.json` beside the task artifact. Its exact body is `{version:1,execution,binding,exported}`. Atomic ledger writes persist it before startup. Replays preserve the same artifact. Changed artifacts fail.
+
+Managed arguments add `--todo-unit-file <artifact>`, `--session-dir <private-directory>`, and `--session-id <requestId>`. The directory is `launches/<requestId>.sessions/`. Profile flags remain unchanged. Profiles with continue, resume, session, fork, no-session, seed, or argument-terminator flags fail explicitly.
+
+Before the first allocation, an existing session directory fails. Before startup, a nonempty directory fails. Unknown startup outcomes retain the existing receipt protections. Dogsled never resets a session to make a retry work.
+
+Pi 1.3.0 documents opaque session IDs and private-directory lookup in `docs/cli.md`. Its session format uses immutable IDs and parent links. Live Herdr argument forwarding and compatible importer startup remain integration proof, not claims from these Rust tests.
+
+## Worker terminal acknowledgement
+
+The worker adapter calls this command on its execution host:
+
+```text
+dogsled unit terminal-ack --input '{"execution":<ExecutionRef>,"unitRef":<UnitRef>,"digest":"...","sealEntryId":"...","sessionLeafId":"..."}'
+```
+
+The input has no caller-supplied transcript path. `HERDR_PANE_ID` must match the host launch receipt. The current terminal, Pi harness, and agent name must also match. Herdr supplies the transcript path.
+
+The transcript must be a regular JSONL file directly inside the private session directory. Symlink files and directories fail. Its v3 header must match the request ID and launch cwd, without a parent session.
+
+Dogsled walks parent links from the acknowledged leaf. Metadata entries can follow the final assistant reply. Substantive conversation after that reply fails. The final reply must contain text, stop normally, and contain no tool call. Its ancestry must reach the acknowledged seal entry. A reply before the seal, or on another branch, cannot match.
+
+Dogsled validates the seal entry's identity and ordering, not task state. The provider owns seal meaning and immutable local activation. The future adapter must obtain the seal from `imported()` at `agent_settled`.
+
+Evidence reads reject malformed, partial, duplicate, cyclic, missing, or oversized data. Limits are 32 MiB per transcript, 1 MiB per line, and 100,000 entries. Failed reads retain the binding. The receipt atomically stores acknowledgement, exact reply text, reply entry ID, and session ID. Repeated acknowledgement returns that receipt. Changed acknowledgement fails.
+
+The peer command `dogsled host unit-receipt --input '{"execution":<ExecutionRef>}'` reads the durable receipt after pane closure. Existing inbox and child refresh paths fetch it. They attach the exact reply to the existing item and persist a deterministic returned event in the admission record. The result ID combines request and reply entry IDs. Evidence summaries contain at most 2,048 characters.
+
+Managed children without terminal evidence retain automatic child-close protection. Idle, closed, missing-process, and missing-probe observations never emit a settlement. This implementation has no positive termination receipt, so it never emits `stopped`. A future termination owner must prove termination before adding that outcome.
+
+## Settlement delivery
+
+`dogsled unit settlements` returns the owner's pending `Settlement[]`. The query refreshes host evidence but starts no worker.
+
+`dogsled unit ack-settlement --input '{"execution":<ExecutionRef>,"eventId":"..."}'` returns `{applied:boolean}`. The future bridge calls it only after provider success or confirmed duplicate application.
+
+The acknowledgement lives in the admission record, separate from inbox text acknowledgement. Missing providers, stale origins, and lost acknowledgements retain the same event indefinitely. Query and observation do not consume delivery. Duplicate acknowledgement is a no-op. No bookkeeping-only model turn is necessary.
+
+Returned events carry the original TaskBinding. Not-started events carry origin and execution, without a fabricated digest. Observation retains the event after delivery acknowledgement.
+
 ## Dependent work
 
-This unit does not provide a Pi provider bridge, MCP unit input, seeded artifact transport, worker import, or startup acknowledgement. It does not deliver settlements.
-
-Commit uses the existing agent launch path with the frozen brief and selected profile. Managed seeded launches must wait for the transport and import units. Fleet installation remains separate authorization.
+This unit does not implement the Pi provider bridge, worker importer, or startup guard. It does not prove loaded-guard startup behavior, resumed-session behavior, or fleet deployment. Compatible packages and the live integration scenario remain dependent work. Fleet installation requires separate authorization.

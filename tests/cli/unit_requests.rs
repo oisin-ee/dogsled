@@ -1,6 +1,6 @@
 use super::*;
 
-fn exported(index: usize) -> Value {
+pub(super) fn exported(index: usize) -> Value {
     let fixtures: Value =
         serde_json::from_str(include_str!("../fixtures/unit-exports.json")).unwrap();
     let mut value: Value =
@@ -9,7 +9,7 @@ fn exported(index: usize) -> Value {
     value
 }
 
-fn rig(name: &str, full: bool) -> Rig {
+pub(super) fn rig(name: &str, full: bool) -> Rig {
     let rig = Rig::new(name);
     rig.snapshot("state/host.json", now(), if full { 3.0 } else { 0.0 }, 2);
     let dir = rig.dir.join("profiles/worker");
@@ -19,7 +19,7 @@ fn rig(name: &str, full: bool) -> Rig {
     rig
 }
 
-fn prepare(rig: &Rig) -> Value {
+pub(super) fn prepare(rig: &Rig) -> Value {
     let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{}});
     let (code, execution) = rig.json(&[
         "unit",
@@ -33,20 +33,20 @@ fn prepare(rig: &Rig) -> Value {
     execution
 }
 
-fn commit_input(execution: &Value, index: usize) -> Value {
+pub(super) fn commit_input(execution: &Value, index: usize) -> Value {
     let export = exported(index);
     json!({"execution":execution,"binding":{"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]},"exported":export})
 }
 
-fn operation(rig: &Rig, operation: &str, input: &Value) -> (i32, Value) {
+pub(super) fn operation(rig: &Rig, operation: &str, input: &Value) -> (i32, Value) {
     rig.json(&["unit", operation, "--input", &input.to_string()])
 }
 
-fn execution_input(execution: &Value) -> Value {
+pub(super) fn execution_input(execution: &Value) -> Value {
     json!({"execution":execution})
 }
 
-fn admission(rig: &Rig, execution: &Value) -> Value {
+pub(super) fn admission(rig: &Rig, execution: &Value) -> Value {
     rig.read(&format!(
         "state/admissions/{}.json",
         execution["requestId"].as_str().unwrap()

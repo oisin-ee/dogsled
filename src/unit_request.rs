@@ -21,6 +21,10 @@ pub struct Prepared {
     pub tool_call_id: String,
     pub committed: Option<CommitInput>,
     pub abandoned: Option<NotStarted>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returned: Option<crate::unit_transport::Returned>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_ack: Option<String>,
 }
 
 fn owner() -> Result<String> {
@@ -114,6 +118,8 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
                 tool_call_id,
                 committed: None,
                 abandoned: None,
+                returned: None,
+                settlement_ack: None,
             }),
         };
         attempts.write(&format!("{}.json", execution.request_id), &attempt)?;
@@ -235,7 +241,9 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
         .as_ref()
         .ok_or_else(|| conflict("not a unit request"))?;
     let receipt = receipt(ledger, &attempt)?;
-    let phase = if unit.abandoned.is_some() {
+    let phase = if unit.returned.is_some() {
+        "returned"
+    } else if unit.abandoned.is_some() {
         "not_started"
     } else if unit.committed.is_none() {
         "prepared"
@@ -265,7 +273,7 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
         "unresolved"
     };
     Ok(
-        json!({"execution":execution,"origin":unit.origin,"phase":phase,"receipt":receipt,"settlement":unit.abandoned}),
+        json!({"execution":execution,"origin":unit.origin,"phase":phase,"receipt":receipt,"settlement":settlement(unit)?}),
     )
 }
 
@@ -325,6 +333,175 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
     Ok(())
 }
 
+fn settlement(unit: &Prepared) -> Result<Value> {
+    Ok(if let Some(event) = &unit.returned {
+        serde_json::to_value(event)?
+    } else {
+        serde_json::to_value(&unit.abandoned)?
+    })
+}
+
+/// Existing inbox/refresh lane imports immutable host evidence. Missing or unreachable
+/// hosts prove nothing; this never manufactures stopped from probes or closed items.
+pub fn refresh(fleet: &Fleet) -> Result<()> {
+    let attempts = fleet.ledger.child("admissions");
+    for file in records(&attempts)? {
+        let Some(attempt) = attempts.read::<Attempt>(&file)? else {
+            continue;
+        };
+        let Some(unit) = attempt.unit.as_ref() else {
+            continue;
+        };
+        if unit.committed.is_none() || unit.abandoned.is_some() || unit.returned.is_some() {
+            continue;
+        }
+        let Some(host) = attempt.host.as_ref() else {
+            continue;
+        };
+        let receipt = if host.is_local() {
+            crate::launch::unit_receipt(fleet.ledger, &unit.execution)
+        } else {
+            fleet.remote(
+                host,
+                &[
+                    "unit-receipt".into(),
+                    "--input".into(),
+                    json!({"execution":unit.execution}).to_string(),
+                ],
+            )
+        };
+        let receipt: crate::unit_reply::Receipt = match receipt {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => continue,
+            Err(error) => {
+                eprintln!(
+                    "dogsled unit evidence {}: {error}",
+                    unit.execution.request_id
+                );
+                continue;
+            }
+        };
+        import_receipt(fleet.ledger, &file, receipt)?;
+    }
+    Ok(())
+}
+
+fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Receipt) -> Result<()> {
+    let attempts = ledger.child("admissions");
+    attempts.with_lock(&receipt.ack.execution.request_id, || {
+        let mut current = attempts
+            .read::<Attempt>(file)?
+            .ok_or_else(|| conflict("admission disappeared"))?;
+        let unit = current
+            .unit
+            .as_mut()
+            .ok_or_else(|| conflict("unit admission disappeared"))?;
+        let committed = unit
+            .committed
+            .as_ref()
+            .ok_or_else(|| conflict("unit is not committed"))?;
+        if receipt.ack.execution != unit.execution
+            || receipt.ack.unit_ref != unit.origin
+            || receipt.ack.digest != committed.exported.digest
+            || receipt.session_id != unit.execution.request_id
+        {
+            return Err(conflict("host terminal evidence does not match commitment"));
+        }
+        let event = crate::unit_transport::Returned {
+            version: 1,
+            event_id: format!("{}-returned", unit.execution.request_id),
+            binding: committed.binding.clone(),
+            result: crate::unit_transport::ReturnedResult::Returned {
+                evidence: crate::unit_transport::Evidence {
+                    execution: unit.execution.clone(),
+                    result_id: format!("{}-{}", unit.execution.request_id, receipt.reply_entry_id),
+                    summary: receipt.text.chars().take(2048).collect(),
+                },
+            },
+        };
+        if let Some(saved) = &unit.returned {
+            if saved != &event {
+                return Err(conflict("contradictory terminal evidence"));
+            }
+            return Ok(());
+        }
+        unit.returned = Some(event);
+        // Keep the exact acknowledged text inspectable in the existing reply record.
+        // This is not the release decision: only the immutable host receipt permits it.
+        if let Some(item) = crate::items::list(ledger)?
+            .into_iter()
+            .find(|i| i.id == unit.execution.request_id)
+        {
+            crate::items::set_reply(
+                ledger,
+                &item.id,
+                crate::items::Reply {
+                    seq: item.reply.as_ref().map_or(0, |r| r.seq),
+                    result_id: Some(format!(
+                        "{}-{}",
+                        unit.execution.request_id, receipt.reply_entry_id
+                    )),
+                    text: receipt.text,
+                    captured_ms: crate::ledger::now_ms(),
+                    reported_ms: None,
+                },
+            )?;
+        }
+        attempts.write(file, &current)
+    })
+}
+
+pub fn managed_returned(ledger: &Ledger, id: &str) -> Result<Option<bool>> {
+    crate::jobs::validate_id(id)?;
+    Ok(ledger
+        .child("admissions")
+        .read::<Attempt>(&format!("{id}.json"))?
+        .and_then(|a| a.unit)
+        .map(|u| u.returned.is_some()))
+}
+
+pub fn settlements(fleet: &Fleet) -> Result<Value> {
+    refresh(fleet)?;
+    let owner = owner()?;
+    let attempts = fleet.ledger.child("admissions");
+    let mut pending = Vec::new();
+    for file in records(&attempts)? {
+        if let Some(attempt) = attempts.read::<Attempt>(&file)?
+            && let Some(unit) = attempt.unit
+            && unit.execution.owner_id == owner
+            && unit.settlement_ack.is_none()
+        {
+            let event = settlement(&unit)?;
+            if !event.is_null() {
+                pending.push(event);
+            }
+        }
+    }
+    Ok(json!(pending))
+}
+
+fn ack_settlement(ledger: &Ledger, input: &crate::unit_transport::SettlementAck) -> Result<Value> {
+    crate::jobs::validate_id(&input.execution.request_id)?;
+    let attempts = ledger.child("admissions");
+    attempts.with_lock(&input.execution.request_id, || {
+        let mut attempt = load(&attempts, &input.execution)?;
+        let unit = attempt
+            .unit
+            .as_mut()
+            .ok_or_else(|| conflict("not a unit request"))?;
+        let event = settlement(unit)?;
+        if event["eventId"].as_str() != Some(input.event_id.as_str()) {
+            return Err(conflict(
+                "settlement acknowledgement does not match pending event",
+            ));
+        }
+        let applied = unit.settlement_ack.is_none();
+        unit.settlement_ack = Some(input.event_id.clone());
+        attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+        Ok(json!({"applied":applied}))
+    })
+}
+
 fn decode<T: serde::de::DeserializeOwned>(input: &str) -> Result<T> {
     serde_json::from_str(input)
         .map_err(|error| conflict(&format!("invalid unit envelope: {error}")))
@@ -364,10 +541,18 @@ fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
             tool_call_id,
         )?)?),
         UnitCommand::Commit { input } => commit(fleet, &decode(&input)?),
-        UnitCommand::Observe { input } => observe(
-            fleet.ledger,
-            &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,
-        ),
+        UnitCommand::Observe { input } => {
+            refresh(fleet)?;
+            observe(
+                fleet.ledger,
+                &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,
+            )
+        }
+        UnitCommand::TerminalAck { input } => Ok(serde_json::to_value(
+            crate::launch::terminal_ack(fleet.ledger, fleet.shell, &decode(&input)?)?,
+        )?),
+        UnitCommand::Settlements => settlements(fleet),
+        UnitCommand::AckSettlement { input } => ack_settlement(fleet.ledger, &decode(&input)?),
         UnitCommand::AbandonPrepared { input } => Ok(serde_json::to_value(abandon(
             fleet.ledger,
             &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,

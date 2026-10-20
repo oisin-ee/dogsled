@@ -107,7 +107,7 @@ fn mcp_lists_the_ten_tools_with_their_schemas() {
             expect("read", &["target"]),
             expect("run", &["cmd"]),
             expect("send", &["message", "target"]),
-            expect("spawn", &["name", "task"]),
+            expect("spawn", &[]),
             expect("status", &[]),
             expect("stop", &["id"]),
         ]
@@ -118,12 +118,58 @@ fn mcp_lists_the_ten_tools_with_their_schemas() {
         .iter()
         .find(|t| t["name"] == "spawn")
         .unwrap();
+    let alternatives = spawn["inputSchema"]["anyOf"].as_array().unwrap();
+    assert_eq!(alternatives.len(), 3, "{spawn}");
+    let schema = &spawn["inputSchema"];
+    let legacy = alternatives[2]["$ref"]
+        .as_str()
+        .map_or(&alternatives[2], |reference| {
+            schema
+                .pointer(reference.strip_prefix('#').unwrap())
+                .unwrap()
+        });
+    assert_eq!(legacy["additionalProperties"], false, "{schema}");
     for field in ["profile", "kind", "host", "branch", "base", "cwd"] {
-        assert!(
-            spawn["inputSchema"]["properties"][field].is_object(),
-            "{spawn}"
-        );
+        assert!(legacy["properties"][field].is_object(), "{spawn}");
     }
+}
+
+#[test]
+fn mcp_spawn_accepts_only_unit_prepared_or_legacy_and_handler_commits() {
+    use super::unit_requests::*;
+    let rig = rig("mcp-unit", true);
+    let execution = prepare(&rig);
+    let input = commit_input(&execution, 0);
+    let mut client = Client::start(&rig);
+    let (error, failed) = client.call("spawn", &json!({"unit":{"id":"u-17"}}));
+    assert!(failed, "{error}");
+    assert!(error.as_str().unwrap().contains("PROVIDER_UNAVAILABLE"));
+    assert!(admission(&rig, &execution)["unit"]["committed"].is_null());
+    for invalid in [
+        json!({"unit":{"id":"u-17"},"task":"go","name":"w"}),
+        json!({"unit":{"id":"u-17"},"cwd":"/tmp"}),
+        json!({"preparedUnit":input,"host":"local"}),
+        json!({"preparedUnit":input,"name":"w","task":"go"}),
+        json!({"preparedUnit":input,"unit":{"id":"u-17"}}),
+    ] {
+        let response = client.request("tools/call", &json!({"name":"spawn","arguments":invalid}));
+        assert!(
+            response.is_null() || response["isError"] == true,
+            "{response}"
+        );
+        assert!(admission(&rig, &execution)["unit"]["committed"].is_null());
+    }
+    let (receipt, failed) = client.call("spawn", &json!({"preparedUnit":input}));
+    assert!(!failed, "{receipt}");
+    assert_eq!(receipt["disposition"], "queued");
+    assert_eq!(receipt["execution"], execution);
+    assert_eq!(admission(&rig, &execution)["unit"]["committed"], input);
+    assert_eq!(
+        client.call("spawn", &json!({"preparedUnit":input})).0,
+        receipt
+    );
+    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
+    assert!(!rig.log("herdr.log").contains("agent start"));
 }
 
 #[test]

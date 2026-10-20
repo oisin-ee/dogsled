@@ -235,6 +235,18 @@ pub enum UnitCommand {
         #[arg(long)]
         input: String,
     },
+    /// Worker-host acknowledgement of a sealed execution and final reply boundary.
+    TerminalAck {
+        #[arg(long)]
+        input: String,
+    },
+    /// Pending task settlements for this owner; never consumes transcript delivery.
+    Settlements,
+    /// Record provider success or confirmed duplicate application.
+    AckSettlement {
+        #[arg(long)]
+        input: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -337,6 +349,11 @@ pub enum HostCommand {
     Tail {
         kind: String,
         id: String,
+    },
+    /// Read immutable seeded terminal evidence on its execution host.
+    UnitReceipt {
+        #[arg(long)]
+        input: String,
     },
     /// The final reply of the finished agent in a pane.
     Reply {

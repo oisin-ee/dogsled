@@ -200,6 +200,7 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
 /// done, clean, and pushed, close exactly as `dogsled close` would. Orphans that stay are
 /// recorded for status and check-ins.
 pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
+    crate::unit_request::refresh(fleet)?;
     let items: Vec<Item> = crate::items::list(fleet.ledger)?
         .into_iter()
         .filter(|i| i.closed_ms.is_none() && i.kind == "agent")
@@ -279,6 +280,11 @@ fn settle(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
     if !matches!(agent.state.as_str(), "idle" | "done") {
         return Some(format!("{owner}; the child is {}", agent.state));
     }
+    match crate::unit_request::managed_returned(fleet.ledger, &item.id) {
+        Ok(Some(false)) => return Some("unit terminal acknowledgement is unresolved".into()),
+        Err(error) => return Some(format!("cannot read unit evidence: {error}")),
+        _ => (),
+    }
     match close(fleet, item, &report.host, Guard::Pushed) {
         Ok(closed) => {
             if let Err(error) = crate::items::close(fleet.ledger, &item.host, &item.pane, now) {
@@ -321,7 +327,10 @@ fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
                 },
                 reply.text
             );
-            let id = format!("reply-{}-{}", item.id, reply.seq);
+            let id = reply.result_id.as_ref().map_or_else(
+                || format!("reply-{}-{}", item.id, reply.seq),
+                |id| format!("unit-reply-{id}"),
+            );
             if crate::inbox::notify(
                 fleet.ledger,
                 reports,
@@ -417,7 +426,11 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
     if !matches!(agent.state.as_str(), "idle" | "done") {
         return None;
     }
-    if item.reply.as_ref().is_none_or(|r| r.seq != seq) {
+    let managed = match crate::unit_request::managed_returned(fleet.ledger, &item.id) {
+        Ok(managed) => managed,
+        Err(error) => return Some(format!("cannot read unit evidence: {error}")),
+    };
+    if managed != Some(true) && item.reply.as_ref().is_none_or(|r| r.seq != seq) {
         let read = if report.host.is_local() {
             local_reply(fleet.shell, &item.pane)
         } else {
@@ -430,6 +443,7 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
         };
         let reply = Reply {
             seq: captured.seq,
+            result_id: None,
             text: captured.text,
             captured_ms: now,
             reported_ms: None,
@@ -437,6 +451,9 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
         if let Err(error) = crate::items::set_reply(fleet.ledger, &item.id, reply) {
             return Some(format!("cannot keep its final reply: {error}"));
         }
+    }
+    if managed == Some(false) {
+        return Some("unit terminal acknowledgement is unresolved".into());
     }
     let guard = if item.role.as_deref() == Some("writer") {
         Guard::Writer

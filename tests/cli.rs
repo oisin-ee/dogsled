@@ -33,6 +33,8 @@ mod sweep;
 mod transcripts;
 #[path = "cli/unit_requests.rs"]
 mod unit_requests;
+#[path = "cli/unit_seeded.rs"]
+mod unit_seeded;
 #[path = "cli/watchdog.rs"]
 mod watchdog;
 

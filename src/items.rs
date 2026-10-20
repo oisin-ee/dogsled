@@ -34,6 +34,9 @@ pub struct Item {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reply {
     pub seq: u64,
+    /// Immutable execution evidence uses a separate identity from turn notifications.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
     pub text: String,
     pub captured_ms: u64,
     /// When the owner was told. A closed item with an untold reply still reports it.

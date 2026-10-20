@@ -52,6 +52,8 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launch {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<crate::unit_transport::Seed>,
     pub action: Action,
     pub host: String,
     pub cwd: String,
@@ -231,6 +233,11 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
 
 pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
+    if launch.unit.is_some() && !matches!(launch.action, Action::Agent { .. }) {
+        return Err(crate::unit_transport::conflict(
+            "seed requires an agent launch",
+        ));
+    }
     if matches!(launch.action, Action::Agent { .. }) {
         let result = crate::launch::agent(ledger, shell, launch)?;
         crate::prepare::used(ledger, &launch.cwd)?;
@@ -529,8 +536,16 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
     } else {
         request.cwd.clone()
     };
+    let unit = fleet
+        .ledger
+        .child("admissions")
+        .read::<Attempt>(&format!("{}.json", request.id))?
+        .and_then(|a| a.unit)
+        .and_then(|u| u.committed)
+        .map(crate::unit_transport::Seed::from);
     Ok(Launch {
         id: request.id.clone(),
+        unit,
         action: request.action.clone(),
         host: host.id.clone(),
         cwd,

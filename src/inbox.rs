@@ -893,6 +893,7 @@ impl Listing {
 
 /// The service's inbox lane: maintain this host's inboxes, then follow up what it sent.
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
+    crate::unit_request::refresh(fleet)?;
     let live: Vec<String> = fleet
         .ledger
         .read::<crate::node::Snapshot>("host.json")?

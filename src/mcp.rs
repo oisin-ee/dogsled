@@ -41,7 +41,37 @@ pub struct StatusArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct SpawnArgs {
+#[serde(untagged)]
+#[schemars(extend("type" = "object"))]
+pub enum SpawnArgs {
+    Unit(UnitSpawn),
+    Prepared(Box<PreparedSpawn>),
+    Legacy(LegacySpawn),
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UnitSelector {
+    pub id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UnitSpawn {
+    pub unit: UnitSelector,
+    #[serde(flatten)]
+    pub placement: crate::unit_transport::Placement,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreparedSpawn {
+    pub prepared_unit: crate::unit_transport::CommitInput,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegacySpawn {
     /// The task, as the child's first prompt. Multi-line text is fine.
     pub task: String,
     /// A short name for the child; `send`, `read`, and `close` accept it.
@@ -198,6 +228,13 @@ impl Server {
     )]
     async fn spawn(&self, Parameters(args): Parameters<SpawnArgs>) -> Result<String, String> {
         self.call(move |fleet| {
+            let args = match args {
+                SpawnArgs::Unit(args) => {
+                    return Err(Error::Invalid(format!("PROVIDER_UNAVAILABLE: unit {} with placement {:?} requires the Dogsled Pi bridge", args.unit.id, args.placement)));
+                },
+                SpawnArgs::Prepared(args) => return crate::unit_request::commit(fleet, &args.prepared_unit),
+                SpawnArgs::Legacy(args) => args,
+            };
             let placement = args.placement.args();
             let action = crate::runtime::agent_action(
                 fleet,

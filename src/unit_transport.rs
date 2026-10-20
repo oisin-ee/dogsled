@@ -1,12 +1,13 @@
 //! Frozen task transport. Schema and correlation checks only; task policy stays in pi-todo.
 
+use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fmt::Write as _;
 
 use crate::error::{Error, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnitRef {
     pub session_id: String,
@@ -15,7 +16,7 @@ pub struct UnitRef {
     pub contract_entry_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionRef {
     pub executor: String,
@@ -23,7 +24,7 @@ pub struct ExecutionRef {
     pub request_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Binding {
     pub contract: UnitRef,
@@ -31,7 +32,7 @@ pub struct Binding {
     pub export_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Placement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,7 +43,7 @@ pub struct Placement {
     pub base: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Assignment {
     #[serde(rename = "self")]
@@ -52,7 +53,7 @@ pub enum Assignment {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Scope {
     pub repository_id: String,
@@ -61,7 +62,7 @@ pub struct Scope {
     pub generates: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Acceptance {
     Command {
@@ -75,7 +76,7 @@ pub enum Acceptance {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Contract {
     #[serde(rename = "ref")]
@@ -88,14 +89,14 @@ pub struct Contract {
     pub assignment: Assignment,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Prerequisite {
     pub unit_id: String,
     pub completed_revision: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Export {
     pub version: u64,
@@ -198,12 +199,87 @@ pub struct PrepareInput {
     pub placement: Placement,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommitInput {
     pub execution: ExecutionRef,
     pub binding: Binding,
     pub exported: Export,
+}
+
+/// Exact durable host artifact; no task semantics are interpreted here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Seed {
+    pub version: u64,
+    pub execution: ExecutionRef,
+    pub binding: Binding,
+    pub exported: Export,
+}
+
+impl From<CommitInput> for Seed {
+    fn from(input: CommitInput) -> Self {
+        Self {
+            version: 1,
+            execution: input.execution,
+            binding: input.binding,
+            exported: input.exported,
+        }
+    }
+}
+
+impl Seed {
+    pub fn validate(&self, id: &str, owner: &str) -> Result<&str> {
+        if self.version != 1
+            || self.execution.executor != "dogsled"
+            || self.execution.request_id != id
+            || self.execution.owner_id != owner
+        {
+            return Err(conflict("seed does not match launch identity"));
+        }
+        self.exported
+            .validate(&self.binding, &self.binding.contract, &self.execution)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TerminalAck {
+    pub execution: ExecutionRef,
+    pub unit_ref: UnitRef,
+    pub digest: String,
+    pub seal_entry_id: String,
+    pub session_leaf_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Evidence {
+    pub execution: ExecutionRef,
+    pub result_id: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Returned {
+    pub version: u64,
+    pub event_id: String,
+    pub binding: Binding,
+    pub result: ReturnedResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReturnedResult {
+    Returned { evidence: Evidence },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettlementAck {
+    pub execution: ExecutionRef,
+    pub event_id: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -17,6 +17,8 @@ struct Progress {
     confirmed: bool,
     result: Value,
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_receipt: Option<crate::unit_reply::Receipt>,
 }
 
 /// Incomplete host-owned receipts protect their checkout, including interrupted starts.
@@ -105,6 +107,15 @@ fn allocate(
     // pane is deliberately not retried after a crash: its ownership is uncertain.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
     work::agent_args(kind, name, message, "task", profile.as_ref())?;
+    if let Some(seed) = &request.unit {
+        validate_seed(request, seed, profile.as_ref())?;
+        let sessions = receipts.dir.join(format!("{}.sessions", request.id));
+        if sessions.exists() {
+            return Err(crate::unit_transport::conflict(
+                "fresh unit session directory already exists",
+            ));
+        }
+    }
     let mut result = json!({"host":request.host,"name":name});
     if let Some(profile) = &profile {
         result["profile"] = json!(profile.name);
@@ -122,6 +133,7 @@ fn allocate(
         confirmed: false,
         result,
         error: None,
+        terminal_receipt: None,
     };
     receipts.write(file, &progress)?;
     let (pane, terminal) = work::pane(shell, request)?;
@@ -186,6 +198,7 @@ fn start_or_reconcile(
     idle(shell, pane)?;
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
     let task = work::task_file(ledger, &request.id, message)?;
+    let seed_flags = seed_flags(ledger, request, profile.as_ref())?;
     let mut args = vec![
         "agent".into(),
         "start".into(),
@@ -196,6 +209,7 @@ fn start_or_reconcile(
         pane.into(),
         "--".into(),
     ];
+    args.extend(seed_flags);
     args.extend(work::agent_args(
         kind,
         name,
@@ -212,6 +226,181 @@ fn start_or_reconcile(
         return Err(error);
     }
     Ok(())
+}
+
+fn validate_seed<'a>(
+    request: &Launch,
+    seed: &'a crate::unit_transport::Seed,
+    profile: Option<&crate::profiles::Profile>,
+) -> Result<&'a str> {
+    let expected = seed.validate(&request.id, &request.owner)?;
+    let Action::Agent {
+        kind,
+        profile: selected,
+        name,
+        message,
+    } = &request.action
+    else {
+        return Err(crate::unit_transport::conflict("seed requires an agent"));
+    };
+    if kind != "pi"
+        || selected.as_deref() != Some(expected)
+        || *message != seed.exported.brief
+        || *name
+            != format!(
+                "unit-{}-r{}",
+                seed.binding.contract.unit_id, seed.binding.contract.revision
+            )
+    {
+        return Err(crate::unit_transport::conflict(
+            "seed requires its assigned Pi profile",
+        ));
+    }
+    if profile.is_none_or(|p| {
+        p.pi_args.iter().any(|arg| {
+            matches!(
+                arg.split('=').next().unwrap_or(arg),
+                "-c" | "--continue"
+                    | "-r"
+                    | "--resume"
+                    | "--session"
+                    | "--session-id"
+                    | "--session-dir"
+                    | "--fork"
+                    | "--no-session"
+                    | "--todo-unit-file"
+                    | "--"
+            )
+        })
+    }) {
+        return Err(Error::Invalid("PROFILE_INVALID: managed units require fresh persisted sessions; profile session/seed flags are incompatible".into()));
+    }
+    Ok(expected)
+}
+
+fn seed_flags(
+    ledger: &Ledger,
+    request: &Launch,
+    profile: Option<&crate::profiles::Profile>,
+) -> Result<Vec<String>> {
+    let Some(seed) = &request.unit else {
+        return Ok(Vec::new());
+    };
+    validate_seed(request, seed, profile)?;
+    let receipts = ledger.child("launches");
+    let file = format!("{}.unit.json", request.id);
+    match receipts.read::<crate::unit_transport::Seed>(&file)? {
+        Some(saved) if saved != *seed => {
+            return Err(crate::unit_transport::conflict("durable seed changed"));
+        }
+        Some(_) => (),
+        None => receipts.write(&file, seed)?,
+    }
+    let sessions = receipts.dir.join(format!("{}.sessions", request.id));
+    std::fs::create_dir_all(&sessions)?;
+    if std::fs::read_dir(&sessions)?.next().is_some() {
+        return Err(crate::unit_transport::conflict(
+            "fresh unit session directory is not empty",
+        ));
+    }
+    Ok(vec![
+        "--todo-unit-file".into(),
+        receipts.dir.join(file).display().to_string(),
+        "--session-dir".into(),
+        sessions.display().to_string(),
+        "--session-id".into(),
+        request.id.clone(),
+    ])
+}
+
+/// Worker acknowledgement is host-owned, serialized with launch and kept with its receipt.
+pub fn terminal_ack(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    ack: &crate::unit_transport::TerminalAck,
+) -> Result<crate::unit_reply::Receipt> {
+    crate::jobs::validate_id(&ack.execution.request_id)?;
+    let receipts = ledger.child("launches");
+    receipts.with_lock(&ack.execution.request_id, || {
+        let file = format!("{}.progress.json", ack.execution.request_id);
+        let mut progress = receipts
+            .read::<Progress>(&file)?
+            .ok_or_else(|| crate::unit_transport::conflict("unknown host launch"))?;
+        let pane = progress
+            .pane
+            .as_deref()
+            .ok_or_else(|| crate::unit_transport::conflict("launch has no pane"))?;
+        if std::env::var("HERDR_PANE_ID").ok().as_deref() != Some(pane) {
+            return Err(crate::unit_transport::conflict(
+                "terminal acknowledgement requires the worker pane",
+            ));
+        }
+        if terminal(shell, pane)?.as_str() != progress.terminal.as_deref().unwrap_or_default() {
+            return Err(crate::unit_transport::conflict("launch terminal changed"));
+        }
+        if let Some(saved) = &progress.terminal_receipt {
+            if saved.ack != *ack {
+                return Err(crate::unit_transport::conflict(
+                    "terminal acknowledgement changed",
+                ));
+            }
+            return Ok(saved.clone());
+        }
+        if !progress.attempted {
+            return Err(crate::unit_transport::conflict("worker was not launched"));
+        }
+        let seed = progress
+            .request
+            .unit
+            .as_ref()
+            .ok_or_else(|| crate::unit_transport::conflict("not a seeded launch"))?;
+        let agent = crate::probe::agent_list(shell)?
+            .into_iter()
+            .find(|a| a.pane == pane)
+            .ok_or_else(|| crate::unit_transport::conflict("worker session unavailable"))?;
+        let Action::Agent { name, .. } = &progress.request.action else {
+            return Err(crate::unit_transport::conflict("not an agent launch"));
+        };
+        if agent.agent.as_deref() != Some("pi")
+            || agent.terminal_id != progress.terminal
+            || agent.name.as_deref() != Some(name.as_str())
+        {
+            return Err(crate::unit_transport::conflict(
+                "worker session identity changed",
+            ));
+        }
+        let path = agent
+            .transcript
+            .as_deref()
+            .ok_or_else(|| crate::unit_transport::conflict("worker transcript unavailable"))?;
+        let receipt = crate::unit_reply::capture(ledger, &progress.request, seed, ack, path)?;
+        progress.terminal_receipt = Some(receipt.clone());
+        receipts.write(&file, &progress)?;
+        Ok(receipt)
+    })
+}
+
+/// Peer refresh reads the immutable receipt, even after the worker pane has closed.
+pub fn unit_receipt(
+    ledger: &Ledger,
+    execution: &crate::unit_transport::ExecutionRef,
+) -> Result<Option<crate::unit_reply::Receipt>> {
+    crate::jobs::validate_id(&execution.request_id)?;
+    let progress = ledger
+        .child("launches")
+        .read::<Progress>(&format!("{}.progress.json", execution.request_id))?;
+    let Some(progress) = progress else {
+        return Ok(None);
+    };
+    if progress
+        .request
+        .unit
+        .as_ref()
+        .is_none_or(|s| s.execution != *execution)
+    {
+        return Err(crate::unit_transport::conflict("host execution mismatch"));
+    }
+    Ok(progress.terminal_receipt)
 }
 
 fn idle(shell: &dyn Shell, pane: &str) -> Result<()> {

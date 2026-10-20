@@ -37,6 +37,7 @@ mod service;
 mod shell;
 mod sweep;
 mod transcript;
+mod unit_reply;
 mod unit_request;
 mod unit_transport;
 mod watchdog;
@@ -317,6 +318,14 @@ fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool)
 /// The host commands that act on one child pane.
 fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     match cmd {
+        HostCommand::UnitReceipt { input } => print(
+            true,
+            &launch::unit_receipt(
+                node.ledger,
+                &serde_json::from_str::<unit_transport::ExecutionInput>(&input)?.execution,
+            )?,
+            String::new,
+        )?,
         HostCommand::Reply { pane } => {
             print(true, &sweep::local_reply(node.shell, &pane)?, String::new)?;
         }
@@ -388,7 +397,9 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             print(true, &tail, String::new)?;
         }
         HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
-        HostCommand::Reply { .. } | HostCommand::Close { .. } => child(cmd, node)?,
+        HostCommand::Reply { .. } | HostCommand::Close { .. } | HostCommand::UnitReceipt { .. } => {
+            child(cmd, node)?;
+        }
         HostCommand::Prune { plan } => print(
             true,
             &cleanup::apply(node, &serde_json::from_str(&plan)?, now_ms())?,
