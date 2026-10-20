@@ -13,6 +13,7 @@ A child finishes when it says so, not when it goes idle.
 - A turn that ends without `done` still sends its reply to the owner's inbox, and says that the child waits for input.
 - Breaking: an idle agent that has not called `done` holds its checkout in prune, the sweep, and an automatic close. The board shows it as running, not TO LAND. Only an explicit `dogsled close` takes it.
 - Queue order holds per host. A full host no longer holds back a ticket pinned to another host with room. Before, the first ticket that found no room ended the admission pass for every host.
+- A host with a stale snapshot gives the snapshot's age in its reason, such as `service: down (last snapshot 44s ago)`. The `service` field is still `down`.
 
 ## 0.14.0 - 2026-10-20
 

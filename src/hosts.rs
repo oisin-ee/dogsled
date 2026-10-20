@@ -307,7 +307,17 @@ impl<'a> Fleet<'a> {
             let mut headroom = evaluate(probe, &self.thresholds());
             if !fresh {
                 headroom.eligible = false;
-                headroom.reason = Some("service: down".into());
+                // A late snapshot and a stopped service both read as down. The age tells the
+                // reader which: a slow tick on a loaded host is tens of seconds old.
+                headroom.reason = Some(sampled_ms.map_or_else(
+                    || "service: down".into(),
+                    |sampled| {
+                        format!(
+                            "service: down (last snapshot {} ago)",
+                            crate::watchdog::age(now.saturating_sub(sampled))
+                        )
+                    },
+                ));
             }
             headroom
         });
@@ -472,6 +482,12 @@ mod tests {
         shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
         assert_eq!(fleet.status(30_100).unwrap()[0].service, "up");
         assert_eq!(fleet.status(30_101).unwrap()[0].service, "down");
+        let stale = fleet.status(44_100).unwrap();
+        assert_eq!(stale[0].service, "down");
+        assert_eq!(
+            stale[0].headroom.as_ref().unwrap().reason.as_deref(),
+            Some("service: down (last snapshot 44s ago)")
+        );
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
