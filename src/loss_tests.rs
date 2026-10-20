@@ -219,11 +219,22 @@ fn survey_continues_past_missing_repositories_and_scopes_agree() {
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
     };
+    // The survey also finds the repository of the process's working directory. Under
+    // `cargo test` that is the developer's own checkout, so every assertion reads only this
+    // fixture's entries, named by its unique temporary root.
+    let marker = repo.root.file_name().unwrap().to_str().unwrap().to_owned();
+    let fixture = |e: &&crate::cleanup::Entry| {
+        e.id.contains(&marker)
+            || e.tree
+                .as_ref()
+                .is_some_and(|t| t.repo.contains(&marker) || t.path.contains(&marker))
+    };
     let prune = survey(&node, Scope::Prune, 100).unwrap();
     let sweep = survey(&node, Scope::Sweep, 100).unwrap();
     let decisions = |plan: &crate::cleanup::Plan| {
         plan.entries
             .iter()
+            .filter(fixture)
             .filter(|e| matches!(e.class.as_str(), "worktrees" | "branches"))
             .map(|e| (e.id.clone(), e.removable))
             .collect::<Vec<_>>()
@@ -306,18 +317,22 @@ fn gone_upstream_with_local_work_stays_but_integrated_branch_is_deleted() {
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
     };
+    // Only this fixture's entries: the survey also reads the developer's own checkout, and
+    // `apply` below must never act on it.
+    let marker = repo.root.file_name().unwrap().to_str().unwrap().to_owned();
     let plan = survey(&node, Scope::Prune, 100).unwrap();
     assert!(
         plan.entries
             .iter()
-            .any(|e| e.class == "branches" && !e.removable)
+            .any(|e| e.id.contains(&marker) && e.class == "branches" && !e.removable)
     );
     assert!(git(&repo.repo, &["branch", "-vv"]).contains("gone"));
     git(&repo.repo, &["merge", "-q", "--squash", "feature"]);
     git(&repo.repo, &["commit", "-q", "-m", "integrated"]);
     git(&repo.repo, &["push", "-q", "origin", "main"]);
     let mut plan = survey(&node, Scope::Prune, 100).unwrap();
-    plan.entries.retain(|e| e.class == "branches");
+    plan.entries
+        .retain(|e| e.id.contains(&marker) && e.class == "branches");
     assert_eq!(plan.entries.len(), 1);
     assert!(plan.entries[0].removable);
     let applied = crate::cleanup::apply(&node, &plan, 100).unwrap();
