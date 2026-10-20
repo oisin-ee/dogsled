@@ -69,7 +69,7 @@ dogsled ps | logs <id> | stop <id> | wait <id>
 
 - Placement as in part 2. With `--branch`, dogsled creates the worktree on the selected host.
   Without a branch, remote work runs in `--cwd`. Non-repository directories must already exist there.
-- Dogsled opens a pane: a tab in the caller's workspace locally, or a workspace with the same name on the remote.
+- Dogsled opens a pane where the work's repository is shown: its worktree's workspace, else the main checkout's, else a new workspace. Work outside a repository uses a tab in the caller's workspace locally, or a workspace with the same name on the remote.
 - The pane runs `dogsled exec <id> -- <cmd>`, a small wrapper that:
   - reports `working` with `--agent dogsled-job` and shows the command as the agent name;
   - writes stdout and stderr to `~/.local/state/dogsled/jobs/<id>.log` and to the pane;

@@ -87,8 +87,10 @@ dogsled items --owner "$HERDR_PANE_ID" --json
 dogsled cancel TICKET
 ```
 
-Jobs use a new tab in the caller's workspace. With `--branch`, an agent uses the pane of the worktree's new Herdr workspace.
-Remote work uses a workspace with the same name as the caller's workspace, creating it when absent.
+With `--branch`, an agent uses the pane of the worktree's new Herdr workspace.
+Other work in a repository opens a new tab where that repository is shown: the workspace of its worktree, else the main checkout's workspace.
+When no workspace shows the repository, dogsled opens a new workspace for it.
+Work outside any repository uses a new tab in the caller's workspace. On a remote host, that is the workspace with the caller's workspace name, created when absent.
 Without a branch, a remote non-repository `--cwd` must exist there.
 Repository directories map to the same path relative to home. A linked-worktree caller needs `--branch` to preserve its branch remotely.
 

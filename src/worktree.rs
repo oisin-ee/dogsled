@@ -174,6 +174,40 @@ pub fn workspace(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Optio
         .map(ToString::to_string))
 }
 
+/// Where a new tab for work in a directory belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Home {
+    /// Not in a repository: the caller's workspace.
+    Outside,
+    /// The Herdr workspace that shows the repository.
+    Shown(String),
+    /// A repository that no Herdr workspace shows.
+    Unshown,
+}
+
+/// The workspace that shows the repository at `cwd`: the workspace of the worktree that
+/// contains `cwd`, else the main checkout's.
+pub fn home(shell: &dyn Shell, cwd: &str) -> Result<Home> {
+    let out = git(shell, Path::new(cwd), &["rev-parse", "--show-toplevel"])?;
+    if !out.ok() {
+        return Ok(Home::Outside);
+    }
+    let top = out.stdout.trim();
+    let listed = herdr_worktrees(shell, Path::new(cwd))?;
+    let open = |w: &serde_json::Value| w["open_workspace_id"].as_str().map(ToString::to_string);
+    let own = listed
+        .iter()
+        .find(|w| w["path"].as_str().is_some_and(|p| same(p, top)))
+        .and_then(open);
+    let main = || {
+        listed
+            .iter()
+            .find(|w| w["is_linked_worktree"] == false)
+            .and_then(open)
+    };
+    Ok(own.or_else(main).map_or(Home::Unshown, Home::Shown))
+}
+
 /// Every pane that works in `path` or sits in the workspace that shows it.
 pub fn holders<'a>(panes: &'a [Pane], path: &str, workspace: Option<&str>) -> Vec<&'a Pane> {
     panes
