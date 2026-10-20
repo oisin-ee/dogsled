@@ -144,6 +144,11 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
         operation(&rig, "commit", &commit_input(&executions[0], 1)).1["error"]["code"],
         "REQUEST_CONFLICT"
     );
+    assert!(rig.run(&["cancel", receipts[0].1["ticket"].as_str().unwrap()]).status.success());
+    let (_, state) = operation(&rig, "observe", &execution_input(&executions[0]));
+    assert_eq!(state["phase"], "unresolved");
+    assert!(state["settlement"].is_null());
+    assert_eq!(operation(&rig, "commit", &input).1["disposition"], "unresolved");
 }
 
 #[test]

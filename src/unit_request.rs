@@ -3,7 +3,7 @@
 
 use crate::error::{Error, Result};
 use crate::hosts::Fleet;
-use crate::ledger::{Ledger, new_id};
+use crate::ledger::Ledger;
 use crate::unit_transport::{
     CommitInput, ExecutionRef, NotStarted, NotStartedResult, Placement, PrepareInput, UnitRef,
     conflict,
@@ -83,7 +83,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
             max: 0,
         };
         // Discovery is read-only. No capacity reservation, checkout, or pane before commit.
-        let mut request = crate::runtime::request(
+        let request = crate::runtime::request(
             fleet,
             &args,
             Action::Agent {
@@ -93,7 +93,6 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
                 profile: None,
             },
         )?;
-        request.id = new_id();
         let execution = ExecutionRef {
             executor: "dogsled".into(),
             owner_id: owner,
@@ -253,6 +252,8 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
         .is_some_and(|r| r["disposition"] == "queued")
     {
         "queued"
+    } else if receipt.is_some() {
+        "unresolved"
     } else if attempt.host.is_none() {
         "launching"
     } else {
