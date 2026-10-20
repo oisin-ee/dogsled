@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.16.3 - 2026-10-20
+
+- Proven native launch refusals now settle managed executions as `not_started`, without accepting their tasks. Evidence must match the saved launch, seed, execution, and commitment; unknown outcomes remain unresolved.
+- Preparations track their request owner. Refusal recovery releases only the matching hold; legacy holds without ownership evidence remain protected.
+- Invalid evidence is reported per request without blocking unrelated settlements or maintenance. Local storage failures remain fatal.
+
 ## 0.16.2 - 2026-10-20
 
 - Managed workers use deterministic 32-character agent names derived from their full task and execution references. UUID-shaped task identifiers now fit Herdr’s native name limit. Full binding checks remain unchanged; name collisions still produce a final refusal.
