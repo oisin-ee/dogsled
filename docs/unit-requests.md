@@ -21,7 +21,9 @@ Prepare records the originating session and tool-call ID. Retries retain the ori
 
 Prepare returns `{executor:"dogsled",ownerId,requestId}`. Commit returns `{execution,origin,disposition,ticket?,host?,pane?}`. Disposition is `queued`, `launched`, or `unresolved`.
 
-Observe returns `{execution,origin,phase,receipt,settlement}`. It reads existing execution facts without dispatch. A launch receipt means `running`; a captured item reply means `returned`. Closure alone does not prove a safe settlement.
+Observe returns `{execution,origin,phase,receipt,settlement}`. It reads existing execution facts without dispatch. A launch receipt with an open item and no captured reply projects `running`.
+
+A captured reply is prose, not terminal evidence. A reply, closed item, or missing item projects `unresolved` with no settlement. This unit never projects `returned`. That phase requires the future execution-specific terminal-evidence protocol.
 
 Errors contain `{error:{code,message}}`. Transport conflicts use `REQUEST_CONFLICT`; local profile refusals use `PROFILE_INVALID`. Other executor failures use `LAUNCH_UNRESOLVED` and never release a claim.
 

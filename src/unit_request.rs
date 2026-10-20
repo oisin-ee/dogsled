@@ -243,9 +243,11 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
         let item = crate::items::list(ledger)?
             .into_iter()
             .find(|item| item.id == execution.request_id);
-        if item.as_ref().is_some_and(|item| item.reply.is_some()) {
-            "returned"
-        } else if item.as_ref().is_some_and(|item| item.closed_ms.is_some()) {
+        // A captured reply is prose, not an execution seal or terminal acknowledgement.
+        if item
+            .as_ref()
+            .is_none_or(|item| item.reply.is_some() || item.closed_ms.is_some())
+        {
             "unresolved"
         } else {
             "running"

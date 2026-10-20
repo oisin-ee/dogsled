@@ -298,6 +298,40 @@ fn lost_commit_response_reuses_launched_receipt_and_exact_profile() {
 }
 
 #[test]
+fn captured_reply_without_terminal_evidence_never_projects_returned() {
+    let rig = rig("unit-prose-not-terminal", false);
+    let execution = prepare(&rig);
+    let (code, receipt) = operation(&rig, "commit", &commit_input(&execution, 0));
+    assert_eq!(code, 0, "{receipt}");
+    assert_eq!(receipt["disposition"], "launched");
+    let input = execution_input(&execution);
+    assert_eq!(operation(&rig, "observe", &input).1["phase"], "running");
+
+    let mut items = rig.read("state/items.json");
+    assert_eq!(items[0]["id"], execution["requestId"]);
+    items[0]["reply"] = json!({"seq":1,"text":"Work complete.","captured_ms":now()});
+    for closed in [Value::Null, json!(now())] {
+        items[0]["closed_ms"] = closed;
+        rig.put("state/items.json", &items);
+        let (code, state) = operation(&rig, "observe", &input);
+        assert_eq!(code, 0, "{state}");
+        assert_eq!(state["phase"], "unresolved");
+        assert!(state["settlement"].is_null());
+        assert_eq!(state["receipt"], receipt);
+    }
+    rig.put("state/items.json", &json!([]));
+    let (_, state) = operation(&rig, "observe", &input);
+    assert_eq!(state["phase"], "unresolved");
+    assert!(state["settlement"].is_null());
+    assert_eq!(
+        rig.log("herdr.log")
+            .matches("agent start unit-u-17-r1 ")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn rejects_unknown_fields_versions_correlation_and_digest_before_commit() {
     let rig = rig("unit-invalid", false);
     let execution = prepare(&rig);
