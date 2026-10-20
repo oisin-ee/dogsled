@@ -9,6 +9,7 @@ This implementation follows sections 4–8 of the approved `oisinpi` plan at `c2
 Each command takes `--input '<JSON>'` and always returns JSON. Success exits 0, including a queued receipt. Failure exits 2.
 
 ```text
+dogsled unit prepared
 dogsled unit prepare --input '{"origin":<UnitRef>,"placement":{}}' --tool-call-id <invocation-id>
 dogsled unit commit --input '{"execution":<ExecutionRef>,"binding":<TaskBinding>,"exported":<TaskExport>}'
 dogsled unit observe --input '{"execution":<ExecutionRef>}'
@@ -75,11 +76,11 @@ Encoding uses compact UTF-8 JSON and lowercase SHA-256 hex. Ordered Rust transpo
 
 The existing MCP spawn accepts exactly one shape:
 
-- `{unit:{id},host?,branch?,base?}` requires the future Pi bridge. Without that bridge, the handler returns `PROVIDER_UNAVAILABLE`.
+- `{unit:{id},host?,branch?,base?}` uses the Pi bridge. Without that bridge, the handler returns `PROVIDER_UNAVAILABLE`.
 - `{preparedUnit:{execution,binding,exported}}` calls commit in the handler. Placement comes from prepare.
 - The existing explicit `{name,task,profile?,kind?,host?,branch?,base?,cwd?}` remains available.
 
-Mixed shapes and unknown keys fail. No interception hook launches a process. The future bridge must match prepared envelopes to actual tool-call IDs.
+Mixed shapes and unknown keys fail. No interception hook launches a process. The Pi bridge matches prepared envelopes to actual tool-call IDs, including nested codemode IDs.
 
 The selected host writes `launches/<requestId>.unit.json` beside the task artifact. Its exact body is `{version:1,execution,binding,exported}`. Atomic ledger writes persist it before startup. Replays preserve the same artifact. Changed artifacts fail.
 
@@ -103,7 +104,7 @@ The transcript must be a regular JSONL file directly inside the private session 
 
 Dogsled walks parent links from the acknowledged leaf. Metadata entries can follow the final assistant reply. Substantive conversation after that reply fails. The final reply must contain text, stop normally, and contain no tool call. Its ancestry must reach the acknowledged seal entry. A reply before the seal, or on another branch, cannot match.
 
-Dogsled validates the seal entry's identity and ordering, not task state. The provider owns seal meaning and immutable local activation. The future adapter must obtain the seal from `imported()` at `agent_settled`.
+Dogsled validates the seal entry's identity and ordering, not task state. The provider owns seal meaning and immutable local activation. The adapter obtains the seal from `imported()` at `agent_settled`.
 
 Evidence reads reject malformed, partial, duplicate, cyclic, missing, or oversized data. Limits are 32 MiB per transcript, 1 MiB per line, and 100,000 entries. Failed reads retain the binding. The receipt atomically stores acknowledgement, exact reply text, reply entry ID, and session ID. Repeated acknowledgement returns that receipt. Changed acknowledgement fails.
 
@@ -115,12 +116,41 @@ Managed children without terminal evidence retain automatic child-close protecti
 
 `dogsled unit settlements` returns the owner's pending `Settlement[]`. The query refreshes host evidence but starts no worker.
 
-`dogsled unit ack-settlement --input '{"execution":<ExecutionRef>,"eventId":"..."}'` returns `{applied:boolean}`. The future bridge calls it only after provider success or confirmed duplicate application.
+`dogsled unit ack-settlement --input '{"execution":<ExecutionRef>,"eventId":"..."}'` returns `{applied:boolean}`. The bridge calls it only after provider success or confirmed duplicate application.
 
 The acknowledgement lives in the admission record, separate from inbox text acknowledgement. Missing providers, stale origins, and lost acknowledgements retain the same event indefinitely. Query and observation do not consume delivery. Duplicate acknowledgement is a no-op. No bookkeeping-only model turn is necessary.
 
 Returned events carry the original TaskBinding. Not-started events carry origin and execution, without a fabricated digest. Observation retains the event after delivery acknowledgement.
 
-## Dependent work
+## Pi bridge
 
-This unit does not implement the Pi provider bridge, worker importer, or startup guard. It does not prove loaded-guard startup behavior, resumed-session behavior, or fleet deployment. Compatible packages and the live integration scenario remain dependent work. Fleet installation requires separate authorization.
+The bridge requires Pi SDK and TUI 1.3.0-compatible peers and Node 22.19.0 or newer. Development tests pin Pi 1.3.0.
+Real-runtime tests on the former Pi 1.0.4 dependency showed that aborting in `before_agent_start` did not prevent the initial model request.
+The bridge does not patch that runtime or weaken the guard assertion.
+
+The existing spawn hook acquires `oisin.tasks.acquire.v1`, inspects the unit, validates checkout identity, and prepares before claiming. The MCP handler alone commits.
+The checkout origin uses canonical lowercase host and case-preserved repository path, without `.git`. SSH and HTTPS clones identify the same repository.
+The bridge supplies the current session cwd to preparation. It does not repeat the brief, profile, or acceptance requirement.
+A pasted `preparedUnit` cannot bypass preparation: the exact envelope must belong to the current runtime invocation.
+
+Actual `tool_execution_end` permits observation and abandonment of a still-prepared request. A later guard may block without emitting `tool_result`.
+Nested calls use their own invocation IDs. An ended duplicate cannot abandon an execution while another known invocation remains active.
+Unknown outcomes retain the binding. The existing settled boundary retries failed recovery; no timeout proves termination.
+The read-only `unit prepared` command lists this owner’s uncommitted requests with origin and invocation ID from existing admission records.
+After a fresh runtime boundary, the adapter abandons only current-session preparations without a known live invocation. Other sessions remain held.
+Recovery uses the existing refresh lifecycle and also runs before the first task request or managed spawn. It never commits or redispatches work and needs no model setup call.
+Commit and abandonment retain their request lock: a concurrent committed request cannot be abandoned. Unknown outcomes remain pending.
+
+The loaded worker guard registers the seed flag even if pi-todo is missing. It validates `imported()` synchronously in `before_agent_start` and calls `ctx.abort()` on failure.
+Fresh receipts must match the launch execution, origin, digest, and current request/session ID. On resume or reload, pi-todo’s recorded receipt owns progress.
+A recorded import does not require the original seed artifact or launch flag. Sealed workers cannot begin another model task.
+Only a correlated seal at `agent_settled` causes terminal acknowledgement. Dogsled still validates the final transcript ancestry.
+
+Settlement delivery runs through the existing refresh and settled lifecycle. Provider failure or a wrong branch leaves the event pending.
+Successful duplicate application acknowledges the same event. Inbox text delivery remains independent. No model turn starts solely for bookkeeping.
+
+## Proof limits
+
+Pi runtime tests exercise direct and nested later-hook blocks and aborts, and the fresh-session guard with missing, invalid, valid, and sealed receipts.
+The zero-request guarantee excludes resume-time compaction and both extensions failing to load. Import acknowledgement proves activation, not initial disk durability.
+Compatible deployed packages and a live local worker scenario remain integration work. This implementation does not install or dispatch workers. Fleet installation requires separate authorization.
