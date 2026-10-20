@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Queue order holds per host. A full host no longer holds back a ticket pinned to another host with room. Before, the first ticket that found no room ended the admission pass for every host.
+
 ## 0.14.0 - 2026-10-20
 
 Cleanup uses one loss rule, and the Stop gate starts each cleanup pass.

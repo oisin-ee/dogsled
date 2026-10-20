@@ -366,13 +366,40 @@ pub fn agent_args(
     Ok(args)
 }
 
-/// A new request runs now only when no ticket waits ahead of it; otherwise the caller
-/// enqueues it, and admission serves the queue in order. `None` means queue it.
+/// A new request runs now only when no ticket that could take one of its hosts waits ahead of
+/// it; otherwise the caller enqueues it, and admission serves the queue in order. `None` means
+/// queue it.
 pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
-    if queue(fleet.ledger)?.iter().any(|t| t.state == "pending") {
+    if waits_behind(fleet, request)? {
         return Ok(None);
     }
     perform(fleet, request, now)
+}
+
+/// The hosts a request may use: its pinned host, or every host.
+fn candidates(fleet: &Fleet, request: &Request) -> Vec<String> {
+    match request.host.as_deref() {
+        Some(host) => vec![
+            fleet
+                .find(host)
+                .map_or_else(|_| host.to_owned(), |h| h.id.clone()),
+        ],
+        None => fleet.hosts.iter().map(|h| h.id.clone()).collect(),
+    }
+}
+
+/// Order holds per host. A pending ticket keeps `request` back only when the two could take the
+/// same host, so a full peer never holds back work for a host with room.
+pub(crate) fn waits_behind(fleet: &Fleet, request: &Request) -> Result<bool> {
+    let wanted = candidates(fleet, request);
+    Ok(queue(fleet.ledger)?
+        .iter()
+        .filter(|t| t.state == "pending")
+        .any(|t| {
+            candidates(fleet, &t.request)
+                .iter()
+                .any(|h| wanted.contains(h))
+        }))
 }
 
 /// Caller-owned progress is durable before any preparation or launch side effect. An
@@ -658,6 +685,9 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
 }
 
 fn admit(fleet: &Fleet, now: u64) -> Result<()> {
+    // Hosts that had no room for an earlier ticket in this pass. A later ticket that can use
+    // only these hosts waits, so it cannot pass an earlier one; any other ticket is still served.
+    let mut full: Vec<String> = Vec::new();
     for ticket in queue(fleet.ledger)? {
         let mut ticket = ticket;
         if ticket.state == "admitting" {
@@ -676,6 +706,10 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
         if ticket.state != "pending" || !ticket.retry.ready(now) {
             continue;
         }
+        let hosts = candidates(fleet, &ticket.request);
+        if hosts.iter().all(|h| full.contains(h)) {
+            continue;
+        }
         let claimed = update_ticket(fleet.ledger, &ticket.id, |t| {
             if t.state == "pending" {
                 t.state = "admitting".into();
@@ -686,7 +720,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
         }
         // No store lock spans SSH, cloning, hooks, or agent readiness.
         let outcome = perform(fleet, &claimed.request, now);
-        let full = matches!(&outcome, Ok(None));
+        let no_room = matches!(&outcome, Ok(None));
         update_ticket(fleet.ledger, &ticket.id, |t| match outcome {
             Ok(Some(result)) => {
                 t.state = "admitted".into();
@@ -708,8 +742,11 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 });
             }
         })?;
-        if full {
-            break;
+        if no_room {
+            full.extend(hosts);
+            if fleet.hosts.iter().all(|h| full.contains(&h.id)) {
+                break;
+            }
         }
     }
     Ok(())

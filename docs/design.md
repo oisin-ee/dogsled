@@ -87,6 +87,7 @@ A failed close writes an error to stderr without changing the job record or exit
 
 When every host is full, `run` and `place` put the work in the queue and print the ticket. With `--wait` they block
 until the ticket is admitted (and for `run`, until the job ends). The owner's host service admits tickets in order when an eligible host has headroom.
+The order holds per host: a ticket waits only behind earlier tickets that could take one of its hosts, so a full host never holds back work pinned to a host with room.
 Admission uses the shared status cache and SSH transport, unlike the local-only measurement step.
 `agent` also queues and supports `--wait`. All admission waits accept `--max` (default 30m).
 A service interruption during admission marks that ticket failed on restart, preventing an automatic duplicate launch.

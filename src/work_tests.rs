@@ -180,6 +180,91 @@ fn place_request(id: &str) -> Request {
     }
 }
 
+fn pinned(id: &str, host: &str) -> Request {
+    Request {
+        host: Some(host.into()),
+        ..place_request(id)
+    }
+}
+
+#[test]
+fn a_full_host_holds_back_only_the_tickets_that_need_it() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let shell = Fake::new();
+    let policy = Policy {
+        memory_reserve_bytes: 0,
+        ..Policy::default()
+    };
+    let peer = Host {
+        id: "peer".into(),
+        label: "peer".into(),
+        target: Some("peer-ssh".into()),
+    };
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local(), peer.clone()],
+    };
+    // Local has room for every local ticket in this test.
+    let mut roomy = snapshot(100);
+    roomy.probe.cores = 8;
+    ledger.write("host.json", &roomy).unwrap();
+    // The peer has no disk to spare, so nothing fits there.
+    let mut full = snapshot(100);
+    full.probe.host = "peer".into();
+    full.probe.label = "peer".into();
+    full.probe.disk_free_percent = 1.0;
+    shell.on(
+        &format!(
+            "ssh {}",
+            fleet.remote_argv(&peer, &["snapshot".into()]).join(" ")
+        ),
+        &serde_json::to_string(&full).unwrap(),
+    );
+    for request in [
+        pinned("peer-first", "peer"),
+        pinned("local-after", "local"),
+        pinned("peer-after", "peer"),
+    ] {
+        work::enqueue(&ledger, request, false, 100).unwrap();
+    }
+    // A new request for local still waits behind the pending local ticket.
+    assert!(
+        work::submit(&fleet, &pinned("local-new", "local"), 100)
+            .unwrap()
+            .is_none(),
+        "a pending ticket for the same host is still ahead of it"
+    );
+    work::tick(&fleet, 100).unwrap();
+    let states: Vec<_> = work::queue(&ledger)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.request.id, t.state))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("peer-first".to_owned(), "pending".to_owned()),
+            ("local-after".to_owned(), "admitted".to_owned()),
+            ("peer-after".to_owned(), "pending".to_owned()),
+        ]
+    );
+    // With nothing pending for local, a local request runs at once while the peer's queue waits.
+    let placed = work::submit(&fleet, &pinned("local-now", "local"), 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(placed["host"]["id"], "local");
+    // A request that may use any host still waits behind the peer's tickets.
+    assert!(
+        work::submit(&fleet, &place_request("anywhere"), 100)
+            .unwrap()
+            .is_none()
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
 #[test]
 fn submit_waits_behind_pending_tickets_even_with_room() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
