@@ -58,7 +58,9 @@ case "$*" in
     sed 's/"w2"/null/' "$RIG/worktrees.json" > "$RIG/worktrees.next" && mv "$RIG/worktrees.next" "$RIG/worktrees.json"
     printf '{}\n' ;;
   'workspace close'*|'pane close'*) printf '{}\n' ;;
-  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;
+  'pane process-info'*)
+    if test -f "$RIG/process-info.json"; then cat "$RIG/process-info.json"
+    else printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_process_group_id":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}'; fi ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
@@ -317,6 +319,143 @@ fn an_unfinished_launch_holds_its_checkout_only_while_its_pane_exists() {
     assert_eq!(code, 0, "{closed}");
     assert_eq!(closed["worktree"]["branch_deleted"], true);
     assert!(!tree.exists());
+}
+
+#[test]
+fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_receipt() {
+    let (rig, tree) = close_rig("close-own-unfinished-launch");
+    advance_main(&rig);
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w2:p2","terminal_id":"term_gone","workspace_id":"w2","cwd":tree}
+        ]}}),
+    );
+    unfinished_launch(&rig, "own", &tree, "w2:p2");
+    let before = rig.read("state/launches/own.progress.json");
+    let holds = json!([{"repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x","head":""}]);
+    rig.put("state/preparations.json", &holds);
+    rig.put(
+        "state/items.json",
+        &json!([{
+            "id":"remote-item","kind":"agent","host":"remote","pane":"w2:p2",
+            "owner_pane":"w1:p1","created_ms":1
+        }]),
+    );
+    let (code, result) = rig.json(&["close", "w2:p2", "--host", "local"]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["pane_closed"], true);
+    assert!(result["worktree"].is_null());
+    assert_eq!(rig.read("state/preparations.json"), holds);
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    assert!(!rig.dir.join("hook.log").exists());
+    assert_eq!(rig.read("state/launches/own.progress.json"), before);
+    assert!(!rig.dir.join("state/launches/own.json").exists());
+    assert!(!rig.log("herdr.log").contains("agent start"));
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
+    let request = before["request"].to_string();
+    let (code, _) = rig.json(&["host", "launch", "--request", &request]);
+    assert_eq!(code, 2);
+    assert_eq!(rig.read("state/launches/own.progress.json"), before);
+    assert!(!rig.log("herdr.log").contains("agent start"));
+    assert!(!rig.log("herdr.log").contains("tab create"));
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{
+            "pane_id":"w2:p2","terminal_id":"replacement","cwd":tree
+        }]}}),
+    );
+    assert_eq!(rig.json(&["host", "launch", "--request", &request]).0, 2);
+    assert_eq!(rig.read("state/launches/own.progress.json"), before);
+    assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+#[test]
+fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
+    for conflict in [
+        "other-launch",
+        "terminal",
+        "agent",
+        "item",
+        "pre-start",
+        "automatic",
+        "missing-process",
+        "foreign-pgid",
+        "malformed",
+        "close-fails",
+    ] {
+        let (rig, tree) = close_rig(&format!("close-launch-{conflict}"));
+        let mut pane =
+            json!({"pane_id":"w2:p2","terminal_id":"term_gone","workspace_id":"w2","cwd":tree});
+        unfinished_launch(&rig, "own", &tree, "w2:p2");
+        match conflict {
+            "other-launch" => unfinished_launch(&rig, "other", &tree, "w2:p2"),
+            "terminal" => pane["terminal_id"] = json!("replacement"),
+            "agent" => {
+                pane["agent"] = json!("pi");
+                pane["agent_status"] = json!("idle");
+            }
+            "item" => rig.put("state/items.json", &json!([{
+                "id":"different","kind":"agent","host":"local","pane":"w2:p2",
+                "owner_pane":"w1:p1","created_ms":1
+            }])),
+            "missing-process" => rig.put("process-info.json", &json!({"result":{"process_info":{}}})),
+            "foreign-pgid" => rig.put("process-info.json", &json!({"result":{"process_info":{
+                "shell_pid":10,"foreground_process_group_id":99,"foreground_processes":[{"pid":10,"name":"zsh"}]
+            }}})),
+            "malformed" => fs::write(rig.dir.join("state/launches/bad.progress.json"), "{").unwrap(),
+            "close-fails" => {
+                let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+                rig.script("herdr", &script.replace("'workspace close'*|'pane close'*) printf '{}\\n' ;;", "'pane close'*) exit 2 ;;\n  'workspace close'*) printf '{}\\n' ;;"));
+            }
+            "pre-start" => {
+                let mut progress = rig.read("state/launches/own.progress.json");
+                progress["attempted"] = json!(false);
+                rig.put("state/launches/own.progress.json", &progress);
+            }
+            _ => (),
+        }
+        rig.put("panes.json", &json!({"result":{"panes":[pane]}}));
+        let before = rig.read("state/launches/own.progress.json");
+        let args = if conflict == "automatic" {
+            vec!["host", "close", "w2:p2", "--pushed"]
+        } else {
+            vec!["close", "w2:p2"]
+        };
+        let out = rig.run(&args);
+        assert_eq!(out.status.code(), Some(2), "{conflict}: {out:?}");
+        assert!(tree.exists());
+        if conflict != "close-fails" {
+            assert!(!rig.log("herdr.log").contains("pane close"));
+        }
+        assert!(!rig.log("herdr.log").contains("workspace close"));
+        assert_eq!(rig.read("state/launches/own.progress.json"), before);
+    }
+}
+
+#[test]
+fn unresolved_unattempted_or_unreceipted_launch_cannot_fall_through_to_plain_pane_close() {
+    for confirmed in [false, true] {
+        let (rig, tree) = close_rig("close-unresolved-plain-pane");
+        let repo = rig.dir.join("home/repo").canonicalize().unwrap();
+        rig.put(
+            "panes.json",
+            &json!({"result":{"panes":[{
+                "pane_id":"w2:p2","terminal_id":"term_gone","workspace_id":"w2","cwd":repo
+            }]}}),
+        );
+        unfinished_launch(&rig, "own", &repo, "w2:p2");
+        let mut progress = rig.read("state/launches/own.progress.json");
+        progress["attempted"] = json!(confirmed);
+        progress["confirmed"] = json!(confirmed);
+        rig.put("state/launches/own.progress.json", &progress);
+        let out = rig.run(&["close", "w2:p2"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(!rig.log("herdr.log").contains("pane close"));
+        assert!(tree.exists());
+    }
 }
 
 #[test]

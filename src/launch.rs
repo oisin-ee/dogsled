@@ -8,6 +8,16 @@ use crate::work::{self, Action, Launch};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod recovery;
+pub use recovery::close_unfinished;
+#[cfg(test)]
+mod pane_tests;
+
+fn with_pane<T>(ledger: &Ledger, pane: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let key = crate::unit_transport::digest_hex(pane.as_bytes());
+    ledger.child("launch-panes").with_lock(&key, f)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Progress {
     request: Launch,
@@ -103,9 +113,9 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
         })?;
         // A confirmed start must not run again, even if the agent finished and exited.
         if !progress.confirmed {
-            if let Err(error) =
+            if let Err(error) = with_pane(ledger, &pane, || {
                 start_or_reconcile(ledger, shell, &mut progress, &pane, &progress_file)
-            {
+            }) {
                 // A prepared pane belongs to its worktree's workspace; only an allocated one is ours.
                 let owned = request
                     .pane
