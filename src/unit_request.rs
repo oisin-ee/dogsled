@@ -380,27 +380,44 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
                 Some(saved) => crate::unit_reply::HostEvidence::Returned(Box::new(saved.clone())),
                 None => continue,
             },
-            Err(error @ crate::error::Error::Invalid(_)) => return Err(error),
-            Err(error) => {
+            // Rejection belongs to this request, not every admission sharing refresh.
+            // Never use rejected/unknown host evidence to authorize a fallback import.
+            Err(error @ Error::Invalid(_)) => {
                 eprintln!(
                     "dogsled unit evidence {}: {error}",
                     unit.execution.request_id
                 );
-                match &unit.terminal_receipt {
-                    Some(saved) => {
-                        crate::unit_reply::HostEvidence::Returned(Box::new(saved.clone()))
-                    }
-                    None => continue,
-                }
+                continue;
             }
+            Err(error @ (Error::Ssh { .. } | Error::Parse { .. } | Error::Deadline(_)))
+                if !host.is_local() =>
+            {
+                eprintln!(
+                    "dogsled unit evidence {}: {error}",
+                    unit.execution.request_id
+                );
+                continue;
+            }
+            // Local storage, serialization and lock failures remain operation failures.
+            Err(error) => return Err(error),
         };
-        match receipt {
+        let imported = match receipt {
             crate::unit_reply::HostEvidence::Returned(receipt) => {
-                import_receipt(fleet.ledger, &file, *receipt)?;
+                import_receipt(fleet.ledger, &file, *receipt)
             }
             crate::unit_reply::HostEvidence::Refused(receipt) => {
-                import_refusal(fleet.ledger, &file, *receipt)?;
+                import_refusal(fleet.ledger, &file, *receipt)
             }
+        };
+        match imported {
+            Ok(()) => (),
+            Err(error @ Error::Invalid(_)) => {
+                eprintln!(
+                    "dogsled unit evidence {}: {error}",
+                    unit.execution.request_id
+                );
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok(())
