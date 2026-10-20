@@ -58,6 +58,572 @@ fn ack(rig: &Rig, input: &Value) -> (i32, Value) {
     )
 }
 
+fn refused_unit(name: &str) -> (Rig, Value, Value) {
+    let rig = rig(name, false);
+    rig.script("herdr", &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
+        "  'agent start'*|",
+        "  'agent start'*) echo '{\"error\":{\"code\":\"invalid_agent_name\",\"message\":\"native refusal\"}}' >&2; exit 1 ;;\n  ",
+    ));
+    let execution = prepare(&rig);
+    let input = commit_input(&execution, 0);
+    assert_eq!(operation(&rig, "commit", &input).0, 2);
+    (rig, execution, input)
+}
+
+#[test]
+fn committed_native_refusal_settles_once_without_start_or_acceptance() {
+    let (rig, execution, _) = refused_unit("refused-unit-settlement");
+    let id = execution["requestId"].as_str().unwrap();
+    let path = format!("state/launches/{id}.progress.json");
+    let mut progress = rig.read(&path);
+    // Existing old-style committed names are evidence, never recomputed or migrated.
+    progress["request"]["action"]["name"] =
+        json!("unit-u-6ce8048d-2317-4b7e-988e-cf6591d1b7a0-1-r1");
+    rig.put(&path, &progress);
+    let mut attempt = admission(&rig, &execution);
+    attempt["launch"]["action"]["name"] = progress["request"]["action"]["name"].clone();
+    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    let (code, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{events}");
+    assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
+    assert_eq!(events[0]["result"]["kind"], "not_started");
+    assert_eq!(events[0]["execution"], execution);
+    assert_eq!(events[0]["origin"], attempt["unit"]["origin"]);
+    assert_eq!(rig.json(&["unit", "settlements"]).1, events);
+    let ack = json!({"execution":execution,"eventId":events[0]["eventId"]});
+    assert_eq!(operation(&rig, "ack-settlement", &ack).0, 0);
+    assert_eq!(operation(&rig, "ack-settlement", &ack).0, 0);
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+    let (_, observed) = operation(&rig, "observe", &execution_input(&execution));
+    assert_eq!(observed["phase"], "not_started");
+    assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+    assert!(!rig.dir.join("state/items.json").exists());
+}
+
+#[test]
+fn refusal_requires_final_consistent_host_provenance() {
+    for case in [
+        "lost",
+        "unattempted",
+        "confirmed",
+        "terminal",
+        "seed",
+        "execution",
+        "error",
+        "host",
+        "commit",
+        "returned",
+    ] {
+        let (rig, execution, _) = refused_unit(&format!("refused-invalid-{case}"));
+        let id = execution["requestId"].as_str().unwrap();
+        let file = format!("state/launches/{id}.progress.json");
+        let mut progress = rig.read(&file);
+        let mut attempt = admission(&rig, &execution);
+        match case {
+            "lost" => fs::remove_file(rig.dir.join(format!("state/launches/{id}.json"))).unwrap(),
+            "unattempted" => progress["attempted"] = json!(false),
+            "confirmed" => progress["confirmed"] = json!(true),
+            "terminal" => {
+                progress["terminal_receipt"] = json!({"ack":acknowledgement(&execution, &commit_input(&execution, 0)),"sessionId":id,"replyEntryId":"reply","text":"contradiction"});
+            }
+            "seed" => {
+                let mut seed = rig.read(&format!("state/launches/{id}.unit.json"));
+                seed["exported"]["brief"] = json!("changed");
+                rig.put(&format!("state/launches/{id}.unit.json"), &seed);
+            }
+            "execution" => progress["request"]["unit"]["execution"]["ownerId"] = json!("another"),
+            "error" => progress["error"] = json!("transport failed"),
+            "host" => attempt["host"]["id"] = json!("other-host"),
+            "commit" => attempt["unit"]["committed"]["exported"]["brief"] = json!("changed"),
+            "returned" => {
+                attempt["unit"]["returned"] = json!({"version":1,"eventId":"returned","binding":commit_input(&execution,0)["binding"],"result":{"kind":"returned","evidence":{"execution":execution,"resultId":"reply","summary":"done"}}});
+            }
+            _ => unreachable!(),
+        }
+        rig.put(&file, &progress);
+        rig.put(&format!("state/admissions/{id}.json"), &attempt);
+        let _ = rig.json(&["unit", "settlements"]);
+        assert!(
+            admission(&rig, &execution)["unit"]["abandoned"].is_null(),
+            "{case}"
+        );
+        assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+    }
+}
+
+#[test]
+fn refusal_release_and_settlement_recover_after_each_durable_boundary() {
+    for point in ["refusal-hold-released", "refusal-settlement-persisted"] {
+        let (rig, execution, _) = refused_unit(point);
+        let id = execution["requestId"].as_str().unwrap();
+        let cwd = admission(&rig, &execution)["launch"]["cwd"].clone();
+        let own = json!({"repo":rig.dir.join("home"),"path":cwd,"branch":"proof","head":"","request_id":id});
+        let legacy = json!({"repo":rig.dir.join("home"),"path":cwd,"branch":"proof","head":""});
+        let mut other = own.clone();
+        other["request_id"] = json!("later-request");
+        rig.put("state/preparations.json", &json!([own, legacy, other]));
+        let result = rig
+            .cmd(&["unit", "settlements"])
+            .env("DOGSLED_TEST_UNIT_CRASH", point)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(86));
+        assert_eq!(rig.read("state/preparations.json"), json!([legacy, other]));
+        let (code, events) = rig.json(&["unit", "settlements"]);
+        assert_eq!(code, 0, "{events}");
+        assert_eq!(events.as_array().unwrap().len(), 1);
+        assert_eq!(events[0]["result"]["kind"], "not_started");
+        assert_eq!(rig.read("state/preparations.json"), json!([legacy, other]));
+        assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+    }
+}
+
+#[test]
+fn remote_refusal_correlates_full_launch_and_rejects_contradictions() {
+    let (rig, execution, input) = refused_unit("refused-remote-correlation");
+    let id = execution["requestId"].as_str().unwrap();
+    let mut attempt = admission(&rig, &execution);
+    attempt["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
+    attempt["launch"]["host"] = json!("8103");
+    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    let receipt = json!({"kind":"refused","launch":attempt["launch"],"failed":"native refusal"});
+    rig.script(
+        "ssh",
+        &fs::read_to_string(rig.dir.join("bin/ssh"))
+            .unwrap()
+            .replace(
+                "case \"$*\" in",
+                "case \"$*\" in\n  *'host unit-receipt'*) cat \"$RIG/remote-receipt.json\" ;;",
+            ),
+    );
+    for changed in ["host", "seed", "execution"] {
+        let mut wrong = receipt.clone();
+        match changed {
+            "host" => wrong["launch"]["host"] = json!("other"),
+            "seed" => wrong["launch"]["unit"]["exported"]["brief"] = json!("different"),
+            _ => wrong["launch"]["unit"]["execution"]["requestId"] = json!("different"),
+        }
+        rig.put("remote-receipt.json", &wrong);
+        let before = admission(&rig, &execution);
+        let events = rejected_refresh(
+            &rig,
+            &["unit", "settlements"],
+            id,
+            "host refusal does not match selected launch",
+        );
+        assert_eq!(events, json!([]), "{changed}");
+        assert_eq!(admission(&rig, &execution), before);
+    }
+    rig.put("remote-receipt.json", &receipt);
+    let (code, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{events}");
+    assert_eq!(events[0]["result"]["kind"], "not_started");
+    let mut changed = receipt;
+    changed["failed"] = json!("contradictory refusal");
+    rig.put("remote-receipt.json", &changed);
+    let saved = admission(&rig, &execution);
+    assert_eq!(
+        rejected_refresh(
+            &rig,
+            &["unit", "settlements"],
+            id,
+            "contradictory refusal evidence"
+        ),
+        events
+    );
+    assert_eq!(admission(&rig, &execution), saved);
+    rig.put("remote-receipt.json", &json!({"ack":acknowledgement(&execution,&input),"sessionId":id,"replyEntryId":"reply","text":"impossible return"}));
+    assert_eq!(
+        rejected_refresh(
+            &rig,
+            &["unit", "settlements"],
+            id,
+            "host terminal evidence does not match commitment"
+        ),
+        events
+    );
+    assert_eq!(admission(&rig, &execution), saved);
+}
+
+fn rejected_refresh(rig: &Rig, args: &[&str], id: &str, reason: &str) -> Value {
+    let out = rig.run(args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "{} {stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains(&format!("dogsled unit evidence {id}:")) && stderr.contains(reason),
+        "{stderr}"
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn merge_records(target: &Rig, source: &Rig, directory: &str) {
+    for entry in fs::read_dir(source.dir.join(directory)).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            fs::copy(
+                entry.path(),
+                target.dir.join(directory).join(entry.file_name()),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn invalid_evidence_is_request_scoped_and_other_owners_can_receive_and_ack() {
+    let (rig, local, _) = refused_unit("isolation-local");
+    let (remote_rig, remote, _) = refused_unit("isolation-remote");
+    let (healthy_rig, healthy, _) = refused_unit("isolation-healthy");
+    let local_id = local["requestId"].as_str().unwrap();
+    let remote_id = remote["requestId"].as_str().unwrap();
+    let healthy_id = healthy["requestId"].as_str().unwrap();
+    assert!(local_id < healthy_id && remote_id < healthy_id);
+    merge_records(&rig, &remote_rig, "state/admissions");
+    merge_records(&rig, &healthy_rig, "state/admissions");
+    merge_records(&rig, &healthy_rig, "state/launches");
+    let progress_file = format!("state/launches/{local_id}.progress.json");
+    let mut progress = rig.read(&progress_file);
+    progress["confirmed"] = json!(true);
+    rig.put(&progress_file, &progress);
+    let mut attempt = admission(&rig, &remote);
+    attempt["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
+    attempt["launch"]["host"] = json!("8103");
+    rig.put(&format!("state/admissions/{remote_id}.json"), &attempt);
+    let mut wrong = json!({"kind":"refused","launch":attempt["launch"],"failed":"native refusal"});
+    wrong["launch"]["host"] = json!("wrong-host");
+    rig.put("remote-receipt.json", &wrong);
+    rig.script("ssh", "#!/bin/sh\ncat \"$RIG/remote-receipt.json\"\n");
+    let prepared = rig
+        .cmd(&[
+            "unit",
+            "prepare",
+            "--input",
+            &json!({"origin":exported(0)["contract"]["ref"],"placement":{}}).to_string(),
+            "--tool-call-id",
+            "other-call",
+        ])
+        .env("HERDR_PANE_ID", "other-owner")
+        .output()
+        .unwrap();
+    assert!(prepared.status.success());
+    let other: Value = serde_json::from_slice(&prepared.stdout).unwrap();
+    let abandoned = rig
+        .cmd(&[
+            "unit",
+            "abandon-prepared",
+            "--input",
+            &execution_input(&other).to_string(),
+        ])
+        .env("HERDR_PANE_ID", "other-owner")
+        .output()
+        .unwrap();
+    assert!(abandoned.status.success());
+    let other_event: Value = serde_json::from_slice(&abandoned.stdout).unwrap();
+    let before_local = admission(&rig, &local);
+    let before_remote = admission(&rig, &remote);
+    for (owner, expected) in [("w1:p1", healthy.clone()), ("other-owner", other.clone())] {
+        let run = |args: &[&str]| rig.cmd(args).env("HERDR_PANE_ID", owner).output().unwrap();
+        let out = run(&["unit", "settlements"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert!(
+            stderr.contains(local_id)
+                && stderr.contains("host refusal lacks consistent launch provenance"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(remote_id)
+                && stderr.contains("host refusal does not match selected launch"),
+            "{stderr}"
+        );
+        let events: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
+        assert_eq!(events[0]["execution"], expected);
+        assert_eq!(events[0]["result"]["kind"], "not_started");
+        if owner == "other-owner" {
+            assert_eq!(events[0], other_event);
+        }
+        let ack = json!({"execution":expected,"eventId":events[0]["eventId"]});
+        let out = run(&["unit", "ack-settlement", "--input", &ack.to_string()]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = run(&["unit", "settlements"]);
+        assert!(out.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+            json!([])
+        );
+    }
+    assert_eq!(admission(&rig, &local), before_local);
+    assert_eq!(admission(&rig, &remote), before_remote);
+    for execution in [&local, &remote] {
+        let (code, observed) = operation(&rig, "observe", &execution_input(execution));
+        assert_eq!(code, 0, "{observed}");
+        assert_eq!(observed["phase"], "unresolved");
+        assert!(observed["settlement"].is_null());
+    }
+}
+
+#[test]
+fn invalid_host_evidence_never_falls_back_to_cached_return_projection() {
+    let (rig, execution, input) = launched("isolation-no-fallback");
+    transcript(&rig, &execution, &entries());
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    assert_eq!(rig.json(&["unit", "settlements"]).0, 0);
+    let id = execution["requestId"].as_str().unwrap();
+    let saved = admission(&rig, &execution);
+    let mut items = rig.read("state/items.json");
+    items[0]["reply"] = Value::Null;
+    rig.put("state/items.json", &items);
+    let progress_file = format!("state/launches/{id}.progress.json");
+    let mut progress = rig.read(&progress_file);
+    progress["request"]["unit"]["execution"]["ownerId"] = json!("wrong-owner");
+    rig.put(&progress_file, &progress);
+    let events = rejected_refresh(&rig, &["unit", "settlements"], id, "REQUEST_CONFLICT");
+    assert_eq!(events, json!([saved["unit"]["returned"]]));
+    assert_eq!(rig.read("state/items.json"), items);
+    assert_eq!(admission(&rig, &execution), saved);
+    let mut remote = saved;
+    remote["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
+    rig.put(&format!("state/admissions/{id}.json"), &remote);
+    rig.script("ssh", "#!/bin/sh\nprintf 'malformed evidence'\n");
+    rejected_refresh(&rig, &["unit", "settlements"], id, "unexpected output");
+    assert_eq!(rig.read("state/items.json"), items);
+    assert_eq!(admission(&rig, &execution), remote);
+}
+
+#[test]
+fn refresh_storage_read_and_write_failures_are_not_request_rejections() {
+    for failure in ["host-read", "preparation-read", "admission-write"] {
+        let (rig, execution, _) = refused_unit(&format!("isolation-storage-{failure}"));
+        let id = execution["requestId"].as_str().unwrap();
+        let saved = admission(&rig, &execution);
+        match failure {
+            "host-read" => {
+                let path = rig.dir.join(format!("state/launches/{id}.progress.json"));
+                fs::remove_file(&path).unwrap();
+                fs::create_dir(path).unwrap();
+            }
+            "preparation-read" => fs::create_dir(rig.dir.join("state/preparations.json")).unwrap(),
+            "admission-write" => {
+                let remote =
+                    json!({"kind":"refused","launch":saved["launch"],"failed":"native refusal"});
+                let mut attempt = saved.clone();
+                attempt["host"]["target"] = json!("remote-host");
+                // Host identity stays correlated; the non-local target selects SSH.
+                attempt["host"]["id"] = json!("8103");
+                attempt["launch"]["host"] = json!("8103");
+                let mut remote = remote;
+                remote["launch"] = attempt["launch"].clone();
+                rig.put(&format!("state/admissions/{id}.json"), &attempt);
+                rig.put("remote-receipt.json", &remote);
+                rig.script("ssh", &format!("#!/bin/sh\ncat \"$RIG/remote-receipt.json\"\nmkdir -p \"$RIG/state/admissions/.{id}.json.r-1-$PPID-0.tmp\"\n"));
+                fs::write(rig.dir.join("clock"), "1").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let out = rig.run(&["unit", "settlements"]);
+        assert!(
+            !out.status.success(),
+            "{failure}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("dogsled unit evidence"));
+        assert!(
+            admission(&rig, &execution)["unit"]["abandoned"].is_null(),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn refused_host_cannot_acknowledge_return_and_cleanup_query_never_closes_panes() {
+    let (rig, execution, input) = refused_unit("refused-host-ack");
+    let before = rig.log("herdr.log").matches("pane close").count();
+    let (code, receipt) = rig.json(&[
+        "host",
+        "unit-receipt",
+        "--input",
+        &execution_input(&execution).to_string(),
+    ]);
+    assert_eq!(code, 0, "{receipt}");
+    assert_eq!(receipt["kind"], "refused");
+    assert_eq!(rig.log("herdr.log").matches("pane close").count(), before);
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 2);
+}
+
+#[test]
+fn preparation_owners_coexist_and_release_only_their_records() {
+    let (rig, repo) = place::place_rig("preparation-owners");
+    for owner in ["first", "first", "later"] {
+        let (code, result) = rig.json(&[
+            "host",
+            "prepare",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--branch",
+            "owned",
+            "--request-id",
+            owner,
+        ]);
+        assert_eq!(code, 0, "{result}");
+    }
+    let path = repo.join(".worktrees/owned");
+    let mut holds = rig.read("state/preparations.json");
+    assert_eq!(holds.as_array().unwrap().len(), 2);
+    let mut legacy = holds[0].clone();
+    legacy.as_object_mut().unwrap().remove("request_id");
+    holds.as_array_mut().unwrap().push(legacy.clone());
+    rig.put("state/preparations.json", &holds);
+    assert_eq!(
+        rig.json(&[
+            "host",
+            "prepared",
+            "--path",
+            path.to_str().unwrap(),
+            "--request-id",
+            "first"
+        ])
+        .0,
+        0
+    );
+    let remaining = rig.read("state/preparations.json");
+    assert_eq!(remaining.as_array().unwrap().len(), 2);
+    assert_eq!(remaining[0]["request_id"], "later");
+    assert_eq!(remaining[1], legacy);
+    assert_eq!(
+        rig.json(&["host", "prepared", "--path", path.to_str().unwrap()])
+            .0,
+        0
+    );
+    assert_eq!(rig.read("state/preparations.json"), json!([remaining[0]]));
+    let before = rig.log("herdr.log");
+    assert_eq!(
+        rig.json(&[
+            "host",
+            "prepare",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--branch",
+            "invalid",
+            "--request-id",
+            "../escape"
+        ])
+        .0,
+        2
+    );
+    assert_eq!(rig.log("herdr.log"), before);
+    assert_eq!(rig.read("state/preparations.json"), json!([remaining[0]]));
+}
+
+#[test]
+fn successful_agent_place_and_failed_setup_release_only_owned_preparation() {
+    for action in ["agent", "place", "setup-failure"] {
+        let (rig, repo) = place::place_rig(&format!("preparation-release-{action}"));
+        let path = repo.join(".worktrees/owned");
+        let legacy = json!({"repo":repo,"path":path,"branch":"owned","head":""});
+        let mut other = legacy.clone();
+        other["request_id"] = json!("other-request");
+        rig.put("state/preparations.json", &json!([legacy, other]));
+        if action == "setup-failure" {
+            fs::write(rig.dir.join("setup-fails"), "").unwrap();
+        }
+        let args = if action == "agent" {
+            vec![
+                "agent",
+                "--cwd",
+                repo.to_str().unwrap(),
+                "--branch",
+                "owned",
+                "--base",
+                "main",
+                "--name",
+                "worker",
+                "--message",
+                "go",
+            ]
+        } else {
+            vec![
+                "place",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--branch",
+                "owned",
+                "--base",
+                "main",
+            ]
+        };
+        let (code, result) = rig.json(&args);
+        assert_eq!(
+            code,
+            if action == "setup-failure" { 2 } else { 0 },
+            "{action}: {result}"
+        );
+        assert_eq!(
+            rig.read("state/preparations.json"),
+            json!([legacy, other]),
+            "{action}"
+        );
+    }
+}
+
+#[test]
+fn remote_preparation_and_placement_release_route_the_same_request_id() {
+    let rig = rig("remote-preparation-owner", false);
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.peer();
+    rig.snapshot("remote.json", now(), 0.0, 8);
+    rig.script(
+        "ssh",
+        &fs::read_to_string(rig.dir.join("bin/ssh"))
+            .unwrap()
+            .replace(
+                "case \"$*\" in",
+                "case \"$*\" in\n  *'host prepared'*) printf '{}\\n' ;;",
+            ),
+    );
+    let (code, result) = rig.json(&[
+        "place",
+        "--host",
+        "netcup",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "owned",
+        "--base",
+        "main",
+    ]);
+    assert_eq!(code, 0, "{result}");
+    let log = rig.log("ssh.log");
+    let prepare = log
+        .lines()
+        .find(|line| line.contains("host prepare "))
+        .unwrap();
+    let released = log
+        .lines()
+        .find(|line| line.contains("host prepared "))
+        .unwrap();
+    let request_arg = prepare
+        .split("--request-id")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    assert!(
+        released.contains(&format!("--request-id {request_arg}")),
+        "{log}"
+    );
+}
+
 #[test]
 fn seed_artifact_and_fresh_session_flags_are_exact_and_idempotent() {
     let (rig, execution, input) = launched("seed-artifact");
@@ -321,18 +887,21 @@ fn terminal_replay_rejects_changed_full_receipt_and_changed_correlated_item() {
     let mut changed = original.clone();
     changed["terminal_receipt"]["text"] = json!(format!("{}changed tail", "x".repeat(2048)));
     rig.put(&path, &changed);
-    let (code, error) = operation(&rig, "observe", &execution_input(&execution));
-    assert_eq!(code, 2, "{error}");
-    assert_eq!(error["error"]["code"], "REQUEST_CONFLICT");
+    let args = [
+        "unit",
+        "observe",
+        "--input",
+        &execution_input(&execution).to_string(),
+    ];
+    let observed = rejected_refresh(&rig, &args, id, "contradictory terminal evidence");
+    assert_eq!(observed["settlement"], saved["unit"]["returned"]);
     assert_eq!(admission(&rig, &execution), saved);
     rig.put(&path, &original);
     let mut items = rig.read("state/items.json");
     items[0]["reply"]["text"] = json!("contradictory item");
     rig.put("state/items.json", &items);
-    assert_eq!(
-        operation(&rig, "observe", &execution_input(&execution)).0,
-        2
-    );
+    let observed = rejected_refresh(&rig, &args, id, "REQUEST_CONFLICT");
+    assert_eq!(observed["settlement"], saved["unit"]["returned"]);
     assert_eq!(rig.read("state/items.json"), items);
     assert_eq!(admission(&rig, &execution), saved);
 }

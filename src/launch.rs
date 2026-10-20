@@ -422,6 +422,14 @@ pub fn terminal_ack(
         let mut progress = receipts
             .read::<Progress>(&file)?
             .ok_or_else(|| crate::unit_transport::conflict("unknown host launch"))?;
+        if receipts
+            .read::<Value>(&format!("{}.json", ack.execution.request_id))?
+            .is_some_and(|value| value.get("failed").is_some())
+        {
+            return Err(crate::unit_transport::conflict(
+                "refused launch cannot acknowledge a return",
+            ));
+        }
         let pane = progress
             .pane
             .as_deref()
@@ -476,27 +484,74 @@ pub fn terminal_ack(
     })
 }
 
-/// Peer refresh reads the immutable receipt, even after the worker pane has closed.
+/// Peer refresh reads immutable execution evidence, even after its pane closes.
+/// A final native refusal repairs only this request's preparation, never its pane.
 pub fn unit_receipt(
     ledger: &Ledger,
     execution: &crate::unit_transport::ExecutionRef,
-) -> Result<Option<crate::unit_reply::Receipt>> {
+) -> Result<Option<crate::unit_reply::HostEvidence>> {
+    use crate::unit_reply::{HostEvidence, Refusal, RefusalKind};
     crate::jobs::validate_id(&execution.request_id)?;
-    let progress = ledger
-        .child("launches")
-        .read::<Progress>(&format!("{}.progress.json", execution.request_id))?;
-    let Some(progress) = progress else {
-        return Ok(None);
-    };
-    if progress
-        .request
-        .unit
-        .as_ref()
-        .is_none_or(|s| s.execution != *execution)
-    {
-        return Err(crate::unit_transport::conflict("host execution mismatch"));
-    }
-    Ok(progress.terminal_receipt)
+    let receipts = ledger.child("launches");
+    receipts.with_lock(&execution.request_id, || {
+        let Some(progress) =
+            receipts.read::<Progress>(&format!("{}.progress.json", execution.request_id))?
+        else {
+            return Ok(None);
+        };
+        let seed = progress
+            .request
+            .unit
+            .as_ref()
+            .ok_or_else(|| crate::unit_transport::conflict("host seed missing"))?;
+        seed.validate(&progress.request.id, &progress.request.owner)?;
+        if seed.execution != *execution {
+            return Err(crate::unit_transport::conflict("host execution mismatch"));
+        }
+        let final_receipt = receipts.read::<Value>(&format!("{}.json", execution.request_id))?;
+        if let Some(value) = final_receipt
+            .as_ref()
+            .filter(|value| value.get("failed").is_some())
+        {
+            let failed = value
+                .get("failed")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .ok_or_else(|| crate::unit_transport::conflict("malformed host refusal"))?;
+            if value.as_object().is_none_or(|object| object.len() != 1)
+                || !progress.attempted
+                || progress.confirmed
+                || progress.terminal_receipt.is_some()
+                || progress.error.as_deref() != Some(failed)
+                || progress.pane.as_deref().is_none_or(str::is_empty)
+                || progress.terminal.as_deref().is_none_or(str::is_empty)
+                || receipts
+                    .read::<crate::unit_transport::Seed>(&format!(
+                        "{}.unit.json",
+                        execution.request_id
+                    ))?
+                    .as_ref()
+                    != Some(seed)
+            {
+                return Err(crate::unit_transport::conflict(
+                    "host refusal lacks consistent launch provenance",
+                ));
+            }
+            // Do not validate the label against today's naming algorithm: old committed
+            // actions and their refusal remain immutable evidence, not a new launch.
+            let evidence = Refusal {
+                kind: RefusalKind::Refused,
+                launch: progress.request.clone(),
+                failed: failed.to_owned(),
+            };
+            crate::prepare::used(ledger, &progress.request.cwd, Some(&execution.request_id))?;
+            crate::unit_request::crash_point("refusal-hold-released");
+            return Ok(Some(HostEvidence::Refused(Box::new(evidence))));
+        }
+        Ok(progress
+            .terminal_receipt
+            .map(|receipt| HostEvidence::Returned(Box::new(receipt))))
+    })
 }
 
 fn idle(shell: &dyn Shell, pane: &str) -> Result<()> {
