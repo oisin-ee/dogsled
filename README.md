@@ -161,6 +161,8 @@ dogsled done                       # as a child: my whole task is complete
 ```
 
 `close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
+
+For an interrupted launch with no final receipt, explicit `close` can retire its exact idle shell under the request and pane locks. This closes **only the pane**, retaining the checkout, preparation holds, and unknown launch evidence. It does not report that the task never started. Competing launch records, a changed terminal, any agent, or incomplete foreground evidence refuse recovery. Automatic cleanup never uses this recovery path; normal cleanup can assess the retained checkout after its holds are resolved.
 In an agent worktree (locked `agent:worktree`, as dogsled makes them), it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
 Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks the worktree, and runs `git worktree remove` without force.
 Close uses the same loss rule as cleanup: a clean checkout and every commit held by the default branch or freshly fetched remote refs. It deletes the branch under that same rule. Local-only work refuses close, including an explicit owner close.

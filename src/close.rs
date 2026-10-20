@@ -108,6 +108,15 @@ pub fn local(
             "{pane} is busy ({reason}); close only an idle or done child"
         )));
     }
+    // An explicit recovery may end a stranded shell without removing its checkout or
+    // assigning an outcome to the interrupted launch. Automatic cleanup cannot do this.
+    if guard == Guard::Clean && crate::launch::close_unfinished(ledger, shell, pane)? {
+        return Ok(Closed {
+            pane: pane.into(),
+            worktree: None,
+            pane_closed: true,
+        });
+    }
     // An automatic close needs the child's own word: idle alone means it waits for input.
     if guard != Guard::Clean
         && target.agent.is_some()
