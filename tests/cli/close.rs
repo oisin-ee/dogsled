@@ -285,6 +285,40 @@ fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
 }
 
+/// A launch receipt with no result, as an interrupted or failed launch leaves it.
+fn unfinished_launch(rig: &Rig, id: &str, tree: &Path, pane: &str) {
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    rig.put(
+        &format!("state/launches/{id}.progress.json"),
+        &json!({"request":{"id":id,"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+            "host":"local","cwd":tree,"pane":null,"workspace":"w2","workspace_name":"x","owner":"w1:p1"},
+            "pane":pane,"terminal":"term_gone","attempted":true,"confirmed":false,
+            "result":{"host":"local","name":"worker","pane":pane},"error":"startup response lost"}),
+    );
+}
+
+#[test]
+fn an_unfinished_launch_holds_its_checkout_only_while_its_pane_exists() {
+    let (rig, tree) = close_rig("close-unfinished-launch");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    // Its pane w2:p2 is live: the outcome is unknown, so the checkout stays.
+    unfinished_launch(&rig, "live", &tree, "w2:p2");
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("pending preparation or launch"), "{stderr}");
+    assert!(tree.exists());
+    // Its pane is gone: nothing can start there any more.
+    fs::remove_file(rig.dir.join("state/launches/live.progress.json")).unwrap();
+    unfinished_launch(&rig, "gone", &tree, "w9:p9");
+    let (code, closed) = rig.json(&["close", "w2:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    assert_eq!(closed["worktree"]["branch_deleted"], true);
+    assert!(!tree.exists());
+}
+
 #[test]
 fn close_keeps_local_only_work_and_deletes_a_branch_at_the_default_tip() {
     let (rig, tree) = close_rig("close-unmerged");
