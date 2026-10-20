@@ -23,6 +23,9 @@ pub struct Prepared {
     pub abandoned: Option<NotStarted>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returned: Option<crate::unit_transport::Returned>,
+    /// Retain full immutable evidence so item repair survives host unavailability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_receipt: Option<crate::unit_reply::Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_ack: Option<String>,
 }
@@ -119,6 +122,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
                 committed: None,
                 abandoned: None,
                 returned: None,
+                terminal_receipt: None,
                 settlement_ack: None,
             }),
         };
@@ -352,7 +356,7 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
         let Some(unit) = attempt.unit.as_ref() else {
             continue;
         };
-        if unit.committed.is_none() || unit.abandoned.is_some() || unit.returned.is_some() {
+        if unit.committed.is_none() || unit.abandoned.is_some() {
             continue;
         }
         let Some(host) = attempt.host.as_ref() else {
@@ -372,13 +376,19 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
         };
         let receipt: crate::unit_reply::Receipt = match receipt {
             Ok(Some(receipt)) => receipt,
-            Ok(None) => continue,
+            Ok(None) => match &unit.terminal_receipt {
+                Some(saved) => saved.clone(),
+                None => continue,
+            },
             Err(error) => {
                 eprintln!(
                     "dogsled unit evidence {}: {error}",
                     unit.execution.request_id
                 );
-                continue;
+                match &unit.terminal_receipt {
+                    Some(saved) => saved.clone(),
+                    None => continue,
+                }
             }
         };
         import_receipt(fleet.ledger, &file, receipt)?;
@@ -388,7 +398,8 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
 
 fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Receipt) -> Result<()> {
     let attempts = ledger.child("admissions");
-    attempts.with_lock(&receipt.ack.execution.request_id, || {
+    let id = receipt.ack.execution.request_id.clone();
+    attempts.with_lock(&id, || {
         let mut current = attempts
             .read::<Attempt>(file)?
             .ok_or_else(|| conflict("admission disappeared"))?;
@@ -419,35 +430,38 @@ fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Recei
                 },
             },
         };
-        if let Some(saved) = &unit.returned {
-            if saved != &event {
-                return Err(conflict("contradictory terminal evidence"));
-            }
-            return Ok(());
-        }
-        unit.returned = Some(event);
-        // Keep the exact acknowledged text inspectable in the existing reply record.
-        // This is not the release decision: only the immutable host receipt permits it.
-        if let Some(item) = crate::items::list(ledger)?
-            .into_iter()
-            .find(|i| i.id == unit.execution.request_id)
+        if unit.returned.as_ref().is_some_and(|saved| saved != &event)
+            || unit
+                .terminal_receipt
+                .as_ref()
+                .is_some_and(|saved| saved != &receipt)
         {
-            crate::items::set_reply(
-                ledger,
-                &item.id,
-                crate::items::Reply {
-                    seq: item.reply.as_ref().map_or(0, |r| r.seq),
-                    result_id: Some(format!(
-                        "{}-{}",
-                        unit.execution.request_id, receipt.reply_entry_id
-                    )),
-                    text: receipt.text,
-                    captured_ms: crate::ledger::now_ms(),
-                    reported_ms: None,
-                },
-            )?;
+            return Err(conflict("contradictory terminal evidence"));
         }
-        attempts.write(file, &current)
+        if unit.returned.is_none() || unit.terminal_receipt.is_none() {
+            unit.returned = Some(event);
+            unit.terminal_receipt = Some(receipt.clone());
+            attempts.write(file, &current)?;
+        }
+        crash_point("settlement-persisted");
+        // This projection is replayable even if finish() has not registered the item yet.
+        // Identical replay preserves notification acknowledgement under the item lock.
+        crate::items::set_reply(
+            ledger,
+            &receipt.ack.execution.request_id,
+            crate::items::Reply {
+                seq: 0,
+                result_id: Some(format!(
+                    "{}-{}",
+                    receipt.ack.execution.request_id, receipt.reply_entry_id
+                )),
+                text: receipt.text,
+                captured_ms: crate::ledger::now_ms(),
+                reported_ms: None,
+            },
+        )?;
+        crash_point("reply-persisted");
+        Ok(())
     })
 }
 

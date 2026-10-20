@@ -61,10 +61,24 @@ fn change(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>)) -> Result<()> {
 
 /// Keep `reply` as `id`'s final reply.
 pub fn set_reply(ledger: &Ledger, id: &str, reply: Reply) -> Result<()> {
-    change(ledger, |items| {
-        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
-            item.reply = Some(reply);
+    ledger.with_lock("items", || {
+        let mut items = list(ledger)?;
+        let Some(item) = items.iter_mut().find(|i| i.id == id) else {
+            return Ok(());
+        };
+        if let Some(saved) = &item.reply
+            && saved.result_id.is_some()
+        {
+            if saved.result_id != reply.result_id || saved.text != reply.text {
+                return Err(crate::unit_transport::conflict(
+                    "correlated item reply changed",
+                ));
+            }
+            // Keep captured_ms and reported_ms: an identical replay is not new delivery.
+            return Ok(());
         }
+        item.reply = Some(reply);
+        ledger.write("items.json", &items)
     })
 }
 

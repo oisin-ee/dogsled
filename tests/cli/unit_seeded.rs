@@ -173,6 +173,170 @@ fn terminal_receipt_pairs_seal_and_exact_reply_and_delivery_replays_until_ack() 
     );
 }
 
+fn tell_once(rig: &Rig) -> Value {
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"].as_array_mut().unwrap().push(json!({
+        "pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle","name":"lead"
+    }));
+    rig.put("agents.json", &agents);
+    assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    let mut items = rig.read("state/items.json");
+    items[0]["closed_ms"] = json!(now());
+    rig.put("state/items.json", &items);
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let records = rig.read("state/inbox/term_owner.json");
+    let replies: Vec<_> = records
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "reply")
+        .collect();
+    assert_eq!(replies.len(), 1, "{records}");
+    assert!(replies[0]["text"].as_str().unwrap().contains("EXACT FINAL"));
+    let saved = rig.read("state/items.json")[0]["reply"].clone();
+    assert!(saved["reported_ms"].is_number());
+    saved
+}
+
+fn replay_keeps_notification(rig: &Rig, execution: &Value, event: &Value, reply: &Value) {
+    for _ in 0..2 {
+        let (code, state) = operation(rig, "observe", &execution_input(execution));
+        assert_eq!(code, 0, "{state}");
+        assert_eq!(state["settlement"], *event);
+        let out = rig.run(&["serve", "--once", "--interval", "1"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(rig.read("state/items.json")[0]["reply"], *reply);
+        assert_eq!(
+            rig.read("state/inbox/term_owner.json")
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["kind"] == "reply")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn receipt_before_item_registration_restores_exact_reply_after_finish_replays() {
+    let (rig, execution, input) = launched("seed-before-item");
+    transcript(&rig, &execution, &entries());
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    let id = execution["requestId"].as_str().unwrap();
+    // Reproduce host completion before owner finish() registers its item/result.
+    rig.put("state/items.json", &json!([]));
+    let mut attempt = admission(&rig, &execution);
+    attempt["result"] = Value::Null;
+    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    let (code, state) = operation(&rig, "observe", &execution_input(&execution));
+    assert_eq!(code, 0, "{state}");
+    let event = state["settlement"].clone();
+    assert_eq!(event["result"]["kind"], "returned");
+    assert_eq!(rig.read("state/items.json"), json!([]));
+    assert_eq!(operation(&rig, "commit", &input).0, 0);
+    // Projection repair must not depend on the host still serving its receipt.
+    let path = format!("state/launches/{id}.progress.json");
+    let mut progress = rig.read(&path);
+    progress["terminal_receipt"] = Value::Null;
+    rig.put(&path, &progress);
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).0,
+        0
+    );
+    let reply = rig.read("state/items.json")[0]["reply"].clone();
+    assert_eq!(reply["text"], "EXACT FINAL");
+    assert_eq!(reply["result_id"], event["result"]["evidence"]["resultId"]);
+    let notified = tell_once(&rig);
+    replay_keeps_notification(&rig, &execution, &event, &notified);
+    assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+}
+
+#[test]
+fn terminal_projection_recovers_each_persistence_boundary_and_legacy_write_order() {
+    for point in ["settlement-persisted", "reply-persisted"] {
+        let (rig, execution, input) = launched(&format!("seed-projection-{point}"));
+        transcript(&rig, &execution, &entries());
+        assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+        let out = rig
+            .cmd(&[
+                "unit",
+                "observe",
+                "--input",
+                &execution_input(&execution).to_string(),
+            ])
+            .env("DOGSLED_TEST_UNIT_CRASH", point)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(86));
+        let event = admission(&rig, &execution)["unit"]["returned"].clone();
+        let has_reply = !rig.read("state/items.json")[0]["reply"].is_null();
+        assert_eq!(has_reply, point == "reply-persisted");
+        assert_eq!(
+            operation(&rig, "observe", &execution_input(&execution)).0,
+            0
+        );
+        let notified = tell_once(&rig);
+        // The prior implementation wrote the item first; replay that interrupted order.
+        let mut attempt = admission(&rig, &execution);
+        attempt["unit"]["returned"] = Value::Null;
+        attempt["unit"]["terminal_receipt"] = Value::Null;
+        rig.put(
+            &format!(
+                "state/admissions/{}.json",
+                execution["requestId"].as_str().unwrap()
+            ),
+            &attempt,
+        );
+        replay_keeps_notification(&rig, &execution, &event, &notified);
+    }
+}
+
+#[test]
+fn terminal_replay_rejects_changed_full_receipt_and_changed_correlated_item() {
+    let (rig, execution, input) = launched("seed-replay-conflict");
+    let mut entries = entries();
+    entries[2]["message"]["content"][0]["text"] =
+        json!(format!("{}original tail", "x".repeat(2048)));
+    transcript(&rig, &execution, &entries);
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).0,
+        0
+    );
+    let saved = admission(&rig, &execution);
+    let id = execution["requestId"].as_str().unwrap();
+    let path = format!("state/launches/{id}.progress.json");
+    let original = rig.read(&path);
+    let mut changed = original.clone();
+    changed["terminal_receipt"]["text"] = json!(format!("{}changed tail", "x".repeat(2048)));
+    rig.put(&path, &changed);
+    let (code, error) = operation(&rig, "observe", &execution_input(&execution));
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["error"]["code"], "REQUEST_CONFLICT");
+    assert_eq!(admission(&rig, &execution), saved);
+    rig.put(&path, &original);
+    let mut items = rig.read("state/items.json");
+    items[0]["reply"]["text"] = json!("contradictory item");
+    rig.put("state/items.json", &items);
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).0,
+        2
+    );
+    assert_eq!(rig.read("state/items.json"), items);
+    assert_eq!(admission(&rig, &execution), saved);
+}
+
 #[test]
 fn old_reply_wrong_branch_malformed_and_partial_transcripts_never_release() {
     let (rig, execution, input) = launched("seed-bad-evidence");
