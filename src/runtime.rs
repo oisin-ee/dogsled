@@ -109,10 +109,7 @@ pub fn start(fleet: &Fleet, request: Request, waiting: bool) -> Result<Value> {
 /// Only for a caller that already owns the request's admission lock.
 pub(crate) fn start_locked(fleet: &Fleet, request: Request) -> Result<Value> {
     start_using(fleet, request, false, |fleet, request, now| {
-        if work::queue(fleet.ledger)?
-            .iter()
-            .any(|t| t.state == "pending")
-        {
+        if work::waits_behind(fleet, request)? {
             return Ok(None);
         }
         work::perform_locked(fleet, request, now)

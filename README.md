@@ -167,6 +167,7 @@ After removal, close drops the worktree's registration, as prune does.
 The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted,anchor_closed?}|null,pane_closed}`. A remote host runs the same steps over SSH.
 
 The service admits tickets in FIFO order using the same placement policy.
+The order holds per host. A ticket waits only behind earlier tickets that could take one of its hosts. A full host does not hold back a ticket that is pinned to another host with room.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
 A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
 For non-waiting callers, admission tells the owner through its inbox. An owner without an inbox reader hears once it has one; nothing is typed into its terminal.
