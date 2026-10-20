@@ -103,7 +103,29 @@ pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
 /// `{"queued":true,"ticket":…}`, with `retrying` when the first launch failed and the service
 /// retries it with backoff.
 pub fn start(fleet: &Fleet, request: Request, waiting: bool) -> Result<Value> {
-    match work::submit(fleet, &request, now_ms()) {
+    start_using(fleet, request, waiting, work::submit)
+}
+
+/// Only for a caller that already owns the request's admission lock.
+pub(crate) fn start_locked(fleet: &Fleet, request: Request) -> Result<Value> {
+    start_using(fleet, request, false, |fleet, request, now| {
+        if work::queue(fleet.ledger)?
+            .iter()
+            .any(|t| t.state == "pending")
+        {
+            return Ok(None);
+        }
+        work::perform_locked(fleet, request, now)
+    })
+}
+
+fn start_using(
+    fleet: &Fleet,
+    request: Request,
+    waiting: bool,
+    submit: fn(&Fleet, &Request, u64) -> Result<Option<Value>>,
+) -> Result<Value> {
+    match submit(fleet, &request, now_ms()) {
         Ok(Some(result)) => Ok(result),
         Ok(None) => {
             let ticket = work::enqueue(fleet.ledger, request, waiting, now_ms())?;

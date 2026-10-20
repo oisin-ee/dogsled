@@ -31,6 +31,8 @@ mod stop_sweep;
 mod sweep;
 #[path = "cli/transcripts.rs"]
 mod transcripts;
+#[path = "cli/unit_requests.rs"]
+mod unit_requests;
 #[path = "cli/watchdog.rs"]
 mod watchdog;
 

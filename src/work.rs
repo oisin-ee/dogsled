@@ -96,6 +96,12 @@ pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
     ledger.with_lock("queue", || {
         let mut tickets = queue(ledger)?;
+        if let Some(ticket) = tickets.iter().find(|t| t.request.id == request.id) {
+            if serde_json::to_value(&ticket.request)? != serde_json::to_value(&request)? {
+                return Err(crate::unit_transport::conflict("queued request changed"));
+            }
+            return Ok(ticket.id.clone());
+        }
         let id = new_id();
         tickets.push(Ticket {
             id: id.clone(),
@@ -365,11 +371,16 @@ pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value
 /// Caller-owned progress is durable before any preparation or launch side effect. An
 /// interrupted preparation cannot be adopted: only a saved launch may be resumed.
 #[derive(Debug, Serialize, Deserialize)]
-struct Attempt {
-    request: Value,
-    host: Host,
-    launch: Option<Launch>,
-    error: Option<String>,
+pub(crate) struct Attempt {
+    pub request: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Host>,
+    pub launch: Option<Launch>,
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<crate::unit_request::Prepared>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
 }
 
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
@@ -395,27 +406,58 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         ));
     }
     let attempts = fleet.ledger.child("admissions");
-    attempts.with_lock(&request.id, || {
-        let file = format!("{}.json", request.id);
-        if let Some(attempt) = attempts.read::<Attempt>(&file)? {
-            if attempt.request != serde_json::to_value(request)? {
-                return Err(Error::Invalid(format!("request {} changed after placement", request.id)));
-            }
-            if !matches!(request.action, Action::Agent { .. }) {
-                return Err(Error::Invalid(format!(
-                    "request {} already attempted a non-reconcilable launch; inspect before resubmitting",
-                    request.id
-                )));
-            }
-            let launch = attempt.launch.ok_or_else(|| Error::Invalid(format!(
-                "request {} stopped during preparation on {}; inspect that host before resubmitting: {}",
-                request.id, attempt.host.label,
-                attempt.error.as_deref().unwrap_or("preparation outcome is unknown")
-            )))?;
-            return finish(fleet, request, &attempt.host, &launch, now).map(Some);
+    attempts.with_lock(&request.id, || perform_locked(fleet, request, now))
+}
+
+/// The caller owns the request's admission lock. Commit uses this path so the lock is
+/// never reacquired while runtime::start enters admission.
+pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    let attempts = fleet.ledger.child("admissions");
+    let file = format!("{}.json", request.id);
+    if let Some(attempt) = attempts.read::<Attempt>(&file)? {
+        if attempt.request != serde_json::to_value(request)? {
+            return Err(Error::Invalid(format!(
+                "request {} changed after placement",
+                request.id
+            )));
         }
-        begin(fleet, request, &attempts, &file, now)
-    })
+        if let Some(unit) = &attempt.unit {
+            if unit.committed.is_none() || unit.abandoned.is_some() {
+                return Err(crate::unit_transport::conflict("request is not committed"));
+            }
+            if let Some(result) = &attempt.result {
+                return Ok(Some(result.clone()));
+            }
+        }
+        if !matches!(request.action, Action::Agent { .. }) {
+            return Err(Error::Invalid(format!(
+                "request {} already attempted a non-reconcilable launch; inspect before resubmitting",
+                request.id
+            )));
+        }
+        if let Some(host) = &attempt.host {
+            let launch = attempt.launch.as_ref().ok_or_else(|| Error::Invalid(format!(
+                    "request {} stopped during preparation on {}; inspect that host before resubmitting: {}",
+                    request.id, host.label,
+                    attempt.error.as_deref().unwrap_or("preparation outcome is unknown")
+                )))?;
+            let result = finish(fleet, request, host, launch, now)?;
+            save_result(&attempts, &file, attempt, &result)?;
+            return Ok(Some(result));
+        }
+        if attempt.unit.is_none() {
+            return Err(Error::Invalid("admission has no selected host".into()));
+        }
+    }
+    begin(fleet, request, &attempts, &file, now)
+}
+
+fn save_result(attempts: &Ledger, file: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
+    if attempt.unit.is_some() {
+        attempt.result = Some(result.clone());
+        attempts.write(file, &attempt)?;
+    }
+    Ok(())
 }
 
 fn begin(
@@ -431,9 +473,11 @@ fn begin(
     };
     let mut attempt = Attempt {
         request: serde_json::to_value(request)?,
-        host: host.clone(),
+        host: Some(host.clone()),
         launch: None,
         error: None,
+        unit: attempts.read::<Attempt>(file)?.and_then(|a| a.unit),
+        result: None,
     };
     attempts.write(file, &attempt)?;
     let prepared = prepare_launch(fleet, request, &host);
@@ -447,7 +491,9 @@ fn begin(
     };
     attempt.launch = Some(launch_request.clone());
     attempts.write(file, &attempt)?;
-    finish(fleet, request, &host, &launch_request, now).map(Some)
+    let result = finish(fleet, request, &host, &launch_request, now)?;
+    save_result(attempts, file, attempt, &result)?;
+    Ok(Some(result))
 }
 
 fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launch> {
@@ -605,7 +651,8 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 .child("admissions")
                 .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
             let recoverable = matches!(ticket.request.action, Action::Agent { .. })
-                && saved.is_some_and(|a| a.launch.is_some());
+                && saved
+                    .is_some_and(|a| a.launch.is_some() || (a.unit.is_some() && a.host.is_none()));
             ticket = update_ticket(fleet.ledger, &ticket.id, |t| {
                 t.state = if recoverable { "pending" } else { "failed" }.into();
                 t.error = Some("service stopped during admission; inspect the selected host before resubmitting".into());
@@ -665,6 +712,7 @@ fn retryable(error: &Error) -> bool {
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     let reports = fleet.status(now)?;
     fleet.ledger.with_lock("admission", || {
+        crate::unit_request::recover(fleet.ledger, now)?;
         admit(fleet, now)?;
         for ticket in queue(fleet.ledger)? {
             if ticket.waiting

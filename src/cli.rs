@@ -143,6 +143,9 @@ pub enum Command {
         #[command(flatten)]
         placement: WorkArgs,
     },
+    /// Durable unit request protocol. All operations accept and return JSON.
+    #[command(subcommand)]
+    Unit(UnitCommand),
     /// List the agent profiles on this host.
     Profiles,
     Track {
@@ -209,6 +212,29 @@ pub enum Command {
     /// Internal local operations used by peers over SSH.
     #[command(subcommand, hide = true)]
     Host(HostCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UnitCommand {
+    Prepare {
+        #[arg(long)]
+        input: String,
+        /// Originating adapter invocation. Retained with the request, not a lease.
+        #[arg(long)]
+        tool_call_id: String,
+    },
+    Commit {
+        #[arg(long)]
+        input: String,
+    },
+    Observe {
+        #[arg(long)]
+        input: String,
+    },
+    AbandonPrepared {
+        #[arg(long)]
+        input: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

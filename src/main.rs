@@ -37,6 +37,8 @@ mod service;
 mod shell;
 mod sweep;
 mod transcript;
+mod unit_request;
+mod unit_transport;
 mod watchdog;
 mod work;
 #[cfg(test)]
@@ -56,7 +58,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let json = cli.json;
+    let json = cli.json || matches!(cli.command, Command::Unit(_));
     let hook = matches!(cli.command, Command::Hook(_));
     if hook && std::env::var_os("HERDR_ENV").is_none() {
         return ExitCode::SUCCESS;
@@ -186,6 +188,26 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             };
             let board = board::build(&status, owner.as_deref(), now_ms());
             print(cli.json, &board, || board.render())?;
+        }
+        Command::Unit(command) => {
+            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
+            let result = unit_request::dispatch(&fleet, command);
+            match result {
+                Ok(value) => print(true, &value, String::new)?,
+                Err(error) => {
+                    let message = error.to_string();
+                    let code = ["REQUEST_CONFLICT", "PROFILE_INVALID", "LAUNCH_UNRESOLVED"]
+                        .into_iter()
+                        .find(|code| message.starts_with(code))
+                        .unwrap_or("LAUNCH_UNRESOLVED");
+                    print(
+                        true,
+                        &serde_json::json!({"error":{"code":code,"message":message}}),
+                        String::new,
+                    )?;
+                    return Ok(error.exit_code());
+                }
+            }
         }
         Command::Mcp => mcp::serve(policy, ledger, home)?,
         Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
