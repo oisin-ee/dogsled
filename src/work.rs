@@ -188,6 +188,39 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
     if let Some(pane) = &launch.pane {
         return Ok((pane.clone(), launch.terminal.clone()));
     }
+    // Work in a repository opens where that repository is shown, never in the caller's
+    // unrelated workspace.
+    let mut args = match crate::worktree::home(shell, &launch.cwd)? {
+        crate::worktree::Home::Shown(id) => tab(id),
+        crate::worktree::Home::Unshown => vec!["workspace".into(), "create".into()],
+        crate::worktree::Home::Outside => callers(shell, launch)?,
+    };
+    args.extend(["--cwd".into(), launch.cwd.clone(), "--no-focus".into()]);
+    let value = herdr(shell, &args)?;
+    let pane = value
+        .pointer("/result/root_pane/pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))?;
+    let terminal = value
+        .pointer("/result/root_pane/terminal_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    Ok((pane, terminal))
+}
+
+fn tab(workspace: String) -> Vec<String> {
+    vec![
+        "tab".into(),
+        "create".into(),
+        "--workspace".into(),
+        workspace,
+    ]
+}
+
+/// A tab in the caller's workspace, or a new workspace with the caller's workspace name.
+fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
     let workspace = if let Some(id) = &launch.workspace {
         Some(id.clone())
     } else {
@@ -203,10 +236,9 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
             .and_then(|w| w["workspace_id"].as_str())
             .map(str::to_owned)
     };
-    let mut args = if let Some(id) = workspace {
-        vec!["tab".into(), "create".into(), "--workspace".into(), id]
-    } else {
-        vec![
+    Ok(match workspace {
+        Some(id) => tab(id),
+        None => vec![
             "workspace".into(),
             "create".into(),
             "--label".into(),
@@ -214,21 +246,8 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
                 .workspace_name
                 .clone()
                 .ok_or_else(|| Error::Invalid("missing workspace name".into()))?,
-        ]
-    };
-    args.extend(["--cwd".into(), launch.cwd.clone(), "--no-focus".into()]);
-    let value = herdr(shell, &args)?;
-    let pane = value
-        .pointer("/result/root_pane/pane_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))?;
-    let terminal = value
-        .pointer("/result/root_pane/terminal_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned);
-    Ok((pane, terminal))
+        ],
+    })
 }
 
 pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {

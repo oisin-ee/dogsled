@@ -19,6 +19,8 @@ mod machines;
 mod mcp;
 #[path = "cli/place.rs"]
 mod place;
+#[path = "cli/placement.rs"]
+mod placement;
 #[path = "cli/profiles.rs"]
 mod profiles;
 #[path = "cli/review.rs"]
@@ -92,6 +94,7 @@ case "$*" in
   'pane list') cat "$RIG/panes.json" ;;
   'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;
+  'worktree list --cwd'*) cat "$RIG/worktrees.json" ;;
   'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
   'pane run'*) shift 3; sh -c "$*" > "$RIG/job-output" 2>&1; printf '{}\n' ;;
   'pane close '*)
