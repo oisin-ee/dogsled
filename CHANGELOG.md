@@ -2,9 +2,9 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.15.0 - 2026-10-20
 
-A child finishes when it says so, not when it goes idle.
+A child finishes when it says so, not when it goes idle. A refused launch no longer holds its worktree.
 
 - Herdr's `idle` and `done` only mean "ready for input". The sweep closed children that asked a question, orchestrators that waited for their own children, and fresh children after their first turn.
 - A child calls the new `done` MCP tool, or `dogsled done`, in the turn that completes its task. The sweep closes it only after that turn ends, and only when the loss rule allows. Orphans follow the same rule.
@@ -14,6 +14,9 @@ A child finishes when it says so, not when it goes idle.
 - Breaking: an idle agent that has not called `done` holds its checkout in prune, the sweep, and an automatic close. The board shows it as running, not TO LAND. Only an explicit `dogsled close` takes it.
 - Queue order holds per host. A full host no longer holds back a ticket pinned to another host with room. Before, the first ticket that found no room ended the admission pass for every host.
 - A host with a stale snapshot gives the snapshot's age in its reason, such as `service: down (last snapshot 44s ago)`. The `service` field is still `down`.
+- Herdr can refuse `agent start` before it types into the pane, for example with `agent_pane_busy` or `agent_name_taken`. Dogsled now treats that refusal as final. It records the refusal as the launch result, closes the empty pane it created, and does not retry. Before, the retry reported "startup outcome is unknown", and the unfinished receipt held the worktree forever.
+- An unfinished launch holds its checkout only while its pane exists. A receipt whose pane is gone no longer blocks `close`, prune, or the sweep.
+- Groundwork, not yet usable: the `dogsled unit` commands and the unit forms of the `spawn` tool implement the unit request protocol in `docs/unit-requests.md`. They need the Dogsled Pi bridge, which is not released. Without it, a unit spawn returns `PROVIDER_UNAVAILABLE`.
 
 ## 0.14.0 - 2026-10-20
 
