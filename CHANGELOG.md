@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.16.4 - 2026-10-20
+
+- Explicit close can retire the verified idle shell of an interrupted launch without deleting its checkout or inventing a task outcome. Unknown launch evidence and preparation holds remain intact for normal cleanup.
+- Agent starts and interrupted-launch recovery share a pane lock. Recovery rejects competing ownership, changed terminals, agents, and incomplete foreground evidence. Automatic cleanup retains its existing safeguards.
+
 ## 0.16.3 - 2026-10-20
 
 - Proven native launch refusals now settle managed executions as `not_started`, without accepting their tasks. Evidence must match the saved launch, seed, execution, and commitment; unknown outcomes remain unresolved.
