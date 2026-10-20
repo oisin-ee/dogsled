@@ -89,6 +89,20 @@ test("runtime-boundary recovery excludes an invocation still known to execute", 
 	await r.bridge.ended("call", r.ctx); assert.equal(r.state().abandons, 1);
 });
 
+for (const fault of ["reject", "malformed"] as const) test(`lost prepare response (${fault}) recovers only after actual invocation end`, async () => {
+	const r = rig(); r.prepareFault(fault);
+	assert.equal((await r.bridge.call(r.event(), r.ctx))?.block, true);
+	assert.equal(r.pending.length, 1); assert.equal(r.state().claims, 0);
+	await r.bridge.settled(r.ctx); await r.bridge.ready(r.ctx);
+	assert.equal(r.state().abandons, 0, "unknown in-flight preparation remains held");
+	r.observeFailure(true); await r.bridge.ended("call", r.ctx);
+	assert.equal(r.state().abandons, 0, "failed observation retains recovery intent");
+	r.observeFailure(false); await r.bridge.settled(r.ctx);
+	assert.equal(r.state().abandons, 1); assert.equal(r.state().acks, 1);
+	assert.equal(r.calls.filter(args => args[2] === "prepare").length, 1);
+	assert.equal(r.calls.some(args => args[2] === "commit"), false);
+});
+
 test("SSH and HTTPS origins map to the user-selected repository identity", () => {
 	for (const origin of ["git@github.com:owner/repo.git", "https://github.com/owner/repo.git", "ssh://git@github.com/owner/repo"]) assert.equal(repositoryIdentity(origin), "github.com/owner/repo");
 	assert.throws(() => repositoryIdentity("/tmp/repo"));

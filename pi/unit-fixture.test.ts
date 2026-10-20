@@ -15,6 +15,7 @@ export function rig() {
 	const data = fixture(), emitter = new EventEmitter(), calls: string[][] = [], notices: string[] = [], settlements: unknown[] = [];
 	const pending: unknown[] = [];
 	let phase = "prepared", session = "lead", imported: Receipt | null = null, settleOK = true, claims = 0, abandons = 0, acks = 0, aborted = false;
+	let prepareFault: "reject" | "malformed" | undefined;
 	let claimFailure = false, observeFailure = false, onPrepare: (() => void) | undefined;
 	const bus = { emit(name: string, value: unknown) { emitter.emit(name, value); }, on(name: string, handler: (value: unknown) => void) { emitter.on(name, handler); return () => { emitter.off(name, handler); }; } };
 	const provider = {
@@ -32,7 +33,15 @@ export function rig() {
 			let value: unknown = {};
 			switch (args[1]) {
 				case "prepared": value = pending; break;
-				case "prepare": if (options?.cwd !== "/checkout") throw new Error("wrong cwd"); onPrepare?.(); value = data.execution; break;
+				case "prepare":
+					if (options?.cwd !== "/checkout") throw new Error("wrong cwd");
+					onPrepare?.();
+					if (prepareFault) {
+						pending.push({ execution: data.execution, origin: data.ref, toolCallId: args[args.indexOf("--tool-call-id") + 1] });
+						if (prepareFault === "reject") throw new Error("response lost after persistence");
+						return { code: 0, stdout: "truncated {", stderr: "", killed: false };
+					}
+					value = data.execution; break;
 				case "observe": if (observeFailure) throw new Error("offline"); value = { execution: data.execution, phase }; break;
 				case "abandon-prepared": if (phase !== "prepared" && phase !== "not_started") throw new Error("already committed"); phase = "not_started"; abandons++; settlements.push({ version: 1, eventId: "abandoned", origin: data.ref, execution: data.execution, result: { kind: "not_started", reason: "abandoned" } }); break;
 				case "settlements": value = settlements; break;
@@ -46,6 +55,7 @@ export function rig() {
 	return { ...data, api, bus, bridge, ctx, calls, notices, provider, settlements, pending,
 		state: () => ({ phase, claims, abandons, acks, aborted }),
 		phase: (value: string) => { phase = value; },
+		prepareFault: (value: "reject" | "malformed") => { prepareFault = value; },
 		claimFailure: () => { claimFailure = true; },
 		observeFailure: (value: boolean) => { observeFailure = value; },
 		onPrepare: (fn: () => void) => { onPrepare = fn; },

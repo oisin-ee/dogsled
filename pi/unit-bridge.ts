@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult, SessionStartEvent } from "@earendil-works/pi-coding-agent";
-import { acquire, execution, prepared, record, reference, repositoryIdentity, sameExecution, sameRef, unitInput, unwrap, type Execution, type Prepared } from "./unit-protocol.ts";
+import { acquire, execution, prepared, record, reference, repositoryIdentity, sameExecution, sameRef, unitInput, unwrap, type Execution, type Prepared, type UnitRef } from "./unit-protocol.ts";
 import { UnitWorker, type UnitExec } from "./unit-worker.ts";
 
-interface Invocation { execution: Execution; cwd: string; prepared?: Prepared; ended: boolean }
+interface Invocation { origin: UnitRef; execution?: Execution; cwd: string; prepared?: Prepared; ended: boolean }
 const SPAWN = "mcp__dogsled__spawn";
 
 /** Execution bookkeeping stays in Dogsled; the task provider owns all task state. */
@@ -47,8 +47,8 @@ export class UnitBridge {
 			this.current(epoch, session, ctx);
 			if (!record(item) || !execution(item.execution) || !reference(item.origin) || typeof item.toolCallId !== "string") throw new Error("LAUNCH_UNRESOLVED: invalid preparation identity");
 			if (item.origin.sessionId !== session) continue;
-			const executionRef = item.execution;
-			if ([...this.calls.values()].some(call => !call.ended && sameExecution(call.execution, executionRef))) continue;
+			const executionRef = item.execution, origin = item.origin;
+			if ([...this.calls.values()].some(call => !call.ended && sameRef(call.origin, origin))) continue;
 			await this.exec(["unit", "abandon-prepared", "--input", JSON.stringify({ execution: executionRef })], ctx.cwd);
 		}
 		await this.drain(ctx);
@@ -80,10 +80,12 @@ export class UnitBridge {
 			const origin = await this.pi.exec("git", ["remote", "get-url", "origin"], { cwd: ctx.cwd });
 			if (origin.code !== 0 || repositoryIdentity(origin.stdout) !== contract.scope.repositoryId) throw new Error("REQUEST_CONFLICT: checkout origin differs from repositoryId");
 			this.current(epoch, session, ctx);
+			// Retain the origin before I/O: prepare may persist while its response is lost.
+			const invocation: Invocation = { origin: contract.ref, cwd: ctx.cwd, ended: false };
+			this.calls.set(event.toolCallId, invocation);
 			const result = await this.exec(["unit", "prepare", "--input", JSON.stringify({ origin: contract.ref, placement: request.placement }), "--tool-call-id", event.toolCallId], ctx.cwd);
 			if (!execution(result)) throw new Error("LAUNCH_UNRESOLVED: prepare returned invalid execution");
-			const invocation: Invocation = { execution: result, cwd: ctx.cwd, ended: false };
-			this.calls.set(event.toolCallId, invocation);
+			invocation.execution = result;
 			this.current(epoch, session, ctx);
 			// Reacquire after I/O so shutdown and ownership changes cannot revive old authority.
 			const current = acquire(this.pi.events);
@@ -98,7 +100,7 @@ export class UnitBridge {
 		} catch (error) {
 			// This hook never committed. Its own failure proves this invocation did not launch.
 			const invocation = this.calls.get(event.toolCallId);
-			if (invocation) { invocation.ended = true; await this.recover(event.toolCallId, invocation, ctx); }
+			if (invocation?.execution) { invocation.ended = true; await this.recover(event.toolCallId, invocation, ctx); }
 			return { block: true, reason: String(error) };
 		}
 	}
@@ -114,9 +116,20 @@ export class UnitBridge {
 	}
 	private async recover(id: string, invocation: Invocation, ctx: ExtensionContext): Promise<void> {
 		try {
+			if (!invocation.ended) return;
+			if ([...this.calls.values()].some(other => other !== invocation && !other.ended && sameRef(other.origin, invocation.origin))) return;
+			if (!invocation.execution) {
+				const pending = await this.exec(["unit", "prepared"], invocation.cwd);
+				if (!Array.isArray(pending)) throw new Error("LAUNCH_UNRESOLVED: invalid prepared listing");
+				for (const item of pending) {
+					if (!record(item) || !execution(item.execution) || !reference(item.origin) || typeof item.toolCallId !== "string") throw new Error("LAUNCH_UNRESOLVED: invalid preparation identity");
+					// Prepare deduplicates by full origin and retains the first invocation ID on retries.
+					if (sameRef(item.origin, invocation.origin)) invocation.execution = item.execution;
+				}
+				if (!invocation.execution) { this.calls.delete(id); await this.drain(ctx); return; }
+			}
 			const state = await this.exec(["unit", "observe", "--input", JSON.stringify({ execution: invocation.execution })], invocation.cwd);
 			if (!record(state) || !execution(state.execution) || !sameExecution(state.execution, invocation.execution)) throw new Error("LAUNCH_UNRESOLVED: invalid observation");
-			if (state.phase === "prepared" && [...this.calls.values()].some(other => other !== invocation && !other.ended && sameExecution(other.execution, invocation.execution))) return;
 			if (state.phase === "prepared" && invocation.ended) {
 				await this.exec(["unit", "abandon-prepared", "--input", JSON.stringify({ execution: invocation.execution })], invocation.cwd);
 			} else if (state.phase === "prepared") return;
