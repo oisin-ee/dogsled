@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.16.1 - 2026-10-20
+
+- Agent launches use Herdr’s native shell-readiness handling. Dogsled no longer rejects a newly opened shell while its initialization commands run. Terminal identity, foreign-agent checks, and unknown-outcome protection remain enforced.
+- After a final launch refusal, Dogsled closes only an allocated pane that still has the expected terminal and a positively verified idle shell. Occupied, replaced, uninspectable, and caller-provided panes stay open.
+
 ## 0.16.0 - 2026-10-20
 
 Repository work opens with its repository. Pi gains the structured task handoff bridge.
