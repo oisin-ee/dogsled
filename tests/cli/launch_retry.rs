@@ -127,6 +127,99 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
 }
 
 #[test]
+fn shell_initialization_is_owned_by_native_agent_start() {
+    let rig = Rig::new("native-shell-startup");
+    rig.script("herdr", &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
+        "[{\"pid\":10,\"name\":\"zsh\"}]",
+        "[{\"pid\":10,\"name\":\"zsh\"},{\"pid\":11,\"name\":\"bash\",\"cmdline\":\"brew shellenv\"}]",
+    ));
+    let request = host_request(&rig);
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    let log = rig.log("herdr.log");
+    assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
+    assert!(!log.contains("pane process-info"), "{log}");
+    assert!(!log.contains("pane close"), "{log}");
+}
+
+#[test]
+fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
+    for case in ["busy", "foreign", "uninspectable", "empty", "replaced"] {
+        let rig = Rig::new(&format!("refused-preserve-{case}"));
+        refusing_start(&rig);
+        let mutation = match case {
+            "foreign" => {
+                "printf '%s\\n' '{\"result\":{\"agents\":[{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\",\"name\":\"foreign\",\"agent\":\"pi\"}]}}' > \"$RIG/agents.json\"; "
+            }
+            "replaced" => {
+                "printf '%s\\n' '{\"result\":{\"panes\":[{\"pane_id\":\"w2:p1\",\"terminal_id\":\"replacement\"}]}}' > \"$RIG/panes.json\"; "
+            }
+            _ => "",
+        };
+        let script = fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "'agent start'*) echo",
+                &format!("'agent start'*) {mutation}echo"),
+            );
+        let script = match case {
+            "busy" => script.replace(
+                "[{\"pid\":10,\"name\":\"zsh\"}]",
+                "[{\"pid\":22,\"name\":\"vim\"}]",
+            ),
+            "uninspectable" => script.replace(
+                "'pane process-info'*) printf",
+                "'pane process-info'*) exit 2 ;;\n  'unused'*) printf",
+            ),
+            "empty" => script.replace("[{\"pid\":10,\"name\":\"zsh\"}]", "[]"),
+            _ => script,
+        };
+        rig.script("herdr", &script);
+        let request = host_request(&rig);
+        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        assert_eq!(code, 2, "{case}: {error}");
+        assert!(
+            error["error"].as_str().unwrap().contains("agent_pane_busy"),
+            "{case}: {error}"
+        );
+        let receipt = rig.read("state/launches/recover-one.json");
+        assert!(
+            receipt["failed"]
+                .as_str()
+                .unwrap()
+                .contains("agent_pane_busy")
+        );
+        assert_eq!(
+            rig.json(&["host", "launch", "--request", &request.to_string()])
+                .0,
+            2
+        );
+        let log = rig.log("herdr.log");
+        assert_eq!(
+            log.matches("agent start worker ").count(),
+            1,
+            "{case}: {log}"
+        );
+        assert!(!log.contains("pane close"), "{case}: {log}");
+    }
+}
+
+#[test]
+fn refused_start_never_closes_a_prepared_pane() {
+    let rig = Rig::new("refused-prepared");
+    refusing_start(&rig);
+    let mut request = host_request(&rig);
+    request["pane"] = json!("w2:p1");
+    request["terminal"] = json!("term_child");
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(rig.read("state/launches/recover-one.json")["failed"].is_string());
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane close"), "{log}");
+    assert!(!log.contains("tab create"), "{log}");
+}
+
+#[test]
 fn a_refused_start_is_not_retried_by_the_service() {
     let rig = Rig::new("refused-retry");
     rig.snapshot("state/host.json", now(), 0.0, 8);
