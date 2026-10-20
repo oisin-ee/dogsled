@@ -505,6 +505,12 @@ fn doctor_finds_a_squashed_branch_held_only_by_an_idle_shell_and_prune_removes_i
             {"pane_id":"w2:p2","workspace_id":"w2","agent":null,"cwd":tree}
         ]}}),
     );
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w2:p1","agent":"pi","agent_status":"done",
+            "terminal_id":"term_child","completion_seq":2,"state_change_seq":2}]}}),
+    );
+    rig.done("term_child", "w2:p1", 2);
     let (_, plan) = rig.json(&["doctor"]);
     let entry = |plan: &Value| {
         plan["entries"]

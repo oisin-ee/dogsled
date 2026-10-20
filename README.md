@@ -141,10 +141,13 @@ Closing is driven by events. When a child's turn completes (Herdr's `completion_
 
 1. reads its final reply from the transcript and keeps it in the item;
 2. puts the reply in the owner's inbox (see [Inbox](#inbox));
-3. closes a reader whose worktree is clean with no commits outside the default branch, and any child whose branch has landed.
+3. if the child called `done` during that turn, closes it when it is a reader whose worktree is clean with no commits outside the default branch, or when its branch has landed.
+
+Herdr's `idle` and `done` only mean that the agent is ready for input. A child that asks a question, or that waits for its own children, is idle too. So a child says it has finished with the `done` MCP tool or `dogsled done`, in the turn that completes its task. Dogsled tells each child this at launch: Pi and Claude through `--append-system-prompt`, Codex through `-c developer_instructions`. The mark lives in the host's `done.json`, keyed by the Herdr terminal. A later turn, or an inbox record delivered to the child, ends it. `done` is refused while the caller owns open items or queued tickets.
+A child that ends a turn without `done` stays open, and its reply tells the owner it waits for input.
 
 A child with commits to land stays open and shows under TO LAND on the board, and the prompt line says `To land: web-tests (+2)`. Merge or drop the branch; the next sweep closes it.
-A `blocked` child stays open, and the owner's inbox gets one `blocked` record per episode. A `working` child, or one that has never completed a turn, is never closed. Nothing closes on a timer.
+A `blocked` child stays open, and the owner's inbox gets one `blocked` record per episode. A `working` child, one that has never completed a turn, and one that has not called `done` are never closed automatically. Nothing closes on a timer.
 
 `dogsled board` groups an owner's children, jobs, and queued tickets by what the owner must do: TO LAND, ATTENTION, RUNNING, and WAITING. Each agent row names the harness and model; each job row names its command. `--json` is what the Pi widget draws.
 `dogsled read TARGET [--host H]` shows a child's or job's newest output and the captured final reply.
@@ -152,6 +155,7 @@ A `blocked` child stays open, and the owner's inbox gets one `blocked` record pe
 ```sh
 dogsled close w2:p1
 dogsled close w9:p1 --host netcup --json
+dogsled done                       # as a child: my whole task is complete
 ```
 
 `close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
@@ -310,12 +314,12 @@ A local branch with no worktree is removable when it is integrated or every comm
 Prune and the sweep share the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches.
 An unfinished launch holds its checkout while its pane exists, because an interrupted start can still bring up an agent there. When its pane is gone, it holds nothing.
 An open agent item holds its checkout in prune and the sweep; `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until the default branch holds its work.
-An idle shell, an idle or done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
+An idle or done agent that has not called `dogsled done` holds its checkout in prune, the sweep, and an automatic close; only an explicit `dogsled close` takes it. An idle shell, a done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
 The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
 A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
 A shell with no foreground command in an ended job's tab is idle at once: the job log keeps its output. So is a shell whose directory no longer exists.
-Other panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot.
+Other panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot. An agent pane also needs a `done` mark.
 A shell pane is idle when the service found no foreground command at each sample for more than 24 hours, and it still has none. Herdr reports no activity time, so a command that starts and ends between samples does not count.
 A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
 Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known dogsled-owned paths.
@@ -347,7 +351,7 @@ Each requested pass builds the doctor plan in sweep scope. It applies only entri
 
 - `panes` and `workspaces`: a shell at an empty prompt in an ended job's tab, or in a directory that no longer exists. A workspace closes whole when every pane in it is one of these.
 - `worktrees` and `branches`: the shared loss rule and holds described above, identical to prune.
-- Orphaned children: an idle or done child whose owner is gone and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
+- Orphaned children: a child that called `done`, whose owner is gone, and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
 The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
 The service keeps seven days of completed passes in `sweeps.jsonl` and the latest pass in `sweep.json`.
@@ -496,7 +500,7 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 ### Tools
 
-`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `stop`, `cancel`, and `place`.
+`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `done`, `stop`, `cancel`, and `place`.
 Each tool calls the same code as its CLI command and returns the same JSON. No tool waits: `spawn` and `run` return the item or the queued ticket at once.
 The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its extension (tools `mcp__dogsled__*`); Claude Code reads `plugins/dogsled/.mcp.json`; Codex reads `plugins/dogsled/codex-mcp.json`, which forwards the Herdr and `DOGSLED_*` variables.
 

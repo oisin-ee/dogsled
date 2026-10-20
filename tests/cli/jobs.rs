@@ -193,9 +193,12 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
         json!({"host":"local","pane":"w2:p1","name":"worker"})
     );
     let log = rig.log("herdr.log");
-    // The task is the harness's launch argument; nothing is typed into the pane.
+    // The task is the harness's launch argument, after the child contract as Codex developer
+    // instructions; nothing is typed into the pane.
     assert!(
-        log.contains("agent start worker --kind codex --pane w2:p1 -- literal ' message\n"),
+        log.contains(&format!(
+            "agent start worker --kind codex --pane w2:p1 -- -c developer_instructions=\"{CONTRACT}\" literal ' message\n"
+        )),
         "{log}"
     );
     assert!(!log.contains("agent prompt"), "{log}");

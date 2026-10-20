@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+A child finishes when it says so, not when it goes idle.
+
+- Herdr's `idle` and `done` only mean "ready for input". The sweep closed children that asked a question, orchestrators that waited for their own children, and fresh children after their first turn.
+- A child calls the new `done` MCP tool, or `dogsled done`, in the turn that completes its task. The sweep closes it only after that turn ends, and only when the loss rule allows. Orphans follow the same rule.
+- `done` is refused while the caller owns open items or queued tickets. A later turn, or an inbox record delivered to the child, ends the mark.
+- Dogsled tells each child this contract at launch: Pi and Claude through `--append-system-prompt`, Codex through `-c developer_instructions`.
+- A turn that ends without `done` still sends its reply to the owner's inbox, and says that the child waits for input.
+- Breaking: an idle agent that has not called `done` holds its checkout in prune, the sweep, and an automatic close. The board shows it as running, not TO LAND. Only an explicit `dogsled close` takes it.
 - Queue order holds per host. A full host no longer holds back a ticket pinned to another host with room. Before, the first ticket that found no room ended the admission pass for every host.
 - A host with a stale snapshot gives the snapshot's age in its reason, such as `service: down (last snapshot 44s ago)`. The `service` field is still `down`.
 

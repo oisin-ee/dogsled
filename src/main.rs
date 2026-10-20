@@ -11,6 +11,7 @@ mod close;
 mod commands;
 mod config;
 mod context;
+mod done;
 mod error;
 mod facts;
 mod gate;
@@ -119,6 +120,17 @@ fn print<T: Serialize>(json: bool, value: &T, text: impl FnOnce() -> String) -> 
     Ok(())
 }
 
+/// `dogsled done`, for the agent in `HERDR_PANE_ID`.
+fn done_command(ledger: &Ledger, shell: &System, json: bool) -> Result<()> {
+    let mark = done::mark(ledger, shell, &inbox::own_pane(None)?, now_ms())?;
+    print(json, &mark, || {
+        format!(
+            "{} is done once this turn ends; dogsled closes it when its work has landed\n",
+            mark.pane
+        )
+    })
+}
+
 fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
     let shell = System { budget };
@@ -195,6 +207,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             return unit_request::run(&fleet, command);
         }
         Command::Mcp => mcp::serve(policy, ledger, home)?,
+        Command::Done => done_command(&ledger, &shell, cli.json)?,
         Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
         Command::Send {
             target,

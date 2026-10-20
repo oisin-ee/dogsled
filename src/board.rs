@@ -146,7 +146,9 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         None if host_up => "starting".to_owned(),
         None => "unavailable".to_owned(),
     };
-    let finished = matches!(state.as_str(), "idle" | "done");
+    // Idle alone waits for input; only a child that called `done` has finished.
+    let waiting = matches!(state.as_str(), "idle" | "done");
+    let finished = agent.is_some_and(|a| a.done) && waiting;
     let group = if !host_up || matches!(state.as_str(), "stalled" | "blocked" | "unknown") {
         Group::Attention
     } else if finished && (dirty || (ahead.is_some() && !landed)) {
@@ -167,14 +169,14 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         (_, None) => "starting".to_owned(),
         (_, Some(a)) => {
             let last = a.session.activity.clone().unwrap_or_default();
-            match quiet_ms.filter(|q| *q >= QUIET_MS && !finished) {
+            match quiet_ms.filter(|q| *q >= QUIET_MS && !waiting) {
                 Some(quiet) if last.is_empty() => format!("quiet {}", age(quiet)),
                 Some(quiet) => format!("quiet {} · last: {last}", age(quiet)),
                 None => last,
             }
         }
     };
-    let group = if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && !finished {
+    let group = if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && !waiting {
         Group::Attention
     } else {
         group
@@ -462,9 +464,11 @@ mod tests {
             state_since_ms: None,
             terminal_id: None,
             completion_seq: None,
+            state_change_seq: None,
             cwd: None,
             session: Session::default(),
             worktree: None,
+            done: false,
         }
     }
 
@@ -525,10 +529,14 @@ mod tests {
     #[test]
     fn rows_group_by_what_the_owner_must_do() {
         let mut writer = agent("w2:p1", "pi", "done");
+        writer.done = true;
         writer.worktree = Some(Worktree {
             ahead: 2,
             ..Worktree::default()
         });
+        // Idle with commits, but it never called `done`: it waits for input.
+        let mut asking = agent("w2:p6", "pi", "idle");
+        asking.worktree = writer.worktree.clone();
         let mut landed = agent("w2:p2", "pi", "idle");
         landed.worktree = Some(Worktree {
             ahead: 2,
@@ -549,7 +557,7 @@ mod tests {
             vec![host(
                 "8103",
                 "netcup",
-                vec![writer, landed, working, quiet, blocked],
+                vec![writer, landed, working, quiet, blocked, asking],
             )],
             vec![
                 item("web-tests", "8103", "w2:p1"),
@@ -557,6 +565,7 @@ mod tests {
                 item("review-auth", "8103", "w2:p3"),
                 item("i18n", "8103", "w2:p4"),
                 item("asks", "8103", "w2:p5"),
+                item("question", "8103", "w2:p6"),
                 Item {
                     owner_pane: "w9:p9".into(),
                     ..item("theirs", "8103", "w2:p3")
@@ -577,6 +586,7 @@ mod tests {
                 ("asks", Group::Attention),
                 ("landed", Group::Running),
                 ("review-auth", Group::Running),
+                ("question", Group::Running),
             ]
         );
         assert_eq!(board.rows[0].activity, "+2 commits");
@@ -584,10 +594,10 @@ mod tests {
         assert_eq!(board.rows[1].activity, "quiet 11m · last: rg \"t(\" web/");
         assert_eq!(board.rows[4].what, "codex · gpt-5.6-sol");
         assert_eq!(board.rows[4].activity, "cargo test -p auth");
-        assert_eq!(board.summary(), "1 to land · 2 attention · 2 running");
-        assert!(board.owner_lines().starts_with("Your children and jobs: 1 to land · 2 attention · 1 idle · 1 running\nTo land: web-tests (+2)."));
+        assert_eq!(board.summary(), "1 to land · 2 attention · 3 running");
+        assert!(board.owner_lines().starts_with("Your children and jobs: 1 to land · 2 attention · 2 idle · 1 running\nTo land: web-tests (+2)."));
         assert!(!board.owner_lines().contains("theirs"));
-        assert_eq!(build(&status, None, NOW).rows.len(), 6);
+        assert_eq!(build(&status, None, NOW).rows.len(), 7);
     }
 
     #[test]

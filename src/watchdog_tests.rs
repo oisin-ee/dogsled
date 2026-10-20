@@ -368,15 +368,26 @@ fn a_finished_child_is_left_to_the_sweep_and_named_at_the_regular_check_in() {
     rig.item("agent");
     let reports = rig.reports(1, "working", "working", Some(1));
     tick(&rig.fleet(), &reports, 1).unwrap();
-    // The child finishes with work to land: the sweep sends its reply, so no check-in now.
-    let reports = rig.reports(60_001, "idle", "done", Some(1));
+    // Idle without `done`: it waits for input, so it has not finished.
+    let reports = rig.reports(30_001, "idle", "idle", Some(1));
+    let item = &crate::items::list(&rig.ledger).unwrap()[0];
+    assert!(!crate::items::finished(item, &reports));
+    // The child called `done` and ended that turn, with work to land: the sweep sends its
+    // reply, so no check-in now.
+    let done = |mut reports: Vec<HostReport>| {
+        for agent in &mut reports[0].probe.as_mut().unwrap().agent_panes {
+            agent.done = agent.pane == "child";
+        }
+        reports
+    };
+    let reports = done(rig.reports(60_001, "idle", "done", Some(1)));
     crate::items::reconcile(&rig.ledger, &reports, 60_001).unwrap();
     let item = &crate::items::list(&rig.ledger).unwrap()[0];
     assert!(crate::items::finished(item, &reports));
     tick(&rig.fleet(), &reports, 60_001).unwrap();
     assert_eq!(rig.prompts(), 0);
     // The regular check-in names it while it stays open.
-    let reports = rig.reports(1_860_001, "idle", "done", Some(1));
+    let reports = done(rig.reports(1_860_001, "idle", "done", Some(1)));
     tick(&rig.fleet(), &reports, 1_860_001).unwrap();
     assert_eq!(rig.prompts(), 1);
     assert!(rig.check_ins()[0].contains("Still open with work to land: test-child."));

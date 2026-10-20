@@ -458,6 +458,8 @@ fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Recei
                 text: receipt.text,
                 captured_ms: crate::ledger::now_ms(),
                 reported_ms: None,
+                // A terminal receipt is the child's own word that the unit returned.
+                done: true,
             },
         )?;
         crash_point("reply-persisted");

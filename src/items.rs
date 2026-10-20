@@ -42,6 +42,9 @@ pub struct Reply {
     /// When the owner was told. A closed item with an untold reply still reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_ms: Option<u64>,
+    /// The child called `done` before this turn ended. Otherwise it waits for input.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub done: bool,
 }
 
 impl Item {
@@ -129,8 +132,8 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
     })
 }
 
-/// An open agent item whose agent is idle or done: its result is ready, and its
-/// pane and worktree wait for `dogsled close`.
+/// An open agent item whose agent called `done` and ended that turn: its result is ready, and
+/// it stays open only for work to land.
 pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
     item.closed_ms.is_none()
         && item.kind == "agent"
@@ -139,7 +142,7 @@ pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
             .filter(|h| h.host.id == item.host)
             .filter_map(|h| h.probe.as_ref())
             .flat_map(|p| &p.agent_panes)
-            .any(|a| a.pane == item.pane && matches!(a.state.as_str(), "idle" | "done"))
+            .any(|a| a.pane == item.pane && a.done)
 }
 
 /// The exact command that closes `item`, naming its host by label.

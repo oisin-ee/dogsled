@@ -118,6 +118,10 @@ pub struct Agent {
     /// Herdr's count of finished turns. A rise is a completion event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_seq: Option<u64>,
+    /// Herdr's counter at the agent's latest state change. While it works, a later completion
+    /// has a higher number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_change_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// What the transcript says: the model that answers, and the latest activity.
@@ -126,6 +130,10 @@ pub struct Agent {
     /// The linked worktree the agent runs in, measured on this host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<crate::facts::Worktree>,
+    /// The agent called `done`, and its turn that called it is its latest completion. Only a
+    /// done agent is finished: idle alone means it waits for input.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub done: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +147,8 @@ struct RawAgent {
     terminal_id: Option<String>,
     #[serde(default)]
     completion_seq: Option<u64>,
+    #[serde(default)]
+    state_change_seq: Option<u64>,
     #[serde(default)]
     cwd: Option<String>,
 }
@@ -254,9 +264,11 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 state_since_ms: None,
                 terminal_id: raw.terminal_id,
                 completion_seq: raw.completion_seq,
+                state_change_seq: raw.state_change_seq,
                 cwd: raw.cwd,
                 session: crate::facts::Session::default(),
                 worktree: None,
+                done: false,
             }
         })
         .collect())

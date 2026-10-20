@@ -221,6 +221,7 @@ fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
         assert_eq!(hook(&rig, harness, "UserPromptSubmit"), "");
         let mut host = rig.read("state/host.json");
         host["probe"]["agent_panes"][2]["worktree"] = json!({"path":"/t","branch":"feat/x","ahead":0,"dirty":true,"landed":false,"head":"h","base":"b"});
+        host["probe"]["agent_panes"][2]["done"] = json!(true);
         rig.put("state/host.json", &host);
         rig.put("state/items.json", &json!([{"id":"child","kind":"agent","host":"local","pane":"w1:p3","owner_pane":"w1:p2","name":"child","created_ms":1,"closed_ms":null}]));
         assert_eq!(

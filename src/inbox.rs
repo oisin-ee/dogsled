@@ -308,7 +308,7 @@ pub fn claim(ledger: &Ledger, terminal: &str, reader: &Reader, now: u64) -> Resu
     if known.is_none_or(|k| k.harness != reader.harness || k.pane != reader.pane) {
         store.write(&file, reader)?;
     }
-    update(ledger, terminal, |all| {
+    let claimed = update(ledger, terminal, |all| {
         let mut claimed = Vec::new();
         for record in all.iter_mut().filter(|r| {
             r.state == State::Pending || (r.state == State::Claimed && r.lease.ready(now))
@@ -318,7 +318,12 @@ pub fn claim(ledger: &Ledger, terminal: &str, reader: &Reader, now: u64) -> Resu
             claimed.push(record.clone());
         }
         Ok(claimed)
-    })
+    })?;
+    // New input is new work: the agent must call `done` again before dogsled closes it.
+    if !claimed.is_empty() {
+        crate::done::clear(ledger, terminal)?;
+    }
+    Ok(claimed)
 }
 
 /// Mark `ids` delivered. Unknown or already final ids are ignored, so a repeated ack is safe.

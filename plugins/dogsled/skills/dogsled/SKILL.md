@@ -5,7 +5,7 @@ description: Start Pi, Claude, and Codex children and jobs on the Herdr host wit
 
 # Dogsled: children, jobs, and messages
 
-Use dogsled to delegate, run jobs, and message other agents. Prefer the tools (`status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `stop`, `cancel`, `place`); each matches a CLI command and returns the same JSON. In Pi they are `mcp__dogsled__<tool>`.
+Use dogsled to delegate, run jobs, and message other agents. Prefer the tools (`status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `done`, `stop`, `cancel`, `place`); each matches a CLI command and returns the same JSON. In Pi they are `mcp__dogsled__<tool>`.
 
 Never type into another agent's terminal (`herdr agent prompt`, `herdr pane send-text`, `send-keys`): it mixes your text into the user's draft. Use `send`.
 
@@ -52,12 +52,14 @@ dogsled inbox list
 
 ## Closing
 
-Dogsled closes a finished child for you, after it captures the reply:
+A child is finished when it calls the `done` tool (or `dogsled done`) during its last turn. Dogsled tells each child this at launch. Dogsled then closes the finished child for you, after it captures the reply:
 
-- a reader (no commits outside the default branch, clean tree) closes when it is idle or done;
+- a reader (no commits outside the default branch, clean tree) closes when that turn ends;
 - a writer closes once its branch has landed. Until then it shows under TO LAND: merge or drop the branch.
 
-Blocked and working children never close, and nothing closes on a timer. To end a child now:
+A child that ends a turn without `done` waits for input, for example after a question: its reply reaches your inbox, and it stays open. Answer it with `send`. Blocked and working children never close, and nothing closes on a timer.
+
+When you are a child, call `done` once, in the turn that completes your whole task, then end the turn with your final reply. Do not call it when you ask a question or wait for your own children; `done` is refused while you own open children or queued work. To end a child now:
 
 ```sh
 dogsled close PANE [--host HOST]

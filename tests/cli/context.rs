@@ -30,6 +30,7 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
     host["probe"]["agent_panes"][0]["worktree"] = json!({
         "path":"/t","branch":"feat/x","ahead":0,"dirty":true,"landed":true,"head":"h","base":"b"
     });
+    host["probe"]["agent_panes"][0]["done"] = json!(true);
     rig.put("state/host.json", &host);
     let mut items = json!([
         {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
@@ -198,6 +199,7 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     host["probe"]["agent_panes"][0]["worktree"] = json!({
         "path":"/t","branch":"feat/x","ahead":2,"dirty":false,"landed":false,"head":"h","base":"b"
     });
+    host["probe"]["agent_panes"][0]["done"] = json!(true);
     rig.put("state/host.json", &host);
     rig.put(
         "state/items.json",

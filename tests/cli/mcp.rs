@@ -73,7 +73,7 @@ impl Drop for Client {
 }
 
 #[test]
-fn mcp_lists_the_ten_tools_with_their_schemas() {
+fn mcp_lists_the_eleven_tools_with_their_schemas() {
     let rig = Rig::new("mcp-list");
     let mut client = Client::start(&rig);
     let tools = client.request("tools/list", &json!({}));
@@ -102,6 +102,7 @@ fn mcp_lists_the_ten_tools_with_their_schemas() {
         [
             expect("cancel", &["id"]),
             expect("close", &["pane"]),
+            expect("done", &[]),
             expect("inbox", &[]),
             expect("place", &[]),
             expect("read", &["target"]),

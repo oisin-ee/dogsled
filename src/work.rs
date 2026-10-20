@@ -318,9 +318,10 @@ pub(crate) fn task_file(ledger: &Ledger, id: &str, message: &str) -> Result<Stri
     Ok(path.display().to_string())
 }
 
-/// The harness arguments after `--`: Pi's session name and profile flags, then the task. A
-/// one-line task that cannot be read as an option or a file goes inline; any other is read from
-/// `task` (Pi's `@file`, or a pointer for Claude and Codex).
+/// The harness arguments after `--`: Pi's session name and profile flags, the child contract
+/// (`crate::done::CONTRACT`) as system instructions, then the task. A one-line task that cannot
+/// be read as an option or a file goes inline; any other is read from `task` (Pi's `@file`, or a
+/// pointer for Claude and Codex).
 pub fn agent_args(
     kind: &str,
     name: &str,
@@ -340,17 +341,38 @@ pub fn agent_args(
                     .map(crate::profiles::Profile::pi_flags)
                     .unwrap_or_default(),
             );
+            args.extend([
+                "--append-system-prompt".to_owned(),
+                crate::done::CONTRACT.to_owned(),
+            ]);
             args.push(if inline {
                 message.to_owned()
             } else {
                 format!("@{task}")
             });
         }
-        "claude" | "codex" if profile.is_none() => args.push(if inline {
-            message.to_owned()
-        } else {
-            format!("Your task is in {task}. Read that file and do the task.")
-        }),
+        "claude" | "codex" if profile.is_none() => {
+            if kind == "claude" {
+                args.extend([
+                    "--append-system-prompt".to_owned(),
+                    crate::done::CONTRACT.to_owned(),
+                ]);
+            } else {
+                // Codex adds `developer_instructions` to its own; the value is TOML.
+                args.extend([
+                    "-c".to_owned(),
+                    format!(
+                        "developer_instructions={}",
+                        toml::Value::String(crate::done::CONTRACT.to_owned())
+                    ),
+                ]);
+            }
+            args.push(if inline {
+                message.to_owned()
+            } else {
+                format!("Your task is in {task}. Read that file and do the task.")
+            });
+        }
         "claude" | "codex" => {
             return Err(Error::Invalid(
                 "profiles configure Pi children; omit --profile or use --kind pi".into(),

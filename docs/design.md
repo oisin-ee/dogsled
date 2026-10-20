@@ -101,7 +101,7 @@ Rule: an agent that owns an open child or job hears from dogsled at least every 
 - `dogsled agent` (spawn for Claude Code, Codex, and scripts): the caller's pane.
 - Children from elsewhere: `dogsled track <host> <pane>`.
 
-A job item closes when its job ends. An agent item closes when its pane closes, or when the sweep closes it: once its turn completes, the sweep captures the final reply, puts it in the owner's inbox, and closes a clean reader or a writer whose branch landed. A writer with commits to land stays open under TO LAND.
+A job item closes when its job ends. An agent item closes when its pane closes, or when the sweep closes it. At each completed turn, the sweep captures the reply and puts it in the owner's inbox. It closes a clean reader, or a writer whose branch landed, only when the child called `dogsled done` during the turn that ended (`src/done.rs`). An idle child without `done` waits for input: a question, or replies from its own children. A writer with commits to land stays open under TO LAND.
 
 **Stall.** An agent is stalled when Herdr shows it `working` or `unknown` and its transcript (`transcript` in host.json) has not changed for 10 min. The screen is not a signal: spinners and elapsed timers redraw it while a tool call hangs. An agent with no transcript is never marked stalled. Unit 3 confirms where Claude Code and Codex transcripts are, because Herdr may report only a session id for them.
 
@@ -137,7 +137,7 @@ Doctor never removes candidates. It refreshes remote refs and builds a plan shar
 
 The loss rule has one owner, `src/loss.rs`. A checkout must be clean, with ignored files excluded. Every commit must be held by the default branch or remote refs refreshed in this pass. A ref without a checkout skips the cleanliness condition. A failed fetch produces a warning and disables remote-ref evidence for that repository. Integration recognizes ancestry, squash, stack, and unchanged merge-tree results.
 
-Prune and the sweep use the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches. An open agent item holds its checkout in prune and the sweep, so only `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until its work lands. Idle shells, idle or done agents without open items, and workspaces alone are not holds. The process check skips each holder pane's shell, and every descendant of an agent pane's shell; a shell's background job still holds. Foreign locks prevent removal.
+Prune and the sweep use the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches. An open agent item holds its checkout in prune and the sweep, so only `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until its work lands. An idle or done agent that has not called `dogsled done` holds its checkout, except for an explicit `dogsled close`. Idle shells, done agents without open items, and workspaces alone are not holds. The process check skips each holder pane's shell, and every descendant of an agent pane's shell; a shell's background job still holds. Foreign locks prevent removal.
 
 An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Missing or unreadable repositories produce warnings without stopping other repositories. Registrations remain unchanged.
 
