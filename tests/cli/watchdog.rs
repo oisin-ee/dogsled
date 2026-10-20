@@ -119,8 +119,11 @@ fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
     rig.put("state/host.json", &snapshot);
     rig.put(
         "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"idle"}]}}),
+        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"idle",
+            "terminal_id":"term_owner","completion_seq":1,"state_change_seq":1}]}}),
     );
+    // Idle for a day after it called `done`: `prune` may close it.
+    rig.done("term_owner", "w1:p1", 1);
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     rig.put("state/jobs/old.json", &json!({"id":"old","cmd":["test"],"cwd":"/","host":"local","owner":"w1:p1","pane":"job-pane","state":"idle","exit":0,"signal":null,"reason":null,"started_ms":1,"ended_ms":2,"timeout_ms":null,"idle_timeout_ms":null}));
     fs::write(rig.dir.join("state/jobs/old.log"), "hello").unwrap();
@@ -274,8 +277,23 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
     assert!(entry["detail"].as_str().unwrap().contains("dogsled close"));
     assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
     assert!(!rig.log("git.log").contains("worktree remove"));
-    // A done agent without an open item does not hold it; removal closes the pane.
+    // Without an open item, an idle agent that has not called `done` still holds it.
     rig.put("state/items.json", &json!([]));
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"child","agent":"pi","agent_status":"done",
+            "terminal_id":"term_child","completion_seq":7,"state_change_seq":7}]}}),
+    );
+    let entry = worktree(&rig);
+    assert_eq!(entry["removable"], false, "{entry}");
+    assert!(
+        entry["detail"]
+            .as_str()
+            .unwrap()
+            .contains("child waits for input")
+    );
+    // A done agent does not hold it; removal closes the pane.
+    rig.done("term_child", "child", 7);
     assert_eq!(worktree(&rig)["removable"], true);
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert!(

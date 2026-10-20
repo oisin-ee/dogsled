@@ -13,6 +13,8 @@ impl Shell for System {
         let stdout = match program {
             "herdr" => Some(if args.starts_with(&["pane".into(), "list".into()]) {
                 "{\"result\":{\"panes\":[]}}"
+            } else if args.starts_with(&["agent".into(), "list".into()]) {
+                "{\"result\":{\"agents\":[]}}"
             } else if args.starts_with(&["workspace".into(), "list".into()]) {
                 "{\"result\":{\"workspaces\":[]}}"
             } else {

@@ -239,30 +239,28 @@ fn item_state<'a>(
             .agent_panes
             .iter()
             .find(|a| a.pane == item.pane)?;
-        // A finished child is not urgent: the sweep sends its reply and closes it.
-        // Idle and done are one event, so a flip between them is no new event.
-        let finished = matches!(agent.state.as_str(), "idle" | "done");
+        // Neither is urgent: the sweep sends each completed turn's reply, and closes a child
+        // that called `done`. Idle and done are one Herdr state, so a flip between them is no
+        // new event.
+        let state = if agent.done {
+            "finished".to_owned()
+        } else if matches!(agent.state.as_str(), "idle" | "done") {
+            "waiting".to_owned()
+        } else {
+            agent.state.clone()
+        };
         Some((
             host,
             if agent.stalled_since_ms.is_some() {
                 "stalled".into()
-            } else if finished {
-                "finished".into()
             } else {
-                agent.state.clone()
+                state.clone()
             },
             agent.transcript_modified,
             agent.stalled_since_ms.is_some(),
-            agent.stalled_since_ms.map_or_else(
-                || {
-                    if finished {
-                        "finished".into()
-                    } else {
-                        agent.state.clone()
-                    }
-                },
-                |since| format!("stalled:{since}"),
-            ),
+            agent
+                .stalled_since_ms
+                .map_or(state, |since| format!("stalled:{since}")),
         ))
     }
 }

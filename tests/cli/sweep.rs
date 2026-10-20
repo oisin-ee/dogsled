@@ -76,8 +76,10 @@ fn serve_closes_ended_job_tabs_and_shells_in_deleted_directories_and_nothing_els
     rig.put("panes.json", &json!({"result":{"panes":live}}));
     rig.put(
         "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"w6:p1","agent":"pi","agent_status":"idle"}]}}),
+        &json!({"result":{"agents":[{"pane_id":"w6:p1","agent":"pi","agent_status":"idle",
+            "terminal_id":"term_w6","completion_seq":1,"state_change_seq":1}]}}),
     );
+    rig.done("term_w6", "w6:p1", 1);
     fs::write(rig.dir.join("busy"), "w4:p2\n").unwrap();
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     let job = |id: &str, pane: &str, ended: Option<u64>| {
@@ -132,6 +134,57 @@ fn serve_closes_ended_job_tabs_and_shells_in_deleted_directories_and_nothing_els
     }
 }
 
+/// Agent pane w3:p1, idle at completion 5.
+fn idle_holder(rig: &Rig) {
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w3:p1","agent":"pi","agent_status":"idle",
+            "terminal_id":"term_w3","completion_seq":5,"state_change_seq":5}]}}),
+    );
+}
+
+/// Agent pane w3:p1, idle after the turn that called `done`.
+fn done_holder(rig: &Rig) {
+    idle_holder(rig);
+    rig.done("term_w3", "w3:p1", 5);
+}
+
+#[test]
+fn an_idle_agent_that_has_not_called_done_holds_its_worktree() {
+    let rig = watchdog_rig("sweep-waiting-holder");
+    let tree = rig.dir.join("home/repo/tree");
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","agent":"pi",
+            "agent_status":"idle","cwd":tree}]}}),
+    );
+    idle_holder(&rig);
+    let entry = |rig: &Rig| {
+        let (_, plan) = rig.json(&["doctor"]);
+        plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["class"] == "worktrees")
+            .unwrap()
+            .clone()
+    };
+    let held = entry(&rig);
+    assert_eq!(held["removable"], false, "{held}");
+    assert!(
+        held["detail"]
+            .as_str()
+            .unwrap()
+            .contains("w3:p1 waits for input; it has not called done"),
+        "{held}"
+    );
+    let journal = requested_sweep(&rig);
+    assert!(!rig.log("git.log").contains("worktree remove"), "{journal}");
+    assert!(!rig.log("herdr.log").contains("close"), "{journal}");
+    done_holder(&rig);
+    assert_eq!(entry(&rig)["removable"], true);
+}
+
 #[test]
 fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     let rig = watchdog_rig("sweep-worktree");
@@ -148,7 +201,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     fs::write(rig.dir.join("dirty"), "").unwrap();
     kept(&rig, "dirty");
     fs::remove_file(rig.dir.join("dirty")).unwrap();
-    // A working agent holds it; idle holders alone do not.
+    // A working agent holds it; an idle agent that called `done` does not.
     let holder = |agent: Value, status: &str| {
         json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","agent":agent,
             "agent_status":status,"cwd":tree}]}})
@@ -189,8 +242,9 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
                 .unwrap()
                 .clone()
         };
-        // An idle agent owns its descendants: closing the pane loses nothing.
+        // A done agent owns its descendants: closing the pane loses nothing.
         rig.put("panes.json", &holder(json!("pi"), "idle"));
+        done_holder(&rig);
         let entry = worktree(&rig);
         assert_eq!(entry["removable"], true, "{entry}");
         // A shell owns only itself: a job it left in the background still holds the checkout.
@@ -323,7 +377,8 @@ fn child(rig: &Rig, status: &str, tree: &Path) {
         "agents.json",
         &json!({"result":{"agents":[
             {"pane_id":"w1:p1","agent":"pi","agent_status":"working"},
-            {"pane_id":"w2:p1","agent":"pi","agent_status":status}
+            {"pane_id":"w2:p1","agent":"pi","agent_status":status,"terminal_id":"term_child",
+                "completion_seq":1,"state_change_seq":1}
         ]}}),
     );
 }
@@ -345,7 +400,7 @@ fn kept_reason(rig: &Rig) -> String {
 }
 
 #[test]
-fn serve_closes_an_orphan_only_when_it_is_idle_clean_and_pushed() {
+fn serve_closes_an_orphan_only_when_it_is_done_clean_and_pushed() {
     let (rig, tree) = close_rig("sweep-orphan");
     let repo = rig.dir.join("home/repo");
     fs::write(tree.join("work"), "work\n").unwrap();
@@ -380,8 +435,16 @@ fn serve_closes_an_orphan_only_when_it_is_idle_clean_and_pushed() {
         );
         untouched(&rig, status);
     }
-    // Idle, but dirty.
+    // Idle, but it never called `done`: it may wait on a question.
     child(&rig, "idle", &tree);
+    serve(&rig);
+    assert_eq!(
+        kept_reason(&rig),
+        "owner w9:p1 is gone; the child has not called done"
+    );
+    untouched(&rig, "not done");
+    // Done, but dirty.
+    rig.done("term_child", "w2:p1", 1);
     fs::write(tree.join("note"), "x").unwrap();
     serve(&rig);
     assert!(
@@ -405,7 +468,7 @@ fn serve_closes_an_orphan_only_when_it_is_idle_clean_and_pushed() {
     let brief = String::from_utf8_lossy(&rig.run(&["status", "--brief"]).stdout).into_owned();
     assert!(brief.contains("1 orphaned"), "{brief}");
     untouched(&rig, "unpushed");
-    // Idle, clean, and pushed: closed exactly as `dogsled close` would.
+    // Done, clean, and pushed: closed exactly as `dogsled close` would.
     git(&repo, &["update-ref", "refs/remotes/origin/main", "feat/x"]);
     let journal = serve(&rig);
     assert!(
@@ -428,6 +491,8 @@ fn serve_closes_a_remote_orphan_over_ssh_with_the_pushed_check() {
     let mut remote = rig.read("remote.json");
     // The peer lists the child's pane, so item reconciliation keeps the item open.
     remote["probe"]["agent_panes"][0]["pane"] = json!("w2:p1");
+    // The peer's own pass judged that the child called `done`.
+    remote["probe"]["agent_panes"][0]["done"] = json!(true);
     remote["probe"]["panes"] = json!([{"pane_id":"w2:p1","workspace_id":"w2"}]);
     rig.put("remote.json", &remote);
     orphan(&rig, "w9:p1", "8103");
@@ -516,8 +581,9 @@ fn build_output_is_report_only_for_serve_and_removed_by_prune_when_unused() {
     assert!(tree.join("target").exists() && repo.join("cache").exists());
 }
 
-/// A child with an owner that is alive, in workspace w2: its agent state, the completion Herdr
-/// numbered, and a Pi transcript whose last assistant message is `reply`.
+/// A child with an owner that is alive, in workspace w2: its agent state, Herdr's state counter
+/// `seq` (also the completion's number while it waits), and a Pi transcript whose last assistant
+/// message is `reply`.
 fn owned_child(rig: &Rig, status: &str, tree: &Path, seq: Option<u64>, role: &str) {
     child(rig, status, tree);
     let transcript = rig.dir.join("child.jsonl");
@@ -535,7 +601,8 @@ fn owned_child(rig: &Rig, status: &str, tree: &Path, seq: Option<u64>, role: &st
         &json!({"result":{"agents":[
             {"pane_id":"w1:p1","agent":"pi","agent_status":"working"},
             {"pane_id":"w2:p1","agent":"pi","agent_status":status,"cwd":tree,
-                "terminal_id":"term_child","completion_seq":seq,
+                "terminal_id":"term_child","state_change_seq":seq,
+                "completion_seq":seq.filter(|_| matches!(status, "idle" | "done")),
                 "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":transcript}}
         ]}}),
     );
@@ -564,8 +631,26 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
         );
         assert!(!rig.log("herdr.log").contains("close"), "{status}");
     }
-    // Finished but dirty: the reply is captured, and the child stays.
+    // A completed turn without `done` waits for input: the reply is captured, and it stays.
     owned_child(&rig, "idle", &tree, Some(1), "reader");
+    let journal = serve(&rig);
+    assert!(item_open(&rig), "{journal}");
+    assert!(!rig.log("herdr.log").contains("close"));
+    let reply = &rig.read("state/items.json")[0]["reply"];
+    assert_eq!((&reply["seq"], &reply["done"]), (&json!(1), &Value::Null));
+    // The next turn calls `dogsled done`, and ends dirty: captured, and it stays.
+    owned_child(&rig, "working", &tree, Some(2), "reader");
+    let out = rig
+        .cmd(&["done"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    owned_child(&rig, "idle", &tree, Some(3), "reader");
     fs::write(tree.join("scratch"), "x").unwrap();
     let journal = serve(&rig);
     assert!(item_open(&rig));
@@ -574,7 +659,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
         "{journal}"
     );
     let reply = &rig.read("state/items.json")[0]["reply"];
-    assert_eq!(reply["seq"], 1);
+    assert_eq!((&reply["seq"], &reply["done"]), (&json!(3), &json!(true)));
     assert_eq!(reply["text"], "Found 3 bugs; notes in review.md.");
     // The reason is journaled once, not on every pass.
     assert!(!serve(&rig).contains("keep w2:p1"));
@@ -600,6 +685,7 @@ fn serve_closes_a_finished_writer_once_its_branch_lands() {
     let (rig, tree) = close_rig("sweep-writer");
     let repo = rig.dir.join("home/repo");
     owned_child(&rig, "done", &tree, Some(2), "writer");
+    rig.done("term_child", "w2:p1", 2);
     // At the default tip, only a pending preparation holds a fresh checkout.
     rig.put(
         "state/preparations.json",
@@ -637,6 +723,7 @@ fn serve_closes_a_finished_writer_once_its_branch_lands() {
 fn a_finished_childs_reply_reaches_its_owners_inbox_once() {
     let (rig, tree) = close_rig("sweep-reply-inbox");
     owned_child(&rig, "idle", &tree, Some(3), "reader");
+    rig.done("term_child", "w2:p1", 3);
     // The owner reads its inbox; the host's snapshot names both terminals.
     let mut agents = rig.read("agents.json");
     agents["result"]["agents"][0]["terminal_id"] = json!("term_lead");
@@ -673,4 +760,62 @@ fn a_finished_childs_reply_reaches_its_owners_inbox_once() {
     let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert_eq!(claimed[0]["kind"], "reply");
     assert!(!rig.log("herdr.log").contains("agent prompt"));
+}
+
+#[test]
+fn a_child_that_waits_for_input_stays_open_and_its_owner_hears_its_question() {
+    let (rig, tree) = close_rig("sweep-question");
+    owned_child(&rig, "idle", &tree, Some(4), "writer");
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"][0]["terminal_id"] = json!("term_lead");
+    rig.put("agents.json", &agents);
+    assert!(
+        rig.cmd(&["inbox", "claim", "--harness", "pi"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    // Clean, with nothing to land, but it never called `done`: it stays, however many passes.
+    serve(&rig);
+    serve(&rig);
+    assert!(item_open(&rig));
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("close"));
+    let inbox = rig.read("state/inbox/term_lead.json");
+    assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
+    let text = inbox[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("worker (w2:p1 on local) ended a turn without calling done"),
+        "{text}"
+    );
+    assert!(text.contains("dogsled send w2:p1 --host local"), "{text}");
+    // `done` is for the turn that completes the task: an idle agent cannot call it.
+    let out = rig
+        .cmd(&["done"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    // An orchestrator with an open child cannot call it either.
+    owned_child(&rig, "working", &tree, Some(5), "writer");
+    let mut items = rig.read("state/items.json");
+    items
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"i2","kind":"agent","host":"local",
+        "pane":"w3:p1","owner_pane":"w2:p1","name":"grandchild","created_ms":2,"closed_ms":null}));
+    rig.put("state/items.json", &items);
+    let out = rig
+        .cmd(&["done"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("still owns open work: grandchild"),
+        "{stderr}"
+    );
+    assert!(!rig.dir.join("state/done.json").exists());
 }

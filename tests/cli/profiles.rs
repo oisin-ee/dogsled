@@ -7,6 +7,13 @@ fn profile(rig: &Rig, name: &str, json: &Value) {
     fs::write(dir.join("prompt.md"), "Review only.\n").unwrap();
 }
 
+/// The `herdr agent start` line for child `name`.
+fn start_line<'a>(log: &'a str, name: &str) -> &'a str {
+    log.lines()
+        .find(|l| l.starts_with(&format!("agent start {name} ")))
+        .unwrap_or_else(|| panic!("{log}"))
+}
+
 #[test]
 fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
     let rig = Rig::new("profile-argv");
@@ -31,12 +38,13 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
     assert_eq!(result["model"], "alias/sol");
     let prompt = rig.dir.join("profiles/reviewer/prompt.md");
     let log = rig.log("herdr.log");
-    assert!(
-        log.contains(&format!(
-            "agent start rev --kind pi --pane w2:p1 -- --name rev --model alias/sol --thinking medium --append-system-prompt {} Review the diff.\n",
+    // The profile's prompt, then the child contract, then the task.
+    assert_eq!(
+        start_line(&log, "rev"),
+        format!(
+            "agent start rev --kind pi --pane w2:p1 -- --name rev --model alias/sol --thinking medium --append-system-prompt {} --append-system-prompt {CONTRACT} Review the diff.",
             prompt.display()
-        )),
-        "{log}"
+        )
     );
     assert!(!log.contains("agent prompt"), "{log}");
     let item = &rig.read("state/items.json")[0];
@@ -62,17 +70,15 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
         .spawn()
         .unwrap();
     std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"Line one.\nLine two.\n").unwrap();
-    let out = child.wait_with_output().unwrap();
-    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
     let log = rig.log("herdr.log");
-    let line = log
-        .lines()
-        .find(|l| l.starts_with("agent start multi"))
-        .unwrap_or_else(|| panic!("{result} {log}"));
+    let line = start_line(&log, "multi");
     let task = line.rsplit_once(" @").unwrap().1;
-    assert!(
-        line.starts_with("agent start multi --kind pi --pane w2:p1 -- --name multi @"),
-        "{line}"
+    assert_eq!(
+        line,
+        format!(
+            "agent start multi --kind pi --pane w2:p1 -- --name multi --append-system-prompt {CONTRACT} @{task}"
+        )
     );
     assert_eq!(fs::read_to_string(task).unwrap(), "Line one.\nLine two.\n");
     // Profiles are for Pi; an unknown profile fails before anything starts.

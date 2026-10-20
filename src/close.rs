@@ -108,6 +108,15 @@ pub fn local(
             "{pane} is busy ({reason}); close only an idle or done child"
         )));
     }
+    // An automatic close needs the child's own word: idle alone means it waits for input.
+    if guard != Guard::Clean
+        && target.agent.is_some()
+        && !crate::done::finished(ledger, &crate::probe::agent_list(shell)?)?.contains(pane)
+    {
+        return Err(refuse(&format!(
+            "{pane} has not called done; it waits for input"
+        )));
+    }
     let tree = target
         .cwd
         .as_deref()
@@ -199,14 +208,7 @@ fn unsaved(
     if !loss.loses_nothing() {
         return Err(refuse(&format!("{}: {}", tree.path, loss.detail())));
     }
-    crate::cleanup::close_holds(
-        shell,
-        ledger,
-        tree,
-        caller,
-        matches!(guard, Guard::Reader | Guard::Writer),
-        &loss,
-    )?;
+    crate::cleanup::close_holds(shell, ledger, tree, caller, guard, &loss)?;
     Ok(evidence)
 }
 

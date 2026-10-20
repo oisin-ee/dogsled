@@ -62,6 +62,9 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 
+/// What dogsled tells each child at launch: `src/done.rs`'s `CONTRACT`, as Herdr logs it.
+const CONTRACT: &str = "Dogsled started you as a child agent. When your whole task is complete, call the dogsled `done` tool (or run `dogsled done`) once, then end your turn with your final reply. Do not call `done` when you stop to ask a question, wait for input, or still own open children. Dogsled closes your pane and worktree only after `done`.";
+
 struct Rig {
     dir: PathBuf,
 }
@@ -195,6 +198,14 @@ esac
             &json!([{"id":"8103","label":"netcup","target":"netcup-dev"}]),
         );
         self.snapshot("remote.json", now(), 3.0, 16);
+    }
+    /// The agent in `terminal` called `dogsled done`, and the turn that called it ended as
+    /// completion `seq`.
+    fn done(&self, terminal: &str, pane: &str, seq: u64) {
+        self.put(
+            "state/done.json",
+            &json!({terminal: {"pane":pane,"after":seq - 1,"sealed":seq,"marked_ms":1}}),
+        );
     }
     fn read(&self, path: &str) -> Value {
         serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap()

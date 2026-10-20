@@ -9,7 +9,8 @@ Status: draft for review, 2026-10-17. After approval, this file moves to `docs/p
 - One panel in Pi that shows everything the lead owns: Pi children, Claude and Codex children, jobs, and queued tickets. Each row names its harness and model, or says "job" and gives the command.
 - No Shepherdr "herdr agents" box and no second view of the same children.
 - No "dogsled close when done" chore. Children close because an event happened, not because the lead remembered.
-- Already decided: a read-only child (clean worktree, no commits) closes as soon as it is idle or done. A writer child closes when its branch lands.
+- Already decided: a read-only child (clean worktree, no commits) closes as soon as it has finished. A writer child closes when it has finished and its branch lands.
+- Amended 2026-10-20: "finished" means the child called `dogsled done` and ended that turn. Herdr's `idle` and `done` only mean "ready for input". A child that asks a question, or an orchestrator that waits for its own children, is idle too, and the sweep closed both. See decision 6.
 
 ### Why Shepherdr has to go
 
@@ -89,7 +90,7 @@ Rust owns all data and policy. `pi/` only draws. Every harness gets the same beh
    - Inbox deliveries.
    - Failed launches (`herdr agent start` timeout): the ticket is re-queued with backoff and reported to the owner after the last try.
    - "Retry now" in the panel clears the backoff.
-6. **Closing is driven by events, in the sweep.** The sweep loop generalises the orphan pass to every open agent item. When an item is finished (idle or done):
+6. **Closing is driven by events, in the sweep.** The sweep loop generalises the orphan pass to every open agent item. At each completed turn it captures the reply into the ledger and tells the owner. An item is finished only when its child called `done` (MCP tool or `dogsled done`) during the turn that ended. Idle without `done` waits for input, and stays open until the child calls `done` or someone runs `dogsled close`. `done` is refused while the caller owns open items or queued tickets, and an inbox record delivered to the child ends its mark. Dogsled tells each child this contract at launch: Pi and Claude through `--append-system-prompt`, Codex through `-c developer_instructions`. When an item is finished:
    - First it captures the final reply into the ledger, so closing loses nothing.
    - Then it closes the child when `ahead == 0 && !dirty` (reader), or when `landed && !dirty` (writer), using the existing close path.
    - Otherwise the item stays open, shows as TO LAND, and the prompt line says "To land: web-tests (+2)".
@@ -202,7 +203,7 @@ Rust owns all data and policy. `pi/` only draws. Every harness gets the same beh
 - [ ] U1b Inbox and backoff: `src/inbox.rs`, `src/backoff.rs`, `dogsled send`, `dogsled inbox put|ack|list`, `serve` delivery to non-Pi targets, and backoff in `cached_peer`. Acceptance: `cargo test` covers backoff timing, a retry until ack, a record dropped when its terminal is gone, and remote put through a fake SSH.
 - [ ] U2 Event-driven close: capture the reply, then close readers on finish and writers on land. Acceptance: sweep tests show that dirty, unpushed, blocked, and working children stay open, and that a clean reader and a landed writer close.
 - [ ] U3 Pi delegation in Rust: profiles, `dogsled agent --profile`, a reply to the inbox when `completion_seq` goes up, and launch retry. Acceptance: `tests/cli` uses a fake herdr to check the exact `herdr agent start … -- --model …` argv and a delivered note that contains the reply.
-- [ ] U3b Tools: `dogsled mcp` with the ten tools, plus the Pi, Claude, and Codex registrations. Acceptance:
+- [ ] U3b Tools: `dogsled mcp` with the ten tools (eleven since `done`), plus the Pi, Claude, and Codex registrations. Acceptance:
   - A `tests/cli` test drives `dogsled mcp` over stdio with `initialize` and `tools/list`, and checks the ten names and their schemas.
   - A `tools/call send` against a fake herdr writes one inbox record owned by `HERDR_PANE_ID`.
   - `spawn` returns within 1 s with `queued` when every host is full.

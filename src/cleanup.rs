@@ -181,6 +181,13 @@ struct Seen {
     panes: Vec<Pane>,
     cwds: Option<Vec<Proc>>,
     evidence: BTreeMap<String, crate::loss::Evidence>,
+    /// Agent panes that called `done` and ended that turn. Any other idle agent waits for input.
+    done: BTreeSet<String>,
+}
+
+/// The agent panes on this host that are done (`crate::done`).
+fn done_panes(shell: &dyn Shell, ledger: &Ledger) -> Result<BTreeSet<String>> {
+    crate::done::finished(ledger, &crate::probe::agent_list(shell)?)
 }
 
 pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
@@ -580,6 +587,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
         panes,
         cwds,
         evidence,
+        done: done_panes(node.shell, node.ledger)?,
     };
     let mut closing = Closing::default();
     let found = parallel(&trees, |tree| disposition(node, tree, &seen));
@@ -969,7 +977,14 @@ fn idle_panes(
         return Ok(idle);
     };
     let agents = crate::probe::agent_list(node.shell)?;
-    for agent in snapshot.probe.agent_panes.iter().filter(|a| stale(a, now)) {
+    // An idle agent that has not called `done` waits for input, however long.
+    let done = crate::done::finished(node.ledger, &agents)?;
+    for agent in snapshot
+        .probe
+        .agent_panes
+        .iter()
+        .filter(|a| stale(a, now) && done.contains(&a.pane))
+    {
         if agents.iter().any(|a| {
             a.pane == agent.pane
                 && a.state == agent.state
@@ -1108,11 +1123,12 @@ fn usage(node: &Node<'_>, tree: &Tree, seen: &Seen) -> Result<Usage> {
 }
 
 /// Who applies the holds. Cleanup never takes an open item's checkout; `close` ends the
-/// item, and an automatic close by a live owner also waits for landing.
+/// item, and an automatic close by a live owner also waits for landing. Only an explicit close
+/// takes a checkout from an agent that has not called `done`.
 #[derive(Clone, Copy)]
 enum Decider {
     Cleanup,
-    Close { owner: bool },
+    Close { guard: crate::close::Guard },
 }
 
 /// Holds are independent of loss and identical in both scopes.
@@ -1126,6 +1142,20 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = usage.in_use.clone();
+    if !matches!(
+        decider,
+        Decider::Close {
+            guard: crate::close::Guard::Clean
+        }
+    ) {
+        held.extend(
+            usage
+                .holders
+                .iter()
+                .filter(|p| p.agent.is_some() && !seen.done.contains(&p.pane_id))
+                .map(|p| format!("{} waits for input; it has not called done", p.pane_id)),
+        );
+    }
     if usage
         .holders
         .iter()
@@ -1163,7 +1193,12 @@ fn held(
             )
         }));
     } else if !loss.landed() {
-        if matches!(decider, Decider::Close { owner: true }) {
+        if matches!(
+            decider,
+            Decider::Close {
+                guard: crate::close::Guard::Reader | crate::close::Guard::Writer
+            }
+        ) {
             held.push("not landed by its owner".into());
         }
         for item in items
@@ -1196,7 +1231,7 @@ pub fn close_holds(
     ledger: &Ledger,
     linked: &crate::worktree::Linked,
     caller: &crate::close::Caller,
-    owner: bool,
+    guard: crate::close::Guard,
     loss: &crate::loss::Assessment,
 ) -> Result<()> {
     let cleanup = crate::config::Cleanup::default();
@@ -1217,6 +1252,7 @@ pub fn close_holds(
         panes: current_panes(shell)?,
         cwds: process_cwds(shell),
         evidence: BTreeMap::new(),
+        done: done_panes(shell, ledger)?,
     };
     let usage = usage(&node, &tree, &seen)?;
     let holds = held(
@@ -1226,7 +1262,7 @@ pub fn close_holds(
         &seen,
         loss,
         caller,
-        Decider::Close { owner },
+        Decider::Close { guard },
     )?;
     if !holds.is_empty() {
         return Err(crate::worktree::refuse(&format!(
@@ -1318,6 +1354,7 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss:
         cwds: process_cwds(node.shell),
         panes: current_panes(node.shell)?,
         evidence: BTreeMap::from([(current.repo.clone(), evidence)]),
+        done: done_panes(node.shell, node.ledger)?,
     };
     let found = disposition(node, &current, &seen)?;
     if !found.removable {
@@ -1563,13 +1600,14 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
         }
         "panes" => {
             let agents = crate::probe::agent_list(node.shell)?;
-            let idle = match agents.iter().find(|a| a.pane == candidate.id) {
-                Some(agent) => matches!(agent.state.as_str(), "idle" | "done"),
-                None => crate::probe::foreground(node.shell, &candidate.id)?.is_none(),
+            let idle = if agents.iter().any(|a| a.pane == candidate.id) {
+                crate::done::finished(node.ledger, &agents)?.contains(&candidate.id)
+            } else {
+                crate::probe::foreground(node.shell, &candidate.id)?.is_none()
             };
             if !idle {
                 return Err(Error::Invalid(format!(
-                    "refuse {}: pane is not idle or done",
+                    "refuse {}: pane is busy, or its agent has not called done",
                     candidate.id
                 )));
             }

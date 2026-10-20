@@ -338,6 +338,25 @@ impl Server {
     }
 
     #[tool(
+        description = "Say that your whole task is complete. Call it once, during the turn that \
+        completes the task, then end the turn with your final reply. Dogsled closes you after \
+        that turn, once your work has landed. Do not call it when you stop to ask a question or \
+        to wait for your own children: an idle agent without `done` stays open."
+    )]
+    async fn done(&self) -> Result<String, String> {
+        self.call(move |fleet| {
+            let pane = crate::inbox::own_pane(None)?;
+            Ok(serde_json::to_value(crate::done::mark(
+                fleet.ledger,
+                fleet.shell,
+                &pane,
+                now_ms(),
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
         description = "Stop a running job.",
         annotations(destructive_hint = true)
     )]
