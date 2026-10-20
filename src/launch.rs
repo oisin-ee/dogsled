@@ -107,7 +107,12 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
                 start_or_reconcile(ledger, shell, &mut progress, &pane, &progress_file)
             {
                 // A prepared pane belongs to its worktree's workspace; only an allocated one is ours.
-                let owned = request.pane.is_none().then_some(pane.as_str());
+                let owned = request
+                    .pane
+                    .is_none()
+                    .then_some(progress.terminal.as_deref())
+                    .flatten()
+                    .map(|terminal| (pane.as_str(), terminal));
                 return Err(refused(&receipts, shell, &file, owned, error)?);
             }
             progress.confirmed = true;
@@ -121,12 +126,13 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
 }
 
 /// A start that Herdr refused is final: no agent ran, so record the refusal as the receipt and
-/// close the empty pane that this launch created. Any other error passes through unchanged.
+/// close only a still-owned idle shell allocated by this launch. Unknown or occupied panes
+/// survive the final refusal. Any other error passes through unchanged.
 fn refused(
     receipts: &Ledger,
     shell: &dyn Shell,
     file: &str,
-    pane: Option<&str>,
+    pane: Option<(&str, &str)>,
     error: Error,
 ) -> Result<Error> {
     let Error::Command { stderr, .. } = &error else {
@@ -145,15 +151,34 @@ fn refused(
             failed: failed.clone(),
         },
     )?;
-    let closed = pane.map_or(Ok(()), |pane| {
-        shell
-            .run_ok("herdr", &["pane".into(), "close".into(), pane.into()])
-            .map(drop)
+    let closed = pane.map_or(Ok(()), |(pane, expected)| {
+        close_refused_pane(shell, pane, expected)
     });
     Ok(Error::Invalid(match closed {
         Ok(()) => failed,
-        Err(close) => format!("{failed}; its empty pane stays open: {close}"),
+        Err(close) => format!("{failed}; its pane stays open: {close}"),
     }))
+}
+
+fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
+    if terminal(shell, pane)? != expected {
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+    }
+    if crate::probe::agent_list(shell)?
+        .iter()
+        .any(|agent| agent.pane == pane)
+    {
+        return Err(Error::Invalid(format!(
+            "{pane}: an agent now owns the pane"
+        )));
+    }
+    idle(shell, pane)?;
+    // Inspection must not authorize closing a replacement terminal.
+    if terminal(shell, pane)? != expected {
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+    }
+    shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+    Ok(())
 }
 
 fn allocate(
@@ -269,7 +294,8 @@ fn start_or_reconcile(
                 .unwrap_or("startup response was interrupted")
         )));
     }
-    idle(shell, pane)?;
+    // Native agent.start owns shell readiness and its atomic busy refusal. An eager
+    // process snapshot here rejects startup before that supported boundary can run.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
     let task = work::task_file(ledger, &request.id, message)?;
     let seed_flags = seed_flags(ledger, request, profile.as_ref())?;
@@ -486,9 +512,10 @@ fn idle(shell: &dyn Shell, pane: &str) -> Result<()> {
     let foreground = info["foreground_processes"]
         .as_array()
         .ok_or_else(|| Error::Invalid(format!("{pane}: no foreground process information")))?;
-    if foreground
-        .iter()
-        .any(|p| p["pid"].as_u64() != Some(shell_pid))
+    if foreground.is_empty()
+        || foreground
+            .iter()
+            .any(|p| p["pid"].as_u64() != Some(shell_pid))
     {
         return Err(Error::Invalid(format!(
             "{pane} is busy; refusing to start another process"
