@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.14.0 - 2026-10-20
+
+Cleanup uses one loss rule, and the Stop gate starts each cleanup pass.
+
+- One rule decides if removal loses work. It applies to worktrees, detached HEADs, branches, `close`, orphan close, and board facts. The checkout must be clean, and the default branch or freshly fetched remote refs must hold every commit. Ignored files do not count.
+- Each pass runs `git fetch --all --prune` first. If the fetch fails, the repository gets a warning, and only the default branch counts.
+- Branches with a deleted upstream get no special rule. They go when the loss rule permits removal.
+- Prune and the sweep share one list of holds: active panes or processes, the caller, an unreadable process table, open agent items, pending preparations and launches, and foreign locks. An idle shell, an idle agent's own processes, or a workspace alone no longer holds a checkout. The "untouched for a day" rule is removed.
+- A missing or unreadable repository is a warning. The survey continues. Before, one missing repository stopped doctor, prune, and every sweep.
+- An unheld dirty checkout whose work is in the default branch is a `landed_dirty` finding, with up to ten dirty paths.
+- The 10-second sweep in `serve` is removed. The Stop hook writes `sweep-request.json` and wakes the service through `sweep.sock`. The service runs one pass for each request. A socket failure is a warning, and the request file stays the source of truth.
+- Each pass is recorded in `sweep.json` and in `sweeps.jsonl`, which keeps seven days. `status` shows the latest pass. The gate reports failures, repository warnings, and landed-dirty findings once for each distinct set. Successful removals give no reminder.
+- Breaking: `close` refuses local-only work, also for an explicit owner close.
+
 ## 0.13.1 - 2026-10-19
 
 - Agent admission retries retain the selected host, prepared workspace, and original terminal identity. They do not prepare the branch again.
