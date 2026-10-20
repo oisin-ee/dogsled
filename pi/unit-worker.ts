@@ -28,8 +28,14 @@ export class UnitWorker {
 	private readonly exec: UnitExec;
 	constructor(pi: Pick<ExtensionAPI, "events" | "getFlag" | "registerFlag">, exec: UnitExec) {
 		this.pi = pi; this.exec = exec;
-		// The guard must load the flag even when pi-todo is absent. Pi merges identical flag names.
+		// Dogsled alone owns the launch flag and supplies its path over the event bus.
+		// Register it even without pi-todo so the loaded guard can reject missing import.
 		pi.registerFlag("todo-unit-file", { type: "string", description: "Executor-owned worker task seed" });
+		// Register during extension loading, before any session_start import handler.
+		pi.events.on("oisin.tasks.seed-source.v1", input => {
+			if (!record(input) || input.version !== 1 || typeof input.reply !== "function") return;
+			input.reply({ version: 1, path: pi.getFlag("todo-unit-file") ?? null });
+		});
 	}
 	start(reason: SessionStartEvent["reason"] = "startup"): void {
 		this.reason = reason;
