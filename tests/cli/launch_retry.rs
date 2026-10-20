@@ -85,6 +85,60 @@ fn failed_host_start(rig: &Rig, request: &Value) {
     );
 }
 
+/// Herdr refuses `agent start` before it types anything into the pane.
+fn refusing_start(rig: &Rig) {
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "  'agent start'*|",
+                "  'agent start'*) echo '{\"error\":{\"code\":\"agent_pane_busy\",\"message\":\"agent target pane w2:p1 is not an available shell\"},\"id\":\"cli:agent:start\"}' >&2; exit 1 ;;\n  ",
+            ),
+    );
+}
+
+#[test]
+fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
+    let rig = Rig::new("refused-start");
+    let request = host_request(&rig);
+    refusing_start(&rig);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains("agent_pane_busy"), "{message}");
+    assert!(!message.contains("outcome is unknown"), "{message}");
+    let log = rig.log("herdr.log");
+    assert!(log.contains("pane close w2:p1"), "{log}");
+    // The refusal is the receipt: a resubmission neither allocates nor starts again.
+    let (code, again) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{again}");
+    assert!(again["error"].as_str().unwrap().contains("agent_pane_busy"));
+    let log = rig.log("herdr.log");
+    assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
+    assert_eq!(log.matches("tab create").count(), 1, "{log}");
+    let receipt = rig.read("state/launches/recover-one.json");
+    assert!(
+        receipt["failed"]
+            .as_str()
+            .unwrap()
+            .contains("agent_pane_busy")
+    );
+}
+
+#[test]
+fn a_refused_start_is_not_retried_by_the_service() {
+    let rig = Rig::new("refused-retry");
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    refusing_start(&rig);
+    let (code, error) = rig.json(&["agent", "--name", "w", "--message", "go"]);
+    assert_eq!(code, 2, "{error}");
+    assert!(error["error"].as_str().unwrap().contains("agent_pane_busy"));
+    // No ticket waits to retry it.
+    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.log("herdr.log").matches("agent start w ").count(), 1);
+}
+
 #[test]
 fn lost_start_response_reconciles_existing_agent_without_starting_twice() {
     let rig = Rig::new("started-response-lost");

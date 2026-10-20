@@ -1176,7 +1176,7 @@ fn held(
     if crate::prepare::pending_trees(node.ledger)?
         .iter()
         .any(|pending| crate::worktree::same(&pending.path, &tree.path))
-        || crate::launch::pending_paths(node.ledger)?
+        || crate::launch::pending_paths(node.ledger, &seen.panes)?
             .iter()
             .any(|path| crate::worktree::same(path, &tree.path))
     {

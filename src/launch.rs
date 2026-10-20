@@ -19,8 +19,30 @@ struct Progress {
     error: Option<String>,
 }
 
-/// Incomplete host-owned receipts protect their checkout, including interrupted starts.
-pub fn pending_paths(ledger: &Ledger) -> Result<Vec<String>> {
+/// Herdr's codes for an `agent start` it refused before typing into the pane. Any other
+/// failure may come after the agent began, so its outcome stays unknown.
+const REFUSALS: [&str; 7] = [
+    "invalid_agent_name",
+    "unsupported_agent_kind",
+    "invalid_agent_argument",
+    "invalid_agent_timeout",
+    "agent_pane_not_found",
+    "agent_pane_busy",
+    "agent_name_taken",
+];
+
+/// A finished launch: its result, or the refusal that ended it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Receipt {
+    Refused { failed: String },
+    Started(Value),
+}
+
+/// Unfinished host-owned receipts protect their checkout while their pane exists: an
+/// interrupted start can still bring up an agent there. Without a pane, or before one was
+/// recorded, nothing can start, and only a receipt still allocating keeps its hold.
+pub fn pending_paths(ledger: &Ledger, panes: &[crate::probe::Pane]) -> Result<Vec<String>> {
     let receipts = ledger.child("launches");
     let entries = match std::fs::read_dir(&receipts.dir) {
         Ok(entries) => entries,
@@ -33,9 +55,17 @@ pub fn pending_paths(ledger: &Ledger) -> Result<Vec<String>> {
         let Some(id) = name.strip_suffix(".progress.json") else {
             continue;
         };
-        if receipts.read::<Value>(&format!("{id}.json"))?.is_none()
-            && let Some(progress) = receipts.read::<Progress>(&name)?
-        {
+        if receipts.read::<Receipt>(&format!("{id}.json"))?.is_some() {
+            continue;
+        }
+        let Some(progress) = receipts.read::<Progress>(&name)? else {
+            continue;
+        };
+        let live = progress
+            .pane
+            .as_ref()
+            .is_none_or(|pane| panes.iter().any(|p| p.pane_id == *pane));
+        if live {
             paths.push(progress.request.cwd);
         }
     }
@@ -54,8 +84,10 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
                 request.id
             )));
         }
-        if let Some(result) = receipts.read::<Value>(&file)? {
-            return Ok(result);
+        match receipts.read::<Receipt>(&file)? {
+            Some(Receipt::Started(result)) => return Ok(result),
+            Some(Receipt::Refused { failed }) => return Err(Error::Invalid(failed)),
+            None => (),
         }
         let mut progress = match saved {
             Some(progress) => progress,
@@ -69,7 +101,13 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
         })?;
         // A confirmed start must not run again, even if the agent finished and exited.
         if !progress.confirmed {
-            start_or_reconcile(ledger, shell, &mut progress, &pane, &progress_file)?;
+            if let Err(error) =
+                start_or_reconcile(ledger, shell, &mut progress, &pane, &progress_file)
+            {
+                // A prepared pane belongs to its worktree's workspace; only an allocated one is ours.
+                let owned = request.pane.is_none().then_some(pane.as_str());
+                return Err(refused(&receipts, shell, &file, owned, error)?);
+            }
             progress.confirmed = true;
             receipts.write(&progress_file, &progress)?;
         }
@@ -78,6 +116,42 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
         receipts.write(&file, &progress.result)?;
         Ok(progress.result)
     })
+}
+
+/// A start that Herdr refused is final: no agent ran, so record the refusal as the receipt and
+/// close the empty pane that this launch created. Any other error passes through unchanged.
+fn refused(
+    receipts: &Ledger,
+    shell: &dyn Shell,
+    file: &str,
+    pane: Option<&str>,
+    error: Error,
+) -> Result<Error> {
+    let Error::Command { stderr, .. } = &error else {
+        return Ok(error);
+    };
+    let code = serde_json::from_str::<Value>(stderr)
+        .ok()
+        .and_then(|v| v.pointer("/error/code")?.as_str().map(str::to_owned));
+    if !code.is_some_and(|code| REFUSALS.contains(&code.as_str())) {
+        return Ok(error);
+    }
+    let failed = error.to_string();
+    receipts.write(
+        file,
+        &Receipt::Refused {
+            failed: failed.clone(),
+        },
+    )?;
+    let closed = pane.map_or(Ok(()), |pane| {
+        shell
+            .run_ok("herdr", &["pane".into(), "close".into(), pane.into()])
+            .map(drop)
+    });
+    Ok(Error::Invalid(match closed {
+        Ok(()) => failed,
+        Err(close) => format!("{failed}; its empty pane stays open: {close}"),
+    }))
 }
 
 fn allocate(
