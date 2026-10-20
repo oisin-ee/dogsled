@@ -9,6 +9,7 @@ This implementation follows sections 4–8 of the approved `oisinpi` plan at `c2
 Each command takes `--input '<JSON>'` and always returns JSON. Success exits 0, including a queued receipt. Failure exits 2.
 
 ```text
+dogsled unit prepared
 dogsled unit prepare --input '{"origin":<UnitRef>,"placement":{}}' --tool-call-id <invocation-id>
 dogsled unit commit --input '{"execution":<ExecutionRef>,"binding":<TaskBinding>,"exported":<TaskExport>}'
 dogsled unit observe --input '{"execution":<ExecutionRef>}'
@@ -135,10 +136,14 @@ A pasted `preparedUnit` cannot bypass preparation: the exact envelope must belon
 Actual `tool_execution_end` permits observation and abandonment of a still-prepared request. A later guard may block without emitting `tool_result`.
 Nested calls use their own invocation IDs. An ended duplicate cannot abandon an execution while another known invocation remains active.
 Unknown outcomes retain the binding. The existing settled boundary retries failed recovery; no timeout proves termination.
-After loss of runtime invocation evidence, durable preparation remains held. Repeating the same unit handoff retrieves the same execution; it never creates a second worker.
+The read-only `unit prepared` command lists this owner’s uncommitted requests with origin and invocation ID from existing admission records.
+After a fresh runtime boundary, the adapter abandons only current-session preparations without a known live invocation. Other sessions remain held.
+Recovery uses the existing refresh lifecycle and also runs before the first task request or managed spawn. It never commits or redispatches work and needs no model setup call.
+Commit and abandonment retain their request lock: a concurrent committed request cannot be abandoned. Unknown outcomes remain pending.
 
 The loaded worker guard registers the seed flag even if pi-todo is missing. It validates `imported()` synchronously in `before_agent_start` and calls `ctx.abort()` on failure.
-The receipt must match execution, origin, digest, and current request/session ID. Sealed workers cannot begin another model task.
+Fresh receipts must match the launch execution, origin, digest, and current request/session ID. On resume or reload, pi-todo’s recorded receipt owns progress.
+A recorded import does not require the original seed artifact or launch flag. Sealed workers cannot begin another model task.
 Only a correlated seal at `agent_settled` causes terminal acknowledgement. Dogsled still validates the final transcript ancestry.
 
 Settlement delivery runs through the existing refresh and settled lifecycle. Provider failure or a wrong branch leaves the event pending.

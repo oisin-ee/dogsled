@@ -1,5 +1,6 @@
 use super::close::{close_rig, git};
 use super::*;
+use std::os::unix::fs::FileTypeExt as _;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -251,20 +252,45 @@ fn until(check: impl Fn() -> bool) {
 #[test]
 fn stop_wakes_the_service_without_waiting_for_the_publication_interval() {
     let rig = Rig::new("stop-wakeup");
+    // Keep the real private directory, but address the socket relative to it.
+    // macOS temporary-directory prefixes can exceed sockaddr_un's path limit.
+    let command = |args: &[&str]| {
+        let mut cmd = rig.cmd(args);
+        cmd.current_dir(&rig.dir).env("DOGSLED_STATE", "state");
+        cmd
+    };
+    let request = || {
+        let out = command(&["hook", "gate"])
+            .env("HERDR_ENV", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
     let _service = Service(
-        rig.cmd(&["serve", "--interval", "60"])
+        command(&["serve", "--interval", "60"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
     );
     until(|| rig.dir.join("state/host.json").exists());
+    assert!(
+        fs::metadata(rig.dir.join("state/sweep.sock"))
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
     assert!(!rig.dir.join("state/sweep.json").exists());
-    gate(&rig, "w1:p1");
+    request();
     until(|| rig.dir.join("state/sweep.json").exists());
     until(|| !rig.dir.join("state/sweep-request.json").exists());
     let first = rig.read("state/sweep.json");
-    gate(&rig, "w1:p1");
+    request();
     until(|| rig.read("state/sweep.json") != first);
 }
 

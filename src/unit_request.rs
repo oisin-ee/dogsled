@@ -476,6 +476,23 @@ pub fn managed_returned(ledger: &Ledger, id: &str) -> Result<Option<bool>> {
         .map(|u| u.returned.is_some()))
 }
 
+fn pending_preparations(ledger: &Ledger) -> Result<Value> {
+    let owner = owner()?;
+    let attempts = ledger.child("admissions");
+    let mut pending = Vec::new();
+    for file in records(&attempts)? {
+        if let Some(attempt) = attempts.read::<Attempt>(&file)?
+            && let Some(unit) = attempt.unit
+            && unit.execution.owner_id == owner
+            && unit.committed.is_none()
+            && unit.abandoned.is_none()
+        {
+            pending.push(json!({"execution": unit.execution, "origin": unit.origin, "toolCallId": unit.tool_call_id}));
+        }
+    }
+    Ok(json!(pending))
+}
+
 pub fn settlements(fleet: &Fleet) -> Result<Value> {
     refresh(fleet)?;
     let owner = owner()?;
@@ -548,6 +565,7 @@ pub fn run(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<std::proce
 fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
     use crate::cli::UnitCommand;
     match command {
+        UnitCommand::Prepared => pending_preparations(fleet.ledger),
         UnitCommand::Prepare {
             input,
             tool_call_id,

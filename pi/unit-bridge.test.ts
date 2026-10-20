@@ -73,6 +73,22 @@ test("settlement stays pending on the wrong branch and duplicate success is ackn
 	r.settleOK(true); await r.bridge.drain(r.ctx); assert.equal(r.state().acks, 1);
 });
 
+test("fresh runtime recovers current-session prepared requests without redispatch or model setup", async () => {
+	const r = rig();
+	r.pending.push({ execution: r.execution, origin: r.ref, toolCallId: "lost-call" });
+	r.pending.push({ execution: { ...r.execution, requestId: "other" }, origin: { ...r.ref, sessionId: "other-session" }, toolCallId: "other-call" });
+	await r.bridge.resume(r.ctx);
+	assert.equal(r.state().abandons, 1); assert.equal(r.state().claims, 0); assert.equal(r.state().acks, 1);
+	assert.equal(r.calls.some(args => args[2] === "prepare" || args[2] === "commit"), false);
+});
+
+test("runtime-boundary recovery excludes an invocation still known to execute", async () => {
+	const r = rig(); await r.bridge.call(r.event(), r.ctx);
+	r.pending.push({ execution: r.execution, origin: r.ref, toolCallId: "call" });
+	await r.bridge.resume(r.ctx); assert.equal(r.state().abandons, 0);
+	await r.bridge.ended("call", r.ctx); assert.equal(r.state().abandons, 1);
+});
+
 test("SSH and HTTPS origins map to the user-selected repository identity", () => {
 	for (const origin of ["git@github.com:owner/repo.git", "https://github.com/owner/repo.git", "ssh://git@github.com/owner/repo"]) assert.equal(repositoryIdentity(origin), "github.com/owner/repo");
 	assert.throws(() => repositoryIdentity("/tmp/repo"));

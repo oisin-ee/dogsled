@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { acquire, execution, prepared, record, reference, repositoryIdentity, sameExecution, sameRef, unitInput, unwrap, type Execution, type Prepared } from "./unit-protocol.ts";
 import { UnitWorker, type UnitExec } from "./unit-worker.ts";
 
@@ -10,6 +10,8 @@ export class UnitBridge {
 	private readonly calls = new Map<string, Invocation>();
 	private epoch = 0;
 	private draining: Promise<void> | undefined;
+	private recovery: Promise<void> | undefined;
+	private recovered = false;
 	private readonly worker: UnitWorker;
 	private readonly exec: UnitExec;
 	private readonly pi: Pick<ExtensionAPI, "events" | "exec" | "getFlag" | "registerFlag">;
@@ -22,9 +24,35 @@ export class UnitBridge {
 		};
 		this.worker = new UnitWorker(pi, this.exec);
 	}
-	start(): void { this.epoch++; this.worker.start(); }
+	start(reason: SessionStartEvent["reason"] = "startup"): void { this.epoch++; this.recovered = false; this.worker.start(reason); }
 	stop(): void { this.epoch++; }
 	guard(ctx: ExtensionContext): boolean { return this.worker.guard(ctx); }
+
+	/** Startup handlers have completed before this boundary; no registration-order race. */
+	ready(ctx: ExtensionContext): Promise<void> {
+		if (this.recovered || !acquire(this.pi.events)) return Promise.resolve();
+		if (this.recovery) return this.recovery;
+		const epoch = this.epoch;
+		this.recovery = this.resume(ctx).then(() => { if (epoch === this.epoch) this.recovered = true; }).finally(() => { this.recovery = undefined; });
+		return this.recovery;
+	}
+
+	/** A completed runtime startup establishes that untracked prior invocations cannot execute here. */
+	async resume(ctx: ExtensionContext): Promise<void> {
+		if (!acquire(this.pi.events)) return;
+		const epoch = this.epoch, session = ctx.sessionManager.getSessionId();
+		const pending = await this.exec(["unit", "prepared"], ctx.cwd);
+		if (!Array.isArray(pending)) throw new Error("LAUNCH_UNRESOLVED: prepared listing returned no list");
+		for (const item of pending) {
+			this.current(epoch, session, ctx);
+			if (!record(item) || !execution(item.execution) || !reference(item.origin) || typeof item.toolCallId !== "string") throw new Error("LAUNCH_UNRESOLVED: invalid preparation identity");
+			if (item.origin.sessionId !== session) continue;
+			const executionRef = item.execution;
+			if ([...this.calls.values()].some(call => !call.ended && sameExecution(call.execution, executionRef))) continue;
+			await this.exec(["unit", "abandon-prepared", "--input", JSON.stringify({ execution: executionRef })], ctx.cwd);
+		}
+		await this.drain(ctx);
+	}
 
 	async call(event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined> {
 		if (event.toolName !== SPAWN) return;
@@ -39,13 +67,15 @@ export class UnitBridge {
 				return;
 			}
 			if (!("unit" in input)) return;
-			const request = unitInput(input), provider = acquire(this.pi.events);
+			const request = unitInput(input), epoch = this.epoch, session = ctx.sessionManager.getSessionId();
+			await this.ready(ctx);
+			this.current(epoch, session, ctx);
+			const provider = acquire(this.pi.events);
 			if (!provider) throw new Error("PROVIDER_UNAVAILABLE: pi-todo capability is unavailable or ambiguous");
 			const contract = unwrap(provider.inspect(request.id));
 			if (!record(contract) || !reference(contract.ref) || !record(contract.scope) || typeof contract.scope.repositoryId !== "string") {
 				throw new Error("PROVIDER_UNAVAILABLE: invalid inspected contract");
 			}
-			const epoch = this.epoch, session = ctx.sessionManager.getSessionId();
 			if (contract.ref.sessionId !== session) throw new Error("STALE_ORIGIN: task belongs to another session");
 			const origin = await this.pi.exec("git", ["remote", "get-url", "origin"], { cwd: ctx.cwd });
 			if (origin.code !== 0 || repositoryIdentity(origin.stdout) !== contract.scope.repositoryId) throw new Error("REQUEST_CONFLICT: checkout origin differs from repositoryId");

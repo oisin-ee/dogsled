@@ -54,6 +54,24 @@ for (const nested of [false, true]) for (const abort of [false, true]) test(`act
 	} finally { testRuntime.session.dispose(); }
 });
 
+test("reload recovery uses the real session boundary without a model request", async () => {
+	const r = rig();
+	const extension: ExtensionFactory = pi => {
+		pi.events.on("oisin.tasks.acquire.v1", (value: any) => value.reply(r.provider));
+		const bridge = new UnitBridge({ events: pi.events, exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled");
+		pi.on("session_start", async (event, ctx) => { bridge.start(event.reason); await bridge.ready(ctx); });
+	};
+	const rt = await runtime([extension]);
+	r.ref.sessionId = rt.manager.getSessionId();
+	r.pending.push({ execution: r.execution, origin: r.ref, toolCallId: "prior-runtime-call" });
+	try {
+		await rt.session.bindExtensions({});
+		assert.equal(r.state().abandons, 1); assert.equal(r.state().acks, 1);
+		assert.equal(rt.faux.state.callCount, 0); assert.equal(r.state().claims, 0);
+		assert.equal(r.calls.some(args => args[2] === "prepare" || args[2] === "commit"), false);
+	} finally { rt.session.dispose(); }
+});
+
 for (const mode of ["missing", "invalid", "valid", "sealed"] as const) test(`fresh loaded worker guard: ${mode} acknowledgement`, async () => {
 	const data = fixture(), dir = await mkdtemp(join(tmpdir(), "dogsled-guard-")), path = join(dir, "seed.json");
 	const acknowledgements: string[][] = [];

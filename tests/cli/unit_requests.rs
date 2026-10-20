@@ -63,6 +63,43 @@ fn no_launch(rig: &Rig) {
 }
 
 #[test]
+fn prepared_listing_is_owner_scoped_and_never_abandons_or_launches() {
+    let rig = rig("unit-prepared-list", true);
+    let execution = prepare(&rig);
+    let (code, pending) = rig.json(&["unit", "prepared"]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        pending,
+        json!([{ "execution": execution, "origin": exported(0)["contract"]["ref"], "toolCallId": "call-1" }])
+    );
+    let other = rig
+        .cmd(&["unit", "prepared"])
+        .env("HERDR_PANE_ID", "other")
+        .output()
+        .unwrap();
+    assert!(other.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&other.stdout).unwrap(),
+        json!([])
+    );
+    no_launch(&rig);
+    assert_eq!(operation(&rig, "commit", &commit_input(&execution, 0)).0, 0);
+    assert_eq!(rig.json(&["unit", "prepared"]).1, json!([]));
+}
+
+#[test]
+fn abandoned_preparation_disappears_from_recovery_listing() {
+    let rig = rig("unit-prepared-abandoned", false);
+    let execution = prepare(&rig);
+    assert_eq!(
+        operation(&rig, "abandon-prepared", &execution_input(&execution)).0,
+        0
+    );
+    assert_eq!(rig.json(&["unit", "prepared"]).1, json!([]));
+    no_launch(&rig);
+}
+
+#[test]
 fn prepare_is_durable_owner_scoped_and_side_effect_free() {
     let rig = rig("unit-prepare", false);
     let execution = prepare(&rig);

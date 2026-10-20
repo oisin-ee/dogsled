@@ -220,6 +220,8 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum UnitCommand {
+    /// Uncommitted requests for this owner, for confirmed runtime-boundary recovery.
+    Prepared,
     Prepare {
         #[arg(long)]
         input: String,

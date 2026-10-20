@@ -172,7 +172,7 @@ export default function dogsled(pi: ExtensionAPI) {
 		const current = generation;
 		refresh = (async () => {
 			await inbox.drain(ctx);
-			try { await units.drain(ctx); } catch (error) { ctx.ui.notify(`Dogsled settlement delivery pending: ${String(error)}`, "warning"); }
+			try { await units.ready(ctx); await units.drain(ctx); } catch (error) { ctx.ui.notify(`Dogsled settlement delivery pending: ${String(error)}`, "warning"); }
 			if (ctx.mode !== "tui") return;
 			try {
 				const next = parseBoard(JSON.parse(await exec(["board", "--json"])));
@@ -197,8 +197,8 @@ export default function dogsled(pi: ExtensionAPI) {
 		return refresh;
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		units.start();
+	pi.on("session_start", async (event, ctx) => {
+		units.start(event.reason);
 		if (ctx.mode === "tui") ctx.ui.setWidget("dogsled", undefined);
 		requestWorkRender = undefined;
 		workPanel?.dispose();
@@ -263,6 +263,7 @@ export default function dogsled(pi: ExtensionAPI) {
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!units.guard(ctx)) return;
+		try { await units.ready(ctx); } catch (error) { ctx.ui.notify(`Dogsled preparation recovery pending: ${String(error)}`, "warning"); }
 		// Context is optional, including when the binary is absent or fails.
 		try {
 			const result = await pi.exec(binary, ["hook", "context", "--harness", "pi"], { timeout: 6_000 });

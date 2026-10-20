@@ -1,5 +1,5 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionStartEvent } from "@earendil-works/pi-coding-agent";
 import { acquire, prepared, receipt, record, sameExecution, sameRef, unwrap, type Prepared, type Receipt } from "./unit-protocol.ts";
 
 /** Read transport correlation, not task semantics; pi-todo validates the actual contract. */
@@ -23,6 +23,7 @@ export class UnitWorker {
 	private seed: Prepared | undefined;
 	private failure: string | undefined;
 	private managed = false;
+	private reason: SessionStartEvent["reason"] = "startup";
 	private readonly pi: Pick<ExtensionAPI, "events" | "getFlag" | "registerFlag">;
 	private readonly exec: UnitExec;
 	constructor(pi: Pick<ExtensionAPI, "events" | "getFlag" | "registerFlag">, exec: UnitExec) {
@@ -30,7 +31,8 @@ export class UnitWorker {
 		// The guard must load the flag even when pi-todo is absent. Pi merges identical flag names.
 		pi.registerFlag("todo-unit-file", { type: "string", description: "Executor-owned worker task seed" });
 	}
-	start(): void {
+	start(reason: SessionStartEvent["reason"] = "startup"): void {
+		this.reason = reason;
 		this.seed = undefined;
 		this.failure = undefined;
 		const path = this.pi.getFlag("todo-unit-file");
@@ -41,22 +43,30 @@ export class UnitWorker {
 			this.seed = seedFile(path);
 		} catch (error) { this.failure = String(error); }
 	}
-	private imported(ctx: ExtensionContext): Receipt {
-		if (!this.seed || this.failure) throw new Error(this.failure ?? "missing seed");
+	private imported(ctx: ExtensionContext): Receipt | null {
 		const provider = acquire(this.pi.events);
-		if (!provider) throw new Error("task provider unavailable");
+		if (!provider) {
+			if (this.managed) throw new Error("task provider unavailable");
+			return null;
+		}
 		const value = unwrap(provider.imported());
+		if (value === null && !this.managed) return null;
 		if (!receipt(value) || value.localSessionId !== ctx.sessionManager.getSessionId()
-			|| value.localSessionId !== this.seed.execution.requestId
-			|| !sameExecution(value.execution, this.seed.execution) || !sameRef(value.unitRef, this.seed.binding.contract)
-			|| value.digest !== this.seed.binding.exportDigest) throw new Error("missing or mismatched import acknowledgement");
+			|| value.localSessionId !== value.execution.requestId) throw new Error("missing or mismatched import acknowledgement");
+		const recorded = this.reason === "reload" || this.reason === "resume"
+			|| ctx.sessionManager.getEntries().some(entry => entry.type === "message");
+		if (!recorded) {
+			if (!this.seed || this.failure) throw new Error(this.failure ?? "missing seed");
+			if (!sameExecution(value.execution, this.seed.execution) || !sameRef(value.unitRef, this.seed.binding.contract)
+				|| value.digest !== this.seed.binding.exportDigest) throw new Error("mismatched seed acknowledgement");
+		}
 		return value;
 	}
 	/** Called synchronously before any other before-agent-start await. */
 	guard(ctx: ExtensionContext): boolean {
-		if (!this.managed) return true;
 		try {
-			if (this.imported(ctx).seal !== null) throw new Error("worker execution is sealed");
+			const imported = this.imported(ctx);
+			if (imported?.seal) throw new Error("worker execution is sealed");
 			return true;
 		} catch (error) {
 			ctx.abort();
@@ -65,9 +75,8 @@ export class UnitWorker {
 		}
 	}
 	async settled(ctx: ExtensionContext): Promise<void> {
-		if (!this.managed) return;
 		const imported = this.imported(ctx);
-		if (!imported.seal) return;
+		if (!imported?.seal) return;
 		const leaf = ctx.sessionManager.getLeafId();
 		if (!leaf) throw new Error("IMPORT_FAILED: sealed session has no final leaf");
 		await this.exec(["unit", "terminal-ack", "--input", JSON.stringify({

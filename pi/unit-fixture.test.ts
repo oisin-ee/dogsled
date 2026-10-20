@@ -13,6 +13,7 @@ export function fixture() {
 }
 export function rig() {
 	const data = fixture(), emitter = new EventEmitter(), calls: string[][] = [], notices: string[] = [], settlements: unknown[] = [];
+	const pending: unknown[] = [];
 	let phase = "prepared", session = "lead", imported: Receipt | null = null, settleOK = true, claims = 0, abandons = 0, acks = 0, aborted = false;
 	let claimFailure = false, observeFailure = false, onPrepare: (() => void) | undefined;
 	const bus = { emit(name: string, value: unknown) { emitter.emit(name, value); }, on(name: string, handler: (value: unknown) => void) { emitter.on(name, handler); return () => { emitter.off(name, handler); }; } };
@@ -30,6 +31,7 @@ export function rig() {
 			if (binary === "git") return { code: 0, stdout: "git@github.com:owner/repo.git", stderr: "", killed: false };
 			let value: unknown = {};
 			switch (args[1]) {
+				case "prepared": value = pending; break;
 				case "prepare": if (options?.cwd !== "/checkout") throw new Error("wrong cwd"); onPrepare?.(); value = data.execution; break;
 				case "observe": if (observeFailure) throw new Error("offline"); value = { execution: data.execution, phase }; break;
 				case "abandon-prepared": if (phase !== "prepared" && phase !== "not_started") throw new Error("already committed"); phase = "not_started"; abandons++; settlements.push({ version: 1, eventId: "abandoned", origin: data.ref, execution: data.execution, result: { kind: "not_started", reason: "abandoned" } }); break;
@@ -39,9 +41,9 @@ export function rig() {
 			return { code: 0, stdout: JSON.stringify(value), stderr: "", killed: false };
 		},
 	};
-	const ctx = { cwd: "/checkout", signal: undefined, sessionManager: { getSessionId: () => session, getLeafId: () => "leaf" }, abort() { aborted = true; }, ui: { notify(text: string) { notices.push(text); } } } as unknown as ExtensionContext;
+	const ctx = { cwd: "/checkout", signal: undefined, sessionManager: { getSessionId: () => session, getLeafId: () => "leaf", getEntries: () => [] }, abort() { aborted = true; }, ui: { notify(text: string) { notices.push(text); } } } as unknown as ExtensionContext;
 	const bridge = new UnitBridge(api, "dogsled"); bridge.start();
-	return { ...data, api, bus, bridge, ctx, calls, notices, provider, settlements,
+	return { ...data, api, bus, bridge, ctx, calls, notices, provider, settlements, pending,
 		state: () => ({ phase, claims, abandons, acks, aborted }),
 		phase: (value: string) => { phase = value; },
 		claimFailure: () => { claimFailure = true; },
