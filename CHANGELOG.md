@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.16.0 - 2026-10-20
+
+Repository work opens with its repository. Pi gains the structured task handoff bridge.
+
+- Jobs and readers use their worktree’s workspace, then the main checkout’s workspace, or a new repository workspace. Remote launches follow the same rule. Branch agents still use their worktree workspace.
+- The Pi bridge prepares and claims a task from pi-todo in one spawn call. It validates worker imports before a model request and delivers sealed results separately from inbox messages. Lead acceptance remains explicit.
+- Runtime recovery reconciles uncommitted preparations after reload and lost prepare responses. Unknown outcomes retain their claims; recovery does not redispatch work.
+- Dogsled alone registers `--todo-unit-file` and exposes the versioned seed-source capability. A compatible pi-todo provider consumes it and owns import validation.
+- The Pi extension now requires Pi SDK/TUI 1.3 or later within major version 1, and Node 22.19 or later.
+- Cross-repository tests load both real extensions in both orders. Executor transport is simulated in those tests; live deployment verification is separate.
+- The cleanup-wakeup test uses a valid short socket path. Deadline-test failures now include the command output.
+
 ## 0.15.0 - 2026-10-20
 
 A child finishes when it says so, not when it goes idle. A refused launch no longer holds its worktree.
