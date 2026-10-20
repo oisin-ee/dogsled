@@ -233,6 +233,7 @@ A shared, locked cache permits at most one read per peer per ten seconds, includ
 Status never probes peers itself.
 
 A missing snapshot, failed read, or snapshot older than 30 seconds shows `service: down`.
+When a snapshot exists, the host's reason gives its age, such as `service: down (last snapshot 44s ago)`. A slow tick on a loaded host is tens of seconds old. A stopped service gets older on every read.
 The last peer measurement remains visible when available. Every discovered host stays in the output.
 The JSON output contains `hosts`, with service state, reachability, sample time, probe, headroom, errors, and `retry_ms` while a peer read backs off.
 
