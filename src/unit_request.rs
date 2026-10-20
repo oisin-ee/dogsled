@@ -173,7 +173,7 @@ pub fn commit(fleet: &Fleet, input: &CommitInput) -> Result<Value> {
             request.action = crate::runtime::agent_action(
                 fleet,
                 "pi".into(),
-                format!("unit-{}-r{}", unit.origin.unit_id, unit.origin.revision),
+                crate::unit_transport::agent_name(&unit.origin, &unit.execution)?,
                 input.exported.brief.clone(),
                 Some(profile.into()),
                 request.host.as_deref(),

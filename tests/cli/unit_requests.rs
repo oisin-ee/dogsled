@@ -38,6 +38,32 @@ pub(super) fn commit_input(execution: &Value, index: usize) -> Value {
     json!({"execution":execution,"binding":{"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]},"exported":export})
 }
 
+// Independent ordered projection; do not call the production naming helper.
+pub(super) fn expected_name(execution: &Value, origin: &Value) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let field = |value: &Value| serde_json::to_string(value).unwrap();
+    let bytes = format!(
+        "[{{\"sessionId\":{},\"unitId\":{},\"revision\":{},\"contractEntryId\":{}}},{{\"executor\":{},\"ownerId\":{},\"requestId\":{}}}]",
+        field(&origin["sessionId"]),
+        field(&origin["unitId"]),
+        field(&origin["revision"]),
+        field(&origin["contractEntryId"]),
+        field(&execution["executor"]),
+        field(&execution["ownerId"]),
+        field(&execution["requestId"])
+    );
+    let hex =
+        Sha256::digest(bytes.as_bytes())
+            .iter()
+            .take(15)
+            .fold(String::new(), |mut hex, byte| {
+                write!(hex, "{byte:02x}").unwrap();
+                hex
+            });
+    format!("u-{hex}")
+}
+
 pub(super) fn operation(rig: &Rig, operation: &str, input: &Value) -> (i32, Value) {
     rig.json(&["unit", operation, "--input", &input.to_string()])
 }
@@ -299,7 +325,10 @@ fn service_recovers_commit_before_enqueue_once_without_abandoning_prepared() {
     );
     assert_eq!(
         rig.log("herdr.log")
-            .matches("agent start unit-u-17-r1 ")
+            .matches(&format!(
+                "agent start {} ",
+                expected_name(&execution, &exported(0)["contract"]["ref"])
+            ))
             .count(),
         1
     );
@@ -318,7 +347,10 @@ fn lost_commit_response_reuses_launched_receipt_and_exact_profile() {
     serve(&rig);
     assert_eq!(
         rig.log("herdr.log")
-            .matches("agent start unit-u-17-r1 ")
+            .matches(&format!(
+                "agent start {} ",
+                expected_name(&execution, &exported(0)["contract"]["ref"])
+            ))
             .count(),
         1
     );
@@ -362,7 +394,10 @@ fn captured_reply_without_terminal_evidence_never_projects_returned() {
     assert!(state["settlement"].is_null());
     assert_eq!(
         rig.log("herdr.log")
-            .matches("agent start unit-u-17-r1 ")
+            .matches(&format!(
+                "agent start {} ",
+                expected_name(&execution, &exported(0)["contract"]["ref"])
+            ))
             .count(),
         1
     );
@@ -398,6 +433,82 @@ fn rejects_unknown_fields_versions_correlation_and_digest_before_commit() {
     }
     assert!(admission(&rig, &execution)["unit"]["committed"].is_null());
     no_launch(&rig);
+}
+
+#[test]
+fn uuid_unit_names_fit_native_limits_and_native_collisions_stay_final() {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    for collision in [false, true] {
+        let rig = rig(&format!("unit-native-name-{collision}"), false);
+        let fixtures: Value =
+            serde_json::from_str(include_str!("../fixtures/unit-exports.json")).unwrap();
+        let canonical = fixtures[0]["canonical"]
+            .as_str()
+            .unwrap()
+            .replace("u-17", "u-6ce8048d-2317-4b7e-988e-cf6591d1b7a0-1");
+        let mut export: Value = serde_json::from_str(&canonical).unwrap();
+        let digest =
+            Sha256::digest(canonical.as_bytes())
+                .iter()
+                .fold(String::new(), |mut hex, byte| {
+                    write!(hex, "{byte:02x}").unwrap();
+                    hex
+                });
+        export["digest"] = json!(digest);
+        let (code, execution) = rig.json(&[
+            "unit",
+            "prepare",
+            "--input",
+            &json!({"origin":export["contract"]["ref"],"placement":{}}).to_string(),
+            "--tool-call-id",
+            "uuid-call",
+        ]);
+        assert_eq!(code, 0, "{execution}");
+        let input = json!({"execution":execution,"binding":{"contract":export["contract"]["ref"],"execution":execution,"exportDigest":digest},"exported":export});
+        let result = if collision {
+            "echo '{\"error\":{\"code\":\"agent_name_taken\",\"message\":\"name is occupied\"}}' >&2; exit 1"
+        } else {
+            "printf '{}\\n'"
+        };
+        rig.script("herdr", &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
+            "  'agent start'*|", &format!("  'agent start'*) name=\"$3\"; case \"$name\" in [a-z]*) ;; *) exit 2 ;; esac; case \"$name\" in *[!a-z0-9_-]*) exit 2 ;; esac; if test \"${{#name}}\" -gt 32; then echo '{{\"error\":{{\"code\":\"invalid_agent_name\",\"message\":\"name exceeds 32 bytes\"}}}}' >&2; exit 1; fi; {result} ;;\n  "),
+        ));
+        let (code, response) = operation(&rig, "commit", &input);
+        if collision {
+            assert_eq!(code, 2, "{response}");
+            assert!(
+                response.to_string().contains("agent_name_taken"),
+                "{response}"
+            );
+            assert_eq!(operation(&rig, "commit", &input).0, 2);
+            let receipt = rig.read(&format!(
+                "state/launches/{}.json",
+                execution["requestId"].as_str().unwrap()
+            ));
+            assert!(
+                receipt["failed"]
+                    .as_str()
+                    .unwrap()
+                    .contains("agent_name_taken")
+            );
+            assert!(!rig.dir.join("state/queue.json").exists());
+        } else {
+            assert_eq!(code, 0, "{response}");
+            assert_eq!(operation(&rig, "commit", &input).0, 0);
+        }
+        let expected = expected_name(&execution, &input["binding"]["contract"]);
+        assert_eq!(
+            rig.log("herdr.log")
+                .matches(&format!("agent start {expected} "))
+                .count(),
+            1
+        );
+        assert_eq!(
+            admission(&rig, &execution)["unit"]["committed"]["exported"]["digest"],
+            digest
+        );
+    }
 }
 
 #[test]
@@ -487,7 +598,10 @@ fn unknown_host_launch_outcome_reuses_attempt_without_safe_release() {
     assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
     assert_eq!(
         rig.log("herdr.log")
-            .matches("agent start unit-u-17-r1 ")
+            .matches(&format!(
+                "agent start {} ",
+                expected_name(&execution, &exported(0)["contract"]["ref"])
+            ))
             .count(),
         1
     );
