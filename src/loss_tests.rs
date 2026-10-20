@@ -237,9 +237,16 @@ fn survey_continues_past_missing_repositories_and_scopes_agree() {
     }
     std::fs::write(repo.tree.join("dirty"), "work").unwrap();
     let plan = survey(&node, Scope::Prune, 100).unwrap();
+    // The survey also covers the caller's own repository, which may have findings of its own.
+    let ours = |e: &&crate::cleanup::Entry| {
+        e.tree.as_ref().is_some_and(|t| {
+            crate::worktree::resolved(Path::new(&t.path)) == crate::worktree::resolved(&repo.tree)
+        })
+    };
     let finding = plan
         .entries
         .iter()
+        .filter(ours)
         .find(|e| e.kind.as_deref() == Some("landed_dirty"))
         .unwrap();
     assert!(!finding.removable);
@@ -268,16 +275,12 @@ fn survey_continues_past_missing_repositories_and_scopes_agree() {
         )
         .unwrap();
     let held = survey(&node, Scope::Prune, 100).unwrap();
+    let entry = held.entries.iter().find(ours).unwrap();
+    assert_ne!(entry.kind.as_deref(), Some("landed_dirty"));
     assert!(
-        !held
-            .entries
-            .iter()
-            .any(|e| e.kind.as_deref() == Some("landed_dirty"))
-    );
-    assert!(
-        held.entries
-            .iter()
-            .any(|e| e.detail.contains("pending preparation"))
+        entry.detail.contains("pending preparation"),
+        "{}",
+        entry.detail
     );
 }
 

@@ -118,6 +118,7 @@ A wait deadline does not cancel its job or ticket. `cancel` only cancels pending
 A task with a newline, a leading `-` or `@`, or more than 4000 characters goes to `launches/<id>.task.md`. Pi reads it as `@<file>`; Claude and Codex get a one-line pointer to it.
 `--message-file PATH` (or `-` for stdin) reads the task from a file.
 A failed `herdr agent start` is retried with backoff, three tries in all. After the last, the ticket fails and the owner's inbox says so. A refusal or a deadline fails at once.
+Herdr refuses a start before it types into the pane, for example `agent_pane_busy` or `agent_name_taken`. That refusal is final: dogsled records it as the launch result, closes the empty pane it created, and does not retry. Any other failure leaves the outcome unknown, so dogsled keeps the pane and reconciles it on the next try.
 
 `--profile NAME` (Pi only) reads `~/.config/dogsled/profiles/NAME/profile.json` on the host that runs the child:
 
@@ -305,6 +306,7 @@ Each path merges on its own. An addition, deletion, or mode change on a path the
 Results use the remote-tracking branch, so `git fetch` keeps them current.
 A local branch with no worktree is removable when it is integrated or every commit is on a remote branch. Other branches are report-only. The default branch is never a candidate. Prune deletes a branch with `git branch -D` after it rechecks the planned commit.
 Prune and the sweep share the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches.
+An unfinished launch holds its checkout while its pane exists, because an interrupted start can still bring up an agent there. When its pane is gone, it holds nothing.
 An open agent item holds its checkout in prune and the sweep; `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until the default branch holds its work.
 An idle shell, an idle or done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
