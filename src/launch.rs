@@ -346,11 +346,7 @@ fn validate_seed<'a>(
     if kind != "pi"
         || selected.as_deref() != Some(expected)
         || *message != seed.exported.brief
-        || *name
-            != format!(
-                "unit-{}-r{}",
-                seed.binding.contract.unit_id, seed.binding.contract.revision
-            )
+        || *name != crate::unit_transport::agent_name(&seed.binding.contract, &seed.execution)?
     {
         return Err(crate::unit_transport::conflict(
             "seed requires its assigned Pi profile",

@@ -23,7 +23,7 @@ fn transcript(rig: &Rig, execution: &Value, entries: &[Value]) -> PathBuf {
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{
-            "pane_id":"w2:p1","terminal_id":"term_child","agent":"pi","name":"unit-u-17-r1",
+            "pane_id":"w2:p1","terminal_id":"term_child","agent":"pi","name":expected_name(execution, &exported(0)["contract"]["ref"]),
             "agent_status":"idle","completion_seq":7,
             "agent_session":{"agent":"pi","kind":"path","value":path}
         }]}}),

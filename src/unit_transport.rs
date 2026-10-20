@@ -179,6 +179,13 @@ impl UnitRef {
     }
 }
 
+/// Bounded native launch label, not an identity or authorization token. Full binding
+/// checks remain authoritative; native name collisions are final refusals, never aliases.
+pub fn agent_name(origin: &UnitRef, execution: &ExecutionRef) -> Result<String> {
+    let digest = digest_hex(&serde_json::to_vec(&(origin, execution))?);
+    Ok(format!("u-{}", &digest[..30]))
+}
+
 pub fn digest_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -307,6 +314,51 @@ pub enum NotStartedResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_label_is_bounded_stable_and_uses_every_identity_field() {
+        let origin = UnitRef {
+            session_id: "01a15a42-78ee-7513-8f13-5005bbbeaf7c".into(),
+            unit_id: "u-6ce8048d-2317-4b7e-988e-cf6591d1b7a0-1".into(),
+            revision: u64::MAX,
+            contract_entry_id: "入口🙂".into(),
+        };
+        let execution = ExecutionRef {
+            executor: "dogsled".into(),
+            owner_id: "wFR:p6".into(),
+            request_id: "r-1792515815179-47198-0".into(),
+        };
+        // Independent Python hashlib SHA256 of the ordered UTF-8 JSON tuple.
+        let expected = "u-9434db3875758021e0c33aa2c9f747";
+        assert_eq!(agent_name(&origin, &execution).unwrap(), expected);
+        assert_eq!(agent_name(&origin, &execution).unwrap(), expected);
+        let mut names = std::collections::BTreeSet::from([expected.to_owned()]);
+        for field in 0..7 {
+            let mut origin = origin.clone();
+            let mut execution = execution.clone();
+            match field {
+                0 => origin.session_id.push('x'),
+                1 => origin.unit_id.push('🙂'),
+                2 => origin.revision -= 1,
+                3 => origin.contract_entry_id.push('x'),
+                4 => execution.executor.push('x'),
+                5 => execution.owner_id.push('x'),
+                _ => execution.request_id.push('x'),
+            }
+            let name = agent_name(&origin, &execution).unwrap();
+            assert_eq!(name.len(), 32);
+            assert!(name.starts_with("u-"));
+            assert!(
+                name[2..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            );
+            assert!(
+                names.insert(name),
+                "field {field} did not distinguish the label"
+            );
+        }
+    }
 
     #[test]
     fn canonical_bytes_match_javascript_fixtures() {
