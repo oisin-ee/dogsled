@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Box, Text, Key } from "@earendil-works/pi-tui";
 import { type Board, clean, parseBoard } from "./board.ts";
 import { WorkTodo } from "./work-todo.ts";
+import { UnitBridge } from "./unit-bridge.ts";
 import { workBoard, workText, type WorkState } from "./work.ts";
 import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
@@ -46,6 +47,9 @@ export default function dogsled(pi: ExtensionAPI) {
 	}
 
 	const inbox = new InboxReader(pi, exec);
+	const units = new UnitBridge(pi, binary);
+	pi.on("tool_call", (event, ctx) => units.call(event, ctx));
+	pi.on("tool_execution_end", (event, ctx) => units.ended(event.toolCallId, ctx));
 
 	pi.registerMessageRenderer<Details>(MESSAGE_TYPE, (message, { expanded, outputPad }, theme) => {
 		const records = message.details?.records ?? [];
@@ -168,6 +172,7 @@ export default function dogsled(pi: ExtensionAPI) {
 		const current = generation;
 		refresh = (async () => {
 			await inbox.drain(ctx);
+			try { await units.drain(ctx); } catch (error) { ctx.ui.notify(`Dogsled settlement delivery pending: ${String(error)}`, "warning"); }
 			if (ctx.mode !== "tui") return;
 			try {
 				const next = parseBoard(JSON.parse(await exec(["board", "--json"])));
@@ -193,6 +198,7 @@ export default function dogsled(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		units.start();
 		if (ctx.mode === "tui") ctx.ui.setWidget("dogsled", undefined);
 		requestWorkRender = undefined;
 		workPanel?.dispose();
@@ -222,6 +228,7 @@ export default function dogsled(pi: ExtensionAPI) {
 		await update(ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		units.stop();
 		workPanel?.dispose();
 		generation++;
 		workAbort?.abort();
@@ -239,7 +246,10 @@ export default function dogsled(pi: ExtensionAPI) {
 	});
 	// A delivered message is in the transcript once Pi ends it: only then is it acknowledged.
 	pi.on("message_end", async event => { await inbox.ended(event.message); });
-	pi.on("agent_settled", () => { inbox.settled(); });
+	pi.on("agent_settled", async (_event, ctx) => {
+		inbox.settled();
+		try { await units.settled(ctx); } catch (error) { ctx.ui.notify(`Dogsled unit acknowledgement pending: ${String(error)}`, "warning"); }
+	});
 	pi.on("agent_before_settle", async event => {
 		if (!owner || event.outcome !== "completed" || !event.context.canContinue || event.continue) return;
 		// The Rust gate owns selection and durable deduplication across all harnesses.
@@ -251,7 +261,8 @@ export default function dogsled(pi: ExtensionAPI) {
 			continue: true,
 		};
 	});
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (!units.guard(ctx)) return;
 		// Context is optional, including when the binary is absent or fails.
 		try {
 			const result = await pi.exec(binary, ["hook", "context", "--harness", "pi"], { timeout: 6_000 });

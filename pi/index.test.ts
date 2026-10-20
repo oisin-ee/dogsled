@@ -27,6 +27,8 @@ function rig() {
 	const api = {
 		events: { emit: (name: string, data: unknown) => { events.emit(name, data); }, on: (name: string, fn: (data: unknown) => void) => { events.on(name, fn); return () => { events.off(name, fn); }; } },
 		on(event: string, fn: Handler) { handlers.set(event, fn); },
+		registerFlag() {},
+		getFlag() { return undefined; },
 		registerMcpServer(name: string, config: unknown) { servers.push([name, config]); },
 		registerCommand(name: string, options: unknown) { commands.set(name, options); },
 		registerShortcut(key: string, options: unknown) { shortcuts.set(key, options); },
