@@ -135,6 +135,145 @@ impl Drop for Repo {
 }
 
 #[test]
+fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
+    let mut repo = Repo::new();
+    let nested = repo.repo.join(".worktrees/feature");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    git(
+        &repo.repo,
+        &[
+            "worktree",
+            "move",
+            repo.tree.to_str().unwrap(),
+            nested.to_str().unwrap(),
+        ],
+    );
+    repo.tree = nested;
+    std::fs::write(repo.repo.join("sandbox.sh"), "main content").unwrap();
+    std::fs::write(repo.tree.join("unknown"), "leftover content").unwrap();
+    // Even tagged output inside this unidentified directory must remain untouched.
+    let target = repo.tree.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55",
+    )
+    .unwrap();
+    std::fs::remove_file(repo.tree.join(".git")).unwrap();
+    assert!(crate::worktree::same(
+        git(&repo.tree, &["rev-parse", "--show-toplevel"]).trim(),
+        repo.repo.to_str().unwrap()
+    ));
+    let listed = git(&repo.repo, &["worktree", "list", "--porcelain", "-z"]);
+    assert!(
+        listed
+            .split('\0')
+            .any(|field| field.starts_with("prunable"))
+    );
+    let ledger = Ledger::new(repo.root.join("state"));
+    ledger
+        .write("repositories.json", &vec![repo.repo.display().to_string()])
+        .unwrap();
+    let cleanup = crate::config::Cleanup::default();
+    let node = crate::node::Node {
+        shell: &System,
+        ledger: &ledger,
+        thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+        home: repo.root.to_str().unwrap(),
+        cleanup: &cleanup,
+    };
+    for scope in [Scope::Prune, Scope::Sweep] {
+        let mut plan = survey(&node, scope, 100).unwrap();
+        // Never apply findings from the developer's own checkout. Git reports resolved paths
+        // (`/private/var` on macOS), so compare resolved paths.
+        let root = crate::worktree::resolved(&repo.root);
+        plan.entries
+            .retain(|entry| crate::worktree::resolved(Path::new(&entry.id)).starts_with(&root));
+        let finding = plan
+            .entries
+            .iter()
+            .find(|entry| crate::worktree::same(&entry.id, repo.tree.to_str().unwrap()))
+            .unwrap();
+        assert_eq!(finding.kind.as_deref(), Some(crate::cleanup::UNLINKED));
+        assert!(
+            finding.detail.contains("git marks the worktree prunable"),
+            "{}",
+            finding.detail
+        );
+        assert!(!finding.removable);
+        assert_eq!(finding.dirty_paths, Vec::<String>::new());
+        assert_eq!(finding.dirty_count, None);
+        assert!(
+            !plan
+                .entries
+                .iter()
+                .any(|entry| entry.kind.as_deref() == Some("landed_dirty"))
+        );
+        assert!(!plan.entries.iter().any(|entry| entry.class == "targets"));
+        let applied = crate::cleanup::apply(&node, &plan, 100).unwrap();
+        assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+        assert_eq!(
+            std::fs::read_to_string(repo.tree.join("unknown")).unwrap(),
+            "leftover content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.repo.join("sandbox.sh")).unwrap(),
+            "main content"
+        );
+        assert!(target.join("CACHEDIR.TAG").exists());
+        assert_eq!(
+            git(&repo.repo, &["worktree", "list", "--porcelain", "-z"]),
+            listed
+        );
+    }
+    // Once the owner removes the directory, nothing is left to remove or to report as dirt.
+    std::fs::remove_dir_all(&repo.tree).unwrap();
+    let plan = survey(&node, Scope::Prune, 100).unwrap();
+    assert!(!plan.entries.iter().any(|entry| crate::worktree::same(
+        &entry.id,
+        repo.tree.to_str().unwrap()
+    ) && (entry.removable
+        || entry.kind.as_deref() == Some("landed_dirty"))));
+}
+
+#[test]
+fn loss_refuses_non_root_paths_before_reading_parent_status() {
+    let repo = Repo::new();
+    let nested = repo.repo.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(repo.repo.join("untracked"), "main checkout content").unwrap();
+    for own_git in [false, true] {
+        if own_git {
+            // A .git directory alone does not establish Git's checkout identity.
+            std::fs::create_dir(nested.join(".git")).unwrap();
+        }
+        let error = crate::loss::dirty_paths(&System, nested.to_str().unwrap(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(nested.to_str().unwrap()), "{error}");
+        assert!(error.contains("not a worktree root"), "{error}");
+    }
+}
+
+#[test]
+fn loss_refuses_missing_worktree_identity_for_assessment_and_recovery() {
+    let repo = Repo::new();
+    std::fs::remove_file(repo.tree.join(".git")).unwrap();
+    let evidence = repo.evidence();
+    let path = repo.tree.to_str().unwrap();
+    for error in [
+        evidence
+            .assess(&System, "refs/heads/feature", Some(path))
+            .unwrap_err(),
+        evidence.restore_deletions(&System, path).unwrap_err(),
+    ] {
+        let error = error.to_string();
+        assert!(error.contains(path), "{error}");
+        assert!(error.contains("not a worktree root"), "{error}");
+    }
+}
+
+#[test]
 fn retained_branch_holds_local_commits_but_never_other_tips_or_dirty_content() {
     let repo = Repo::new();
     repo.commit();

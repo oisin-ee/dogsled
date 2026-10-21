@@ -1028,8 +1028,11 @@ fn branches(
 ) -> Result<()> {
     let shell = node.shell;
     let pending = crate::prepare::pending_trees(node.ledger, launches)?;
-    let checked_out: BTreeSet<String> =
-        listed(shell, repo)?.into_iter().map(|t| t.branch).collect();
+    // Git keeps a prunable worktree's branch checked out until the entry is pruned.
+    let checked_out: BTreeSet<String> = porcelain(shell, repo)?
+        .into_iter()
+        .map(|(t, _)| t.branch)
+        .collect();
     let base = crate::integration::base(shell, repo)?;
     let default = base
         .strip_prefix("refs/remotes/origin/")

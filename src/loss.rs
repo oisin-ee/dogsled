@@ -220,6 +220,15 @@ struct Change {
 }
 
 fn changes(shell: &dyn Shell, checkout: &str) -> Result<Vec<Change>> {
+    let path = std::path::Path::new(checkout);
+    if !path.join(".git").exists() {
+        return Err(Error::Invalid(format!("{checkout}: not a worktree root")));
+    }
+    let root = git(shell, checkout, &["rev-parse", "--show-toplevel"])?;
+    let top = root.stdout.strip_suffix('\n').unwrap_or(&root.stdout);
+    if !root.ok() || top.is_empty() || !crate::worktree::same(checkout, top) {
+        return Err(Error::Invalid(format!("{checkout}: not a worktree root")));
+    }
     let out = git(
         shell,
         checkout,

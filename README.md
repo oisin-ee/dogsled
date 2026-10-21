@@ -328,6 +328,8 @@ An open agent item holds its checkout in prune and the sweep; `close` ends it an
 An idle or done agent that has not called `dogsled done` holds its checkout in prune, the sweep, and an automatic close; only an explicit `dogsled close` takes it. An idle shell, a done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
 The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
+Before it reads checkout changes, the loss rule requires the checkout's own `.git` and a matching Git top-level path.
+A missing or mismatched identity refuses the check. It never counts as clean or inherits a parent checkout's dirt.
 A registered worktree whose path is absent is a stale registration. Prune and the sweep remove the record only.
 A planned worktree that something else removes before its removal runs is not a failure. When Git no longer lists it and its path is absent, the pass drops its registration and reports it as already removed. When Git no longer lists it but its path still exists, the removal is refused.
 A worktree whose directory remains but that Git can no longer remove is an `unlinked` hold. This happens when Git does not list it (for example after `git worktree prune`), calls it prunable, or its `.git` file is gone.
