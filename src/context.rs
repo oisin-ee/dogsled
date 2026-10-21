@@ -1,6 +1,7 @@
 //! One prompt-context formatter for Pi, Claude Code, and Codex.
 
-use crate::commands::{Status, brief};
+use crate::commands::{Status, fleet};
+use crate::gate::Findings;
 use clap::ValueEnum;
 use serde::Serialize;
 
@@ -30,15 +31,34 @@ pub enum Event {
 }
 
 /// `owner` is the caller's Herdr pane. Its own children and jobs come first, with those that
-/// have work to land named; the fleet's hosts and counts follow.
-pub fn format(harness: Harness, event: Event, status: &Status, owner: Option<&str>) -> String {
+/// have work to land named; the fleet's hosts and counts follow. The cleanup line counts only
+/// `found`: the last pass's findings about work the caller created.
+pub fn format(
+    harness: Harness,
+    event: Event,
+    status: &Status,
+    owner: Option<&str>,
+    found: &Findings,
+) -> String {
     if status.hosts.iter().all(|host| host.sampled_ms.is_none()) && status.sweep.is_none() {
         return String::new();
     }
     let mut text = owner.map_or_else(String::new, |owner| {
         crate::board::build(status, Some(owner), crate::ledger::now_ms()).owner_lines()
     });
-    text.push_str(&brief(status));
+    let mut rows = fleet(status);
+    if let Some(sweep) = &status.sweep
+        && (!found.failures.is_empty() || !found.holds.is_empty())
+    {
+        rows.push(format!(
+            "Cleanup at {} ms: {} failures and {} held worktrees in your work. Run `dogsled status` for details.",
+            sweep.finished_ms,
+            found.failures.len(),
+            found.holds.len()
+        ));
+    }
+    text.push_str(&rows.join("\n"));
+    text.push('\n');
     match harness {
         Harness::Pi => text,
         Harness::Claude | Harness::Codex => format!(
@@ -56,6 +76,7 @@ pub fn format(harness: Harness, event: Event, status: &Status, owner: Option<&st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::brief;
     use crate::hosts::{Host, HostReport};
 
     fn status() -> Status {
@@ -84,8 +105,14 @@ mod tests {
         let status = status();
         for harness in [Harness::Claude, Harness::Codex] {
             for event in [Event::SessionStart, Event::UserPromptSubmit] {
-                let output: serde_json::Value =
-                    serde_json::from_str(&format(harness, event, &status, None)).unwrap();
+                let output: serde_json::Value = serde_json::from_str(&format(
+                    harness,
+                    event,
+                    &status,
+                    None,
+                    &Findings::default(),
+                ))
+                .unwrap();
                 assert_eq!(
                     output,
                     serde_json::json!({
@@ -103,7 +130,13 @@ mod tests {
     fn pi_receives_plain_brief_text() {
         let status = status();
         assert_eq!(
-            format(Harness::Pi, Event::UserPromptSubmit, &status, None),
+            format(
+                Harness::Pi,
+                Event::UserPromptSubmit,
+                &status,
+                None,
+                &Findings::default()
+            ),
             brief(&status)
         );
     }
@@ -113,7 +146,16 @@ mod tests {
         let mut status = status();
         status.hosts[0].sampled_ms = None;
         for harness in [Harness::Claude, Harness::Codex, Harness::Pi] {
-            assert_eq!(format(harness, Event::SessionStart, &status, None), "");
+            assert_eq!(
+                format(
+                    harness,
+                    Event::SessionStart,
+                    &status,
+                    None,
+                    &Findings::default()
+                ),
+                ""
+            );
         }
     }
 }

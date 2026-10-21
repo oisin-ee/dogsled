@@ -173,13 +173,12 @@ A socket bind failure produces a warning instead of stopping the service. Stop r
 Requests during a pass remain pending until the worker completes another pass. A service lock prevents concurrent service instances.
 Each pass records its times, removals, failures, repository warnings, and landed-dirty findings in `sweeps.jsonl` and `sweep.json`.
 History entries include `ts_ms`; each new pass removes entries older than seven days. Successful removals never trigger a gate reminder.
-Status exposes the latest report. Prompt context summarizes failures and warnings on one line.
-The gate delivers warnings and failures once per recipient’s distinct set through `gate.json`.
+Status exposes the latest report, and `status --brief` summarizes it on one line. Prompt context counts only the caller's own findings.
+The gate delivers findings once per recipient’s distinct set through `gate.json`.
 Failures preserve their cleanup entry identity in `failure_entries`, beside the existing failure strings.
-A notice about a worktree or pane goes to its open item’s live owner, including an owner that is itself a child.
-Without an owner, only an operator receives the notice. Host-level repository warnings also require an operator: a pane Dogsled did not launch.
-Landed-dirty messages require equal resolved main-repository paths for the owner pane and the finding.
-Repository warnings request a dogsled agent to repair the registration, not manual state edits.
+A notice reaches only the agent that created the work: the owner of an open item whose pane holds the worktree or pane, or the requester of a recorded launch into the worktree. An owner can itself be a child.
+Without a creator, no agent receives the notice. Host-level failures and repository warnings stay in status.
+The launch record keeps the creator after the child's pane closes, so landed-dirty findings still reach it.
 Dirty-worktree guidance preserves wanted changes and requires user approval before discarding abandoned work.
 
 Placement registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
