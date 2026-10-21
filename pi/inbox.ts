@@ -26,6 +26,8 @@ interface Claimed extends Delivered {
 }
 
 type Exec = (args: string[]) => Promise<string>;
+export type WatchDirectory = (dir: string, listener: (event: string, name: string | null) => void) => FSWatcher;
+const watchDirectory: WatchDirectory = (dir, listener) => watch(dir, { persistent: false }, listener);
 
 function parseClaimed(stdout: string): Claimed[] {
 	const value: unknown = JSON.parse(stdout);
@@ -58,10 +60,12 @@ export class InboxReader {
 
 	private readonly pi: Pick<ExtensionAPI, "sendMessage">;
 	private readonly exec: Exec;
+	private readonly watchDirectory: WatchDirectory;
 
-	constructor(pi: Pick<ExtensionAPI, "sendMessage">, exec: Exec) {
+	constructor(pi: Pick<ExtensionAPI, "sendMessage">, exec: Exec, watchInbox: WatchDirectory = watchDirectory) {
 		this.pi = pi;
 		this.exec = exec;
+		this.watchDirectory = watchInbox;
 	}
 
 	/** Register as this pane's reader, deliver what is waiting, and watch for more. */
@@ -74,7 +78,7 @@ export class InboxReader {
 			if (typeof where.dir !== "string" || typeof where.file !== "string") throw new Error("dogsled inbox path returned no dir or file");
 			const file = where.file;
 			// Each write replaces the file, so the directory is watched, not the file.
-			this.watcher = watch(where.dir, { persistent: false }, (_event, name) => {
+			this.watcher = this.watchDirectory(where.dir, (_event, name) => {
 				if (name === file) void this.drain(ctx);
 			});
 			this.watcher.on("error", () => { this.watcher?.close(); this.watcher = undefined; });
