@@ -458,6 +458,20 @@ pub(crate) struct Attempt {
     pub result: Option<Value>,
 }
 
+/// A local preparation that returned an error never launches: `perform_locked` refuses to resume
+/// an attempt that stopped during preparation, so its hold has no owner left.
+pub(crate) fn preparation_failed(ledger: &Ledger, request_id: &str) -> Result<bool> {
+    jobs::validate_id(request_id)?;
+    Ok(ledger
+        .child("admissions")
+        .read::<Attempt>(&format!("{request_id}.json"))?
+        .is_some_and(|attempt| {
+            attempt.host.as_ref().is_some_and(Host::is_local)
+                && attempt.launch.is_none()
+                && attempt.error.is_some()
+        }))
+}
+
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
     if matches!(request.action, Action::Place) {

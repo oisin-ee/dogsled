@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 - `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.
 - Quota no longer discovers MiniMax through `claude-api-key` or parses `token_plan/remains`. A MiniMax CLIProxy plugin appears on the board without a dogsled change.
+- Settled preparations no longer hold landed checkouts. A preparation that fails releases its own hold. Cleanup and close ignore a hold whose launch has a final receipt, or whose local preparation failed. A legacy hold without a request id ends when any launch of its checkout is final. Interrupted preparations, launches without a final receipt, and seeded unit refusals that their peer has not settled still hold. No state file is rewritten.
 
 ## 0.18.1 - 2026-10-21
 
