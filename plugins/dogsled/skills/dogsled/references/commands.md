@@ -21,8 +21,10 @@ Never discard dirty work to satisfy the reminder. The gate does not close or mer
 
 ## Delegate
 
+A unit dispatch is the lead's normal path: `spawn {unit:{id}, branch, base}` links the child to its todo unit and its seeded contract. See `SKILL.md` step 4. The CLI below is a standalone launch. It has no unit, so its todo can never close. Use it for ad-hoc children only.
+
 ```sh
-dogsled agent --profile general --name api-dups --message-file task.md --branch feat/api-dups
+dogsled agent --profile writer --name api-dups --message-file task.md --branch feat/api-dups
 dogsled agent --kind codex --name reviewer --message 'Review the change on feat/x'
 dogsled profiles
 ```

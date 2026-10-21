@@ -16,9 +16,9 @@ Status: proposal. Nothing here is applied.
 
 Every writer runs prewalk. Sonnet or Sol plans, writes the checklist, and makes the first edit. MiniMax types the rest with the whole trajectory in context.
 
-- **Why MiniMax can do this now.** In calibration, MiniMax stalled on O26 while it explored: 45 tool calls, no edit, and reads outside the checkout. Prewalk takes exploration away from it. MiniMax starts after the plan and the first edit already exist.
+- **Why this is approved.** In calibration, MiniMax stalled on O26 while it explored: 45 tool calls, no edit, and reads outside the checkout. Prewalk should take exploration away from it, because MiniMax starts after the plan and the first edit exist. That calibration did not test prewalk, so its effect is unverified. A real handoff run must verify it.
 - **New tier `tier/type`:** `[minimax-m3.1-flash, gpt-6.1-sol]`. If MiniMax errors or runs out of quota, Sol takes over. Luna stays out because it shares the codex pool with Sol and the reviewer.
-- **Stall guard.** A stall is not an error, so the tier never falls back on its own. The writer prompt and `trouble.md` define a stall: 20 tool calls in a row with no edit after the handoff. The lead closes the worker and restarts the unit. A real guard in pi-prewalk, which hands back to the planner, is a later code unit.
+- **Stall guard.** A stall is not an error, so the tier never falls back on its own. The writer prompt and `trouble.md` define a stall: 20 tool calls in a row with no edit after the handoff. The lead sends a nudge and keeps the branch and edits. It never closes a busy worker or discards its edits. A real guard in pi-prewalk, which hands back to the planner, is a later code unit.
 - **The mechanic profile is deleted.** A writer with prewalk into MiniMax does the same job.
 
 ## Profiles
@@ -43,14 +43,14 @@ These are the whole instructions for each agent.
 
 ```
 You are a writer. Your brief is your plan. Do not plan beyond it.
-1. Before any other tool, create one todo unit for the brief.
-2. Read the files the brief names. Write a todo checklist of the edits, then make the first edit. MiniMax takes over after that edit.
+1. Your unit is already seeded from the brief. Do not create, append, or drop todo units.
+2. Read the files the brief names. List the edits in your reply text, then make the first edit. The seeded unit opens the handoff gate, and MiniMax takes over after that edit.
 3. Change only the owned paths. Follow the exemplar exactly.
 4. If the brief is wrong or missing a fact, stop. Send `blocked: <what is missing>` to the lead. Do not guess.
 5. If you make 20 tool calls in a row without an edit, stop and report blocked.
-6. When the edits are done, run the checks the brief names, once. If one fails, fix the cause and run only that check again.
+6. When the edits are done, run the checks the brief names, once. Skip a check that already passed at the same revision. If one fails, fix the cause and run only that check again.
 7. Commit, push, and open a draft PR. Never bypass hooks, merge, spawn agents, or run builds, full suites, e2e, or installs.
-8. Reply with the branch, head SHA, PR URL, the checks and their results, and anything left open. Then call done.
+8. Reply with the branch, head SHA, PR URL, the checks and their results, and anything left open. Then call done. `done` closes you, so the lead sends any fix as a follow-up unit on your branch.
 ```
 
 **reviewer**
