@@ -11,6 +11,8 @@ All notable changes to this project are documented in this file.
 - Cleanup no longer runs `git worktree remove` on a worktree whose directory remains after Git lost it: Git does not list it (for example after `git worktree prune`), calls it prunable, or its `.git` file is gone. Before, a pass could unlock it and fail with a raw Git error such as `validation failed` or `is not a working tree`; after a prune, the survey ignored it without a word and kept its registration. Now prune and the sweep report it as an `unlinked` hold, for example `worktree unregistered by git; directory remains: <path>`, with the owner's action. Status, stderr, and the stop gate show it; the gate speaks once per set. `close` refuses it before it closes or unlocks anything. Dogsled never deletes the directory. After the owner moves or deletes it, the next pass drops the registration.
 - Loss checks refuse a path without its own worktree identity (its own `.git` and a matching Git top-level path) before they read status. Before, a worktree whose `.git` file was gone inherited the main checkout's untracked files as its own dirt and showed as landed-dirty.
 - Cleanup failures and `unlinked` holds go to the affected item’s live owner. Unowned ones and host-level repository warnings go only to operator panes, never unrelated children.
+- MCP `spawn` returns a durable ticket before agent startup. The admission service confirms startup outside the MCP call budget. CLI agent launches keep their synchronous result.
+- Startup errors include recent pane output in caller or ticket errors and launch progress records. Native refusals, unknown outcomes, and recovery safeguards remain unchanged.
 
 ## 0.19.0 - 2026-10-21
 

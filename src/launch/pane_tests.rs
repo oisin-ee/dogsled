@@ -20,6 +20,9 @@ impl Shell for StartingShell {
                 "pane_id":"w2:p2","terminal_id":"term_shell"
             }]}}),
             ["agent", "list"] => json!({"result":{"agents":[]}}),
+            ["pane", "read", ..] => {
+                return Err(Error::Invalid("startup output unavailable".into()));
+            }
             ["agent", "start", ..] => {
                 self.starts.fetch_add(1, Ordering::SeqCst);
                 return Err(Error::Invalid("test stops at native start".into()));

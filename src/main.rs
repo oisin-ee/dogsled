@@ -91,7 +91,7 @@ fn main() -> ExitCode {
         Ok(code) => code,
         // Prompt context is optional: unavailable state must not block a turn.
         Err(_) if hook => ExitCode::SUCCESS,
-        Err(Error::Deadline(_)) if waiting => {
+        Err(ref error) if waiting && matches!(error.root(), Error::Deadline(_)) => {
             println!("still running");
             ExitCode::from(124)
         }
@@ -99,7 +99,7 @@ fn main() -> ExitCode {
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "error": error.to_string(), "deadline": matches!(error, Error::Deadline(_)) })
+                    serde_json::json!({ "error": error.to_string(), "deadline": matches!(error.root(), Error::Deadline(_)) })
                 );
             } else {
                 eprintln!("dogsled: {error}");

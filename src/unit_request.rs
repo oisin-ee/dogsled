@@ -150,6 +150,19 @@ fn load(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
 }
 
 pub fn commit(fleet: &Fleet, input: &CommitInput) -> Result<Value> {
+    commit_using(fleet, input, crate::runtime::start_locked)
+}
+
+/// MCP commits durably; the service owns preparation and startup confirmation.
+pub fn commit_queued(fleet: &Fleet, input: &CommitInput) -> Result<Value> {
+    commit_using(fleet, input, crate::runtime::start_queued)
+}
+
+fn commit_using(
+    fleet: &Fleet,
+    input: &CommitInput,
+    start: fn(&Fleet, Request) -> Result<Value>,
+) -> Result<Value> {
     crate::jobs::validate_id(&input.execution.request_id)?;
     let attempts = fleet.ledger.child("admissions");
     attempts.with_lock(&input.execution.request_id, || {
@@ -188,8 +201,8 @@ pub fn commit(fleet: &Fleet, input: &CommitInput) -> Result<Value> {
             return Ok(receipt);
         }
         let request = serde_json::from_value(attempt.request.clone())?;
-        // No recursive admission lock: runtime uses perform_locked for this request.
-        let result = crate::runtime::start_locked(fleet, request);
+        // The synchronous CLI uses perform_locked; MCP only persists the ticket.
+        let result = start(fleet, request);
         crash_point("started");
         let current = load(&attempts, &input.execution)?;
         match result {
