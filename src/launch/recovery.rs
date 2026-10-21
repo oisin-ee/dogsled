@@ -98,6 +98,24 @@ fn consumed(progress: &Progress, receipt: Option<&Receipt>) -> bool {
     }
 }
 
+/// The launch's recorded terminal no longer runs in its pane: the pane is gone or another
+/// terminal replaced it. Start and recovery refuse such a pane, so the launch can never start
+/// or use its checkout. A missing saved identity proves nothing.
+fn lost_pane(
+    progress: &Progress,
+    panes: &[crate::probe::Pane],
+    terminals: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let (Some(pane), Some(saved)) = (
+        progress.pane.as_deref(),
+        progress.terminal.as_deref().filter(|t| !t.is_empty()),
+    ) else {
+        return false;
+    };
+    !panes.iter().any(|p| p.pane_id == pane)
+        || terminals.get(pane).is_some_and(|current| current != saved)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneLaunch {
     Unrecorded,
@@ -110,7 +128,8 @@ pub enum PaneLaunch {
 pub struct Survey {
     states: std::collections::BTreeMap<String, PaneLaunch>,
     pub pending_paths: Vec<String>,
-    /// Requests whose launch ended in an immutable final receipt, with their checkout.
+    /// Requests whose launch ended in an immutable final receipt, or can never use its checkout
+    /// again because its pane is gone, with their checkout.
     settled: Vec<(String, String)>,
 }
 
@@ -129,11 +148,19 @@ impl Survey {
             settled: Vec::new(),
         };
         for (id, progress) in candidates(&receipts, None)? {
+            // Read the lock first: a launch that ends after this check leaves its receipt.
+            let running = receipts.locked(&id)?;
             let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
             if receipt.is_none() && super::pending(&progress, agents) {
                 survey.pending_paths.push(progress.request.cwd.clone());
             }
-            if progress.request.id == id && consumed(&progress, receipt.as_ref()) {
+            if progress.request.id == id
+                && (consumed(&progress, receipt.as_ref())
+                    || (receipt.is_none()
+                        && !super::pending(&progress, agents)
+                        && !running
+                        && lost_pane(&progress, panes, terminals)))
+            {
                 survey
                     .settled
                     .push((id.clone(), progress.request.cwd.clone()));
@@ -184,7 +211,7 @@ impl Survey {
         Ok(survey)
     }
 
-    /// A preparation is consumed once its launch is final. An identified preparation needs its
+    /// A preparation is consumed once its launch is final or has lost its pane. An identified preparation needs its
     /// own request; a legacy path-only one has no owner, so any final launch of its checkout
     /// ends it.
     pub fn consumed(&self, request_id: Option<&str>, path: &str) -> bool {
