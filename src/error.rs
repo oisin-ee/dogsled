@@ -28,7 +28,12 @@ pub enum Error {
         stderr: String,
     },
     #[error("ssh {target}: {detail}")]
-    Ssh { target: String, detail: String },
+    Ssh {
+        target: String,
+        detail: String,
+        /// The safe category of the failure; status shows this and never `detail`.
+        failure: crate::hosts::Failure,
+    },
     #[error("unexpected output from {origin}: {detail}")]
     Parse { origin: String, detail: String },
     #[error("unknown host {0}; see `dogsled status`")]
@@ -39,15 +44,31 @@ pub enum Error {
     Invalid(String),
     #[error("deadline reached: {0}")]
     Deadline(String),
+    /// Terminal diagnostics retain the original error classification and payload.
+    #[error("{source}; startup output from {pane}:\n{output}")]
+    Startup {
+        #[source]
+        source: Box<Error>,
+        pane: String,
+        output: String,
+    },
     /// An agent launch failed after placement; admission retries it with backoff.
     #[error("launch failed: {0}")]
     Launch(String),
 }
 
 impl Error {
+    /// Classify a failure without discarding its startup diagnostics.
+    pub fn root(&self) -> &Self {
+        match self {
+            Self::Startup { source, .. } => source.root(),
+            error => error,
+        }
+    }
+
     #[must_use]
     pub fn exit_code(&self) -> ExitCode {
-        match self {
+        match self.root() {
             Self::Full => ExitCode::from(EXIT_FULL),
             _ => ExitCode::from(EXIT_ERROR),
         }

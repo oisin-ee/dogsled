@@ -53,13 +53,16 @@ pub enum Command {
         #[arg(long)]
         all: bool,
         /// Compact right-side display (cache-only quotas).
-        #[arg(long, conflicts_with_all = ["json", "open", "todo_path"])]
+        #[arg(long, conflicts_with_all = ["json", "open", "toggle", "todo_path"])]
         side: bool,
         #[arg(long, requires = "side")]
         watch: bool,
-        /// Open or reuse this tab's right split.
-        #[arg(long, conflicts_with_all = ["all", "todo_path"])]
+        /// Open or reuse this tab's board, docked on the left.
+        #[arg(long, conflicts_with_all = ["all", "todo_path", "toggle"])]
         open: bool,
+        /// Close this tab's docked board, or open it when there is none.
+        #[arg(long, conflicts_with_all = ["all", "todo_path"])]
+        toggle: bool,
         /// Local rendered-todo publication path and side-panel width.
         #[arg(long, conflicts_with = "all")]
         todo_path: bool,
@@ -184,7 +187,7 @@ pub enum Command {
         ticket: String,
     },
     /// Say that this agent's whole task is complete. Call it during the turn that completes the
-    /// task; dogsled closes the child after that turn ends and its work has landed. Without
+    /// task; dogsled closes the child after that turn ends and keeps its branch. Without
     /// it, an idle child waits for input and stays open. Refused while it owns open children.
     Done,
     /// Show a child's or job's newest output and its captured final reply.
@@ -402,11 +405,10 @@ pub enum HostCommand {
     },
     Close {
         pane: String,
-        /// Also refuse a worktree with a commit on no remote ref: the sweep's orphan close.
+        /// Legacy transport spelling for an orphan handoff: require done and keep its branch.
         #[arg(long)]
         pushed: bool,
-        /// Also refuse a worktree whose work is not in the default branch: the sweep's close
-        /// of a finished child. A reader with no commits passes; `--writer` needs a landed branch.
+        /// Legacy transport spelling for an owned handoff: require done and keep its branch.
         #[arg(long)]
         landed: bool,
         #[arg(long, requires = "landed")]

@@ -18,14 +18,16 @@ enum Lane {
     Watchdog,
     Admission,
     Children,
+    Handoff,
     Inbox,
     Quota,
 }
 
-const LANES: [Lane; 5] = [
+const LANES: [Lane; 6] = [
     Lane::Watchdog,
     Lane::Admission,
     Lane::Children,
+    Lane::Handoff,
     Lane::Inbox,
     Lane::Quota,
 ];
@@ -94,6 +96,9 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     if lane == Lane::Quota {
         return crate::quota::read(&shell, ledger, policy, &home, false, false).map(|_| ());
     }
+    if lane == Lane::Handoff {
+        return crate::done::handoff(ledger, &shell, now_ms());
+    }
     let fleet = if items::list(ledger)?.is_empty()
         && work::queue(ledger)?.is_empty()
         && !crate::inbox::pending(ledger)?
@@ -118,7 +123,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
         Lane::Admission => work::tick(&fleet, now_ms()),
         Lane::Children => crate::sweep::children(&fleet, now_ms()),
         Lane::Inbox => crate::inbox::tick(&fleet, now_ms()),
-        Lane::Quota => Ok(()),
+        Lane::Quota | Lane::Handoff => Ok(()),
     }
 }
 

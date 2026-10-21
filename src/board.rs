@@ -133,15 +133,99 @@ pub fn owner(explicit: Option<String>, all: bool) -> Result<Option<String>> {
         .ok_or_else(|| Error::Invalid("HERDR_PANE_ID or --owner is required; or pass --all".into()))
 }
 
+/// Cells the docked board takes beside Herdr's own sidebar.
+const DOCK_WIDTH: f32 = 38.0;
+
+fn pane_id(node: &serde_json::Value) -> Option<&str> {
+    node["pane_id"].as_str()
+}
+
+/// The top-left pane: follow `first` through every split, right or down.
+fn leftmost_pane(node: &serde_json::Value) -> Option<&str> {
+    if node["type"] == "split" {
+        leftmost_pane(&node["first"])
+    } else {
+        pane_id(node)
+    }
+}
+
+/// Path (`false` = first, `true` = second) to the split whose first child is `pane`.
+fn dock_split_path(node: &serde_json::Value, pane: &str) -> Option<Vec<bool>> {
+    if node["type"] != "split" {
+        return None;
+    }
+    if pane_id(&node["first"]) == Some(pane) {
+        return Some(Vec::new());
+    }
+    for (side, child) in [(false, "first"), (true, "second")] {
+        if let Some(mut rest) = dock_split_path(&node[child], pane) {
+            rest.insert(0, side);
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// Herdr names a split `split_<n>_root` or `split_<n>_<bits>`, one bit per step (1 = second).
+fn split_width(layout: &serde_json::Value, path: &[bool]) -> Option<u16> {
+    let bits: String = path
+        .iter()
+        .map(|second| if *second { '1' } else { '0' })
+        .collect();
+    let bits = if bits.is_empty() {
+        "root".to_owned()
+    } else {
+        bits
+    };
+    layout["splits"]
+        .as_array()?
+        .iter()
+        .find(|split| {
+            split["id"].as_str().is_some_and(|id| {
+                id.split_once('_')
+                    .and_then(|(_, rest)| rest.split_once('_'))
+                    .is_some_and(|(_, tail)| tail == bits)
+            })
+        })
+        .and_then(|split| u16::try_from(split["rect"]["width"].as_u64()?).ok())
+}
+
+fn dock_ratio(width: u16) -> f32 {
+    (DOCK_WIDTH / f32::from(width.max(1))).clamp(f32::EPSILON, 1.0 - f32::EPSILON)
+}
+
 /// Herdr 0.9.5 creates a new plugin pane on every open. Keep one per live tab,
 /// under the ledger lock, and validate its terminal identity before reuse.
 /// A pane Dogsled launched is a child agent: the board belongs to its parent's
 /// session, so a child never opens one (it would poll the fleet unseen).
-pub fn open(ledger: &Ledger, shell: &dyn Shell, owner: &str) -> Result<serde_json::Value> {
-    if !matches!(
-        crate::launch::final_pane(ledger, shell, owner)?,
-        crate::launch::PaneLaunch::Unrecorded
-    ) {
+/// A new board docks in the leftmost slot of the tab, 38 cells wide.
+pub fn open(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    socket: &crate::herdr_socket::Client,
+    owner: &str,
+) -> Result<serde_json::Value> {
+    dock(ledger, shell, socket, owner, false)
+}
+
+/// Close this tab's live dock, or open it when there is none.
+pub fn toggle(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    socket: &crate::herdr_socket::Client,
+    owner: &str,
+) -> Result<serde_json::Value> {
+    dock(ledger, shell, socket, owner, true)
+}
+
+fn dock(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    socket: &crate::herdr_socket::Client,
+    owner: &str,
+    toggling: bool,
+) -> Result<serde_json::Value> {
+    if crate::launch::launched(ledger, owner)? {
         return Ok(serde_json::json!({"skipped": "child"}));
     }
     ledger.with_lock("board-open", || {
@@ -160,15 +244,28 @@ pub fn open(ledger: &Ledger, shell: &dyn Shell, owner: &str) -> Result<serde_jso
         let registry = ledger.child("boards");
         let file = format!("{}.json", key(tab));
         if let Some(saved) = registry.read::<serde_json::Value>(&file)? {
-            if panes.iter().any(|pane| {
+            let live = panes.iter().any(|pane| {
                 pane["pane_id"] == saved["pane_id"]
                     && pane["terminal_id"] == saved["terminal_id"]
                     && pane["tab_id"] == tab
-            }) {
+            });
+            if live && !toggling {
                 return Ok(saved);
+            }
+            if live {
+                let id = saved["pane_id"].as_str().unwrap_or_default();
+                shell.run_ok(
+                    "herdr",
+                    &["plugin".into(), "pane".into(), "close".into(), id.into()],
+                )?;
+                std::fs::remove_file(registry.dir.join(&file))?;
+                return Ok(serde_json::json!({"closed": id}));
             }
             std::fs::remove_file(registry.dir.join(&file))?;
         }
+        let target = leftmost_pane(&socket.layout_export(owner)?["root"])
+            .unwrap_or(owner)
+            .to_owned();
         let out = shell.run_ok(
             "herdr",
             &[
@@ -184,15 +281,33 @@ pub fn open(ledger: &Ledger, shell: &dyn Shell, owner: &str) -> Result<serde_jso
                 "--direction".into(),
                 "right".into(),
                 "--target-pane".into(),
-                owner.into(),
+                target.clone(),
                 "--no-focus".into(),
             ],
         )?;
         let opened: serde_json::Value = serde_json::from_str(&out.stdout)?;
         let pane = &opened["result"]["plugin_pane"]["pane"];
-        if !pane["pane_id"].is_string() || !pane["terminal_id"].is_string() {
+        let (Some(new), true) = (pane["pane_id"].as_str(), pane["terminal_id"].is_string()) else {
             return Err(Error::Invalid("invalid Herdr plugin pane response".into()));
-        }
+        };
+        shell.run_ok(
+            "herdr",
+            &[
+                "pane".into(),
+                "swap".into(),
+                "--source-pane".into(),
+                new.into(),
+                "--target-pane".into(),
+                target,
+            ],
+        )?;
+        let exported = socket.layout_export(new)?;
+        let path = dock_split_path(&exported["root"], new)
+            .ok_or_else(|| Error::Invalid("herdr layout.export: dock split not found".into()))?;
+        let width = split_width(&socket.pane_layout(new)?, &path).ok_or_else(|| {
+            Error::Invalid("herdr pane.layout: dock split width not found".into())
+        })?;
+        socket.set_split_ratio(tab, &path, dock_ratio(width))?;
         registry.write(&file, pane)?;
         Ok(pane.clone())
     })
@@ -251,12 +366,7 @@ fn quota_lines(snapshot: &crate::quota::Snapshot, now: u64) -> Vec<String> {
         }
     )];
     for row in &snapshot.pools {
-        let pool = match row.pool {
-            crate::quota::Pool::Claude => "claude",
-            crate::quota::Pool::Codex => "codex",
-            crate::quota::Pool::Minimax => "minimax",
-        };
-        lines.push(format!("{pool} {} · {}", row.account, row.window));
+        lines.push(format!("{} {} · {}", row.pool, row.account, row.window));
         lines.push(format!(
             "  {:.1}% used{}",
             row.used_pct,
@@ -347,6 +457,7 @@ pub fn command(
         side,
         watch,
         open: opening,
+        toggle: toggling,
         todo_path: publishing,
     } = command
     else {
@@ -360,12 +471,15 @@ pub fn command(
             String::new,
         );
     }
-    if opening {
-        return crate::print(
-            true,
-            &open(ledger, shell, owner.as_deref().unwrap_or_default())?,
-            String::new,
-        );
+    if opening || toggling {
+        let socket = crate::herdr_socket::Client::from_env()?;
+        let owner = owner.as_deref().unwrap_or_default();
+        let result = if toggling {
+            toggle(ledger, shell, &socket, owner)?
+        } else {
+            open(ledger, shell, &socket, owner)?
+        };
+        return crate::print(true, &result, String::new);
     }
     let fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home)?;
     if side {
@@ -550,6 +664,25 @@ fn what(item: &Item, agent: Option<&Agent>) -> String {
 }
 
 fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
+    if item.closed_ms.is_some()
+        && let Some(branch) = &item.branch
+    {
+        return Row {
+            group: Group::ToLand,
+            kind: "agent".into(),
+            id: item.id.clone(),
+            name: item.name.clone().unwrap_or_else(|| item.pane.clone()),
+            what: what(item, None),
+            host: label(hosts, &item.host),
+            pane: None,
+            state: "closed".into(),
+            activity: format!("branch {} +{} to land", branch.name, branch.ahead),
+            age_ms: now.saturating_sub(item.created_ms),
+            quiet_ms: None,
+            ahead: Some(branch.ahead),
+            dirty: false,
+        };
+    }
     let found = agent(hosts, item);
     let host_up = hosts
         .iter()
@@ -706,7 +839,10 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
     let mut rows: Vec<Row> = status
         .items
         .iter()
-        .filter(|i| i.closed_ms.is_none() && mine(&i.owner_pane))
+        .filter(|i| {
+            mine(&i.owner_pane)
+                && (i.closed_ms.is_none() || i.branch.as_ref().is_some_and(|b| !b.landed))
+        })
         .map(|i| {
             if i.kind == "job" {
                 job_row(i, &status.hosts, now)
@@ -829,7 +965,7 @@ impl Board {
         if let Some(names) = self.land_names() {
             let _ = writeln!(
                 out,
-                "To land: {names}. Review and integrate finished work. Ask dirty children to commit. Dogsled closes children after their work lands."
+                "To land: {names}. Review and integrate the retained branches. Finished children close at handoff, before landing."
             );
         }
         out
@@ -991,54 +1127,269 @@ mod tests {
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
-    #[test]
-    fn board_open_requests_right_split_and_reuses_only_matching_live_terminal() {
-        #[derive(Debug, Default)]
-        struct Herdr {
-            opens: std::sync::atomic::AtomicUsize,
-        }
-        impl Shell for Herdr {
-            fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
-                assert_eq!(program, "herdr");
-                let pane = serde_json::json!({"pane_id":"w1:p2", "terminal_id":"term-board", "tab_id":"w1:t1"});
-                let value = if args[0] == "pane" {
-                    let mut panes = vec![
-                        serde_json::json!({"pane_id":"w1:p1", "terminal_id":"term-owner", "tab_id":"w1:t1"}),
-                    ];
-                    if self.opens.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-                        panes.push(pane);
-                    }
-                    serde_json::json!({"result":{"panes":panes}})
-                } else {
-                    assert!(args.windows(2).any(|pair| pair == ["--direction", "right"]));
-                    assert!(args.windows(2).any(|pair| pair == ["--placement", "split"]));
-                    assert!(args.contains(&"--no-focus".into()));
-                    self.opens
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    serde_json::json!({"result":{"plugin_pane":{"pane":pane}}})
-                };
-                Ok(crate::shell::Output {
-                    status: 0,
-                    stdout: value.to_string(),
-                    stderr: String::new(),
-                })
+    fn leaf(id: &str) -> serde_json::Value {
+        serde_json::json!({"type":"pane","pane_id":id})
+    }
+
+    #[allow(clippy::needless_pass_by_value)] // nested literals read best by value
+    fn split(
+        direction: &str,
+        first: serde_json::Value,
+        second: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({"type":"split","direction":direction,"ratio":0.5,"first":first,"second":second})
+    }
+
+    /// A fake Herdr: scripted CLI plus a socket whose export changes once the swap has run.
+    struct Dock {
+        shell: crate::shell::Fake,
+        socket: crate::herdr_socket::fake::Server,
+        ledger: Ledger,
+    }
+
+    fn dock_rig(
+        before: serde_json::Value,
+        after: serde_json::Value,
+        split_id: &str,
+        width: u16,
+        target: &str,
+    ) -> Dock {
+        let shell = crate::shell::Fake::new();
+        let panes = |extra: bool| {
+            let mut panes = vec![
+                serde_json::json!({"pane_id":"w1:p1","terminal_id":"term-owner","tab_id":"w1:t1"}),
+            ];
+            if extra {
+                panes.push(serde_json::json!({"pane_id":"w1:p2","terminal_id":"term-board","tab_id":"w1:t1"}));
             }
+            serde_json::json!({"result":{"panes":panes}}).to_string()
+        };
+        shell.on("herdr pane list", &panes(false));
+        shell.on(
+            &format!("herdr plugin pane open --plugin dogsled --entrypoint board --placement split --direction right --target-pane {target} --no-focus"),
+            &serde_json::json!({"result":{"plugin_pane":{"pane":{"pane_id":"w1:p2","terminal_id":"term-board","tab_id":"w1:t1"}}}}).to_string(),
+        );
+        shell.on(
+            &format!("herdr pane swap --source-pane w1:p2 --target-pane {target}"),
+            "{}",
+        );
+        let split_id = split_id.to_owned();
+        let exports = std::sync::atomic::AtomicUsize::new(0);
+        let socket = crate::herdr_socket::fake::Server::start(move |method, _| match method {
+            "layout.export" => {
+                let root = if exports.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    &before
+                } else {
+                    &after
+                };
+                serde_json::json!({"result":{"type":"layout_export","layout":{"root":root}}})
+            }
+            "pane.layout" => serde_json::json!({"result":{"type":"pane_layout","layout":{
+                "splits":[{"id":"split_9_1","rect":{"width":1}},{"id":split_id,"rect":{"width":width}}]}}}),
+            "layout.set_split_ratio" => {
+                serde_json::json!({"result":{"type":"layout_split_ratio_set","layout":{}}})
+            }
+            other => panic!("unexpected socket method {other}"),
+        });
+        Dock {
+            shell,
+            socket,
+            ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
         }
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        let shell = Herdr::default();
-        let first = open(&ledger, &shell, "w1:p1").unwrap();
-        assert_eq!(open(&ledger, &shell, "w1:p1").unwrap(), first);
-        assert_eq!(shell.opens.load(std::sync::atomic::Ordering::Relaxed), 1);
-        ledger
+    }
+
+    impl Dock {
+        fn open(&self) -> serde_json::Value {
+            open(&self.ledger, &self.shell, &self.socket.client(), "w1:p1").unwrap()
+        }
+
+        fn ratio_request(&self) -> serde_json::Value {
+            let requests = self.socket.requests.lock().unwrap();
+            let last = requests.last().unwrap();
+            assert_eq!(last["method"], "layout.set_split_ratio");
+            last["params"].clone()
+        }
+
+        fn finish(self) {
+            std::fs::remove_dir_all(&self.ledger.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn board_open_docks_left_of_a_single_pane_at_38_cells() {
+        let rig = dock_rig(
+            leaf("w1:p1"),
+            split("right", leaf("w1:p2"), leaf("w1:p1")),
+            "split_0_root",
+            120,
+            "w1:p1",
+        );
+        let pane = rig.open();
+        assert_eq!(pane["pane_id"], "w1:p2");
+        let calls = rig.shell.calls.lock().unwrap().clone();
+        assert_eq!(calls[0], "herdr pane list");
+        assert!(calls[1].contains("plugin pane open") && calls[1].contains("--target-pane w1:p1"));
+        assert_eq!(
+            calls[2],
+            "herdr pane swap --source-pane w1:p2 --target-pane w1:p1"
+        );
+        assert_eq!(calls.len(), 3, "no other Herdr writes: {calls:?}");
+        let params = rig.ratio_request();
+        assert_eq!(params["tab_id"], "w1:t1");
+        assert_eq!(params["path"], serde_json::json!([]));
+        assert!((params["ratio"].as_f64().unwrap() - 38.0 / 120.0).abs() < 1e-6);
+        let methods = rig.socket.methods();
+        assert!(!methods.iter().any(|method| method == "layout.apply"));
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_targets_the_leftmost_of_three_columns_not_the_owner() {
+        let before = split(
+            "right",
+            leaf("w1:p5"),
+            split("right", leaf("w1:p1"), leaf("w1:p3")),
+        );
+        let after = split(
+            "right",
+            split("right", leaf("w1:p2"), leaf("w1:p5")),
+            split("right", leaf("w1:p1"), leaf("w1:p3")),
+        );
+        let rig = dock_rig(before, after, "split_1_0", 80, "w1:p5");
+        rig.open();
+        let calls = rig.shell.calls.lock().unwrap().clone();
+        assert!(calls[1].contains("--target-pane w1:p5"), "{calls:?}");
+        let params = rig.ratio_request();
+        assert_eq!(params["path"], serde_json::json!([false]));
+        assert!((params["ratio"].as_f64().unwrap() - 38.0 / 80.0).abs() < 1e-6);
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_takes_the_top_slot_of_a_split_leftmost_column() {
+        let before = split(
+            "right",
+            split("down", leaf("w1:p5"), leaf("w1:p6")),
+            leaf("w1:p1"),
+        );
+        let after = split(
+            "right",
+            split(
+                "down",
+                split("right", leaf("w1:p2"), leaf("w1:p5")),
+                leaf("w1:p6"),
+            ),
+            leaf("w1:p1"),
+        );
+        let rig = dock_rig(before, after, "split_2_00", 100, "w1:p5");
+        rig.open();
+        let calls = rig.shell.calls.lock().unwrap().clone();
+        assert!(calls[1].contains("--target-pane w1:p5"), "{calls:?}");
+        assert_eq!(
+            rig.ratio_request()["path"],
+            serde_json::json!([false, false])
+        );
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_reuses_a_live_dock_without_herdr_writes() {
+        let rig = dock_rig(leaf("w1:p1"), leaf("w1:p1"), "split_0_root", 120, "w1:p1");
+        let saved =
+            serde_json::json!({"pane_id":"w1:p2","terminal_id":"term-board","tab_id":"w1:t1"});
+        rig.ledger
+            .child("boards")
+            .write(&format!("{}.json", key("w1:t1")), &saved)
+            .unwrap();
+        rig.shell.on(
+            "herdr pane list",
+            &serde_json::json!({"result":{"panes":[
+                {"pane_id":"w1:p1","terminal_id":"term-owner","tab_id":"w1:t1"},
+                {"pane_id":"w1:p2","terminal_id":"term-board","tab_id":"w1:t1"}]}})
+            .to_string(),
+        );
+        assert_eq!(rig.open(), saved);
+        assert_eq!(*rig.shell.calls.lock().unwrap(), ["herdr pane list"]);
+        assert_eq!(rig.socket.methods().len(), 0);
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_replaces_a_dock_whose_terminal_changed() {
+        let rig = dock_rig(
+            leaf("w1:p1"),
+            split("right", leaf("w1:p2"), leaf("w1:p1")),
+            "split_0_root",
+            120,
+            "w1:p1",
+        );
+        rig.ledger
             .child("boards")
             .write(
                 &format!("{}.json", key("w1:t1")),
-                &serde_json::json!({"pane_id":"w1:p2", "terminal_id":"old"}),
+                &serde_json::json!({"pane_id":"w1:p2","terminal_id":"old"}),
             )
             .unwrap();
-        open(&ledger, &shell, "w1:p1").unwrap();
-        assert_eq!(shell.opens.load(std::sync::atomic::Ordering::Relaxed), 2);
-        std::fs::remove_dir_all(ledger.dir).unwrap();
+        assert_eq!(rig.open()["terminal_id"], "term-board");
+        rig.finish();
+    }
+
+    #[test]
+    fn board_toggle_closes_a_live_dock_and_opens_when_none() {
+        let rig = dock_rig(
+            leaf("w1:p1"),
+            split("right", leaf("w1:p2"), leaf("w1:p1")),
+            "split_0_root",
+            120,
+            "w1:p1",
+        );
+        let toggle =
+            |rig: &Dock| toggle(&rig.ledger, &rig.shell, &rig.socket.client(), "w1:p1").unwrap();
+        assert_eq!(toggle(&rig)["pane_id"], "w1:p2", "no dock: opens");
+        rig.shell.on(
+            "herdr pane list",
+            &serde_json::json!({"result":{"panes":[
+                {"pane_id":"w1:p1","terminal_id":"term-owner","tab_id":"w1:t1"},
+                {"pane_id":"w1:p2","terminal_id":"term-board","tab_id":"w1:t1"}]}})
+            .to_string(),
+        );
+        rig.shell.on("herdr plugin pane close w1:p2", "{}");
+        assert_eq!(toggle(&rig), serde_json::json!({"closed":"w1:p2"}));
+        assert!(
+            rig.shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call == "herdr plugin pane close w1:p2")
+        );
+        assert!(
+            !rig.ledger
+                .child("boards")
+                .dir
+                .join(format!("{}.json", key("w1:t1")))
+                .exists()
+        );
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_returns_herdrs_error_and_does_not_fall_back() {
+        let rig = dock_rig(leaf("w1:p1"), leaf("w1:p1"), "split_0_root", 120, "w1:p1");
+        let refusing = crate::herdr_socket::fake::Server::start(
+            |_, _| serde_json::json!({"error":{"code":"layout_not_found","message":"layout target not found"}}),
+        );
+        let result = open(&rig.ledger, &rig.shell, &refusing.client(), "w1:p1");
+        assert!(
+            matches!(&result, Err(Error::Invalid(message)) if message.contains("layout target not found")),
+            "{result:?}"
+        );
+        assert_eq!(
+            *rig.shell.calls.lock().unwrap(),
+            ["herdr pane list"],
+            "no split, swap, or old right split"
+        );
+        rig.finish();
     }
 
     #[test]
@@ -1064,8 +1415,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            open(&ledger, &NoHerdr, "w2:p2").unwrap(),
+            open(
+                &ledger,
+                &NoHerdr,
+                &crate::herdr_socket::Client::at("/nonexistent"),
+                "w2:p2"
+            )
+            .unwrap(),
             serde_json::json!({"skipped": "child"})
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn board_open_skips_a_child_after_its_terminal_changes() {
+        #[derive(Debug)]
+        struct RestoredPane;
+        impl Shell for RestoredPane {
+            fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
+                assert_eq!(program, "herdr");
+                assert_eq!(args, ["pane", "list"], "a child must not open a board");
+                Ok(crate::shell::Output {
+                    status: 0,
+                    stdout: serde_json::json!({"result":{"panes":[{
+                        "pane_id":"w2:p2","terminal_id":"term_restored","tab_id":"tab_child"
+                    }]}})
+                    .to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        ledger.child("launches").write("child.progress.json", &serde_json::json!({
+            "request":{"id":"child","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+                "host":"local","cwd":"/checkout","owner":"w1:p1"},
+            "pane":"w2:p2","terminal":"term_before_restore","attempted":true,"confirmed":false,
+            "result":{},"error":"response lost"
+        })).unwrap();
+        assert_eq!(
+            crate::launch::final_pane(&ledger, &RestoredPane, "w2:p2").unwrap(),
+            crate::launch::PaneLaunch::Unrecorded
+        );
+        assert_eq!(
+            open(
+                &ledger,
+                &RestoredPane,
+                &crate::herdr_socket::Client::at("/nonexistent"),
+                "w2:p2"
+            )
+            .unwrap(),
+            serde_json::json!({"skipped":"child"})
         );
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
@@ -1081,6 +1480,7 @@ mod tests {
             stalled_since_ms: None,
             state_since_ms: None,
             terminal_id: None,
+            agent_session: None,
             completion_seq: None,
             state_change_seq: None,
             cwd: None,
@@ -1116,7 +1516,9 @@ mod tests {
             }),
             headroom: None,
             error: None,
+            failure: None,
             jobs: Vec::new(),
+            handoffs: Vec::new(),
             retry_ms: None,
         }
     }

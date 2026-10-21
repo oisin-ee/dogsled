@@ -178,7 +178,21 @@ fn sweep_recovers_final_launch_shells_without_rewriting_their_evidence() {
 
 #[test]
 fn sweep_uses_fifteen_minutes_and_keeps_focused_caller_busy_and_unfinished_agent_panes() {
-    let rig = shells_rig("sweep-fifteen-minutes");
+    fifteen_minute_shells(None);
+}
+
+#[test]
+fn obsolete_launch_terminals_use_guarded_fifteen_minute_shell_cleanup() {
+    for state in ["refused", "unconfirmed"] {
+        fifteen_minute_shells(Some(state));
+    }
+}
+
+fn fifteen_minute_shells(launch: Option<&str>) {
+    let rig = shells_rig(&format!(
+        "sweep-fifteen-minutes-{}",
+        launch.unwrap_or("none")
+    ));
     fs::write(rig.dir.join("unmerged"), "").unwrap();
     let home = rig.dir.join("home");
     let mut live = vec![];
@@ -192,6 +206,28 @@ fn sweep_uses_fifteen_minutes_and_keeps_focused_caller_busy_and_unfinished_agent
         ("parent", 30, false),
     ] {
         live.push(json!({"pane_id":id,"cwd":home,"focused":focused,"idle_shell":true,"idle_since_ms":NOW - minutes * 60_000}));
+    }
+    let mut evidence = Vec::new();
+    if let Some(state) = launch {
+        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+        for (index, pane) in live.iter_mut().enumerate() {
+            pane["terminal_id"] = json!(format!("term_restored_{index}"));
+            let id = format!("obsolete-{index}");
+            let progress_path = format!("state/launches/{id}.progress.json");
+            rig.put(&progress_path, &json!({
+                "request":{"id":id,"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+                    "host":"local","cwd":home,"owner":"w1:p1"},
+                "pane":pane["pane_id"],"terminal":format!("term_old_{index}"),
+                "attempted":true,"confirmed":false,"result":{},"error":"response lost"
+            }));
+            let receipt_path = format!("state/launches/{id}.json");
+            if state == "refused" {
+                rig.put(&receipt_path, &json!({"failed":"agent_pane_busy"}));
+            }
+            for path in [progress_path, receipt_path] {
+                evidence.push((path.clone(), fs::read(rig.dir.join(&path)).ok()));
+            }
+        }
     }
     for pane in &mut live[5..] {
         pane["agent"] = json!("pi");
@@ -223,11 +259,21 @@ fn sweep_uses_fifteen_minutes_and_keeps_focused_caller_busy_and_unfinished_agent
         .map(|e| e["id"].as_str().unwrap())
         .collect();
     assert_eq!(candidates, ["old"], "{plan}");
+    let old = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "old")
+        .unwrap();
+    assert_eq!(old["detail"], "shell idle for 15m");
     let journal = requested_sweep(&rig);
     let log = rig.log("herdr.log");
     assert!(log.contains("pane close old\n"), "{journal}\n{log}");
     for kept in ["young", "focused", "busy", "w1:p1", "agent", "parent"] {
         assert!(!log.contains(&format!("pane close {kept}\n")), "{log}");
+    }
+    for (path, bytes) in evidence {
+        assert_eq!(fs::read(rig.dir.join(&path)).ok(), bytes, "{path}");
     }
 }
 
@@ -497,7 +543,7 @@ fn kept_reason(rig: &Rig) -> String {
 }
 
 #[test]
-fn serve_closes_an_orphan_only_when_it_is_done_clean_and_pushed() {
+fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     let (rig, tree) = close_rig("sweep-orphan");
     let repo = rig.dir.join("home/repo");
     fs::write(tree.join("work"), "work\n").unwrap();
@@ -551,22 +597,8 @@ fn serve_closes_an_orphan_only_when_it_is_done_clean_and_pushed() {
     );
     untouched(&rig, "dirty");
     fs::remove_file(tree.join("note")).unwrap();
-    // Idle and clean, but its commit is on no remote.
+    // Done, clean, and local-only: keep the branch, release the child.
     git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
-    serve(&rig);
-    assert!(
-        kept_reason(&rig).contains("commits are not held"),
-        "{}",
-        kept_reason(&rig)
-    );
-    // Status and the prompt brief report the kept orphan.
-    let text = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
-    assert!(text.contains("orphaned: owner w9:p1 is gone;"), "{text}");
-    let brief = String::from_utf8_lossy(&rig.run(&["status", "--brief"]).stdout).into_owned();
-    assert!(brief.contains("1 orphaned"), "{brief}");
-    untouched(&rig, "unpushed");
-    // Done, clean, and pushed: closed exactly as `dogsled close` would.
-    git(&repo, &["update-ref", "refs/remotes/origin/main", "feat/x"]);
     let journal = serve(&rig);
     assert!(
         journal.contains("dogsled sweep: closed orphan w2:p1 on local (owner w9:p1 is gone)"),
@@ -575,6 +607,7 @@ fn serve_closes_an_orphan_only_when_it_is_done_clean_and_pushed() {
     assert!(rig.log("herdr.log").contains("workspace close w2"));
     assert_eq!(rig.log("hook.log"), hook_log(&rig, &tree));
     assert!(!tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["orphans"], json!([]));
@@ -751,10 +784,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     fs::write(tree.join("scratch"), "x").unwrap();
     let journal = serve(&rig);
     assert!(item_open(&rig));
-    assert!(
-        journal.contains("dogsled sweep: keep w2:p1 on local: uncommitted changes"),
-        "{journal}"
-    );
+    assert!(journal.contains("uncommitted changes"), "{journal}");
     let reply = &rig.read("state/items.json")[0]["reply"];
     assert_eq!((&reply["seq"], &reply["done"]), (&json!(3), &json!(true)));
     assert_eq!(reply["text"], "Found 3 bugs; notes in review.md.");
@@ -764,7 +794,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     // Clean, with no commits: closed as `dogsled close` would, and the reply is kept.
     let journal = serve(&rig);
     assert!(
-        journal.contains("dogsled sweep: closed finished w2:p1 on local"),
+        journal.contains("dogsled handoff: closed w2:p1"),
         "{journal}"
     );
     assert!(!item_open(&rig));
@@ -778,44 +808,56 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
 }
 
 #[test]
-fn serve_closes_a_finished_writer_once_its_branch_lands() {
+fn serve_hands_off_unlanded_writer_and_keeps_branch_on_board_without_a_pane() {
     let (rig, tree) = close_rig("sweep-writer");
     let repo = rig.dir.join("home/repo");
-    owned_child(&rig, "done", &tree, Some(2), "writer");
-    rig.done("term_child", "w2:p1", 2);
-    // At the default tip, only a pending preparation holds a fresh checkout.
-    rig.put(
-        "state/preparations.json",
-        &json!([{ "repo":repo,"path":tree,"branch":"feat/x","head":"" }]),
-    );
-    let journal = serve(&rig);
-    assert!(item_open(&rig), "{journal}");
-    assert!(journal.contains("pending preparation"), "{journal}");
-    rig.put("state/preparations.json", &json!([]));
-    // A commit on no remote and not in main: it stays, and says how much is left to land.
     fs::write(tree.join("fix"), "fix\n").unwrap();
     git(&tree, &["add", "fix"]);
     git(&tree, &["commit", "-q", "-m", "fix"]);
-    let journal = serve(&rig);
-    assert!(item_open(&rig));
+    owned_child(&rig, "working", &tree, Some(2), "writer");
+    let out = rig
+        .cmd(&["done"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
     assert!(
-        journal.contains("dogsled sweep: keep w2:p1 on local: +1 commit to land"),
-        "{journal}"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    // Model a service that is running again after the one-shot service exited.
+    // Restore keeps the pane and session, but resets the terminal and every counter.
+    owned_child(&rig, "idle", &tree, None, "writer");
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"][1]["terminal_id"] = json!("restored_terminal");
+    rig.put("agents.json", &agents);
+    serve(&rig);
+    assert!(!item_open(&rig));
+    assert!(!tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    assert_eq!(
+        rig.read("state/items.json")[0]["reply"]["text"],
+        "Found 3 bugs; notes in review.md."
+    );
+    rig.put("agents.json", &json!({"result":{"agents":[]}}));
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
     rig.service();
     let (_, board) = rig.json(&["board"]);
     assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
-    // The branch merges: the next pass closes the child and deletes the landed branch.
-    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
-    let journal = serve(&rig);
+    assert_eq!(board["rows"][0]["activity"], "branch feat/x +1 to land");
+    assert!(board["rows"][0]["pane"].is_null());
+    let status = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
     assert!(
-        journal.contains("dogsled sweep: closed finished w2:p1 on local"),
-        "{journal}"
+        status.contains("worker: branch feat/x +1 to land"),
+        "{status}"
     );
-    assert!(!item_open(&rig));
-    assert!(!tree.exists());
-    assert!(!branch_exists(&rig, "feat/x"));
+    let (code, read) = rig.json(&["read", "worker"]);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["reply"], "Found 3 bugs; notes in review.md.");
+    rig.service.lock().unwrap().take();
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
+    serve(&rig);
+    let (_, board) = rig.json(&["board"]);
+    assert_eq!(board["rows"], json!([]));
 }
 
 #[test]

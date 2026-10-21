@@ -11,13 +11,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.17.0
+mise use github:oisin-ee/dogsled@v0.20.0
 ```
 
 Pi (extension, tools, and skill), from npm or as part of `@oisin-ee/oisinpi`:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.17.0
+pi install npm:@oisin-ee/pi-dogsled@0.20.0
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -25,27 +25,27 @@ At session start the extension compares its version with `dogsled --version` and
 Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/dogsled#v0.17.0
+claude plugin marketplace add oisin-ee/dogsled#v0.20.0
 claude plugin install dogsled@dogsled
 ```
 
 Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/dogsled --ref v0.17.0
+codex plugin marketplace add oisin-ee/dogsled --ref v0.20.0
 codex plugin add dogsled@dogsled
 ```
 
 Codex requires review and trust before it runs plugin hooks. See the [Codex hooks documentation](https://developers.openai.com/codex/hooks#plugin-hooks).
 The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#codex-plugin) describes plugin installation.
 
-Herdr (right-side work board):
+Herdr (left-docked work board):
 
 ```sh
-herdr plugin install oisin-ee/dogsled --ref v0.17.0 --yes
+herdr plugin install oisin-ee/dogsled --ref v0.20.0 --yes
 ```
 
-Harness plugins use the binary on `PATH`. They do not install it or start host services.
+The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build step (`plugin/fetch.sh`) installs its own binary at `bin/dogsled`: the release archive for the manifest version, checked against its published SHA-256. When that release has no archive for the platform, it runs `cargo build --release --locked` instead, which needs Rust at the crate's `rust-version` or newer. A checksum mismatch stops the install. `DOGSLED_RELEASES` replaces the download base, such as a mirror. `herdr plugin link` skips build steps, so run `sh plugin/fetch.sh` in a linked checkout. No plugin starts host services.
 
 ## Commands
 
@@ -140,17 +140,17 @@ An item records its host, pane, owner pane, creation time, closure time, and for
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
 The service closes a job item after job completion, and any item after pane removal.
 
-Closing is driven by events. When a child's turn completes (Herdr's `completion_seq` goes up) and it is `idle` or `done`, the sweep:
+`done` hands the task back to the owner. The child host captures the final reply, closes the pane and agent worktree, and keeps the branch. The owner receives the reply and lands the branch without a live child. The sweep remains a backstop.
 
-1. reads its final reply from the transcript and keeps it in the item;
-2. puts the reply in the owner's inbox (see [Inbox](#inbox));
-3. if the child called `done` during that turn, closes it when it is a reader whose worktree is clean with no commits outside the default branch, or when its branch has landed.
+Call `done` during the final working turn, after committing changes. It refuses open children, queued tickets, dirty agent worktrees, and removal that loses content under the shared loss rule. Retaining the local branch protects unlanded commits.
 
-Herdr's `idle` and `done` only mean that the agent is ready for input. A child that asks a question, or that waits for its own children, is idle too. So a child says it has finished with the `done` MCP tool or `dogsled done`, in the turn that completes its task. Dogsled tells each child this at launch: Pi and Claude through `--append-system-prompt`, Codex through `-c developer_instructions`. The mark lives in the host's `done.json`, keyed by the Herdr terminal. A later turn, or an inbox record delivered to the child, ends it. `done` is refused while the caller owns open items or queued tickets.
-A child that ends a turn without `done` stays open, and its reply tells the owner it waits for input.
+Marks in `done.json` use the launch/item id, pane, and `agent_session.value`, not the terminal id. Legacy marks migrate without deletion. The first `idle` or `done` observation ends the marked turn, including after restore without a completion counter. Working, blocked, and unknown states never authorize closure.
 
-A child with commits to land stays open and shows under TO LAND on the board, and the prompt line says `To land: web-tests (+2)`. Merge or drop the branch; the next sweep closes it.
-A `blocked` child stays open, and the owner's inbox gets one `blocked` record per episode. A `working` child, one that has never completed a turn, and one that has not called `done` are never closed automatically. Nothing closes on a timer.
+New inbox work accepted during that same working turn cancels its mark. After that turn ends, the mark is terminal. Senders receive `<name> finished; start a new child for more work`.
+
+A child without its own `done` stays open, including a child that asks a question or orchestrates other children. Automatic closure never closes the caller or a busy pane. Shared worktrees remain, and only the finished child pane closes. A last primary pane stays while closing it would close linked workspaces.
+
+Closed children retain TO LAND rows: `<child>: branch <b> +N to land`. These rows come from durable items and branch observations, not live panes. Integration or branch deletion removes the row.
 
 `dogsled board` groups an owner's children, jobs, and queued tickets by what the owner must do: TO LAND, ATTENTION, RUNNING, and WAITING. Each agent row names the harness and model; each job row names its command. `--json` is what the Pi widget draws.
 `dogsled read TARGET [--host H]` shows a child's or job's newest output and the captured final reply.
@@ -169,6 +169,7 @@ Then it closes every pane that uses the worktree and the Herdr workspace that sh
 Close uses the same loss rule as cleanup: no unique checkout content and every commit held by the default branch or freshly fetched remote refs. It deletes the branch under that same rule. Local-only work refuses close, including an explicit owner close.
 When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
 A pane outside a worktree, or in an unlocked worktree (someone's own checkout), is closed alone; the checkout stays.
+A pane in a checkout that another agent, an open item, or a busy pane still uses is closed alone too, even by an explicit close: close never closes agents it was not asked to close, and never removes a checkout they use. The last pane in the checkout takes the checkout with it.
 A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a worktree outside the repository's worktree directory, a dirty or detached worktree, and any other lock.
 It also refuses a busy target or a busy pane that uses the worktree: an agent that is not `idle` or `done`, or a shell with a foreground command.
 Each refusal happens before a change. If a `teardown` command fails, the worktree, its panes, its lock, and the item stay, and the error shows the command's last lines of output.
@@ -242,7 +243,7 @@ Peer reads run in parallel through SSH and the configured `remote_command`.
 A shared, locked cache permits at most one read per peer per ten seconds, including concurrent callers.
 Status never probes peers itself.
 
-`service: up` means a process holds the host's service lock. A free lock or unreachable peer means `service: down`.
+`service: up` means a process holds the host's service lock. A free lock on a host that answers means `service: down`. A peer that SSH cannot read shows `unreachable: <category>` (for example `timeout` or `connection refused`, never the raw SSH text) instead, with the age of its last snapshot when one exists.
 Status shows snapshot age separately, including when the service runs. Peers without the liveness field retain the 30-second age fallback during upgrades.
 Admission still requires a snapshot no older than 30 seconds. Finished-child cleanup can use an older snapshot from a running service.
 Close rechecks the live pane, the child's `done` mark, and the loss guard before it acts.
@@ -328,7 +329,13 @@ An open agent item holds its checkout in prune and the sweep; `close` ends it an
 An idle or done agent that has not called `dogsled done` holds its checkout in prune, the sweep, and an automatic close; only an explicit `dogsled close` takes it. An idle shell, a done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
 The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
-A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
+Before it reads checkout changes, the loss rule requires the checkout's own `.git` and a matching Git top-level path.
+A missing or mismatched identity refuses the check. It never counts as clean or inherits a parent checkout's dirt.
+A registered worktree whose path is absent is a stale registration. Prune and the sweep remove the record only.
+A planned worktree that something else removes before its removal runs is not a failure. When Git no longer lists it and its path is absent, the pass drops its registration and reports it as already removed. When Git no longer lists it but its path still exists, the removal is refused.
+A worktree whose directory remains but that Git can no longer remove is an `unlinked` hold. This happens when Git does not list it (for example after `git worktree prune`), calls it prunable, or its `.git` file is gone.
+Prune and the sweep never run `git worktree remove` on it, never delete it, and never fail on it. `close` refuses it before it closes or unlocks anything.
+The hold names the reason and the path, for example `worktree unregistered by git; directory remains: <path>`. The owner checks the directory and moves or deletes it. The next pass then drops the registration as stale.
 Prune and the sweep use one pane rule. Both keep the caller's pane and focused panes.
 An empty shell closes when its job ended, its directory disappeared, its launch is final, or its agent item closed.
 A final launch was refused, never attempted, or has an unknown outcome with no agent in its terminal. Cleanup preserves launch receipts and checks terminal ownership under the launch locks.
@@ -343,15 +350,17 @@ Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune neve
 
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
 Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and local-only commits remain untouched.
-Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
+Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any change stops removal. A changed repository, path, or branch is an identity change and a failure. A HEAD that moved because of a new commit is live work and a skip.
 Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when its commits are held, and the idle anchor. Dogsled checks that the worktree is gone afterwards.
-Each entry is independent. A failed or refused entry does not stop the others; prune reports each failure, then exits with status 2.
-`--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
+Each entry is independent. A failed or refused entry does not stop the others.
+A recheck can refuse an entry because its state changed after the plan: the worktree is now dirty, held, or not landed, the pane is now busy, or a new commit moved HEAD after the plan. Prune keeps that entry and reports it as `skipped:` with the reason. A skip is not a failure.
+An identity change (repository, path, or branch), a missing entry, a command error, or unreadable evidence is a failure. Prune reports each failure, then exits with status 2.
+`--json` returns `{results,skipped,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
 
 Placement records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
-A missing or unreadable repository produces a report-only `repositories` warning. The warning names its registration or configuration, and the survey continues.
-Repository registrations stay unchanged.
+An absent remembered repository produces a removable `repositories` entry. Prune and the sweep recheck absence under the registry locks, then remove only stale records.
+Existing worktree records stay. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only. Doctor changes no registrations.
 ### The sweep in `serve`
 
 The sweep closes finished children (see [Items and closing](#items-and-closing)), and a job closes its own tab. That closed loop ends most work.
@@ -364,17 +373,18 @@ Each requested pass builds the doctor plan in sweep scope. It applies only entri
 
 - `panes` and `workspaces`: the shared pane rule above. A workspace closes whole only when every pane qualifies. Final launch panes close separately under their launch locks.
 - `worktrees` and `branches`: the shared loss rule and holds described above, identical to prune.
+- Stale repository and worktree registrations: remove only records whose paths are absent, with the same locked recheck as prune.
 - Orphaned children: a child that called `done`, whose owner is gone, and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
-The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
+The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others. An entry that its recheck refuses because live work changed it after the survey is a skip, not a failure: the pass lists it as `skipped:`, and the stop gate ignores it.
 The service keeps seven days of completed passes in `sweeps.jsonl` and the latest pass in `sweep.json`.
 Each history entry has a `ts_ms` timestamp; each new pass removes entries older than seven days.
-The report includes start and finish times, removals, failures, repository warnings, and landed-dirty findings.
+The report includes start and finish times, removals, failures, repository warnings, landed-dirty findings, and `unlinked` holds.
 `dogsled status` and `status --json` show the latest pass. Prompt context adds one summary line when that pass has errors or warnings.
-The service also writes removals, failures, and repository warnings to stderr.
+The service also writes removals, failures, repository warnings, and holds to stderr.
 Child completion and orphan checks remain independent of requested doctor cleanup.
 An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
-Prune also handles ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
+Prune also handles ended jobs and `targets`. Disk and process findings are report-only. Repository findings remain report-only except for absent remembered paths.
 
 ## Placement
 
@@ -467,15 +477,18 @@ Peers need a dogsled version that supports quota storage. No management credenti
 The version-1 contract contains `version`, `fetched_ms`, `source`, and `pools`.
 `source` identifies the collector by hostname. Each row contains these fields:
 
-- `pool`: `claude`, `codex`, or `minimax`.
+- `pool`: the lowercase CLIProxy provider name, such as `claude`, `codex`, or a plugin provider. Consumers must accept any string.
 - `account` and `window`: the account label and provider window name.
 - `used_pct`: a number from 0 to 100.
 - `resets_ms`: Unix milliseconds, or `null` when unavailable.
 - `error`: a safe error description, or `null`.
 
 Claude windows are `five_hour`, `seven_day`, `seven_day_opus`, and `seven_day_sonnet`.
-Codex windows are `primary` and `secondary`. MiniMax windows are `interval` and `weekly`.
-MiniMax account labels use `minimax-N`, where N is the position in the configured API-key list.
+Codex windows are `primary` and `secondary`.
+Dogsled reads Claude and Codex through CLIProxy `api-call`. For every other enabled credential that CLIProxy marks `supports_quota`, it calls `POST /v0/management/quota/fetch` with the credential's `auth_index`. It needs no change for a new provider.
+Each bucket becomes one row. The window is the bucket window. With more than one group, it is `<group>-<window>`, where the group is its lowercase `[a-z0-9_-]` display name.
+`used_pct` is `(1 - remainingFraction) * 100`, limited to 0..100. `resets_ms` comes from `resetTime`.
+Plugin account labels follow the same redaction as Claude and Codex labels. A failed fetch gives one error row with the window `quota`.
 A failed account has error rows with zero usage and no reset time. Consumers must treat these rows as unknown, not available quota.
 A pool is exhausted when every account has a window at 100% with a reset time in the future.
 Human output shows each window, reset time, and snapshot age. No snapshot produces an empty version-1 snapshot with `fetched_ms: 0`.
@@ -544,10 +557,11 @@ Claude Code and Codex include the reminder in their existing `Stop` inbox respon
 The reminder requests a review, a commit from dirty children, integration, or an explicit blocker or deferral.
 It never commits, merges, closes, or discards work itself. Clean readers and working children do not trigger it.
 
-The gate reports failures, repository warnings, and landed-dirty findings from the latest completed pass, without waiting for the requested pass.
-Successful removals remain in status and the journal; they do not continue an agent turn.
-Repository warnings name the repository and state entries, and request delegation to a dogsled agent instead of manual state edits.
-Landed-dirty findings reach only panes in the same main repository, including linked worktrees and symlink paths.
+The gate reports failures, `unlinked` holds, and landed-dirty findings from the latest completed pass, without waiting for the requested pass.
+A finding reaches only the agent that created its work. That agent owns an open item whose pane holds the worktree or pane, or its launch record started a child in the worktree.
+An agent that created nothing there hears nothing, whether Dogsled launched it or not. A research agent in the same repository gets no cleanup message.
+Host-level failures and repository warnings have no creator. They stay in `dogsled status` and `status --brief` and reach no agent.
+Prompt context shows the same owner-scoped counts. Successful removals remain in status and the journal; they do not continue an agent turn.
 The message asks the owner to read and preserve wanted changes, or obtain user approval before discarding abandoned work.
 It forbids forced worktree removal, `git clean`, and `rm -rf` on the checkout.
 Cleanup reminders use separate, once-per-set histories in `gate.json`, so an unchanged warning cannot cause a continuation loop.
@@ -565,14 +579,18 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 ### Tools
 
 `dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `done`, `stop`, `cancel`, and `place`.
-Each tool calls the same code as its CLI command and returns the same JSON. No tool waits: `spawn` and `run` return the item or the queued ticket at once.
+Tools share the CLI action code. `spawn` returns a durable queued ticket, even when a host has room.
+The service owns startup confirmation outside the MCP call budget. `dogsled agent` still starts synchronously under `--max`.
+Startup errors include recent pane output in the launch record and ticket when the pane read succeeds.
+A failed pane read preserves the original error. Native refusals and unknown startup outcomes keep their existing recovery rules.
+`run` returns the item or queued ticket at once.
 The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its extension (tools `mcp__dogsled__*`); Claude Code reads `plugins/dogsled/.mcp.json`; Codex reads `plugins/dogsled/codex-mcp.json`, which forwards the Herdr and `DOGSLED_*` variables.
 
 ### Pi
 
 The extension adds host status before each prompt, registers the tools, and draws:
 
-- **The right-side board** shows cached quotas, agents, jobs, and todos when `HERDR_ENV=1` and `HERDR_SOCKET_PATH` accepts a connection. Pi opens or reuses the tab’s split and sets no above-editor widget. Without Herdr, the existing widget shows host meters, the current task, and work groups. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately in the widget.
+- **The right-side board** shows cached quotas, agents, jobs, and todos when `HERDR_ENV=1` and `HERDR_SOCKET_PATH` accepts a connection. Pi opens or reuses the tab’s board, docked at the left edge beside Herdr’s own sidebar at 38 cells, and sets no above-editor widget. Without Herdr, the existing widget shows host meters, the current task, and work groups. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately in the widget.
 - **Alt+W or `/work`** opens or reuses the Herdr split. Without Herdr, it expands or collapses the widget in place, without a popup or editor replacement. Alt+J/K moves selection, Alt+] changes views, and Alt+I shows inline details. Typing stays in the editor. Alt+S stops jobs, Alt+C cancels queued work, and Alt+M sends agent messages. Stop and cancel require confirmation. Completed job history starts collapsed.
 - **`/dogsled`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
 - **The inbox reader** and a renderer that shows each record's kind, sender, and text, folded past twelve lines.
@@ -583,15 +601,15 @@ Todos follow the active Pi session branch. Agents and jobs follow the calling He
 
 The Jobs view joins retained records to the current owner's ledger by host and job ID. It does not show unrelated fleet jobs. Job inspection uses `dogsled read` for a bounded log tail and shows the `dogsled logs` command for full output. Expired records and unavailable hosts produce explicit errors. The panel never starts a new process manager, edits todos, or writes into an agent terminal.
 
-The Herdr plugin opens the right-side work board:
+The Herdr plugin docks the work board at the left edge of the tab, 38 cells wide. Its `toggle` action closes or reopens it:
 
 ```sh
-dogsled board --open                     # open or reuse the caller’s tab split
+dogsled board --open                     # open or reuse the caller’s docked board (`--toggle` closes it)
 dogsled board --side --owner "$HERDR_PANE_ID" # print once
 herdr plugin pane open --plugin dogsled --entrypoint board --direction right --no-focus
 ```
 
-The split runs `dogsled board --side --watch` and refreshes every ten seconds. `--owner` defaults to the opening pane from Herdr’s plugin context.
+The split runs the plugin's own `bin/dogsled board --side --watch` and refreshes every ten seconds. `--owner` defaults to the opening pane from Herdr’s plugin context.
 Quotas come only from `quota.json`; the board never calls a provider or reads credentials. The heading shows cache age and `STALE` after fifteen minutes.
 
 Pi renders each new todo revision through pi-todo’s `display.createView(host).render(width)`. Dogsled never reads or copies task state.

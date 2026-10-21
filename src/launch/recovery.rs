@@ -32,6 +32,21 @@ pub(super) fn candidates(receipts: &Ledger, pane: Option<&str>) -> Result<Vec<(S
     Ok(found)
 }
 
+/// Launch history identifies child panes even after terminal ownership changes.
+/// Board placement needs this ledger-only fact, not cleanup eligibility.
+pub fn launched(ledger: &Ledger, pane: &str) -> Result<bool> {
+    Ok(!candidates(&ledger.child("launches"), Some(pane))?.is_empty())
+}
+
+/// Every recorded launch request on this host. Each names the pane that asked for it and the
+/// directory it started in, so a prepared worktree's launch names the agent that created it.
+pub fn requests(ledger: &Ledger) -> Result<Vec<crate::work::Launch>> {
+    Ok(candidates(&ledger.child("launches"), None)?
+        .into_iter()
+        .map(|(_, progress)| progress.request)
+        .collect())
+}
+
 fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> {
     Ok(recoverable(
         progress,
@@ -42,6 +57,72 @@ fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> 
 fn recoverable(progress: &Progress, receipt: Option<&Receipt>) -> bool {
     matches!(receipt, Some(Receipt::Refused { .. }))
         || (receipt.is_none() && !progress.confirmed && progress.terminal_receipt.is_none())
+}
+
+/// Only a proven terminal mismatch releases ownership; missing identities remain unresolved.
+/// Started receipts retain ownership regardless of terminal. For several records on one pane,
+/// discard non-owners first: none means Unrecorded, one uses its usual classification, and
+/// several remaining owners mean Unresolved. Locked recovery still rejects competing records.
+fn owns_pane(progress: &Progress, receipt: Option<&Receipt>, current: Option<&str>) -> bool {
+    if matches!(receipt, Some(Receipt::Started(_))) {
+        return true;
+    }
+    match (
+        progress.terminal.as_deref().filter(|t| !t.is_empty()),
+        current.filter(|t| !t.is_empty()),
+    ) {
+        (Some(saved), Some(current)) => saved == current,
+        _ => true,
+    }
+}
+
+fn owned_candidates(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    pane: &str,
+) -> Result<Vec<(String, Progress)>> {
+    let receipts = ledger.child("launches");
+    let found = candidates(&receipts, Some(pane))?;
+    if found.is_empty() {
+        return Ok(found);
+    }
+    let current = terminal(shell, pane).ok();
+    let mut owned = Vec::new();
+    for (id, progress) in found {
+        let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+        if owns_pane(&progress, receipt.as_ref(), current.as_deref()) {
+            owned.push((id, progress));
+        }
+    }
+    Ok(owned)
+}
+
+/// A started launch consumed its preparation. A refusal is final too, except for a seeded unit:
+/// its peer settles the refusal first and then releases the preparation itself.
+fn consumed(progress: &Progress, receipt: Option<&Receipt>) -> bool {
+    match receipt {
+        Some(Receipt::Started(_)) => true,
+        Some(Receipt::Refused { .. }) => progress.request.unit.is_none(),
+        None => false,
+    }
+}
+
+/// The launch's recorded terminal no longer runs in its pane: the pane is gone or another
+/// terminal replaced it. Start and recovery refuse such a pane, so the launch can never start
+/// or use its checkout. A missing saved identity proves nothing.
+fn lost_pane(
+    progress: &Progress,
+    panes: &[crate::probe::Pane],
+    terminals: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let (Some(pane), Some(saved)) = (
+        progress.pane.as_deref(),
+        progress.terminal.as_deref().filter(|t| !t.is_empty()),
+    ) else {
+        return false;
+    };
+    !panes.iter().any(|p| p.pane_id == pane)
+        || terminals.get(pane).is_some_and(|current| current != saved)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +137,9 @@ pub enum PaneLaunch {
 pub struct Survey {
     states: std::collections::BTreeMap<String, PaneLaunch>,
     pub pending_paths: Vec<String>,
+    /// Requests whose launch ended in an immutable final receipt, or can never use its checkout
+    /// again because its pane is gone, with their checkout.
+    settled: Vec<(String, String)>,
 }
 
 impl Survey {
@@ -70,15 +154,36 @@ impl Survey {
         let mut survey = Self {
             states: std::collections::BTreeMap::new(),
             pending_paths: Vec::new(),
+            settled: Vec::new(),
         };
         for (id, progress) in candidates(&receipts, None)? {
+            // Read the lock first: a launch that ends after this check leaves its receipt.
+            let running = receipts.locked(&id)?;
             let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
             if receipt.is_none() && super::pending(&progress, agents) {
                 survey.pending_paths.push(progress.request.cwd.clone());
             }
+            if progress.request.id == id
+                && (consumed(&progress, receipt.as_ref())
+                    || (receipt.is_none()
+                        && !super::pending(&progress, agents)
+                        && !running
+                        && lost_pane(&progress, panes, terminals)))
+            {
+                survey
+                    .settled
+                    .push((id.clone(), progress.request.cwd.clone()));
+            }
             let Some(pane) = progress.pane.as_ref() else {
                 continue;
             };
+            if !owns_pane(
+                &progress,
+                receipt.as_ref(),
+                terminals.get(pane).map(String::as_str),
+            ) {
+                continue;
+            }
             let state = if matches!(receipt, Some(Receipt::Started(_))) {
                 PaneLaunch::Started
             } else if recoverable(&progress, receipt.as_ref())
@@ -115,6 +220,15 @@ impl Survey {
         Ok(survey)
     }
 
+    /// A preparation is consumed once its launch is final or has lost its pane. An identified preparation needs its
+    /// own request; a legacy path-only one has no owner, so any final launch of its checkout
+    /// ends it.
+    pub fn consumed(&self, request_id: Option<&str>, path: &str) -> bool {
+        self.settled.iter().any(|(id, cwd)| {
+            request_id.is_none_or(|request| request == id) && crate::worktree::same(cwd, path)
+        })
+    }
+
     pub fn pane(&self, pane: &str) -> PaneLaunch {
         self.states
             .get(pane)
@@ -127,7 +241,7 @@ impl Survey {
 /// age-based cleanup; unresolved ownership also prevents closing by another shell rule.
 pub fn final_pane(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<PaneLaunch> {
     let receipts = ledger.child("launches");
-    let found = candidates(&receipts, Some(pane))?;
+    let found = owned_candidates(ledger, shell, pane)?;
     if found.is_empty() {
         return Ok(PaneLaunch::Unrecorded);
     }

@@ -52,12 +52,11 @@ dogsled inbox list
 
 ## Closing
 
-A child is finished when it calls the `done` tool (or `dogsled done`) during its last turn. Dogsled tells each child this at launch. Dogsled then closes the finished child for you, after it captures the reply:
+`done` means your work is finished: hand it back, release your resources, and end your agent. Call it during the final working turn, after committing changes. The child host captures your reply and closes your pane and agent worktree when the turn ends. Your branch stays for the owner to land. Closed children remain under TO LAND until integration or branch deletion.
 
-- a reader (no commits outside the default branch, clean tree) closes when that turn ends;
-- a writer closes once its branch has landed. Until then it shows under TO LAND: merge or drop the branch.
+`done` refuses open children, queued tickets, dirty agent worktrees, and removal that loses content with the branch kept. New inbox work during the same working turn cancels the mark. After the turn ends, messages fail with `<name> finished; start a new child for more work`.
 
-A child that ends a turn without `done` waits for input, for example after a question: its reply reaches your inbox, and it stays open. Answer it with `send`. Blocked and working children never close, and nothing closes on a timer.
+Without its own `done`, a child stays open. Questions and orchestration do not authorize closure. Busy panes and the caller never close automatically. Shared worktrees stay. A primary pane stays if its closure would close linked workspaces.
 
 When you are a child, call `done` once, in the turn that completes your whole task, then end the turn with your final reply. Do not call it when you ask a question or wait for your own children; `done` is refused while you own open children or queued work. To end a child now:
 

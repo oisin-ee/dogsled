@@ -18,9 +18,12 @@ pub struct Status {
 }
 
 pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
+    let hosts = fleet.status(crate::ledger::now_ms())?;
+    let mut items = crate::items::list(fleet.ledger)?;
+    crate::items::merge_handoffs(&mut items, &hosts);
     Ok(Status {
-        hosts: fleet.status(crate::ledger::now_ms())?,
-        items: crate::items::list(fleet.ledger)?,
+        hosts,
+        items,
         queue: crate::work::queue(fleet.ledger)?,
         orphans: crate::sweep::list(fleet.ledger)?,
         sweep: crate::sweep::latest(fleet.ledger)?,
@@ -150,11 +153,11 @@ fn summary(host: &HostReport) -> String {
         },
     );
     format!(
-        "{} {}{} {details} service: {}{}",
+        "{} {}{} {details} {}{}",
         one_line(&host.host.label),
         load(host),
         marker(host),
-        host.service,
+        host.condition(),
         host.sampled_ms.map_or_else(String::new, |sampled| format!(
             " (snapshot {} ago)",
             crate::watchdog::age(crate::ledger::now_ms().saturating_sub(sampled))
@@ -162,7 +165,21 @@ fn summary(host: &HostReport) -> String {
     )
 }
 
+/// The fleet brief for `status --brief`: every host, the counts, and the last pass's findings.
 pub fn brief(status: &Status) -> String {
+    let mut rows = fleet(status);
+    if let Some(sweep) = &status.sweep
+        && (!sweep.applied.failures.is_empty()
+            || !sweep.applied.repositories.is_empty()
+            || !sweep.applied.unlinked.is_empty())
+    {
+        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings, {} held worktrees. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len(), sweep.applied.unlinked.len()));
+    }
+    format!("{}\n", rows.join("\n"))
+}
+
+/// The host rows and the work counts, without cleanup findings.
+pub fn fleet(status: &Status) -> Vec<String> {
     // Keep every host even when the fleet exceeds the prompt's line budget.
     // Larger fleets share rows; no host disappears into an omitted count.
     let mut rows = vec![String::new(); status.hosts.len().min(5)];
@@ -205,12 +222,43 @@ pub fn brief(status: &Status) -> String {
             .filter(|a| a.stalled_since_ms.is_some())
             .count()
     ));
-    if let Some(sweep) = &status.sweep
-        && (!sweep.applied.failures.is_empty() || !sweep.applied.repositories.is_empty())
-    {
-        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len()));
+    rows
+}
+
+fn item_lines(status: &Status, lines: &mut Vec<String>) {
+    for item in &status.items {
+        if let Some(branch) = &item.branch
+            && !branch.landed
+        {
+            lines.push(format!(
+                "{}: branch {} +{} to land",
+                item.name.as_deref().unwrap_or(&item.pane),
+                branch.name,
+                branch.ahead
+            ));
+        }
+        if item.closed_ms.is_some() {
+            continue;
+        }
+        lines.push(format!(
+            "owner {}: {} {} on {} ({}){}",
+            item.owner_pane,
+            item.kind,
+            item.id,
+            item.host,
+            item.pane,
+            if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
+                format!(" orphaned: {}", one_line(&orphan.reason))
+            } else if crate::items::finished(item, &status.hosts) {
+                format!(
+                    " finished; run {}",
+                    crate::items::close_command(item, &status.hosts)
+                )
+            } else {
+                String::new()
+            }
+        ));
     }
-    format!("{}\n", rows.join("\n"))
 }
 
 pub fn render(status: &Status) -> String {
@@ -224,6 +272,13 @@ pub fn render(status: &Status) -> String {
         lines.extend(
             sweep
                 .applied
+                .skipped
+                .iter()
+                .map(|s| format!("  skipped: {s}")),
+        );
+        lines.extend(
+            sweep
+                .applied
                 .failures
                 .iter()
                 .map(|f| format!("  failed: {f}")),
@@ -234,6 +289,13 @@ pub fn render(status: &Status) -> String {
                 .repositories
                 .iter()
                 .map(|w| format!("  warning: {}: {}", w.id, w.detail)),
+        );
+        lines.extend(
+            sweep
+                .applied
+                .unlinked
+                .iter()
+                .map(|h| format!("  hold: {}: {}", h.id, h.detail)),
         );
     } else {
         lines.push("Last cleanup: none".into());
@@ -281,26 +343,7 @@ pub fn render(status: &Status) -> String {
             }
         }
     }
-    for item in status.items.iter().filter(|i| i.closed_ms.is_none()) {
-        lines.push(format!(
-            "owner {}: {} {} on {} ({}){}",
-            item.owner_pane,
-            item.kind,
-            item.id,
-            item.host,
-            item.pane,
-            if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
-                format!(" orphaned: {}", one_line(&orphan.reason))
-            } else if crate::items::finished(item, &status.hosts) {
-                format!(
-                    " finished; run {}",
-                    crate::items::close_command(item, &status.hosts)
-                )
-            } else {
-                String::new()
-            }
-        ));
-    }
+    item_lines(status, &mut lines);
     for ticket in status.queue.iter().filter(|t| t.state == "pending") {
         lines.push(format!(
             "queued {} owner {}",

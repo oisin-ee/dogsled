@@ -261,7 +261,13 @@ pub fn reader(ledger: &Ledger, terminal: &str) -> Result<Option<Reader>> {
 
 /// Put `record` in its terminal's inbox on this host. Refuses a terminal that is not in this
 /// host's latest snapshot, or that has no reader: nothing would ever deliver the record.
-pub fn put(ledger: &Ledger, record: Record) -> Result<Record> {
+fn put_checked(ledger: &Ledger, shell: &dyn crate::shell::Shell, record: Record) -> Result<Record> {
+    // Read live state: an ended turn seals done before a message can reopen it.
+    let agent = local_agent(shell, &record.pane)?;
+    crate::done::input(ledger, &agent, || put(ledger, record).map(|r| (r, true)))
+}
+
+fn put(ledger: &Ledger, record: Record) -> Result<Record> {
     validate_terminal(&record.terminal)?;
     if record.text.len() > MAX_TEXT {
         return Err(Error::Invalid(format!(
@@ -319,10 +325,6 @@ pub fn claim(ledger: &Ledger, terminal: &str, reader: &Reader, now: u64) -> Resu
         }
         Ok(claimed)
     })?;
-    // New input is new work: the agent must call `done` again before dogsled closes it.
-    if !claimed.is_empty() {
-        crate::done::clear(ledger, terminal)?;
-    }
     Ok(claimed)
 }
 
@@ -476,9 +478,17 @@ pub fn resolve<'a>(
 ) -> Result<Target<'a>> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
     let mut found = Vec::new();
+    let mut finished = None;
     for report in fleet.status(now)? {
         if pinned.is_some_and(|h| h.id != report.host.id) {
             continue;
+        }
+        if let Some(mark) = report
+            .handoffs
+            .iter()
+            .find(|m| m.sealed.is_some() && (m.pane == target || m.name.as_deref() == Some(target)))
+        {
+            finished = Some(mark.name.clone().unwrap_or_else(|| mark.pane.clone()));
         }
         let Some(probe) = report.probe else { continue };
         for agent in probe.agent_panes {
@@ -488,6 +498,10 @@ pub fn resolve<'a>(
         }
     }
     match found.len() {
+        0 if finished.is_some() => Err(Error::Invalid(format!(
+            "{} finished; start a new child for more work",
+            finished.unwrap_or_default()
+        ))),
         0 => Err(Error::Invalid(format!(
             "no agent named or in pane {target}{}; see `dogsled status`",
             pinned.map_or_else(String::new, |h| format!(" on {}", h.label))
@@ -542,7 +556,7 @@ pub fn send(
         done_ms: None,
     };
     let stored = if target.host.is_local() {
-        put(fleet.ledger, record)?
+        put_checked(fleet.ledger, fleet.shell, record)?
     } else {
         fleet.remote_setup(
             target.host,
@@ -645,13 +659,13 @@ pub fn reconcile(fleet: &Fleet, now: u64) -> Result<()> {
         Ok(failed)
     })?;
     for s in failed {
-        report(fleet.ledger, &s, now)?;
+        report(fleet.ledger, fleet.shell, &s, now)?;
     }
     Ok(())
 }
 
 /// Tell the sender of `s` that it failed, when the sender has a reader on this host.
-fn report(ledger: &Ledger, s: &Sent, now: u64) -> Result<()> {
+fn report(ledger: &Ledger, shell: &dyn crate::shell::Shell, s: &Sent, now: u64) -> Result<()> {
     let (Some(terminal), Some(pane)) = (&s.from.terminal, &s.from.pane) else {
         return Ok(());
     };
@@ -678,7 +692,7 @@ fn report(ledger: &Ledger, s: &Sent, now: u64) -> Result<()> {
         reason: None,
         done_ms: None,
     };
-    match put(ledger, record) {
+    match put_checked(ledger, shell, record) {
         // The sender itself may be gone; nobody is left to tell.
         Ok(_) | Err(Error::Invalid(_)) => Ok(()),
         Err(e) => Err(e),
@@ -735,13 +749,18 @@ pub fn claim_for(
     harness: &str,
     now: u64,
 ) -> Result<Vec<Record>> {
-    let terminal = terminal_of(&local_agent(shell, pane)?)?;
+    let agent = local_agent(shell, pane)?;
+    let terminal = terminal_of(&agent)?;
     let reader = Reader {
         harness: harness.into(),
         pane: pane.into(),
         registered_ms: now,
     };
-    claim(ledger, &terminal, &reader, now)
+    crate::done::input(ledger, &agent, || {
+        let records = claim(ledger, &terminal, &reader, now)?;
+        let received = !records.is_empty();
+        Ok((records, received))
+    })
 }
 
 pub fn ack_for(
@@ -957,10 +976,14 @@ impl Sent {
 }
 
 /// The inbox commands a peer runs on this host over SSH.
-pub fn host(ledger: &Ledger, cmd: crate::cli::HostCommand) -> Result<()> {
+pub fn host(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    cmd: crate::cli::HostCommand,
+) -> Result<()> {
     let value = match cmd {
         crate::cli::HostCommand::InboxPut { record } => {
-            serde_json::to_value(put(ledger, serde_json::from_str(&record)?)?)?
+            serde_json::to_value(put_checked(ledger, shell, serde_json::from_str(&record)?)?)?
         }
         crate::cli::HostCommand::InboxState { terminal, ids } => {
             serde_json::to_value(states(ledger, &terminal, &ids)?)?
@@ -992,7 +1015,7 @@ pub fn readable(
 /// idempotent. `Ok(false)` when the owner is not running or has no reader: nothing would
 /// deliver it, so the caller keeps it for later.
 pub fn notify(
-    ledger: &Ledger,
+    fleet: &Fleet,
     reports: &[crate::hosts::HostReport],
     owner: &str,
     id: &str,
@@ -1000,6 +1023,8 @@ pub fn notify(
     text: String,
     now: u64,
 ) -> Result<bool> {
+    let ledger = fleet.ledger;
+    let shell = fleet.shell;
     let Some(terminal) = readable(ledger, reports, owner)? else {
         return Ok(false);
     };
@@ -1016,7 +1041,7 @@ pub fn notify(
         reason: None,
         done_ms: None,
     };
-    match put(ledger, record) {
+    match put_checked(ledger, shell, record) {
         Ok(_) => Ok(true),
         Err(Error::Invalid(_)) => Ok(false),
         Err(e) => Err(e),

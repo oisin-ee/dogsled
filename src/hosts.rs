@@ -42,14 +42,124 @@ pub struct HostReport {
     pub sampled_ms: Option<u64>,
     pub probe: Option<Probe>,
     pub headroom: Option<Headroom>,
+    /// Safe words for why the host is in this state; for an unreachable host, its `failure`.
     pub error: Option<String>,
+    /// Why an unreachable host could not be read. Never raw ssh or remote text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Failure>,
     pub jobs: Vec<crate::jobs::Job>,
+    #[serde(default)]
+    pub handoffs: Vec<crate::done::Mark>,
     /// When an unreachable peer is read again, after backoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_ms: Option<u64>,
 }
 
+/// Why a host could not be read, as a fixed category.
+///
+/// SSH and remote error text can carry secrets, such as a token in a failing command or a
+/// banner. The transport that sees that text classifies it here, and status shows only the
+/// category. Raw text never reaches a status line, a headroom reason, or the peer cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Failure {
+    Timeout,
+    ConnectionRefused,
+    HostNotResolved,
+    AuthenticationFailed,
+    /// SSH connected, and the remote dogsled command failed.
+    RemoteCommandFailed,
+    /// The remote command answered with output dogsled cannot read.
+    UnexpectedOutput,
+    /// Dogsled's own time budget ran out before the host answered.
+    Deadline,
+    Other,
+}
+
+/// The exit status ssh uses for its own failures; any other status is the remote command's.
+const SSH_FAILED: i32 = 255;
+
+impl Failure {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::ConnectionRefused => "connection refused",
+            Self::HostNotResolved => "host not resolved",
+            Self::AuthenticationFailed => "authentication failed",
+            Self::RemoteCommandFailed => "remote command failed",
+            Self::UnexpectedOutput => "unexpected output",
+            Self::Deadline => "deadline reached",
+            Self::Other => "other",
+        }
+    }
+
+    /// Classify a failed ssh run by its exit status and, for ssh's own failures, its stderr.
+    fn of_ssh(status: i32, stderr: &str) -> Self {
+        if status != SSH_FAILED {
+            return Self::RemoteCommandFailed;
+        }
+        let stderr = stderr.to_lowercase();
+        let says = |needles: &[&str]| needles.iter().any(|n| stderr.contains(n));
+        if says(&["timed out", "timeout"]) {
+            Self::Timeout
+        } else if says(&["connection refused"]) {
+            Self::ConnectionRefused
+        } else if says(&[
+            "could not resolve hostname",
+            "name or service not known",
+            "nodename nor servname",
+            "temporary failure in name resolution",
+        ]) {
+            Self::HostNotResolved
+        } else if says(&[
+            "permission denied",
+            "host key verification failed",
+            "too many authentication failures",
+            "no supported authentication methods",
+        ]) {
+            Self::AuthenticationFailed
+        } else {
+            Self::Other
+        }
+    }
+
+    /// The category of an error from reading a host.
+    #[must_use]
+    pub const fn of(error: &Error) -> Self {
+        match error {
+            Error::Ssh { failure, .. } => *failure,
+            Error::Deadline(_) => Self::Deadline,
+            Error::Parse { .. } => Self::UnexpectedOutput,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `unreachable: <category>` for a host that could not be read.
+/// A host that answered but runs no service is `service: down`, never this.
+#[must_use]
+pub fn unreachable(failure: Failure) -> String {
+    format!("unreachable: {failure}")
+}
+
 impl HostReport {
+    /// Why the host is in this state, for one status line: unreachable, or its service.
+    #[must_use]
+    pub fn condition(&self) -> String {
+        if self.reachable {
+            format!("service: {}", self.service)
+        } else {
+            unreachable(self.failure.unwrap_or(Failure::Other))
+        }
+    }
+
     /// Readers that need current measurements must not substitute service liveness for age.
     pub fn fresh(&self, now: u64) -> bool {
         self.reachable
@@ -94,7 +204,12 @@ struct Cached {
     available: bool,
     #[serde(default)]
     running: Option<bool>,
+    #[serde(default)]
+    handoffs: Vec<crate::done::Mark>,
+    /// Safe words for a reachable host only; an unreachable one carries its `failure`.
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<Failure>,
     /// Consecutive failed reads: an unreachable peer is asked again with backoff, not on
     /// every cache expiry.
     #[serde(default)]
@@ -223,6 +338,7 @@ impl<'a> Fleet<'a> {
             return Err(Error::Ssh {
                 target: host.label.clone(),
                 detail: format!("exit {}: {detail}", out.status),
+                failure: Failure::of_ssh(out.status, &out.stderr),
             });
         }
         serde_json::from_str(&out.stdout).map_err(|e| Error::Parse {
@@ -285,7 +401,9 @@ impl<'a> Fleet<'a> {
                 reachable: true,
                 available: true,
                 running: report.running,
+                handoffs: report.handoffs,
                 error: None,
+                failure: None,
                 retry: crate::backoff::Backoff::default(),
             })
         } else {
@@ -298,9 +416,15 @@ impl<'a> Fleet<'a> {
             reachable: false,
             available: false,
             running: None,
-            error: Some(e.to_string()),
+            error: None,
+            handoffs: Vec::new(),
+            failure: Some(Failure::of(&e)),
             retry: crate::backoff::Backoff::default(),
         });
+        // Only the category describes an unreachable host. This also covers a cache written
+        // before categories existed, which may still hold raw ssh text.
+        let failure = (!cached.reachable).then(|| cached.failure.unwrap_or(Failure::Other));
+        let error = failure.map_or_else(|| cached.error.clone(), |f| Some(f.to_string()));
         let fresh = cached.available && cached.snapshot.as_ref().is_some_and(|s| s.fresh(now));
         // Old peers have no liveness field. Only they retain the age-based fallback.
         let running = cached.reachable && cached.running.unwrap_or(fresh);
@@ -322,13 +446,15 @@ impl<'a> Fleet<'a> {
             let mut headroom = evaluate(probe, &self.thresholds());
             if !running || !fresh {
                 headroom.eligible = false;
-                let reason = if running {
-                    "snapshot: stale"
+                let reason = if let Some(failure) = failure {
+                    unreachable(failure)
+                } else if running {
+                    "snapshot: stale".into()
                 } else {
-                    "service: down"
+                    "service: down".into()
                 };
                 headroom.reason = Some(sampled_ms.map_or_else(
-                    || reason.into(),
+                    || reason.clone(),
                     |sampled| {
                         format!(
                             "{reason} (last snapshot {} ago)",
@@ -346,8 +472,10 @@ impl<'a> Fleet<'a> {
             sampled_ms,
             probe,
             headroom,
-            error: cached.error,
+            error,
+            failure,
             jobs,
+            handoffs: cached.handoffs,
             retry_ms: (!cached.reachable && cached.retry.attempts > 0)
                 .then_some(cached.retry.next_ms),
         }
@@ -407,7 +535,8 @@ impl<'a> Fleet<'a> {
                 return Ok(cached.clone());
             }
             let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
-            let (snapshot, reachable, available, running, error) = match self.remote::<Option<
+            let (snapshot, reachable, available, running, handoffs, error, failure) = match self
+                .remote::<Option<
                 crate::node::SnapshotReport,
             >>(
                 host,
@@ -422,6 +551,8 @@ impl<'a> Fleet<'a> {
                         true,
                         available,
                         report.running,
+                        report.handoffs,
+                        None,
                         None,
                     )
                 }
@@ -430,14 +561,18 @@ impl<'a> Fleet<'a> {
                     true,
                     false,
                     None,
+                    Vec::new(),
                     Some("host.json is missing; service: down".into()),
+                    None,
                 ),
                 Err(e) => (
                     previous.and_then(|c| c.snapshot),
                     false,
                     false,
                     None,
-                    Some(e.to_string()),
+                    Vec::new(),
+                    None,
+                    Some(Failure::of(&e)),
                 ),
             };
             if reachable {
@@ -452,7 +587,9 @@ impl<'a> Fleet<'a> {
                 reachable,
                 available,
                 running,
+                handoffs,
                 error,
+                failure,
                 retry,
             };
             self.ledger.write(&file, &cached)?;
@@ -539,6 +676,258 @@ mod tests {
         let starting = fleet.status(80_100).unwrap();
         assert_eq!(starting[0].service, "up");
         assert!(!starting[0].headroom.as_ref().unwrap().eligible);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn status_words_an_unreachable_peer_apart_from_a_stopped_service() {
+        let shell = Fake::new();
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let policy = Policy::default();
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![host.clone()],
+        };
+        let command = format!(
+            "ssh {}",
+            fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
+        );
+        let snapshot = serde_json::to_string(&Snapshot {
+            sampled_ms: 100,
+            jobs: Vec::new(),
+            probe: Probe {
+                host: "local".into(),
+                label: "local".into(),
+                load1: 0.0,
+                cores: 8,
+                cpu_ticks: None,
+                busy: Some(0.0),
+                memory: Memory::default(),
+                disk_free_percent: 50.0,
+                agents: AgentCounts::default(),
+                agent_panes: Vec::new(),
+                reservations: Vec::new(),
+                panes: Vec::new(),
+            },
+        })
+        .unwrap();
+        let snapshot = snapshot.as_str();
+        // A reachable host whose service is not running keeps `service: down`.
+        shell.on(&command, snapshot);
+        fleet.status(100).unwrap();
+        shell.on(&command, "null");
+        let stopped = fleet.status(20_100).unwrap().remove(0);
+        assert!(stopped.reachable);
+        assert_eq!(stopped.condition(), "service: down");
+        assert_eq!(
+            stopped.headroom.unwrap().reason.as_deref(),
+            Some("service: down (last snapshot 20s ago)")
+        );
+        // A peer that SSH cannot read is unreachable, with the age of its last snapshot.
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let fleet = Fleet {
+            ledger: &ledger,
+            ..fleet
+        };
+        shell.on(&command, snapshot);
+        fleet.status(100).unwrap();
+        shell.on_output(
+            &command,
+            crate::shell::Output {
+                status: 255,
+                stdout: String::new(),
+                stderr: "ssh: connect to host peer port 22: Operation timed out\n".into(),
+            },
+        );
+        let asleep = fleet.status(20_100).unwrap().remove(0);
+        assert!(!asleep.reachable);
+        assert_eq!(asleep.failure, Some(Failure::Timeout));
+        assert_eq!(asleep.condition(), "unreachable: timeout");
+        assert_eq!(asleep.error.as_deref(), Some("timeout"));
+        assert_eq!(
+            asleep.headroom.unwrap().reason.as_deref(),
+            Some("unreachable: timeout (last snapshot 20s ago)")
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    const SECRET: &str = "token=EXAMPLE_SECRET";
+
+    fn ssh_failure(status: i32, stderr: &str) -> Failure {
+        Failure::of_ssh(status, stderr)
+    }
+
+    #[test]
+    fn ssh_failures_map_to_safe_categories() {
+        for (status, stderr, want) in [
+            (
+                255,
+                "ssh: connect to host h port 22: Operation timed out",
+                Failure::Timeout,
+            ),
+            (
+                255,
+                "ssh: connect to host h port 22: Connection timed out",
+                Failure::Timeout,
+            ),
+            (
+                255,
+                "ssh: connect to host h port 22: Connection refused",
+                Failure::ConnectionRefused,
+            ),
+            (
+                255,
+                "ssh: Could not resolve hostname h: Name or service not known",
+                Failure::HostNotResolved,
+            ),
+            (
+                255,
+                "ssh: Could not resolve hostname h: nodename nor servname provided",
+                Failure::HostNotResolved,
+            ),
+            (
+                255,
+                "user@h: Permission denied (publickey).",
+                Failure::AuthenticationFailed,
+            ),
+            (
+                255,
+                "Host key verification failed.",
+                Failure::AuthenticationFailed,
+            ),
+            (255, "something unrecognised", Failure::Other),
+            (255, "", Failure::Other),
+            (2, "remote said no", Failure::RemoteCommandFailed),
+            // A remote command's own output never picks a connection category.
+            (2, "Connection refused", Failure::RemoteCommandFailed),
+        ] {
+            assert_eq!(ssh_failure(status, stderr), want, "{status} {stderr}");
+        }
+        assert_eq!(Failure::of(&Error::Deadline("x".into())), Failure::Deadline);
+        assert_eq!(
+            Failure::of(&Error::Parse {
+                origin: "o".into(),
+                detail: "d".into()
+            }),
+            Failure::UnexpectedOutput
+        );
+        assert_eq!(Failure::of(&Error::Full), Failure::Other);
+        assert_eq!(
+            unreachable(Failure::ConnectionRefused),
+            "unreachable: connection refused"
+        );
+    }
+
+    #[test]
+    fn status_never_shows_raw_ssh_or_remote_text() {
+        for (status, stdout, stderr, want) in [
+            (
+                255,
+                String::new(),
+                format!("ssh: connect to host peer: Connection refused {SECRET}\n"),
+                "connection refused",
+            ),
+            (
+                255,
+                String::new(),
+                format!("{SECRET}\nunrecognised"),
+                "other",
+            ),
+            (
+                2,
+                String::new(),
+                format!("remote failed {SECRET}"),
+                "remote command failed",
+            ),
+            (
+                2,
+                format!("{{\"error\":\"{SECRET}\"}}"),
+                String::new(),
+                "remote command failed",
+            ),
+        ] {
+            let shell = Fake::new();
+            let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+            let policy = Policy::default();
+            let host = Host {
+                id: "peer".into(),
+                label: "peer".into(),
+                target: Some("peer-ssh".into()),
+            };
+            let fleet = Fleet {
+                shell: &shell,
+                ledger: &ledger,
+                policy: &policy,
+                home: "/home".into(),
+                hosts: vec![host.clone()],
+            };
+            let command = format!(
+                "ssh {}",
+                fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
+            );
+            shell.on_output(
+                &command,
+                crate::shell::Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+            );
+            let report = fleet.status(100).unwrap().remove(0);
+            assert_eq!(report.condition(), format!("unreachable: {want}"));
+            let printed = serde_json::to_string(&report).unwrap();
+            assert!(!printed.contains("EXAMPLE_SECRET"), "{printed}");
+            assert!(!format!("{report:?}").contains("EXAMPLE_SECRET"));
+            let cache = std::fs::read_to_string(
+                ledger.dir.join(format!("{}.json", Fleet::peer_file(&host))),
+            )
+            .unwrap();
+            assert!(!cache.contains("EXAMPLE_SECRET"), "{cache}");
+            std::fs::remove_dir_all(ledger.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_cache_with_raw_text_from_before_categories_is_not_shown() {
+        let shell = Fake::new();
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let policy = Policy::default();
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![host.clone()],
+        };
+        let old = serde_json::json!({
+            "fetched_ms": 100,
+            "source": fleet.remote_argv(&host, &["snapshot".into()]),
+            "snapshot": null, "reachable": false, "available": false,
+            "error": format!("ssh peer: exit 255: {SECRET}")
+        });
+        ledger
+            .write(&format!("{}.json", Fleet::peer_file(&host)), &old)
+            .unwrap();
+        let report = fleet.status(100).unwrap().remove(0);
+        assert_eq!(report.condition(), "unreachable: other");
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("EXAMPLE_SECRET")
+        );
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 

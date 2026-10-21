@@ -179,6 +179,7 @@ fn pane_owned(shell: &dyn Shell, holders: &[Pane], table: &[Proc]) -> Result<BTr
 /// What one survey saw of the host, shared by every worktree's finding.
 struct Seen {
     panes: Vec<Pane>,
+    workspaces: Vec<Workspace>,
     cwds: Option<Vec<Proc>>,
     evidence: BTreeMap<String, crate::loss::Evidence>,
     /// Agent panes that called `done` and ended that turn. Any other idle agent waits for input.
@@ -188,6 +189,11 @@ struct Seen {
 }
 
 impl Seen {
+    /// Closing the last pane also closes its workspace, potentially the whole group.
+    fn pane_group_hold(&self, pane: &str) -> Option<String> {
+        pane_group_hold(&self.panes, &self.workspaces, pane)
+    }
+
     fn load(
         node: &Node<'_>,
         cwds: Option<Vec<Proc>>,
@@ -199,6 +205,7 @@ impl Seen {
         let launches = crate::launch::Survey::load(node.ledger, &panes, &terminals, &agents)?;
         Ok(Self {
             panes,
+            workspaces: workspaces(node.shell)?,
             cwds,
             evidence,
             done,
@@ -245,6 +252,66 @@ struct Workspace {
 #[derive(Debug, Deserialize)]
 struct WorkspaceTree {
     repo_root: String,
+    repo_key: String,
+    is_linked_worktree: bool,
+}
+
+/// Herdr groups open workspace records by `repo_key`, not the Git worktree inventory.
+/// A linked workspace closes alone. A primary also closes alone if another primary
+/// holds the group; otherwise it requires an explicit group close, which we never do.
+fn workspace_group_hold(workspaces: &[Workspace], id: &str) -> Option<String> {
+    let tree = workspaces
+        .iter()
+        .find(|w| w.workspace_id == id)?
+        .worktree
+        .as_ref()
+        .filter(|t| !t.is_linked_worktree)?;
+    let others: Vec<_> = workspaces
+        .iter()
+        .filter(|w| w.workspace_id != id)
+        .filter(|w| {
+            w.worktree
+                .as_ref()
+                .is_some_and(|t| t.repo_key == tree.repo_key)
+        })
+        .collect();
+    if others.is_empty()
+        || others
+            .iter()
+            .any(|w| w.worktree.as_ref().is_some_and(|t| !t.is_linked_worktree))
+    {
+        return None;
+    }
+    let ids = others
+        .iter()
+        .map(|w| w.workspace_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "closing its pane would close linked workspaces {ids}"
+    ))
+}
+
+/// Shared guard for an explicit close, host handoff, and the sweep's pane removal.
+pub fn close_group_hold(shell: &dyn Shell, panes: &[Pane], pane: &str) -> Result<Option<String>> {
+    Ok(pane_group_hold(panes, &workspaces(shell)?, pane))
+}
+
+fn pane_group_hold(panes: &[Pane], workspaces: &[Workspace], pane: &str) -> Option<String> {
+    let workspace = panes
+        .iter()
+        .find(|p| p.pane_id == pane)?
+        .workspace_id
+        .as_deref()?;
+    if panes
+        .iter()
+        .filter(|p| p.workspace_id.as_deref() == Some(workspace))
+        .count()
+        != 1
+    {
+        return None;
+    }
+    workspace_group_hold(workspaces, workspace)
 }
 
 fn workspaces(shell: &dyn Shell) -> Result<Vec<Workspace>> {
@@ -276,8 +343,39 @@ pub(crate) fn main_root(shell: &dyn Shell, path: &str) -> Result<Option<String>>
         .map(|parent| parent.display().to_string()))
 }
 
+/// Only ENOENT is stale. Other errors and dangling symlinks remain reportable.
+/// Forgetting a record deletes no data, even if an absent path is on an unmounted volume.
+/// Placement remembers the path again if it returns.
+fn missing(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// The `kind` of a worktree entry whose directory remains but that Git can no longer remove.
+pub const UNLINKED: &str = "unlinked";
+
+fn unlinked_reason(tree: &Tree, prunable: Option<bool>) -> Option<&'static str> {
+    crate::worktree::unlinked_reason(&tree.path, prunable)
+}
+
+/// A hold, never a removal: the directory may hold content that no Git check can vouch for.
+/// The owner decides; once the directory is gone, the stale-registration rule drops the record.
+fn unlinked(tree: &Tree, reason: &str) -> Entry {
+    let mut e = entry(
+        "worktrees",
+        tree.path.clone(),
+        format!(
+            "held: {reason}; directory remains: {}. Dogsled does not delete it. Check that nothing in it is needed, then move or delete the directory yourself; the next cleanup pass then drops its registration",
+            tree.path
+        ),
+        false,
+    );
+    e.kind = Some(UNLINKED.into());
+    e.tree = Some(tree.clone());
+    e
+}
+
 /// Registered and configured repositories, and those of live panes, Herdr workspaces, and the
-/// caller. Doctor does not scan home.
+/// caller. Doctor does not scan home or change registrations.
 fn repositories(
     node: &Node<'_>,
     panes: &[Pane],
@@ -287,6 +385,28 @@ fn repositories(
     let recorded: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
     let mut repos: BTreeSet<String> = node.ledger.read("repositories.json")?.unwrap_or_default();
     repos.extend(recorded.iter().map(|t| t.repo.clone()));
+    repos.retain(|repo| {
+        if !missing(repo) {
+            return true;
+        }
+        plan.entries.push(entry(
+            "repositories",
+            repo.clone(),
+            "missing remembered repository; drops stale entries from repositories.json and worktrees.json".into(),
+            true,
+        ));
+        false
+    });
+    for tree in &recorded {
+        if missing(&tree.path) && !missing(&tree.repo) {
+            plan.entries.push(entry(
+                "worktrees",
+                tree.path.clone(),
+                "missing registered worktree; drops the stale registration".into(),
+                true,
+            ));
+        }
+    }
     for configured in &node.cleanup.repositories {
         let path = configured.strip_prefix("~/").map_or_else(
             || configured.clone(),
@@ -363,9 +483,20 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
     Ok(listed(shell, repo)?.into_iter().skip(1).collect())
 }
 
-/// Every worktree of `repo`, the main checkout first. A detached worktree has no branch.
+/// Every working tree of `repo`, the main checkout first. A detached worktree has no branch.
+/// A prunable entry is not a working tree any more: `git worktree remove` refuses it.
 fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
+    Ok(porcelain(shell, repo)?
+        .into_iter()
+        .filter(|(_, prunable)| !prunable)
+        .map(|(tree, _)| tree)
+        .collect())
+}
+
+/// Every entry of `git worktree list`, with whether Git calls it prunable.
+fn porcelain(shell: &dyn Shell, repo: &str) -> Result<Vec<(Tree, bool)>> {
     let mut result = Vec::new();
+    let mut prunable = false;
     let output = git(shell, repo, &["worktree", "list", "--porcelain", "-z"])?;
     if !output.ok() {
         return Err(Error::Invalid(format!(
@@ -386,8 +517,10 @@ fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
             tree.head = value.into();
         } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
             tree.branch = value.into();
+        } else if field == "prunable" || field.starts_with("prunable ") {
+            prunable = true;
         } else if field.is_empty() && !tree.path.is_empty() {
-            result.push(tree.clone());
+            result.push((tree.clone(), std::mem::take(&mut prunable)));
             tree.path.clear();
             tree.branch.clear();
             tree.head.clear();
@@ -574,14 +707,37 @@ fn readable(
     let mut usable = BTreeSet::new();
     let mut trees = Vec::new();
     let mut evidence = BTreeMap::new();
+    // An unreadable registry hides no candidate: Git's list still drives removal.
+    let recorded: Vec<Tree> = node
+        .ledger
+        .read("worktrees.json")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     for repo in repos {
-        match repository_trees(node.shell, &repo) {
+        match porcelain(node.shell, &repo) {
             Ok(found) => {
-                trees.extend(
-                    found
-                        .into_iter()
-                        .filter(|tree| Path::new(&tree.path).exists()),
-                );
+                for (tree, prunable) in found.iter().skip(1) {
+                    if !Path::new(&tree.path).exists() {
+                        continue;
+                    }
+                    match unlinked_reason(tree, Some(*prunable)) {
+                        Some(reason) => plan.entries.push(unlinked(tree, reason)),
+                        None => trees.push(tree.clone()),
+                    }
+                }
+                // Dogsled made it, Git forgot it (`git worktree prune`), and its directory stays.
+                for tree in recorded.iter().filter(|t| {
+                    crate::worktree::same(&t.repo, &repo)
+                        && !missing(&t.path)
+                        && !found
+                            .iter()
+                            .any(|(f, _)| crate::worktree::same(&f.path, &t.path))
+                }) {
+                    if let Some(reason) = unlinked_reason(tree, None) {
+                        plan.entries.push(unlinked(tree, reason));
+                    }
+                }
                 let fetched = crate::loss::Evidence::fetch(node.shell, &repo);
                 if let Some(warning) = &fetched.warning {
                     plan.entries
@@ -611,9 +767,8 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     // Process directories first: dogsled's own Git calls below run with `-C`, not `cd`.
     let cwds = process_cwds(node.shell);
     let mut seen = Seen::load(node, cwds, BTreeMap::new())?;
-    let workspaces = workspaces(node.shell)?;
     let mut plan = Plan::default();
-    let repos = repositories(node, &seen.panes, &workspaces, &mut plan)?;
+    let repos = repositories(node, &seen.panes, &seen.workspaces, &mut plan)?;
     let (repos, trees, evidence) = readable(node, repos, &mut plan);
     seen.evidence = evidence;
     let mut closing = Closing::default();
@@ -622,6 +777,10 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     for (tree, found) in trees.iter().zip(found) {
         let found = match found {
             Ok(found) => found,
+            Err(_) if gone(node.shell, tree) => {
+                plan.entries.extend(vanished(node, tree));
+                continue;
+            }
             Err(error) => {
                 let mut warning = entry(
                     "worktrees",
@@ -656,7 +815,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
         plan.entries.push(e);
     }
     for repo in &repos {
-        if let Err(error) = branches(node, repo, &seen.evidence[repo], &mut plan) {
+        if let Err(error) = branches(node, repo, &seen.evidence[repo], &seen.launches, &mut plan) {
             plan.entries.push(entry(
                 "repositories",
                 repo.clone(),
@@ -665,7 +824,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
             ));
         }
     }
-    idle(node, now, &seen, &workspaces, &closing, &mut plan)?;
+    idle(node, now, &seen, &closing, &mut plan)?;
     if scope == Scope::Sweep {
         return Ok(plan);
     }
@@ -674,7 +833,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     Ok(plan)
 }
 
-/// The classes the sweep never applies: expired jobs, stale registrations, disk, and processes.
+/// The classes the sweep never applies: expired jobs, disk, and processes.
 fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result<()> {
     for job in crate::jobs::list(node.ledger)? {
         if job.ended_ms.is_some_and(|t| now.saturating_sub(t) > DAY) {
@@ -697,16 +856,6 @@ fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result
         .ledger
         .read::<Vec<Tree>>("worktrees.json")?
         .unwrap_or_default();
-    for tree in &owned {
-        if !Path::new(&tree.path).exists() {
-            plan.entries.push(entry(
-                "worktrees",
-                tree.path.clone(),
-                "missing registered worktree; drops the stale registration".into(),
-                true,
-            ));
-        }
-    }
     disk(node, &owned, plan)?;
     processes(node.shell, &seen.panes, plan)
 }
@@ -874,12 +1023,16 @@ fn branches(
     node: &Node<'_>,
     repo: &str,
     evidence: &crate::loss::Evidence,
+    launches: &crate::launch::Survey,
     plan: &mut Plan,
 ) -> Result<()> {
     let shell = node.shell;
-    let pending = crate::prepare::pending_trees(node.ledger)?;
-    let checked_out: BTreeSet<String> =
-        listed(shell, repo)?.into_iter().map(|t| t.branch).collect();
+    let pending = crate::prepare::pending_trees(node.ledger, launches)?;
+    // Git keeps a prunable worktree's branch checked out until the entry is pruned.
+    let checked_out: BTreeSet<String> = porcelain(shell, repo)?
+        .into_iter()
+        .map(|(t, _)| t.branch)
+        .collect();
     let base = crate::integration::base(shell, repo)?;
     let default = base
         .strip_prefix("refs/remotes/origin/")
@@ -915,14 +1068,20 @@ fn branches(
     });
     for (&(head, _, branch), found) in candidates.iter().zip(found) {
         let found = found?;
-        let held = pending
-            .iter()
-            .any(|tree| crate::worktree::same(&tree.repo, repo) && tree.branch == branch);
+        let handoff = crate::done::list(node.ledger)?.iter().any(|m| {
+            m.branch
+                .as_ref()
+                .is_some_and(|b| crate::worktree::same(&b.repo, repo) && b.name == branch)
+        });
+        let held = (handoff && !found.landed())
+            || pending
+                .iter()
+                .any(|tree| crate::worktree::same(&tree.repo, repo) && tree.branch == branch);
         let detail = format!(
             "{}{}",
             found.detail(),
             if held {
-                "; about to be used by a pending preparation"
+                "; retained for handoff or pending preparation"
             } else {
                 ""
             }
@@ -941,7 +1100,7 @@ fn branches(
 }
 
 /// The single shell rule for prune and sweep. Launch ownership is checked before other
-/// reasons so a replaced terminal or an unresolved successful start cannot fall through.
+/// reasons so unresolved ownership cannot fall through. Obsolete terminals do not own panes.
 fn idle_shell(
     node: &Node<'_>,
     pane: &Pane,
@@ -1078,14 +1237,7 @@ fn idle_panes(node: &Node<'_>, now: u64, seen: &Seen) -> Result<BTreeMap<String,
 
 /// Idle panes, and workspaces whose every pane is idle. A workspace closes as one entry; the
 /// caller's workspace and those a worktree removal closes are not entries.
-fn idle(
-    node: &Node<'_>,
-    now: u64,
-    seen: &Seen,
-    workspaces: &[Workspace],
-    closing: &Closing,
-    plan: &mut Plan,
-) -> Result<()> {
+fn idle(node: &Node<'_>, now: u64, seen: &Seen, closing: &Closing, plan: &mut Plan) -> Result<()> {
     let panes = &seen.panes;
     let idle = idle_panes(node, now, seen)?;
     // Final launches close through recovery, never a whole-workspace close that skips locks.
@@ -1114,7 +1266,8 @@ fn idle(
         if !whole(workspace) {
             continue;
         }
-        let label = workspaces
+        let label = seen
+            .workspaces
             .iter()
             .find(|w| w.workspace_id == *workspace)
             .map_or("", |w| w.label.as_str());
@@ -1123,11 +1276,15 @@ fn idle(
             .map(|p| format!("{} {}", p.pane_id, idle[&p.pane_id]))
             .collect::<Vec<_>>()
             .join("; ");
+        let hold = workspace_group_hold(&seen.workspaces, workspace);
         plan.entries.push(entry(
             "workspaces",
             (*workspace).into(),
-            format!("{label}: {detail}"),
-            true,
+            match &hold {
+                Some(reason) => format!("{label}: {detail}; {reason}"),
+                None => format!("{label}: {detail}"),
+            },
+            hold.is_none(),
         ));
     }
     for (pane, detail) in &idle {
@@ -1140,8 +1297,16 @@ fn idle(
         {
             continue;
         }
-        plan.entries
-            .push(entry("panes", pane.clone(), detail.clone(), true));
+        let hold = seen.pane_group_hold(pane);
+        plan.entries.push(entry(
+            "panes",
+            pane.clone(),
+            match &hold {
+                Some(reason) => format!("{detail}; {reason}"),
+                None => detail.clone(),
+            },
+            hold.is_none(),
+        ));
     }
     Ok(())
 }
@@ -1224,6 +1389,42 @@ fn pane_holds(usage: &Usage, seen: &Seen, decider: Decider) -> Vec<String> {
     held
 }
 
+/// A shell in the checkout that the host snapshot reports idle for less than the shell rule's
+/// age is still in use. `place` marks its preparation used at once, so a worktree it just made
+/// holds only such a shell, and removal would race the owner's first commands. A shell with no
+/// reported age is not held: that is the existing rule.
+fn young_shells(node: &Node<'_>, usage: &Usage) -> Result<Vec<String>> {
+    let now = crate::ledger::now_ms();
+    let Some(snapshot) = node
+        .ledger
+        .read::<Snapshot>("host.json")?
+        .filter(|s| s.fresh(now))
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(usage
+        .holders
+        .iter()
+        .filter(|p| p.agent.is_none())
+        .filter(|p| {
+            snapshot
+                .probe
+                .panes
+                .iter()
+                .find(|s| s.pane_id == p.pane_id && s.idle_shell)
+                .and_then(|s| s.idle_since_ms)
+                .is_some_and(|since| now.saturating_sub(since) < crate::watchdog::IDLE_SHELL)
+        })
+        .map(|p| {
+            format!(
+                "{} is a shell idle for less than {}",
+                p.pane_id,
+                crate::watchdog::age(crate::watchdog::IDLE_SHELL)
+            )
+        })
+        .collect())
+}
+
 /// Holds are independent of loss and identical in both scopes.
 fn held(
     node: &Node<'_>,
@@ -1235,6 +1436,9 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = pane_holds(usage, seen, decider);
+    if matches!(decider, Decider::Cleanup) {
+        held.extend(young_shells(node, usage)?);
+    }
     if usage
         .holders
         .iter()
@@ -1271,15 +1475,14 @@ fn held(
                 i.id, i.pane
             )
         }));
-    } else if !loss.landed() {
-        if matches!(
+    } else if !loss.landed()
+        && matches!(
             decider,
             Decider::Close {
-                guard: crate::close::Guard::Reader | crate::close::Guard::Writer
+                guard: crate::close::Guard::Clean
             }
-        ) {
-            held.push("not landed by its owner".into());
-        }
+        )
+    {
         for item in items
             .iter()
             .filter(|i| seen.panes.iter().any(|p| p.pane_id == i.owner_pane))
@@ -1287,7 +1490,7 @@ fn held(
             held.push(format!("not landed by its owner {}", item.owner_pane));
         }
     }
-    if crate::prepare::pending_trees(node.ledger)?
+    if crate::prepare::pending_trees(node.ledger, &seen.launches)?
         .iter()
         .any(|pending| crate::worktree::same(&pending.path, &tree.path))
         || seen
@@ -1402,24 +1605,112 @@ fn disposition(node: &Node<'_>, tree: &Tree, seen: &Seen) -> Result<Disposition>
     })
 }
 
-fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss::Evidence)> {
+/// What one planned entry did when no error stopped it.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    /// The entry was removed, closed, or reported.
+    Done(String),
+    /// The recheck found that the state changed since the plan: the checkout is now dirty,
+    /// held, or not landed, or the pane is now busy. The entry stays. This is the safeguard
+    /// working, not a failure. A changed or missing identity, a command error, and unreadable
+    /// evidence are errors instead.
+    Skipped(String),
+}
+
+/// Another actor removed `tree` after this pass listed it: a fresh listing no longer has it and
+/// its path is absent. The removal goal holds. A path that Git no longer lists but that still
+/// exists is not gone, because it may hold content. A failed listing proves nothing.
+fn gone(shell: &dyn Shell, tree: &Tree) -> bool {
+    repository_trees(shell, &tree.repo)
+        .is_ok_and(|trees| !trees.iter().any(|t| t.path == tree.path))
+        && missing(&tree.path)
+}
+
+/// A Git error inside a listed worktree that has since gone is the race, not a failure:
+/// `None` then. Any other error stays an error.
+fn unless_gone<T>(shell: &dyn Shell, tree: &Tree, result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(_) if gone(shell, tree) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The survey's entry for a worktree that went during the survey: the same registration drop
+/// that a later survey plans for a missing registered worktree. An unregistered one needs no
+/// entry.
+fn vanished(node: &Node<'_>, tree: &Tree) -> Option<Entry> {
+    let recorded: Vec<Tree> = node
+        .ledger
+        .read("worktrees.json")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    recorded
+        .into_iter()
+        .find(|t| crate::worktree::same(&t.path, &tree.path))
+        .map(|t| {
+            entry(
+                "worktrees",
+                t.path,
+                "removed during the survey; drops the stale registration".into(),
+                true,
+            )
+        })
+}
+
+/// The apply-time recheck of a planned worktree.
+enum Recheck {
+    Removable(Usage, crate::loss::Evidence),
+    /// The refusal and its reason, as `refuse <path>: <detail>`.
+    Refused(String),
+    /// Another actor removed it after the survey: Git no longer lists it and its path is
+    /// absent. A path that Git no longer lists but that still exists is refused, because it
+    /// may hold content.
+    Gone,
+}
+
+fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
     let current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
-        .find(|t| t.path == planned.path)
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "refuse {}: worktree identity disappeared",
-                planned.path
-            ))
-        })?;
-    let repo = crate::prepare::main_checkout(node.shell, &current.path)?;
-    if current != *planned
+        .find(|t| t.path == planned.path);
+    if current.is_none() && missing(&planned.path) {
+        return Ok(Recheck::Gone);
+    }
+    // Git lost it after the survey: the next survey holds it; this pass touches nothing.
+    let reason = unlinked_reason(planned, current.as_ref().map(|_| false));
+    let (Some(current), None) = (current, reason) else {
+        return Err(Error::Invalid(format!(
+            "refuse {}: {}; directory remains",
+            planned.path,
+            reason.unwrap_or_default()
+        )));
+    };
+    let Some(repo) = unless_gone(
+        node.shell,
+        planned,
+        crate::prepare::main_checkout(node.shell, &current.path),
+    )?
+    else {
+        return Ok(Recheck::Gone);
+    };
+    if current.repo != planned.repo
+        || current.path != planned.path
+        || current.branch != planned.branch
         || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
         || current.head.is_empty()
     {
         return Err(Error::Invalid(format!(
             "refuse {}: worktree identity changed",
             planned.path
+        )));
+    }
+    // A new commit on the same branch is live work, like "not landed": a skip that the next
+    // survey re-plans, not an identity change.
+    if current.head != planned.head {
+        return Ok(Recheck::Refused(format!(
+            "refuse {}: HEAD moved since the survey ({} -> {})",
+            planned.path, planned.head, current.head
         )));
     }
     let evidence = crate::loss::Evidence::fetch(node.shell, &current.repo);
@@ -1431,9 +1722,12 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss:
         process_cwds(node.shell),
         BTreeMap::from([(current.repo.clone(), evidence)]),
     )?;
-    let found = disposition(node, &current, &seen)?;
+    // Another actor can remove it between this listing and the checks inside it.
+    let Some(found) = unless_gone(node.shell, planned, disposition(node, &current, &seen))? else {
+        return Ok(Recheck::Gone);
+    };
     if !found.removable {
-        return Err(Error::Invalid(format!(
+        return Ok(Recheck::Refused(format!(
             "refuse {}: {}",
             current.path, found.detail
         )));
@@ -1443,20 +1737,31 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss:
         .into_values()
         .next()
         .ok_or_else(|| Error::Invalid("missing loss evidence".into()))?;
-    Ok((found.usage, evidence))
+    Ok(Recheck::Removable(found.usage, evidence))
 }
 
 /// Drop a removed worktree's registration. Its repository stays registered.
 pub fn forget(ledger: &Ledger, path: &str) -> Result<()> {
     ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
-        trees.retain(|t| t.path != path);
+        trees.retain(|t| !crate::worktree::same(&t.path, path));
         ledger.write("worktrees.json", &trees)
     })
 }
 
-fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
-    let (held, evidence) = validate_tree(node, tree)?;
+fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
+    let (held, evidence) = match validate_tree(node, tree)? {
+        Recheck::Removable(held, evidence) => (held, evidence),
+        Recheck::Refused(reason) => return Ok(Outcome::Skipped(reason)),
+        Recheck::Gone => {
+            // Another actor removed it after the survey. The goal holds; reconcile the record.
+            drop_registration(node, &tree.path)?;
+            return Ok(Outcome::Done(format!(
+                "{} was already removed; dropped its registration",
+                tree.path
+            )));
+        }
+    };
     let linked = crate::worktree::Linked {
         checkout: tree.repo.clone().into(),
         path: tree.path.clone(),
@@ -1497,7 +1802,7 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         .map(|p| p.pane_id.as_str())
         .chain(held.workspace.as_deref())
         .collect::<Vec<_>>();
-    Ok(format!(
+    Ok(Outcome::Done(format!(
         "removed {}{}{}{}",
         tree.path,
         if closed.is_empty() {
@@ -1513,18 +1818,39 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         removed
             .anchor_closed
             .map_or(String::new(), |anchor| format!("; closed anchor {anchor}"))
-    ))
+    )))
+}
+
+fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
+    node.ledger.with_lock("repositories", || {
+        node.ledger.with_lock("worktrees", || {
+            if !missing(repo) {
+                return Err(Error::Invalid(format!(
+                    "refuse {repo}: the repository is no longer missing"
+                )));
+            }
+            let mut repos: BTreeSet<String> =
+                node.ledger.read("repositories.json")?.unwrap_or_default();
+            let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
+            repos.remove(repo);
+            // An existing worktree may still hold content even when its main checkout is gone.
+            trees.retain(|tree| tree.repo != repo || !missing(&tree.path));
+            node.ledger.write("worktrees.json", &trees)?;
+            node.ledger.write("repositories.json", &repos)
+        })
+    })?;
+    Ok(format!("dropped stale repository registration {repo}"))
 }
 
 fn drop_registration(node: &Node<'_>, path: &str) -> Result<String> {
     node.ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-        if Path::new(path).exists() {
+        if !missing(path) {
             return Err(Error::Invalid(format!(
-                "refuse {path}: the worktree exists again"
+                "refuse {path}: the worktree is no longer missing"
             )));
         }
-        trees.retain(|t| t.path != path);
+        trees.retain(|t| !crate::worktree::same(&t.path, path));
         node.ledger.write("worktrees.json", &trees)
     })?;
     Ok(format!("dropped the stale registration of {path}"))
@@ -1550,7 +1876,7 @@ fn remove_job(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
 }
 
 /// Delete a branch the plan found integrated or pushed, at the planned commit.
-fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
+fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<Outcome> {
     let reference = format!("refs/heads/{}", tree.branch);
     let evidence = crate::loss::Evidence::fetch(shell, &tree.repo);
     if let Some(warning) = &evidence.warning {
@@ -1565,7 +1891,7 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
     }
     let loss = evidence.assess(shell, &reference, None)?;
     if !loss.loses_nothing() {
-        return Err(Error::Invalid(format!(
+        return Ok(Outcome::Skipped(format!(
             "refuse {}: {}",
             tree.branch,
             loss.detail()
@@ -1580,25 +1906,54 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
             out.stderr.trim()
         )));
     }
-    Ok(format!("deleted branch {} in {}", tree.branch, tree.repo))
+    Ok(Outcome::Done(format!(
+        "deleted branch {} in {}",
+        tree.branch, tree.repo
+    )))
+}
+
+/// A failed action keeps its target identity for recipient routing.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Failure {
+    pub entry: Entry,
+    pub detail: String,
 }
 
 /// What prune did. Each entry is independent, so one failure does not stop the others.
+/// `skipped` lists entries whose apply-time recheck refused them because their state changed
+/// after the plan; they stay, and they are not failures.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Applied {
     pub results: Vec<String>,
     pub failures: Vec<String>,
     #[serde(default)]
+    pub skipped: Vec<String>,
+    /// Preserve the target identity for recipient routing; strings remain the status API.
+    #[serde(default)]
+    pub failure_entries: Vec<Failure>,
+    #[serde(default)]
     pub repositories: Vec<Entry>,
     #[serde(default)]
     pub landed_dirty: Vec<Entry>,
+    /// Worktrees held because Git can no longer remove them while their directories remain.
+    #[serde(default)]
+    pub unlinked: Vec<Entry>,
 }
 
 impl Applied {
+    fn failed(&mut self, entry: &Entry, detail: String) {
+        self.failures.push(detail.clone());
+        self.failure_entries.push(Failure {
+            entry: entry.clone(),
+            detail,
+        });
+    }
+
     pub fn render(&self) -> String {
         self.results
             .iter()
             .cloned()
+            .chain(self.skipped.iter().map(|s| format!("skipped: {s}")))
             .chain(self.failures.iter().map(|f| format!("failed: {f}")))
             .map(|line| line + "\n")
             .collect()
@@ -1610,32 +1965,57 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
     // A remote plan is input, not authority: rebuild the candidate set on this host.
     let actual = doctor(node, now)?;
     for requested in &plan.entries {
-        match apply_one(node, &actual, requested, now) {
-            Ok(result) => applied.results.push(result),
-            Err(e) => applied.failures.push(e.to_string()),
-        }
+        applied.record(requested, apply_one(node, &actual, requested, now));
     }
     Ok(applied)
 }
 
+impl Applied {
+    fn record(&mut self, entry: &Entry, outcome: Result<Outcome>) {
+        match outcome {
+            Ok(Outcome::Done(result)) => self.results.push(result),
+            Ok(Outcome::Skipped(reason)) => self.skipped.push(reason),
+            Err(e) => self.failed(entry, e.to_string()),
+        }
+    }
+}
+
 /// The classes the sweep applies. Everything else waits for `prune`.
-pub const SWEPT: [&str; 4] = ["worktrees", "branches", "workspaces", "panes"];
+pub const SWEPT: [&str; 5] = [
+    "worktrees",
+    "branches",
+    "workspaces",
+    "panes",
+    "repositories",
+];
 
 /// The `serve` sweep: survey in `Sweep` scope and apply each removable entry with the same
 /// checks as `prune`. Each entry is independent, so one failure does not stop the others.
 pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
     let plan = survey(node, Scope::Sweep, now)?;
+    Ok(apply_survey(node, &plan, now))
+}
+
+/// Apply each removable entry of a sweep survey. Each removal rechecks its entry first, because
+/// live work can change a checkout after the survey.
+pub(crate) fn apply_survey(node: &Node<'_>, plan: &Plan, now: u64) -> Applied {
     let mut applied = Applied {
         repositories: plan
             .entries
             .iter()
-            .filter(|e| e.class == "repositories")
+            .filter(|e| e.class == "repositories" && !e.removable)
             .cloned()
             .collect(),
         landed_dirty: plan
             .entries
             .iter()
             .filter(|e| e.kind.as_deref() == Some("landed_dirty"))
+            .cloned()
+            .collect(),
+        unlinked: plan
+            .entries
+            .iter()
+            .filter(|e| e.kind.as_deref() == Some(UNLINKED))
             .cloned()
             .collect(),
         ..Applied::default()
@@ -1645,104 +2025,141 @@ pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
         .iter()
         .filter(|e| e.removable && SWEPT.contains(&e.class.as_str()))
     {
-        match apply_one(node, &plan, entry, now) {
-            Ok(result) => applied.results.push(result),
-            Err(e) => applied.failures.push(e.to_string()),
-        }
+        applied.record(entry, apply_one(node, plan, entry, now));
     }
-    Ok(applied)
+    applied
 }
 
-fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<String> {
+fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<Outcome> {
     if matches!(requested.class.as_str(), "disk" | "processes") {
-        return Ok(format!("{} {}: report only", requested.class, requested.id));
+        return Ok(Outcome::Done(format!(
+            "{} {}: report only",
+            requested.class, requested.id
+        )));
     }
     // A refused entry stays: the plan shows why, and prune removes only eligible entries.
     if !requested.removable {
-        return Ok(format!("{} {}: kept", requested.class, requested.id));
+        return Ok(Outcome::Done(format!(
+            "{} {}: kept",
+            requested.class, requested.id
+        )));
     }
-    let candidate = actual
+    let same = |e: &&Entry| e.class == requested.class && e.id == requested.id;
+    let Some(current) = actual
         .entries
         .iter()
-        .find(|e| e.class == requested.class && e.id == requested.id && e.removable)
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "refuse {} {}: no longer safe to remove",
+        .filter(same)
+        .find(|e| e.removable)
+        .or_else(|| actual.entries.iter().find(same))
+    else {
+        // The survey lists panes and workspaces only while they are idle: absence means busy.
+        if matches!(requested.class.as_str(), "panes" | "workspaces") {
+            return Ok(Outcome::Skipped(format!(
+                "refuse {} {}: no longer safe to remove: no longer listed as idle",
                 requested.class, requested.id
-            ))
-        })?;
-    if candidate.tree != requested.tree {
+            )));
+        }
+        return Err(Error::Invalid(format!(
+            "refuse {} {}: no longer in the survey",
+            requested.class, requested.id
+        )));
+    };
+    if current.tree != requested.tree {
         return Err(Error::Invalid(format!(
             "refuse {}: planned worktree identity changed",
             requested.id
         )));
     }
+    // The fresh survey refuses it now: its state changed after the plan.
+    if !current.removable {
+        return Ok(Outcome::Skipped(format!(
+            "refuse {} {}: no longer safe to remove: {}",
+            requested.class, requested.id, current.detail
+        )));
+    }
+    let candidate = current;
     match candidate.class.as_str() {
         "worktrees" => match &requested.tree {
             Some(tree) => remove_tree(node, tree),
-            None => drop_registration(node, &candidate.id),
+            None => drop_registration(node, &candidate.id).map(Outcome::Done),
         },
         "branches" => match &requested.tree {
             Some(tree) => delete_branch(node.shell, tree),
             None => Err(Error::Invalid("a branch entry has no branch".into())),
         },
-        "workspaces" => {
-            let seen = Seen::load(node, None, BTreeMap::new())?;
-            let idle = idle_panes(node, now, &seen)?;
-            for pane in seen
-                .panes
-                .iter()
-                .filter(|p| p.workspace_id.as_deref() == Some(candidate.id.as_str()))
-            {
-                if !idle.contains_key(&pane.pane_id)
-                    || crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?
-                        == crate::launch::PaneLaunch::Final
-                {
-                    return Err(Error::Invalid(format!(
-                        "refuse {}: workspace is no longer idle",
-                        candidate.id
-                    )));
-                }
-            }
-            node.shell.run_ok(
-                "herdr",
-                &["workspace".into(), "close".into(), candidate.id.clone()],
-            )?;
-            Ok(format!("closed workspace {}", candidate.id))
-        }
-        "panes" => {
-            let seen = Seen::load(node, None, BTreeMap::new())?;
-            if !idle_panes(node, now, &seen)?.contains_key(&candidate.id) {
-                return Err(Error::Invalid(format!(
-                    "refuse {}: pane is no longer idle",
-                    candidate.id
-                )));
-            }
-            if crate::launch::close_unfinished(node.ledger, node.shell, &candidate.id)? {
-                return Ok(format!("closed pane {}", candidate.id));
-            }
-            let agents = crate::probe::agent_list(node.shell)?;
-            let idle = if agents.iter().any(|a| a.pane == candidate.id) {
-                crate::done::finished(node.ledger, &agents)?.contains(&candidate.id)
-            } else {
-                crate::probe::foreground(node.shell, &candidate.id)?.is_none()
-            };
-            if !idle {
-                return Err(Error::Invalid(format!(
-                    "refuse {}: pane is busy, or its agent has not called done",
-                    candidate.id
-                )));
-            }
-            node.shell.run_ok(
-                "herdr",
-                &["pane".into(), "close".into(), candidate.id.clone()],
-            )?;
-            Ok(format!("closed pane {}", candidate.id))
-        }
-        "jobs" => remove_job(node, &candidate.id, now),
-        "targets" => remove_target(&candidate.id),
+        "workspaces" => close_workspace(node, &candidate.id, now),
+        "panes" => close_pane(node, &candidate.id, now),
+        "repositories" => drop_repository(node, &candidate.id).map(Outcome::Done),
+        "jobs" => remove_job(node, &candidate.id, now).map(Outcome::Done),
+        "targets" => remove_target(&candidate.id).map(Outcome::Done),
         _ => Err(Error::Invalid("unknown cleanup class".into())),
     }
+}
+
+/// Re-check a planned workspace close against a fresh survey under the cleanup lock.
+fn close_workspace(node: &Node<'_>, id: &str, now: u64) -> Result<Outcome> {
+    let seen = Seen::load(node, None, BTreeMap::new())?;
+    if let Some(reason) = workspace_group_hold(&seen.workspaces, id) {
+        return Ok(Outcome::Skipped(format!("refuse {id}: {reason}")));
+    }
+    let idle = idle_panes(node, now, &seen)?;
+    for pane in seen
+        .panes
+        .iter()
+        .filter(|p| p.workspace_id.as_deref() == Some(id))
+    {
+        if !idle.contains_key(&pane.pane_id)
+            || crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?
+                == crate::launch::PaneLaunch::Final
+        {
+            return Ok(Outcome::Skipped(format!(
+                "refuse {id}: workspace is no longer idle"
+            )));
+        }
+    }
+    node.shell
+        .run_ok("herdr", &["workspace".into(), "close".into(), id.into()])?;
+    Ok(Outcome::Done(format!("closed workspace {id}")))
+}
+
+/// Re-check a planned pane close against a fresh survey under the cleanup lock.
+fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<Outcome> {
+    let seen = Seen::load(node, None, BTreeMap::new())?;
+    if let Some(reason) = seen.pane_group_hold(id) {
+        return Ok(Outcome::Skipped(format!("refuse {id}: {reason}")));
+    }
+    if !idle_panes(node, now, &seen)?.contains_key(id) {
+        return Ok(Outcome::Skipped(format!(
+            "refuse {id}: pane is no longer idle"
+        )));
+    }
+    match crate::launch::final_pane(node.ledger, node.shell, id)? {
+        crate::launch::PaneLaunch::Final
+            if crate::launch::close_unfinished(node.ledger, node.shell, id)? =>
+        {
+            return Ok(Outcome::Done(format!("closed pane {id}")));
+        }
+        crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved => {
+            return Err(Error::Invalid(format!(
+                "refuse {id}: unresolved launch ownership"
+            )));
+        }
+        _ => (),
+    }
+    let agents = crate::probe::agent_list(node.shell)?;
+    let idle = if agents.iter().any(|a| a.pane == id) {
+        crate::done::finished(node.ledger, &agents)?.contains(id)
+    } else {
+        crate::probe::foreground(node.shell, id)?.is_none()
+    };
+    if !idle {
+        return Ok(Outcome::Skipped(format!(
+            "refuse {id}: pane is busy, or its agent has not called done"
+        )));
+    }
+    node.shell
+        .run_ok("herdr", &["pane".into(), "close".into(), id.into()])?;
+    Ok(Outcome::Done(format!("closed pane {id}")))
 }
 
 pub fn render(plan: &Plan) -> String {
@@ -1770,4 +2187,603 @@ pub fn render(plan: &Plan) -> String {
         );
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::Fake;
+    use serde_json::json;
+
+    struct Rig {
+        shell: Fake,
+        ledger: Ledger,
+        cleanup: crate::config::Cleanup,
+    }
+
+    impl Rig {
+        fn new(workspaces: serde_json::Value) -> Self {
+            let mut response = json!({"result":{}});
+            response["result"]["workspaces"] = workspaces;
+            let rig = Self {
+                shell: Fake::new(),
+                ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+                cleanup: crate::config::Cleanup::default(),
+            };
+            rig.shell
+                .on("herdr workspace list", &response.to_string())
+                .on("herdr agent list", r#"{"result":{"agents":[]}}"#);
+            rig.panes(&[("wVR:p1", "wVR", true)]);
+            rig
+        }
+
+        fn node(&self) -> Node<'_> {
+            Node {
+                shell: &self.shell,
+                ledger: &self.ledger,
+                thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+                home: "/",
+                cleanup: &self.cleanup,
+            }
+        }
+
+        fn panes(&self, panes: &[(&str, &str, bool)]) {
+            let panes: Vec<_> = panes.iter().map(|(id, workspace, idle)| {
+                self.shell.on(
+                    &format!("herdr pane process-info --pane {id}"),
+                    if *idle { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[]}}}"# }
+                    else { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[{"pid":2,"name":"pi"}]}}}"# },
+                );
+                json!({"pane_id":id,"workspace_id":workspace,"idle_shell":idle,"idle_since_ms":1})
+            }).collect();
+            self.shell.on(
+                "herdr pane list",
+                &json!({"result":{"panes":panes}}).to_string(),
+            );
+            let snapshot = Snapshot {
+                sampled_ms: 2_000_000,
+                probe: crate::probe::Probe {
+                    host: "local".into(),
+                    label: "local".into(),
+                    load1: 0.0,
+                    cores: 1,
+                    cpu_ticks: None,
+                    busy: None,
+                    memory: crate::probe::Memory::default(),
+                    disk_free_percent: 90.0,
+                    agents: crate::probe::AgentCounts::default(),
+                    agent_panes: vec![],
+                    reservations: vec![],
+                    panes: serde_json::from_value(json!(panes)).unwrap(),
+                },
+                jobs: vec![],
+            };
+            self.ledger.write("host.json", &snapshot).unwrap();
+        }
+
+        fn plan(&self) -> Plan {
+            let node = self.node();
+            let seen = Seen::load(&node, None, BTreeMap::new()).unwrap();
+            let mut plan = Plan::default();
+            idle(&node, 2_000_000, &seen, &Closing::default(), &mut plan).unwrap();
+            plan
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.ledger.dir);
+        }
+    }
+
+    fn workspace(id: &str, linked: bool) -> serde_json::Value {
+        json!({"workspace_id":id,"label":"jalgpall","worktree":{
+            "repo_root":"/repo","repo_key":"/repo/.git","is_linked_worktree":linked
+        }})
+    }
+
+    #[test]
+    fn missing_remembered_repository_is_removable_but_configuration_is_not() {
+        let mut rig = Rig::new(json!([]));
+        let missing = rig.ledger.dir.join("missing").display().to_string();
+        remember(
+            &rig.ledger,
+            Tree {
+                repo: missing.clone(),
+                path: format!("{missing}/tree"),
+                branch: "feature".into(),
+                head: String::new(),
+            },
+        )
+        .unwrap();
+        rig.cleanup.repositories.push(missing.clone());
+        let mut plan = Plan::default();
+        let repos = repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        assert!(!repos.contains(&missing));
+        let stale = plan
+            .entries
+            .iter()
+            .find(|e| e.class == "repositories" && e.id == missing && e.removable)
+            .unwrap();
+        assert!(plan.entries.iter().any(|e| e.class == "repositories"
+            && e.id == missing
+            && !e.removable
+            && e.detail.contains("cleanup.repositories")));
+        // Surveying must not change registrations; only applying the candidate may do so.
+        assert_eq!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap(),
+            BTreeSet::from([missing.clone()])
+        );
+        apply_one(&rig.node(), &plan, stale, 100).unwrap();
+        assert!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [] as [Tree; 0]
+        );
+        let mut next = Plan::default();
+        repositories(&rig.node(), &[], &[], &mut next).unwrap();
+        let configured: Vec<_> = next.entries.iter().filter(|e| e.id == missing).collect();
+        assert_eq!(configured.len(), 1);
+        assert!(!configured[0].removable);
+        assert_eq!(rig.cleanup.repositories, [missing]);
+    }
+
+    #[test]
+    fn sweep_forgets_missing_registrations_but_keeps_configured_and_discovered_warnings() {
+        let mut rig = Rig::new(json!([]));
+        rig.panes(&[]);
+        let repo = rig
+            .ledger
+            .dir
+            .join("deleted-fixture/repo")
+            .display()
+            .to_string();
+        let tree = Tree {
+            repo: repo.clone(),
+            path: format!("{repo}/tree"),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree).unwrap();
+        rig.cleanup.repositories.push(repo.clone());
+        rig.shell
+            .on("df -Pk /", "FS 1000 500 400 60% /\n")
+            .on("ps -axo pid=,ppid=,pcpu=,comm=", "")
+            .on_output(
+                &format!("git -C {repo} rev-parse --path-format=absolute --git-common-dir"),
+                crate::shell::Output {
+                    status: 128,
+                    stdout: String::new(),
+                    stderr: "No such file or directory".into(),
+                },
+            );
+        rig.shell.on(
+            "herdr workspace list",
+            &json!({"result":{"workspaces":[{"workspace_id":"external","worktree":{
+                "repo_root":repo,"repo_key":"external","is_linked_worktree":false
+            }}]}})
+            .to_string(),
+        );
+        let planned = doctor(&rig.node(), 100).unwrap();
+        assert!(planned.entries.iter().any(|e| e.id == repo && e.removable));
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        let applied = sweep(&rig.node(), 100).unwrap();
+        assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+        assert!(applied.results.iter().any(|result| result.contains(&repo)));
+        let warnings: Vec<_> = applied
+            .repositories
+            .iter()
+            .filter(|e| e.id == repo)
+            .collect();
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|e| !e.removable));
+        assert!(
+            warnings
+                .iter()
+                .any(|e| e.detail.contains("cleanup.repositories"))
+        );
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [] as [Tree; 0]
+        );
+        assert!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(rig.cleanup.repositories, [repo]);
+    }
+
+    #[test]
+    fn stale_registry_removal_rechecks_absence_and_keeps_other_records() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("gone").display().to_string();
+        let surviving = rig.ledger.dir.join("surviving").display().to_string();
+        std::fs::create_dir_all(&surviving).unwrap();
+        let live_tree = Tree {
+            repo: surviving.clone(),
+            path: surviving.clone(),
+            branch: "main".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, live_tree.clone()).unwrap();
+        remember(
+            &rig.ledger,
+            Tree {
+                repo: repo.clone(),
+                path: format!("{repo}/tree"),
+                branch: "feature".into(),
+                head: String::new(),
+            },
+        )
+        .unwrap();
+        let mut plan = Plan::default();
+        repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        let stale = plan.entries.iter().find(|e| e.id == repo).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_dir(&repo).unwrap();
+        apply_one(&rig.node(), &plan, stale, 100).unwrap();
+        assert_eq!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap(),
+            BTreeSet::from([surviving])
+        );
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [live_tree]
+        );
+    }
+
+    #[test]
+    fn missing_repository_does_not_forget_an_existing_worktree() {
+        let rig = Rig::new(json!([]));
+        let path = rig.ledger.dir.join("surviving-tree");
+        std::fs::create_dir_all(&path).unwrap();
+        let tree = Tree {
+            repo: rig.ledger.dir.join("gone-repo").display().to_string(),
+            path: path.display().to_string(),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        drop_repository(&rig.node(), &tree.repo).unwrap();
+        assert!(path.is_dir());
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [tree]
+        );
+    }
+
+    #[test]
+    fn unreadable_and_existing_repository_paths_are_report_only() {
+        let rig = Rig::new(json!([]));
+        let directory = rig.ledger.dir.join("directory");
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = rig.ledger.dir.join("file");
+        std::fs::write(&file, "not a checkout").unwrap();
+        let symlink = rig.ledger.dir.join("dangling");
+        std::os::unix::fs::symlink(rig.ledger.dir.join("absent"), &symlink).unwrap();
+        // ENOTDIR is not evidence that a registration is safe to forget.
+        let paths: BTreeSet<String> = [directory, file.join("child"), file, symlink]
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        rig.ledger.write("repositories.json", &paths).unwrap();
+        let mut plan = Plan::default();
+        let repos = repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        let resolved: BTreeSet<_> = paths
+            .iter()
+            .map(|path| {
+                std::fs::canonicalize(path)
+                    .map_or_else(|_| path.clone(), |p| p.display().to_string())
+            })
+            .collect();
+        assert!(resolved.is_subset(&repos));
+        readable(&rig.node(), repos, &mut plan);
+        for path in &resolved {
+            assert!(plan.entries.iter().any(|e| e.id == *path && !e.removable));
+            assert!(!plan.entries.iter().any(|e| e.id == *path && e.removable));
+        }
+        assert_eq!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap(),
+            paths
+        );
+    }
+
+    #[test]
+    fn unreadable_parent_keeps_repository_and_worktree_registrations() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let rig = Rig::new(json!([]));
+        let parent = rig.ledger.dir.join("unreadable");
+        std::fs::create_dir_all(&parent).unwrap();
+        let tree = Tree {
+            repo: parent.join("repo").display().to_string(),
+            path: parent.join("tree").display().to_string(),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::symlink_metadata(&tree.repo);
+        let mut plan = Plan::default();
+        let result = repositories(&rig.node(), &[], &[], &mut plan);
+        // Restore before assertions so the fixture can always be removed.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            denied.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(result.unwrap().contains(&tree.repo));
+        assert!(plan.entries.iter().all(|e| !e.removable));
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [tree]
+        );
+    }
+
+    #[test]
+    fn missing_worktree_registration_is_rechecked_without_removing_existing_paths() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let tree = Tree {
+            repo: repo.display().to_string(),
+            path: repo.join("tree").display().to_string(),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        let mut plan = Plan::default();
+        repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        let stale = plan.entries.iter().find(|e| e.id == tree.path).unwrap();
+        assert!(stale.removable);
+        std::fs::create_dir(&tree.path).unwrap();
+        assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            std::slice::from_ref(&tree)
+        );
+        std::fs::remove_dir(&tree.path).unwrap();
+        apply_one(&rig.node(), &plan, stale, 100).unwrap();
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [] as [Tree; 0]
+        );
+        assert!(repo.is_dir());
+    }
+
+    #[test]
+    fn planned_worktree_removed_by_another_actor_is_reconciled_not_failed() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.display().to_string();
+        let tree = Tree {
+            repo: repo.clone(),
+            path: format!("{repo}/.worktrees/tiers-case"),
+            branch: "tiers-case".into(),
+            head: "abc".into(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        // The survey planned the removal; then the worktree left Git's list before apply.
+        rig.shell.on(
+            &format!("git -C {repo} worktree list --porcelain -z"),
+            &format!("worktree {repo}\0HEAD abc\0branch refs/heads/main\0\0"),
+        );
+        let mut planned = entry("worktrees", tree.path.clone(), "no holds".into(), true);
+        planned.tree = Some(tree.clone());
+        let plan = Plan {
+            entries: vec![planned.clone()],
+        };
+        let registered = || {
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap()
+        };
+
+        // Unlisted but still on disk: it may hold content, so the refusal stays.
+        std::fs::create_dir_all(&tree.path).unwrap();
+        let refused = apply_one(&rig.node(), &plan, &planned, 100).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("worktree unregistered by git; directory remains"),
+            "{refused}"
+        );
+        assert_eq!(registered(), std::slice::from_ref(&tree));
+        assert!(Path::new(&tree.path).is_dir());
+
+        // Gone from Git and disk: the pass succeeds and forgets the record.
+        std::fs::remove_dir(&tree.path).unwrap();
+        let Outcome::Done(result) = apply_one(&rig.node(), &plan, &planned, 100).unwrap() else {
+            panic!("a vanished worktree is not a skip");
+        };
+        assert!(result.contains("already removed"), "{result}");
+        assert_eq!(registered(), [] as [Tree; 0]);
+        assert!(Path::new(&repo).is_dir());
+    }
+
+    #[test]
+    fn primary_with_open_linked_workspace_is_kept_with_its_idle_pane() {
+        let rig = Rig::new(json!([workspace("wVR", false), workspace("wVS", true)]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVS:p1", "wVS", false)]);
+        let plan = rig.plan();
+        assert_eq!(plan.entries.len(), 1);
+        let primary = &plan.entries[0];
+        assert_eq!(
+            (&*primary.class, &*primary.id, primary.removable),
+            ("workspaces", "wVR", false)
+        );
+        let rendered = render(&plan);
+        assert!(
+            rendered.contains("closing its pane would close linked workspaces wVS"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("closing its pane would close linked workspaces"));
+        assert!(rendered.contains("[report/refuse]"));
+        let calls = rig.shell.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| *c == "herdr workspace list")
+                .count(),
+            1
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("herdr worktree ") || c.contains(" close "))
+        );
+    }
+
+    #[test]
+    fn primary_without_open_group_is_still_removable() {
+        let rig = Rig::new(json!([workspace("wVR", false)]));
+        let plan = rig.plan();
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].id, "wVR");
+        assert!(plan.entries[0].removable);
+    }
+
+    #[test]
+    fn linked_workspace_closed_later_in_a_pass_releases_primary_on_next_survey() {
+        // wVR failed before the same sweep closed wVS. A checkout remaining on disk
+        // without an open workspace does not hold the group on the next survey.
+        let rig = Rig::new(json!([workspace("wVR", false), workspace("wVS", true)]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVS:p1", "wVS", true)]);
+        let first = rig.plan();
+        assert!(
+            !first
+                .entries
+                .iter()
+                .find(|e| e.id == "wVR")
+                .unwrap()
+                .removable
+        );
+        assert!(
+            first
+                .entries
+                .iter()
+                .find(|e| e.id == "wVS")
+                .unwrap()
+                .removable
+        );
+        rig.shell.on(
+            "herdr workspace list",
+            &json!({"result":{"workspaces":[workspace("wVR", false)]}}).to_string(),
+        );
+        rig.panes(&[("wVR:p1", "wVR", true)]);
+        assert!(rig.plan().entries[0].removable);
+    }
+
+    #[test]
+    fn duplicate_primary_can_close_without_closing_the_group() {
+        let rig = Rig::new(json!([
+            workspace("wVR", false),
+            workspace("wVS", true),
+            workspace("wOther", false)
+        ]));
+        assert!(rig.plan().entries[0].removable);
+    }
+
+    #[test]
+    fn group_added_after_plan_is_rechecked_before_workspace_or_last_pane_close() {
+        let rig = Rig::new(json!([workspace("wVR", false)]));
+        let plan = rig.plan();
+        rig.shell.on(
+            "herdr workspace list",
+            &json!({"result":{"workspaces":[workspace("wVR", false), workspace("wVS", true)]}})
+                .to_string(),
+        );
+        // A hold that appeared after the plan is a skip: the entry stays, and it is no failure.
+        let skipped = |outcome: Result<Outcome>| match outcome.unwrap() {
+            Outcome::Skipped(reason) => reason,
+            Outcome::Done(result) => panic!("not skipped: {result}"),
+        };
+        assert!(
+            skipped(apply_one(&rig.node(), &plan, &plan.entries[0], 2_000_000))
+                .contains("closing its pane would close linked workspaces")
+        );
+        let panes = Plan {
+            entries: vec![entry("panes", "wVR:p1".into(), String::new(), true)],
+        };
+        assert!(
+            skipped(apply_one(&rig.node(), &panes, &panes.entries[0], 2_000_000))
+                .contains("closing its pane would close linked workspaces")
+        );
+        assert!(
+            !rig.shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains(" close "))
+        );
+    }
+
+    #[test]
+    fn grouped_primary_can_still_lose_an_idle_pane_when_another_pane_is_busy() {
+        let rig = Rig::new(json!([workspace("wVR", false), workspace("wVS", true)]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVR:p2", "wVR", false)]);
+        let plan = rig.plan();
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].class, "panes");
+        assert_eq!(plan.entries[0].id, "wVR:p1");
+        assert!(plan.entries[0].removable);
+    }
 }

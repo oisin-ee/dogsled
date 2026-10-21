@@ -496,6 +496,20 @@ pub(crate) struct Attempt {
     pub result: Option<Value>,
 }
 
+/// A local preparation that returned an error never launches: `perform_locked` refuses to resume
+/// an attempt that stopped during preparation, so its hold has no owner left.
+pub(crate) fn preparation_failed(ledger: &Ledger, request_id: &str) -> Result<bool> {
+    jobs::validate_id(request_id)?;
+    Ok(ledger
+        .child("admissions")
+        .read::<Attempt>(&format!("{request_id}.json"))?
+        .is_some_and(|attempt| {
+            attempt.host.as_ref().is_some_and(Host::is_local)
+                && attempt.launch.is_none()
+                && attempt.error.is_some()
+        }))
+}
+
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
     if matches!(request.action, Action::Place) {
@@ -713,6 +727,8 @@ fn finish(
     let pane = result["pane"]
         .as_str()
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;
+    // Queued and still-launching requests have no item: only a successful receipt
+    // reaches this point. Preserve its host-clock confirmation, not admission's `now`.
     items::record(
         fleet.ledger,
         item(request, host.id.clone(), pane, &result, now)?,
@@ -753,6 +769,7 @@ fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -
         owner_pane: request.owner.clone(),
         name,
         created_ms: now,
+        launch_confirmed_ms: result["launch_confirmed_ms"].as_u64(),
         closed_ms: None,
         harness,
         role,
@@ -848,7 +865,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
 /// launch call failed. Refusals and deadlines are not retried.
 fn retryable(error: &Error) -> bool {
     matches!(
-        error,
+        error.root(),
         Error::Command { .. } | Error::Ssh { .. } | Error::Io(_)
     )
 }
@@ -881,7 +898,7 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
             // it has one; nothing types into its terminal.
             let id = format!("ticket-{}", ticket.id);
             if !crate::inbox::notify(
-                fleet.ledger,
+                fleet,
                 &reports,
                 &ticket.request.owner,
                 &id,

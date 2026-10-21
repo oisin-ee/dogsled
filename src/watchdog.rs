@@ -505,7 +505,7 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             }
             let note = note(fleet, &open, reports, now);
             crate::inbox::notify(
-                fleet.ledger,
+                fleet,
                 reports,
                 owner,
                 &format!("check-in-{now}"),

@@ -145,6 +145,155 @@ fn survey_retains_one_launch_snapshot_but_recovery_rereads_before_closing() {
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
 
+#[derive(Debug)]
+struct CurrentShell;
+
+impl Shell for CurrentShell {
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        assert_eq!(program, "herdr");
+        let value = match args
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["pane", "list"] => json!({"result":{"panes":[{
+                "pane_id":"w2:p2","terminal_id":"term_shell","cwd":"/checkout"
+            }]}}),
+            ["agent", "list"] => json!({"result":{"agents":[]}}),
+            ["pane", "process-info", "--pane", "w2:p2"] => json!({"result":{"process_info":{
+                "shell_pid":10,"foreground_process_group_id":10,
+                "foreground_processes":[{"pid":10,"name":"zsh"}]
+            }}}),
+            _ => panic!("unexpected command {args:?}"),
+        };
+        Ok(Output {
+            status: 0,
+            stdout: value.to_string(),
+            stderr: String::new(),
+        })
+    }
+}
+
+fn assert_pane_state(ledger: &Ledger, expected: PaneLaunch) {
+    let panes = crate::cleanup::current_panes(&CurrentShell).unwrap();
+    let terminals = std::collections::BTreeMap::from([("w2:p2".into(), "term_shell".into())]);
+    let survey = Survey::load(ledger, &panes, &terminals, &[]).unwrap();
+    assert_eq!(survey.pane("w2:p2"), expected);
+    assert_eq!(
+        final_pane(ledger, &CurrentShell, "w2:p2").unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn changed_terminals_release_non_started_records_but_matching_and_started_records_stay() {
+    for state in ["refused", "unconfirmed", "confirmed", "started"] {
+        for changed in [false, true] {
+            let ledger = fixture();
+            let receipts = ledger.child("launches");
+            let mut progress = receipts
+                .read::<Progress>("own.progress.json")
+                .unwrap()
+                .unwrap();
+            progress.confirmed = state == "confirmed";
+            if changed {
+                progress.terminal = Some("term_before_restore".into());
+            }
+            receipts.write("own.progress.json", &progress).unwrap();
+            match state {
+                "refused" => receipts
+                    .write(
+                        "own.json",
+                        &Receipt::Refused {
+                            failed: "agent_pane_busy".into(),
+                        },
+                    )
+                    .unwrap(),
+                "started" => receipts
+                    .write("own.json", &Receipt::Started(json!({"pane":"w2:p2"})))
+                    .unwrap(),
+                _ => (),
+            }
+            let before = std::fs::read(receipts.dir.join("own.progress.json")).unwrap();
+            let receipt = std::fs::read(receipts.dir.join("own.json")).ok();
+            let expected = if state == "started" {
+                PaneLaunch::Started
+            } else if changed {
+                PaneLaunch::Unrecorded
+            } else if state == "confirmed" {
+                PaneLaunch::Unresolved
+            } else {
+                PaneLaunch::Final
+            };
+            assert_pane_state(&ledger, expected);
+            assert_eq!(
+                std::fs::read(receipts.dir.join("own.progress.json")).unwrap(),
+                before
+            );
+            assert_eq!(std::fs::read(receipts.dir.join("own.json")).ok(), receipt);
+            std::fs::remove_dir_all(ledger.dir).unwrap();
+        }
+    }
+}
+
+#[test]
+fn obsolete_records_do_not_compete_but_multiple_remaining_owners_still_hold() {
+    for matching in [0, 1, 2] {
+        for started in [false, true] {
+            let ledger = fixture();
+            let receipts = ledger.child("launches");
+            let mut progress = receipts
+                .read::<Progress>("own.progress.json")
+                .unwrap()
+                .unwrap();
+            progress.terminal = Some("term_obsolete".into());
+            receipts.write("own.progress.json", &progress).unwrap();
+            if started {
+                receipts
+                    .write("own.json", &Receipt::Started(json!({"pane":"w2:p2"})))
+                    .unwrap();
+            }
+            progress.request.id = "obsolete".into();
+            receipts.write("obsolete.progress.json", &progress).unwrap();
+            for index in 0..matching {
+                let id = format!("matching-{index}");
+                progress.request.id = id.clone();
+                progress.terminal = Some("term_shell".into());
+                receipts
+                    .write(&format!("{id}.progress.json"), &progress)
+                    .unwrap();
+            }
+            let expected = match (matching, started) {
+                (0, false) => PaneLaunch::Unrecorded,
+                (0, true) => PaneLaunch::Started,
+                (1, false) => PaneLaunch::Final,
+                _ => PaneLaunch::Unresolved,
+            };
+            assert_pane_state(&ledger, expected);
+            // Filtering classification never weakens recovery's locked competing-record check.
+            assert!(close_unfinished(&ledger, &CurrentShell, "w2:p2").is_err());
+            std::fs::remove_dir_all(ledger.dir).unwrap();
+        }
+    }
+}
+
+#[test]
+fn missing_terminal_identity_is_not_proof_that_a_record_has_lost_ownership() {
+    for saved in [None, Some("")] {
+        let ledger = fixture();
+        let receipts = ledger.child("launches");
+        let mut progress = receipts
+            .read::<Progress>("own.progress.json")
+            .unwrap()
+            .unwrap();
+        progress.terminal = saved.map(str::to_owned);
+        receipts.write("own.progress.json", &progress).unwrap();
+        assert_pane_state(&ledger, PaneLaunch::Unresolved);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+}
+
 fn pending_paths(ledger: &Ledger, agents: &[crate::probe::Agent]) -> Result<Vec<String>> {
     Ok(Survey::load(ledger, &[], &std::collections::BTreeMap::new(), agents)?.pending_paths)
 }
@@ -278,4 +427,60 @@ fn recovery_rereads_a_changed_candidate_after_the_request_lock() {
         assert!(matches!(worker.join().unwrap(), Err(Error::Invalid(_))));
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
+}
+
+#[test]
+fn a_launch_whose_pane_is_gone_or_replaced_no_longer_holds_its_preparation() {
+    let ledger = fixture();
+    let receipts = ledger.child("launches");
+    let shell_pane = |pane: &str| crate::probe::Pane {
+        pane_id: pane.into(),
+        cwd: Some("/checkout".into()),
+        ..Default::default()
+    };
+    let consumed = |panes: &[crate::probe::Pane], terminals: &[(&str, &str)], agents: &[_]| {
+        let terminals = terminals
+            .iter()
+            .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
+            .collect();
+        Survey::load(&ledger, panes, &terminals, agents)
+            .unwrap()
+            .consumed(Some("own"), "/checkout")
+    };
+    let agent = crate::probe::Agent {
+        pane: "w2:p2".into(),
+        name: Some("worker".into()),
+        agent: Some("pi".into()),
+        terminal_id: Some("term_shell".into()),
+        ..Default::default()
+    };
+    // Its own terminal still runs in the pane: the outcome is unknown and the hold stays.
+    let live = [shell_pane("w2:p2")];
+    assert!(!consumed(&live, &[("w2:p2", "term_shell")], &[]));
+    // Gone, or replaced by another terminal: start and recovery refuse it, so it is over.
+    assert!(consumed(&[], &[], &[]));
+    assert!(consumed(&live, &[("w2:p2", "term_new")], &[]));
+    // A matching agent still running holds, whatever the snapshot says.
+    assert!(!consumed(&[], &[], std::slice::from_ref(&agent)));
+    // A launch that holds its request lock may be writing its receipt now.
+    receipts
+        .with_lock("own", || {
+            assert!(!consumed(&[], &[], &[]));
+            Ok(())
+        })
+        .unwrap();
+    // A missing saved identity proves nothing.
+    let mut progress = receipts
+        .read::<Progress>("own.progress.json")
+        .unwrap()
+        .unwrap();
+    progress.terminal = None;
+    receipts.write("own.progress.json", &progress).unwrap();
+    assert!(!consumed(&[], &[], &[]));
+    // An allocating launch has no pane yet.
+    progress.terminal = Some("term_shell".into());
+    progress.pane = None;
+    receipts.write("own.progress.json", &progress).unwrap();
+    assert!(!consumed(&[], &[], &[]));
+    std::fs::remove_dir_all(ledger.dir).unwrap();
 }
