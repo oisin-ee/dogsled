@@ -4,6 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- A cleanup recheck that finds a new commit in a planned worktree after the survey is now a skip, not a failure. Before, the pass reported `worktree identity changed` and alerted the owner, although only `head` had moved. Now the entry is skipped with `refuse <path>: HEAD moved since the survey (<old> -> <new>)`, the worktree stays, and the next survey re-plans it. A changed repository, path or branch, a different main checkout, or an empty head is still a failure. The recheck is as strict as before: a moved worktree is never removed in that pass.
 - `dogsled board --open` now docks the board in the leftmost slot of the tab, 38 cells wide, beside Herdr’s own sidebar. Before, it split the owner pane 50/50 on the right. It splits the tab’s top-left pane, swaps the new pane into that slot, and sets the split ratio over the Herdr socket. It never re-creates other panes. A new `toggle` plugin action (`dogsled board --toggle`) closes this tab’s live board or opens it. A Herdr failure is an error, with no fallback to the old split. `--open` and `--toggle` now need `HERDR_SOCKET_PATH`.
 
 ## 0.20.0 - 2026-10-21
