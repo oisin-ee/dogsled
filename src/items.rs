@@ -14,6 +14,9 @@ pub struct Item {
     pub owner_pane: String,
     pub name: Option<String>,
     pub created_ms: u64,
+    /// Successful launch confirmation, measured on `host`, not the owner's clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_confirmed_ms: Option<u64>,
     pub closed_ms: Option<u64>,
     /// What was asked for. Records from before these fields load with `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,8 +176,17 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
             let Some(probe) = &host.probe else {
                 continue;
             };
-            // Ignore a snapshot taken before creation: a newly launched pane is not missing.
-            if host.sampled_ms.is_none_or(|t| t < item.created_ms) {
+            let after_launch = if item.kind == "agent"
+                && let Some(confirmed) = item.launch_confirmed_ms
+            {
+                // Both timestamps belong to the child host. Equality cannot prove ordering.
+                host.sampled_ms.is_some_and(|sampled| sampled > confirmed)
+            } else {
+                // Old items without launch evidence keep today's creation-time rule, as do jobs.
+                host.sampled_ms
+                    .is_some_and(|sampled| sampled >= item.created_ms)
+            };
+            if !after_launch {
                 continue;
             }
             let ended = item.kind == "job"
@@ -208,6 +220,7 @@ mod tests {
         assert_eq!(items[0].pane, "w1:p1");
         assert_eq!(items[0].harness, None);
         assert_eq!(items[0].role, None);
+        assert_eq!(items[0].launch_confirmed_ms, None);
         let text = serde_json::to_string(&items[0]).unwrap();
         assert!(!text.contains("harness"), "{text}");
         std::fs::remove_dir_all(ledger.dir).unwrap();

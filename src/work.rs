@@ -675,6 +675,8 @@ fn finish(
     let pane = result["pane"]
         .as_str()
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;
+    // Queued and still-launching requests have no item: only a successful receipt
+    // reaches this point. Preserve its host-clock confirmation, not admission's `now`.
     items::record(
         fleet.ledger,
         item(request, host.id.clone(), pane, &result, now)?,
@@ -715,6 +717,7 @@ fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -
         owner_pane: request.owner.clone(),
         name,
         created_ms: now,
+        launch_confirmed_ms: result["launch_confirmed_ms"].as_u64(),
         closed_ms: None,
         harness,
         role,
