@@ -50,6 +50,19 @@ pub fn notices(
             text: format!("Cleanup repository warnings:\n{}\nCheck the repository entries in {} and {}, or cleanup.repositories in the configuration. Hand the fix to a dogsled agent: `dogsled agent --profile general --name <name> --message-file <brief>`. Name the repository and its state file entry in the brief. Do not edit the state by hand.", warnings.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("repositories.json").display(), ledger.dir.join("worktrees.json").display()),
         });
     }
+    if !report.applied.unlinked.is_empty() {
+        let holds: BTreeSet<_> = report
+            .applied
+            .unlinked
+            .iter()
+            .map(|e| format!("{}: {}", e.id, e.detail))
+            .collect();
+        notices.push(Notice {
+            key: "unlinked",
+            signature: holds.iter().map(|s| (s.clone(), None, false)).collect(),
+            text: format!("Cleanup holds worktrees that Git can no longer remove:\n{}\nThe owner decides what happens to each directory. Report it to the user; do not delete it yourself. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on it, and do not edit {} by hand.", holds.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("worktrees.json").display()),
+        });
+    }
     if report.applied.landed_dirty.is_empty() {
         return Ok(notices);
     }
