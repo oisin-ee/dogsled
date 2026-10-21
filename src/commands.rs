@@ -165,7 +165,21 @@ fn summary(host: &HostReport) -> String {
     )
 }
 
+/// The fleet brief for `status --brief`: every host, the counts, and the last pass's findings.
 pub fn brief(status: &Status) -> String {
+    let mut rows = fleet(status);
+    if let Some(sweep) = &status.sweep
+        && (!sweep.applied.failures.is_empty()
+            || !sweep.applied.repositories.is_empty()
+            || !sweep.applied.unlinked.is_empty())
+    {
+        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings, {} held worktrees. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len(), sweep.applied.unlinked.len()));
+    }
+    format!("{}\n", rows.join("\n"))
+}
+
+/// The host rows and the work counts, without cleanup findings.
+pub fn fleet(status: &Status) -> Vec<String> {
     // Keep every host even when the fleet exceeds the prompt's line budget.
     // Larger fleets share rows; no host disappears into an omitted count.
     let mut rows = vec![String::new(); status.hosts.len().min(5)];
@@ -208,14 +222,7 @@ pub fn brief(status: &Status) -> String {
             .filter(|a| a.stalled_since_ms.is_some())
             .count()
     ));
-    if let Some(sweep) = &status.sweep
-        && (!sweep.applied.failures.is_empty()
-            || !sweep.applied.repositories.is_empty()
-            || !sweep.applied.unlinked.is_empty())
-    {
-        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings, {} held worktrees. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len(), sweep.applied.unlinked.len()));
-    }
-    format!("{}\n", rows.join("\n"))
+    rows
 }
 
 fn item_lines(status: &Status, lines: &mut Vec<String>) {

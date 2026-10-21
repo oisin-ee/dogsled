@@ -38,6 +38,15 @@ pub fn launched(ledger: &Ledger, pane: &str) -> Result<bool> {
     Ok(!candidates(&ledger.child("launches"), Some(pane))?.is_empty())
 }
 
+/// Every recorded launch request on this host. Each names the pane that asked for it and the
+/// directory it started in, so a prepared worktree's launch names the agent that created it.
+pub fn requests(ledger: &Ledger) -> Result<Vec<crate::work::Launch>> {
+    Ok(candidates(&ledger.child("launches"), None)?
+        .into_iter()
+        .map(|(_, progress)| progress.request)
+        .collect())
+}
+
 fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> {
     Ok(recoverable(
         progress,
