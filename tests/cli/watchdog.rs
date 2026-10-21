@@ -70,6 +70,12 @@ case "$*" in
 esac
 "#);
     fs::create_dir_all(rig.dir.join("home/repo/tree")).unwrap();
+    // A linked worktree has a `.git` file; without one Git cannot remove it.
+    fs::write(
+        rig.dir.join("home/repo/tree/.git"),
+        "gitdir: ../.git/worktrees/tree\n",
+    )
+    .unwrap();
     rig.put("state/worktrees.json", &json!([{"repo":rig.dir.join("home/repo"),"path":rig.dir.join("home/repo/tree"),"branch":"feature"}]));
     rig
 }

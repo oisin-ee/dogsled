@@ -350,6 +350,30 @@ fn missing(path: &str) -> bool {
     std::fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// The `kind` of a worktree entry whose directory remains but that Git can no longer remove.
+pub const UNLINKED: &str = "unlinked";
+
+fn unlinked_reason(tree: &Tree, prunable: Option<bool>) -> Option<&'static str> {
+    crate::worktree::unlinked_reason(&tree.path, prunable)
+}
+
+/// A hold, never a removal: the directory may hold content that no Git check can vouch for.
+/// The owner decides; once the directory is gone, the stale-registration rule drops the record.
+fn unlinked(tree: &Tree, reason: &str) -> Entry {
+    let mut e = entry(
+        "worktrees",
+        tree.path.clone(),
+        format!(
+            "held: {reason}; directory remains: {}. Dogsled does not delete it. Check that nothing in it is needed, then move or delete the directory yourself; the next cleanup pass then drops its registration",
+            tree.path
+        ),
+        false,
+    );
+    e.kind = Some(UNLINKED.into());
+    e.tree = Some(tree.clone());
+    e
+}
+
 /// Registered and configured repositories, and those of live panes, Herdr workspaces, and the
 /// caller. Doctor does not scan home or change registrations.
 fn repositories(
@@ -459,9 +483,20 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
     Ok(listed(shell, repo)?.into_iter().skip(1).collect())
 }
 
-/// Every worktree of `repo`, the main checkout first. A detached worktree has no branch.
+/// Every working tree of `repo`, the main checkout first. A detached worktree has no branch.
+/// A prunable entry is not a working tree any more: `git worktree remove` refuses it.
 fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
+    Ok(porcelain(shell, repo)?
+        .into_iter()
+        .filter(|(_, prunable)| !prunable)
+        .map(|(tree, _)| tree)
+        .collect())
+}
+
+/// Every entry of `git worktree list`, with whether Git calls it prunable.
+fn porcelain(shell: &dyn Shell, repo: &str) -> Result<Vec<(Tree, bool)>> {
     let mut result = Vec::new();
+    let mut prunable = false;
     let output = git(shell, repo, &["worktree", "list", "--porcelain", "-z"])?;
     if !output.ok() {
         return Err(Error::Invalid(format!(
@@ -482,8 +517,10 @@ fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
             tree.head = value.into();
         } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
             tree.branch = value.into();
+        } else if field == "prunable" || field.starts_with("prunable ") {
+            prunable = true;
         } else if field.is_empty() && !tree.path.is_empty() {
-            result.push(tree.clone());
+            result.push((tree.clone(), std::mem::take(&mut prunable)));
             tree.path.clear();
             tree.branch.clear();
             tree.head.clear();
@@ -670,14 +707,37 @@ fn readable(
     let mut usable = BTreeSet::new();
     let mut trees = Vec::new();
     let mut evidence = BTreeMap::new();
+    // An unreadable registry hides no candidate: Git's list still drives removal.
+    let recorded: Vec<Tree> = node
+        .ledger
+        .read("worktrees.json")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     for repo in repos {
-        match repository_trees(node.shell, &repo) {
+        match porcelain(node.shell, &repo) {
             Ok(found) => {
-                trees.extend(
-                    found
-                        .into_iter()
-                        .filter(|tree| Path::new(&tree.path).exists()),
-                );
+                for (tree, prunable) in found.iter().skip(1) {
+                    if !Path::new(&tree.path).exists() {
+                        continue;
+                    }
+                    match unlinked_reason(tree, Some(*prunable)) {
+                        Some(reason) => plan.entries.push(unlinked(tree, reason)),
+                        None => trees.push(tree.clone()),
+                    }
+                }
+                // Dogsled made it, Git forgot it (`git worktree prune`), and its directory stays.
+                for tree in recorded.iter().filter(|t| {
+                    crate::worktree::same(&t.repo, &repo)
+                        && !missing(&t.path)
+                        && !found
+                            .iter()
+                            .any(|(f, _)| crate::worktree::same(&f.path, &t.path))
+                }) {
+                    if let Some(reason) = unlinked_reason(tree, None) {
+                        plan.entries.push(unlinked(tree, reason));
+                    }
+                }
                 let fetched = crate::loss::Evidence::fetch(node.shell, &repo);
                 if let Some(warning) = &fetched.warning {
                     plan.entries
@@ -1505,16 +1565,19 @@ fn validate_tree(
     node: &Node<'_>,
     planned: &Tree,
 ) -> Result<Option<(Usage, crate::loss::Evidence)>> {
-    let Some(current) = repository_trees(node.shell, &planned.repo)?
+    let current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
-        .find(|t| t.path == planned.path)
-    else {
-        if missing(&planned.path) {
-            return Ok(None);
-        }
+        .find(|t| t.path == planned.path);
+    if current.is_none() && missing(&planned.path) {
+        return Ok(None);
+    }
+    // Git lost it after the survey: the next survey holds it; this pass touches nothing.
+    let reason = unlinked_reason(planned, current.as_ref().map(|_| false));
+    let (Some(current), None) = (current, reason) else {
         return Err(Error::Invalid(format!(
-            "refuse {}: worktree identity disappeared",
-            planned.path
+            "refuse {}: {}; directory remains",
+            planned.path,
+            reason.unwrap_or_default()
         )));
     };
     let repo = crate::prepare::main_checkout(node.shell, &current.path)?;
@@ -1725,6 +1788,9 @@ pub struct Applied {
     pub repositories: Vec<Entry>,
     #[serde(default)]
     pub landed_dirty: Vec<Entry>,
+    /// Worktrees held because Git can no longer remove them while their directories remain.
+    #[serde(default)]
+    pub unlinked: Vec<Entry>,
 }
 
 impl Applied {
@@ -1775,6 +1841,12 @@ pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
             .entries
             .iter()
             .filter(|e| e.kind.as_deref() == Some("landed_dirty"))
+            .cloned()
+            .collect(),
+        unlinked: plan
+            .entries
+            .iter()
+            .filter(|e| e.kind.as_deref() == Some(UNLINKED))
             .cloned()
             .collect(),
         ..Applied::default()
@@ -2380,7 +2452,8 @@ mod tests {
         assert!(
             refused
                 .to_string()
-                .contains("worktree identity disappeared")
+                .contains("worktree unregistered by git; directory remains"),
+            "{refused}"
         );
         assert_eq!(registered(), std::slice::from_ref(&tree));
         assert!(Path::new(&tree.path).is_dir());

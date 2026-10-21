@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - A cleanup pass no longer fails with `worktree identity disappeared` when another actor removes a planned worktree after the survey. When Git no longer lists the worktree and its path is absent, the pass drops the registration and reports it as already removed. A path that Git no longer lists but that still exists is still refused.
+- Cleanup no longer runs `git worktree remove` on a worktree whose directory remains after Git lost it: Git does not list it (for example after `git worktree prune`), calls it prunable, or its `.git` file is gone. Before, a pass could unlock it and fail with a raw Git error such as `validation failed` or `is not a working tree`; after a prune, the survey ignored it without a word and kept its registration. Now prune and the sweep report it as an `unlinked` hold, for example `worktree unregistered by git; directory remains: <path>`, with the owner's action. Status, stderr, and the stop gate show it; the gate speaks once per set. `close` refuses it before it closes or unlocks anything. Dogsled never deletes the directory. After the owner moves or deletes it, the next pass drops the registration.
 
 ## 0.18.1 - 2026-10-21
 
