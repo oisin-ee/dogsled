@@ -686,13 +686,16 @@ mod tests {
 
     #[test]
     fn debug_file_refuses_a_symlink_and_leaves_its_target_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
         let dir = debug_dir();
+        // The target passes every fd check, so only O_NOFOLLOW can make the write refuse.
         let target = dir.join("target.log");
-        std::fs::write(&target, "").unwrap();
+        std::fs::write(&target, "sentinel\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
         let link = dir.join("link.log");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert!(write_ssh_detail(&link, "secret").is_err());
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+        assert!(write_ssh_detail(&link, "ssh peer: secret").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "sentinel\n");
     }
 
     #[test]
