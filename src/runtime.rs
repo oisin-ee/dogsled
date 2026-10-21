@@ -184,30 +184,16 @@ pub fn agent_action(
         ));
     }
     // A peer checks its own profiles.
-    let loaded = match &profile {
-        Some(profile)
-            if host.is_none_or(|h| fleet.find(h).is_ok_and(crate::hosts::Host::is_local)) =>
-        {
-            Some(crate::profiles::load(profile)?)
-        }
-        _ => None,
-    };
+    if let Some(profile) = &profile
+        && host.is_none_or(|h| fleet.find(h).is_ok_and(crate::hosts::Host::is_local))
+    {
+        crate::profiles::load(profile)?;
+    }
     if message.trim().is_empty() {
         return Err(Error::Invalid("the task is empty".into()));
     }
-    // The task goes to a file, so only the fixed part of the launch line can be too long.
-    // Refuse that now rather than after the ticket queues. The id's length is a typical one.
-    work::agent_args(
-        &kind,
-        &name,
-        &message,
-        &[],
-        &work::Files::at(
-            &fleet.ledger.child("launches").dir,
-            "r-0000000000000-00000-000",
-        ),
-        loaded.as_ref(),
-    )?;
+    // The launch line holds paths of the host that runs it, so that host checks its length
+    // (`launch::agent`, before it creates a pane). The caller's paths say nothing about a peer's.
     Ok(Action::Agent {
         kind,
         name,

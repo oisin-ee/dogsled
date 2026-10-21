@@ -192,8 +192,8 @@ fn allocate(
     let Action::Agent {
         kind,
         name,
-        message,
         profile,
+        ..
     } = &request.action
     else {
         return Err(Error::Invalid("not an agent launch".into()));
@@ -207,11 +207,11 @@ fn allocate(
     // Validate profile/argv before creating a pane. An allocating state without a
     // pane is deliberately not retried after a crash: its ownership is uncertain.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
-    // Refuse a launch line over Herdr's limit here, before any pane exists.
+    // Refuse a launch line over Herdr's limit here, on the host whose paths it holds, before
+    // any pane exists.
     work::agent_args(
         kind,
         name,
-        message,
         &seed_args(request, receipts),
         &work::Files::at(&receipts.dir, &request.id),
         profile.as_ref(),
@@ -323,7 +323,6 @@ fn start_or_reconcile(
     args.extend(work::agent_args(
         kind,
         name,
-        message,
         &seed_flags,
         &files,
         profile.as_ref(),
