@@ -155,6 +155,105 @@ fn missing_configured_repository_warns_once_per_set_and_does_not_stop_other_clea
 }
 
 #[test]
+fn cleanup_failure_report_preserves_worktree_identity_for_notice_routing() {
+    let (rig, tree) = close_rig("stop-failure-identity");
+    rig.put(
+        "state/repositories.json",
+        &json!([rig.dir.join("home/repo")]),
+    );
+    fs::write(rig.dir.join("hook-fails"), "").unwrap();
+    gate(&rig, "w1:p1");
+    serve(&rig);
+    assert!(tree.exists());
+    let report = rig.read("state/sweep.json");
+    let failed = report["failure_entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|failed| failed["entry"]["id"] == json!(tree))
+        .unwrap();
+    assert_eq!(failed["entry"]["class"], "worktrees");
+    assert_eq!(failed["entry"]["tree"]["path"], json!(tree));
+    assert!(
+        report["failures"]
+            .as_array()
+            .unwrap()
+            .contains(&failed["detail"])
+    );
+}
+
+#[test]
+fn cleanup_notice_routes_to_item_owner_and_operator_but_not_unrelated_children() {
+    let rig = Rig::new("cleanup-notice-routing");
+    let checkout = rig.dir.join("home/child-checkout");
+    fs::create_dir_all(&checkout).unwrap();
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","terminal_id":"operator"},
+            {"pane_id":"w2:p1","terminal_id":"unrelated"},
+            {"pane_id":"w3:p1","terminal_id":"owner"},
+            {"pane_id":"w4:p1","terminal_id":"worker","cwd":checkout}
+        ]}}),
+    );
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    for (id, pane) in [
+        ("unrelated", "w2:p1"),
+        ("owner", "w3:p1"),
+        ("worker", "w4:p1"),
+    ] {
+        rig.put(
+            &format!("state/launches/{id}.progress.json"),
+            &json!({
+                "request":{"id":id,"action":{"type":"agent","kind":"pi","name":id,"message":"go"},
+                    "host":"local","cwd":checkout,"owner":"w1:p1"},
+                "pane":pane,"terminal":id,"attempted":true,"confirmed":true,"result":{},"error":null
+            }),
+        );
+    }
+    rig.put(
+        "state/items.json",
+        &json!([
+            {"id":"child","kind":"agent","host":"local","pane":"w4:p1","owner_pane":"w3:p1",
+                "name":"worker","created_ms":1,"closed_ms":null}
+        ]),
+    );
+    let entry = json!({"class":"worktrees","id":checkout,"detail":"teardown refused","removable":true,
+        "tree":{"repo":rig.dir.join("home/repo"),"path":checkout,"branch":"feat/child"}});
+    rig.put(
+        "state/sweep.json",
+        &json!({"started_ms":1,"finished_ms":2,"results":[],
+        "failures":["child teardown refused","host survey failed"],
+        "failure_entries":[{"entry":entry,"detail":"child teardown refused"}],
+        "repositories":[{"class":"repositories","id":"/host/repository","detail":"cannot inspect",
+            "removable":false,"tree":null}],"landed_dirty":[]}),
+    );
+    // An unrelated child must not consume the owner's or operator's delivery history.
+    assert_eq!(gate(&rig, "w2:p1"), "");
+    assert_eq!(gate(&rig, "w4:p1"), "");
+    let owner = gate(&rig, "w3:p1");
+    assert!(owner.contains("child teardown refused"), "{owner}");
+    assert!(!owner.contains("host survey failed"), "{owner}");
+    assert!(!owner.contains("/host/repository"), "{owner}");
+    assert_eq!(gate(&rig, "w3:p1"), "");
+    let operator = gate(&rig, "w1:p1");
+    assert!(operator.contains("host survey failed"), "{operator}");
+    assert!(operator.contains("/host/repository"), "{operator}");
+    assert!(!operator.contains("child teardown refused"), "{operator}");
+    assert_eq!(gate(&rig, "w1:p1"), "");
+    // With no live owner the targeted failure falls back to the operator, not the child.
+    let mut panes = rig.read("panes.json");
+    panes["result"]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|pane| pane["pane_id"] != "w3:p1");
+    rig.put("panes.json", &panes);
+    assert_eq!(gate(&rig, "w2:p1"), "");
+    assert!(gate(&rig, "w1:p1").contains("child teardown refused"));
+    assert_eq!(gate(&rig, "w1:p1"), "");
+}
+
+#[test]
 fn landed_dirty_reaches_only_owners_in_the_same_main_repository() {
     let (rig, tree) = close_rig("stop-landed-dirty");
     let repo = rig.dir.join("home/repo");

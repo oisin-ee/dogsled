@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Cleanup failures go to the affected item’s live owner. Unowned failures and host-level repository warnings go only to operator panes, never unrelated children.
+
 ## 0.18.0 - 2026-10-21
 
 - Prune and automatic cleanup remove remembered repository and worktree registrations only when their paths are absent. Removal rechecks absence under the registry locks and deletes no checkout data. Doctor lists the removable records without changing them. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.

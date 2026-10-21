@@ -1700,11 +1700,21 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
     Ok(format!("deleted branch {} in {}", tree.branch, tree.repo))
 }
 
+/// A failed action keeps its target identity for recipient routing.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Failure {
+    pub entry: Entry,
+    pub detail: String,
+}
+
 /// What prune did. Each entry is independent, so one failure does not stop the others.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Applied {
     pub results: Vec<String>,
     pub failures: Vec<String>,
+    /// Preserve the target identity for recipient routing; strings remain the status API.
+    #[serde(default)]
+    pub failure_entries: Vec<Failure>,
     #[serde(default)]
     pub repositories: Vec<Entry>,
     #[serde(default)]
@@ -1712,6 +1722,14 @@ pub struct Applied {
 }
 
 impl Applied {
+    fn failed(&mut self, entry: &Entry, detail: String) {
+        self.failures.push(detail.clone());
+        self.failure_entries.push(Failure {
+            entry: entry.clone(),
+            detail,
+        });
+    }
+
     pub fn render(&self) -> String {
         self.results
             .iter()
@@ -1729,7 +1747,7 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
     for requested in &plan.entries {
         match apply_one(node, &actual, requested, now) {
             Ok(result) => applied.results.push(result),
-            Err(e) => applied.failures.push(e.to_string()),
+            Err(e) => applied.failed(requested, e.to_string()),
         }
     }
     Ok(applied)
@@ -1770,7 +1788,7 @@ pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
     {
         match apply_one(node, &plan, entry, now) {
             Ok(result) => applied.results.push(result),
-            Err(e) => applied.failures.push(e.to_string()),
+            Err(e) => applied.failed(entry, e.to_string()),
         }
     }
     Ok(applied)
