@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- A cleanup pass no longer fails with `worktree identity disappeared` when another actor removes a planned worktree after the survey. When Git no longer lists the worktree and its path is absent, the pass drops the registration and reports it as already removed. A path that Git no longer lists but that still exists is still refused.
+
 ## 0.18.1 - 2026-10-21
 
 - Prune and automatic cleanup remove remembered repository and worktree registrations only when their paths are absent. Removal rechecks absence under the registry locks and deletes no checkout data. Doctor lists the removable records without changing them. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.
