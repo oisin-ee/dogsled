@@ -597,6 +597,157 @@ fn gone_upstream_with_local_work_stays_but_integrated_branch_is_deleted() {
     assert_eq!(git(&repo.repo, &["branch", "--list", "feature"]), "");
 }
 
+/// A pushed, clean worktree that the sweep survey finds removable, and its node.
+struct Landed {
+    repo: Repo,
+    ledger: Ledger,
+    cleanup: crate::config::Cleanup,
+}
+
+impl Landed {
+    fn new() -> Self {
+        let repo = Repo::new();
+        repo.commit();
+        git(&repo.tree, &["push", "-q", "-u", "origin", "feature"]);
+        let ledger = Ledger::new(repo.root.join("state"));
+        ledger
+            .write("repositories.json", &vec![repo.repo.display().to_string()])
+            .unwrap();
+        Self {
+            repo,
+            ledger,
+            cleanup: crate::config::Cleanup::default(),
+        }
+    }
+    fn node<'a>(&'a self, shell: &'a dyn Shell) -> crate::node::Node<'a> {
+        crate::node::Node {
+            shell,
+            ledger: &self.ledger,
+            thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+            home: self.repo.root.to_str().unwrap(),
+            cleanup: &self.cleanup,
+        }
+    }
+    /// The sweep survey, reduced to this fixture's worktree.
+    fn plan(&self, shell: &dyn Shell) -> crate::cleanup::Plan {
+        let mut plan = survey(&self.node(shell), Scope::Sweep, 100).unwrap();
+        plan.entries.retain(|e| {
+            e.class == "worktrees"
+                && e.tree.as_ref().is_some_and(|t| {
+                    crate::worktree::resolved(Path::new(&t.path))
+                        == crate::worktree::resolved(&self.repo.tree)
+                })
+        });
+        assert_eq!(plan.entries.len(), 1);
+        plan
+    }
+}
+
+/// `System`, with one more process whose cwd is `path` where the process table comes from lsof.
+#[derive(Debug)]
+struct Working {
+    pid: u32,
+    path: PathBuf,
+}
+
+impl Shell for Working {
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        if program == "lsof" {
+            return Ok(Output {
+                status: 0,
+                stdout: format!("p1\nn/\np{}\nn{}\n", self.pid, self.path.display()),
+                stderr: String::new(),
+            });
+        }
+        System.run(program, args)
+    }
+}
+
+#[test]
+fn landed_worktree_without_live_user_is_removed() {
+    let fixture = Landed::new();
+    let plan = fixture.plan(&System);
+    assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
+    let applied = crate::cleanup::apply_survey(&fixture.node(&System), &plan, 100);
+    assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+    assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+    assert!(!fixture.repo.tree.exists());
+}
+
+#[test]
+fn worktree_dirty_after_the_plan_is_skipped_not_removed_or_failed() {
+    let fixture = Landed::new();
+    let plan = fixture.plan(&System);
+    assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
+    std::fs::write(fixture.repo.tree.join("fresh"), "live work\n").unwrap();
+    // The sweep applies its own survey; the removal recheck finds the new dirt.
+    let applied = crate::cleanup::apply_survey(&fixture.node(&System), &plan, 100);
+    assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+    assert_eq!(applied.skipped.len(), 1, "{:?}", applied.skipped);
+    assert!(
+        applied.skipped[0].starts_with("refuse ")
+            && applied.skipped[0].contains("uncommitted changes"),
+        "{}",
+        applied.skipped[0]
+    );
+    assert!(applied.results.is_empty(), "{:?}", applied.results);
+    assert!(fixture.repo.tree.join("fresh").exists());
+    // Prune rebuilds the survey before it applies; that survey refuses the entry too.
+    let applied = crate::cleanup::apply(&fixture.node(&System), &plan, 100).unwrap();
+    assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+    assert_eq!(applied.skipped.len(), 1, "{:?}", applied.skipped);
+    assert!(applied.render().contains("skipped: refuse "));
+    assert!(fixture.repo.tree.join("fresh").exists());
+}
+
+#[test]
+fn worktree_held_by_a_process_after_the_plan_is_skipped_not_removed_or_failed() {
+    let fixture = Landed::new();
+    let plan = fixture.plan(&System);
+    assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
+    // A job or a shell command started from another pane works in the checkout.
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .current_dir(&fixture.repo.tree)
+        .spawn()
+        .unwrap();
+    let shell = Working {
+        pid: child.id(),
+        path: fixture.repo.tree.clone(),
+    };
+    let applied = crate::cleanup::apply_survey(&fixture.node(&shell), &plan, 100);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+    assert_eq!(applied.skipped.len(), 1, "{:?}", applied.skipped);
+    assert!(
+        applied.skipped[0].contains("held: a process works in"),
+        "{}",
+        applied.skipped[0]
+    );
+    assert!(fixture.repo.tree.join("work").exists());
+}
+
+#[test]
+fn worktree_identity_change_after_the_plan_still_fails() {
+    let fixture = Landed::new();
+    let plan = fixture.plan(&System);
+    assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
+    git(
+        &fixture.repo.tree,
+        &["commit", "-q", "--allow-empty", "-m", "moved"],
+    );
+    let applied = crate::cleanup::apply_survey(&fixture.node(&System), &plan, 100);
+    assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+    assert_eq!(applied.failures.len(), 1, "{:?}", applied.failures);
+    assert!(
+        applied.failures[0].contains("worktree identity changed"),
+        "{}",
+        applied.failures[0]
+    );
+    assert!(fixture.repo.tree.exists());
+}
+
 #[test]
 fn worktree_whose_git_file_is_gone_is_held_and_removal_refuses_before_unlocking() {
     let repo = Repo::new();

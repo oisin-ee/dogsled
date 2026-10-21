@@ -265,6 +265,13 @@ pub fn render(status: &Status) -> String {
         lines.extend(
             sweep
                 .applied
+                .skipped
+                .iter()
+                .map(|s| format!("  skipped: {s}")),
+        );
+        lines.extend(
+            sweep
+                .applied
                 .failures
                 .iter()
                 .map(|f| format!("  failed: {f}")),
