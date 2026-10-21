@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.20.0 - 2026-10-21
 
 - Dropping a worktree registration matches the registered path and Git's path after both resolve symlinks. On macOS, a registration under `/var` now matches Git's `/private/var` path, so cleanup no longer keeps a stale registration after it reconciles a vanished worktree.
 - A cleanup pass no longer fails with `cannot check worktree <path>: fatal: cannot change to <path>` when another actor removes a worktree after the pass lists it, but before the dirty check that runs `git status` inside it. This applies to the survey and to the apply-time recheck. After a Git error there, cleanup lists the worktrees again. When Git no longer lists the worktree and its path is absent, the survey plans a registration drop, and the recheck drops the registration and reports the worktree as already removed. Cleanup does not match Git's error text. A worktree whose directory remains after Git lost it is still refused. Any other Git error in an existing checkout still fails.
