@@ -150,9 +150,9 @@ A tip also lands through a local or remote-tracking ref that contains it and pas
 
 Prune and the sweep use the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches. An open agent item holds its checkout in prune and the sweep, so only `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until its work lands. An idle or done agent that has not called `dogsled done` holds its checkout, except for an explicit `dogsled close`. Idle shells, done agents without open items, and workspaces alone are not holds. The process check skips each holder pane's shell, and every descendant of an agent pane's shell; a shell's background job still holds. Foreign locks prevent removal.
 
-An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Missing or unreadable repositories produce warnings without stopping other repositories. Registrations remain unchanged.
+An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Unreadable repositories produce warnings without stopping other repositories. Absent remembered repositories produce removable registrations. Doctor changes no registrations.
 
-The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `panes`. Orphan close uses the same loss rule. Prune also shows non-removable findings, expired jobs, stale registrations, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
+The sweep applies only removable `worktrees`, `branches`, `workspaces`, `panes`, and absent remembered `repositories`. Orphan close uses the same loss rule. Prune also shows non-removable findings, expired jobs, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
 
 Both scopes use one pane rule and exclude the caller and focused panes. An empty shell closes after its job ends, its directory disappears, its launch becomes final, or its agent item closes. A shell without a Dogsled record needs 15 minutes continuously at an empty prompt. Agents retain the one-day rule and require `done`, with no open children.
 
@@ -177,7 +177,7 @@ Doctor also discovers repositories from the caller, live pane directories, Herdr
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
 Prune compares current Git path, branch, HEAD, and repository with the approved plan immediately before removal.
 Removal runs the repository's `dogsled.toml` `teardown` in the worktree, then a non-forced `git worktree remove`. A teardown failure keeps the worktree. The branch is deleted only when the integration check finds it integrated.
-Missing or unreadable disk paths remain report-only findings without discarding other candidates.
+Prune and the sweep remove absent remembered registrations after a locked recheck. Removal deletes no checkout data and preserves existing worktree records. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.
 
 ### 7. Prompt context
 

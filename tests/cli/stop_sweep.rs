@@ -104,22 +104,29 @@ esac
 }
 
 #[test]
-fn missing_repository_warns_once_per_set_and_does_not_stop_other_cleanup() {
+fn missing_configured_repository_warns_once_per_set_and_does_not_stop_other_cleanup() {
     let (rig, tree) = close_rig("stop-missing-repo");
     let missing = rig.dir.join("gone-repo");
     let repo = rig.dir.join("home/repo");
     rig.put("state/repositories.json", &json!([missing, repo]));
+    rig.config(&format!("[cleanup]\nrepositories = [{}]\n", json!(missing)));
     gate(&rig, "w1:p1");
     serve(&rig);
     assert!(
         !tree.exists(),
         "one missing repository must not stop cleanup"
     );
+    assert_eq!(rig.read("state/repositories.json"), json!([repo]));
+    assert!(
+        fs::read_to_string(rig.dir.join("config.toml"))
+            .unwrap()
+            .contains(missing.to_str().unwrap())
+    );
     let message = gate(&rig, "w1:p1");
     for expected in [
         missing.to_str().unwrap(),
         "repositories.json",
-        "repository entry",
+        "configured in cleanup.repositories but not a Git checkout",
         "dogsled agent --profile general --name <name> --message-file <brief>",
         "Do not edit the state by hand",
     ] {
@@ -129,10 +136,16 @@ fn missing_repository_warns_once_per_set_and_does_not_stop_other_cleanup() {
     // A new set speaks once; returning to the first set never loops the Stop hook.
     let second = rig.dir.join("another-gone-repo");
     rig.put("state/repositories.json", &json!([missing, second, repo]));
+    rig.config(&format!(
+        "[cleanup]\nrepositories = [{}, {}]\n",
+        json!(missing),
+        json!(second)
+    ));
     serve(&rig);
     assert!(gate(&rig, "w1:p1").contains(second.to_str().unwrap()));
     assert_eq!(gate(&rig, "w1:p1"), "");
     rig.put("state/repositories.json", &json!([missing, repo]));
+    rig.config(&format!("[cleanup]\nrepositories = [{}]\n", json!(missing)));
     serve(&rig);
     assert_eq!(gate(&rig, "w1:p1"), "");
     let (_, status) = rig.json(&["status"]);

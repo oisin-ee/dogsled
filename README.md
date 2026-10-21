@@ -328,7 +328,7 @@ An open agent item holds its checkout in prune and the sweep; `close` ends it an
 An idle or done agent that has not called `dogsled done` holds its checkout in prune, the sweep, and an automatic close; only an explicit `dogsled close` takes it. An idle shell, a done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
 The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
-A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
+A registered worktree whose path is absent is a stale registration. Prune and the sweep remove the record only.
 Prune and the sweep use one pane rule. Both keep the caller's pane and focused panes.
 An empty shell closes when its job ended, its directory disappeared, its launch is final, or its agent item closed.
 A final launch was refused, never attempted, or has an unknown outcome with no agent in its terminal. Cleanup preserves launch receipts and checks terminal ownership under the launch locks.
@@ -350,8 +350,8 @@ Each entry is independent. A failed or refused entry does not stop the others; p
 
 Placement records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
-A missing or unreadable repository produces a report-only `repositories` warning. The warning names its registration or configuration, and the survey continues.
-Repository registrations stay unchanged.
+An absent remembered repository produces a removable `repositories` entry. Prune and the sweep recheck absence under the registry locks, then remove only stale records.
+Existing worktree records stay. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only. Doctor changes no registrations.
 ### The sweep in `serve`
 
 The sweep closes finished children (see [Items and closing](#items-and-closing)), and a job closes its own tab. That closed loop ends most work.
@@ -364,6 +364,7 @@ Each requested pass builds the doctor plan in sweep scope. It applies only entri
 
 - `panes` and `workspaces`: the shared pane rule above. A workspace closes whole only when every pane qualifies. Final launch panes close separately under their launch locks.
 - `worktrees` and `branches`: the shared loss rule and holds described above, identical to prune.
+- Stale repository and worktree registrations: remove only records whose paths are absent, with the same locked recheck as prune.
 - Orphaned children: a child that called `done`, whose owner is gone, and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
 The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
@@ -374,7 +375,7 @@ The report includes start and finish times, removals, failures, repository warni
 The service also writes removals, failures, and repository warnings to stderr.
 Child completion and orphan checks remain independent of requested doctor cleanup.
 An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
-Prune also handles ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
+Prune also handles ended jobs and `targets`. Disk and process findings are report-only. Repository findings remain report-only except for absent remembered paths.
 
 ## Placement
 

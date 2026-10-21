@@ -466,6 +466,7 @@ fn survey_continues_past_missing_repositories_and_scopes_agree() {
     for plan in [&prune, &sweep] {
         assert!(plan.entries.iter().any(|e| e.class == "repositories"
             && e.id == missing
+            && e.removable
             && e.detail.contains("repositories.json")));
     }
     std::fs::write(repo.tree.join("dirty"), "work").unwrap();
