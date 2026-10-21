@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. A pane Dogsled launched never opens a board: it keeps the widget, and its todo lines appear on the parent's board. `/dogsled` remains available in both modes.
+- Launch records with obsolete terminal identities no longer hold restored panes. Empty shells use the existing 15-minute cleanup rule. Started receipts, active panes, and locked recovery checks remain protected; launch evidence stays unchanged.
 
 ## 0.17.0 - 2026-10-21
 

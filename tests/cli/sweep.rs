@@ -178,7 +178,21 @@ fn sweep_recovers_final_launch_shells_without_rewriting_their_evidence() {
 
 #[test]
 fn sweep_uses_fifteen_minutes_and_keeps_focused_caller_busy_and_unfinished_agent_panes() {
-    let rig = shells_rig("sweep-fifteen-minutes");
+    fifteen_minute_shells(None);
+}
+
+#[test]
+fn obsolete_launch_terminals_use_guarded_fifteen_minute_shell_cleanup() {
+    for state in ["refused", "unconfirmed"] {
+        fifteen_minute_shells(Some(state));
+    }
+}
+
+fn fifteen_minute_shells(launch: Option<&str>) {
+    let rig = shells_rig(&format!(
+        "sweep-fifteen-minutes-{}",
+        launch.unwrap_or("none")
+    ));
     fs::write(rig.dir.join("unmerged"), "").unwrap();
     let home = rig.dir.join("home");
     let mut live = vec![];
@@ -192,6 +206,28 @@ fn sweep_uses_fifteen_minutes_and_keeps_focused_caller_busy_and_unfinished_agent
         ("parent", 30, false),
     ] {
         live.push(json!({"pane_id":id,"cwd":home,"focused":focused,"idle_shell":true,"idle_since_ms":NOW - minutes * 60_000}));
+    }
+    let mut evidence = Vec::new();
+    if let Some(state) = launch {
+        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+        for (index, pane) in live.iter_mut().enumerate() {
+            pane["terminal_id"] = json!(format!("term_restored_{index}"));
+            let id = format!("obsolete-{index}");
+            let progress_path = format!("state/launches/{id}.progress.json");
+            rig.put(&progress_path, &json!({
+                "request":{"id":id,"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+                    "host":"local","cwd":home,"owner":"w1:p1"},
+                "pane":pane["pane_id"],"terminal":format!("term_old_{index}"),
+                "attempted":true,"confirmed":false,"result":{},"error":"response lost"
+            }));
+            let receipt_path = format!("state/launches/{id}.json");
+            if state == "refused" {
+                rig.put(&receipt_path, &json!({"failed":"agent_pane_busy"}));
+            }
+            for path in [progress_path, receipt_path] {
+                evidence.push((path.clone(), fs::read(rig.dir.join(&path)).ok()));
+            }
+        }
     }
     for pane in &mut live[5..] {
         pane["agent"] = json!("pi");
@@ -223,11 +259,21 @@ fn sweep_uses_fifteen_minutes_and_keeps_focused_caller_busy_and_unfinished_agent
         .map(|e| e["id"].as_str().unwrap())
         .collect();
     assert_eq!(candidates, ["old"], "{plan}");
+    let old = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "old")
+        .unwrap();
+    assert_eq!(old["detail"], "shell idle for 15m");
     let journal = requested_sweep(&rig);
     let log = rig.log("herdr.log");
     assert!(log.contains("pane close old\n"), "{journal}\n{log}");
     for kept in ["young", "focused", "busy", "w1:p1", "agent", "parent"] {
         assert!(!log.contains(&format!("pane close {kept}\n")), "{log}");
+    }
+    for (path, bytes) in evidence {
+        assert_eq!(fs::read(rig.dir.join(&path)).ok(), bytes, "{path}");
     }
 }
 
