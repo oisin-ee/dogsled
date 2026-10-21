@@ -8,6 +8,8 @@ use crate::probe::{Agent, AgentCounts, Memory, Pane, Probe};
 use crate::shell::Fake;
 use crate::work::{self, Action, Request};
 
+mod reconcile;
+
 fn service(ledger: &Ledger) -> std::fs::File {
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let lock = std::fs::OpenOptions::new()

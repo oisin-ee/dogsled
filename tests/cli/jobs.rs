@@ -177,7 +177,9 @@ fn wait_max_and_stop_use_durable_local_job_state() {
 #[test]
 fn agent_places_starts_with_its_task_and_tracks_any_kind() {
     let rig = Rig::new("agent");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let confirmed = now();
+    fs::write(rig.dir.join("clock"), confirmed.to_string()).unwrap();
+    rig.snapshot("state/host.json", confirmed, 0.0, 8);
     let (code, result) = rig.json(&[
         "agent",
         "--kind",
@@ -190,7 +192,7 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
     assert_eq!(code, 0, "{result}");
     assert_eq!(
         result,
-        json!({"host":"local","pane":"w2:p1","name":"worker"})
+        json!({"host":"local","pane":"w2:p1","name":"worker","launch_confirmed_ms":confirmed})
     );
     let log = rig.log("herdr.log");
     // The task is the harness's launch argument, after the child contract as Codex developer
@@ -203,6 +205,10 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
     );
     assert!(!log.contains("agent prompt"), "{log}");
     assert_eq!(rig.read("state/items.json")[0]["kind"], "agent");
+    assert_eq!(
+        rig.read("state/items.json")[0]["launch_confirmed_ms"],
+        confirmed
+    );
     assert_eq!(
         rig.json(&["track", "local", "w3:p1", "--name", "other"]).0,
         0

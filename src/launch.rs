@@ -111,6 +111,9 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
                 Ok(())
             })?;
             progress.confirmed = true;
+            // Stamp after native start (or matching-agent recovery), on the pane's host.
+            // Persist with confirmation so retries return the same evidence to the owner.
+            progress.result["launch_confirmed_ms"] = json!(crate::ledger::now_ms());
             receipts.write(&progress_file, &progress)?;
         }
         // Parent registration can fail after startup; the confirmed result survives it.
