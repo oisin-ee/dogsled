@@ -53,13 +53,16 @@ pub enum Command {
         #[arg(long)]
         all: bool,
         /// Compact right-side display (cache-only quotas).
-        #[arg(long, conflicts_with_all = ["json", "open", "todo_path"])]
+        #[arg(long, conflicts_with_all = ["json", "open", "toggle", "todo_path"])]
         side: bool,
         #[arg(long, requires = "side")]
         watch: bool,
-        /// Open or reuse this tab's right split.
-        #[arg(long, conflicts_with_all = ["all", "todo_path"])]
+        /// Open or reuse this tab's board, docked on the left.
+        #[arg(long, conflicts_with_all = ["all", "todo_path", "toggle"])]
         open: bool,
+        /// Close this tab's docked board, or open it when there is none.
+        #[arg(long, conflicts_with_all = ["all", "todo_path"])]
+        toggle: bool,
         /// Local rendered-todo publication path and side-panel width.
         #[arg(long, conflicts_with = "all")]
         todo_path: bool,
