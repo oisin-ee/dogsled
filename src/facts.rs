@@ -367,7 +367,7 @@ mod tests {
                 "h1\nb1\n",
             )
             .on_output(
-                "git -C /t merge-base --is-ancestor refs/heads/feat/x refs/remotes/origin/main",
+                "git -C /t merge-base --is-ancestor h1 b1",
                 crate::shell::Output {
                     status: 0,
                     stdout: String::new(),

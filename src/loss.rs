@@ -17,6 +17,7 @@ fn git(shell: &dyn Shell, repo: &str, args: &[&str]) -> Result<crate::shell::Out
 pub struct Evidence {
     repo: String,
     refreshed: bool,
+    proofs: crate::integration::Proofs,
     pub warning: Option<String>,
 }
 
@@ -36,6 +37,7 @@ impl Evidence {
         Self {
             repo: repo.into(),
             refreshed: warning.is_none(),
+            proofs: crate::integration::Proofs::default(),
             warning,
         }
     }
@@ -45,6 +47,7 @@ impl Evidence {
         Self {
             repo: repo.into(),
             refreshed: false,
+            proofs: crate::integration::Proofs::default(),
             warning: None,
         }
     }
@@ -59,16 +62,7 @@ impl Evidence {
             .map(|path| changes(shell, path))
             .transpose()?
             .unwrap_or_default();
-        let integrated = match tip.strip_prefix("refs/heads/") {
-            Some(branch) => crate::integration::check(shell, &self.repo, branch)?,
-            None => crate::integration::check_ref(shell, &self.repo, tip)?,
-        };
-        if matches!(integrated, Some(Integrated::Deleted)) {
-            return Err(Error::Invalid(format!(
-                "{}: tip {tip} disappeared",
-                self.repo
-            )));
-        }
+        let integrated = crate::integration::check_cached(shell, &self.repo, tip, &self.proofs)?;
         let held = if let Some(integrated) = integrated {
             Some(Held::Default { integrated })
         } else if self.refreshed {

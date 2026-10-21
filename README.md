@@ -316,9 +316,10 @@ Before removal, dogsled restores only those deleted paths from the held HEAD, in
 Every commit must be held by the default branch or remote-tracking refs. Each cleanup pass runs `git fetch --all --prune` before remote refs count.
 A failed fetch produces a repository warning. Only the default branch counts for that repository. Deleted upstream branches receive no special treatment.
 A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when commits on that branch apply it.
-The branch's commits split into consecutive runs, and each run needs one commit that applies it. A commit applies a run when it changes every path the run changed, and merging the run into the commit's parent gives the commit's content on those paths.
+The branch's commits split into consecutive runs, and each run needs one commit that applies it. Each run uses its net diff, including paths and before/after objects, rather than the union of paths from its commits. Merges from main and reverted edits therefore do not enlarge the whole branch's required path set. A candidate must change every net path. The exact three-way merge into its parent must reproduce its content on those paths.
 One run is a merge, squash, or cherry-pick of the whole branch. Several runs are a stack: the branch holds an earlier branch's commits, and each branch landed as its own squash. Git alone decides this.
 Each path merges on its own. An addition, deletion, or mode change on a path the base also changed differently is a conflict, and renames are not followed, so a doubtful run is not applied.
+A tip also counts as integrated when a local or remote-tracking ref contains it and that ref is integrated. This proof names the containing ref. The search considers only containing refs and checks each directly, without recursive alias loops.
 Results use the remote-tracking branch, so `git fetch` keeps them current.
 A local branch with no worktree is removable when it is integrated or every commit is on a remote branch. Other branches are report-only. The default branch is never a candidate. Prune deletes a branch with `git branch -D` after it rechecks the planned commit.
 Prune and the sweep share the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches.
