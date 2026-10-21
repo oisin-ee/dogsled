@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.18.0 - 2026-10-21
 
 - Agent items now retain the child host's launch-confirmation timestamp. Reconciliation ignores absent-pane snapshots from before confirmation, including late remote admissions and clock skew. Legacy items and job completion keep their existing rules.
 - Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. A pane Dogsled launched never opens a board: it keeps the widget, and its todo lines appear on the parent's board. `/dogsled` remains available in both modes.
