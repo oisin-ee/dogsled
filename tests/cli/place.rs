@@ -289,6 +289,37 @@ fn place_bases_a_branch_missing_everywhere_on_origin_default_without_upstream() 
 }
 
 #[test]
+fn a_failed_fetch_stops_placement_of_a_missing_branch() {
+    let (rig, repo) = place_rig("place-fetch-fails");
+    git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            rig.dir.join("gone.git").to_str().unwrap(),
+        ],
+    );
+    // Without a reachable origin, placement cannot tell a new branch from a remote one.
+    let (code, error) = place(&rig, &repo, "feat/offline", None);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("git fetch origin failed, so the current origin branches are unknown"),
+        "{error}"
+    );
+    assert_eq!(git(&repo, &["branch", "--list", "feat/offline"]), "");
+    assert!(!repo.join(".worktrees/feat-offline").exists());
+    assert!(!rig.log("herdr.log").contains("worktree open"));
+    // An existing local branch needs no fetch.
+    git(&repo, &["branch", "feat/local"]);
+    let (code, placed) = place(&rig, &repo, "feat/local", None);
+    assert_eq!(code, 0, "{placed}");
+}
+
+#[test]
 fn place_bases_a_new_branch_on_the_fetched_origin_tip_not_a_stale_local_main() {
     let (rig, repo) = place_rig("place-stale-main");
     let stale = git(&repo, &["rev-parse", "main"]);
@@ -330,6 +361,44 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert_eq!(place(&rig, &repo, "kept", None).0, 2);
     assert!(!repo.join(".worktrees/kept").exists());
     assert_ne!(git(&repo, &["branch", "--list", "kept"]), "");
+}
+
+#[test]
+fn setup_failure_deletes_the_local_branch_made_from_origin_and_keeps_origin() {
+    let (rig, repo) = place_rig("place-setup-fails-remote");
+    let other = other_clone(&rig);
+    git(&other, &["switch", "-q", "-c", "feat/remote"]);
+    git(
+        &other,
+        &["commit", "-q", "--allow-empty", "-m", "remote work"],
+    );
+    git(&other, &["push", "-q", "origin", "feat/remote"]);
+    let pushed = git(&other, &["rev-parse", "HEAD"]);
+    fs::write(rig.dir.join("setup-fails"), "").unwrap();
+    let (code, error) = place(&rig, &repo, "feat/remote", None);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("the new worktree was removed"),
+        "{error}"
+    );
+    assert!(!repo.join(".worktrees/feat-remote").exists());
+    // Placement made the local branch, so it goes; origin's branch is untouched.
+    assert_eq!(git(&repo, &["branch", "--list", "feat/remote"]), "");
+    assert_eq!(git(&repo, &["rev-parse", "origin/feat/remote"]), pushed);
+    assert_eq!(
+        git(&other, &["ls-remote", "origin", "refs/heads/feat/remote"])
+            .split_whitespace()
+            .next(),
+        Some(pushed.trim())
+    );
+    // With setup fixed, the same branch is placed from origin again.
+    fs::remove_file(rig.dir.join("setup-fails")).unwrap();
+    let (code, placed) = place(&rig, &repo, "feat/remote", None);
+    assert_eq!(code, 0, "{placed}");
+    assert_eq!(git(&repo, &["rev-parse", "feat/remote"]), pushed);
 }
 
 #[test]

@@ -190,6 +190,14 @@ enum Start {
     New(String),
 }
 
+impl Start {
+    /// The local branch that this placement creates, which a failed setup deletes again. A
+    /// branch that existed before placement is never deleted.
+    fn created<'a>(&self, branch: &'a str) -> Option<&'a str> {
+        (*self != Self::Local).then_some(branch)
+    }
+}
+
 /// Decide where the branch starts. A branch that exists locally or on `origin` is reused and
 /// takes no base. A new branch starts at `base`, or at the current tip of the remote default
 /// branch, never at a stale local copy of it.
@@ -289,12 +297,7 @@ fn make(
         };
         if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
         {
-            discard(
-                shell,
-                checkout,
-                &path,
-                (*start != Start::Local).then_some(branch),
-            )?;
+            discard(shell, checkout, &path, start.created(branch))?;
             return Err(Error::Invalid(format!(
                 "{error}; the new worktree was removed"
             )));
