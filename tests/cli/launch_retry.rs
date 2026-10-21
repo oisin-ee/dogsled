@@ -662,8 +662,37 @@ fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried
         rig.read("state/launches/recover-one.progress.json")["attempted"],
         false
     );
-    // The shell finishes starting: the same pane takes the agent without a second allocation.
+    // The shell finishes starting. Cleanup must not retire its retryable launch before replay.
     busy_start(&rig, 0);
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{
+            "pane_id":"w2:p1","terminal_id":"term_child",
+            "cwd":rig.dir.join("home"),"workspace_id":"w1"
+        }]}}),
+    );
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "\"shell_pid\":10,\"foreground_processes\"",
+                "\"shell_pid\":10,\"foreground_process_group_id\":10,\"foreground_processes\"",
+            ),
+    );
+    let cleanup = rig.run(&["prune", "--yes", "panes", "workspaces"]);
+    assert!(
+        cleanup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane close"), "{log}");
+    assert!(!log.contains("workspace close"), "{log}");
+    assert_eq!(
+        rig.read("state/launches/recover-one.progress.json")["attempted"],
+        false
+    );
     let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
     assert_eq!(code, 0, "{result}");
     let log = rig.log("herdr.log");

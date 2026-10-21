@@ -137,7 +137,7 @@ fn serve_closes_ended_job_deleted_directory_and_old_shells_but_keeps_unfinished_
 }
 
 #[test]
-fn sweep_recovers_final_launch_shells_without_rewriting_their_evidence() {
+fn sweep_keeps_retryable_launches_and_recovers_final_shells_without_rewriting_evidence() {
     for state in ["unattempted", "unknown", "refused"] {
         let (rig, tree) = close_rig(&format!("sweep-final-{state}"));
         // Dirty work stays; only the stranded launch pane can close.
@@ -162,8 +162,9 @@ fn sweep_recovers_final_launch_shells_without_rewriting_their_evidence() {
         let receipt = fs::read(rig.dir.join("state/launches/final.json")).ok();
         let journal = requested_sweep(&rig);
         let log = rig.log("herdr.log");
-        assert!(
+        assert_eq!(
             log.contains("pane close w2:p2"),
+            state != "unattempted",
             "{state}: {journal}\n{log}"
         );
         assert!(!log.contains("workspace close w2"), "{log}");

@@ -122,6 +122,9 @@ impl Shell for ConfirmingShell {
                 self.starts.fetch_add(1, Ordering::SeqCst);
                 json!({"result":{}})
             }
+            ["pane", "read", ..] => {
+                return Err(Error::Invalid("startup output unavailable".into()));
+            }
             _ => panic!("unexpected command {args:?}"),
         };
         Ok(Output {
@@ -234,6 +237,84 @@ fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
     assert!(message.contains("w2:p2"), "{message}");
     assert!(message.contains("after 0."), "{message}");
     assert!(shell.starts.load(Ordering::SeqCst) >= 2);
+}
+
+#[derive(Debug)]
+struct BudgetShell {
+    budget: crate::budget::Budget,
+    starts: AtomicUsize,
+    uncertain: bool,
+}
+
+impl Shell for BudgetShell {
+    fn budget(&self) -> crate::budget::Budget {
+        self.budget
+    }
+
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        if args.starts_with(&["pane".into(), "read".into()]) {
+            return Err(Error::Invalid("startup output unavailable".into()));
+        }
+        if args.starts_with(&["agent".into(), "start".into()]) {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            if self.uncertain {
+                return Err(Error::Deadline("issued agent start".into()));
+            }
+            return BusyShell {
+                busy: usize::MAX,
+                starts: AtomicUsize::new(0),
+            }
+            .run(program, args);
+        }
+        ConfirmingShell {
+            recovering: false,
+            starts: AtomicUsize::new(0),
+        }
+        .run(program, args)
+    }
+}
+
+#[test]
+fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_not() {
+    for uncertain in [false, true] {
+        let mut ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let progress: Progress = serde_json::from_value(json!({
+            "request":{"id":"budget","action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
+                "host":"local","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
+            "pane":"w2:p2","terminal":"term_shell","attempted":false,"confirmed":false,
+            "result":{"host":"local","pane":"w2:p2"},"error":null
+        })).unwrap();
+        let receipts = ledger.child("launches");
+        receipts.write("budget.progress.json", &progress).unwrap();
+        ledger.budget = crate::budget::Budget::until(
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+        );
+        let shell = BudgetShell {
+            budget: ledger.budget,
+            starts: AtomicUsize::new(0),
+            uncertain,
+        };
+        assert!(agent(&ledger, &shell, &progress.request).is_err());
+        assert_eq!(shell.starts.load(Ordering::SeqCst), 1);
+        let saved = receipts
+            .read::<Progress>("budget.progress.json")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.attempted, uncertain);
+        assert!(!saved.confirmed);
+        assert!(receipts.read::<Receipt>("budget.json").unwrap().is_none());
+        ledger.budget = crate::budget::Budget::default();
+        let ready = ConfirmingShell {
+            recovering: false,
+            starts: AtomicUsize::new(0),
+        };
+        assert_eq!(
+            agent(&ledger, &ready, &progress.request).is_ok(),
+            !uncertain
+        );
+        assert_eq!(ready.starts.load(Ordering::SeqCst), usize::from(!uncertain));
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
 }
 
 #[derive(Debug)]

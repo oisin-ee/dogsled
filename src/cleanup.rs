@@ -1772,7 +1772,7 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
         let launch = crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?;
         match launch {
             crate::launch::PaneLaunch::Final if pane.agent.is_none() => {
-                if !crate::launch::close_unfinished(node.ledger, node.shell, &pane.pane_id)? {
+                if !crate::launch::close_final(node.ledger, node.shell, &pane.pane_id)? {
                     return Err(Error::Invalid(format!(
                         "{}: launch changed before removal",
                         pane.pane_id
@@ -2156,7 +2156,7 @@ fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<Outcome> {
     }
     match crate::launch::final_pane(node.ledger, node.shell, id)? {
         crate::launch::PaneLaunch::Final
-            if crate::launch::close_unfinished(node.ledger, node.shell, id)? =>
+            if crate::launch::close_final(node.ledger, node.shell, id)? =>
         {
             return Ok(Outcome::Done(format!("closed pane {id}")));
         }

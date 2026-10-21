@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod recovery;
-pub use recovery::{PaneLaunch, Survey, close_unfinished, final_pane, launched, requests};
+pub use recovery::{
+    PaneLaunch, Survey, close_final, close_unfinished, final_pane, launched, requests,
+};
 #[cfg(test)]
 mod diagnostic_tests;
 #[cfg(test)]
@@ -81,6 +83,18 @@ fn start_while_busy(
     let began = std::time::Instant::now();
     let mut pause = BUSY_FIRST_PAUSE;
     loop {
+        // Before invocation, expiry proves no start was issued. A deadline returned by the
+        // invocation itself is different: the agent may already have begun.
+        let remaining = ledger
+            .budget
+            .with_limit("agent start", crate::budget::SETUP_LIMIT)
+            .and_then(|left| shell.budget().with_limit("agent start", left))
+            .map_err(|_| {
+                Error::Launch(format!(
+                    "{pane} was still not an available shell when the command deadline passed after {:.1}s; the pane stays open",
+                    began.elapsed().as_secs_f32()
+                ))
+            })?;
         match shell.run_setup_ok("herdr", args) {
             Err(error) if is_busy(&error) => {
                 let elapsed = began.elapsed();
@@ -90,13 +104,13 @@ fn start_while_busy(
                         elapsed.as_secs_f32()
                     )));
                 };
-                ledger.budget.remaining("agent start").map_err(|_| {
-                    Error::Launch(format!(
-                        "{pane} was still not an available shell when the command deadline passed after {:.1}s; the pane stays open",
-                        elapsed.as_secs_f32()
-                    ))
-                })?;
-                std::thread::sleep(pause.min(left));
+                // Include time spent in the refused command in the shared deadline.
+                let remaining = ledger
+                    .budget
+                    .with_limit("agent start", remaining)
+                    .and_then(|left| shell.budget().with_limit("agent start", left))
+                    .unwrap_or_default();
+                std::thread::sleep(pause.min(left).min(remaining));
                 pause = (pause * 2).min(BUSY_MAX_PAUSE);
             }
             other => return other.map(drop),
