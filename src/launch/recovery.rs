@@ -32,6 +32,12 @@ pub(super) fn candidates(receipts: &Ledger, pane: Option<&str>) -> Result<Vec<(S
     Ok(found)
 }
 
+/// Launch history identifies child panes even after terminal ownership changes.
+/// Board placement needs this ledger-only fact, not cleanup eligibility.
+pub fn launched(ledger: &Ledger, pane: &str) -> Result<bool> {
+    Ok(!candidates(&ledger.child("launches"), Some(pane))?.is_empty())
+}
+
 fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> {
     Ok(recoverable(
         progress,
@@ -42,6 +48,44 @@ fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> 
 fn recoverable(progress: &Progress, receipt: Option<&Receipt>) -> bool {
     matches!(receipt, Some(Receipt::Refused { .. }))
         || (receipt.is_none() && !progress.confirmed && progress.terminal_receipt.is_none())
+}
+
+/// Only a proven terminal mismatch releases ownership; missing identities remain unresolved.
+/// Started receipts retain ownership regardless of terminal. For several records on one pane,
+/// discard non-owners first: none means Unrecorded, one uses its usual classification, and
+/// several remaining owners mean Unresolved. Locked recovery still rejects competing records.
+fn owns_pane(progress: &Progress, receipt: Option<&Receipt>, current: Option<&str>) -> bool {
+    if matches!(receipt, Some(Receipt::Started(_))) {
+        return true;
+    }
+    match (
+        progress.terminal.as_deref().filter(|t| !t.is_empty()),
+        current.filter(|t| !t.is_empty()),
+    ) {
+        (Some(saved), Some(current)) => saved == current,
+        _ => true,
+    }
+}
+
+fn owned_candidates(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    pane: &str,
+) -> Result<Vec<(String, Progress)>> {
+    let receipts = ledger.child("launches");
+    let found = candidates(&receipts, Some(pane))?;
+    if found.is_empty() {
+        return Ok(found);
+    }
+    let current = terminal(shell, pane).ok();
+    let mut owned = Vec::new();
+    for (id, progress) in found {
+        let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+        if owns_pane(&progress, receipt.as_ref(), current.as_deref()) {
+            owned.push((id, progress));
+        }
+    }
+    Ok(owned)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +123,13 @@ impl Survey {
             let Some(pane) = progress.pane.as_ref() else {
                 continue;
             };
+            if !owns_pane(
+                &progress,
+                receipt.as_ref(),
+                terminals.get(pane).map(String::as_str),
+            ) {
+                continue;
+            }
             let state = if matches!(receipt, Some(Receipt::Started(_))) {
                 PaneLaunch::Started
             } else if recoverable(&progress, receipt.as_ref())
@@ -127,7 +178,7 @@ impl Survey {
 /// age-based cleanup; unresolved ownership also prevents closing by another shell rule.
 pub fn final_pane(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<PaneLaunch> {
     let receipts = ledger.child("launches");
-    let found = candidates(&receipts, Some(pane))?;
+    let found = owned_candidates(ledger, shell, pane)?;
     if found.is_empty() {
         return Ok(PaneLaunch::Unrecorded);
     }

@@ -941,7 +941,7 @@ fn branches(
 }
 
 /// The single shell rule for prune and sweep. Launch ownership is checked before other
-/// reasons so a replaced terminal or an unresolved successful start cannot fall through.
+/// reasons so unresolved ownership cannot fall through. Obsolete terminals do not own panes.
 fn idle_shell(
     node: &Node<'_>,
     pane: &Pane,
@@ -1718,8 +1718,19 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
                     candidate.id
                 )));
             }
-            if crate::launch::close_unfinished(node.ledger, node.shell, &candidate.id)? {
-                return Ok(format!("closed pane {}", candidate.id));
+            match crate::launch::final_pane(node.ledger, node.shell, &candidate.id)? {
+                crate::launch::PaneLaunch::Final
+                    if crate::launch::close_unfinished(node.ledger, node.shell, &candidate.id)? =>
+                {
+                    return Ok(format!("closed pane {}", candidate.id));
+                }
+                crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved => {
+                    return Err(Error::Invalid(format!(
+                        "refuse {}: unresolved launch ownership",
+                        candidate.id
+                    )));
+                }
+                _ => (),
             }
             let agents = crate::probe::agent_list(node.shell)?;
             let idle = if agents.iter().any(|a| a.pane == candidate.id) {
