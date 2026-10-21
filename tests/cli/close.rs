@@ -180,10 +180,14 @@ fn close_finishes_a_child_tab_in_the_callers_workspace_but_not_the_callers_workt
             {"pane_id":"w1:p2","workspace_id":"w1","agent":"pi","agent_status":"done","cwd":tree}
         ]}}),
     );
-    let out = rig.run(&["close", "w1:p2"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("the caller uses this checkout"));
+    // The caller's agent shares the checkout: only the child's pane closes.
+    let (code, closed) = rig.json(&["close", "w1:p2"]);
+    assert_eq!(code, 0, "{closed}");
+    assert_eq!(closed["worktree"], Value::Null);
+    assert!(rig.log("herdr.log").contains("pane close w1:p2"));
     assert_eq!(rig.log("hook.log"), "");
+    assert!(tree.exists());
+    fs::write(rig.dir.join("herdr.log"), "").unwrap();
     rig.put(
         "panes.json",
         &json!({"result":{"panes":[
@@ -355,8 +359,15 @@ fn a_settled_preparation_no_longer_holds_its_landed_checkout() {
         &json!({"request":{},"host":{"id":"local","label":"local"},"launch":null,
             "error":"Herdr workspace w2 already shows the checkout; a child may own it"}),
     );
-    // A launch with no final receipt is unresolved, and its preparation still holds.
+    // A launch with no final receipt whose own terminal still runs in its pane is unresolved,
+    // and its preparation still holds.
     unfinished_launch(&rig, "live", &tree, "w9:p3");
+    let mut listed = rig.read("panes.json");
+    listed["result"]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"pane_id":"w9:p3","workspace_id":"w9","terminal_id":"term_gone"}));
+    rig.put("panes.json", &listed);
     let holds = json!([
         hold(Some("refused")),
         hold(Some("failed")),

@@ -177,7 +177,9 @@ fn remove_target(
     };
     let workspace = worktree::workspace(shell, &tree.checkout, &tree.path)?;
     let holders = worktree::holders(panes, &tree.path, workspace.as_deref());
-    if automatic && shared(shell, ledger, pane, &holders)? {
+    // Another agent, open item, or busy pane still uses the checkout. Even an explicit close
+    // releases only its own pane: closing the others would close agents nobody asked to close.
+    if shared(shell, ledger, pane, &holders)? {
         shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
         return Ok(Closed {
             pane: pane.into(),
