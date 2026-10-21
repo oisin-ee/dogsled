@@ -777,6 +777,10 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     for (tree, found) in trees.iter().zip(found) {
         let found = match found {
             Ok(found) => found,
+            Err(_) if gone(node.shell, tree) => {
+                plan.entries.extend(vanished(node, tree));
+                continue;
+            }
             Err(error) => {
                 let mut warning = entry(
                     "worktrees",
@@ -1571,6 +1575,48 @@ enum Outcome {
     Skipped(String),
 }
 
+/// Another actor removed `tree` after this pass listed it: a fresh listing no longer has it and
+/// its path is absent. The removal goal holds. A path that Git no longer lists but that still
+/// exists is not gone, because it may hold content. A failed listing proves nothing.
+fn gone(shell: &dyn Shell, tree: &Tree) -> bool {
+    repository_trees(shell, &tree.repo)
+        .is_ok_and(|trees| !trees.iter().any(|t| t.path == tree.path))
+        && missing(&tree.path)
+}
+
+/// A Git error inside a listed worktree that has since gone is the race, not a failure:
+/// `None` then. Any other error stays an error.
+fn unless_gone<T>(shell: &dyn Shell, tree: &Tree, result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(_) if gone(shell, tree) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The survey's entry for a worktree that went during the survey: the same registration drop
+/// that a later survey plans for a missing registered worktree. An unregistered one needs no
+/// entry.
+fn vanished(node: &Node<'_>, tree: &Tree) -> Option<Entry> {
+    let recorded: Vec<Tree> = node
+        .ledger
+        .read("worktrees.json")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    recorded
+        .into_iter()
+        .find(|t| crate::worktree::same(&t.path, &tree.path))
+        .map(|t| {
+            entry(
+                "worktrees",
+                t.path,
+                "removed during the survey; drops the stale registration".into(),
+                true,
+            )
+        })
+}
+
 /// The apply-time recheck of a planned worktree.
 enum Recheck {
     Removable(Usage, crate::loss::Evidence),
@@ -1598,7 +1644,14 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
             reason.unwrap_or_default()
         )));
     };
-    let repo = crate::prepare::main_checkout(node.shell, &current.path)?;
+    let Some(repo) = unless_gone(
+        node.shell,
+        planned,
+        crate::prepare::main_checkout(node.shell, &current.path),
+    )?
+    else {
+        return Ok(Recheck::Gone);
+    };
     if current != *planned
         || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
         || current.head.is_empty()
@@ -1617,7 +1670,10 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
         process_cwds(node.shell),
         BTreeMap::from([(current.repo.clone(), evidence)]),
     )?;
-    let found = disposition(node, &current, &seen)?;
+    // Another actor can remove it between this listing and the checks inside it.
+    let Some(found) = unless_gone(node.shell, planned, disposition(node, &current, &seen))? else {
+        return Ok(Recheck::Gone);
+    };
     if !found.removable {
         return Ok(Recheck::Refused(format!(
             "refuse {}: {}",
