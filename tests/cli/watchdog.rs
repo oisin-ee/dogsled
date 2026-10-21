@@ -70,6 +70,12 @@ case "$*" in
 esac
 "#);
     fs::create_dir_all(rig.dir.join("home/repo/tree")).unwrap();
+    // A linked worktree has a `.git` file; without one Git cannot remove it.
+    fs::write(
+        rig.dir.join("home/repo/tree/.git"),
+        "gitdir: ../.git/worktrees/tree\n",
+    )
+    .unwrap();
     rig.put("state/worktrees.json", &json!([{"repo":rig.dir.join("home/repo"),"path":rig.dir.join("home/repo/tree"),"branch":"feature"}]));
     rig
 }
@@ -182,7 +188,9 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
         let (code, applied) = rig.json(&["host", "prune", "--plan", plan]);
         assert_eq!(code, 0, "{applied}");
         assert_eq!(applied["results"], json!([]), "{applied}");
-        applied["failures"][0].as_str().unwrap().to_owned()
+        // The recheck refusal is a skip: the entry stays, and nothing failed.
+        assert_eq!(applied["failures"], json!([]), "{applied}");
+        applied["skipped"][0].as_str().unwrap().to_owned()
     };
     assert!(refused(&plan).contains("no longer safe"));
     fs::remove_file(rig.dir.join("dirty")).unwrap();
@@ -203,9 +211,10 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
         &json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":"working"}]}}),
     );
     let pane_plan=json!({"entries":[{"class":"panes","id":"w1:p1","detail":"old","removable":true,"tree":null}]}).to_string();
-    assert_eq!(
-        refused(&pane_plan),
-        "refuse panes w1:p1: no longer safe to remove"
+    let reason = refused(&pane_plan);
+    assert!(
+        reason.starts_with("refuse panes w1:p1: no longer safe to remove"),
+        "{reason}"
     );
     assert!(!rig.log("herdr.log").contains("pane close"));
     assert!(!rig.log("git.log").contains("worktree remove"));
@@ -453,9 +462,11 @@ fn doctor_closes_an_all_idle_workspace_whole_and_other_idle_panes_alone() {
     fs::write(rig.dir.join("busy"), "w4:p1\nw4:p2\n").unwrap();
     let plan = json!({"entries":[{"class":"panes","id":"w4:p1","detail":"","removable":true,"tree":null}]});
     let (_, applied) = rig.json(&["host", "prune", "--plan", &plan.to_string()]);
-    assert_eq!(
-        applied["failures"][0],
-        "refuse panes w4:p1: no longer safe to remove"
+    assert_eq!(applied["failures"], json!([]), "{applied}");
+    let reason = applied["skipped"][0].as_str().unwrap();
+    assert!(
+        reason.starts_with("refuse panes w4:p1: no longer safe to remove"),
+        "{reason}"
     );
 }
 

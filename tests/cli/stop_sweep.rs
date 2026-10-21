@@ -104,6 +104,63 @@ esac
 }
 
 #[test]
+fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() {
+    let (rig, tree) = close_rig("stop-pruned-worktree");
+    let repo = rig.dir.join("home/repo").canonicalize().unwrap();
+    let head = git(&tree, &["rev-parse", "HEAD"]).trim().to_owned();
+    rig.put("state/repositories.json", &json!([repo]));
+    let registration = json!([{"repo":repo,"path":tree,"branch":"feat/x","head":head}]);
+    rig.put("state/worktrees.json", &registration);
+    // The tova case: the `.git` file went missing, so Git marked the worktree prunable, and
+    // `git worktree prune` dropped it. The directory and its generated output remain.
+    fs::create_dir_all(tree.join("build")).unwrap();
+    fs::write(tree.join("build/generated"), "output\n").unwrap();
+    fs::remove_file(tree.join(".git")).unwrap();
+    git(&repo, &["worktree", "unlock", tree.to_str().unwrap()]);
+    git(&repo, &["worktree", "prune"]);
+    assert!(!git(&repo, &["worktree", "list"]).contains(".worktrees/x"));
+
+    gate(&rig, "w1:p1");
+    let log = serve(&rig);
+    let reason = format!(
+        "worktree unregistered by git; directory remains: {}",
+        tree.display()
+    );
+    assert!(log.contains("dogsled sweep: hold:"), "{log}");
+    assert!(!log.contains("failed:"), "{log}");
+    assert!(tree.join("build/generated").is_file());
+    assert_eq!(rig.read("state/worktrees.json"), registration);
+    let (_, status) = rig.json(&["status"]);
+    assert_eq!(status["sweep"]["failures"], json!([]), "{status}");
+    let hold = &status["sweep"]["unlinked"][0];
+    assert_eq!(hold["removable"], false);
+    assert_eq!(hold["kind"], "unlinked");
+    let detail = hold["detail"].as_str().unwrap();
+    assert!(detail.contains(&reason), "{detail}");
+    assert!(detail.contains("move or delete the directory yourself"));
+    let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
+    assert!(
+        human.contains(&format!("hold: {}", tree.display())),
+        "{human}"
+    );
+    let message = gate(&rig, "w1:p1");
+    assert!(message.contains(&reason), "{message}");
+    assert!(message.contains("do not delete it yourself"));
+    // The same hold speaks once, and later passes neither fail nor touch the directory.
+    assert_eq!(gate(&rig, "w1:p1"), "");
+    assert!(!serve(&rig).contains("failed:"));
+    assert_eq!(gate(&rig, "w1:p1"), "");
+    assert!(tree.join("build/generated").is_file());
+
+    // The owner checked the directory and deleted it: the next pass drops the registration.
+    fs::remove_dir_all(&tree).unwrap();
+    gate(&rig, "w1:p1");
+    let log = serve(&rig);
+    assert!(!log.contains("failed:"), "{log}");
+    assert_eq!(rig.read("state/worktrees.json"), json!([]));
+}
+
+#[test]
 fn missing_configured_repository_warns_once_per_set_and_does_not_stop_other_cleanup() {
     let (rig, tree) = close_rig("stop-missing-repo");
     let missing = rig.dir.join("gone-repo");

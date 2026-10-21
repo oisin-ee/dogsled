@@ -209,9 +209,11 @@ pub fn brief(status: &Status) -> String {
             .count()
     ));
     if let Some(sweep) = &status.sweep
-        && (!sweep.applied.failures.is_empty() || !sweep.applied.repositories.is_empty())
+        && (!sweep.applied.failures.is_empty()
+            || !sweep.applied.repositories.is_empty()
+            || !sweep.applied.unlinked.is_empty())
     {
-        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len()));
+        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings, {} held worktrees. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len(), sweep.applied.unlinked.len()));
     }
     format!("{}\n", rows.join("\n"))
 }
@@ -263,6 +265,13 @@ pub fn render(status: &Status) -> String {
         lines.extend(
             sweep
                 .applied
+                .skipped
+                .iter()
+                .map(|s| format!("  skipped: {s}")),
+        );
+        lines.extend(
+            sweep
+                .applied
                 .failures
                 .iter()
                 .map(|f| format!("  failed: {f}")),
@@ -273,6 +282,13 @@ pub fn render(status: &Status) -> String {
                 .repositories
                 .iter()
                 .map(|w| format!("  warning: {}: {}", w.id, w.detail)),
+        );
+        lines.extend(
+            sweep
+                .applied
+                .unlinked
+                .iter()
+                .map(|h| format!("  hold: {}: {}", h.id, h.detail)),
         );
     } else {
         lines.push("Last cleanup: none".into());

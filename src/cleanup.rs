@@ -350,6 +350,30 @@ fn missing(path: &str) -> bool {
     std::fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// The `kind` of a worktree entry whose directory remains but that Git can no longer remove.
+pub const UNLINKED: &str = "unlinked";
+
+fn unlinked_reason(tree: &Tree, prunable: Option<bool>) -> Option<&'static str> {
+    crate::worktree::unlinked_reason(&tree.path, prunable)
+}
+
+/// A hold, never a removal: the directory may hold content that no Git check can vouch for.
+/// The owner decides; once the directory is gone, the stale-registration rule drops the record.
+fn unlinked(tree: &Tree, reason: &str) -> Entry {
+    let mut e = entry(
+        "worktrees",
+        tree.path.clone(),
+        format!(
+            "held: {reason}; directory remains: {}. Dogsled does not delete it. Check that nothing in it is needed, then move or delete the directory yourself; the next cleanup pass then drops its registration",
+            tree.path
+        ),
+        false,
+    );
+    e.kind = Some(UNLINKED.into());
+    e.tree = Some(tree.clone());
+    e
+}
+
 /// Registered and configured repositories, and those of live panes, Herdr workspaces, and the
 /// caller. Doctor does not scan home or change registrations.
 fn repositories(
@@ -459,9 +483,20 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
     Ok(listed(shell, repo)?.into_iter().skip(1).collect())
 }
 
-/// Every worktree of `repo`, the main checkout first. A detached worktree has no branch.
+/// Every working tree of `repo`, the main checkout first. A detached worktree has no branch.
+/// A prunable entry is not a working tree any more: `git worktree remove` refuses it.
 fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
+    Ok(porcelain(shell, repo)?
+        .into_iter()
+        .filter(|(_, prunable)| !prunable)
+        .map(|(tree, _)| tree)
+        .collect())
+}
+
+/// Every entry of `git worktree list`, with whether Git calls it prunable.
+fn porcelain(shell: &dyn Shell, repo: &str) -> Result<Vec<(Tree, bool)>> {
     let mut result = Vec::new();
+    let mut prunable = false;
     let output = git(shell, repo, &["worktree", "list", "--porcelain", "-z"])?;
     if !output.ok() {
         return Err(Error::Invalid(format!(
@@ -482,8 +517,10 @@ fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
             tree.head = value.into();
         } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
             tree.branch = value.into();
+        } else if field == "prunable" || field.starts_with("prunable ") {
+            prunable = true;
         } else if field.is_empty() && !tree.path.is_empty() {
-            result.push(tree.clone());
+            result.push((tree.clone(), std::mem::take(&mut prunable)));
             tree.path.clear();
             tree.branch.clear();
             tree.head.clear();
@@ -670,14 +707,37 @@ fn readable(
     let mut usable = BTreeSet::new();
     let mut trees = Vec::new();
     let mut evidence = BTreeMap::new();
+    // An unreadable registry hides no candidate: Git's list still drives removal.
+    let recorded: Vec<Tree> = node
+        .ledger
+        .read("worktrees.json")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     for repo in repos {
-        match repository_trees(node.shell, &repo) {
+        match porcelain(node.shell, &repo) {
             Ok(found) => {
-                trees.extend(
-                    found
-                        .into_iter()
-                        .filter(|tree| Path::new(&tree.path).exists()),
-                );
+                for (tree, prunable) in found.iter().skip(1) {
+                    if !Path::new(&tree.path).exists() {
+                        continue;
+                    }
+                    match unlinked_reason(tree, Some(*prunable)) {
+                        Some(reason) => plan.entries.push(unlinked(tree, reason)),
+                        None => trees.push(tree.clone()),
+                    }
+                }
+                // Dogsled made it, Git forgot it (`git worktree prune`), and its directory stays.
+                for tree in recorded.iter().filter(|t| {
+                    crate::worktree::same(&t.repo, &repo)
+                        && !missing(&t.path)
+                        && !found
+                            .iter()
+                            .any(|(f, _)| crate::worktree::same(&f.path, &t.path))
+                }) {
+                    if let Some(reason) = unlinked_reason(tree, None) {
+                        plan.entries.push(unlinked(tree, reason));
+                    }
+                }
                 let fetched = crate::loss::Evidence::fetch(node.shell, &repo);
                 if let Some(warning) = &fetched.warning {
                     plan.entries
@@ -1499,16 +1559,45 @@ fn disposition(node: &Node<'_>, tree: &Tree, seen: &Seen) -> Result<Disposition>
     })
 }
 
-fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss::Evidence)> {
+/// What one planned entry did when no error stopped it.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    /// The entry was removed, closed, or reported.
+    Done(String),
+    /// The recheck found that the state changed since the plan: the checkout is now dirty,
+    /// held, or not landed, or the pane is now busy. The entry stays. This is the safeguard
+    /// working, not a failure. A changed or missing identity, a command error, and unreadable
+    /// evidence are errors instead.
+    Skipped(String),
+}
+
+/// The apply-time recheck of a planned worktree.
+enum Recheck {
+    Removable(Usage, crate::loss::Evidence),
+    /// The refusal and its reason, as `refuse <path>: <detail>`.
+    Refused(String),
+    /// Another actor removed it after the survey: Git no longer lists it and its path is
+    /// absent. A path that Git no longer lists but that still exists is refused, because it
+    /// may hold content.
+    Gone,
+}
+
+fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
     let current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
-        .find(|t| t.path == planned.path)
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "refuse {}: worktree identity disappeared",
-                planned.path
-            ))
-        })?;
+        .find(|t| t.path == planned.path);
+    if current.is_none() && missing(&planned.path) {
+        return Ok(Recheck::Gone);
+    }
+    // Git lost it after the survey: the next survey holds it; this pass touches nothing.
+    let reason = unlinked_reason(planned, current.as_ref().map(|_| false));
+    let (Some(current), None) = (current, reason) else {
+        return Err(Error::Invalid(format!(
+            "refuse {}: {}; directory remains",
+            planned.path,
+            reason.unwrap_or_default()
+        )));
+    };
     let repo = crate::prepare::main_checkout(node.shell, &current.path)?;
     if current != *planned
         || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
@@ -1530,7 +1619,7 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss:
     )?;
     let found = disposition(node, &current, &seen)?;
     if !found.removable {
-        return Err(Error::Invalid(format!(
+        return Ok(Recheck::Refused(format!(
             "refuse {}: {}",
             current.path, found.detail
         )));
@@ -1540,7 +1629,7 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss:
         .into_values()
         .next()
         .ok_or_else(|| Error::Invalid("missing loss evidence".into()))?;
-    Ok((found.usage, evidence))
+    Ok(Recheck::Removable(found.usage, evidence))
 }
 
 /// Drop a removed worktree's registration. Its repository stays registered.
@@ -1552,8 +1641,19 @@ pub fn forget(ledger: &Ledger, path: &str) -> Result<()> {
     })
 }
 
-fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
-    let (held, evidence) = validate_tree(node, tree)?;
+fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
+    let (held, evidence) = match validate_tree(node, tree)? {
+        Recheck::Removable(held, evidence) => (held, evidence),
+        Recheck::Refused(reason) => return Ok(Outcome::Skipped(reason)),
+        Recheck::Gone => {
+            // Another actor removed it after the survey. The goal holds; reconcile the record.
+            drop_registration(node, &tree.path)?;
+            return Ok(Outcome::Done(format!(
+                "{} was already removed; dropped its registration",
+                tree.path
+            )));
+        }
+    };
     let linked = crate::worktree::Linked {
         checkout: tree.repo.clone().into(),
         path: tree.path.clone(),
@@ -1594,7 +1694,7 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         .map(|p| p.pane_id.as_str())
         .chain(held.workspace.as_deref())
         .collect::<Vec<_>>();
-    Ok(format!(
+    Ok(Outcome::Done(format!(
         "removed {}{}{}{}",
         tree.path,
         if closed.is_empty() {
@@ -1610,7 +1710,7 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         removed
             .anchor_closed
             .map_or(String::new(), |anchor| format!("; closed anchor {anchor}"))
-    ))
+    )))
 }
 
 fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
@@ -1668,7 +1768,7 @@ fn remove_job(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
 }
 
 /// Delete a branch the plan found integrated or pushed, at the planned commit.
-fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
+fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<Outcome> {
     let reference = format!("refs/heads/{}", tree.branch);
     let evidence = crate::loss::Evidence::fetch(shell, &tree.repo);
     if let Some(warning) = &evidence.warning {
@@ -1683,7 +1783,7 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
     }
     let loss = evidence.assess(shell, &reference, None)?;
     if !loss.loses_nothing() {
-        return Err(Error::Invalid(format!(
+        return Ok(Outcome::Skipped(format!(
             "refuse {}: {}",
             tree.branch,
             loss.detail()
@@ -1698,18 +1798,28 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<String> {
             out.stderr.trim()
         )));
     }
-    Ok(format!("deleted branch {} in {}", tree.branch, tree.repo))
+    Ok(Outcome::Done(format!(
+        "deleted branch {} in {}",
+        tree.branch, tree.repo
+    )))
 }
 
 /// What prune did. Each entry is independent, so one failure does not stop the others.
+/// `skipped` lists entries whose apply-time recheck refused them because their state changed
+/// after the plan; they stay, and they are not failures.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Applied {
     pub results: Vec<String>,
     pub failures: Vec<String>,
     #[serde(default)]
+    pub skipped: Vec<String>,
+    #[serde(default)]
     pub repositories: Vec<Entry>,
     #[serde(default)]
     pub landed_dirty: Vec<Entry>,
+    /// Worktrees held because Git can no longer remove them while their directories remain.
+    #[serde(default)]
+    pub unlinked: Vec<Entry>,
 }
 
 impl Applied {
@@ -1717,6 +1827,7 @@ impl Applied {
         self.results
             .iter()
             .cloned()
+            .chain(self.skipped.iter().map(|s| format!("skipped: {s}")))
             .chain(self.failures.iter().map(|f| format!("failed: {f}")))
             .map(|line| line + "\n")
             .collect()
@@ -1728,12 +1839,19 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
     // A remote plan is input, not authority: rebuild the candidate set on this host.
     let actual = doctor(node, now)?;
     for requested in &plan.entries {
-        match apply_one(node, &actual, requested, now) {
-            Ok(result) => applied.results.push(result),
-            Err(e) => applied.failures.push(e.to_string()),
-        }
+        applied.record(apply_one(node, &actual, requested, now));
     }
     Ok(applied)
+}
+
+impl Applied {
+    fn record(&mut self, outcome: Result<Outcome>) {
+        match outcome {
+            Ok(Outcome::Done(result)) => self.results.push(result),
+            Ok(Outcome::Skipped(reason)) => self.skipped.push(reason),
+            Err(e) => self.failures.push(e.to_string()),
+        }
+    }
 }
 
 /// The classes the sweep applies. Everything else waits for `prune`.
@@ -1749,6 +1867,12 @@ pub const SWEPT: [&str; 5] = [
 /// checks as `prune`. Each entry is independent, so one failure does not stop the others.
 pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
     let plan = survey(node, Scope::Sweep, now)?;
+    Ok(apply_survey(node, &plan, now))
+}
+
+/// Apply each removable entry of a sweep survey. Each removal rechecks its entry first, because
+/// live work can change a checkout after the survey.
+pub(crate) fn apply_survey(node: &Node<'_>, plan: &Plan, now: u64) -> Applied {
     let mut applied = Applied {
         repositories: plan
             .entries
@@ -1762,6 +1886,12 @@ pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
             .filter(|e| e.kind.as_deref() == Some("landed_dirty"))
             .cloned()
             .collect(),
+        unlinked: plan
+            .entries
+            .iter()
+            .filter(|e| e.kind.as_deref() == Some(UNLINKED))
+            .cloned()
+            .collect(),
         ..Applied::default()
     };
     for entry in plan
@@ -1769,42 +1899,63 @@ pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
         .iter()
         .filter(|e| e.removable && SWEPT.contains(&e.class.as_str()))
     {
-        match apply_one(node, &plan, entry, now) {
-            Ok(result) => applied.results.push(result),
-            Err(e) => applied.failures.push(e.to_string()),
-        }
+        applied.record(apply_one(node, plan, entry, now));
     }
-    Ok(applied)
+    applied
 }
 
-fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<String> {
+fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<Outcome> {
     if matches!(requested.class.as_str(), "disk" | "processes") {
-        return Ok(format!("{} {}: report only", requested.class, requested.id));
+        return Ok(Outcome::Done(format!(
+            "{} {}: report only",
+            requested.class, requested.id
+        )));
     }
     // A refused entry stays: the plan shows why, and prune removes only eligible entries.
     if !requested.removable {
-        return Ok(format!("{} {}: kept", requested.class, requested.id));
+        return Ok(Outcome::Done(format!(
+            "{} {}: kept",
+            requested.class, requested.id
+        )));
     }
-    let candidate = actual
+    let same = |e: &&Entry| e.class == requested.class && e.id == requested.id;
+    let Some(current) = actual
         .entries
         .iter()
-        .find(|e| e.class == requested.class && e.id == requested.id && e.removable)
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "refuse {} {}: no longer safe to remove",
+        .filter(same)
+        .find(|e| e.removable)
+        .or_else(|| actual.entries.iter().find(same))
+    else {
+        // The survey lists panes and workspaces only while they are idle: absence means busy.
+        if matches!(requested.class.as_str(), "panes" | "workspaces") {
+            return Ok(Outcome::Skipped(format!(
+                "refuse {} {}: no longer safe to remove: no longer listed as idle",
                 requested.class, requested.id
-            ))
-        })?;
-    if candidate.tree != requested.tree {
+            )));
+        }
+        return Err(Error::Invalid(format!(
+            "refuse {} {}: no longer in the survey",
+            requested.class, requested.id
+        )));
+    };
+    if current.tree != requested.tree {
         return Err(Error::Invalid(format!(
             "refuse {}: planned worktree identity changed",
             requested.id
         )));
     }
+    // The fresh survey refuses it now: its state changed after the plan.
+    if !current.removable {
+        return Ok(Outcome::Skipped(format!(
+            "refuse {} {}: no longer safe to remove: {}",
+            requested.class, requested.id, current.detail
+        )));
+    }
+    let candidate = current;
     match candidate.class.as_str() {
         "worktrees" => match &requested.tree {
             Some(tree) => remove_tree(node, tree),
-            None => drop_registration(node, &candidate.id),
+            None => drop_registration(node, &candidate.id).map(Outcome::Done),
         },
         "branches" => match &requested.tree {
             Some(tree) => delete_branch(node.shell, tree),
@@ -1812,18 +1963,18 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
         },
         "workspaces" => close_workspace(node, &candidate.id, now),
         "panes" => close_pane(node, &candidate.id, now),
-        "repositories" => drop_repository(node, &candidate.id),
-        "jobs" => remove_job(node, &candidate.id, now),
-        "targets" => remove_target(&candidate.id),
+        "repositories" => drop_repository(node, &candidate.id).map(Outcome::Done),
+        "jobs" => remove_job(node, &candidate.id, now).map(Outcome::Done),
+        "targets" => remove_target(&candidate.id).map(Outcome::Done),
         _ => Err(Error::Invalid("unknown cleanup class".into())),
     }
 }
 
 /// Re-check a planned workspace close against a fresh survey under the cleanup lock.
-fn close_workspace(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
+fn close_workspace(node: &Node<'_>, id: &str, now: u64) -> Result<Outcome> {
     let seen = Seen::load(node, None, BTreeMap::new())?;
     if let Some(reason) = workspace_group_hold(&seen.workspaces, id) {
-        return Err(Error::Invalid(format!("refuse {id}: {reason}")));
+        return Ok(Outcome::Skipped(format!("refuse {id}: {reason}")));
     }
     let idle = idle_panes(node, now, &seen)?;
     for pane in seen
@@ -1835,24 +1986,24 @@ fn close_workspace(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
             || crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?
                 == crate::launch::PaneLaunch::Final
         {
-            return Err(Error::Invalid(format!(
+            return Ok(Outcome::Skipped(format!(
                 "refuse {id}: workspace is no longer idle"
             )));
         }
     }
     node.shell
         .run_ok("herdr", &["workspace".into(), "close".into(), id.into()])?;
-    Ok(format!("closed workspace {id}"))
+    Ok(Outcome::Done(format!("closed workspace {id}")))
 }
 
 /// Re-check a planned pane close against a fresh survey under the cleanup lock.
-fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
+fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<Outcome> {
     let seen = Seen::load(node, None, BTreeMap::new())?;
     if let Some(reason) = seen.pane_group_hold(id) {
-        return Err(Error::Invalid(format!("refuse {id}: {reason}")));
+        return Ok(Outcome::Skipped(format!("refuse {id}: {reason}")));
     }
     if !idle_panes(node, now, &seen)?.contains_key(id) {
-        return Err(Error::Invalid(format!(
+        return Ok(Outcome::Skipped(format!(
             "refuse {id}: pane is no longer idle"
         )));
     }
@@ -1860,7 +2011,7 @@ fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
         crate::launch::PaneLaunch::Final
             if crate::launch::close_unfinished(node.ledger, node.shell, id)? =>
         {
-            return Ok(format!("closed pane {id}"));
+            return Ok(Outcome::Done(format!("closed pane {id}")));
         }
         crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved => {
             return Err(Error::Invalid(format!(
@@ -1876,13 +2027,13 @@ fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
         crate::probe::foreground(node.shell, id)?.is_none()
     };
     if !idle {
-        return Err(Error::Invalid(format!(
+        return Ok(Outcome::Skipped(format!(
             "refuse {id}: pane is busy, or its agent has not called done"
         )));
     }
     node.shell
         .run_ok("herdr", &["pane".into(), "close".into(), id.into()])?;
-    Ok(format!("closed pane {id}"))
+    Ok(Outcome::Done(format!("closed pane {id}")))
 }
 
 pub fn render(plan: &Plan) -> String {
@@ -2330,6 +2481,58 @@ mod tests {
     }
 
     #[test]
+    fn planned_worktree_removed_by_another_actor_is_reconciled_not_failed() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.display().to_string();
+        let tree = Tree {
+            repo: repo.clone(),
+            path: format!("{repo}/.worktrees/tiers-case"),
+            branch: "tiers-case".into(),
+            head: "abc".into(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        // The survey planned the removal; then the worktree left Git's list before apply.
+        rig.shell.on(
+            &format!("git -C {repo} worktree list --porcelain -z"),
+            &format!("worktree {repo}\0HEAD abc\0branch refs/heads/main\0\0"),
+        );
+        let mut planned = entry("worktrees", tree.path.clone(), "no holds".into(), true);
+        planned.tree = Some(tree.clone());
+        let plan = Plan {
+            entries: vec![planned.clone()],
+        };
+        let registered = || {
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap()
+        };
+
+        // Unlisted but still on disk: it may hold content, so the refusal stays.
+        std::fs::create_dir_all(&tree.path).unwrap();
+        let refused = apply_one(&rig.node(), &plan, &planned, 100).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("worktree unregistered by git; directory remains"),
+            "{refused}"
+        );
+        assert_eq!(registered(), std::slice::from_ref(&tree));
+        assert!(Path::new(&tree.path).is_dir());
+
+        // Gone from Git and disk: the pass succeeds and forgets the record.
+        std::fs::remove_dir(&tree.path).unwrap();
+        let Outcome::Done(result) = apply_one(&rig.node(), &plan, &planned, 100).unwrap() else {
+            panic!("a vanished worktree is not a skip");
+        };
+        assert!(result.contains("already removed"), "{result}");
+        assert_eq!(registered(), [] as [Tree; 0]);
+        assert!(Path::new(&repo).is_dir());
+    }
+
+    #[test]
     fn primary_with_open_linked_workspace_is_kept_with_its_idle_pane() {
         let rig = Rig::new(json!([workspace("wVR", false), workspace("wVS", true)]));
         rig.panes(&[("wVR:p1", "wVR", true), ("wVS:p1", "wVS", false)]);
@@ -2421,19 +2624,20 @@ mod tests {
             &json!({"result":{"workspaces":[workspace("wVR", false), workspace("wVS", true)]}})
                 .to_string(),
         );
-        let error = apply_one(&rig.node(), &plan, &plan.entries[0], 2_000_000).unwrap_err();
+        // A hold that appeared after the plan is a skip: the entry stays, and it is no failure.
+        let skipped = |outcome: Result<Outcome>| match outcome.unwrap() {
+            Outcome::Skipped(reason) => reason,
+            Outcome::Done(result) => panic!("not skipped: {result}"),
+        };
         assert!(
-            error
-                .to_string()
+            skipped(apply_one(&rig.node(), &plan, &plan.entries[0], 2_000_000))
                 .contains("closing its pane would close linked workspaces")
         );
         let panes = Plan {
             entries: vec![entry("panes", "wVR:p1".into(), String::new(), true)],
         };
-        let error = apply_one(&rig.node(), &panes, &panes.entries[0], 2_000_000).unwrap_err();
         assert!(
-            error
-                .to_string()
+            skipped(apply_one(&rig.node(), &panes, &panes.entries[0], 2_000_000))
                 .contains("closing its pane would close linked workspaces")
         );
         assert!(
