@@ -705,6 +705,8 @@ fn serve_closes_a_finished_writer_once_its_branch_lands() {
         journal.contains("dogsled sweep: keep w2:p1 on local: +1 commit to land"),
         "{journal}"
     );
+    // Model a service that is running again after the one-shot service exited.
+    rig.service();
     let (_, board) = rig.json(&["board"]);
     assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
     // The branch merges: the next pass closes the child and deletes the landed branch.

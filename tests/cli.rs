@@ -69,6 +69,7 @@ const CONTRACT: &str = "Dogsled started you as a child agent. When your whole ta
 
 struct Rig {
     dir: PathBuf,
+    service: std::sync::Mutex<Option<fs::File>>,
 }
 impl Rig {
     fn new(name: &str) -> Self {
@@ -77,7 +78,10 @@ impl Rig {
         for child in ["bin", "state", "home"] {
             fs::create_dir_all(dir.join(child)).unwrap();
         }
-        let rig = Self { dir };
+        let rig = Self {
+            dir,
+            service: std::sync::Mutex::new(None),
+        };
         rig.put("machines.json", &json!([]));
         rig.put("agents.json", &json!({"result":{"agents":[]}}));
         rig.put(
@@ -131,7 +135,24 @@ esac
         rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
         rig
     }
+    fn service(&self) {
+        let mut service = self.service.lock().unwrap();
+        if service.is_none() {
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(self.dir.join("state/service.lock"))
+                .unwrap();
+            lock.try_lock().unwrap();
+            *service = Some(lock);
+        }
+    }
     fn put(&self, path: &str, value: &Value) {
+        if path == "state/host.json" {
+            self.service();
+        }
         fs::write(
             self.dir.join(path),
             serde_json::to_vec_pretty(value).unwrap(),
@@ -147,6 +168,9 @@ esac
         fs::write(self.dir.join("config.toml"), text).unwrap();
     }
     fn cmd(&self, args: &[&str]) -> Command {
+        if args.first() == Some(&"serve") {
+            self.service.lock().unwrap().take();
+        }
         let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
         cmd.args(args)
             .env(
@@ -260,7 +284,22 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
     // add ticks. Every tick reads agents, panes, and each shell's foreground.
     // No Stop request means no doctor survey or workspace list.
     let herdr = rig.log("herdr.log");
-    assert!(herdr.contains("agent list\npane list\npane process-info --pane w1:p1\n"));
+    let ticks: Vec<_> = herdr.split("agent list\n").collect();
+    assert_eq!(ticks[0], "");
+    assert!(ticks.len() > 1);
+    for tick in &ticks[1..] {
+        let mut calls = tick.lines();
+        assert_eq!(calls.next(), Some("pane list"));
+        let mut foreground: Vec<_> = calls.collect();
+        foreground.sort_unstable();
+        assert_eq!(
+            foreground,
+            [
+                "pane process-info --pane w1:p1",
+                "pane process-info --pane w2:p1"
+            ]
+        );
+    }
     assert!(
         herdr.lines().all(|line| [
             "agent list",
@@ -327,6 +366,25 @@ fn serve_records_transcript_paths_and_file_mtimes() {
     assert!(agents[2]["transcript_modified"].is_null());
     assert_eq!(agents[3]["state"], "unknown");
     assert!(agents[3]["transcript"].is_null());
+}
+
+#[test]
+fn service_liveness_and_snapshot_age_are_independent() {
+    let rig = Rig::new("service-liveness");
+    fs::write(rig.dir.join("clock"), "61000").unwrap();
+    rig.snapshot("state/host.json", 1000, 0.0, 8);
+    let status = rig.json(&["status"]).1;
+    assert_eq!(status["hosts"][0]["service"], "up");
+    assert_eq!(status["hosts"][0]["sampled_ms"], 1000);
+    assert_eq!(status["hosts"][0]["headroom"]["eligible"], false);
+    let text = rig.run(&["status", "--brief"]);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("service: up (snapshot 1m ago)"));
+    let live = rig.json(&["host", "snapshot"]).1;
+    assert_eq!(live["running"], true);
+    assert_eq!(live["sampled_ms"], 1000);
+    rig.service.lock().unwrap().take();
+    assert_eq!(rig.json(&["status"]).1["hosts"][0]["service"], "down");
+    assert_eq!(rig.json(&["host", "snapshot"]).1["running"], false);
 }
 
 #[test]

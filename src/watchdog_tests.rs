@@ -36,11 +36,23 @@ struct Rig {
     ledger: Ledger,
     shell: Commands,
     policy: Policy,
+    _service: std::fs::File,
 }
 impl Rig {
     fn new() -> Self {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        std::fs::create_dir_all(&ledger.dir).unwrap();
+        let service = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(ledger.dir.join("service.lock"))
+            .unwrap();
+        service.try_lock().unwrap();
         let rig = Self {
-            ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+            ledger,
+            _service: service,
             shell: Commands::default(),
             policy: Policy::default(),
         };

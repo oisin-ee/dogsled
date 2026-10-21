@@ -186,6 +186,9 @@ pub fn worktree(shell: &dyn Shell, cwd: &str, previous: Option<&Worktree>) -> Op
 
 /// Fill each agent's transcript and worktree facts, reusing `previous` where nothing changed.
 pub fn observe(shell: &dyn Shell, probe: &mut Probe, previous: Option<&Probe>) {
+    // Several agents can share one checkout. Observe it once per tick, but never cache its
+    // dirty state across ticks: unchanged Git tips do not imply an unchanged index/worktree.
+    let mut inputs = std::collections::BTreeMap::new();
     for agent in &mut probe.agent_panes {
         let old = previous.and_then(|p| {
             p.agent_panes
@@ -193,10 +196,37 @@ pub fn observe(shell: &dyn Shell, probe: &mut Probe, previous: Option<&Probe>) {
                 .find(|a| a.pane == agent.pane && a.terminal_id == agent.terminal_id)
         });
         agent.session = transcript(agent, old);
+        if let Some(cwd) = &agent.cwd {
+            inputs
+                .entry(cwd.as_str())
+                .or_insert(old.and_then(|a| a.worktree.as_ref()));
+        }
+    }
+    let mut trees: Vec<_> = inputs
+        .into_iter()
+        .map(|(cwd, old)| (cwd, old, None))
+        .collect();
+    let chunk = trees.len().div_ceil(crate::probe::cores() as usize).max(1);
+    std::thread::scope(|scope| {
+        for group in trees.chunks_mut(chunk) {
+            scope.spawn(move || {
+                for (cwd, old, observed) in group {
+                    *observed = worktree(shell, cwd, *old);
+                }
+            });
+        }
+    });
+    let trees: std::collections::BTreeMap<_, _> = trees
+        .into_iter()
+        .map(|(cwd, _, tree)| (cwd.to_owned(), tree))
+        .collect();
+    for agent in &mut probe.agent_panes {
         agent.worktree = agent
             .cwd
-            .as_deref()
-            .and_then(|cwd| worktree(shell, cwd, old.and_then(|a| a.worktree.as_ref())));
+            .as_ref()
+            .and_then(|cwd| trees.get(cwd))
+            .cloned()
+            .flatten();
     }
 }
 
@@ -294,6 +324,27 @@ mod tests {
                 &format!("{head}\n{base}\n"),
             )
             .on("git -C /t status --porcelain --untracked-files=all -z", "");
+    }
+
+    #[test]
+    fn shared_cwd_is_observed_once_each_tick() {
+        let dir = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = crate::shell::Fake::new();
+        let mut probe: Probe = serde_json::from_value(json!({"host":"local","label":"local","load1":0,"cores":4,
+            "memory":{"used_bytes":0,"total_bytes":0},"disk_free_percent":50,"agents":{"total":2,"by_status":{}},
+            "agent_panes":[{"pane":"a","state":"idle","cwd":dir},{"pane":"b","state":"working","cwd":dir}],
+            "panes":[],"reservations":[]})).unwrap();
+        observe(&shell, &mut probe, None);
+        assert_eq!(shell.calls.lock().unwrap().len(), 1);
+        let previous = probe.clone();
+        observe(&shell, &mut probe, Some(&previous));
+        assert_eq!(
+            shell.calls.lock().unwrap().len(),
+            2,
+            "even a non-worktree is checked again next tick"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

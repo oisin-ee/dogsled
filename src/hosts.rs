@@ -49,6 +49,17 @@ pub struct HostReport {
     pub retry_ms: Option<u64>,
 }
 
+impl HostReport {
+    /// Readers that need current measurements must not substitute service liveness for age.
+    pub fn fresh(&self, now: u64) -> bool {
+        self.reachable
+            && self.service == "up"
+            && self
+                .sampled_ms
+                .is_some_and(|sampled| now.saturating_sub(sampled) <= crate::node::STALE_MS)
+    }
+}
+
 #[derive(Deserialize)]
 struct MachineRow {
     id: String,
@@ -81,6 +92,8 @@ struct Cached {
     snapshot: Option<Snapshot>,
     reachable: bool,
     available: bool,
+    #[serde(default)]
+    running: Option<bool>,
     error: Option<String>,
     /// Consecutive failed reads: an unreachable peer is asked again with backoff, not on
     /// every cache expiry.
@@ -265,17 +278,16 @@ impl<'a> Fleet<'a> {
 
     fn read_host(&self, host: &Host, now: u64) -> HostReport {
         let result = if host.is_local() {
-            self.ledger
-                .read::<Snapshot>("host.json")
-                .map(|snapshot| Cached {
-                    fetched_ms: now,
-                    source: Vec::new(),
-                    snapshot,
-                    reachable: true,
-                    available: true,
-                    error: None,
-                    retry: crate::backoff::Backoff::default(),
-                })
+            self.node().snapshot().map(|report| Cached {
+                fetched_ms: now,
+                source: Vec::new(),
+                snapshot: report.snapshot,
+                reachable: true,
+                available: true,
+                running: report.running,
+                error: None,
+                retry: crate::backoff::Backoff::default(),
+            })
         } else {
             self.cached_peer(host, now)
         };
@@ -285,10 +297,13 @@ impl<'a> Fleet<'a> {
             snapshot: None,
             reachable: false,
             available: false,
+            running: None,
             error: Some(e.to_string()),
             retry: crate::backoff::Backoff::default(),
         });
         let fresh = cached.available && cached.snapshot.as_ref().is_some_and(|s| s.fresh(now));
+        // Old peers have no liveness field. Only they retain the age-based fallback.
+        let running = cached.reachable && cached.running.unwrap_or(fresh);
         let sampled_ms = cached.snapshot.as_ref().map(|s| s.sampled_ms);
         let jobs = cached
             .snapshot
@@ -305,15 +320,18 @@ impl<'a> Fleet<'a> {
         });
         let headroom = probe.as_ref().map(|probe| {
             let mut headroom = evaluate(probe, &self.thresholds());
-            if !fresh {
+            if !running || !fresh {
                 headroom.eligible = false;
-                // A late snapshot and a stopped service both read as down. The age tells the
-                // reader which: a slow tick on a loaded host is tens of seconds old.
+                let reason = if running {
+                    "snapshot: stale"
+                } else {
+                    "service: down"
+                };
                 headroom.reason = Some(sampled_ms.map_or_else(
-                    || "service: down".into(),
+                    || reason.into(),
                     |sampled| {
                         format!(
-                            "service: down (last snapshot {} ago)",
+                            "{reason} (last snapshot {} ago)",
                             crate::watchdog::age(now.saturating_sub(sampled))
                         )
                     },
@@ -323,7 +341,7 @@ impl<'a> Fleet<'a> {
         });
         HostReport {
             host: host.clone(),
-            service: if fresh { "up" } else { "down" }.into(),
+            service: if running { "up" } else { "down" }.into(),
             reachable: cached.reachable,
             sampled_ms,
             probe,
@@ -389,22 +407,39 @@ impl<'a> Fleet<'a> {
                 return Ok(cached.clone());
             }
             let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
-            let (snapshot, reachable, available, error) =
-                match self.remote::<Option<Snapshot>>(host, &["snapshot".into()]) {
-                    Ok(Some(snapshot)) => (Some(snapshot), true, true, None),
-                    Ok(None) => (
-                        previous.and_then(|c| c.snapshot),
+            let (snapshot, reachable, available, running, error) = match self.remote::<Option<
+                crate::node::SnapshotReport,
+            >>(
+                host,
+                &["snapshot".into()],
+            ) {
+                Ok(Some(report)) => {
+                    let available = report.snapshot.is_some();
+                    (
+                        report
+                            .snapshot
+                            .or_else(|| previous.and_then(|c| c.snapshot)),
                         true,
-                        false,
-                        Some("host.json is missing; service: down".into()),
-                    ),
-                    Err(e) => (
-                        previous.and_then(|c| c.snapshot),
-                        false,
-                        false,
-                        Some(e.to_string()),
-                    ),
-                };
+                        available,
+                        report.running,
+                        None,
+                    )
+                }
+                Ok(None) => (
+                    previous.and_then(|c| c.snapshot),
+                    true,
+                    false,
+                    None,
+                    Some("host.json is missing; service: down".into()),
+                ),
+                Err(e) => (
+                    previous.and_then(|c| c.snapshot),
+                    false,
+                    false,
+                    None,
+                    Some(e.to_string()),
+                ),
+            };
             if reachable {
                 retry.reset();
             } else {
@@ -416,6 +451,7 @@ impl<'a> Fleet<'a> {
                 snapshot,
                 reachable,
                 available,
+                running,
                 error,
                 retry,
             };
@@ -488,6 +524,21 @@ mod tests {
             stale[0].headroom.as_ref().unwrap().reason.as_deref(),
             Some("service: down (last snapshot 44s ago)")
         );
+        // New peers report process liveness independently of their sample timestamp.
+        let mut wire = serde_json::to_value(&snapshot).unwrap();
+        wire["running"] = serde_json::json!(true);
+        shell.on(&command, &wire.to_string());
+        let late = fleet.status(60_100).unwrap();
+        assert_eq!(late[0].service, "up");
+        assert_eq!(late[0].sampled_ms, Some(100));
+        assert!(!late[0].headroom.as_ref().unwrap().eligible);
+        wire["running"] = serde_json::json!(false);
+        shell.on(&command, &wire.to_string());
+        assert_eq!(fleet.status(70_100).unwrap()[0].service, "down");
+        shell.on(&command, r#"{"running":true}"#);
+        let starting = fleet.status(80_100).unwrap();
+        assert_eq!(starting[0].service, "up");
+        assert!(!starting[0].headroom.as_ref().unwrap().eligible);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 

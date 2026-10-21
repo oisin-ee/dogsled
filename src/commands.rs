@@ -150,11 +150,15 @@ fn summary(host: &HostReport) -> String {
         },
     );
     format!(
-        "{} {}{} {details} service: {}",
+        "{} {}{} {details} service: {}{}",
         one_line(&host.host.label),
         load(host),
         marker(host),
-        host.service
+        host.service,
+        host.sampled_ms.map_or_else(String::new, |sampled| format!(
+            " (snapshot {} ago)",
+            crate::watchdog::age(crate::ledger::now_ms().saturating_sub(sampled))
+        ))
     )
 }
 

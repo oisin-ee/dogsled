@@ -166,7 +166,7 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
         for item in items.iter_mut().filter(|i| i.closed_ms.is_none()) {
             let Some(host) = hosts
                 .iter()
-                .find(|h| h.host.id == item.host && h.service == "up")
+                .find(|h| h.host.id == item.host && h.fresh(now))
             else {
                 continue;
             };

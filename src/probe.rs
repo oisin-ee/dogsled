@@ -211,10 +211,18 @@ pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
             .ok_or_else(|| parse_error("herdr pane list", &panes.stdout))?
             .clone(),
     )?;
-    for pane in panes.iter_mut().filter(|p| p.agent.is_none()) {
-        // A pane closed since the list is not idle; it is gone.
-        pane.idle_shell = matches!(foreground(shell, &pane.pane_id), Ok(None));
-    }
+    let mut shells: Vec<_> = panes.iter_mut().filter(|p| p.agent.is_none()).collect();
+    let chunk = shells.len().div_ceil(cores() as usize).max(1);
+    std::thread::scope(|scope| {
+        for group in shells.chunks_mut(chunk) {
+            scope.spawn(move || {
+                for pane in group {
+                    // A pane closed since the list is not idle; it is gone.
+                    pane.idle_shell = matches!(foreground(shell, &pane.pane_id), Ok(None));
+                }
+            });
+        }
+    });
     Ok(Probe {
         host: "local".into(),
         label: "local".into(),

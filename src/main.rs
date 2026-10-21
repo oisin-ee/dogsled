@@ -418,11 +418,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             &cleanup::apply(node, &serde_json::from_str(&plan)?, now_ms())?,
             String::new,
         )?,
-        HostCommand::Snapshot => print(
-            true,
-            &node.ledger.read::<node::Snapshot>("host.json")?,
-            String::new,
-        )?,
+        HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,
         HostCommand::Reserve { id, thresholds } => {
             let node = Node {
                 thresholds: thresholds.over(node.thresholds),

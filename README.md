@@ -241,8 +241,11 @@ Peer reads run in parallel through SSH and the configured `remote_command`.
 A shared, locked cache permits at most one read per peer per ten seconds, including concurrent callers.
 Status never probes peers itself.
 
-A missing snapshot, failed read, or snapshot older than 30 seconds shows `service: down`.
-When a snapshot exists, the host's reason gives its age, such as `service: down (last snapshot 44s ago)`. A slow tick on a loaded host is tens of seconds old. A stopped service gets older on every read.
+`service: up` means a process holds the host's service lock. A free lock or unreachable peer means `service: down`.
+Status shows snapshot age separately, including when the service runs. Peers without the liveness field retain the 30-second age fallback during upgrades.
+Admission still requires a snapshot no older than 30 seconds. Finished-child cleanup can use an older snapshot from a running service.
+Close rechecks the live pane, the child's `done` mark, and the loss guard before it acts.
+Each tick observes a shared checkout once. Independent checkout and shell-pane reads use at most one worker per available CPU.
 The last peer measurement remains visible when available. Every discovered host stays in the output.
 The JSON output contains `hosts`, with service state, reachability, sample time, probe, headroom, errors, and `retry_ms` while a peer read backs off.
 
@@ -262,7 +265,7 @@ Example tab-row output:
 local 11/12 ▲ · netcup 3/16 · momokaya-2 1/7
 ```
 
-`▲` means not eligible. `?` means the snapshot is missing, stale, or unavailable.
+`▲` means not eligible, including a stale snapshot from a running service. `?` means the service is down or unavailable, or no snapshot exists.
 A host without measurements prints `momokaya-2 ?`. A stale host keeps its last numbers, followed by ` ?`.
 The numbers are busy cores over cores. A host without a CPU sample shows `load N/cores` instead.
 `--brief` includes busy/cores, memory, disk, agent counts, and a hint to run `dogsled status`.

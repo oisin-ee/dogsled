@@ -8,6 +8,9 @@ All notable changes to this project are documented in this file.
 - Worktree removal uses the existing 10-minute setup limit instead of the 30-second routine limit, including cleanup after failed setup.
 - Pure tracked deletions lose nothing when the default branch or refreshed remote refs hold HEAD. Cleanup restores only those deleted paths before unforced removal. Other dirt still prevents removal. Board facts use the same loss rule.
 
+- Service status uses the service lock instead of snapshot age. Status shows age separately, and finished children can close despite late snapshots. Admission and freshness-sensitive readers retain the 30-second limit. Older peers retain age-based liveness during upgrades.
+- Tick observations deduplicate shared checkouts and bound parallel checkout and shell-pane reads by available CPUs. Dirty checks and automatic-close guards remain unchanged.
+
 ## 0.16.4 - 2026-10-20
 
 - Explicit close can retire the verified idle shell of an interrupted launch without deleting its checkout or inventing a task outcome. Unknown launch evidence and preparation holds remain intact for normal cleanup.
