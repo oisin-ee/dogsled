@@ -46,15 +46,15 @@ case "$*" in
  *'symbolic-ref --quiet refs/remotes/origin/HEAD') printf 'refs/remotes/origin/main\n' ;;
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
  *'rev-parse refs/heads/feature refs/remotes/origin/main') printf 'abc\nmain\n' ;;
- *'merge-base refs/remotes/origin/main refs/heads/feature') printf 'fork\n' ;;
- *'diff --no-ext-diff --no-textconv --raw -z --no-renames --no-abbrev fork refs/heads/feature --')
+ *'merge-base main abc') printf 'fork\n' ;;
+ *'diff --no-ext-diff --no-textconv --raw -z --no-renames --no-abbrev fork abc --')
  printf ':100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0file\0' ;;
- *'for-each-ref --contains refs/heads/feature --format=%(objectname) %(refname) refs/heads/ refs/remotes/') printf 'abc refs/heads/feature\n' ;;
- *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --first-parent fork..refs/heads/feature --')
+ *'for-each-ref --contains abc --format=%(objectname) %(refname) refs/heads/ refs/remotes/') printf 'abc refs/heads/feature\n' ;;
+ *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --first-parent fork..abc --')
  printf '\001abc fork\0\n:100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0file\0' ;;
- *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --no-merges fork..refs/remotes/origin/main -- :(literal)file') ;;
+ *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --no-merges fork..main -- :(literal)file') ;;
  *'rev-parse --path-format=absolute --show-object-format --git-path objects') printf 'sha1\n%s\n' "$RIG/home/repo/.git/objects" ;;
- *'rev-parse refs/remotes/origin/main refs/heads/feature refs/remotes/origin/main^{tree}') printf 'main\nabc\nmain-tree\n' ;;
+ *'rev-parse main abc main^{tree}') printf 'main\nabc\nmain-tree\n' ;;
  *'init --bare --quiet --template= --object-format=sha1') mkdir -p "$2/objects/info" ;;
  *'hash-object -t tree -w -- /dev/null') printf 'empty-tree\n' ;;
  *'merge-tree --write-tree --no-messages main abc') printf 'branch-tree\n' ;;
@@ -327,10 +327,7 @@ fn doctor_reports_an_unused_unmerged_worktree_and_prune_keeps_it() {
         "branch feature commits are not held by the default branch or a refreshed remote ref; \
          no holds"
     );
-    assert!(
-        rig.log("git.log")
-            .contains("--first-parent fork..refs/heads/feature")
-    );
+    assert!(rig.log("git.log").contains("--first-parent fork..abc"));
     assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
     assert!(!rig.log("git.log").contains("worktree remove"));
 }

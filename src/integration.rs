@@ -19,6 +19,21 @@ use crate::error::{Error, Result};
 use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+
+/// Direct proofs belong to one repository's evidence pass, never to persistent state.
+#[derive(Debug, Default)]
+pub struct Proofs(Mutex<BTreeMap<(String, String), DirectProof>>);
+
+#[derive(Debug, Clone, Default)]
+struct DirectProof(Arc<Mutex<ProofState>>);
+
+#[derive(Debug, Default)]
+enum ProofState {
+    #[default]
+    Unchecked,
+    Checked(Option<Integrated>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
@@ -94,6 +109,7 @@ pub fn short(reference: &str) -> String {
 }
 
 /// `None` means the branch has work that `base` does not hold.
+#[cfg(test)]
 pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integrated>> {
     let reference = format!("refs/heads/{branch}");
     let exists = git(
@@ -111,9 +127,28 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
 
 /// The same integration proof for a branch, detached HEAD, or immutable commit ID.
 /// Equality is ancestry too: pending preparation is a hold, not unheld work.
+#[cfg(test)]
 pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Option<Integrated>> {
+    check_cached(shell, repo, reference, &Proofs::default())
+}
+
+pub fn check_cached(
+    shell: &dyn Shell,
+    repo: &str,
+    reference: &str,
+    proofs: &Proofs,
+) -> Result<Option<Integrated>> {
     let base = base(shell, repo)?;
-    if let Some(integrated) = check_direct(shell, repo, reference, &base)? {
+    let resolved = git(shell, repo, &["rev-parse", reference, &base])?;
+    if !resolved.ok() {
+        return Err(failed(repo, "resolve integration tips", &resolved));
+    }
+    let fields: Vec<&str> = resolved.stdout.lines().collect();
+    let [tip, base_tip] = fields.as_slice() else {
+        return Err(Error::Invalid(format!("{repo}: invalid integration tips")));
+    };
+    let name = short(&base);
+    if let Some(integrated) = proofs.direct(shell, repo, tip, base_tip, &name)? {
         return Ok(Some(integrated));
     }
     let containing = git(
@@ -122,7 +157,7 @@ pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Optio
         &[
             "for-each-ref",
             "--contains",
-            reference,
+            tip,
             "--format=%(objectname) %(refname)",
             "refs/heads/",
             "refs/remotes/",
@@ -131,7 +166,7 @@ pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Optio
     if !containing.ok() {
         return Err(failed(repo, "list containing refs", &containing));
     }
-    let mut seen = BTreeSet::new();
+    let mut seen = BTreeSet::from([*tip]);
     for line in containing.stdout.lines() {
         let Some((tip, containing_ref)) = line.split_once(' ') else {
             return Err(Error::Invalid(format!("{repo}: invalid containing ref")));
@@ -141,7 +176,7 @@ pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Optio
         }
         // No recursion: every transitive container also contains the original tip and
         // is already in this list. Aliases cannot prove each other integrated.
-        if check_direct(shell, repo, containing_ref, &base)?.is_some() {
+        if proofs.direct(shell, repo, tip, base_tip, &name)?.is_some() {
             return Ok(Some(Integrated::Contained {
                 reference: containing_ref.into(),
             }));
@@ -150,14 +185,45 @@ pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Optio
     Ok(None)
 }
 
+impl Proofs {
+    fn direct(
+        &self,
+        shell: &dyn Shell,
+        repo: &str,
+        tip: &str,
+        base: &str,
+        name: &str,
+    ) -> Result<Option<Integrated>> {
+        let key = (tip.to_string(), base.to_string());
+        let entry = {
+            let mut cache = self
+                .0
+                .lock()
+                .map_err(|_| Error::Invalid("integration cache lock poisoned".into()))?;
+            cache.entry(key).or_default().clone()
+        };
+        // Only identical proofs serialize. Independent branches still run in parallel.
+        let mut cached = entry
+            .0
+            .lock()
+            .map_err(|_| Error::Invalid("integration proof lock poisoned".into()))?;
+        if let ProofState::Checked(proof) = &*cached {
+            return Ok(proof.clone());
+        }
+        let proof = check_direct(shell, repo, tip, base, name.to_string())?;
+        *cached = ProofState::Checked(proof.clone());
+        Ok(proof)
+    }
+}
+
 fn check_direct(
     shell: &dyn Shell,
     repo: &str,
     reference: &str,
     base: &str,
+    name: String,
 ) -> Result<Option<Integrated>> {
     let branch = reference;
-    let name = short(base);
     let ancestor = git(
         shell,
         repo,
@@ -824,6 +890,57 @@ mod tests {
                 Some(found)
             );
         }
+    }
+
+    #[test]
+    fn proof_cache_reuses_aliases_and_rechecks_changed_tip_or_base() {
+        #[derive(Debug, Default)]
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl Shell for Counting {
+            fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+                if args.iter().any(|arg| arg == "--is-ancestor") {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Isolated.run(program, args)
+            }
+        }
+        let repo = Repo::new("proof-cache");
+        repo.git(&["switch", "-q", "-c", "feat"]);
+        repo.commit("b", "own\n", "own");
+        repo.git(&["branch", "alias"]);
+        repo.git(&["switch", "-q", "main"]);
+        let proofs = Proofs::default();
+        let shell = Counting::default();
+        assert_eq!(
+            check_cached(&shell, repo.path(), "feat", &proofs).unwrap(),
+            None
+        );
+        assert_eq!(
+            check_cached(&shell, repo.path(), "alias", &proofs).unwrap(),
+            None
+        );
+        assert_eq!(shell.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        repo.git(&["merge", "-q", "--squash", "feat"]);
+        repo.git(&["commit", "-q", "-m", "squash"]);
+        assert!(applied(
+            check_cached(&shell, repo.path(), "feat", &proofs)
+                .unwrap()
+                .as_ref()
+        ));
+        assert_eq!(shell.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        repo.git(&["switch", "-q", "feat"]);
+        repo.commit("c", "later\n", "later");
+        repo.git(&["switch", "-q", "main"]);
+        assert_eq!(
+            check_cached(&shell, repo.path(), "feat", &proofs).unwrap(),
+            None
+        );
+        assert_eq!(shell.0.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(
+            check_cached(&shell, repo.path(), "feat", &Proofs::default()).unwrap(),
+            None
+        );
+        assert_eq!(shell.0.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 
     #[test]
