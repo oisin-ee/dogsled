@@ -190,12 +190,126 @@ fn plugins_dist_keeps_service_templates_and_herdr_keeps_its_board() {
     assert_eq!(herdr["panes"][0]["placement"].as_str(), Some("split"));
     assert!(herdr["panes"][0].get("width").is_none());
     assert!(herdr["panes"][0].get("height").is_none());
-    let script = std::fs::read_to_string(root().join("plugin/board.sh")).unwrap();
-    assert!(script.contains("run_dogsled board --side --watch"));
-    assert!(!script.contains("status --watch"));
-    assert!(
-        root()
-            .join(herdr["panes"][0]["command"][1].as_str().unwrap())
-            .is_file()
+    // The build step installs the plugin's own release; the pane runs it, never one from PATH.
+    let builds = herdr["build"].as_array().unwrap();
+    assert_eq!(builds.len(), 1);
+    assert_eq!(argv(&builds[0]["command"]), ["sh", "plugin/fetch.sh"]);
+    assert_eq!(
+        argv(&herdr["panes"][0]["command"]),
+        ["bin/dogsled", "board", "--side", "--watch"]
     );
+}
+
+fn argv(value: &toml::Value) -> Vec<String> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The release archive name cargo-dist publishes for this test host, if any.
+fn release_triple() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
+/// A plugin checkout and a local release of `version` holding a stub binary.
+/// `corrupt` publishes a checksum that does not match the archive.
+fn fetch_fixture(name: &str, triple: &str, corrupt: bool) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("dogsled-fetch-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugin = dir.join("plugin-root");
+    std::fs::create_dir_all(plugin.join("plugin")).unwrap();
+    std::fs::copy(
+        root().join("herdr-plugin.toml"),
+        plugin.join("herdr-plugin.toml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        root().join("plugin/fetch.sh"),
+        plugin.join("plugin/fetch.sh"),
+    )
+    .unwrap();
+    let version = toml("herdr-plugin.toml")["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let release = dir.join("releases").join(format!("v{version}"));
+    let staged = dir.join("stage").join(format!("dogsled-{triple}"));
+    std::fs::create_dir_all(&staged).unwrap();
+    std::fs::create_dir_all(&release).unwrap();
+    std::fs::write(staged.join("dogsled"), "#!/bin/sh\necho stub-release\n").unwrap();
+    let archive = format!("dogsled-{triple}.tar.xz");
+    let status = Command::new("tar")
+        .arg("-cJf")
+        .arg(release.join(&archive))
+        .arg("-C")
+        .arg(dir.join("stage"))
+        .arg(format!("dogsled-{triple}"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let digest = if corrupt {
+        "0".repeat(64)
+    } else {
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sha256sum \"$0\" 2>/dev/null || shasum -a 256 \"$0\"")
+            .arg(release.join(&archive))
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()[..64].to_owned()
+    };
+    std::fs::write(
+        release.join(format!("{archive}.sha256")),
+        format!("{digest} *{archive}\n"),
+    )
+    .unwrap();
+    (plugin, dir.join("releases"))
+}
+
+fn run_fetch(plugin: &Path, releases: &Path) -> std::process::Output {
+    // No cargo on PATH: a missed download must fail rather than build.
+    Command::new("/bin/sh")
+        .arg(plugin.join("plugin/fetch.sh"))
+        .env("PATH", "/usr/bin:/bin")
+        .env("DOGSLED_RELEASES", format!("file://{}", releases.display()))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn herdr_build_installs_the_verified_release_of_the_manifest_version() {
+    let Some(triple) = release_triple() else {
+        return;
+    };
+    let (plugin, releases) = fetch_fixture("ok", triple, false);
+    let output = run_fetch(&plugin, &releases);
+    assert!(output.status.success(), "{output:?}");
+    let installed = Command::new(plugin.join("bin/dogsled")).output().unwrap();
+    assert_eq!(
+        String::from_utf8(installed.stdout).unwrap(),
+        "stub-release\n"
+    );
+}
+
+#[test]
+fn herdr_build_refuses_a_release_whose_checksum_does_not_match() {
+    let Some(triple) = release_triple() else {
+        return;
+    };
+    let (plugin, releases) = fetch_fixture("bad-sum", triple, true);
+    let output = run_fetch(&plugin, &releases);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("checksum mismatch")
+    );
+    assert!(!plugin.join("bin/dogsled").exists());
 }

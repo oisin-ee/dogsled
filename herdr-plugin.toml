@@ -1,5 +1,4 @@
 # Herdr plugin manifest. Install: herdr plugin install oisin-ee/dogsled --ref vX.Y.Z --yes
-# The plugin only calls the dogsled binary; install that with mise or cargo first (see README).
 
 id = "dogsled"
 name = "dogsled"
@@ -8,9 +7,14 @@ min_herdr_version = "0.9.1"
 description = "Opens the dogsled right-side work board."
 platforms = ["macos", "linux"]
 
+# Installs the checksum-verified release binary for this version at bin/dogsled,
+# or builds it with cargo when no release archive exists. `plugin link` skips it.
+[[build]]
+command = ["sh", "plugin/fetch.sh"]
+
 # Cached quotas, owned work, and provider-rendered todos. Herdr splits right by default.
 [[panes]]
 id = "board"
 title = "dogsled"
 placement = "split"
-command = ["sh", "plugin/board.sh"]
+command = ["bin/dogsled", "board", "--side", "--watch"]

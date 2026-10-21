@@ -45,7 +45,7 @@ Herdr (right-side work board):
 herdr plugin install oisin-ee/dogsled --ref v0.19.0 --yes
 ```
 
-Harness plugins use the binary on `PATH`. They do not install it or start host services.
+The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build step (`plugin/fetch.sh`) installs its own binary at `bin/dogsled`: the release archive for the manifest version, checked against its published SHA-256. When that release has no archive for the platform, it runs `cargo build --release --locked` instead, which needs Rust at the crate's `rust-version` or newer. A checksum mismatch stops the install. `DOGSLED_RELEASES` replaces the download base, such as a mirror. `herdr plugin link` skips build steps, so run `sh plugin/fetch.sh` in a linked checkout. No plugin starts host services.
 
 ## Commands
 
@@ -601,7 +601,7 @@ dogsled board --side --owner "$HERDR_PANE_ID" # print once
 herdr plugin pane open --plugin dogsled --entrypoint board --direction right --no-focus
 ```
 
-The split runs `dogsled board --side --watch` and refreshes every ten seconds. `--owner` defaults to the opening pane from Herdr’s plugin context.
+The split runs the plugin's own `bin/dogsled board --side --watch` and refreshes every ten seconds. `--owner` defaults to the opening pane from Herdr’s plugin context.
 Quotas come only from `quota.json`; the board never calls a provider or reads credentials. The heading shows cache age and `STALE` after fifteen minutes.
 
 Pi renders each new todo revision through pi-todo’s `display.createView(host).render(width)`. Dogsled never reads or copies task state.
