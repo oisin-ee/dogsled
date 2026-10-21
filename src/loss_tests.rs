@@ -867,6 +867,86 @@ fn worktree_held_by_a_process_after_the_plan_is_skipped_not_removed_or_failed() 
     assert!(fixture.repo.tree.join("work").exists());
 }
 
+/// `System`, with one idle shell pane whose cwd is `path`.
+#[derive(Debug)]
+struct ShellIn {
+    path: PathBuf,
+}
+
+impl Shell for ShellIn {
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        let value = if program == "herdr" && args == ["pane", "list"] {
+            Some(serde_json::json!({"result":{"panes":[
+                {"pane_id":"placed-shell","cwd":self.path.display().to_string()}
+            ]}}))
+        } else if program == "herdr" && args.starts_with(&["pane".into(), "process-info".into()]) {
+            Some(
+                serde_json::json!({"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}),
+            )
+        } else {
+            None
+        };
+        match value {
+            Some(value) => Ok(Output {
+                status: 0,
+                stdout: value.to_string(),
+                stderr: String::new(),
+            }),
+            None => System.run(program, args),
+        }
+    }
+}
+
+fn shell_idle_for(fixture: &Landed, minutes: u64) {
+    let now = crate::ledger::now_ms();
+    let snapshot = crate::node::Snapshot {
+        sampled_ms: now,
+        probe: crate::probe::Probe {
+            host: "local".into(),
+            label: "local".into(),
+            load1: 0.0,
+            cores: 1,
+            cpu_ticks: None,
+            busy: None,
+            memory: crate::probe::Memory::default(),
+            disk_free_percent: 90.0,
+            agents: crate::probe::AgentCounts::default(),
+            agent_panes: vec![],
+            reservations: vec![],
+            panes: vec![crate::probe::Pane {
+                pane_id: "placed-shell".into(),
+                idle_shell: true,
+                idle_since_ms: Some(now - minutes * 60_000),
+                ..Default::default()
+            }],
+        },
+        jobs: vec![],
+    };
+    fixture.ledger.write("host.json", &snapshot).unwrap();
+}
+
+#[test]
+fn worktree_with_a_young_shell_is_held_and_an_old_shell_releases_it() {
+    let fixture = Landed::new();
+    let shell = ShellIn {
+        path: fixture.repo.tree.clone(),
+    };
+    // `place` marks its preparation used at once, so only the new shell shows an owner.
+    shell_idle_for(&fixture, 1);
+    let plan = fixture.plan(&shell);
+    assert!(!plan.entries[0].removable, "{}", plan.entries[0].detail);
+    assert!(
+        plan.entries[0]
+            .detail
+            .contains("placed-shell is a shell idle for less than"),
+        "{}",
+        plan.entries[0].detail
+    );
+    shell_idle_for(&fixture, 16);
+    let plan = fixture.plan(&shell);
+    assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
+}
+
 #[test]
 fn worktree_identity_change_after_the_plan_still_fails() {
     let fixture = Landed::new();

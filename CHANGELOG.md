@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Prune and the sweep no longer plan to remove a worktree while the host snapshot reports a shell in it idle for less than 15 minutes. Before, the worktree that `place` made held only an idle shell, so a pass could plan its removal seconds after the owner started work there, and the apply-time check then failed with `worktree identity changed` when the owner's first commit moved HEAD. Such a shell now holds the checkout until it has been idle for 15 minutes, the shell rule's age; a shell with no reported age holds nothing, as before. An explicit `close` and the identity check are unchanged.
+
 ## 0.20.0 - 2026-10-21
 
 - The Herdr plugin installs the checksum-verified release binary for its own version at `bin/dogsled` during install, building from source only when no archive exists, and its board pane runs that binary directly. Before, a shell wrapper ran whichever `dogsled` was on the Herdr server's `PATH`; an older binary rejected `--side` and the pane closed at once with no message. The shell wrappers are gone.
