@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.19.0 - 2026-10-21
 
 - `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.
 - Quota no longer discovers MiniMax through `claude-api-key` or parses `token_plan/remains`. A MiniMax CLIProxy plugin appears on the board without a dogsled change.
