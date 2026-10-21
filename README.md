@@ -117,7 +117,7 @@ A wait deadline does not cancel its job or ticket. `cancel` only cancels pending
 ### Agents and profiles
 
 `dogsled agent` starts a child with `herdr agent start <name> --kind pi|claude|codex --pane <pane> -- <args>`. The task is a launch argument, so nothing is typed into the new pane.
-A task with a newline, a leading `-` or `@`, or more than 4000 characters goes to `launches/<id>.task.md`. Pi reads it as `@<file>`; Claude and Codex get a one-line pointer to it.
+Herdr types the launch as one terminal line of at most 1024 bytes, so no task text goes on it. The task is always `launches/<id>.task.md` on the host that runs the child; Pi reads it as `@<file>`, and Claude and Codex get a one-line pointer to it. Pi and Claude read the child contract from `launches/<id>.contract.md` (Codex has no file form, so its fixed contract stays inline). The host that runs the child refuses a name, profile or state path that makes the line over 960 bytes, before it creates a pane.
 `--message-file PATH` (or `-` for stdin) reads the task from a file.
 A failed `herdr agent start` is retried with backoff, three tries in all. After the last, the ticket fails and the owner's inbox says so. A refusal or a deadline fails at once.
 Herdr refuses a start before it types into the pane, for example `agent_pane_busy` or `agent_name_taken`. That refusal is final: dogsled records it as the launch result, closes the empty pane it created, and does not retry. Any other failure leaves the outcome unknown, so dogsled keeps the pane and reconciles it on the next try.
