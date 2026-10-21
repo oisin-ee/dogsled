@@ -302,14 +302,19 @@ fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
 
 #[derive(Debug)]
 struct BudgetShell {
-    budget: crate::budget::Budget,
+    /// Set once a start is refused as busy, so setup (locks, fsync) never races the deadline.
+    expired: std::sync::atomic::AtomicBool,
     starts: AtomicUsize,
     uncertain: bool,
 }
 
 impl Shell for BudgetShell {
     fn budget(&self) -> crate::budget::Budget {
-        self.budget
+        if self.expired.load(Ordering::SeqCst) {
+            crate::budget::Budget::until(std::time::Instant::now())
+        } else {
+            crate::budget::Budget::default()
+        }
     }
 
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
@@ -321,7 +326,9 @@ impl Shell for BudgetShell {
             if self.uncertain {
                 return Err(Error::Deadline("issued agent start".into()));
             }
-            return BusyShell::new(usize::MAX).run(program, args);
+            let refused = BusyShell::new(usize::MAX).run(program, args);
+            self.expired.store(true, Ordering::SeqCst);
+            return refused;
         }
         ConfirmingShell {
             recovering: false,
@@ -334,7 +341,7 @@ impl Shell for BudgetShell {
 #[test]
 fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_not() {
     for uncertain in [false, true] {
-        let mut ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let progress: Progress = serde_json::from_value(json!({
             "request":{"id":"budget","action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
                 "host":"local","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
@@ -343,11 +350,8 @@ fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_n
         })).unwrap();
         let receipts = ledger.child("launches");
         receipts.write("budget.progress.json", &progress).unwrap();
-        ledger.budget = crate::budget::Budget::until(
-            std::time::Instant::now() + std::time::Duration::from_millis(100),
-        );
         let shell = BudgetShell {
-            budget: ledger.budget,
+            expired: std::sync::atomic::AtomicBool::new(false),
             starts: AtomicUsize::new(0),
             uncertain,
         };
@@ -360,7 +364,6 @@ fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_n
         assert_eq!(saved.attempted, uncertain);
         assert!(!saved.confirmed);
         assert!(receipts.read::<Receipt>("budget.json").unwrap().is_none());
-        ledger.budget = crate::budget::Budget::default();
         let ready = ConfirmingShell {
             recovering: false,
             starts: AtomicUsize::new(0),
