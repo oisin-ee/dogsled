@@ -202,10 +202,13 @@ pub fn local(
             &["clone".into(), "--".into(), origin.into(), display.clone()],
         )?;
         if !cloned.ok() {
-            return Err(Error::Invalid(format!(
-                "{host}: clone {origin} into {display} failed: {}",
-                cloned.stderr.trim()
-            )));
+            return Err(Error::Refused {
+                code: crate::error::Refusal::CloneFailed,
+                detail: format!(
+                    "{host}: clone {origin} into {display} failed: {}",
+                    cloned.stderr.trim()
+                ),
+            });
         }
         // Only the new checkout may acquire trust. Never trust ancestors or all configs.
         let checked = shell.run_setup(

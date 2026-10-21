@@ -190,6 +190,62 @@ esac
     assert_eq!(listing["sent"][0]["state"], "failed");
 }
 
+#[test]
+fn a_peer_failure_carrying_a_token_reaches_no_output_or_state_file() {
+    const TOKEN: &str = "ghp_SECRETTOKEN123";
+    let rig = Rig::new("inbox-remote-token");
+    rig.peer();
+    rig.config(&format!(
+        "remote_command = ['{}']\n",
+        env!("CARGO_BIN_EXE_dogsled")
+    ));
+    rig.script(
+        "ssh",
+        &format!(
+            r#"#!/bin/sh
+case "$*" in
+  *'host snapshot'*) cat "$RIG/remote.json" ;;
+  *) echo 'fatal: {TOKEN}' >&2; printf '%s\n' '{{"error":"{TOKEN}","code":"{TOKEN}"}}'; exit 2 ;;
+esac
+"#
+        ),
+    );
+    agents(&rig, "remote-state", &[("w9:p1", "term_far", "far")]);
+    let remote = rig.read("remote-state/host.json");
+    rig.put("remote.json", &remote);
+    agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
+
+    let mut seen = Vec::new();
+    for args in [
+        &["send", "far", "--host", "netcup", "--message", "hi"][..],
+        &["status"][..],
+        &["inbox", "list"][..],
+    ] {
+        let out = rig.run(args);
+        seen.push(String::from_utf8_lossy(&out.stdout).into_owned());
+        seen.push(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    let (_, claimed) = as_pane(&rig, "w1:p1", &["inbox", "claim", "--harness", "pi"]);
+    seen.push(claimed.to_string());
+    // The peer really failed: the send failed with a fixed message, not silently skipped.
+    assert!(seen[1].contains("remote command failed"), "{}", seen[1]);
+    for text in &seen {
+        assert!(!text.contains(TOKEN), "{text}");
+    }
+    // Nothing persisted by dogsled (tickets, inbox, logs, cache) holds it either.
+    let mut stack = vec![rig.dir.join("state")];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(text) = fs::read_to_string(&path) {
+                assert!(!text.contains(TOKEN), "{}", path.display());
+            }
+        }
+    }
+}
+
 /// Run `dogsled hook inbox` as the hook would: with Herdr, as pane `w1:p2`.
 fn hook(rig: &Rig, harness: &str, event: &str) -> String {
     let out = rig

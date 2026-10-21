@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- An SSH read error now holds only a safe category, such as `ssh peer: connection refused`. Before, `Error::Ssh` carried raw remote stderr and remote error text in its `Display`, so a secret in a banner or a failing command could reach ticket errors, inbox handoffs, unit-evidence logs, and unit JSON. A remote deadline error no longer repeats the remote text either. The raw text is written only to the local file named by `DOGSLED_SSH_DEBUG_FILE` (mode 0600), and only when that variable is set. A peer's own refusals now carry a structured `code` in their JSON error (`NO_INBOX_READER`, `CLONE_FAILED`). The caller maps a known code to a fixed message, so a missing inbox reader and a failed clone still say what happened; unknown remote text shows only as `remote command failed`. The clone failure shows no git output. Older ticket and unit records are not rewritten.
+
 ## 0.21.0 - 2026-10-22
 
 - A committed unit whose ticket ended `failed` or `cancelled` before any launch request was saved now settles as `not_started`, with the ticket and its error as the reason. Before, `unit observe` showed `unresolved` with no settlement for ever, so the owner's todo kept its claim and could not retry (for example after `ssh netcup: exit 255`). Refresh, `unit observe` and `unit settlements` write the event under the admission lock, and the owner receives it through the normal settlement delivery. A ticket that is still pending, or one that failed after a launch request was saved, is not settled: the worker may have started, so only host evidence can settle it. A settled unit cannot be committed again; the owner prepares a new revision.
