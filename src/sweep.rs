@@ -1,12 +1,7 @@
-//! Stop requests drive doctor cleanup in `serve`; child completion is independent.
-//! When a child completes a turn (Herdr's `completion_seq`), the sweep captures its reply into
-//! its item and tells the owner. An idle child only waits for input, so the sweep closes a child
-//! only after it called `done` (`crate::done`) and ended that turn, and only when that loses
-//! nothing: a reader with no commits outside the default branch, or a child whose branch landed
-//! there. A child with work to land stays open. A child that did not call `done`, or that is
-//! blocked or working, never closes, and nothing closes on a timer. An orphan follows the same
-//! rule, and must also be clean and pushed. Each removal is logged to stderr, the service
-//! journal. Doctor passes also persist their results.
+//! Stop requests drive doctor cleanup. Child hosts own terminal handoff (`crate::done`).
+//! The owner imports durable handoffs and delivers replies even after panes close. Ordinary
+//! completed turns still report questions without closing the child. Legacy peers use the
+//! guarded close backstop: own done, idle/done, clean, branch retained. No landing wait.
 
 use crate::close::Guard;
 use crate::error::Result;
@@ -46,15 +41,20 @@ pub struct Final {
 
 /// The final reply of the agent in `pane` on this host: the newest assistant text of the
 /// completion Herdr numbered. `None` while it works, or when nothing can be read.
-pub fn local_reply(shell: &dyn crate::shell::Shell, pane: &str) -> Result<Option<Final>> {
+pub fn local_reply(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+) -> Result<Option<Final>> {
     let Some(agent) = crate::probe::agent_list(shell)?
         .into_iter()
         .find(|a| a.pane == pane)
     else {
         return Ok(None);
     };
+    let done = crate::done::finished(ledger, std::slice::from_ref(&agent))?.contains(pane);
     let (Some(seq), Some(kind), Some(path)) = (
-        agent.completion_seq,
+        agent.completion_seq.or(done.then_some(0)),
         agent.agent.as_deref(),
         agent.transcript.as_deref(),
     ) else {
@@ -202,6 +202,8 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
 /// recorded for status and check-ins.
 pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
     crate::unit_request::refresh(fleet)?;
+    crate::done::handoff(fleet.ledger, fleet.shell, now)?;
+    crate::items::handoffs(fleet.ledger, &fleet.status(now)?)?;
     let items: Vec<Item> = crate::items::list(fleet.ledger)?
         .into_iter()
         .filter(|i| i.closed_ms.is_none() && i.kind == "agent")
@@ -289,6 +291,13 @@ fn settle(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
         Err(error) => return Some(format!("cannot read unit evidence: {error}")),
         _ => (),
     }
+    if report
+        .handoffs
+        .iter()
+        .any(|m| m.pane == item.pane && m.session.is_some())
+    {
+        return None;
+    }
     match close(fleet, item, &report.host, Guard::Pushed) {
         Ok(closed) => {
             if let Err(error) = crate::items::close(fleet.ledger, &item.host, &item.pane, now) {
@@ -342,15 +351,7 @@ fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
                 || format!("reply-{}-{}", item.id, reply.seq),
                 |id| format!("unit-reply-{id}"),
             );
-            if crate::inbox::notify(
-                fleet.ledger,
-                reports,
-                &item.owner_pane,
-                &id,
-                "reply",
-                text,
-                now,
-            )? {
+            if crate::inbox::notify(fleet, reports, &item.owner_pane, &id, "reply", text, now)? {
                 told.push(item.id.clone());
             }
             continue;
@@ -382,15 +383,7 @@ fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             item.id,
             agent.state_since_ms.unwrap_or_default()
         );
-        crate::inbox::notify(
-            fleet.ledger,
-            reports,
-            &item.owner_pane,
-            &id,
-            "blocked",
-            text,
-            now,
-        )?;
+        crate::inbox::notify(fleet, reports, &item.owner_pane, &id, "blocked", text, now)?;
     }
     if told.is_empty() {
         return Ok(());
@@ -427,6 +420,15 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
     let report = reports
         .iter()
         .find(|h| h.host.id == item.host && h.service == "up")?;
+    // Modern handoffs belong to the child's host. The owner imports their durable reply
+    // and closure instead of racing the host to remove the same checkout.
+    if report
+        .handoffs
+        .iter()
+        .any(|m| m.pane == item.pane && m.session.is_some())
+    {
+        return None;
+    }
     let agent = report
         .probe
         .as_ref()?
@@ -434,7 +436,7 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
         .iter()
         .find(|a| a.pane == item.pane)?;
     // Idle without a completed turn is a child that has not started its task yet.
-    let seq = agent.completion_seq?;
+    let seq = agent.completion_seq.or(agent.done.then_some(0))?;
     if !matches!(agent.state.as_str(), "idle" | "done") {
         return None;
     }
@@ -444,7 +446,7 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
     };
     if managed != Some(true) && item.reply.as_ref().is_none_or(|r| r.seq != seq) {
         let read = if report.host.is_local() {
-            local_reply(fleet.shell, &item.pane)
+            local_reply(fleet.shell, fleet.ledger, &item.pane)
         } else {
             fleet.remote(&report.host, &["reply".into(), item.pane.clone()])
         };
@@ -478,14 +480,8 @@ fn finish(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
         Guard::Reader
     };
     // The snapshot's facts say when a close would refuse; the close re-checks on the host.
-    if let Some(tree) = &agent.worktree {
-        let commits = |n: u64| format!("+{n} commit{} to land", if n == 1 { "" } else { "s" });
-        if tree.dirty {
-            return Some("uncommitted changes".into());
-        }
-        if tree.ahead > 0 && !tree.landed {
-            return Some(commits(tree.ahead));
-        }
+    if agent.worktree.as_ref().is_some_and(|tree| tree.dirty) {
+        return Some("uncommitted changes".into());
     }
     match close(fleet, item, &report.host, guard) {
         Ok(closed) => {
@@ -586,6 +582,7 @@ mod liveness_tests {
             .unwrap();
         shell.on("herdr pane list", r#"{"result":{"panes":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle"}]}}"#)
             .on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle","terminal_id":"child","completion_seq":2}]}}"#)
+            .on("herdr workspace list", r#"{"result":{"workspaces":[]}}"#)
             .on("herdr pane close w99:p1", "{}");
         let reports = fleet.status(61_000).unwrap();
         assert_eq!(reports[0].service, "down");

@@ -543,7 +543,7 @@ fn kept_reason(rig: &Rig) -> String {
 }
 
 #[test]
-fn serve_closes_an_orphan_only_when_it_is_done_clean_and_pushed() {
+fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     let (rig, tree) = close_rig("sweep-orphan");
     let repo = rig.dir.join("home/repo");
     fs::write(tree.join("work"), "work\n").unwrap();
@@ -597,22 +597,8 @@ fn serve_closes_an_orphan_only_when_it_is_done_clean_and_pushed() {
     );
     untouched(&rig, "dirty");
     fs::remove_file(tree.join("note")).unwrap();
-    // Idle and clean, but its commit is on no remote.
+    // Done, clean, and local-only: keep the branch, release the child.
     git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
-    serve(&rig);
-    assert!(
-        kept_reason(&rig).contains("commits are not held"),
-        "{}",
-        kept_reason(&rig)
-    );
-    // Status and the prompt brief report the kept orphan.
-    let text = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
-    assert!(text.contains("orphaned: owner w9:p1 is gone;"), "{text}");
-    let brief = String::from_utf8_lossy(&rig.run(&["status", "--brief"]).stdout).into_owned();
-    assert!(brief.contains("1 orphaned"), "{brief}");
-    untouched(&rig, "unpushed");
-    // Done, clean, and pushed: closed exactly as `dogsled close` would.
-    git(&repo, &["update-ref", "refs/remotes/origin/main", "feat/x"]);
     let journal = serve(&rig);
     assert!(
         journal.contains("dogsled sweep: closed orphan w2:p1 on local (owner w9:p1 is gone)"),
@@ -621,6 +607,7 @@ fn serve_closes_an_orphan_only_when_it_is_done_clean_and_pushed() {
     assert!(rig.log("herdr.log").contains("workspace close w2"));
     assert_eq!(rig.log("hook.log"), hook_log(&rig, &tree));
     assert!(!tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["orphans"], json!([]));
@@ -797,10 +784,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     fs::write(tree.join("scratch"), "x").unwrap();
     let journal = serve(&rig);
     assert!(item_open(&rig));
-    assert!(
-        journal.contains("dogsled sweep: keep w2:p1 on local: uncommitted changes"),
-        "{journal}"
-    );
+    assert!(journal.contains("uncommitted changes"), "{journal}");
     let reply = &rig.read("state/items.json")[0]["reply"];
     assert_eq!((&reply["seq"], &reply["done"]), (&json!(3), &json!(true)));
     assert_eq!(reply["text"], "Found 3 bugs; notes in review.md.");
@@ -810,7 +794,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     // Clean, with no commits: closed as `dogsled close` would, and the reply is kept.
     let journal = serve(&rig);
     assert!(
-        journal.contains("dogsled sweep: closed finished w2:p1 on local"),
+        journal.contains("dogsled handoff: closed w2:p1"),
         "{journal}"
     );
     assert!(!item_open(&rig));
@@ -824,44 +808,53 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
 }
 
 #[test]
-fn serve_closes_a_finished_writer_once_its_branch_lands() {
+fn serve_hands_off_unlanded_writer_and_keeps_branch_on_board_without_a_pane() {
     let (rig, tree) = close_rig("sweep-writer");
     let repo = rig.dir.join("home/repo");
-    owned_child(&rig, "done", &tree, Some(2), "writer");
-    rig.done("term_child", "w2:p1", 2);
-    // At the default tip, only a pending preparation holds a fresh checkout.
-    rig.put(
-        "state/preparations.json",
-        &json!([{ "repo":repo,"path":tree,"branch":"feat/x","head":"" }]),
-    );
-    let journal = serve(&rig);
-    assert!(item_open(&rig), "{journal}");
-    assert!(journal.contains("pending preparation"), "{journal}");
-    rig.put("state/preparations.json", &json!([]));
-    // A commit on no remote and not in main: it stays, and says how much is left to land.
     fs::write(tree.join("fix"), "fix\n").unwrap();
     git(&tree, &["add", "fix"]);
     git(&tree, &["commit", "-q", "-m", "fix"]);
-    let journal = serve(&rig);
-    assert!(item_open(&rig));
+    owned_child(&rig, "working", &tree, Some(2), "writer");
+    let out = rig
+        .cmd(&["done"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
     assert!(
-        journal.contains("dogsled sweep: keep w2:p1 on local: +1 commit to land"),
-        "{journal}"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    // Model a service that is running again after the one-shot service exited.
+    // Restore keeps the pane and session, but resets the terminal and every counter.
+    owned_child(&rig, "idle", &tree, None, "writer");
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"][1]["terminal_id"] = json!("restored_terminal");
+    rig.put("agents.json", &agents);
+    serve(&rig);
+    assert!(!item_open(&rig));
+    assert!(!tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    assert_eq!(
+        rig.read("state/items.json")[0]["reply"]["text"],
+        "Found 3 bugs; notes in review.md."
+    );
+    rig.put("agents.json", &json!({"result":{"agents":[]}}));
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
     rig.service();
     let (_, board) = rig.json(&["board"]);
     assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
-    // The branch merges: the next pass closes the child and deletes the landed branch.
-    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
-    let journal = serve(&rig);
+    assert_eq!(board["rows"][0]["activity"], "branch feat/x +1 to land");
+    assert!(board["rows"][0]["pane"].is_null());
+    let status = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
     assert!(
-        journal.contains("dogsled sweep: closed finished w2:p1 on local"),
-        "{journal}"
+        status.contains("worker: branch feat/x +1 to land"),
+        "{status}"
     );
-    assert!(!item_open(&rig));
-    assert!(!tree.exists());
-    assert!(!branch_exists(&rig, "feat/x"));
+    rig.service.lock().unwrap().take();
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
+    serve(&rig);
+    let (_, board) = rig.json(&["board"]);
+    assert_eq!(board["rows"], json!([]));
 }
 
 #[test]

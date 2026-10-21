@@ -31,6 +31,9 @@ pub struct Item {
     /// The child's final reply, captured before the sweep closes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Reply>,
+    /// Retained branch on the child's host, observed without a live pane or checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<crate::done::Branch>,
 }
 
 /// A finished child's final reply, for the completion Herdr numbered `seq`.
@@ -133,6 +136,39 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
         ledger.write("items.json", &items)?;
         Ok(count)
     })
+}
+
+/// Import durable child-host handoffs, including after pane closure or owner downtime.
+pub fn handoffs(ledger: &Ledger, hosts: &[HostReport]) -> Result<()> {
+    change(ledger, |items| merge_handoffs(items, hosts))
+}
+
+pub fn merge_handoffs(items: &mut [Item], hosts: &[HostReport]) {
+    for item in items {
+        let Some(mark) = hosts.iter().find(|h| h.host.id == item.host).and_then(|h| {
+            h.handoffs
+                .iter()
+                .find(|m| m.pane == item.pane && m.item.as_deref().is_none_or(|id| id == item.id))
+        }) else {
+            continue;
+        };
+        if let Some(reply) = &mark.reply {
+            // Preserve the owner's delivery stamp and immutable unit evidence.
+            if item
+                .reply
+                .as_ref()
+                .is_none_or(|r| r.result_id.is_none() && (r.seq != reply.seq || !r.done))
+            {
+                item.reply = Some(reply.clone());
+            }
+        }
+        if let Some(closed) = mark.closed_ms {
+            item.closed_ms.get_or_insert(closed);
+        }
+        if mark.branch.is_some() {
+            item.branch.clone_from(&mark.branch);
+        }
+    }
 }
 
 /// An open agent item whose agent called `done` and ended that turn: its result is ready, and

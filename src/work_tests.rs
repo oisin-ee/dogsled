@@ -113,6 +113,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     )
     .unwrap();
     // A working owner hears too: its reader delivers at the next step.
+    shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"owner","agent":"claude","agent_status":"working","terminal_id":"term_owner"}]}}"#);
     work::tick(&fleet, 101).unwrap();
     assert!(work::queue(&ledger).unwrap()[0].notified);
     let told = crate::inbox::received(&ledger, "term_owner").unwrap();
@@ -130,7 +131,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
         crate::inbox::received(&ledger, "term_owner").unwrap().len(),
         1
     );
-    assert_eq!(shell.calls.lock().unwrap().len(), 0);
+    assert_eq!(*shell.calls.lock().unwrap(), ["herdr agent list"]);
     // Exactly at TTL, a fresh sample admits the second ticket without a sleep.
     let mut refreshed = snapshot(90_100);
     refreshed.probe.agent_panes[0].state = "working".into();

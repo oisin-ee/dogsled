@@ -69,6 +69,16 @@ fn pending(progress: &Progress, agents: &[crate::probe::Agent]) -> bool {
     })
 }
 
+/// Find the durable launch identity for a pane, independent of Herdr's terminal ids.
+pub fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
+    let found = recovery::candidates(&ledger.child("launches"), Some(pane))?;
+    match found.as_slice() {
+        [] => Ok(None),
+        [(id, _)] => Ok(Some(id.clone())),
+        _ => Err(Error::Invalid(format!("{pane}: competing launch records"))),
+    }
+}
+
 pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {
     let receipts = ledger.child("launches");
     receipts.with_lock(&request.id, || {

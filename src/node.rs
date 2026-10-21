@@ -46,6 +46,9 @@ pub struct SnapshotReport {
     /// Absent on peers predating lock-based liveness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running: Option<bool>,
+    /// Host-owned results survive the child pane and checkout.
+    #[serde(default)]
+    pub handoffs: Vec<crate::done::Mark>,
 }
 
 impl Snapshot {
@@ -85,6 +88,7 @@ impl Node<'_> {
         Ok(SnapshotReport {
             snapshot: self.ledger.read("host.json")?,
             running: Some(self.ledger.locked("service")?),
+            handoffs: crate::done::list(self.ledger)?,
         })
     }
 

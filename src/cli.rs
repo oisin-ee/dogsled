@@ -184,7 +184,7 @@ pub enum Command {
         ticket: String,
     },
     /// Say that this agent's whole task is complete. Call it during the turn that completes the
-    /// task; dogsled closes the child after that turn ends and its work has landed. Without
+    /// task; dogsled closes the child after that turn ends and keeps its branch. Without
     /// it, an idle child waits for input and stays open. Refused while it owns open children.
     Done,
     /// Show a child's or job's newest output and its captured final reply.

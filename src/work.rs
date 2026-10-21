@@ -846,7 +846,7 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
             // it has one; nothing types into its terminal.
             let id = format!("ticket-{}", ticket.id);
             if !crate::inbox::notify(
-                fleet.ledger,
+                fleet,
                 &reports,
                 &ticket.request.owner,
                 &id,

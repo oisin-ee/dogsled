@@ -96,6 +96,17 @@ pub fn local(
     guard: Guard,
 ) -> Result<Closed> {
     let panes = crate::cleanup::current_panes(shell)?;
+    let target = validate_target(shell, &panes, pane, caller)?;
+    remove_target(shell, ledger, target, &panes, caller, guard)
+}
+
+/// Validate pane safety before selecting checkout removal or pane-only closure.
+fn validate_target<'a>(
+    shell: &dyn crate::shell::Shell,
+    panes: &'a [crate::probe::Pane],
+    pane: &str,
+    caller: &Caller,
+) -> Result<&'a crate::probe::Pane> {
     let target = panes
         .iter()
         .find(|p| p.pane_id == pane)
@@ -108,6 +119,21 @@ pub fn local(
             "{pane} is busy ({reason}); close only an idle or done child"
         )));
     }
+    if let Some(reason) = crate::cleanup::close_group_hold(shell, panes, pane)? {
+        return Err(refuse(&reason));
+    }
+    Ok(target)
+}
+
+fn remove_target(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    target: &crate::probe::Pane,
+    panes: &[crate::probe::Pane],
+    caller: &Caller,
+    guard: Guard,
+) -> Result<Closed> {
+    let pane = target.pane_id.as_str();
     // An explicit recovery may end a stranded shell without removing its checkout or
     // assigning an outcome to the interrupted launch. Automatic cleanup cannot do this.
     if guard == Guard::Clean && crate::launch::close_unfinished(ledger, shell, pane)? {
@@ -138,7 +164,10 @@ pub fn local(
         Some(tree) => worktree::lock_reason(shell, &tree.checkout, &tree.path)?,
         None => None,
     };
-    let Some(tree) = tree.filter(|_| lock.is_some()) else {
+    let automatic = guard != Guard::Clean;
+    let Some(tree) =
+        tree.filter(|_| lock.is_some() && (!automatic || lock.as_deref() == Some(AGENT_LOCK)))
+    else {
         shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
         return Ok(Closed {
             pane: pane.into(),
@@ -146,6 +175,16 @@ pub fn local(
             pane_closed: true,
         });
     };
+    let workspace = worktree::workspace(shell, &tree.checkout, &tree.path)?;
+    let holders = worktree::holders(panes, &tree.path, workspace.as_deref());
+    if automatic && shared(shell, ledger, pane, &holders)? {
+        shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+        return Ok(Closed {
+            pane: pane.into(),
+            worktree: None,
+            pane_closed: true,
+        });
+    }
     outside(&tree, caller)?;
     let evidence = unsaved(shell, ledger, &tree, caller, guard)?;
     if let Some(lock) = lock
@@ -156,14 +195,12 @@ pub fn local(
             tree.path
         )));
     }
-    let workspace = worktree::workspace(shell, &tree.checkout, &tree.path)?;
     if workspace.is_some() && workspace == caller.workspace {
         return Err(refuse(&format!(
             "workspace {} is the caller's own",
             workspace.as_deref().unwrap_or_default()
         )));
     }
-    let holders = worktree::holders(&panes, &tree.path, workspace.as_deref());
     for other in holders.iter().filter(|p| p.pane_id != pane) {
         if caller.pane.as_deref() == Some(other.pane_id.as_str()) {
             return Err(refuse(&format!("the caller works in {}", tree.path)));
@@ -199,7 +236,28 @@ pub fn local(
     })
 }
 
-/// All close modes use the same loss rule. Automatic owner closes add a landing hold.
+/// A shared checkout stays, but its finished child can release its own pane.
+fn shared(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    holders: &[&crate::probe::Pane],
+) -> Result<bool> {
+    let items = crate::items::list(ledger)?;
+    for other in holders.iter().filter(|p| p.pane_id != pane) {
+        if other.agent.is_some()
+            || items
+                .iter()
+                .any(|i| i.closed_ms.is_none() && i.pane == other.pane_id)
+            || worktree::busy(shell, other)?.is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The same loss rule, with the local branch retained for automatic handoff.
 fn unsaved(
     shell: &dyn crate::shell::Shell,
     ledger: &Ledger,
@@ -208,7 +266,19 @@ fn unsaved(
     guard: Guard,
 ) -> Result<crate::loss::Evidence> {
     let repo = tree.checkout.display().to_string();
-    let evidence = crate::loss::Evidence::fetch(shell, &repo);
+    let evidence = if guard == Guard::Clean {
+        crate::loss::Evidence::fetch(shell, &repo)
+    } else {
+        let dirty = crate::loss::dirty_paths(shell, &tree.path, false)?;
+        if !dirty.is_empty() {
+            return Err(refuse(&format!(
+                "{}: uncommitted changes: {}",
+                tree.path,
+                dirty.join(", ")
+            )));
+        }
+        crate::loss::Evidence::keeping_branch(&repo, &tree.branch)
+    };
     if let Some(warning) = &evidence.warning {
         eprintln!("{warning}");
     }

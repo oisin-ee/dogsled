@@ -547,6 +547,25 @@ fn what(item: &Item, agent: Option<&Agent>) -> String {
 }
 
 fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
+    if item.closed_ms.is_some()
+        && let Some(branch) = &item.branch
+    {
+        return Row {
+            group: Group::ToLand,
+            kind: "agent".into(),
+            id: item.id.clone(),
+            name: item.name.clone().unwrap_or_else(|| item.pane.clone()),
+            what: what(item, None),
+            host: label(hosts, &item.host),
+            pane: None,
+            state: "closed".into(),
+            activity: format!("branch {} +{} to land", branch.name, branch.ahead),
+            age_ms: now.saturating_sub(item.created_ms),
+            quiet_ms: None,
+            ahead: Some(branch.ahead),
+            dirty: false,
+        };
+    }
     let found = agent(hosts, item);
     let host_up = hosts
         .iter()
@@ -703,7 +722,10 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
     let mut rows: Vec<Row> = status
         .items
         .iter()
-        .filter(|i| i.closed_ms.is_none() && mine(&i.owner_pane))
+        .filter(|i| {
+            mine(&i.owner_pane)
+                && (i.closed_ms.is_none() || i.branch.as_ref().is_some_and(|b| !b.landed))
+        })
         .map(|i| {
             if i.kind == "job" {
                 job_row(i, &status.hosts, now)
@@ -826,7 +848,7 @@ impl Board {
         if let Some(names) = self.land_names() {
             let _ = writeln!(
                 out,
-                "To land: {names}. Review and integrate finished work. Ask dirty children to commit. Dogsled closes children after their work lands."
+                "To land: {names}. Review and integrate the retained branches. Finished children close at handoff, before landing."
             );
         }
         out
@@ -1114,6 +1136,7 @@ mod tests {
             stalled_since_ms: None,
             state_since_ms: None,
             terminal_id: None,
+            agent_session: None,
             completion_seq: None,
             state_change_seq: None,
             cwd: None,
@@ -1150,6 +1173,7 @@ mod tests {
             headroom: None,
             error: None,
             jobs: Vec::new(),
+            handoffs: Vec::new(),
             retry_ms: None,
         }
     }

@@ -140,17 +140,17 @@ An item records its host, pane, owner pane, creation time, closure time, and for
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
 The service closes a job item after job completion, and any item after pane removal.
 
-Closing is driven by events. When a child's turn completes (Herdr's `completion_seq` goes up) and it is `idle` or `done`, the sweep:
+`done` hands the task back to the owner. The child host captures the final reply, closes the pane and agent worktree, and keeps the branch. The owner receives the reply and lands the branch without a live child. The sweep remains a backstop.
 
-1. reads its final reply from the transcript and keeps it in the item;
-2. puts the reply in the owner's inbox (see [Inbox](#inbox));
-3. if the child called `done` during that turn, closes it when it is a reader whose worktree is clean with no commits outside the default branch, or when its branch has landed.
+Call `done` during the final working turn, after committing changes. It refuses open children, queued tickets, dirty agent worktrees, and removal that loses content under the shared loss rule. Retaining the local branch protects unlanded commits.
 
-Herdr's `idle` and `done` only mean that the agent is ready for input. A child that asks a question, or that waits for its own children, is idle too. So a child says it has finished with the `done` MCP tool or `dogsled done`, in the turn that completes its task. Dogsled tells each child this at launch: Pi and Claude through `--append-system-prompt`, Codex through `-c developer_instructions`. The mark lives in the host's `done.json`, keyed by the Herdr terminal. A later turn, or an inbox record delivered to the child, ends it. `done` is refused while the caller owns open items or queued tickets.
-A child that ends a turn without `done` stays open, and its reply tells the owner it waits for input.
+Marks in `done.json` use the launch/item id, pane, and `agent_session.value`, not the terminal id. Legacy marks migrate without deletion. The first `idle` or `done` observation ends the marked turn, including after restore without a completion counter. Working, blocked, and unknown states never authorize closure.
 
-A child with commits to land stays open and shows under TO LAND on the board, and the prompt line says `To land: web-tests (+2)`. Merge or drop the branch; the next sweep closes it.
-A `blocked` child stays open, and the owner's inbox gets one `blocked` record per episode. A `working` child, one that has never completed a turn, and one that has not called `done` are never closed automatically. Nothing closes on a timer.
+New inbox work accepted during that same working turn cancels its mark. After that turn ends, the mark is terminal. Senders receive `<name> finished; start a new child for more work`.
+
+A child without its own `done` stays open, including a child that asks a question or orchestrates other children. Automatic closure never closes the caller or a busy pane. Shared worktrees remain, and only the finished child pane closes. A last primary pane stays while closing it would close linked workspaces.
+
+Closed children retain TO LAND rows: `<child>: branch <b> +N to land`. These rows come from durable items and branch observations, not live panes. Integration or branch deletion removes the row.
 
 `dogsled board` groups an owner's children, jobs, and queued tickets by what the owner must do: TO LAND, ATTENTION, RUNNING, and WAITING. Each agent row names the harness and model; each job row names its command. `--json` is what the Pi widget draws.
 `dogsled read TARGET [--host H]` shows a child's or job's newest output and the captured final reply.

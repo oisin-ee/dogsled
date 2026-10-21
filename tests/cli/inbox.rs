@@ -131,11 +131,12 @@ printf '%s\n' "$*" >> "$RIG/ssh.log"
 shift 7
 case "$1" in
   *'host snapshot'*) cat "$RIG/remote.json" ;;
-  *) DOGSLED_STATE="$RIG/remote-state" sh -c "$1" ;;
+  *) DOGSLED_STATE="$RIG/remote-state" RIG_AGENTS="$RIG/remote-agents.json" sh -c "$1" ;;
 esac
 "#,
     );
     agents(&rig, "remote-state", &[("w9:p1", "term_far", "far")]);
+    rig.put("remote-agents.json", &rig.read("agents.json"));
     let remote = rig.read("remote-state/host.json");
     rig.put("remote.json", &remote);
     agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
