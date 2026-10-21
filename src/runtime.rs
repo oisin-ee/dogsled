@@ -106,6 +106,12 @@ pub fn start(fleet: &Fleet, request: Request, waiting: bool) -> Result<Value> {
     start_using(fleet, request, waiting, work::submit)
 }
 
+/// Hand startup to the admission service instead of spending a tool call's budget.
+pub(crate) fn start_queued(fleet: &Fleet, request: Request) -> Result<Value> {
+    let ticket = work::enqueue(fleet.ledger, request, false, now_ms())?;
+    Ok(json!({"queued":true,"ticket":ticket}))
+}
+
 /// Only for a caller that already owns the request's admission lock.
 pub(crate) fn start_locked(fleet: &Fleet, request: Request) -> Result<Value> {
     start_using(fleet, request, false, |fleet, request, now| {

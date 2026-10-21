@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- MCP `spawn` returns a durable ticket before agent startup. The admission service confirms startup outside the MCP call budget. CLI agent launches keep their synchronous result.
+- Startup errors include recent pane output in caller or ticket errors and launch progress records. Native refusals, unknown outcomes, and recovery safeguards remain unchanged.
+
 ## 0.19.0 - 2026-10-21
 
 - `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.

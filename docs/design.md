@@ -99,6 +99,11 @@ Admission uses the shared status cache and SSH transport, unlike the local-only 
 `agent` also queues and supports `--wait`. All admission waits accept `--max` (default 30m).
 A service interruption during admission marks that ticket failed on restart, preventing an automatic duplicate launch.
 
+MCP `spawn` persists a ticket before startup, for both legacy requests and committed unit requests.
+The admission worker starts the child under the existing setup limit, independent of the MCP call budget.
+CLI agent launches remain synchronous. Startup errors retain their original classification and add recent pane output when available.
+An interrupted startup can recover that output on confirmation. Diagnostic reads do not change launch receipts, holds, or closure checks.
+
 ### 4. No wait without a deadline: stalls and check-ins
 
 Rule: an agent that owns an open child or job hears from dogsled at least every 30 min while it is idle, until that work ends. Nothing depends on the agent remembering.

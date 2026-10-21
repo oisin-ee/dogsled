@@ -569,7 +569,11 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 ### Tools
 
 `dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `done`, `stop`, `cancel`, and `place`.
-Each tool calls the same code as its CLI command and returns the same JSON. No tool waits: `spawn` and `run` return the item or the queued ticket at once.
+Tools share the CLI action code. `spawn` returns a durable queued ticket, even when a host has room.
+The service owns startup confirmation outside the MCP call budget. `dogsled agent` still starts synchronously under `--max`.
+Startup errors include recent pane output in the launch record and ticket when the pane read succeeds.
+A failed pane read preserves the original error. Native refusals and unknown startup outcomes keep their existing recovery rules.
+`run` returns the item or queued ticket at once.
 The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its extension (tools `mcp__dogsled__*`); Claude Code reads `plugins/dogsled/.mcp.json`; Codex reads `plugins/dogsled/codex-mcp.json`, which forwards the Herdr and `DOGSLED_*` variables.
 
 ### Pi

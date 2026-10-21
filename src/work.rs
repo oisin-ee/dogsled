@@ -827,7 +827,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
 /// launch call failed. Refusals and deadlines are not retried.
 fn retryable(error: &Error) -> bool {
     matches!(
-        error,
+        error.root(),
         Error::Command { .. } | Error::Ssh { .. } | Error::Io(_)
     )
 }

@@ -1,7 +1,7 @@
 //! `dogsled mcp`: the dogsled commands as MCP tools on stdio, for Pi, Claude Code, and Codex.
 //!
-//! Each tool calls the function its CLI subcommand calls and returns the same JSON. No tool
-//! waits: `spawn`, `run`, and `place` return `placed` or `queued` at once. The caller is the
+//! Tools share the CLI action code. `spawn` returns a durable ticket without waiting for
+//! startup; `run` and `place` return `placed` or `queued`. The caller is the
 //! pane in `HERDR_PANE_ID`, which the harness passes to this server. Tokio stays in this file;
 //! each call runs the synchronous code on a blocking thread.
 
@@ -224,7 +224,7 @@ impl Server {
 
     #[tool(
         description = "Start a Pi, Claude, or Codex child on the host with room, with its task. \
-        Returns at once: `queued` when every host is full. Its final reply reaches your inbox."
+        Returns a durable queued ticket at once. The service starts the child and reports its outcome; its final reply reaches your inbox."
     )]
     async fn spawn(&self, Parameters(args): Parameters<SpawnArgs>) -> Result<String, String> {
         self.call(move |fleet| {
@@ -232,7 +232,7 @@ impl Server {
                 SpawnArgs::Unit(args) => {
                     return Err(Error::Invalid(format!("PROVIDER_UNAVAILABLE: unit {} with placement {:?} requires the Dogsled Pi bridge", args.unit.id, args.placement)));
                 },
-                SpawnArgs::Prepared(args) => return crate::unit_request::commit(fleet, &args.prepared_unit),
+                SpawnArgs::Prepared(args) => return crate::unit_request::commit_queued(fleet, &args.prepared_unit),
                 SpawnArgs::Legacy(args) => args,
             };
             let placement = args.placement.args();
@@ -245,7 +245,7 @@ impl Server {
                 placement.host.as_deref(),
             )?;
             let request = crate::runtime::request(fleet, &placement, action)?;
-            crate::runtime::start(fleet, request, false)
+            crate::runtime::start_queued(fleet, request)
         })
         .await
     }

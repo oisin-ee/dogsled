@@ -65,6 +65,173 @@ fn host_request(rig: &Rig) -> Value {
     json!({"id":"recover-one","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":rig.dir.join("home"),"pane":null,"workspace":"w1","workspace_name":"caller","owner":"parent"})
 }
 
+pub(super) const NPM_FAILURE: &str =
+    "npm error ETARGET No matching version found for @oisin-ee/pi-dogsled@0.19.0";
+
+pub(super) fn npm_start_fails(rig: &Rig) {
+    fs::write(rig.dir.join("startup-output"), NPM_FAILURE).unwrap();
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "  'agent start'*|",
+                "  'agent start'*) echo '{\"error\":{\"code\":\"timeout\",\"message\":\"timed out waiting for agent startup\"}}' >&2; exit 1 ;;\n  ",
+            )
+            .replace(
+                "case \"$*\" in",
+                "case \"$*\" in\n  'pane read '*) cat \"$RIG/startup-output\" ;;",
+            ),
+    );
+}
+
+#[test]
+fn failed_start_records_the_child_output_without_changing_unknown_outcome() {
+    let rig = Rig::new("startup-output");
+    npm_start_fails(&rig);
+    let request = host_request(&rig);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains(NPM_FAILURE), "{message}");
+    assert!(
+        message.contains("timed out waiting for agent startup"),
+        "{message}"
+    );
+    assert_eq!(error["deadline"], false);
+    let progress = rig.read("state/launches/recover-one.progress.json");
+    assert_eq!(progress["error"], error["error"]);
+    assert_eq!(progress["attempted"], true);
+    assert_eq!(progress["confirmed"], false);
+    assert!(!rig.dir.join("state/launches/recover-one.json").exists());
+    for _ in 0..2 {
+        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        assert_eq!(code, 2, "{error}");
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains("startup outcome is unknown"), "{message}");
+        assert_eq!(message.matches(NPM_FAILURE).count(), 1, "{message}");
+    }
+    let log = rig.log("herdr.log");
+    assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
+    assert!(
+        log.contains("pane read w2:p1 --source recent-unwrapped --lines 120 --format text"),
+        "{log}"
+    );
+    assert!(!log.contains("pane close"), "{log}");
+}
+
+#[test]
+fn cli_spawn_error_and_progress_include_the_child_startup_failure() {
+    let rig = Rig::new("cli-startup-output");
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    npm_start_fails(&rig);
+    let (code, queued) = rig.json(&["agent", "--name", "worker", "--message", "go"]);
+    assert_eq!(code, 1, "{queued}");
+    assert!(
+        queued["retrying"].as_str().unwrap().contains(NPM_FAILURE),
+        "{queued}"
+    );
+    let ticket = rig.read("state/queue.json")[0].clone();
+    let id = ticket["request"]["id"].as_str().unwrap();
+    let progress = rig.read(&format!("state/launches/{id}.progress.json"));
+    assert!(
+        progress["error"].as_str().unwrap().contains(NPM_FAILURE),
+        "{progress}"
+    );
+    assert!(
+        ticket["error"].as_str().unwrap().contains(NPM_FAILURE),
+        "{ticket}"
+    );
+}
+
+#[test]
+fn interrupted_start_can_recover_diagnostics_on_confirmation() {
+    let rig = Rig::new("startup-late-output");
+    let request = host_request(&rig);
+    failed_host_start(&rig, &request);
+    npm_start_fails(&rig);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains("startup outcome is unknown"), "{message}");
+    assert!(message.contains("startup response lost"), "{message}");
+    assert!(message.contains(NPM_FAILURE), "{message}");
+    let progress = rig.read("state/launches/recover-one.progress.json");
+    assert!(
+        progress["error"].as_str().unwrap().contains(NPM_FAILURE),
+        "{progress}"
+    );
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
+}
+
+#[test]
+fn startup_diagnostics_do_not_turn_a_native_refusal_into_an_unknown_launch() {
+    let rig = Rig::new("refused-with-output");
+    refusing_start(&rig);
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "case \"$*\" in",
+                "case \"$*\" in\n  'pane read '*) printf 'startup detail\\n' ;;",
+            ),
+    );
+    let request = host_request(&rig);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains("agent_pane_busy"), "{message}");
+    assert!(message.contains("startup detail"), "{message}");
+    assert!(!message.contains("outcome is unknown"), "{message}");
+    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
+    assert!(
+        rig.read("state/launches/recover-one.json")["failed"]
+            .as_str()
+            .unwrap()
+            .contains("startup detail")
+    );
+    assert_eq!(
+        rig.json(&["host", "launch", "--request", &request.to_string()])
+            .0,
+        2
+    );
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
+}
+
+#[test]
+fn empty_or_unavailable_pane_output_preserves_the_native_failure() {
+    for empty in [true, false] {
+        let rig = Rig::new(&format!("startup-missing-output-{empty}"));
+        npm_start_fails(&rig);
+        if empty {
+            fs::write(rig.dir.join("startup-output"), " \n").unwrap();
+        } else {
+            fs::remove_file(rig.dir.join("startup-output")).unwrap();
+        }
+        let request = host_request(&rig);
+        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        assert_eq!(code, 2, "{error}");
+        let message = error["error"].as_str().unwrap();
+        assert!(
+            message.contains("timed out waiting for agent startup"),
+            "{message}"
+        );
+        assert!(!message.contains("startup output from"), "{message}");
+        assert!(!message.contains("cat:"), "{message}");
+        assert_eq!(
+            rig.read("state/launches/recover-one.progress.json")["error"],
+            error["error"]
+        );
+    }
+}
+
 fn failed_host_start(rig: &Rig, request: &Value) {
     rig.script(
         "herdr",
