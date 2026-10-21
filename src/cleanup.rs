@@ -1692,7 +1692,7 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
 pub fn forget(ledger: &Ledger, path: &str) -> Result<()> {
     ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
-        trees.retain(|t| t.path != path);
+        trees.retain(|t| !crate::worktree::same(&t.path, path));
         ledger.write("worktrees.json", &trees)
     })
 }
@@ -1798,7 +1798,7 @@ fn drop_registration(node: &Node<'_>, path: &str) -> Result<String> {
                 "refuse {path}: the worktree is no longer missing"
             )));
         }
-        trees.retain(|t| t.path != path);
+        trees.retain(|t| !crate::worktree::same(&t.path, path));
         node.ledger.write("worktrees.json", &trees)
     })?;
     Ok(format!("dropped the stale registration of {path}"))
