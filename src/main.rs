@@ -99,10 +99,11 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "error": error.to_string(), "deadline": matches!(error.root(), Error::Deadline(_)) })
-                );
+                let mut body = serde_json::json!({ "error": error.to_string(), "deadline": matches!(error.root(), Error::Deadline(_)) });
+                if let Error::Refused { code, .. } = error.root() {
+                    body["code"] = code.code().into();
+                }
+                println!("{body}");
             } else {
                 eprintln!("dogsled: {error}");
             }
