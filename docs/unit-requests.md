@@ -129,9 +129,27 @@ The command accepts the input only when all of these conditions are true:
 - The launch is started and confirmed, and it has no terminal receipt. The pane, terminal, Pi name, and done mark agree with the launch. The launch item is open, and it is the only open item of the pane.
 - The worker terminal has an inbox reader.
 
-The host takes the locks in this order: `admissions/<request>`, `done`, `launches/<request>`, `inbox/<terminal>`. No other path takes them in the opposite order. It reads all evidence again under the locks. It observes the owner and the worker again immediately before it stores the input. A terminal acknowledgement holds `launches/<request>`, so it cannot pass between the check and the input.
+The host takes the locks in this order: `admissions/<request>`, `done`, `launches/<request>`. It holds them for the whole decision. Inside them it takes `inbox/<terminal>` and then `outbox`, one at a time, and neither of these holds another lock. No other path takes the locks in the opposite order. The host reads all evidence again under the locks, on every attempt, a retry too. It observes the owner and the worker again immediately before it stores the input. A terminal acknowledgement holds `launches/<request>`, so it cannot pass between the check and the input.
 
-The record ID comes from the request, the owner, the message, and the done mark. If the command stops after it stores the input, a retry finds the same record and removes the mark. If the worker called `done` again later, a replay of the same message is refused, and the later mark stays. The inbox keeps final records for 24 hours, so this protection has the same limit. A refusal changes no mark, record, or inbox. A worker on another host, or an admission that selected another host, is refused: this command has no remote path.
+The unit execution owns the replay protection, not the inbox. The inbox removes final records after 24 hours, so it cannot prove an old continuation. The host keeps `launches/<request>.continuations.json` beside the launch record, and nothing removes it. It holds one receipt for each series: the request, the owner, the kind, and the message. A receipt holds the full proof (request, owner sender, origin session, worker pane, terminal, session, and name, and the message digest), the exact done mark, the record, and a phase. Only the phase changes. The host writes and reads it only under `launches/<request>`.
+
+The command goes through these steps, and each write is atomic:
+
+1. It writes a `prepared` receipt. The receipt names the done mark and the record ID and creation time. No input exists yet.
+2. It puts the record in the inbox. A record with the same ID is not put again.
+3. It records the sent record in the outbox, once.
+4. It sets the receipt to `accepted`.
+5. It removes the done mark that the receipt names, only if that mark is unchanged.
+
+While the mark is in place, the worker's own claim is refused, so the record stays pending. When the command stops at any step, a retry of the same message does this:
+
+- The mark that the receipt names is still in place: the retry finishes the remaining steps, and returns the first record.
+- The receipt is `accepted`, and the pane has no mark: the retry returns the first record. If the outbox lost the entry while the inbox still keeps the record, it adds the entry again with the record's state. It never puts the input again.
+- The pane has a later mark: the replay is refused. The later mark, the inbox, and the receipt stay as they are, also after the inbox removed the first record.
+- The receipt is `prepared`, and its mark is gone: nothing proves that the input was stored. The retry is refused, and it puts no input.
+- A receipt that does not equal the request is a conflict.
+
+To continue after a later `done`, send a different message. A refusal changes no mark, record, receipt, inbox, or outbox. A worker on another host, or an admission that selected another host, is refused: this command has no remote path.
 
 Before the host accepts input, it binds the pane to exactly one seeded launch. The done mark, terminal, agent name, durable seed, and receipt must agree. When the evidence is missing, unreadable, competing, or mismatched, the host refuses the input and does not close the pane. After the receipt exists, the host refuses all input, and the normal handoff closes the pane.
 

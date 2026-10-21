@@ -284,10 +284,9 @@ fn put(ledger: &Ledger, record: Record) -> Result<Record> {
     })
 }
 
-/// Put one legacy continuation record. Its ID is `series` followed by the done mark it
-/// continues. A retry after a crash finds the same record and changes nothing. A record of the
-/// same series for an earlier mark means a stale replay: it is refused, and nothing changes.
-pub(crate) fn put_continuation(ledger: &Ledger, record: Record, series: &str) -> Result<Record> {
+/// Put one legacy continuation record. The caller's durable receipt owns replay protection and
+/// fixes the record ID. A retry after a crash finds the same record and changes nothing.
+pub(crate) fn put_continuation(ledger: &Ledger, record: Record) -> Result<Record> {
     deliverable(ledger, &record)?;
     update(ledger, &record.terminal.clone(), |all| {
         if let Some(existing) = all.iter().find(|r| r.id == record.id) {
@@ -302,12 +301,6 @@ pub(crate) fn put_continuation(ledger: &Ledger, record: Record, series: &str) ->
             }
             return Ok(existing.clone());
         }
-        if all.iter().any(|r| r.id.starts_with(series)) {
-            return Err(Error::Invalid(format!(
-                "{} already received this continuation for an earlier done mark; nothing was sent",
-                record.pane
-            )));
-        }
         all.push(record.clone());
         Ok(record)
     })
@@ -315,7 +308,7 @@ pub(crate) fn put_continuation(ledger: &Ledger, record: Record, series: &str) ->
 
 /// Refuse a record that nothing would deliver: too long, for a terminal that is not in this
 /// host's latest snapshot, or for a terminal with no reader.
-fn deliverable(ledger: &Ledger, record: &Record) -> Result<()> {
+pub(crate) fn deliverable(ledger: &Ledger, record: &Record) -> Result<()> {
     validate_terminal(&record.terminal)?;
     if record.text.len() > MAX_TEXT {
         return Err(Error::Invalid(format!(

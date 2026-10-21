@@ -28,14 +28,92 @@ fn immutable(rig: &Rig, id: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Every record a refusal must leave unchanged.
-fn state(rig: &Rig, id: &str) -> (Vec<Vec<u8>>, Value, Value, Vec<u8>) {
+/// The execution-owned continuation receipts of request `id`, as raw bytes.
+fn receipts(rig: &Rig, id: &str) -> Vec<u8> {
+    fs::read(
+        rig.dir
+            .join(format!("state/launches/{id}.continuations.json")),
+    )
+    .unwrap_or_default()
+}
+
+fn receipt(rig: &Rig, id: &str) -> Value {
+    let all: Value = serde_json::from_slice(&receipts(rig, id)).unwrap();
+    let map = all.as_object().unwrap();
+    assert_eq!(map.len(), 1, "{all}");
+    map.values().next().unwrap().clone()
+}
+
+fn outbox(rig: &Rig) -> Value {
+    serde_json::from_slice(&fs::read(rig.dir.join("state/outbox.json")).unwrap_or_default())
+        .unwrap_or_else(|_| json!([]))
+}
+
+/// Every record a refusal must leave unchanged, including the receipts: a refusal never
+/// creates or changes one.
+fn state(rig: &Rig, id: &str) -> (Vec<Vec<u8>>, Value, Value, Vec<u8>, Vec<u8>) {
     (
         immutable(rig, id),
         rig.read("state/done.json"),
         inbox(rig),
         fs::read(rig.dir.join("state/outbox.json")).unwrap_or_default(),
+        receipts(rig, id),
     )
+}
+
+fn crash_at(rig: &Rig, point: &str, text: &str) {
+    let out = rig
+        .cmd(&["legacy-continue", "w2:p1", "--message", text, "--json"])
+        .env("DOGSLED_TEST_UNIT_CRASH", point)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(86),
+        "{point}: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The worker calls `done` again after it took the input, and goes idle: a later mark.
+fn done_again(rig: &Rig) {
+    worker_state(rig, "working");
+    let out = rig
+        .cmd(&["done"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    worker_state(rig, "idle");
+    assert_ne!(rig.read("state/done.json"), json!({}));
+}
+
+/// The worker claims and acknowledges its one record, as its reader does.
+fn claim_and_ack(rig: &Rig) -> Value {
+    let out = worker_claim(rig);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let claimed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(claimed.as_array().unwrap().len(), 1, "{claimed}");
+    let id = claimed[0]["id"].as_str().unwrap();
+    let out = rig
+        .cmd(&["inbox", "ack", id])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    claimed[0].clone()
 }
 
 /// Write the owner's Pi transcript with session `session`, and list `pane` as a Pi agent
@@ -356,49 +434,208 @@ fn returned_or_remote_workers_cannot_be_continued() {
 }
 
 #[test]
-fn a_crash_after_the_input_persists_recovers_once_and_a_stale_replay_changes_nothing() {
-    let (rig, execution, _) = legacy_unreturned("legacy-crash");
+fn every_crash_point_recovers_exactly_once_and_the_claim_waits_for_the_mark() {
+    for point in [
+        "legacy-continue-prepared",
+        "legacy-continue-stored",
+        "legacy-continue-accepted",
+        "legacy-continue-removed",
+    ] {
+        let (rig, execution, _) = legacy_unreturned(&format!("legacy-{point}"));
+        let id = request_id(&execution);
+        let records = immutable(&rig, &id);
+        let marks = rig.read("state/done.json");
+        crash_at(&rig, point, "continue");
+        // The intent is durable before any input exists, and names the exact mark.
+        let intent = receipt(&rig, &id);
+        assert_eq!(
+            intent["mark"],
+            *marks.as_object().unwrap().values().next().unwrap()
+        );
+        let phase = if point.ends_with("prepared") || point.ends_with("stored") {
+            "prepared"
+        } else {
+            "accepted"
+        };
+        assert_eq!(intent["phase"], phase, "{point}");
+        let stored = !point.ends_with("prepared");
+        assert_eq!(
+            inbox(&rig).as_array().unwrap().len(),
+            usize::from(stored),
+            "{point}"
+        );
+        assert_eq!(
+            outbox(&rig).as_array().unwrap().len(),
+            usize::from(phase == "accepted")
+        );
+        if point.ends_with("removed") {
+            assert_eq!(rig.read("state/done.json"), json!({}), "{point}");
+        } else {
+            assert_eq!(rig.read("state/done.json"), marks, "{point}");
+            // The production claim path is refused while the mark is in place, so a stored
+            // input stays pending: nothing consumes or prunes it before the retry.
+            let before = state(&rig, &id);
+            let out = worker_claim(&rig);
+            assert!(!out.status.success(), "{point}");
+            assert_eq!(state(&rig, &id), before, "{point}");
+        }
+        // The retry finishes the same continuation once: the same record and creation time.
+        let (code, sent) = continue_from(&rig, "w1:p1", "continue");
+        assert_eq!(code, 0, "{point}: {sent}");
+        assert_eq!(sent["id"], intent["sent"]["id"], "{point}");
+        assert_eq!(sent["created_ms"], intent["sent"]["created_ms"], "{point}");
+        assert_eq!(rig.read("state/done.json"), json!({}), "{point}");
+        assert_eq!(receipt(&rig, &id)["phase"], "accepted");
+        assert_eq!(receipt(&rig, &id)["sent"], intent["sent"]);
+        let stored = inbox(&rig);
+        assert_eq!(stored.as_array().unwrap().len(), 1, "{point}");
+        assert_eq!(stored[0]["id"], intent["sent"]["id"]);
+        assert_eq!(outbox(&rig).as_array().unwrap().len(), 1, "{point}");
+        assert_eq!(outbox(&rig)[0]["id"], intent["sent"]["id"]);
+        // Another retry changes nothing.
+        let after = state(&rig, &id);
+        assert_eq!(continue_from(&rig, "w1:p1", "continue").1["id"], sent["id"]);
+        assert_eq!(state(&rig, &id), after, "{point}");
+        // The worker now takes the input once. No original record changed.
+        assert_eq!(claim_and_ack(&rig)["text"], "continue");
+        assert_eq!(immutable(&rig, &id), records, "{point}");
+        assert_eq!(rig.log("herdr.log").matches("agent start").count(), 1);
+    }
+}
+
+#[test]
+fn a_retained_receipt_fences_a_replay_after_the_inbox_prunes_its_record() {
+    let (rig, execution, _) = legacy_unreturned("legacy-pruned");
     let id = request_id(&execution);
-    let marks = rig.read("state/done.json");
-    let out = rig
-        .cmd(&[
-            "legacy-continue",
-            "w2:p1",
-            "--message",
-            "continue",
-            "--json",
-        ])
-        .env("DOGSLED_TEST_UNIT_CRASH", "legacy-continue-stored")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(86));
-    // The input is durable and the mark is still in place.
-    assert_eq!(rig.read("state/done.json"), marks);
-    let stored = inbox(&rig);
-    assert_eq!(stored.as_array().unwrap().len(), 1);
-    // The retry finds the same record and removes the mark it continued.
+    let records = immutable(&rig, &id);
     let (code, sent) = continue_from(&rig, "w1:p1", "continue");
     assert_eq!(code, 0, "{sent}");
-    assert_eq!(sent["id"], stored[0]["id"]);
-    assert_eq!(inbox(&rig), stored);
+    claim_and_ack(&rig);
+    done_again(&rig);
+    let later = rig.read("state/done.json");
+    let fence = receipts(&rig, &id);
+    // A service pass two days later prunes the final record from the inbox.
+    fs::write(rig.dir.join("clock"), (now() + 2 * 86_400_000).to_string()).unwrap();
+    serve_once(&rig);
+    assert_eq!(inbox(&rig), json!([]));
+    assert_eq!(rig.read("state/done.json"), later);
+    assert_eq!(receipts(&rig, &id), fence);
+    // Each later process reads the same receipt: the replay is refused, and the later mark,
+    // the inbox, the outbox, and the receipt stay as they are.
+    for _ in 0..2 {
+        assert_continue_refused(&rig, &id, "w1:p1", "for an earlier done mark");
+    }
+    assert_eq!(rig.read("state/done.json"), later);
+    // A different message continues the later mark once.
+    assert_eq!(continue_from(&rig, "w1:p1", "next step").0, 0);
     assert_eq!(rig.read("state/done.json"), json!({}));
-    // The worker takes the input, works, and calls done again.
-    assert!(worker_claim(&rig).status.success());
-    worker_state(&rig, "working");
-    let out = rig
-        .cmd(&["done"])
-        .env("HERDR_PANE_ID", "w2:p1")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    worker_state(&rig, "idle");
+    assert_eq!(inbox(&rig).as_array().unwrap().len(), 1);
+    assert_eq!(inbox(&rig)[0]["text"], "next step");
+    assert_eq!(immutable(&rig, &id), records);
+}
+
+#[test]
+fn a_prepared_receipt_whose_mark_is_gone_never_exposes_input_again() {
+    // Synthetic: no production path removes the mark of a prepared continuation, and the
+    // claim is refused while the mark is in place. The fixture removes the mark and consumes
+    // and prunes the record directly, to prove that the receipt alone fails closed.
+    let (rig, execution, _) = legacy_unreturned("legacy-prepared-gone");
+    let id = request_id(&execution);
+    crash_at(&rig, "legacy-continue-stored", "continue");
+    assert_eq!(receipt(&rig, &id)["phase"], "prepared");
+    rig.put("state/done.json", &json!({}));
+    rig.put("state/inbox/term_child.json", &json!([]));
+    assert_continue_refused(&rig, &id, "w1:p1", "prepared continuation is gone");
+    // The worker calls done again: the replay still never continues the later mark.
+    done_again(&rig);
+    let later = rig.read("state/done.json");
+    assert_continue_refused(&rig, &id, "w1:p1", "for an earlier done mark");
+    assert_eq!(rig.read("state/done.json"), later);
+    assert_eq!(inbox(&rig), json!([]));
+}
+
+#[test]
+fn outbox_recovery_never_redelivers_input_or_touches_a_later_mark() {
+    let (rig, execution, _) = legacy_unreturned("legacy-outbox");
+    let id = request_id(&execution);
+    let (code, sent) = continue_from(&rig, "w1:p1", "continue");
+    assert_eq!(code, 0, "{sent}");
+    // Synthetic: the outbox entry is lost after the mark was removed.
+    fs::remove_file(rig.dir.join("state/outbox.json")).unwrap();
+    let delivered = inbox(&rig);
+    let (code, again) = continue_from(&rig, "w1:p1", "continue");
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["id"], sent["id"]);
+    assert_eq!(inbox(&rig), delivered);
+    assert_eq!(outbox(&rig).as_array().unwrap().len(), 1);
+    assert_eq!(outbox(&rig)[0]["state"], "pending");
+    // After the worker took it, the restored entry has the record's state, and the inbox
+    // keeps exactly the one acknowledged record.
+    claim_and_ack(&rig);
+    fs::remove_file(rig.dir.join("state/outbox.json")).unwrap();
+    let acked = inbox(&rig);
+    assert_eq!(continue_from(&rig, "w1:p1", "continue").1["id"], sent["id"]);
+    assert_eq!(inbox(&rig), acked);
+    assert_eq!(outbox(&rig)[0]["state"], "delivered");
+    // With a later mark, nothing is restored and the mark stays.
+    done_again(&rig);
+    fs::remove_file(rig.dir.join("state/outbox.json")).unwrap();
+    assert_continue_refused(&rig, &id, "w1:p1", "for an earlier done mark");
+    assert!(!rig.dir.join("state/outbox.json").exists());
+}
+
+#[test]
+fn a_changed_or_unreadable_receipt_refuses_with_no_change() {
+    for case in ["owner", "mark", "sent", "session", "phase", "corrupt"] {
+        let (rig, execution, _) = legacy_unreturned(&format!("legacy-receipt-{case}"));
+        let id = request_id(&execution);
+        crash_at(&rig, "legacy-continue-accepted", "continue");
+        let file = format!("state/launches/{id}.continuations.json");
+        let mut all = rig.read(&file);
+        let series = all.as_object().unwrap().keys().next().unwrap().clone();
+        let entry = &mut all[&series];
+        let expected = match case {
+            "owner" => {
+                entry["request"]["owner"]["name"] = json!("intruder");
+                "does not match this request"
+            }
+            "mark" => {
+                entry["mark"]["marked_ms"] = json!(1);
+                "does not match this request"
+            }
+            "sent" => {
+                entry["sent"]["terminal"] = json!("term_other");
+                "does not match this request"
+            }
+            "session" => {
+                entry["request"]["session"] = json!("01a00000-0000-7000-8000-000000000000");
+                "does not match this request"
+            }
+            "phase" => {
+                entry["phase"] = json!("delivered");
+                ""
+            }
+            _ => {
+                fs::write(rig.dir.join(&file), "{").unwrap();
+                ""
+            }
+        };
+        if case != "corrupt" {
+            rig.put(&file, &all);
+        }
+        assert_continue_refused(&rig, &id, "w1:p1", expected);
+    }
+}
+
+#[test]
+fn a_stale_replay_after_a_later_done_changes_nothing_and_new_text_continues_once() {
+    let (rig, execution, _) = legacy_unreturned("legacy-stale");
+    let id = request_id(&execution);
+    assert_eq!(continue_from(&rig, "w1:p1", "continue").0, 0);
+    claim_and_ack(&rig);
+    done_again(&rig);
     // A stale replay of the first continuation never clears the later mark.
     assert_continue_refused(&rig, &id, "w1:p1", "for an earlier done mark");
-    assert_ne!(rig.read("state/done.json"), json!({}));
     // A new continuation is accepted once.
     assert_eq!(continue_from(&rig, "w1:p1", "next step").0, 0);
     assert_eq!(rig.read("state/done.json"), json!({}));

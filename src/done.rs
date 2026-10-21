@@ -388,25 +388,19 @@ pub fn input<T>(
     guarded(ledger, agent, input, |_| accept())
 }
 
-/// Continue the one done mark of a legacy unit execution in `agent`'s pane. The mark must
+/// Continue the one done mark of a legacy unit execution in `agent`'s pane. A mark must
 /// belong to an unreturned launch with no owner host, and `from` must be its owner pane on
-/// this host. `accept` gets that exact mark while the done lock is held. It must prove the
-/// original admission and persist the input; only then is that mark, and no other, removed.
+/// this host. `accept` gets that exact mark, or `None` when the pane has no mark, while the
+/// done lock is held. It must prove the original admission and decide from its durable
+/// receipt. It returns whether its acceptance consumed the mark: only then is that mark, and
+/// no other, removed, and only if it is unchanged.
 pub fn continue_legacy<T>(
     ledger: &Ledger,
     agent: &Agent,
     from: &crate::inbox::Sender,
-    accept: impl FnOnce(&Mark) -> Result<T>,
+    accept: impl FnOnce(Option<&Mark>) -> Result<(T, bool)>,
 ) -> Result<T> {
-    guarded(ledger, agent, Input::Legacy { from }, |mark| {
-        let mark = mark.ok_or_else(|| {
-            Error::Invalid(format!(
-                "{} has no done mark to continue; nothing was accepted",
-                agent.pane
-            ))
-        })?;
-        Ok((accept(mark)?, true))
-    })
+    guarded(ledger, agent, Input::Legacy { from }, accept)
 }
 
 fn guarded<T>(
@@ -496,15 +490,11 @@ fn guarded<T>(
             }
             return Err(Error::Invalid(refusal));
         }
-        if matches!(input, Input::Legacy { .. }) && legacy.is_none() {
-            return Err(Error::Invalid(format!(
-                "{} has no done mark to continue; nothing was accepted",
-                agent.pane
-            )));
-        }
+        // Legacy input without a refusal reaches here with its one mark, or with no matching
+        // mark at all: its receipt decides whether that is a finished retry.
         let (result, received) = accept(legacy.as_ref().map(|(_, mark)| mark))?;
         if let Some((key, mark)) = &legacy {
-            // The input persisted. Remove exactly the mark it continued, and only if unchanged.
+            // The acceptance consumed this mark. Remove exactly it, and only if unchanged.
             if received && marks.get(key) == Some(mark) {
                 marks.remove(key);
             }
