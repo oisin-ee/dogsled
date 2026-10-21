@@ -119,7 +119,7 @@ Watchdog, admission, child completion, inbox delivery, and requested cleanup hav
 **Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
 
 **Bounded waits.** One deadline starts at command entry. `--max` (default 30m) includes discovery, locks, transport, preparation, admission, and job completion.
-Routine calls and lock waits also have a 30-second limit. Setup calls (prepare, clone, mise trust, agent startup) have a 10-minute limit. Wait paths return `still running` and exit 124 at the deadline.
+Routine calls and lock waits also have a 30-second limit. Setup calls (prepare, worktree removal, teardown, clone, mise trust, agent startup) have a 10-minute limit. Wait paths return `still running` and exit 124 at the deadline.
 Non-waiting actions report the operation that timed out. Service admission runs separately from periodic snapshot publication. A job's `--idle-timeout` kills it after that much silence in its own output.
 
 ### 5. Status
@@ -135,7 +135,7 @@ dogsled status --brief    ≤ 6 lines, for the prompt hooks
 
 Doctor never removes candidates. It refreshes remote refs and builds a plan shared with prune and the sweep.
 
-The loss rule has one owner, `src/loss.rs`. A checkout must be clean, with ignored files excluded. Every commit must be held by the default branch or remote refs refreshed in this pass. A ref without a checkout skips the cleanliness condition. A failed fetch produces a warning and disables remote-ref evidence for that repository. Integration recognizes ancestry, squash, stack, and unchanged merge-tree results.
+The loss rule has one owner, `src/loss.rs`. A checkout must contain no unique content, with ignored files excluded. Pure tracked deletions (` D` or `D `) are lossless only when the tip is held. Modified, added, renamed, type-changed, and untracked paths still count as dirt. Every commit must be held by the default branch or remote refs refreshed in this pass. A ref without a checkout skips the cleanliness condition. A failed fetch produces a warning and disables remote-ref evidence for that repository. Integration recognizes ancestry, squash, stack, and unchanged merge-tree results.
 
 Prune and the sweep use the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches. An open agent item holds its checkout in prune and the sweep, so only `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until its work lands. An idle or done agent that has not called `dogsled done` holds its checkout, except for an explicit `dogsled close`. Idle shells, done agents without open items, and workspaces alone are not holds. The process check skips each holder pane's shell, and every descendant of an agent pane's shell; a shell's background job still holds. Foreign locks prevent removal.
 
@@ -143,7 +143,7 @@ An unheld dirty checkout whose work is in the default branch produces a `landed_
 
 The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `panes`. Orphan close uses the same loss rule. Prune also shows non-removable findings, stale-agent panes, expired jobs, stale registrations, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
 
-Every removal rechecks identity and safety. Worktree removal runs teardown, closes holders, unlocks, removes without force, and deletes a held branch. A failed entry does not stop the others. Completion-event behavior remains independent of doctor cleanup.
+Every removal rechecks identity and safety. Worktree removal runs teardown, restores only deletion-only paths from held HEAD, closes holders, unlocks, removes without force, and deletes a held branch. Restoration refuses other dirt and uses literal paths. Both creation and removal use the existing setup budget. A failed entry does not stop the others. Completion-event behavior remains independent of doctor cleanup.
 
 Stop writes a durable `sweep-request.json` and sends a local datagram to `sweep.sock`. The hook does not wait for cleanup.
 The service checks the durable request at startup, on notification, and on each publication iteration. It surveys only when a request exists.

@@ -152,6 +152,8 @@ impl Shell for System {
 pub struct Fake {
     responses: std::sync::Mutex<std::collections::HashMap<String, Output>>,
     pub calls: std::sync::Mutex<Vec<String>>,
+    /// Each bounded call and the time limit it was given.
+    pub limits: std::sync::Mutex<Vec<(String, std::time::Duration)>>,
 }
 
 #[cfg(test)]
@@ -182,6 +184,18 @@ impl Fake {
 
 #[cfg(test)]
 impl Shell for Fake {
+    fn run_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        if let Ok(mut limits) = self.limits.lock() {
+            limits.push((format!("{program} {}", args.join(" ")), timeout));
+        }
+        self.run(program, args)
+    }
+
     /// Files are scripted under the key `read <path>`.
     fn read_file(&self, path: &str) -> Result<String> {
         self.run("read", &[path.to_string()]).map(|o| o.stdout)

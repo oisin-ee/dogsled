@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - Pi runs the stop gate on every completed stop. Before, it skipped stops that ended on the assistant's message, which is every normal stop in Pi 1.3, so Pi agents never requested a cleanup pass or heard gate reminders.
+- Worktree removal uses the existing 10-minute setup limit instead of the 30-second routine limit, including cleanup after failed setup.
+- Pure tracked deletions lose nothing when the default branch or refreshed remote refs hold HEAD. Cleanup restores only those deleted paths before unforced removal. Other dirt still prevents removal. Board facts use the same loss rule.
 
 ## 0.16.4 - 2026-10-20
 

@@ -1,5 +1,5 @@
-//! The single definition of loss: a clean checkout and a tip held by the default branch
-//! or by remote refs refreshed in this pass. Holds on otherwise safe work are separate.
+//! The single definition of loss: no unique checkout content and a tip held by the default
+//! branch or by remote refs refreshed in this pass. Holds on otherwise safe work are separate.
 
 use crate::error::{Error, Result};
 use crate::integration::Integrated;
@@ -55,8 +55,8 @@ impl Evidence {
         tip: &str,
         checkout: Option<&str>,
     ) -> Result<Assessment> {
-        let dirty = checkout
-            .map(|path| dirty_paths(shell, path))
+        let changes = checkout
+            .map(|path| changes(shell, path))
             .transpose()?
             .unwrap_or_default();
         let integrated = match tip.strip_prefix("refs/heads/") {
@@ -93,7 +93,36 @@ impl Evidence {
         } else {
             None
         };
+        let dirty = lossy_paths(changes, held.is_some());
         Ok(Assessment { dirty, held })
+    }
+
+    /// Git refuses deletion-only checkouts too. Recover their held content before an ordinary,
+    /// unforced removal. Other dirt refuses recovery without changing the index or checkout.
+    pub fn restore_deletions(&self, shell: &dyn Shell, checkout: &str) -> Result<()> {
+        let changes = changes(shell, checkout)?;
+        if !changes.iter().any(|change| change.deleted) {
+            return Ok(());
+        }
+        let head = git(shell, checkout, &["rev-parse", "HEAD"])?;
+        if !head.ok() || head.stdout.trim().is_empty() {
+            return Err(Error::Invalid(format!("cannot read HEAD in {checkout}")));
+        }
+        let loss = self.assess(shell, head.stdout.trim(), Some(checkout))?;
+        if changes.iter().any(|change| !change.deleted) || !loss.loses_nothing() {
+            return Err(Error::Invalid(format!(
+                "refuse {checkout}: cannot recover deletions with other dirt or unheld commits"
+            )));
+        }
+        let mut args = vec!["--literal-pathspecs", "checkout", head.stdout.trim(), "--"];
+        args.extend(changes.iter().map(|change| change.path.as_str()));
+        let out = git(shell, checkout, &args)?;
+        crate::shell::checked(
+            "git",
+            &args.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            out,
+        )?;
+        Ok(())
     }
 }
 
@@ -143,7 +172,24 @@ impl Assessment {
 }
 
 /// Porcelain's NUL form preserves spaces, newlines, and rename paths without unquoting.
-pub fn dirty_paths(shell: &dyn Shell, checkout: &str) -> Result<Vec<String>> {
+pub fn dirty_paths(shell: &dyn Shell, checkout: &str, held: bool) -> Result<Vec<String>> {
+    Ok(lossy_paths(changes(shell, checkout)?, held))
+}
+
+fn lossy_paths(changes: Vec<Change>, held: bool) -> Vec<String> {
+    changes
+        .into_iter()
+        .filter(|change| !held || !change.deleted)
+        .map(|change| change.path)
+        .collect()
+}
+
+struct Change {
+    path: String,
+    deleted: bool,
+}
+
+fn changes(shell: &dyn Shell, checkout: &str) -> Result<Vec<Change>> {
     let out = git(
         shell,
         checkout,
@@ -163,7 +209,10 @@ pub fn dirty_paths(shell: &dyn Shell, checkout: &str) -> Result<Vec<String>> {
                 "{checkout}: invalid porcelain status"
             )));
         };
-        paths.push(path.to_string());
+        paths.push(Change {
+            path: path.to_string(),
+            deleted: matches!(&field[..2], " D" | "D "),
+        });
         if field[..2].contains(['R', 'C']) {
             fields.next();
         }
