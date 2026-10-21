@@ -165,7 +165,11 @@ fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
         repo.repo.to_str().unwrap()
     ));
     let listed = git(&repo.repo, &["worktree", "list", "--porcelain", "-z"]);
-    assert!(listed.split('\0').any(|field| field.starts_with("prunable")));
+    assert!(
+        listed
+            .split('\0')
+            .any(|field| field.starts_with("prunable"))
+    );
     let ledger = Ledger::new(repo.root.join("state"));
     ledger
         .write("repositories.json", &vec![repo.repo.display().to_string()])
@@ -180,13 +184,15 @@ fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
     };
     for scope in [Scope::Prune, Scope::Sweep] {
         let mut plan = survey(&node, scope, 100).unwrap();
-        // Never apply findings from the developer's own checkout.
+        // Never apply findings from the developer's own checkout. Git reports resolved paths
+        // (`/private/var` on macOS), so compare resolved paths.
+        let root = crate::worktree::resolved(&repo.root);
         plan.entries
-            .retain(|entry| entry.id.starts_with(repo.root.to_str().unwrap()));
+            .retain(|entry| crate::worktree::resolved(Path::new(&entry.id)).starts_with(&root));
         let finding = plan
             .entries
             .iter()
-            .find(|entry| entry.id == repo.tree.to_str().unwrap())
+            .find(|entry| crate::worktree::same(&entry.id, repo.tree.to_str().unwrap()))
             .unwrap();
         assert_eq!(finding.kind.as_deref(), Some(crate::cleanup::UNLINKED));
         assert!(
@@ -223,8 +229,11 @@ fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
     // Once the owner removes the directory, nothing is left to remove or to report as dirt.
     std::fs::remove_dir_all(&repo.tree).unwrap();
     let plan = survey(&node, Scope::Prune, 100).unwrap();
-    assert!(!plan.entries.iter().any(|entry| entry.id == repo.tree.to_str().unwrap()
-        && (entry.removable || entry.kind.as_deref() == Some("landed_dirty"))));
+    assert!(!plan.entries.iter().any(|entry| crate::worktree::same(
+        &entry.id,
+        repo.tree.to_str().unwrap()
+    ) && (entry.removable
+        || entry.kind.as_deref() == Some("landed_dirty"))));
 }
 
 #[test]
