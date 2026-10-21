@@ -108,7 +108,7 @@ The sidebar shows `working`, then `idle` for success or `blocked` for failure, w
 
 `--max` sets one deadline from command startup, including discovery, placement, admission, and job completion. It defaults to 30 minutes.
 Operations use the remaining command budget, capped at 30 seconds for routine calls and locks, or 10 minutes for setup.
-Setup includes worktree creation and `setup` commands, repository clones, mise trust checks, and agent startup, locally and through SSH.
+Setup includes worktree creation and removal, `setup` and `teardown` commands, repository clones, mise trust checks, and agent startup, locally and through SSH.
 A non-waiting action reports the operation that exceeded its deadline.
 `logs --follow` can continue indefinitely, but each remote read has a 30-second limit.
 Run long waits through the harness's background-task facility.
@@ -165,7 +165,7 @@ dogsled done                       # as a child: my whole task is complete
 For an interrupted launch with no final receipt, explicit `close` can retire its exact idle shell under the request and pane locks. This closes **only the pane**, retaining the checkout, preparation holds, and unknown launch evidence. It does not report that the task never started. Competing launch records, a changed terminal, any agent, or incomplete foreground evidence refuse recovery. Automatic cleanup never uses this recovery path; normal cleanup can assess the retained checkout after its holds are resolved.
 In an agent worktree (locked `agent:worktree`, as dogsled makes them), it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
 Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks the worktree, and runs `git worktree remove` without force.
-Close uses the same loss rule as cleanup: a clean checkout and every commit held by the default branch or freshly fetched remote refs. It deletes the branch under that same rule. Local-only work refuses close, including an explicit owner close.
+Close uses the same loss rule as cleanup: no unique checkout content and every commit held by the default branch or freshly fetched remote refs. It deletes the branch under that same rule. Local-only work refuses close, including an explicit owner close.
 When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
 A pane outside a worktree, or in an unlocked worktree (someone's own checkout), is closed alone; the checkout stays.
 A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a worktree outside the repository's worktree directory, a dirty or detached worktree, and any other lock.
@@ -306,7 +306,9 @@ dogsled prune targets
 Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `targets`, `disk`, `processes`, and `repositories`.
 Doctor lists linked worktrees on a branch and detached ones.
 One loss rule in `src/loss.rs` governs worktrees, detached HEADs, branches, close, and board facts.
-A checkout must have no tracked or untracked changes. Ignored files do not count. A ref without a checkout skips this condition.
+A checkout must have no unique tracked or untracked content. Ignored files do not count. A ref without a checkout skips this condition.
+Deleted tracked files alone (` D` or `D `) lose nothing when the tip is held. Other changes still prevent removal.
+Before removal, dogsled restores only those deleted paths from the held HEAD, including staged deletions. It then removes the checkout without force.
 Every commit must be held by the default branch or remote-tracking refs. Each cleanup pass runs `git fetch --all --prune` before remote refs count.
 A failed fetch produces a repository warning. Only the default branch counts for that repository. Deleted upstream branches receive no special treatment.
 A branch is integrated when it is deleted, when it is an ancestor of Git's remote default branch (local `main` is the fallback), or when commits on that branch apply it.

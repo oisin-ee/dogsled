@@ -149,12 +149,13 @@ pub fn worktree(shell: &dyn Shell, cwd: &str, previous: Option<&Worktree>) -> Op
     let tips = git(shell, &tree.path, &["rev-parse", "HEAD", &base_ref])?;
     let mut tips = tips.lines();
     let (head, base) = (tips.next()?.to_owned(), tips.next()?.to_owned());
-    let dirty = !crate::loss::dirty_paths(shell, &tree.path).ok()?.is_empty();
     if let Some(previous) = previous.filter(|p| {
         p.path == tree.path && p.branch == tree.branch && p.head == head && p.base == base
     }) {
         return Some(Worktree {
-            dirty,
+            dirty: !crate::loss::dirty_paths(shell, &tree.path, previous.landed)
+                .ok()?
+                .is_empty(),
             ..previous.clone()
         });
     }
@@ -169,6 +170,9 @@ pub fn worktree(shell: &dyn Shell, cwd: &str, previous: Option<&Worktree>) -> Op
         .assess(shell, &format!("refs/heads/{}", tree.branch), None)
         .ok()?
         .landed();
+    let dirty = !crate::loss::dirty_paths(shell, &tree.path, landed)
+        .ok()?
+        .is_empty();
     Some(Worktree {
         path: tree.path,
         branch: tree.branch,
@@ -336,6 +340,21 @@ mod tests {
             !counted,
             "unchanged tips reuse the count and the landed check"
         );
+        shell.on(
+            "git -C /t status --porcelain --untracked-files=all -z",
+            " D a\0D  b\0",
+        );
+        assert!(!worktree(&shell, &cwd, Some(&first)).unwrap().dirty);
+        let unheld = Worktree {
+            landed: false,
+            ..first.clone()
+        };
+        assert!(worktree(&shell, &cwd, Some(&unheld)).unwrap().dirty);
+        shell.on(
+            "git -C /t status --porcelain --untracked-files=all -z",
+            " D a\0 M b\0?? c\0",
+        );
+        assert!(worktree(&shell, &cwd, Some(&first)).unwrap().dirty);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -134,6 +134,133 @@ impl Drop for Repo {
     }
 }
 
+/// A killed worktree removal leaves tracked deletions, including unusual path names.
+fn deleted_checkout(staged: bool) -> Repo {
+    let repo = Repo::new();
+    for name in ["work", ":(glob)*", "line\nbreak"] {
+        std::fs::write(repo.tree.join(name), "held content\n").unwrap();
+    }
+    git(&repo.tree, &["add", "."]);
+    git(&repo.tree, &["commit", "-q", "-m", "held content"]);
+    git(&repo.repo, &["merge", "-q", "feature"]);
+    git(&repo.repo, &["push", "-q", "origin", "main"]);
+    for name in ["work", ":(glob)*", "line\nbreak"] {
+        std::fs::remove_file(repo.tree.join(name)).unwrap();
+    }
+    if staged {
+        git(&repo.tree, &["add", "-u"]);
+    }
+    repo
+}
+
+#[test]
+fn held_tracked_deletions_are_lossless_and_cleanup_removes_them_without_force() {
+    for staged in [false, true] {
+        let repo = deleted_checkout(staged);
+        let loss = repo.assess();
+        assert!(loss.loses_nothing() && loss.landed());
+        let ledger = Ledger::new(repo.root.join("state"));
+        ledger
+            .write("repositories.json", &vec![repo.repo.display().to_string()])
+            .unwrap();
+        let cleanup = crate::config::Cleanup::default();
+        let node = crate::node::Node {
+            shell: &System,
+            ledger: &ledger,
+            thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+            home: repo.root.to_str().unwrap(),
+            cleanup: &cleanup,
+        };
+        let mut plan = survey(&node, Scope::Sweep, 100).unwrap();
+        plan.entries.retain(|e| {
+            e.class == "worktrees"
+                && e.tree.as_ref().is_some_and(|t| {
+                    crate::worktree::resolved(Path::new(&t.path))
+                        == crate::worktree::resolved(&repo.tree)
+                })
+        });
+        assert_eq!(plan.entries.len(), 1);
+        assert!(plan.entries[0].removable);
+        let result = crate::cleanup::apply(&node, &plan, 100).unwrap();
+        assert!(result.failures.is_empty(), "{:?}", result.failures);
+        assert!(!repo.tree.exists());
+        assert!(
+            !git(&repo.repo, &["worktree", "list", "--porcelain"])
+                .contains(repo.tree.to_str().unwrap())
+        );
+    }
+}
+
+#[test]
+fn deletions_do_not_hide_modified_added_renamed_or_untracked_content() {
+    for kind in ["modified", "added", "renamed", "untracked", "type_changed"] {
+        let repo = deleted_checkout(false);
+        git(
+            &repo.tree,
+            &["--literal-pathspecs", "checkout", "HEAD", "--", "work"],
+        );
+        match kind {
+            "modified" => std::fs::write(repo.tree.join("work"), "unique\n").unwrap(),
+            "added" => {
+                std::fs::write(repo.tree.join("new"), "unique\n").unwrap();
+                git(&repo.tree, &["add", "new"]);
+            }
+            "renamed" => {
+                git(&repo.tree, &["mv", "work", "renamed"]);
+            }
+            "type_changed" => {
+                std::fs::remove_file(repo.tree.join("work")).unwrap();
+                std::os::unix::fs::symlink("elsewhere", repo.tree.join("work")).unwrap();
+            }
+            _ => std::fs::write(repo.tree.join("new"), "unique\n").unwrap(),
+        }
+        let loss = repo.assess();
+        assert!(!loss.loses_nothing(), "{kind}: {loss:?}");
+        assert_eq!(loss.dirty.len(), 1);
+        assert!(
+            repo.evidence()
+                .restore_deletions(&System, repo.tree.to_str().unwrap())
+                .is_err()
+        );
+        assert!(repo.tree.exists());
+        assert!(!repo.tree.join(":(glob)*").exists());
+    }
+}
+
+#[test]
+fn deleted_files_require_a_held_tip_and_refreshed_remote_evidence() {
+    let repo = Repo::new();
+    repo.commit();
+    std::fs::remove_file(repo.tree.join("work")).unwrap();
+    let local = repo.assess();
+    assert!(!local.loses_nothing());
+    assert_eq!(local.dirty, ["work"]);
+    assert!(
+        repo.evidence()
+            .restore_deletions(&System, repo.tree.to_str().unwrap())
+            .is_err()
+    );
+    git(&repo.tree, &["push", "-q", "origin", "feature"]);
+    let remote = repo.assess();
+    assert!(remote.loses_nothing());
+    assert_eq!(remote.held, Some(Held::Remote));
+    let stale = Evidence::default_only(repo.repo.to_str().unwrap())
+        .assess(
+            &System,
+            "refs/heads/feature",
+            Some(repo.tree.to_str().unwrap()),
+        )
+        .unwrap();
+    assert_eq!(stale.dirty, ["work"]);
+    repo.evidence()
+        .restore_deletions(&System, repo.tree.to_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(repo.tree.join("work")).unwrap(),
+        "work\n"
+    );
+}
+
 #[test]
 fn clean_integrated_and_ignored_only_are_lossless_but_dirty_is_not() {
     let repo = Repo::new();

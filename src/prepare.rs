@@ -325,7 +325,7 @@ fn default_branch(shell: &dyn Shell, checkout: &Path) -> Result<String> {
 /// Remove a worktree that `place` just made and whose setup failed. It holds nothing yet, so
 /// the removal is forced through the agent lock, and a branch made for it goes too.
 fn discard(shell: &dyn Shell, checkout: &Path, path: &str, branch: Option<&str>) -> Result<()> {
-    git(checkout, &["worktree", "remove", "-f", "-f", path]).run_ok(shell)?;
+    git(checkout, &["worktree", "remove", "-f", "-f", path]).setup_ok(shell)?;
     if let Some(branch) = branch {
         git(checkout, &["branch", "-D", branch]).run_ok(shell)?;
     }
@@ -418,7 +418,7 @@ impl Git {
         shell.run_ok("git", &self.0).map(drop)
     }
 
-    /// A checkout can take longer than an ordinary call.
+    /// Making or removing a checkout can take longer than an ordinary call.
     fn setup_ok(&self, shell: &dyn Shell) -> Result<()> {
         shell.run_setup_ok("git", &self.0).map(drop)
     }

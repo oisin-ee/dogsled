@@ -33,10 +33,14 @@ pub struct Listed {
     pub lock: Option<String>,
 }
 
-fn git(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<crate::shell::Output> {
+fn git_words(dir: &Path, args: &[&str]) -> Vec<String> {
     let mut words = vec!["-C".to_string(), dir.display().to_string()];
     words.extend(args.iter().map(ToString::to_string));
-    shell.run("git", &words)
+    words
+}
+
+fn git(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<crate::shell::Output> {
+    shell.run("git", &git_words(dir, args))
 }
 
 pub fn refuse(message: &str) -> Error {
@@ -284,6 +288,9 @@ pub fn remove(
 ) -> Result<Removed> {
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
+    if Path::new(&tree.path).is_dir() {
+        evidence.restore_deletions(shell, &tree.path)?;
+    }
     let open = crate::cleanup::current_panes(shell)?;
     for pane in holders {
         let outside = workspace.is_none() || pane.workspace_id.as_deref() != workspace;
@@ -313,7 +320,11 @@ pub fn remove(
             )));
         }
     }
-    let out = git(shell, &tree.checkout, &["worktree", "remove", &tree.path])?;
+    // Removing ignored build output can take as long as creating the checkout.
+    let out = shell.run_setup(
+        "git",
+        &git_words(&tree.checkout, &["worktree", "remove", &tree.path]),
+    )?;
     if !out.ok() {
         if lock.is_some() && Path::new(&tree.path).exists() {
             git_ok(
@@ -434,4 +445,47 @@ fn close_anchor(
     )?;
     std::fs::remove_file(&file)?;
     Ok(Some(anchor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::{Fake, Output};
+
+    #[test]
+    fn removal_gets_the_setup_limit_not_the_routine_limit() {
+        let shell = Fake::new();
+        let checkout = std::env::temp_dir().join(crate::ledger::new_id());
+        let repo = checkout.display().to_string();
+        let path = format!("{repo}/.worktrees/x");
+        shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+        shell.on(
+            &format!("git -C {repo} worktree list --porcelain"),
+            &format!("worktree {repo}\n\nworktree {path}\nbranch refs/heads/x\n"),
+        );
+        let removal = format!("git -C {repo} worktree remove {path}");
+        shell.on_output(
+            &removal,
+            Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: "stop here".into(),
+            },
+        );
+        let tree = Linked {
+            checkout,
+            path,
+            branch: "x".into(),
+        };
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let evidence = crate::loss::Evidence::default_only(&repo);
+        let error = remove(&shell, &ledger, &tree, None, &[], None, &evidence).unwrap_err();
+        assert!(error.to_string().contains("stop here"), "{error}");
+        let limits = shell.limits.lock().unwrap();
+        let limit = limits
+            .iter()
+            .find(|(call, _)| *call == removal)
+            .map(|(_, l)| *l);
+        assert_eq!(limit, Some(crate::budget::SETUP_LIMIT));
+    }
 }
