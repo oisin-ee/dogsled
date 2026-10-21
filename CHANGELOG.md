@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. `/dogsled` remains available in both modes.
+
 - A profile's `prompt` can be a list of files. Each one is appended to the system prompt in order, so team profiles share a common prompt and add their own.
 - `dogsled quota` collects Claude, Codex, and MiniMax quota on a configured Mac through a Keychain-only management key. Versioned snapshots refresh every five minutes, persist atomically, and reach enabled peers over SSH. Cached reads never contact the provider. Account errors exclude credentials and response bodies.
 - Pi runs the stop gate on every completed stop. Before, it skipped stops that ended on the assistant's message, which is every normal stop in Pi 1.3, so Pi agents never requested a cleanup pass or heard gate reminders.

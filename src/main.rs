@@ -188,24 +188,8 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         },
-        Command::Board { owner, all } => {
-            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            let status = commands::status(&fleet)?;
-            let owner = if all {
-                None
-            } else {
-                Some(
-                    owner
-                        .or_else(|| std::env::var("HERDR_PANE_ID").ok())
-                        .ok_or_else(|| {
-                            Error::Invalid(
-                                "HERDR_PANE_ID or --owner is required; or pass --all".into(),
-                            )
-                        })?,
-                )
-            };
-            let board = board::build(&status, owner.as_deref(), now_ms());
-            print(cli.json, &board, || board.render())?;
+        command @ Command::Board { .. } => {
+            board::command(&shell, &ledger, &policy, home, command, cli.json)?;
         }
         Command::Unit(command) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
@@ -424,6 +408,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             String::new,
         )?,
         HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,
+        HostCommand::Todos => print(true, &board::cached_todos(node.ledger)?, String::new)?,
         HostCommand::QuotaStore => print(
             true,
             &quota::store(node.ledger, std::io::stdin().lock())?,

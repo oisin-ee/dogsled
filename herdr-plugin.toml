@@ -5,14 +5,12 @@ id = "dogsled"
 name = "dogsled"
 version = "0.16.4"
 min_herdr_version = "0.9.1"
-description = "Opens the dogsled host status board."
+description = "Opens the dogsled right-side work board."
 platforms = ["macos", "linux"]
 
-# Every host, its agents, and its reservations. Refreshes until Ctrl-C.
+# Cached quotas, owned work, and provider-rendered todos. Herdr splits right by default.
 [[panes]]
 id = "board"
 title = "dogsled"
-placement = "popup"
-width = "90%"
-height = "70%"
+placement = "split"
 command = ["sh", "plugin/board.sh"]

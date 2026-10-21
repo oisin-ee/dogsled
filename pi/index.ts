@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text, Key } from "@earendil-works/pi-tui";
-import { type Board, clean, parseBoard } from "./board.ts";
-import { WorkTodo } from "./work-todo.ts";
+import { type Board, clean, parseBoard, herdrAvailable } from "./board.ts";
+import { WorkTodo, TodoPublisher } from "./work-todo.ts";
 import { UnitBridge } from "./unit-bridge.ts";
 import { workBoard, workText, type WorkState } from "./work.ts";
 import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
@@ -74,9 +74,29 @@ export default function dogsled(pi: ExtensionAPI) {
 	let workAbort: AbortController | undefined;
 	let context: ExtensionContext | undefined;
 	let requestWorkRender: (() => void) | undefined;
-	const todos = new WorkTodo(pi.events, () => { if (context) draw(context); }, () => {
+	let sideDisplay = false;
+	let publicationFailure: string | undefined;
+	const publisher = new TodoPublisher(owner ?? "", error => context?.ui.notify(`Todo publication failed: ${String(error)}`, "error"));
+	const todos = new WorkTodo(pi.events, () => {
+		if (context) { publishTodos(context); draw(context); }
+	}, () => {
 		if (context) void openWork(context, "todos").catch(error => context?.ui.notify(String(error), "error"));
 	});
+
+	function publishTodos(ctx: ExtensionContext): void {
+		if (!owner) return;
+		try { publisher.publish(todos.current, ctx.ui.theme); }
+		catch (error) { ctx.ui.notify(`Todo publication failed: ${String(error)}`, "error"); }
+	}
+
+	async function publication(ctx: ExtensionContext): Promise<void> {
+		if (!owner) return;
+		const current = generation;
+		const location: unknown = JSON.parse(await exec(["board", "--todo-path", "--owner", owner, "--json"]));
+		if (current !== generation) return;
+		publisher.configure(location);
+		publishTodos(ctx);
+	}
 
 	function state(): WorkState {
 		return { board, todo: todos.current, error: failure ?? todos.error };
@@ -97,6 +117,7 @@ export default function dogsled(pi: ExtensionAPI) {
 	}
 
 	async function openWork(ctx: ExtensionContext, tab: WorkTab): Promise<void> {
+		if (sideDisplay && owner) { await exec(["board", "--open", "--owner", owner, "--json"]); return; }
 		if (ctx.mode !== "tui") { ctx.ui.notify(workText(state()), "info"); return; }
 		if (panelOpen) return;
 		workOpen = true;
@@ -136,7 +157,7 @@ export default function dogsled(pi: ExtensionAPI) {
 	}
 
 	function draw(ctx: ExtensionContext) {
-		if (ctx.mode !== "tui") return;
+		if (ctx.mode !== "tui" || sideDisplay) return;
 		workPanel?.update(workData());
 		const data = state();
 		if (panelOpen || (!workOpen && !data.board.rows.length && (!data.todo || data.todo.display.empty) && !data.error)) {
@@ -174,6 +195,13 @@ export default function dogsled(pi: ExtensionAPI) {
 			await inbox.drain(ctx);
 			try { await units.ready(ctx); await units.drain(ctx); } catch (error) { ctx.ui.notify(`Dogsled settlement delivery pending: ${String(error)}`, "warning"); }
 			if (ctx.mode !== "tui") return;
+			try { await publication(ctx); publicationFailure = undefined; }
+			catch (error) {
+				const text = `Todo publication unavailable: ${String(error)}`;
+				if (text !== publicationFailure) ctx.ui.notify(text, "warning");
+				publicationFailure = text;
+			}
+			if (current !== generation || sideDisplay) return;
 			try {
 				const next = parseBoard(JSON.parse(await exec(["board", "--json"])));
 				if (current !== generation) return;
@@ -199,7 +227,10 @@ export default function dogsled(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		units.start(event.reason);
-		if (ctx.mode === "tui") ctx.ui.setWidget("dogsled", undefined);
+		const wasSide = sideDisplay;
+		sideDisplay = Boolean(owner) && ctx.mode === "tui" && await herdrAvailable();
+		if (ctx.mode === "tui" && (!sideDisplay || (!wasSide && requestWorkRender))) ctx.ui.setWidget("dogsled", undefined);
+		await publisher.clear();
 		requestWorkRender = undefined;
 		workPanel?.dispose();
 		if (timer) clearInterval(timer);
@@ -214,6 +245,10 @@ export default function dogsled(pi: ExtensionAPI) {
 		context = ctx;
 		board = { hosts: [], rows: [] };
 		failure = owner ? undefined : "Dogsled needs a Herdr owner pane";
+		if (owner && sideDisplay) {
+			try { await exec(["board", "--open", "--owner", owner, "--json"]); }
+			catch (error) { ctx.ui.notify(`Dogsled side board unavailable: ${String(error)}`, "error"); }
+		}
 		todos.start(ctx);
 		if (!owner) { draw(ctx); return; }
 		timer = setInterval(() => { void update(ctx); }, REFRESH_MS);
@@ -227,7 +262,7 @@ export default function dogsled(pi: ExtensionAPI) {
 		}
 		await update(ctx);
 	});
-	pi.on("session_shutdown", (_event, ctx) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		units.stop();
 		workPanel?.dispose();
 		generation++;
@@ -241,8 +276,9 @@ export default function dogsled(pi: ExtensionAPI) {
 		timer = undefined;
 		inbox.stop();
 		todos.stop();
+		await publisher.clear();
 		context = undefined;
-		if (ctx.mode === "tui") ctx.ui.setWidget("dogsled", undefined);
+		if (ctx.mode === "tui" && !sideDisplay) ctx.ui.setWidget("dogsled", undefined);
 	});
 	// A delivered message is in the transcript once Pi ends it: only then is it acknowledged.
 	pi.on("message_end", async event => { await inbox.ended(event.message); });

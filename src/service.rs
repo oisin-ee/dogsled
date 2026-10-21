@@ -146,6 +146,9 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
         // iteration, including when the socket cannot bind or a notification was lost.
         requested |= crate::sweep::pending(node.ledger)?;
         node.tick(now_ms())?;
+        if let Err(error) = crate::board::collect_todos(node.ledger) {
+            eprintln!("dogsled service: todo intake failed: {error}");
+        }
         for (lane, worker) in workers.iter_mut().enumerate() {
             if worker.is_none() && (!once || !completed[lane]) {
                 let mut ledger = node.ledger.clone();

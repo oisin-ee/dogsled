@@ -52,6 +52,17 @@ pub enum Command {
         owner: Option<String>,
         #[arg(long)]
         all: bool,
+        /// Compact right-side display (cache-only quotas).
+        #[arg(long, conflicts_with_all = ["json", "open", "todo_path"])]
+        side: bool,
+        #[arg(long, requires = "side")]
+        watch: bool,
+        /// Open or reuse this tab's right split.
+        #[arg(long, conflicts_with_all = ["all", "todo_path"])]
+        open: bool,
+        /// Local rendered-todo publication path and side-panel width.
+        #[arg(long, conflicts_with = "all")]
+        todo_path: bool,
     },
     /// List cleanup candidates without changing them.
     Doctor {
@@ -356,6 +367,8 @@ pub enum HostCommand {
     Snapshot,
     /// SSH transport for quota --store.
     QuotaStore,
+    /// Read the service's rendered todo snapshot; no task state.
+    Todos,
     /// Put one inbox record, sent from another host.
     InboxPut {
         #[arg(long)]

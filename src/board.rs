@@ -3,12 +3,427 @@
 //! context, and the Pi panel all read this, so they never disagree.
 
 use crate::commands::Status;
+use crate::error::{Error, Result};
 use crate::hosts::HostReport;
 use crate::items::Item;
+use crate::ledger::Ledger;
 use crate::probe::Agent;
+use crate::shell::Shell;
 use crate::watchdog::age;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
+
+/// Rendered presentation only. Task records never cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TodoLines {
+    pub session: String,
+    pub branch: Option<String>,
+    pub revision: u64,
+    pub current: String,
+    pub pane: String,
+    pub width: u16,
+    pub lines: Vec<String>,
+}
+
+const DEFAULT_WIDTH: u16 = 48;
+const TODO_HEIGHT: usize = 10_000;
+const MAX_TODO_BYTES: u64 = 1024 * 1024;
+
+fn key(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// The same ledger path for Pi publication and service intake.
+pub fn todo_path(ledger: &Ledger, pane: &str) -> Result<serde_json::Value> {
+    let dir = ledger.child("todo-lines");
+    std::fs::create_dir_all(&dir.dir)?;
+    let width: Option<u16> = ledger
+        .child("board-widths")
+        .read(&format!("{}.json", key(pane)))?;
+    Ok(serde_json::json!({
+        "path": dir.dir.join(format!("{}.json", key(pane))),
+        "width": width.unwrap_or(DEFAULT_WIDTH),
+        "height": TODO_HEIGHT,
+    }))
+}
+
+fn validate_todo(todo: &TodoLines) -> Result<()> {
+    if todo.session.is_empty()
+        || todo.pane.is_empty()
+        || todo.revision == 0
+        || todo.width == 0
+        || todo.lines.len() > TODO_HEIGHT
+        || todo.lines.iter().any(|line| line.contains(['\n', '\r']))
+    {
+        return Err(Error::Invalid("invalid rendered todo snapshot".into()));
+    }
+    Ok(())
+}
+
+/// The publication lane reads only files belonging to currently observed agent panes.
+/// Each file is replaced atomically by Pi. Closed panes cannot leave visible todo rows.
+pub fn collect_todos(ledger: &Ledger) -> Result<()> {
+    use std::io::Read as _;
+    let snapshot: Option<crate::node::Snapshot> = ledger.read("host.json")?;
+    let mut todos = Vec::new();
+    if let Some(snapshot) = snapshot {
+        for agent in &snapshot.probe.agent_panes {
+            let path = ledger
+                .child("todo-lines")
+                .dir
+                .join(format!("{}.json", key(&agent.pane)));
+            let file = match std::fs::File::open(path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let mut bytes = Vec::new();
+            file.take(MAX_TODO_BYTES + 1).read_to_end(&mut bytes)?;
+            let todo = (|| -> Result<TodoLines> {
+                if bytes.len() as u64 > MAX_TODO_BYTES {
+                    return Err(Error::Invalid("rendered todo snapshot too large".into()));
+                }
+                let todo: TodoLines = serde_json::from_slice(&bytes)?;
+                validate_todo(&todo)?;
+                if todo.pane != agent.pane {
+                    return Err(Error::Invalid("rendered todo pane mismatch".into()));
+                }
+                Ok(todo)
+            })();
+            match todo {
+                Ok(todo) => todos.push(todo),
+                Err(_) => eprintln!(
+                    "dogsled board: invalid rendered todo snapshot for {}",
+                    agent.pane
+                ),
+            }
+        }
+    }
+    ledger.write("todos.json", &todos)
+}
+
+pub fn cached_todos(ledger: &Ledger) -> Result<Vec<TodoLines>> {
+    let todos: Vec<TodoLines> = ledger.read("todos.json")?.unwrap_or_default();
+    for todo in &todos {
+        validate_todo(todo)?;
+    }
+    Ok(todos)
+}
+
+/// Plugin context names the opener, not the new board pane.
+pub fn owner(explicit: Option<String>, all: bool) -> Result<Option<String>> {
+    if all {
+        return Ok(None);
+    }
+    explicit
+        .or_else(|| {
+            let context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok()?;
+            let context: serde_json::Value = serde_json::from_str(&context).ok()?;
+            context["focused_pane_id"].as_str().map(str::to_owned)
+        })
+        .or_else(|| std::env::var("HERDR_PANE_ID").ok())
+        .map(Some)
+        .ok_or_else(|| Error::Invalid("HERDR_PANE_ID or --owner is required; or pass --all".into()))
+}
+
+/// Herdr 0.9.5 creates a new plugin pane on every open. Keep one per live tab,
+/// under the ledger lock, and validate its terminal identity before reuse.
+pub fn open(ledger: &Ledger, shell: &dyn Shell, owner: &str) -> Result<serde_json::Value> {
+    ledger.with_lock("board-open", || {
+        let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
+        let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
+        let panes = value["result"]["panes"]
+            .as_array()
+            .ok_or_else(|| Error::Invalid("invalid Herdr pane list".into()))?;
+        let caller = panes
+            .iter()
+            .find(|pane| pane["pane_id"] == owner)
+            .ok_or_else(|| Error::Invalid("board owner pane is unavailable".into()))?;
+        let tab = caller["tab_id"]
+            .as_str()
+            .ok_or_else(|| Error::Invalid("board owner tab is unavailable".into()))?;
+        let registry = ledger.child("boards");
+        let file = format!("{}.json", key(tab));
+        if let Some(saved) = registry.read::<serde_json::Value>(&file)? {
+            if panes.iter().any(|pane| {
+                pane["pane_id"] == saved["pane_id"]
+                    && pane["terminal_id"] == saved["terminal_id"]
+                    && pane["tab_id"] == tab
+            }) {
+                return Ok(saved);
+            }
+            std::fs::remove_file(registry.dir.join(&file))?;
+        }
+        let out = shell.run_ok(
+            "herdr",
+            &[
+                "plugin".into(),
+                "pane".into(),
+                "open".into(),
+                "--plugin".into(),
+                "dogsled".into(),
+                "--entrypoint".into(),
+                "board".into(),
+                "--placement".into(),
+                "split".into(),
+                "--direction".into(),
+                "right".into(),
+                "--target-pane".into(),
+                owner.into(),
+                "--no-focus".into(),
+            ],
+        )?;
+        let opened: serde_json::Value = serde_json::from_str(&out.stdout)?;
+        let pane = &opened["result"]["plugin_pane"]["pane"];
+        if !pane["pane_id"].is_string() || !pane["terminal_id"].is_string() {
+            return Err(Error::Invalid("invalid Herdr plugin pane response".into()));
+        }
+        registry.write(&file, pane)?;
+        Ok(pane.clone())
+    })
+}
+
+fn pane_width() -> u16 {
+    let size = (|| {
+        let tty = std::fs::File::open("/dev/tty").ok()?;
+        let output = std::process::Command::new("stty")
+            .arg("size")
+            .stdin(tty)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout)
+            .ok()?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<u16>()
+            .ok()
+    })();
+    size.filter(|width| *width > 0).unwrap_or(DEFAULT_WIDTH)
+}
+
+/// Clip board-owned labels conservatively in terminal cells. Provider lines bypass this.
+fn compact(text: &str, width: u16) -> String {
+    let mut remaining = usize::from(width);
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take_while(|c| {
+            let cells = if c.is_ascii() { 1 } else { 2 };
+            if cells > remaining {
+                return false;
+            }
+            remaining -= cells;
+            true
+        })
+        .collect()
+}
+
+/// Display-only quotas: never calls the collector or reads credentials.
+fn quota_lines(snapshot: &crate::quota::Snapshot, now: u64) -> Vec<String> {
+    if snapshot.fetched_ms == 0 {
+        return vec!["QUOTAS · unavailable".into()];
+    }
+    let elapsed = now.saturating_sub(snapshot.fetched_ms);
+    let mut lines = vec![format!(
+        "QUOTAS · age {}{}",
+        age(elapsed),
+        if elapsed > 15 * crate::watchdog::MINUTE {
+            " · STALE"
+        } else {
+            ""
+        }
+    )];
+    for row in &snapshot.pools {
+        let pool = match row.pool {
+            crate::quota::Pool::Claude => "claude",
+            crate::quota::Pool::Codex => "codex",
+            crate::quota::Pool::Minimax => "minimax",
+        };
+        lines.push(format!("{pool} {} · {}", row.account, row.window));
+        lines.push(format!(
+            "  {:.1}% used{}",
+            row.used_pct,
+            row.error
+                .as_ref()
+                .map_or_else(String::new, |error| format!(" · {error}"))
+        ));
+    }
+    if snapshot.pools.is_empty() {
+        lines.push("No quota accounts".into());
+    }
+    lines
+}
+
+impl Board {
+    pub fn render_side(
+        &self,
+        quota: &crate::quota::Snapshot,
+        todos: &[(String, TodoLines)],
+        owner: Option<&str>,
+        width: u16,
+        now: u64,
+    ) -> String {
+        let mut lines = quota_lines(quota, now);
+        lines.push(String::new());
+        lines.push("AGENTS AND JOBS".into());
+        if self.rows.is_empty() {
+            lines.push("nothing running".into());
+        }
+        let mut group = None;
+        for row in &self.rows {
+            if group != Some(row.group) {
+                lines.push(row.group.title().into());
+                group = Some(row.group);
+            }
+            lines.push(format!(
+                "{} · {} · {}",
+                row.name,
+                row.state,
+                age(row.age_ms)
+            ));
+            lines.push(format!("  {} · {}", row.what, row.host));
+            if !row.activity.is_empty() {
+                lines.push(format!("  {}", one_line(&row.activity)));
+            }
+        }
+        lines.push(String::new());
+        lines.push("TODOS".into());
+        for row in self.rows.iter().filter(|row| row.kind == "agent") {
+            let current = todos
+                .iter()
+                .find(|(host, todo)| row.host == *host && row.pane.as_deref() == Some(&todo.pane))
+                .map_or("unavailable", |(_, todo)| todo.current.as_str());
+            lines.push(format!("{}: {}", row.name, one_line(current)));
+        }
+        for (host, todo) in todos
+            .iter()
+            .filter(|(host, todo)| host == "local" && Some(todo.pane.as_str()) == owner)
+        {
+            lines.push(format!("{host} {}: {}", todo.pane, one_line(&todo.current)));
+        }
+        let mut lines: Vec<_> = lines.iter().map(|line| compact(line, width)).collect();
+        if let Some((_, todo)) = todos
+            .iter()
+            .find(|(host, todo)| host == "local" && Some(todo.pane.as_str()) == owner)
+        {
+            lines.push(String::new());
+            // No prefix, truncation, ANSI rewriting, or task-state interpretation here.
+            lines.extend(todo.lines.iter().cloned());
+        } else {
+            lines.push("Owner todo view unavailable".into());
+        }
+        lines.join("\n") + "\n"
+    }
+}
+
+pub fn command(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    policy: &crate::config::Policy,
+    home: String,
+    command: crate::cli::Command,
+    json: bool,
+) -> Result<()> {
+    let crate::cli::Command::Board {
+        owner: requested,
+        all,
+        side,
+        watch,
+        open: opening,
+        todo_path: publishing,
+    } = command
+    else {
+        return Err(Error::Invalid("expected board command".into()));
+    };
+    let owner = owner(requested, all)?;
+    if publishing {
+        return crate::print(
+            true,
+            &todo_path(ledger, owner.as_deref().unwrap_or_default())?,
+            String::new,
+        );
+    }
+    if opening {
+        return crate::print(
+            true,
+            &open(ledger, shell, owner.as_deref().unwrap_or_default())?,
+            String::new,
+        );
+    }
+    let fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home)?;
+    if side {
+        return show_side(&fleet, owner.as_deref(), watch);
+    }
+    let status = crate::commands::status(&fleet)?;
+    let board = build(&status, owner.as_deref(), crate::ledger::now_ms());
+    crate::print(json, &board, || board.render())
+}
+
+fn show_side(fleet: &crate::hosts::Fleet<'_>, owner: Option<&str>, watch: bool) -> Result<()> {
+    use std::io::Write as _;
+    loop {
+        let width = pane_width();
+        if let Some(owner) = owner {
+            fleet
+                .ledger
+                .child("board-widths")
+                .write(&format!("{}.json", key(owner)), &width)?;
+        }
+        let status = crate::commands::status(fleet)?;
+        let board = build(&status, owner, crate::ledger::now_ms());
+        let quota = crate::quota::cached(fleet.ledger)?;
+        let mut todos: Vec<_> = cached_todos(fleet.ledger)?
+            .into_iter()
+            .map(|todo| ("local".into(), todo))
+            .collect();
+        let mut errors = Vec::new();
+        for host in &fleet.hosts {
+            if host.is_local() || !board.rows.iter().any(|row| row.host == host.label) {
+                continue;
+            }
+            match fleet.remote::<Vec<TodoLines>>(host, &["todos".into()]) {
+                Ok(remote) => {
+                    todos.extend(remote.into_iter().map(|todo| (host.label.clone(), todo)));
+                }
+                Err(_) => errors.push(format!("{}: todos unavailable", host.label)),
+            }
+        }
+        // Keep only the owner's view and its visible agent rows (including remote pane collisions).
+        todos.retain(|(host, todo)| {
+            (host == "local" && Some(todo.pane.as_str()) == owner)
+                || board.rows.iter().any(|row| {
+                    row.kind == "agent"
+                        && row.host == *host
+                        && row.pane.as_deref() == Some(&todo.pane)
+                })
+        });
+        if watch {
+            print!("\x1b[2J\x1b[H");
+        }
+        print!(
+            "{}",
+            board.render_side(&quota, &todos, owner, width, crate::ledger::now_ms())
+        );
+        for error in errors {
+            println!("{}", compact(&error, width));
+        }
+        std::io::stdout().flush()?;
+        if !watch {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    Ok(())
+}
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -451,6 +866,172 @@ mod tests {
     use crate::probe::{AgentCounts, Memory, Probe};
 
     const NOW: u64 = 100 * crate::watchdog::MINUTE;
+
+    fn quota_fixture() -> crate::quota::Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "fetched_ms": NOW - 16 * crate::watchdog::MINUTE, "source": "mac",
+            "pools": [{"pool":"claude", "account":"work", "window":"five_hour", "used_pct":42.5, "resets_ms":null, "error":null}]
+        })).unwrap()
+    }
+
+    fn todo_fixture(pane: &str) -> TodoLines {
+        TodoLines {
+            session: "session".into(),
+            branch: Some("branch".into()),
+            revision: 3,
+            current: "Verify changes".into(),
+            pane: pane.into(),
+            width: 48,
+            lines: vec![
+                "\u{1b}[32mProvider-owned ✓\u{1b}[0m  ".into(),
+                "  second line".into(),
+            ],
+        }
+    }
+
+    #[test]
+    fn board_side_uses_cached_quota_age_and_marks_only_older_than_fifteen_minutes() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        ledger.write("quota.json", &quota_fixture()).unwrap();
+        let quota = crate::quota::cached(&ledger).unwrap();
+        let board = Board {
+            hosts: vec![],
+            rows: vec![],
+        };
+        let rendered = board.render_side(&quota, &[], None, 48, NOW);
+        assert!(rendered.contains("QUOTAS · age 16m · STALE"), "{rendered}");
+        assert!(rendered.contains("claude work · five_hour"));
+        assert!(rendered.contains("42.5% used"));
+        assert!(
+            !board
+                .render_side(
+                    &quota,
+                    &[],
+                    None,
+                    48,
+                    quota.fetched_ms + 15 * crate::watchdog::MINUTE
+                )
+                .contains("STALE")
+        );
+        assert!(rendered.find("QUOTAS").unwrap() < rendered.find("AGENTS AND JOBS").unwrap());
+        assert!(rendered.find("AGENTS AND JOBS").unwrap() < rendered.find("TODOS").unwrap());
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn board_side_prints_owner_provider_lines_byte_for_byte_and_not_remote_collisions() {
+        let board = Board {
+            hosts: vec![],
+            rows: vec![],
+        };
+        let local = todo_fixture("w1:p1");
+        let mut remote = local.clone();
+        remote.lines = vec!["remote full view must not appear".into()];
+        let rendered = board.render_side(
+            &quota_fixture(),
+            &[("peer".into(), remote), ("local".into(), local.clone())],
+            Some("w1:p1"),
+            48,
+            NOW,
+        );
+        assert!(rendered.ends_with(&(local.lines.join("\n") + "\n")));
+        assert!(!rendered.contains("remote full view"));
+        assert!(rendered.contains("local w1:p1: Verify changes"));
+        for width in [1, 8, 24, 48] {
+            assert!(
+                compact("界a界b\u{1b}", width)
+                    .chars()
+                    .map(|c| if c.is_ascii() { 1 } else { 2 })
+                    .sum::<u16>()
+                    <= width
+            );
+        }
+    }
+
+    #[test]
+    fn board_todo_intake_roundtrips_lines_and_drops_closed_or_invalid_panes() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let host = host("local", "local", vec![agent("w1:p1", "pi", "working")]);
+        let snapshot = crate::node::Snapshot {
+            sampled_ms: NOW,
+            probe: host.probe.unwrap(),
+            jobs: vec![],
+        };
+        ledger.write("host.json", &snapshot).unwrap();
+        let todo = todo_fixture("w1:p1");
+        let location = todo_path(&ledger, "w1:p1").unwrap();
+        assert_eq!(location["width"], 48);
+        ledger
+            .child("todo-lines")
+            .write(&format!("{}.json", key("w1:p1")), &todo)
+            .unwrap();
+        collect_todos(&ledger).unwrap();
+        assert_eq!(cached_todos(&ledger).unwrap(), vec![todo.clone()]);
+        let mut invalid = todo;
+        invalid.pane = "another".into();
+        ledger
+            .child("todo-lines")
+            .write(&format!("{}.json", key("w1:p1")), &invalid)
+            .unwrap();
+        collect_todos(&ledger).unwrap();
+        assert_eq!(cached_todos(&ledger).unwrap(), Vec::<TodoLines>::new());
+        let mut snapshot = snapshot;
+        snapshot.probe.agent_panes.clear();
+        ledger.write("host.json", &snapshot).unwrap();
+        collect_todos(&ledger).unwrap();
+        assert_eq!(cached_todos(&ledger).unwrap(), Vec::<TodoLines>::new());
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn board_open_requests_right_split_and_reuses_only_matching_live_terminal() {
+        #[derive(Debug, Default)]
+        struct Herdr {
+            opens: std::sync::atomic::AtomicUsize,
+        }
+        impl Shell for Herdr {
+            fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
+                assert_eq!(program, "herdr");
+                let pane = serde_json::json!({"pane_id":"w1:p2", "terminal_id":"term-board", "tab_id":"w1:t1"});
+                let value = if args[0] == "pane" {
+                    let mut panes = vec![
+                        serde_json::json!({"pane_id":"w1:p1", "terminal_id":"term-owner", "tab_id":"w1:t1"}),
+                    ];
+                    if self.opens.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                        panes.push(pane);
+                    }
+                    serde_json::json!({"result":{"panes":panes}})
+                } else {
+                    assert!(args.windows(2).any(|pair| pair == ["--direction", "right"]));
+                    assert!(args.windows(2).any(|pair| pair == ["--placement", "split"]));
+                    assert!(args.contains(&"--no-focus".into()));
+                    self.opens
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    serde_json::json!({"result":{"plugin_pane":{"pane":pane}}})
+                };
+                Ok(crate::shell::Output {
+                    status: 0,
+                    stdout: value.to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let shell = Herdr::default();
+        let first = open(&ledger, &shell, "w1:p1").unwrap();
+        assert_eq!(open(&ledger, &shell, "w1:p1").unwrap(), first);
+        assert_eq!(shell.opens.load(std::sync::atomic::Ordering::Relaxed), 1);
+        ledger
+            .child("boards")
+            .write(
+                &format!("{}.json", key("w1:t1")),
+                &serde_json::json!({"pane_id":"w1:p2", "terminal_id":"old"}),
+            )
+            .unwrap();
+        open(&ledger, &shell, "w1:p1").unwrap();
+        assert_eq!(shell.opens.load(std::sync::atomic::Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
 
     fn agent(pane: &str, kind: &str, state: &str) -> Agent {
         Agent {
