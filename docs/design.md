@@ -169,7 +169,10 @@ Requests during a pass remain pending until the worker completes another pass. A
 Each pass records its times, removals, failures, repository warnings, and landed-dirty findings in `sweeps.jsonl` and `sweep.json`.
 History entries include `ts_ms`; each new pass removes entries older than seven days. Successful removals never trigger a gate reminder.
 Status exposes the latest report. Prompt context summarizes failures and warnings on one line.
-The gate delivers warnings and failures once per distinct set through `gate.json`.
+The gate delivers warnings and failures once per recipient’s distinct set through `gate.json`.
+Failures preserve their cleanup entry identity in `failure_entries`, beside the existing failure strings.
+A notice about a worktree or pane goes to its open item’s live owner, including an owner that is itself a child.
+Without an owner, only an operator receives the notice. Host-level repository warnings also require an operator: a pane Dogsled did not launch.
 Landed-dirty messages require equal resolved main-repository paths for the owner pane and the finding.
 Repository warnings request a dogsled agent to repair the registration, not manual state edits.
 Dirty-worktree guidance preserves wanted changes and requires user approval before discarding abandoned work.

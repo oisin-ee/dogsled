@@ -1863,6 +1863,13 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<Outcome> {
     )))
 }
 
+/// A failed action keeps its target identity for recipient routing.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Failure {
+    pub entry: Entry,
+    pub detail: String,
+}
+
 /// What prune did. Each entry is independent, so one failure does not stop the others.
 /// `skipped` lists entries whose apply-time recheck refused them because their state changed
 /// after the plan; they stay, and they are not failures.
@@ -1872,6 +1879,9 @@ pub struct Applied {
     pub failures: Vec<String>,
     #[serde(default)]
     pub skipped: Vec<String>,
+    /// Preserve the target identity for recipient routing; strings remain the status API.
+    #[serde(default)]
+    pub failure_entries: Vec<Failure>,
     #[serde(default)]
     pub repositories: Vec<Entry>,
     #[serde(default)]
@@ -1882,6 +1892,14 @@ pub struct Applied {
 }
 
 impl Applied {
+    fn failed(&mut self, entry: &Entry, detail: String) {
+        self.failures.push(detail.clone());
+        self.failure_entries.push(Failure {
+            entry: entry.clone(),
+            detail,
+        });
+    }
+
     pub fn render(&self) -> String {
         self.results
             .iter()
@@ -1898,17 +1916,17 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
     // A remote plan is input, not authority: rebuild the candidate set on this host.
     let actual = doctor(node, now)?;
     for requested in &plan.entries {
-        applied.record(apply_one(node, &actual, requested, now));
+        applied.record(requested, apply_one(node, &actual, requested, now));
     }
     Ok(applied)
 }
 
 impl Applied {
-    fn record(&mut self, outcome: Result<Outcome>) {
+    fn record(&mut self, entry: &Entry, outcome: Result<Outcome>) {
         match outcome {
             Ok(Outcome::Done(result)) => self.results.push(result),
             Ok(Outcome::Skipped(reason)) => self.skipped.push(reason),
-            Err(e) => self.failures.push(e.to_string()),
+            Err(e) => self.failed(entry, e.to_string()),
         }
     }
 }
@@ -1958,7 +1976,7 @@ pub(crate) fn apply_survey(node: &Node<'_>, plan: &Plan, now: u64) -> Applied {
         .iter()
         .filter(|e| e.removable && SWEPT.contains(&e.class.as_str()))
     {
-        applied.record(apply_one(node, plan, entry, now));
+        applied.record(entry, apply_one(node, plan, entry, now));
     }
     applied
 }

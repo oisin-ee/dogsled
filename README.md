@@ -557,6 +557,9 @@ The reminder requests a review, a commit from dirty children, integration, or an
 It never commits, merges, closes, or discards work itself. Clean readers and working children do not trigger it.
 
 The gate reports failures, repository warnings, `unlinked` holds, and landed-dirty findings from the latest completed pass, without waiting for the requested pass.
+A worktree failure or `unlinked` hold goes to its open item’s owner when that owner exists. Otherwise it goes only to an operator pane.
+Host-level repository warnings also go only to operators: panes Dogsled did not launch. Unrelated children receive neither notice.
+Landed-dirty findings keep their repository-root filter.
 Successful removals remain in status and the journal; they do not continue an agent turn.
 Repository warnings name the repository and state entries, and request delegation to a dogsled agent instead of manual state edits.
 Landed-dirty findings reach only panes in the same main repository, including linked worktrees and symlink paths.
