@@ -96,8 +96,33 @@ impl Ledger {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        // Dropping the file releases the lock, including on error or panic.
-        f()
+        // Forked children share the open file description until exec. Explicit unlock
+        // releases their copies too; close alone can leave the lock held until they exec.
+        // Dropping the file remains the fallback on panic.
+        let result = f();
+        lock.unlock()?;
+        result
+    }
+
+    /// Observe a lock without waiting or creating it. The file's existence is not liveness.
+    pub fn locked(&self, name: &str) -> Result<bool> {
+        let lock = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.dir.join(format!("{name}.lock")))
+        {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        match lock.try_lock() {
+            Ok(()) => {
+                lock.unlock()?;
+                Ok(false)
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
     }
 
     pub fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {

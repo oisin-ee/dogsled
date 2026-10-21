@@ -8,6 +8,19 @@ use crate::probe::{Agent, AgentCounts, Memory, Pane, Probe};
 use crate::shell::Fake;
 use crate::work::{self, Action, Request};
 
+fn service(ledger: &Ledger) -> std::fs::File {
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(ledger.dir.join("service.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    lock
+}
+
 fn snapshot(now: u64) -> Snapshot {
     Snapshot {
         sampled_ms: now,
@@ -46,6 +59,7 @@ fn snapshot(now: u64) -> Snapshot {
 #[test]
 fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_inbox() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
         memory_reserve_bytes: 0,
@@ -127,6 +141,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
 #[test]
 fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
     let fleet = Fleet {
@@ -190,6 +205,7 @@ fn pinned(id: &str, host: &str) -> Request {
 #[test]
 fn a_full_host_holds_back_only_the_tickets_that_need_it() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
         memory_reserve_bytes: 0,
@@ -268,6 +284,7 @@ fn a_full_host_holds_back_only_the_tickets_that_need_it() {
 #[test]
 fn submit_waits_behind_pending_tickets_even_with_room() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
         memory_reserve_bytes: 0,

@@ -44,6 +44,13 @@ Every N seconds (default 10) it:
 cache (default 10 s). It never probes a peer itself. Pi, the prompt hooks, and the tab-row command all read through
 this cache, so they cost one ssh read per peer per 10 s at most.
 
+Service liveness comes from the kernel service lock, not snapshot age. Peer responses add a live `running` field without moving existing snapshot fields.
+Old peers without this field retain age-based liveness until upgraded. Unreachable peers remain down.
+Admission, watchdog marks and owner readiness, and idle-pane cleanup still require fresh measurements.
+Finished-child and orphan cleanup use running-host snapshots, then close rechecks the live pane, `done` mark, and loss guard.
+Each tick deduplicates checkout observations by directory. Independent checkout and shell-pane observations use at most `available_parallelism` workers per step.
+Git tip caching remains in place, but dirty-state checks run each tick because unchanged commits do not prove an unchanged checkout.
+
 ### 2. Placement: `dogsled place`
 
 `dogsled place [--host H] [--branch B] [--base B] [--repo R]` picks the host with the most headroom, writes a short

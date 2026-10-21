@@ -135,7 +135,7 @@ fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
 fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> Result<()> {
     let Some(probe) = reports
         .iter()
-        .find(|h| h.host.is_local() && h.service == "up")
+        .find(|h| h.host.is_local() && h.fresh(now))
         .and_then(|h| h.probe.as_ref())
     else {
         return Ok(());
@@ -462,7 +462,7 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
         for owner in owners {
             let ready = reports
                 .iter()
-                .find(|h| h.host.is_local() && h.service == "up")
+                .find(|h| h.host.is_local() && h.fresh(now))
                 .and_then(|h| h.probe.as_ref())
                 .is_some_and(|p| {
                     p.agent_panes

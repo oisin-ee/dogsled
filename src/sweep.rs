@@ -536,3 +536,97 @@ fn close(
         fleet.remote_setup(host, &args)
     }
 }
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::hosts::Host;
+    use crate::node::Snapshot;
+    use crate::shell::Fake;
+    use serde_json::json;
+
+    #[test]
+    fn old_running_snapshot_closes_done_child_but_free_service_lock_skips_it() {
+        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let shell = Fake::new();
+        let policy = crate::config::Policy::default();
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![Host::local()],
+        };
+        let agent = json!({"pane":"w99:p1","agent":"pi","state":"idle","terminal_id":"child","completion_seq":2,"done":true});
+        let snapshot: Snapshot = serde_json::from_value(json!({"sampled_ms":1000,"probe":{
+            "host":"local","label":"local","load1":0,"cores":4,"busy":0,
+            "memory":{"used_bytes":0,"total_bytes":8_589_934_592_u64},"disk_free_percent":50,
+            "agents":{"total":1,"by_status":{"idle":1}},"agent_panes":[agent],"reservations":[],"panes":[]
+        }})).unwrap();
+        ledger.write("host.json", &snapshot).unwrap();
+        let item = Item {
+            id: "child".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "w99:p1".into(),
+            owner_pane: "w98:p1".into(),
+            reply: Some(Reply {
+                seq: 2,
+                done: true,
+                ..Reply::default()
+            }),
+            ..Item::default()
+        };
+        ledger.write("items.json", &vec![item.clone()]).unwrap();
+        ledger
+            .write(
+                "done.json",
+                &json!({"child":{"pane":"w99:p1","after":1,"sealed":2,"marked_ms":1}}),
+            )
+            .unwrap();
+        shell.on("herdr pane list", r#"{"result":{"panes":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle"}]}}"#)
+            .on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle","terminal_id":"child","completion_seq":2}]}}"#)
+            .on("herdr pane close w99:p1", "{}");
+        let reports = fleet.status(61_000).unwrap();
+        assert_eq!(reports[0].service, "down");
+        assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
+        assert!(
+            settle(&fleet, &item, &reports, 61_000)
+                .unwrap()
+                .contains("unavailable")
+        );
+        assert!(shell.calls.lock().unwrap().is_empty());
+        ledger
+            .with_lock("service", || {
+                let reports = fleet.status(61_000)?;
+                assert_eq!(reports[0].service, "up");
+                assert_eq!(reports[0].sampled_ms, Some(1000));
+                assert!(!reports[0].headroom.as_ref().unwrap().eligible);
+                assert!(!reports[0].fresh(61_000));
+                assert!(!fleet.node().reserve("new", 61_000)?.reserved);
+                assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
+                assert!(crate::items::list(&ledger)?[0].closed_ms.is_some());
+                // The same old observation cannot close an agent after its done mark disappears.
+                ledger.write("done.json", &json!({}))?;
+                assert!(
+                    settle(&fleet, &item, &reports, 61_000)
+                        .unwrap()
+                        .contains("has not called done")
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| *c == "herdr pane close w99:p1")
+                .count(),
+            1
+        );
+        assert_eq!(fleet.status(61_000).unwrap()[0].service, "down");
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+}

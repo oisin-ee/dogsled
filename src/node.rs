@@ -38,6 +38,16 @@ pub struct Snapshot {
     pub jobs: Vec<crate::jobs::Job>,
 }
 
+/// Live host response. Snapshot fields stay at the top level for older readers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotReport {
+    #[serde(flatten)]
+    pub snapshot: Option<Snapshot>,
+    /// Absent on peers predating lock-based liveness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<bool>,
+}
+
 impl Snapshot {
     pub fn fresh(&self, now: u64) -> bool {
         now.saturating_sub(self.sampled_ms) <= STALE_MS
@@ -71,6 +81,13 @@ pub struct Node<'a> {
 }
 
 impl Node<'_> {
+    pub fn snapshot(&self) -> Result<SnapshotReport> {
+        Ok(SnapshotReport {
+            snapshot: self.ledger.read("host.json")?,
+            running: Some(self.ledger.locked("service")?),
+        })
+    }
+
     /// Publication never waits for prompts, notifications, or cleanup.
     pub fn tick(&self, now: u64) -> Result<()> {
         let mut probe = probe::local(self.shell, self.home)?;
