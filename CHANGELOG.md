@@ -2,9 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
-## 0.17.0 - 2026-10-21
+## Unreleased
 
-- Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. `/dogsled` remains available in both modes.
+- Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. A pane Dogsled launched never opens a board: it keeps the widget, and its todo lines appear on the parent's board. `/dogsled` remains available in both modes.
+
+## 0.17.0 - 2026-10-21
 
 - A profile's `prompt` can be a list of files. Each one is appended to the system prompt in order, so team profiles share a common prompt and add their own.
 - `dogsled quota` collects Claude, Codex, and MiniMax quota on a configured Mac through a Keychain-only management key. Versioned snapshots refresh every five minutes, persist atomically, and reach enabled peers over SSH. Cached reads never contact the provider. Account errors exclude credentials and response bodies.
