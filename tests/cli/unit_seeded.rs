@@ -71,6 +71,27 @@ fn refused_unit(name: &str) -> (Rig, Value, Value) {
 }
 
 #[test]
+fn done_handoff_waits_for_host_terminal_evidence_not_owner_acknowledgement() {
+    let (rig, execution, input) = launched("seeded-done-handoff");
+    transcript(&rig, &execution, &entries());
+    rig.done("term_child", "w2:p1", 7);
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert!(!rig.log("herdr.log").contains("pane close"));
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    let out = rig.run(&["serve", "--once"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
+    let marks = rig.read("state/done.json");
+    let mark = marks.as_object().unwrap().values().next().unwrap();
+    assert!(mark["closed_ms"].is_u64());
+    assert_eq!(mark["reply"]["text"], "EXACT FINAL");
+}
+
+#[test]
 fn committed_native_refusal_settles_once_without_start_or_acceptance() {
     let (rig, execution, _) = refused_unit("refused-unit-settlement");
     let id = execution["requestId"].as_str().unwrap();

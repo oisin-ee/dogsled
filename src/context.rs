@@ -69,6 +69,7 @@ mod tests {
                 headroom: None,
                 error: None,
                 jobs: Vec::new(),
+                handoffs: Vec::new(),
                 retry_ms: None,
             }],
             items: Vec::new(),

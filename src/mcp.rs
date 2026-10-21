@@ -325,8 +325,8 @@ impl Server {
 
     #[tool(
         description = "Close a finished child now: its pane, its worktree, and its item. \
-        Refuses busy or dirty work. Dogsled closes finished children itself once their work \
-        lands; use this to drop one.",
+        Refuses busy or dirty work. Dogsled closes finished children at handoff; \
+        use this to end one explicitly.",
         annotations(destructive_hint = true)
     )]
     async fn close(&self, Parameters(args): Parameters<CloseArgs>) -> Result<String, String> {
@@ -340,7 +340,7 @@ impl Server {
     #[tool(
         description = "Say that your whole task is complete. Call it once, during the turn that \
         completes the task, then end the turn with your final reply. Dogsled closes you after \
-        that turn, once your work has landed. Do not call it when you stop to ask a question or \
+        that turn and keeps your branch for the owner to land. Do not call it when you stop to ask a question or \
         to wait for your own children: an idle agent without `done` stays open."
     )]
     async fn done(&self) -> Result<String, String> {

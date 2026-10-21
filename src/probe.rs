@@ -117,6 +117,9 @@ pub struct Agent {
     /// Herdr's terminal identity: a reused pane id gets a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_id: Option<String>,
+    /// Stable harness session identity, including across a Herdr terminal restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<String>,
     /// Herdr's count of finished turns. A rise is a completion event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_seq: Option<u64>,
@@ -251,6 +254,7 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
     Ok(agents
         .into_iter()
         .map(|raw| {
+            let agent_session = raw.agent_session.as_ref().map(|s| s.value.clone());
             let transcript = raw.agent_session.and_then(|session| {
                 crate::transcript::resolve(raw.agent.as_deref(), &session.kind, &session.value)
             });
@@ -273,6 +277,7 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 stalled_since_ms: None,
                 state_since_ms: None,
                 terminal_id: raw.terminal_id,
+                agent_session,
                 completion_seq: raw.completion_seq,
                 state_change_seq: raw.state_change_seq,
                 cwd: raw.cwd,

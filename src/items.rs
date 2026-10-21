@@ -31,6 +31,9 @@ pub struct Item {
     /// The child's final reply, captured before the sweep closes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Reply>,
+    /// Retained branch on the child's host, observed without a live pane or checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<crate::done::Branch>,
 }
 
 /// A finished child's final reply, for the completion Herdr numbered `seq`.
@@ -135,8 +138,41 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
     })
 }
 
+/// Import durable child-host handoffs, including after pane closure or owner downtime.
+pub fn handoffs(ledger: &Ledger, hosts: &[HostReport]) -> Result<()> {
+    change(ledger, |items| merge_handoffs(items, hosts))
+}
+
+pub fn merge_handoffs(items: &mut [Item], hosts: &[HostReport]) {
+    for item in items {
+        let Some(mark) = hosts.iter().find(|h| h.host.id == item.host).and_then(|h| {
+            h.handoffs
+                .iter()
+                .find(|m| m.pane == item.pane && m.item.as_deref().is_none_or(|id| id == item.id))
+        }) else {
+            continue;
+        };
+        if let Some(reply) = &mark.reply {
+            // Preserve the owner's delivery stamp and immutable unit evidence.
+            if item
+                .reply
+                .as_ref()
+                .is_none_or(|r| r.result_id.is_none() && (r.seq != reply.seq || !r.done))
+            {
+                item.reply = Some(reply.clone());
+            }
+        }
+        if let Some(closed) = mark.closed_ms {
+            item.closed_ms.get_or_insert(closed);
+        }
+        if mark.branch.is_some() {
+            item.branch.clone_from(&mark.branch);
+        }
+    }
+}
+
 /// An open agent item whose agent called `done` and ended that turn: its result is ready, and
-/// it stays open only for work to land.
+/// its host is completing the guarded handoff.
 pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
     item.closed_ms.is_none()
         && item.kind == "agent"
@@ -206,6 +242,35 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_closed_handoff_import_keeps_branch_and_reply_delivery_stamp() {
+        let mut item = Item {
+            id: "launch".into(),
+            host: "remote".into(),
+            pane: "w2:p1".into(),
+            ..Item::default()
+        };
+        let mut host: HostReport = serde_json::from_value(serde_json::json!({
+            "id":"remote","label":"remote","target":"remote-dev",
+            "service":"up","reachable":true,"sampled_ms":1,"probe":null,
+            "headroom":null,"error":null,"jobs":[],"handoffs":[{
+                "pane":"w2:p1","item":"launch","session":"session","marked_ms":1,
+                "sealed":0,"closed_ms":2,
+                "reply":{"seq":0,"text":"final reply","captured_ms":2,"done":true},
+                "branch":{"repo":"/repo","name":"feature","ahead":3,"landed":false}
+            }]
+        }))
+        .unwrap();
+        merge_handoffs(std::slice::from_mut(&mut item), &[host.clone()]);
+        assert_eq!(item.closed_ms, Some(2));
+        assert_eq!(item.branch.as_ref().unwrap().ahead, 3);
+        item.reply.as_mut().unwrap().reported_ms = Some(3);
+        host.handoffs[0].branch.as_mut().unwrap().landed = true;
+        merge_handoffs(std::slice::from_mut(&mut item), &[host]);
+        assert_eq!(item.reply.unwrap().reported_ms, Some(3));
+        assert!(item.branch.unwrap().landed);
+    }
 
     #[test]
     fn records_from_before_the_request_fields_still_load() {

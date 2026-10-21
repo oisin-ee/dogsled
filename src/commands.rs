@@ -18,9 +18,12 @@ pub struct Status {
 }
 
 pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
+    let hosts = fleet.status(crate::ledger::now_ms())?;
+    let mut items = crate::items::list(fleet.ledger)?;
+    crate::items::merge_handoffs(&mut items, &hosts);
     Ok(Status {
-        hosts: fleet.status(crate::ledger::now_ms())?,
-        items: crate::items::list(fleet.ledger)?,
+        hosts,
+        items,
         queue: crate::work::queue(fleet.ledger)?,
         orphans: crate::sweep::list(fleet.ledger)?,
         sweep: crate::sweep::latest(fleet.ledger)?,
@@ -213,6 +216,42 @@ pub fn brief(status: &Status) -> String {
     format!("{}\n", rows.join("\n"))
 }
 
+fn item_lines(status: &Status, lines: &mut Vec<String>) {
+    for item in &status.items {
+        if let Some(branch) = &item.branch
+            && !branch.landed
+        {
+            lines.push(format!(
+                "{}: branch {} +{} to land",
+                item.name.as_deref().unwrap_or(&item.pane),
+                branch.name,
+                branch.ahead
+            ));
+        }
+        if item.closed_ms.is_some() {
+            continue;
+        }
+        lines.push(format!(
+            "owner {}: {} {} on {} ({}){}",
+            item.owner_pane,
+            item.kind,
+            item.id,
+            item.host,
+            item.pane,
+            if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
+                format!(" orphaned: {}", one_line(&orphan.reason))
+            } else if crate::items::finished(item, &status.hosts) {
+                format!(
+                    " finished; run {}",
+                    crate::items::close_command(item, &status.hosts)
+                )
+            } else {
+                String::new()
+            }
+        ));
+    }
+}
+
 pub fn render(status: &Status) -> String {
     let mut lines = Vec::new();
     if let Some(sweep) = &status.sweep {
@@ -281,26 +320,7 @@ pub fn render(status: &Status) -> String {
             }
         }
     }
-    for item in status.items.iter().filter(|i| i.closed_ms.is_none()) {
-        lines.push(format!(
-            "owner {}: {} {} on {} ({}){}",
-            item.owner_pane,
-            item.kind,
-            item.id,
-            item.host,
-            item.pane,
-            if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
-                format!(" orphaned: {}", one_line(&orphan.reason))
-            } else if crate::items::finished(item, &status.hosts) {
-                format!(
-                    " finished; run {}",
-                    crate::items::close_command(item, &status.hosts)
-                )
-            } else {
-                String::new()
-            }
-        ));
-    }
+    item_lines(status, &mut lines);
     for ticket in status.queue.iter().filter(|t| t.state == "pending") {
         lines.push(format!(
             "queued {} owner {}",

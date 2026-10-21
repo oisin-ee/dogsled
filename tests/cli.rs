@@ -5,6 +5,8 @@
 mod close;
 #[path = "cli/context.rs"]
 mod context;
+#[path = "cli/done.rs"]
+mod done;
 #[path = "cli/inbox.rs"]
 mod inbox;
 #[path = "cli/jobs.rs"]
@@ -65,7 +67,7 @@ fn now() -> u64 {
 }
 
 /// What dogsled tells each child at launch: `src/done.rs`'s `CONTRACT`, as Herdr logs it.
-const CONTRACT: &str = "Dogsled started you as a child agent. When your whole task is complete, call the dogsled `done` tool (or run `dogsled done`) once, then end your turn with your final reply. Do not call `done` when you stop to ask a question, wait for input, or still own open children. Dogsled closes your pane and worktree only after `done`.";
+const CONTRACT: &str = "Dogsled started you as a child agent. When your whole task is complete, call the dogsled `done` tool (or run `dogsled done`) once, then end your turn with your final reply. Do not call `done` when you ask a question, wait for input, or own open children. Commit your changes first. `done` hands your work back: Dogsled closes your pane and agent worktree when this turn ends, keeps your branch, and leaves landing to your owner. After that turn, messages cannot reopen you; more work needs a new child.";
 
 struct Rig {
     dir: PathBuf,
@@ -94,7 +96,7 @@ impl Rig {
 printf '%s\n' "$*" >> "$RIG/herdr.log"
 case "$*" in
   'machine list --json') cat "$RIG/machines.json" ;;
-  'agent list') cat "$RIG/agents.json" ;;
+  'agent list') cat "${RIG_AGENTS:-$RIG/agents.json}" ;;
   'pane list') cat "$RIG/panes.json" ;;
   'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}' ;;

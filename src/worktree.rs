@@ -346,7 +346,8 @@ pub fn remove(
         )));
     }
     crate::cleanup::forget(ledger, &tree.path)?;
-    let branch_deleted = !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
+    let branch_deleted =
+        !evidence.keeps_branch() && !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
     let anchor_closed = close_anchor(shell, &tree.checkout, caller_workspace)?;
     Ok(Removed {
         branch_deleted,

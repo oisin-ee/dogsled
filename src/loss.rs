@@ -18,6 +18,8 @@ pub struct Evidence {
     repo: String,
     refreshed: bool,
     proofs: crate::integration::Proofs,
+    /// A local branch retained by this operation. Never authorizes deleting that branch.
+    kept_branch: Option<String>,
     pub warning: Option<String>,
 }
 
@@ -37,6 +39,7 @@ impl Evidence {
         Self {
             repo: repo.into(),
             refreshed: warning.is_none(),
+            kept_branch: None,
             proofs: crate::integration::Proofs::default(),
             warning,
         }
@@ -47,9 +50,22 @@ impl Evidence {
         Self {
             repo: repo.into(),
             refreshed: false,
+            kept_branch: None,
             proofs: crate::integration::Proofs::default(),
             warning: None,
         }
+    }
+
+    /// Removing a checkout can retain its local branch, unlike deleting the branch itself.
+    pub fn keeping_branch(repo: &str, branch: &str) -> Self {
+        Self {
+            kept_branch: Some(format!("refs/heads/{branch}")),
+            ..Self::default_only(repo)
+        }
+    }
+
+    pub fn keeps_branch(&self) -> bool {
+        self.kept_branch.is_some()
     }
 
     pub fn assess(
@@ -63,8 +79,23 @@ impl Evidence {
             .transpose()?
             .unwrap_or_default();
         let integrated = crate::integration::check_cached(shell, &self.repo, tip, &self.proofs)?;
+        let retained = self
+            .kept_branch
+            .as_ref()
+            .map(|branch| {
+                git(
+                    shell,
+                    &self.repo,
+                    &["merge-base", "--is-ancestor", tip, branch],
+                )
+                .map(|out| out.ok())
+            })
+            .transpose()?
+            .unwrap_or(false);
         let held = if let Some(integrated) = integrated {
             Some(Held::Default { integrated })
+        } else if retained {
+            Some(Held::Branch)
         } else if self.refreshed {
             let out = git(
                 shell,
@@ -123,8 +154,12 @@ impl Evidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Held {
-    Default { integrated: Integrated },
+    Default {
+        integrated: Integrated,
+    },
     Remote,
+    /// This operation keeps the local branch containing the tip.
+    Branch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +181,7 @@ impl Assessment {
         let held = match &self.held {
             Some(Held::Default { integrated }) => integrated.to_string(),
             Some(Held::Remote) => "every commit is on a refreshed remote ref".into(),
+            Some(Held::Branch) => "every commit is on the retained local branch".into(),
             None => "commits are not held by the default branch or a refreshed remote ref".into(),
         };
         if self.dirty.is_empty() {

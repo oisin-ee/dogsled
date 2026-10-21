@@ -191,22 +191,7 @@ struct Seen {
 impl Seen {
     /// Closing the last pane also closes its workspace, potentially the whole group.
     fn pane_group_hold(&self, pane: &str) -> Option<String> {
-        let workspace = self
-            .panes
-            .iter()
-            .find(|p| p.pane_id == pane)?
-            .workspace_id
-            .as_deref()?;
-        if self
-            .panes
-            .iter()
-            .filter(|p| p.workspace_id.as_deref() == Some(workspace))
-            .count()
-            != 1
-        {
-            return None;
-        }
-        workspace_group_hold(&self.workspaces, workspace)
+        pane_group_hold(&self.panes, &self.workspaces, pane)
     }
 
     fn load(
@@ -303,8 +288,30 @@ fn workspace_group_hold(workspaces: &[Workspace], id: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!(
-        "primary workspace has open linked workspaces {ids}; requires group close; keep idle panes because closing the last pane can close the group"
+        "closing its pane would close linked workspaces {ids}"
     ))
+}
+
+/// Shared guard for an explicit close, host handoff, and the sweep's pane removal.
+pub fn close_group_hold(shell: &dyn Shell, panes: &[Pane], pane: &str) -> Result<Option<String>> {
+    Ok(pane_group_hold(panes, &workspaces(shell)?, pane))
+}
+
+fn pane_group_hold(panes: &[Pane], workspaces: &[Workspace], pane: &str) -> Option<String> {
+    let workspace = panes
+        .iter()
+        .find(|p| p.pane_id == pane)?
+        .workspace_id
+        .as_deref()?;
+    if panes
+        .iter()
+        .filter(|p| p.workspace_id.as_deref() == Some(workspace))
+        .count()
+        != 1
+    {
+        return None;
+    }
+    workspace_group_hold(workspaces, workspace)
 }
 
 fn workspaces(shell: &dyn Shell) -> Result<Vec<Workspace>> {
@@ -974,14 +981,20 @@ fn branches(
     });
     for (&(head, _, branch), found) in candidates.iter().zip(found) {
         let found = found?;
-        let held = pending
-            .iter()
-            .any(|tree| crate::worktree::same(&tree.repo, repo) && tree.branch == branch);
+        let handoff = crate::done::list(node.ledger)?.iter().any(|m| {
+            m.branch
+                .as_ref()
+                .is_some_and(|b| crate::worktree::same(&b.repo, repo) && b.name == branch)
+        });
+        let held = (handoff && !found.landed())
+            || pending
+                .iter()
+                .any(|tree| crate::worktree::same(&tree.repo, repo) && tree.branch == branch);
         let detail = format!(
             "{}{}",
             found.detail(),
             if held {
-                "; about to be used by a pending preparation"
+                "; retained for handoff or pending preparation"
             } else {
                 ""
             }
@@ -1336,15 +1349,14 @@ fn held(
                 i.id, i.pane
             )
         }));
-    } else if !loss.landed() {
-        if matches!(
+    } else if !loss.landed()
+        && matches!(
             decider,
             Decider::Close {
-                guard: crate::close::Guard::Reader | crate::close::Guard::Writer
+                guard: crate::close::Guard::Clean
             }
-        ) {
-            held.push("not landed by its owner".into());
-        }
+        )
+    {
         for item in items
             .iter()
             .filter(|i| seen.panes.iter().any(|p| p.pane_id == i.owner_pane))
@@ -1958,10 +1970,10 @@ mod tests {
         );
         let rendered = render(&plan);
         assert!(
-            rendered.contains("open linked workspaces wVS; requires group close"),
+            rendered.contains("closing its pane would close linked workspaces wVS"),
             "{rendered}"
         );
-        assert!(rendered.contains("closing the last pane can close the group"));
+        assert!(rendered.contains("closing its pane would close linked workspaces"));
         assert!(rendered.contains("[report/refuse]"));
         let calls = rig.shell.calls.lock().unwrap();
         assert_eq!(
@@ -2038,7 +2050,11 @@ mod tests {
                 .to_string(),
         );
         let error = apply_one(&rig.node(), &plan, &plan.entries[0], 2_000_000).unwrap_err();
-        assert!(error.to_string().contains("requires group close"));
+        assert!(
+            error
+                .to_string()
+                .contains("closing its pane would close linked workspaces")
+        );
         let panes = Plan {
             entries: vec![entry("panes", "wVR:p1".into(), String::new(), true)],
         };
@@ -2046,7 +2062,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("closing the last pane can close the group")
+                .contains("closing its pane would close linked workspaces")
         );
         assert!(
             !rig.shell

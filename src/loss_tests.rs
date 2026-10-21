@@ -134,6 +134,40 @@ impl Drop for Repo {
     }
 }
 
+#[test]
+fn retained_branch_holds_local_commits_but_never_other_tips_or_dirty_content() {
+    let repo = Repo::new();
+    repo.commit();
+    let evidence = Evidence::keeping_branch(repo.repo.to_str().unwrap(), "feature");
+    let tip = git(&repo.tree, &["rev-parse", "HEAD"]);
+    let assess = || {
+        evidence
+            .assess(&System, tip.trim(), Some(repo.tree.to_str().unwrap()))
+            .unwrap()
+    };
+    assert_eq!(assess().held, Some(Held::Branch));
+    assert!(assess().loses_nothing());
+    std::fs::write(repo.tree.join("untracked"), "keep me").unwrap();
+    assert!(!assess().loses_nothing());
+    std::fs::remove_file(repo.tree.join("untracked")).unwrap();
+    // A retained branch protects only its own ancestors, not a detached commit elsewhere.
+    git(&repo.tree, &["checkout", "--detach"]);
+    git(
+        &repo.tree,
+        &["commit", "-q", "--allow-empty", "-m", "detached"],
+    );
+    std::fs::write(repo.tree.join("work"), "unique detached content").unwrap();
+    git(&repo.tree, &["add", "work"]);
+    git(&repo.tree, &["commit", "-q", "-m", "unique"]);
+    let other = git(&repo.tree, &["rev-parse", "HEAD"]);
+    assert!(
+        !evidence
+            .assess(&System, other.trim(), Some(repo.tree.to_str().unwrap()))
+            .unwrap()
+            .loses_nothing()
+    );
+}
+
 /// A killed worktree removal leaves tracked deletions, including unusual path names.
 fn deleted_checkout(staged: bool) -> Repo {
     let repo = Repo::new();

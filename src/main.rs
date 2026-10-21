@@ -329,7 +329,11 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             String::new,
         )?,
         HostCommand::Reply { pane } => {
-            print(true, &sweep::local_reply(node.shell, &pane)?, String::new)?;
+            print(
+                true,
+                &sweep::local_reply(node.shell, node.ledger, &pane)?,
+                String::new,
+            )?;
         }
         // Over SSH the caller has no pane or workspace on this host.
         HostCommand::Close {
@@ -356,7 +360,7 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
-            inbox::host(node.ledger, cmd)?;
+            inbox::host(node.ledger, node.shell, cmd)?;
         }
         HostCommand::Launch { request } => print(
             true,
