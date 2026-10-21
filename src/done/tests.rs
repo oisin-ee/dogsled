@@ -101,6 +101,17 @@ fn inbox_cancels_only_during_the_done_turn_and_never_after_it() {
 }
 
 #[test]
+fn an_overlapping_branch_refresh_cannot_erase_a_terminal_seal() {
+    let ledger = ledger();
+    let older = mark_at();
+    put(&ledger, older.clone());
+    finished(&ledger, &[agent("idle")]).unwrap();
+    save(&ledger, &older).unwrap();
+    assert_eq!(list(&ledger).unwrap()[0].sealed, Some(0));
+    assert!(input(&ledger, &agent("working"), || Ok(((), true))).is_err());
+}
+
+#[test]
 fn legacy_migration_retains_missing_marks_and_rekeys_restored_panes_once() {
     let ledger = ledger();
     ledger

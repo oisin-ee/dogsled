@@ -54,11 +54,11 @@ impl Caller {
 pub enum Guard {
     /// Explicit close; inspect local item ownership.
     Clean,
-    /// An orphan; no live-owner landing hold.
+    /// An orphan handoff; retain its branch.
     Pushed,
-    /// A finished reader whose owner is alive.
+    /// A finished reader handoff; retain its branch.
     Reader,
-    /// A finished writer whose owner is alive.
+    /// A finished writer handoff; retain its branch.
     Writer,
 }
 

@@ -271,7 +271,11 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
         }
     };
     let host = fleet.find(&item.host)?;
-    let tail = crate::watchdog::item_tail(fleet, &item, host)?;
+    let tail = if item.kind == "agent" && item.closed_ms.is_some() {
+        String::new()
+    } else {
+        crate::watchdog::item_tail(fleet, &item, host)?
+    };
     Ok(json!({
         "name": item.name,
         "kind": item.kind,

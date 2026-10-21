@@ -314,7 +314,12 @@ fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
         let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
         // A message during the same turn may have removed it. Never resurrect it.
         if let std::collections::btree_map::Entry::Occupied(mut entry) = marks.entry(key(mark)) {
-            entry.insert(mark.clone());
+            let mut updated = mark.clone();
+            // Branch refresh can overlap a live inbox check. Never replace its terminal seal
+            // with an older unsealed observation from the start of this handoff pass.
+            updated.sealed = entry.get().sealed.or(updated.sealed);
+            updated.closed_ms = entry.get().closed_ms.or(updated.closed_ms);
+            entry.insert(updated);
             ledger.write(FILE, &marks)?;
         }
         Ok(())
@@ -383,8 +388,18 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
         let Some(agent) = agents.iter().find(|a| matches(&mark, a) && a.done) else {
             continue;
         };
+        if !crate::launch::handoff_ready(ledger, &mark.pane)? {
+            continue;
+        }
         if mark.reply.is_none() {
-            let Some(reply) = crate::sweep::local_reply(shell, ledger, &mark.pane)? else {
+            let reply = if let Some(text) = crate::launch::handoff_reply(ledger, &mark.pane)? {
+                crate::sweep::Final {
+                    seq: mark.sealed.unwrap_or(0),
+                    text,
+                }
+            } else if let Some(reply) = crate::sweep::local_reply(shell, ledger, &mark.pane)? {
+                reply
+            } else {
                 continue;
             };
             mark.reply = Some(crate::items::Reply {

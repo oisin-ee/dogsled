@@ -79,6 +79,23 @@ pub fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     }
 }
 
+/// A seeded worker's end-of-turn hook must persist its immutable terminal evidence before
+/// its process closes. This is host-local and does not wait for the owner's acknowledgement.
+pub fn handoff_ready(ledger: &Ledger, pane: &str) -> Result<bool> {
+    Ok(recovery::candidates(&ledger.child("launches"), Some(pane))?
+        .iter()
+        .all(|(_, progress)| {
+            progress.request.unit.is_none() || progress.terminal_receipt.is_some()
+        }))
+}
+
+/// A seeded result uses the acknowledged transcript branch, not its newest message.
+pub fn handoff_reply(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
+    Ok(recovery::candidates(&ledger.child("launches"), Some(pane))?
+        .into_iter()
+        .find_map(|(_, progress)| progress.terminal_receipt.map(|receipt| receipt.text)))
+}
+
 pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {
     let receipts = ledger.child("launches");
     receipts.with_lock(&request.id, || {

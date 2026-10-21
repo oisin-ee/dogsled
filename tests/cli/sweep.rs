@@ -850,6 +850,9 @@ fn serve_hands_off_unlanded_writer_and_keeps_branch_on_board_without_a_pane() {
         status.contains("worker: branch feat/x +1 to land"),
         "{status}"
     );
+    let (code, read) = rig.json(&["read", "worker"]);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["reply"], "Found 3 bugs; notes in review.md.");
     rig.service.lock().unwrap().take();
     git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
     serve(&rig);

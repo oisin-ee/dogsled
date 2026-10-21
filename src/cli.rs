@@ -402,11 +402,10 @@ pub enum HostCommand {
     },
     Close {
         pane: String,
-        /// Also refuse a worktree with a commit on no remote ref: the sweep's orphan close.
+        /// Legacy transport spelling for an orphan handoff: require done and keep its branch.
         #[arg(long)]
         pushed: bool,
-        /// Also refuse a worktree whose work is not in the default branch: the sweep's close
-        /// of a finished child. A reader with no commits passes; `--writer` needs a landed branch.
+        /// Legacy transport spelling for an owned handoff: require done and keep its branch.
         #[arg(long)]
         landed: bool,
         #[arg(long, requires = "landed")]
