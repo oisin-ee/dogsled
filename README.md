@@ -601,22 +601,24 @@ Todos follow the active Pi session branch. Agents and jobs follow the calling He
 
 The Jobs view joins retained records to the current owner's ledger by host and job ID. It does not show unrelated fleet jobs. Job inspection uses `dogsled read` for a bounded log tail and shows the `dogsled logs` command for full output. Expired records and unavailable hosts produce explicit errors. The panel never starts a new process manager, edits todos, or writes into an agent terminal.
 
-The Herdr plugin docks the work board at the left edge of the tab, 38 cells wide. Its `toggle` action closes or reopens it:
+The Herdr plugin docks the sidebar at the left edge of the tab, 38 cells wide. Its `toggle` action closes or reopens it:
 
 ```sh
-dogsled board --open                     # open or reuse the caller’s docked board (`--toggle` closes it)
-dogsled board --side --owner "$HERDR_PANE_ID" # print once
-herdr plugin pane open --plugin dogsled --entrypoint board --direction right --no-focus
+dogsled board --open                     # open or reuse the caller’s docked sidebar (`--toggle` closes it)
+dogsled sidebar --owner "$HERDR_PANE_ID" # run the app in this terminal
+herdr plugin pane open --plugin dogsled --entrypoint sidebar --direction right --no-focus
 ```
 
-The split runs the plugin's own `bin/dogsled board --side --watch` and refreshes every ten seconds. `--owner` defaults to the opening pane from Herdr’s plugin context.
-Quotas come only from `quota.json`; the board never calls a provider or reads credentials. The heading shows cache age and `STALE` after fifteen minutes.
+`dogsled sidebar` is a ratatui app with three framed panels, top to bottom:
 
-Pi renders each new todo revision through pi-todo’s `display.createView(host).render(width)`. Dogsled never reads or copies task state.
-The board publishes its width in the ledger; before that, Pi uses 48 columns. Resizing republishes the same provider view at the new width.
-Pi atomically writes `{session, branch, revision, current, pane, width, lines}` to `todo-lines/<pane-hash>.json` in Dogsled’s state directory.
-The service reads files for live agent panes into `todos.json`. Peers expose this presentation through `dogsled host todos --json`.
-The board shows each agent’s current line and prints the owner’s full provider-rendered lines unchanged, including ANSI styles. Missing presentations show as unavailable.
+- **Hosts**: one card per host (local first, then config order). Line 1 is the label, `busy/cores`, and the `status --line` marker (`▲` without headroom, `?` unreachable). Line 2 is an eight-cell memory meter and free disk. Colours use the admission thresholds: memory turns yellow within 10% of the reserve and red past it; disk turns yellow below twice `disk_free_min_percent` and red below it. An unreachable host shows `?` and `no reply 2m` (the age of its last snapshot); its cards below stay, dimmed. Hosts folds to one line per host with `space`, and by itself when the pane is short.
+- **Agents & Jobs**: three-line cards with a state pill.
+- **Todos**: the owner's pi-todo v3 `display.sections` as progress, NOW, NEXT, and a fold for done and dropped.
+
+It reads only cached state: the service snapshots, the peer caches, and the todo files. It never probes a host. `tab` cycles Hosts, Agents & Jobs, Todos; `space` collapses; `⏎` focuses; `m` opens a menu; the mouse clicks, double-clicks, and scrolls. Colours come from the `[theme]` in Herdr’s `config.toml` (`catppuccin`, `catppuccin-latte`, `[theme.custom]` overrides; other names use the terminal’s ANSI palette).
+
+Pi atomically writes `{session, branch, revision, current, pane, sections}` (protocol v3) to `todo-lines/<pane-hash>.json` in Dogsled’s state directory.
+The service reads files for live agent panes into `todos.json`. Peers expose them through `dogsled host todos --json`. Missing presentations show as unavailable.
 Session shutdown and provider release remove the pane’s publication. `/dogsled` remains the interactive control panel in both display modes.
 
 Herdr 0.9.5 creates a new pane on every plugin open. Dogsled keeps a small `boards/<tab-hash>.json` registry keyed by Herdr tab ID.

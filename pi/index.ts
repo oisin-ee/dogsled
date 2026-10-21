@@ -85,7 +85,7 @@ export default function dogsled(pi: ExtensionAPI) {
 
 	function publishTodos(ctx: ExtensionContext): void {
 		if (!owner) return;
-		try { publisher.publish(todos.current, ctx.ui.theme); }
+		try { publisher.publish(todos.current); }
 		catch (error) { ctx.ui.notify(`Todo publication failed: ${String(error)}`, "error"); }
 	}
 
