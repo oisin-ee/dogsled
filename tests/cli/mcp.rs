@@ -231,6 +231,8 @@ fn mcp_spawn_with_capacity_hands_startup_to_the_service() {
     for fails in [false, true] {
         let rig = Rig::new(&format!("mcp-startup-handoff-{fails}"));
         rig.snapshot("state/host.json", now(), 0.0, 8);
+        // Admission behavior is independent of the CI runner's real probe load/disk.
+        rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
         if fails {
             launch_retry::npm_start_fails(&rig);
         }
@@ -285,6 +287,8 @@ fn mcp_spawn_with_capacity_hands_startup_to_the_service() {
 fn mcp_prepared_spawn_with_capacity_queues_idempotently_before_startup() {
     use super::unit_requests::*;
     let rig = rig("mcp-prepared-handoff", false);
+    // Admission behavior is independent of the CI runner's real probe load/disk.
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
     let mut client = Client::start(&rig);
