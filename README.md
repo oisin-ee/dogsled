@@ -129,6 +129,7 @@ Herdr refuses a start before it types into the pane, for example `agent_pane_bus
 ```
 
 The child gets `--model`, `--thinking`, `--append-system-prompt <prompt>`, then `pi_args`. Unknown keys are ignored, so Shepherdr profiles load as they are.
+`prompt` can also be a list, such as `["../_shared/lead.md", "prompt.md"]`. Each file becomes its own `--append-system-prompt`, in order, so profiles can share one prompt. A directory without `profile.json`, such as `_shared`, is not a profile. The profile panel edits the last file.
 `role` is `reader` or `writer`. Without it, a child with `--branch` is a writer, and any other child a reader.
 `dogsled profiles` lists them; a broken profile shows as `broken: <reason>`.
 
