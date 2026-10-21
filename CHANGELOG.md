@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.21.0 - 2026-10-22
 
 - Prune and the sweep no longer plan to remove a worktree while the host snapshot reports a shell in it idle for less than 15 minutes. Before, the worktree that `place` made held only an idle shell, so a pass could plan its removal seconds after the owner started work there, and the apply-time check then failed with `worktree identity changed` when the owner's first commit moved HEAD. Such a shell now holds the checkout until it has been idle for 15 minutes, the shell rule's age; a shell with no reported age holds nothing, as before. An explicit `close` and the identity check are unchanged.
 - A cleanup recheck that finds a new commit in a planned worktree after the survey is now a skip, not a failure. Before, the pass reported `worktree identity changed` and alerted the owner, although only `head` had moved. Now the entry is skipped with `refuse <path>: HEAD moved since the survey (<old> -> <new>)`, the worktree stays, and the next survey re-plans it. A changed repository, path or branch, a different main checkout, or an empty head is still a failure. The recheck is as strict as before: a moved worktree is never removed in that pass.
