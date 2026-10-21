@@ -49,7 +49,39 @@ pub struct HostReport {
     pub retry_ms: Option<u64>,
 }
 
+/// The most characters of an ssh error that status shows on one line.
+const SHORT_ERROR_CHARS: usize = 80;
+
+/// `unreachable: <error>` for a peer ssh could not read: its last non-empty line, cut short.
+/// A host that answered but runs no service is `service: down`, never this.
+#[must_use]
+pub fn unreachable(error: Option<&str>) -> String {
+    let line = error
+        .and_then(|e| e.lines().map(str::trim).rfind(|l| !l.is_empty()))
+        .map_or_else(
+            || "no answer".into(),
+            |l| l.split_whitespace().collect::<Vec<_>>().join(" "),
+        );
+    let short = if line.chars().count() > SHORT_ERROR_CHARS {
+        let cut: String = line.chars().take(SHORT_ERROR_CHARS - 1).collect();
+        format!("{cut}…")
+    } else {
+        line
+    };
+    format!("unreachable: {short}")
+}
+
 impl HostReport {
+    /// Why the host is in this state, for one status line: unreachable, or its service.
+    #[must_use]
+    pub fn condition(&self) -> String {
+        if self.reachable {
+            format!("service: {}", self.service)
+        } else {
+            unreachable(self.error.as_deref())
+        }
+    }
+
     /// Readers that need current measurements must not substitute service liveness for age.
     pub fn fresh(&self, now: u64) -> bool {
         self.reachable
@@ -322,13 +354,15 @@ impl<'a> Fleet<'a> {
             let mut headroom = evaluate(probe, &self.thresholds());
             if !running || !fresh {
                 headroom.eligible = false;
-                let reason = if running {
-                    "snapshot: stale"
+                let reason = if !cached.reachable {
+                    unreachable(cached.error.as_deref())
+                } else if running {
+                    "snapshot: stale".into()
                 } else {
-                    "service: down"
+                    "service: down".into()
                 };
                 headroom.reason = Some(sampled_ms.map_or_else(
-                    || reason.into(),
+                    || reason.clone(),
                     |sampled| {
                         format!(
                             "{reason} (last snapshot {} ago)",
@@ -540,6 +574,105 @@ mod tests {
         assert_eq!(starting[0].service, "up");
         assert!(!starting[0].headroom.as_ref().unwrap().eligible);
         std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn status_words_an_unreachable_peer_apart_from_a_stopped_service() {
+        let shell = Fake::new();
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let policy = Policy::default();
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![host.clone()],
+        };
+        let command = format!(
+            "ssh {}",
+            fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
+        );
+        let snapshot = serde_json::to_string(&Snapshot {
+            sampled_ms: 100,
+            jobs: Vec::new(),
+            probe: Probe {
+                host: "local".into(),
+                label: "local".into(),
+                load1: 0.0,
+                cores: 8,
+                cpu_ticks: None,
+                busy: Some(0.0),
+                memory: Memory::default(),
+                disk_free_percent: 50.0,
+                agents: AgentCounts::default(),
+                agent_panes: Vec::new(),
+                reservations: Vec::new(),
+                panes: Vec::new(),
+            },
+        })
+        .unwrap();
+        let snapshot = snapshot.as_str();
+        // A reachable host whose service is not running keeps `service: down`.
+        shell.on(&command, snapshot);
+        fleet.status(100).unwrap();
+        shell.on(&command, "null");
+        let stopped = fleet.status(20_100).unwrap().remove(0);
+        assert!(stopped.reachable);
+        assert_eq!(stopped.condition(), "service: down");
+        assert_eq!(
+            stopped.headroom.unwrap().reason.as_deref(),
+            Some("service: down (last snapshot 20s ago)")
+        );
+        // A peer that SSH cannot read is unreachable, with the age of its last snapshot.
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let fleet = Fleet {
+            ledger: &ledger,
+            ..fleet
+        };
+        shell.on(&command, snapshot);
+        fleet.status(100).unwrap();
+        shell.on_output(
+            &command,
+            crate::shell::Output {
+                status: 255,
+                stdout: String::new(),
+                stderr: "ssh: connect to host peer port 22: Operation timed out\n".into(),
+            },
+        );
+        let asleep = fleet.status(20_100).unwrap().remove(0);
+        assert!(!asleep.reachable);
+        assert_eq!(
+            asleep.condition(),
+            "unreachable: ssh peer: exit 255: ssh: connect to host peer port 22: Operation timed out"
+        );
+        assert_eq!(
+            asleep.headroom.unwrap().reason.as_deref(),
+            Some(
+                "unreachable: ssh peer: exit 255: ssh: connect to host peer port 22: Operation timed out (last snapshot 20s ago)"
+            )
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn unreachable_wording_keeps_one_short_line() {
+        assert_eq!(unreachable(None), "unreachable: no answer");
+        assert_eq!(unreachable(Some("\n  \n")), "unreachable: no answer");
+        assert_eq!(
+            unreachable(Some("warning\n  timed   out  \n")),
+            "unreachable: timed out"
+        );
+        let long = unreachable(Some(&"x".repeat(500)));
+        assert_eq!(
+            long.chars().count(),
+            "unreachable: ".len() + SHORT_ERROR_CHARS
+        );
+        assert!(long.ends_with('…'));
     }
 
     #[test]
