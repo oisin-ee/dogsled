@@ -248,12 +248,7 @@ fn quota_lines(snapshot: &crate::quota::Snapshot, now: u64) -> Vec<String> {
         }
     )];
     for row in &snapshot.pools {
-        let pool = match row.pool {
-            crate::quota::Pool::Claude => "claude",
-            crate::quota::Pool::Codex => "codex",
-            crate::quota::Pool::Minimax => "minimax",
-        };
-        lines.push(format!("{pool} {} · {}", row.account, row.window));
+        lines.push(format!("{} {} · {}", row.pool, row.account, row.window));
         lines.push(format!(
             "  {:.1}% used{}",
             row.used_pct,

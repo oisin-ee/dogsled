@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 - A cleanup pass no longer fails with `worktree identity disappeared` when another actor removes a planned worktree after the survey. When Git no longer lists the worktree and its path is absent, the pass drops the registration and reports it as already removed. A path that Git no longer lists but that still exists is still refused.
 
+## 0.19.0 - 2026-10-21
+
+- `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.
+- Quota no longer discovers MiniMax through `claude-api-key` or parses `token_plan/remains`. A MiniMax CLIProxy plugin appears on the board without a dogsled change.
+- Settled preparations no longer hold landed checkouts. A preparation that fails releases its own hold. Cleanup and close ignore a hold whose launch has a final receipt, or whose local preparation failed. A legacy hold without a request id ends when any launch of its checkout is final. Interrupted preparations, launches without a final receipt, and seeded unit refusals that their peer has not settled still hold. No state file is rewritten.
+
 ## 0.18.1 - 2026-10-21
 
 - Prune and automatic cleanup remove remembered repository and worktree registrations only when their paths are absent. Removal rechecks absence under the registry locks and deletes no checkout data. Doctor lists the removable records without changing them. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.
