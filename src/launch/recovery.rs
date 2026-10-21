@@ -32,6 +32,12 @@ pub(super) fn candidates(receipts: &Ledger, pane: Option<&str>) -> Result<Vec<(S
     Ok(found)
 }
 
+/// Launch history identifies child panes even after terminal ownership changes.
+/// Board placement needs this ledger-only fact, not cleanup eligibility.
+pub fn launched(ledger: &Ledger, pane: &str) -> Result<bool> {
+    Ok(!candidates(&ledger.child("launches"), Some(pane))?.is_empty())
+}
+
 fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> {
     Ok(recoverable(
         progress,

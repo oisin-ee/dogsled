@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod recovery;
-pub use recovery::{PaneLaunch, Survey, close_unfinished, final_pane};
+pub use recovery::{PaneLaunch, Survey, close_unfinished, final_pane, launched};
 #[cfg(test)]
 mod pane_tests;
 

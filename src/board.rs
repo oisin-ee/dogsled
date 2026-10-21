@@ -138,10 +138,7 @@ pub fn owner(explicit: Option<String>, all: bool) -> Result<Option<String>> {
 /// A pane Dogsled launched is a child agent: the board belongs to its parent's
 /// session, so a child never opens one (it would poll the fleet unseen).
 pub fn open(ledger: &Ledger, shell: &dyn Shell, owner: &str) -> Result<serde_json::Value> {
-    if !matches!(
-        crate::launch::final_pane(ledger, shell, owner)?,
-        crate::launch::PaneLaunch::Unrecorded
-    ) {
+    if crate::launch::launched(ledger, owner)? {
         return Ok(serde_json::json!({"skipped": "child"}));
     }
     ledger.with_lock("board-open", || {
@@ -1066,6 +1063,42 @@ mod tests {
         assert_eq!(
             open(&ledger, &NoHerdr, "w2:p2").unwrap(),
             serde_json::json!({"skipped": "child"})
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn board_open_skips_a_child_after_its_terminal_changes() {
+        #[derive(Debug)]
+        struct RestoredPane;
+        impl Shell for RestoredPane {
+            fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
+                assert_eq!(program, "herdr");
+                assert_eq!(args, ["pane", "list"], "a child must not open a board");
+                Ok(crate::shell::Output {
+                    status: 0,
+                    stdout: serde_json::json!({"result":{"panes":[{
+                        "pane_id":"w2:p2","terminal_id":"term_restored","tab_id":"tab_child"
+                    }]}})
+                    .to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        ledger.child("launches").write("child.progress.json", &serde_json::json!({
+            "request":{"id":"child","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+                "host":"local","cwd":"/checkout","owner":"w1:p1"},
+            "pane":"w2:p2","terminal":"term_before_restore","attempted":true,"confirmed":false,
+            "result":{},"error":"response lost"
+        })).unwrap();
+        assert_eq!(
+            crate::launch::final_pane(&ledger, &RestoredPane, "w2:p2").unwrap(),
+            crate::launch::PaneLaunch::Unrecorded
+        );
+        assert_eq!(
+            open(&ledger, &RestoredPane, "w2:p2").unwrap(),
+            serde_json::json!({"skipped":"child"})
         );
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
