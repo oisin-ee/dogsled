@@ -198,6 +198,8 @@ pub fn agent_action(
     if message.trim().is_empty() {
         return Err(Error::Invalid("the task is empty".into()));
     }
+    // The launch line holds paths of the host that runs it, so that host checks its length
+    // (`launch::agent`, before it creates a pane). The caller's paths say nothing about a peer's.
     Ok(Action::Agent {
         kind,
         name,

@@ -195,11 +195,19 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
         json!({"host":"local","pane":"w2:p1","name":"worker","launch_confirmed_ms":confirmed})
     );
     let log = rig.log("herdr.log");
-    // The task is the harness's launch argument, after the child contract as Codex developer
-    // instructions; nothing is typed into the pane.
+    // The task is read from its file, named on a line that also holds the child contract as
+    // Codex developer instructions; nothing is typed into the pane.
+    let task = log
+        .lines()
+        .find(|l| l.starts_with("agent start worker "))
+        .and_then(|l| l.split("Your task is in ").nth(1))
+        .and_then(|l| l.split(". Read that file").next())
+        .unwrap()
+        .to_owned();
+    assert_eq!(fs::read_to_string(&task).unwrap(), "literal ' message");
     assert!(
         log.contains(&format!(
-            "agent start worker --kind codex --pane w2:p1 -- -c developer_instructions=\"{CONTRACT}\" literal ' message\n"
+            "agent start worker --kind codex --pane w2:p1 -- -c developer_instructions=\"{CONTRACT}\" Your task is in {task}. Read that file and do the task.\n"
         )),
         "{log}"
     );

@@ -148,18 +148,37 @@ impl std::fmt::Display for Failure {
 pub const SSH_DEBUG_FILE: &str = "DOGSLED_SSH_DEBUG_FILE";
 
 fn record_ssh_detail(target: &str, detail: &str) {
-    use std::io::Write as _;
     let Some(path) = std::env::var_os(SSH_DEBUG_FILE) else {
         return;
     };
+    // A debug aid: a failed or refused write must not change the failure being reported.
+    let _ = write_ssh_detail(
+        std::path::Path::new(&path),
+        &format!("ssh {target}: {detail}"),
+    );
+}
+
+fn write_ssh_detail(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    if let Ok(mut file) = options.open(path) {
-        // A debug aid: a failed write must not change the failure being reported.
-        let _ = writeln!(file, "ssh {target}: {detail}");
+    // O_NOFOLLOW: a symlink is refused. O_NONBLOCK: a FIFO with no reader fails instead of
+    // hanging. The mode applies only on creation, so the opened file is checked below.
+    options
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    let mut file = options.open(path)?;
+    let meta = file.metadata()?;
+    let owned = meta.uid() == nix::unistd::geteuid().as_raw();
+    if !meta.is_file() || !owned || meta.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "ssh debug file must be a regular file owned by this user with mode 0600",
+        ));
     }
+    writeln!(file, "{line}")
 }
 
 /// `unreachable: <category>` for a host that could not be read.
@@ -636,6 +655,59 @@ mod tests {
     use crate::ledger::new_id;
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
+
+    fn debug_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(new_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn debug_file_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = debug_dir().join("new.log");
+        write_ssh_detail(&path, "ssh peer: boom").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ssh peer: boom\n");
+    }
+
+    #[test]
+    fn debug_file_refuses_an_existing_group_or_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = debug_dir().join("open.log");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(write_ssh_detail(&path, "secret").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "refusal must not chmod and continue");
+    }
+
+    #[test]
+    fn debug_file_refuses_a_symlink_and_leaves_its_target_alone() {
+        let dir = debug_dir();
+        let target = dir.join("target.log");
+        std::fs::write(&target, "").unwrap();
+        let link = dir.join("link.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write_ssh_detail(&link, "secret").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+    }
+
+    #[test]
+    fn debug_file_refuses_a_non_regular_path() {
+        assert!(write_ssh_detail(std::path::Path::new("/dev/null"), "secret").is_err());
+        assert!(write_ssh_detail(&debug_dir(), "secret").is_err());
+    }
+
+    #[test]
+    fn debug_sink_writes_nothing_when_the_variable_is_unset() {
+        // Reads the real environment, so only assert when it is unset for this process.
+        if std::env::var_os(SSH_DEBUG_FILE).is_none() {
+            record_ssh_detail("peer", "secret");
+        }
+    }
 
     #[test]
     fn cache_and_service_boundaries_use_injected_time() {

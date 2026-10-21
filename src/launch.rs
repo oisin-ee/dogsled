@@ -224,8 +224,8 @@ fn allocate(
     let Action::Agent {
         kind,
         name,
-        message,
         profile,
+        ..
     } = &request.action
     else {
         return Err(Error::Invalid("not an agent launch".into()));
@@ -239,7 +239,15 @@ fn allocate(
     // Validate profile/argv before creating a pane. An allocating state without a
     // pane is deliberately not retried after a crash: its ownership is uncertain.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
-    work::agent_args(kind, name, message, "task", profile.as_ref())?;
+    // Refuse a launch line over Herdr's limit here, on the host whose paths it holds, before
+    // any pane exists.
+    work::agent_args(
+        kind,
+        name,
+        &seed_args(request, receipts),
+        &work::Files::at(&receipts.dir, &request.id),
+        profile.as_ref(),
+    )?;
     if let Some(seed) = &request.unit {
         validate_seed(request, seed, profile.as_ref())?;
         let sessions = receipts.dir.join(format!("{}.sessions", request.id));
@@ -341,7 +349,8 @@ fn start_or_reconcile(
     // Native agent.start owns shell readiness and its atomic busy refusal. An eager
     // process snapshot here rejects startup before that supported boundary can run.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
-    let task = work::task_file(ledger, &request.id, message)?;
+    let receipts = ledger.child("launches");
+    let files = work::Files::write(&receipts.dir, &request.id, message)?;
     let seed_flags = seed_flags(ledger, request, profile.as_ref())?;
     let mut args = vec![
         "agent".into(),
@@ -353,16 +362,14 @@ fn start_or_reconcile(
         pane.into(),
         "--".into(),
     ];
-    args.extend(seed_flags);
     args.extend(work::agent_args(
         kind,
         name,
-        message,
-        &task,
+        &seed_flags,
+        &files,
         profile.as_ref(),
     )?);
     progress.attempted = true;
-    let receipts = ledger.child("launches");
     receipts.write(file, progress)?;
     if let Err(error) = shell.run_setup_ok("herdr", &args) {
         let error = startup_error(shell, pane, error);
@@ -479,14 +486,31 @@ fn seed_flags(
             "fresh unit session directory is not empty",
         ));
     }
-    Ok(vec![
+    Ok(seed_args(request, &receipts))
+}
+
+/// The Pi flags that bind a unit launch to its seed and fresh session directory. Pure: the
+/// files and directory they name are made by `seed_flags`.
+fn seed_args(request: &Launch, receipts: &Ledger) -> Vec<String> {
+    if request.unit.is_none() {
+        return Vec::new();
+    }
+    vec![
         "--todo-unit-file".into(),
-        receipts.dir.join(file).display().to_string(),
+        receipts
+            .dir
+            .join(format!("{}.unit.json", request.id))
+            .display()
+            .to_string(),
         "--session-dir".into(),
-        sessions.display().to_string(),
+        receipts
+            .dir
+            .join(format!("{}.sessions", request.id))
+            .display()
+            .to_string(),
         "--session-id".into(),
         request.id.clone(),
-    ])
+    ]
 }
 
 /// Worker acknowledgement is host-owned, serialized with launch and kept with its receipt.
