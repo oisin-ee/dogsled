@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::ledger::{Ledger, now_ms};
-use crate::shell::Shell;
+use crate::shell::{Shell, kill_group};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -159,16 +159,6 @@ fn report(shell: &dyn Shell, job: &Job, state: &str, token: Option<&str>) -> Res
     }
     shell.run_ok("herdr", &args)?;
     Ok(())
-}
-
-fn kill_group(pid: u32) -> Result<()> {
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-    let pid = i32::try_from(pid).map_err(|e| Error::Invalid(e.to_string()))?;
-    match killpg(Pid::from_raw(pid), Signal::SIGKILL) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-        Err(error) => Err(Error::Invalid(format!("kill process group: {error}"))),
-    }
 }
 
 fn reader(mut input: impl Read + Send + 'static, send: mpsc::Sender<std::io::Result<Vec<u8>>>) {
