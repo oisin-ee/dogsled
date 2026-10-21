@@ -110,6 +110,14 @@ Dogsled walks parent links from the acknowledged leaf. Metadata entries can foll
 
 Dogsled validates the seal entry's identity and ordering, not task state. The provider owns seal meaning and immutable local activation. The adapter obtains the seal from `imported()` at `agent_settled`.
 
+### `done` before the unit returns
+
+A seeded worker can call `dogsled done` before its unit is sealed. The worker host does not treat that mark as finished until the launch has a terminal receipt. Until then, the pane stays open, `done` is false in the host snapshot, and the board shows the worker as waiting.
+
+Only the execution owner can continue such a worker. The owner is the originating pane ID (`execution.ownerId`) on the originating host. The launch record stores both, and the host compares the full sender (pane and hostname) before it changes anything, because a pane ID is unique only on its own host. A launch record from an earlier release has no owner host, so it refuses every sender. The owner sends a message or a task to the same pane. The worker host then removes the mark, and the same execution continues in the same session, worktree, and branch. The host refuses input from any other sender, and the worker's own inbox claim, and changes nothing. A mark sealed by an earlier release without a receipt follows the same rule.
+
+Before the host accepts input, it binds the pane to exactly one seeded launch. The done mark, terminal, agent name, durable seed, and receipt must agree. When the evidence is missing, unreadable, competing, or mismatched, the host refuses the input and does not close the pane. After the receipt exists, the host refuses all input, and the normal handoff closes the pane.
+
 Evidence reads reject malformed, partial, duplicate, cyclic, missing, or oversized data. Limits are 32 MiB per transcript, 1 MiB per line, and 100,000 entries. Failed reads retain the binding. The receipt atomically stores acknowledgement, exact reply text, reply entry ID, and session ID. Repeated acknowledgement returns that receipt. Changed acknowledgement fails.
 
 The peer command `dogsled host unit-receipt --input '{"execution":<ExecutionRef>}'` reads the durable receipt after pane closure. Existing inbox and child refresh paths fetch it. The admission record retains the full receipt and a deterministic returned event before the item update. Refresh repairs the item from that receipt, even after settlement delivery or host unavailability. If the item does not exist yet, later refresh repairs it after registration. Identical replay preserves reply timestamps and notification acknowledgement. Contradictory receipts or correlated item replies fail explicitly. The result ID combines request and reply entry IDs. Evidence summaries contain at most 2,048 characters.

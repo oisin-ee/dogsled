@@ -177,6 +177,93 @@ pub fn handoff_ready(ledger: &Ledger, pane: &str) -> Result<bool> {
         }))
 }
 
+/// What this host's launch evidence says about the unit execution in a pane that called `done`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Execution {
+    /// No unit execution was launched in the pane.
+    Plain,
+    /// The unit has not returned. Only `owner` may continue it. `host` is the originating
+    /// owner's hostname; a launch record without one cannot prove any sender is its owner.
+    Unreturned { owner: String, host: Option<String> },
+    /// The worker acknowledged its sealed terminal boundary.
+    Returned,
+}
+
+/// Bind `agent` and its done mark's launch `item` to exactly one seeded launch, or to none.
+/// Missing, unreadable, competing, or mismatched evidence is an error, never `Plain`.
+pub fn execution(
+    ledger: &Ledger,
+    item: Option<&str>,
+    agent: &crate::probe::Agent,
+) -> Result<Execution> {
+    let receipts = ledger.child("launches");
+    let seeded: Vec<_> = recovery::candidates(&receipts, Some(&agent.pane))?
+        .into_iter()
+        .filter(|(_, progress)| progress.request.unit.is_some())
+        .collect();
+    let [(id, progress)] = seeded.as_slice() else {
+        if !seeded.is_empty() {
+            return Err(crate::unit_transport::conflict(&format!(
+                "{}: competing unit launches",
+                agent.pane
+            )));
+        }
+        if let Some(item) = item {
+            crate::jobs::validate_id(item)?;
+            match std::fs::symlink_metadata(receipts.dir.join(format!("{item}.unit.json"))) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+                Ok(_) => {
+                    return Err(crate::unit_transport::conflict(&format!(
+                        "unit launch {item} has a seed but no launch record for {}",
+                        agent.pane
+                    )));
+                }
+            }
+        }
+        return Ok(Execution::Plain);
+    };
+    let seed = progress
+        .request
+        .unit
+        .as_ref()
+        .ok_or_else(|| crate::unit_transport::conflict("host seed missing"))?;
+    seed.validate(id, &progress.request.owner)?;
+    let Action::Agent { name, .. } = &progress.request.action else {
+        return Err(crate::unit_transport::conflict("not an agent launch"));
+    };
+    if item != Some(id.as_str())
+        || progress.terminal.is_none()
+        || agent.terminal_id != progress.terminal
+        || agent.agent.as_deref() != Some("pi")
+        || agent.name.as_deref() != Some(name.as_str())
+    {
+        return Err(crate::unit_transport::conflict(&format!(
+            "{}: done mark, terminal, or agent does not match unit launch {id}",
+            agent.pane
+        )));
+    }
+    if receipts
+        .read::<crate::unit_transport::Seed>(&format!("{id}.unit.json"))?
+        .as_ref()
+        != Some(seed)
+    {
+        return Err(crate::unit_transport::conflict(&format!(
+            "unit launch {id}: durable seed is missing or changed"
+        )));
+    }
+    match &progress.terminal_receipt {
+        None => Ok(Execution::Unreturned {
+            owner: seed.execution.owner_id.clone(),
+            host: progress.request.owner_host.clone(),
+        }),
+        Some(receipt) if receipt.ack.execution == seed.execution => Ok(Execution::Returned),
+        Some(_) => Err(crate::unit_transport::conflict(&format!(
+            "unit launch {id}: terminal receipt names another execution"
+        ))),
+    }
+}
+
 /// A seeded result uses the acknowledged transcript branch, not its newest message.
 pub fn handoff_reply(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     Ok(recovery::candidates(&ledger.child("launches"), Some(pane))?

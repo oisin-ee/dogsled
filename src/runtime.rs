@@ -53,6 +53,7 @@ pub fn request(fleet: &Fleet, args: &WorkArgs, action: Action) -> Result<Request
         workspace,
         workspace_name,
         owner,
+        owner_host: Some(crate::inbox::hostname()),
     })
 }
 

@@ -89,6 +89,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
                 workspace: None,
                 workspace_name: None,
                 owner: "owner".into(),
+                owner_host: None,
             },
             false,
             100,
@@ -195,6 +196,7 @@ fn place_request(id: &str) -> Request {
         workspace: None,
         workspace_name: None,
         owner: "owner".into(),
+        owner_host: None,
     }
 }
 
