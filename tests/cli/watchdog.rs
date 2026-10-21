@@ -70,7 +70,7 @@ case "$*" in
  *) echo unexpected >&2; exit 2 ;;
 esac
 "#);
-    fs::create_dir_all(rig.dir.join("home/repo/tree/.git")).unwrap();
+    fs::create_dir_all(rig.dir.join("home/repo/tree")).unwrap();
     // A linked worktree has a `.git` file; without one Git cannot remove it.
     fs::write(
         rig.dir.join("home/repo/tree/.git"),
