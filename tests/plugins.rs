@@ -196,7 +196,7 @@ fn plugins_dist_keeps_service_templates_and_herdr_keeps_its_board() {
     assert_eq!(argv(&builds[0]["command"]), ["sh", "plugin/fetch.sh"]);
     assert_eq!(
         argv(&herdr["panes"][0]["command"]),
-        ["bin/dogsled", "board", "--side", "--watch"]
+        ["bin/dogsled", "sidebar"]
     );
 }
 
