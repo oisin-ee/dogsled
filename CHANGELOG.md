@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Loss checks refuse paths without their own worktree identity before they read status. Prunable Git worktree entries are report-only findings with Git's reason, not landed-dirty checkouts. Cleanup leaves their directory contents and administrative data untouched.
+
 ## 0.19.0 - 2026-10-21
 
 - `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.

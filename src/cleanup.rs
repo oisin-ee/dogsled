@@ -461,7 +461,16 @@ fn repository_trees(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
 
 /// Every worktree of `repo`, the main checkout first. A detached worktree has no branch.
 fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
+    Ok(listed_entries(shell, repo)?
+        .into_iter()
+        .map(|(tree, _)| tree)
+        .collect())
+}
+
+/// Git's prunable reason describes stale administrative data, not disposable content.
+fn listed_entries(shell: &dyn Shell, repo: &str) -> Result<Vec<(Tree, Option<String>)>> {
     let mut result = Vec::new();
+    let mut prunable = None;
     let output = git(shell, repo, &["worktree", "list", "--porcelain", "-z"])?;
     if !output.ok() {
         return Err(Error::Invalid(format!(
@@ -482,8 +491,12 @@ fn listed(shell: &dyn Shell, repo: &str) -> Result<Vec<Tree>> {
             tree.head = value.into();
         } else if let Some(value) = field.strip_prefix("branch refs/heads/") {
             tree.branch = value.into();
+        } else if field == "prunable" {
+            prunable = Some(String::new());
+        } else if let Some(reason) = field.strip_prefix("prunable ") {
+            prunable = Some(reason.into());
         } else if field.is_empty() && !tree.path.is_empty() {
-            result.push(tree.clone());
+            result.push((tree.clone(), prunable.take()));
             tree.path.clear();
             tree.branch.clear();
             tree.head.clear();
@@ -671,13 +684,25 @@ fn readable(
     let mut trees = Vec::new();
     let mut evidence = BTreeMap::new();
     for repo in repos {
-        match repository_trees(node.shell, &repo) {
+        match listed_entries(node.shell, &repo) {
             Ok(found) => {
-                trees.extend(
-                    found
-                        .into_iter()
-                        .filter(|tree| Path::new(&tree.path).exists()),
-                );
+                for (tree, prunable) in found.into_iter().skip(1) {
+                    if let Some(reason) = prunable {
+                        let mut finding = entry(
+                            "worktrees",
+                            tree.path.clone(),
+                            format!(
+                                "prunable: {reason}; stale Git registration; directory contents are unknown and remain untouched"
+                            ),
+                            false,
+                        );
+                        finding.kind = Some("prunable".into());
+                        finding.tree = Some(tree);
+                        plan.entries.push(finding);
+                    } else if Path::new(&tree.path).exists() {
+                        trees.push(tree);
+                    }
+                }
                 let fetched = crate::loss::Evidence::fetch(node.shell, &repo);
                 if let Some(warning) = &fetched.warning {
                     plan.entries
