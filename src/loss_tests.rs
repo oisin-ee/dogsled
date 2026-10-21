@@ -596,3 +596,85 @@ fn gone_upstream_with_local_work_stays_but_integrated_branch_is_deleted() {
     assert!(applied.failures.is_empty(), "{:?}", applied.failures);
     assert_eq!(git(&repo.repo, &["branch", "--list", "feature"]), "");
 }
+
+#[test]
+fn worktree_whose_git_file_is_gone_is_held_and_removal_refuses_before_unlocking() {
+    let repo = Repo::new();
+    let path = repo.tree.display().to_string();
+    git(
+        &repo.repo,
+        &["worktree", "lock", "--reason", "agent:worktree", &path],
+    );
+    std::fs::write(repo.tree.join("generated"), "output\n").unwrap();
+    std::fs::remove_file(repo.tree.join(".git")).unwrap();
+    let ledger = Ledger::new(repo.root.join("state"));
+    ledger
+        .write("repositories.json", &vec![repo.repo.display().to_string()])
+        .unwrap();
+    let cleanup = crate::config::Cleanup::default();
+    let node = crate::node::Node {
+        shell: &System,
+        ledger: &ledger,
+        thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+        home: repo.root.to_str().unwrap(),
+        cleanup: &cleanup,
+    };
+    let held = |scope| {
+        survey(&node, scope, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.class == "worktrees" && crate::worktree::same(&e.id, &path))
+            .unwrap()
+    };
+    // Locked, so Git still lists it and never calls it prunable; `git worktree remove` would
+    // still fail on the missing `.git` file. Both scopes hold it.
+    for scope in [Scope::Sweep, Scope::Prune] {
+        let entry = held(scope);
+        assert_eq!(entry.kind.as_deref(), Some(crate::cleanup::UNLINKED));
+        assert!(!entry.removable);
+        assert!(
+            entry
+                .detail
+                .contains("worktree has no .git file; git cannot remove it; directory remains"),
+            "{}",
+            entry.detail
+        );
+    }
+    let linked = crate::worktree::Linked {
+        checkout: repo.repo.clone(),
+        path: path.clone(),
+        branch: "feature".into(),
+    };
+    let refused =
+        crate::worktree::remove(&System, &ledger, &linked, None, &[], None, &repo.evidence())
+            .unwrap_err()
+            .to_string();
+    assert!(refused.contains("directory remains"), "{refused}");
+    assert!(refused.contains("nothing was closed"), "{refused}");
+    assert!(
+        git(&repo.repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree")
+    );
+    assert!(repo.tree.join("generated").is_file());
+
+    // Unlocked, Git calls it prunable; the hold names that instead.
+    git(&repo.repo, &["worktree", "unlock", &path]);
+    let entry = held(Scope::Sweep);
+    assert!(
+        entry.detail.contains("git marks the worktree prunable"),
+        "{}",
+        entry.detail
+    );
+    assert!(!entry.removable);
+    let mut plan = survey(&node, Scope::Prune, 100).unwrap();
+    plan.entries
+        .retain(|e| e.class == "worktrees" && crate::worktree::same(&e.id, &path));
+    let applied = crate::cleanup::apply(&node, &plan, 100).unwrap();
+    assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+    assert!(
+        applied.results[0].ends_with(": kept"),
+        "{:?}",
+        applied.results
+    );
+    assert!(repo.tree.join("generated").is_file());
+}
