@@ -185,10 +185,35 @@ fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
 struct BusyShell {
     busy: usize,
     starts: AtomicUsize,
+    /// After this many starts, the pane id belongs to a replacement terminal.
+    replaced_after: usize,
+}
+
+impl BusyShell {
+    fn new(busy: usize) -> Self {
+        Self {
+            busy,
+            starts: AtomicUsize::new(0),
+            replaced_after: usize::MAX,
+        }
+    }
 }
 
 impl Shell for BusyShell {
-    fn run(&self, _program: &str, _args: &[String]) -> Result<Output> {
+    fn run(&self, _program: &str, args: &[String]) -> Result<Output> {
+        if args.starts_with(&["pane".into(), "list".into()]) {
+            let terminal = if self.starts.load(Ordering::SeqCst) >= self.replaced_after {
+                "term_replacement"
+            } else {
+                "term_shell"
+            };
+            return Ok(Output {
+                status: 0,
+                stdout: json!({"result":{"panes":[{"pane_id":"w2:p2","terminal_id":terminal}]}})
+                    .to_string(),
+                stderr: String::new(),
+            });
+        }
         let start = self.starts.fetch_add(1, Ordering::SeqCst);
         Ok(if start < self.busy {
             Output {
@@ -213,24 +238,60 @@ fn start_args() -> Vec<String> {
 #[test]
 fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
     let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let shell = BusyShell::new(2);
+    let window = std::time::Duration::from_secs(5);
+    start_while_busy(
+        &ledger,
+        &shell,
+        &start_args(),
+        "w2:p2",
+        "term_shell",
+        window,
+    )
+    .unwrap();
+    assert_eq!(shell.starts.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn a_busy_retry_is_refused_once_another_terminal_holds_the_pane() {
+    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
     let shell = BusyShell {
-        busy: 2,
-        starts: AtomicUsize::new(0),
+        replaced_after: 1,
+        ..BusyShell::new(usize::MAX)
     };
     let window = std::time::Duration::from_secs(5);
-    start_while_busy(&ledger, &shell, &start_args(), "w2:p2", window).unwrap();
-    assert_eq!(shell.starts.load(Ordering::SeqCst), 3);
+    let error = start_while_busy(
+        &ledger,
+        &shell,
+        &start_args(),
+        "w2:p2",
+        "term_shell",
+        window,
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Launch(_)), "{error:?}");
+    assert!(
+        error.to_string().contains("launch terminal changed"),
+        "{error}"
+    );
+    // Only the first, refused start ran; the replacement terminal never got a second one.
+    assert_eq!(shell.starts.load(Ordering::SeqCst), 1);
 }
 
 #[test]
 fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
     let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-    let shell = BusyShell {
-        busy: usize::MAX,
-        starts: AtomicUsize::new(0),
-    };
+    let shell = BusyShell::new(usize::MAX);
     let window = std::time::Duration::from_millis(300);
-    let error = start_while_busy(&ledger, &shell, &start_args(), "w2:p2", window).unwrap_err();
+    let error = start_while_busy(
+        &ledger,
+        &shell,
+        &start_args(),
+        "w2:p2",
+        "term_shell",
+        window,
+    )
+    .unwrap_err();
     let Error::Launch(message) = &error else {
         panic!("expected a launch error, got {error:?}");
     };
@@ -260,11 +321,7 @@ impl Shell for BudgetShell {
             if self.uncertain {
                 return Err(Error::Deadline("issued agent start".into()));
             }
-            return BusyShell {
-                busy: usize::MAX,
-                starts: AtomicUsize::new(0),
-            }
-            .run(program, args);
+            return BusyShell::new(usize::MAX).run(program, args);
         }
         ConfirmingShell {
             recovering: false,
@@ -334,6 +391,14 @@ impl Shell for TakenShell {
 fn only_a_busy_refusal_is_repeated() {
     let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
     let window = std::time::Duration::from_secs(5);
-    let error = start_while_busy(&ledger, &TakenShell, &start_args(), "w2:p2", window).unwrap_err();
+    let error = start_while_busy(
+        &ledger,
+        &TakenShell,
+        &start_args(),
+        "w2:p2",
+        "term_shell",
+        window,
+    )
+    .unwrap_err();
     assert!(matches!(error, Error::Command { .. }), "{error:?}");
 }

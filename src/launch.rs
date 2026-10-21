@@ -72,16 +72,20 @@ fn is_busy(error: &Error) -> bool {
 }
 
 /// Run `agent start`, repeating it on the same pane while Herdr reports the shell busy. Herdr
-/// typed nothing into a busy pane, so a repeat cannot start the agent twice.
+/// typed nothing into a busy pane, so a repeat cannot start the agent twice. A pane id can be
+/// reused by another terminal during a pause, so every repeat first proves that the pane still
+/// runs the launch's saved `terminal`.
 fn start_while_busy(
     ledger: &Ledger,
     shell: &dyn Shell,
     args: &[String],
     pane: &str,
+    terminal: &str,
     window: std::time::Duration,
 ) -> Result<()> {
     let began = std::time::Instant::now();
     let mut pause = BUSY_FIRST_PAUSE;
+    let mut retry = false;
     loop {
         // Before invocation, expiry proves no start was issued. A deadline returned by the
         // invocation itself is different: the agent may already have begun.
@@ -95,6 +99,15 @@ fn start_while_busy(
                     began.elapsed().as_secs_f32()
                 ))
             })?;
+        if retry {
+            // Every earlier start was refused as busy, so nothing was issued yet.
+            same_terminal(shell, pane, terminal).map_err(|error| {
+                Error::Launch(format!(
+                    "{pane} was busy and its launch terminal could not be revalidated before a retry; refusing to take it over: {error}"
+                ))
+            })?;
+        }
+        retry = true;
         match shell.run_setup_ok("herdr", args) {
             Err(error) if is_busy(&error) => {
                 let elapsed = began.elapsed();
@@ -444,7 +457,7 @@ fn start_or_reconcile(
     )?);
     progress.attempted = true;
     receipts.write(file, progress)?;
-    if let Err(error) = start_while_busy(ledger, shell, &args, pane, busy_window()) {
+    if let Err(error) = start_while_busy(ledger, shell, &args, pane, &current, busy_window()) {
         if matches!(error, Error::Launch(_)) {
             // Herdr never typed into the pane, so the launch may be tried again.
             progress.attempted = false;
@@ -755,6 +768,14 @@ fn idle(shell: &dyn Shell, pane: &str) -> Result<()> {
         return Err(Error::Invalid(format!(
             "{pane} is busy; refusing to start another process"
         )));
+    }
+    Ok(())
+}
+
+fn same_terminal(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
+    let current = terminal(shell, pane)?;
+    if current != expected {
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
     }
     Ok(())
 }
