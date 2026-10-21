@@ -184,7 +184,7 @@ fn startup_diagnostics_do_not_turn_a_native_refusal_into_an_unknown_launch() {
     let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
     assert_eq!(code, 2, "{error}");
     let message = error["error"].as_str().unwrap();
-    assert!(message.contains("agent_pane_busy"), "{message}");
+    assert!(message.contains("agent_name_taken"), "{message}");
     assert!(message.contains("startup detail"), "{message}");
     assert!(!message.contains("outcome is unknown"), "{message}");
     assert!(rig.log("herdr.log").contains("pane close w2:p1"));
@@ -260,7 +260,7 @@ fn refusing_start(rig: &Rig) {
             .unwrap()
             .replace(
                 "  'agent start'*|",
-                "  'agent start'*) echo '{\"error\":{\"code\":\"agent_pane_busy\",\"message\":\"agent target pane w2:p1 is not an available shell\"},\"id\":\"cli:agent:start\"}' >&2; exit 1 ;;\n  ",
+                "  'agent start'*) echo '{\"error\":{\"code\":\"agent_name_taken\",\"message\":\"agent name worker is already used\"},\"id\":\"cli:agent:start\"}' >&2; exit 1 ;;\n  ",
             ),
     );
 }
@@ -273,14 +273,19 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
     let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
     assert_eq!(code, 2, "{error}");
     let message = error["error"].as_str().unwrap();
-    assert!(message.contains("agent_pane_busy"), "{message}");
+    assert!(message.contains("agent_name_taken"), "{message}");
     assert!(!message.contains("outcome is unknown"), "{message}");
     let log = rig.log("herdr.log");
     assert!(log.contains("pane close w2:p1"), "{log}");
     // The refusal is the receipt: a resubmission neither allocates nor starts again.
     let (code, again) = rig.json(&["host", "launch", "--request", &request.to_string()]);
     assert_eq!(code, 2, "{again}");
-    assert!(again["error"].as_str().unwrap().contains("agent_pane_busy"));
+    assert!(
+        again["error"]
+            .as_str()
+            .unwrap()
+            .contains("agent_name_taken")
+    );
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
     assert_eq!(log.matches("tab create").count(), 1, "{log}");
@@ -289,7 +294,7 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
         receipt["failed"]
             .as_str()
             .unwrap()
-            .contains("agent_pane_busy")
+            .contains("agent_name_taken")
     );
 }
 
@@ -356,7 +361,10 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
         let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
         assert_eq!(code, 2, "{case}: {error}");
         assert!(
-            error["error"].as_str().unwrap().contains("agent_pane_busy"),
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("agent_name_taken"),
             "{case}: {error}"
         );
         let receipt = rig.read("state/launches/recover-one.json");
@@ -364,7 +372,7 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
             receipt["failed"]
                 .as_str()
                 .unwrap()
-                .contains("agent_pane_busy")
+                .contains("agent_name_taken")
         );
         assert_eq!(
             rig.json(&["host", "launch", "--request", &request.to_string()])
@@ -394,7 +402,7 @@ fn refused_start_closes_its_idle_prepared_pane_and_records_the_refusal() {
         rig.read("state/launches/recover-one.json")["failed"]
             .as_str()
             .unwrap()
-            .contains("agent_pane_busy")
+            .contains("agent_name_taken")
     );
     let log = rig.log("herdr.log");
     assert!(log.contains("pane close w2:p1"), "{log}");
@@ -408,7 +416,12 @@ fn a_refused_start_is_not_retried_by_the_service() {
     refusing_start(&rig);
     let (code, error) = rig.json(&["agent", "--name", "w", "--message", "go"]);
     assert_eq!(code, 2, "{error}");
-    assert!(error["error"].as_str().unwrap().contains("agent_pane_busy"));
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("agent_name_taken")
+    );
     // No ticket waits to retry it.
     assert!(!rig.dir.join("state/queue.json").exists());
     assert_eq!(rig.log("herdr.log").matches("agent start w ").count(), 1);
@@ -592,4 +605,97 @@ fn first_host_launch_refuses_a_terminal_replaced_after_preparation() {
             .contains("prepared pane has no terminal identity")
     );
     assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+/// Herdr reports the shell busy for the first `busy` starts, then accepts the start. A negative
+/// count means it stays busy.
+fn busy_start(rig: &Rig, busy: i32) {
+    fs::write(rig.dir.join("busy-left"), busy.to_string()).unwrap();
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "  'agent start'*|",
+                "  'agent start'*) left=$(cat \"$RIG/busy-left\"); if test \"$left\" != 0; then test \"$left\" -gt 0 && echo $((left - 1)) > \"$RIG/busy-left\"; echo '{\"error\":{\"code\":\"agent_pane_busy\",\"message\":\"agent target pane w2:p1 is not an available shell\"},\"id\":\"cli:agent:start\"}' >&2; exit 1; fi; printf '{}\\n' ;;\n  ",
+            ),
+    );
+}
+
+#[test]
+fn a_busy_start_is_repeated_on_the_same_pane_until_the_shell_is_ready() {
+    let rig = Rig::new("busy-then-ready");
+    busy_start(&rig, 2);
+    let request = host_request(&rig);
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["pane"], "w2:p1");
+    let log = rig.log("herdr.log");
+    assert_eq!(log.matches("agent start worker ").count(), 3, "{log}");
+    assert_eq!(log.matches("tab create").count(), 1, "{log}");
+    assert!(!log.contains("pane close"), "{log}");
+}
+
+#[test]
+fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried() {
+    let rig = Rig::new("busy-timeout");
+    fs::write(rig.dir.join("busy-window-ms"), "600").unwrap();
+    busy_start(&rig, -1);
+    let request = host_request(&rig);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_ne!(code, 0, "{error}");
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains("w2:p1"), "{message}");
+    assert!(
+        message.contains("not an available shell after"),
+        "{message}"
+    );
+    assert!(message.contains("stays open"), "{message}");
+    assert!(!message.contains("outcome is unknown"), "{message}");
+    let log = rig.log("herdr.log");
+    assert!(log.matches("agent start worker ").count() >= 2, "{log}");
+    assert!(!log.contains("pane close"), "{log}");
+    assert!(!log.contains("workspace close"), "{log}");
+    // No final receipt: the launch may run again, and it has not been attempted.
+    assert!(!rig.dir.join("state/launches/recover-one.json").exists());
+    assert_eq!(
+        rig.read("state/launches/recover-one.progress.json")["attempted"],
+        false
+    );
+    // The shell finishes starting. Cleanup must not retire its retryable launch before replay.
+    busy_start(&rig, 0);
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{
+            "pane_id":"w2:p1","terminal_id":"term_child",
+            "cwd":rig.dir.join("home"),"workspace_id":"w1"
+        }]}}),
+    );
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr"))
+            .unwrap()
+            .replace(
+                "\"shell_pid\":10,\"foreground_processes\"",
+                "\"shell_pid\":10,\"foreground_process_group_id\":10,\"foreground_processes\"",
+            ),
+    );
+    let cleanup = rig.run(&["prune", "--yes", "panes", "workspaces"]);
+    assert!(
+        cleanup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane close"), "{log}");
+    assert!(!log.contains("workspace close"), "{log}");
+    assert_eq!(
+        rig.read("state/launches/recover-one.progress.json")["attempted"],
+        false
+    );
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    let log = rig.log("herdr.log");
+    assert_eq!(log.matches("tab create").count(), 1, "{log}");
+    assert!(!log.contains("pane close"), "{log}");
 }

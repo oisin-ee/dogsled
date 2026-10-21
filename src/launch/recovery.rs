@@ -47,16 +47,15 @@ pub fn requests(ledger: &Ledger) -> Result<Vec<crate::work::Launch>> {
         .collect())
 }
 
-fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> {
-    Ok(recoverable(
-        progress,
-        receipts.read::<Receipt>(&format!("{id}.json"))?.as_ref(),
-    ))
-}
-
 fn recoverable(progress: &Progress, receipt: Option<&Receipt>) -> bool {
     matches!(receipt, Some(Receipt::Refused { .. }))
         || (receipt.is_none() && !progress.confirmed && progress.terminal_receipt.is_none())
+}
+
+/// Automatic cleanup must retain a receiptless launch that has not issued a start. The same
+/// request can still retry it. Explicit recovery may close that shell through `recoverable`.
+fn finalizable(progress: &Progress, receipt: Option<&Receipt>) -> bool {
+    recoverable(progress, receipt) && (receipt.is_some() || progress.attempted)
 }
 
 /// Only a proven terminal mismatch releases ownership; missing identities remain unresolved.
@@ -186,7 +185,7 @@ impl Survey {
             }
             let state = if matches!(receipt, Some(Receipt::Started(_))) {
                 PaneLaunch::Started
-            } else if recoverable(&progress, receipt.as_ref())
+            } else if finalizable(&progress, receipt.as_ref())
                 && progress.request.id == id
                 && progress
                     .terminal
@@ -248,14 +247,12 @@ pub fn final_pane(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<Pane
     let [(id, progress)] = found.as_slice() else {
         return Ok(PaneLaunch::Unresolved);
     };
-    if matches!(
-        receipts.read::<Receipt>(&format!("{id}.json"))?,
-        Some(Receipt::Started(_))
-    ) {
+    let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+    if matches!(receipt, Some(Receipt::Started(_))) {
         return Ok(PaneLaunch::Started);
     }
     Ok(
-        if unfinished(&receipts, id, progress)?
+        if finalizable(progress, receipt.as_ref())
             && progress.request.id == *id
             && verify_items(ledger, pane, progress).is_ok()
             && verify_shell(shell, pane, progress).is_ok()
@@ -272,11 +269,29 @@ pub fn final_pane(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<Pane
 /// either lock. External terminal mutations still require fresh identity and busy checks.
 /// No receipt, preparation, branch or checkout is changed by this operation.
 pub fn close_unfinished(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<bool> {
+    close(ledger, shell, pane, recoverable)
+}
+
+/// Automatic cleanup rechecks finality under both locks; a busy start may have become
+/// retryable after the survey. Explicit recovery still permits retiring an unattempted shell.
+pub fn close_final(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<bool> {
+    close(ledger, shell, pane, finalizable)
+}
+
+fn close(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    pane: &str,
+    eligible: fn(&Progress, Option<&Receipt>) -> bool,
+) -> Result<bool> {
     let receipts = ledger.child("launches");
     let found = candidates(&receipts, Some(pane))?;
     let mut selected = None;
     for (id, progress) in &found {
-        if unfinished(&receipts, id, progress)? {
+        if eligible(
+            progress,
+            receipts.read::<Receipt>(&format!("{id}.json"))?.as_ref(),
+        ) {
             selected = Some((id, progress));
         }
     }
@@ -295,7 +310,7 @@ pub fn close_unfinished(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Resul
             "{pane}: competing launch records; nothing was closed"
         )));
     }
-    close_selected(ledger, shell, pane, id, original)
+    close_selected(ledger, shell, pane, id, original, eligible)
 }
 
 fn close_selected(
@@ -304,6 +319,7 @@ fn close_selected(
     pane: &str,
     id: &str,
     original: &Progress,
+    eligible: fn(&Progress, Option<&Receipt>) -> bool,
 ) -> Result<bool> {
     let receipts = ledger.child("launches");
     receipts.with_lock(id, || {
@@ -316,7 +332,7 @@ fn close_selected(
                 || progress.request != original.request
                 || progress.request.id != id
                 || progress.terminal != original.terminal
-                || !unfinished(&receipts, id, progress)?
+                || !eligible(progress, receipts.read::<Receipt>(&format!("{id}.json"))?.as_ref())
             {
                 return Err(Error::Invalid(format!("{pane}: launch changed; nothing was closed")));
             }

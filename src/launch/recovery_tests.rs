@@ -82,7 +82,7 @@ fn receipt_and_pane_locks_span_every_verification_and_native_close() {
 }
 
 #[test]
-fn final_unattempted_and_refused_shells_close_under_both_locks_without_changing_evidence() {
+fn explicit_recovery_closes_unattempted_and_refused_shells_without_changing_evidence() {
     for refused in [false, true] {
         let ledger = fixture();
         let receipts = ledger.child("launches");
@@ -102,12 +102,24 @@ fn final_unattempted_and_refused_shells_close_under_both_locks_without_changing_
                 )
                 .unwrap();
         }
+        assert_pane_state(
+            &ledger,
+            if refused {
+                PaneLaunch::Final
+            } else {
+                PaneLaunch::Unresolved
+            },
+        );
         let before = std::fs::read(receipts.dir.join("own.progress.json")).unwrap();
         let receipt = std::fs::read(receipts.dir.join("own.json")).ok();
         let shell = LockedShell {
             ledger: ledger.clone(),
             closed: AtomicUsize::new(0),
         };
+        if !refused {
+            assert!(close_final(&ledger, &shell, "w2:p2").is_err());
+            assert_eq!(shell.closed.load(Ordering::SeqCst), 0);
+        }
         assert!(close_unfinished(&ledger, &shell, "w2:p2").unwrap());
         assert_eq!(shell.closed.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -383,7 +395,7 @@ fn occupied_receipt_lock_prevents_all_terminal_operations() {
 
 #[test]
 fn recovery_rereads_a_changed_candidate_after_the_request_lock() {
-    for change in ["confirmed", "receipt", "terminal"] {
+    for change in ["confirmed", "receipt", "terminal", "busy"] {
         let ledger = fixture();
         let receipts = ledger.child("launches");
         let original = receipts
@@ -405,7 +417,14 @@ fn recovery_rereads_a_changed_candidate_after_the_request_lock() {
                 closed: AtomicUsize::new(0),
             };
             ready_tx.send(()).unwrap();
-            let result = close_selected(&worker_ledger, &shell, "w2:p2", "own", &original);
+            let result = close_selected(
+                &worker_ledger,
+                &shell,
+                "w2:p2",
+                "own",
+                &original,
+                finalizable,
+            );
             assert_eq!(shell.closed.load(Ordering::SeqCst), 0);
             result
         });
@@ -416,6 +435,7 @@ fn recovery_rereads_a_changed_candidate_after_the_request_lock() {
             .unwrap();
         match change {
             "confirmed" => progress.confirmed = true,
+            "busy" => progress.attempted = false,
             "terminal" => progress.terminal = Some("replacement".into()),
             "receipt" => receipts
                 .write("own.json", &Receipt::Started(json!({"pane":"w2:p2"})))

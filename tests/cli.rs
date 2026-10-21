@@ -207,6 +207,9 @@ esac
         if let Ok(now) = fs::read_to_string(self.dir.join("clock")) {
             cmd.env("DOGSLED_TEST_NOW_MS", now.trim());
         }
+        if let Ok(window) = fs::read_to_string(self.dir.join("busy-window-ms")) {
+            cmd.env("DOGSLED_TEST_BUSY_WINDOW_MS", window.trim());
+        }
         cmd
     }
     fn run(&self, args: &[&str]) -> Output {
