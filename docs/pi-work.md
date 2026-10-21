@@ -3,7 +3,7 @@
 Dogsled owns the above-editor work widget. pi-todo owns the tasks and their session-branch history.
 The two extensions communicate through `pi.events`. Neither imports the other package.
 
-## Version 2 events
+## Version 3 events
 
 | Event | Sender | Data |
 | --- | --- | --- |
@@ -15,11 +15,14 @@ The two extensions communicate through `pi.events`. Neither imports the other pa
 | `oisin.todo.stop` | pi-todo | `version`, `publisher` |
 | `oisin.work.open` | pi-todo | Request identity and `view: "todos"` |
 
-`version` is `2`. Request identity contains `version`, `presenter`, and `request`.
+`version` is `3`. Request identity contains `version`, `presenter`, and `request`.
 Each presenter and publisher has a new identifier for each session lifecycle.
 A new request invalidates earlier replies. Revisions increase within a publisher lifecycle.
 The snapshot identifies the current Pi session and active branch leaf, including a null leaf.
-`display` contains `empty`, `summary`, `current`, `text`, opaque `state`, and a `createView` function.
+`display` contains `empty`, `summary`, `current`, `text`, `sections`, opaque `state`, and a `createView` function.
+`sections` is four lists in order: `in_progress`, `pending`, `completed`, `abandoned`. Each is `{status, count, items}`.
+An item is `{status, text, description?, review, unit, children}`; a child is `{status, text, description?, unit}`.
+The sidebar draws these lists and nothing else. Pi writes them to the ledger as `{session, branch, revision, current, pane, sections}`.
 Pi-todo owns these projections. Dogsled does not interpret task records or reproduce todo rendering.
 The capability is in-process only. Never serialize functions or components into session state.
 
@@ -31,7 +34,7 @@ The same pi-todo renderer supplies standalone and hosted rows. All shows one sum
 Before claiming a snapshot, Dogsled creates, updates, renders, and disposes a preflight view.
 A live view survives ordinary refreshes and ends on collapse, publisher replacement, release, or shutdown.
 Factory, render, update, and input failures release the claim and restore standalone todos.
-Version 1 peers do not receive flattened data. Incompatible versions leave standalone todos available.
+Version 1 and 2 peers do not receive flattened data. Incompatible versions leave standalone todos available.
 
 Both extensions subscribe during `session_start`. Dogsled requests a snapshot at startup and when a provider announces readiness.
 Thus either session-handler order works. Dogsled validates snapshots and draws before acknowledging presentation ownership.

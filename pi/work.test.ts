@@ -44,7 +44,7 @@ test("consumer requests an already started provider and acknowledges only after 
 test("provider starting later requests a fresh handshake and can open the todo view", () => {
 	const r = rig(); r.consumer.start(r.ctx);
 	const first = r.requests.at(-1);
-	r.bus.emit("oisin.todo.ready", { publisher: "provider", version: 2 });
+	r.bus.emit("oisin.todo.ready", { publisher: "provider", version: 3 });
 	assert.notEqual(r.requests.at(-1).request, first.request);
 	r.bus.emit("oisin.todo.snapshot", r.data());
 	r.bus.emit("oisin.work.open", { ...r.requests.at(-1), view: "todos" });
@@ -67,7 +67,7 @@ test("delayed contexts, duplicate revisions and retired publishers cannot replac
 	r.bus.emit("oisin.todo.snapshot", r.data({ publisher: "new-provider" }));
 	r.bus.emit("oisin.todo.snapshot", r.data({ revision: 99 }));
 	assert.equal(r.consumer.current?.publisher, "new-provider");
-	r.bus.emit("oisin.todo.stop", { version: 2, publisher: "new-provider" });
+	r.bus.emit("oisin.todo.stop", { version: 3, publisher: "new-provider" });
 	assert.equal(r.consumer.current, undefined);
 	r.consumer.stop();
 });

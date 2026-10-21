@@ -84,13 +84,57 @@ pub fn place(fleet: &Fleet, host: Option<&str>, now: u64) -> Result<Placement> {
     })
 }
 
-fn marker(host: &HostReport) -> &'static str {
-    if !host.reachable || host.service == "down" {
-        " ?"
-    } else if !host.headroom.as_ref().is_some_and(|h| h.eligible) {
-        " ▲"
-    } else {
-        ""
+/// Whether a host can take work, as `status --line` marks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostState {
+    Eligible,
+    /// Reachable, but admission would refuse new work (` ▲`).
+    NoHeadroom,
+    /// Not reachable, or its service is down (` ?`).
+    Unreachable,
+}
+
+impl HostState {
+    pub fn of(host: &HostReport) -> Self {
+        if !host.reachable || host.service == "down" {
+            Self::Unreachable
+        } else if !host.headroom.as_ref().is_some_and(|h| h.eligible) {
+            Self::NoHeadroom
+        } else {
+            Self::Eligible
+        }
+    }
+
+    /// The text `status --line` appends after the load.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Unreachable => " ?",
+            Self::NoHeadroom => " ▲",
+            Self::Eligible => "",
+        }
+    }
+}
+
+/// The first line of a host, as typed values. `status --line` and the sidebar both read it,
+/// so they never disagree and nothing parses the rendered text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBrief {
+    pub label: String,
+    /// Busy cores over cores (`11/12`), `load N/cores` before the first sample, or `-`.
+    pub load: String,
+    pub state: HostState,
+    /// False until the host has reported a probe; its line is then just `?`.
+    pub measured: bool,
+}
+
+impl HostBrief {
+    pub fn of(host: &HostReport) -> Self {
+        Self {
+            label: one_line(&host.host.label),
+            load: load(host),
+            state: HostState::of(host),
+            measured: host.probe.is_some(),
+        }
     }
 }
 
@@ -112,15 +156,11 @@ pub fn line(status: &Status) -> String {
             .hosts
             .iter()
             .map(|host| {
-                if host.probe.is_none() {
-                    format!("{} ?", one_line(&host.host.label))
+                let brief = HostBrief::of(host);
+                if brief.measured {
+                    format!("{} {}{}", brief.label, brief.load, brief.state.marker())
                 } else {
-                    format!(
-                        "{} {}{}",
-                        one_line(&host.host.label),
-                        load(host),
-                        marker(host)
-                    )
+                    format!("{} ?", brief.label)
                 }
             })
             .collect::<Vec<_>>()
@@ -152,11 +192,12 @@ fn summary(host: &HostReport) -> String {
             )
         },
     );
+    let brief = HostBrief::of(host);
     format!(
         "{} {}{} {details} {}{}",
-        one_line(&host.host.label),
-        load(host),
-        marker(host),
+        brief.label,
+        brief.load,
+        brief.state.marker(),
         host.condition(),
         host.sampled_ms.map_or_else(String::new, |sampled| format!(
             " (snapshot {} ago)",
