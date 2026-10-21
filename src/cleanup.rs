@@ -179,6 +179,7 @@ fn pane_owned(shell: &dyn Shell, holders: &[Pane], table: &[Proc]) -> Result<BTr
 /// What one survey saw of the host, shared by every worktree's finding.
 struct Seen {
     panes: Vec<Pane>,
+    workspaces: Vec<Workspace>,
     cwds: Option<Vec<Proc>>,
     evidence: BTreeMap<String, crate::loss::Evidence>,
     /// Agent panes that called `done` and ended that turn. Any other idle agent waits for input.
@@ -188,6 +189,26 @@ struct Seen {
 }
 
 impl Seen {
+    /// Closing the last pane also closes its workspace, potentially the whole group.
+    fn pane_group_hold(&self, pane: &str) -> Option<String> {
+        let workspace = self
+            .panes
+            .iter()
+            .find(|p| p.pane_id == pane)?
+            .workspace_id
+            .as_deref()?;
+        if self
+            .panes
+            .iter()
+            .filter(|p| p.workspace_id.as_deref() == Some(workspace))
+            .count()
+            != 1
+        {
+            return None;
+        }
+        workspace_group_hold(&self.workspaces, workspace)
+    }
+
     fn load(
         node: &Node<'_>,
         cwds: Option<Vec<Proc>>,
@@ -199,6 +220,7 @@ impl Seen {
         let launches = crate::launch::Survey::load(node.ledger, &panes, &terminals, &agents)?;
         Ok(Self {
             panes,
+            workspaces: workspaces(node.shell)?,
             cwds,
             evidence,
             done,
@@ -245,6 +267,44 @@ struct Workspace {
 #[derive(Debug, Deserialize)]
 struct WorkspaceTree {
     repo_root: String,
+    repo_key: String,
+    is_linked_worktree: bool,
+}
+
+/// Herdr groups open workspace records by `repo_key`, not the Git worktree inventory.
+/// A linked workspace closes alone. A primary also closes alone if another primary
+/// holds the group; otherwise it requires an explicit group close, which we never do.
+fn workspace_group_hold(workspaces: &[Workspace], id: &str) -> Option<String> {
+    let tree = workspaces
+        .iter()
+        .find(|w| w.workspace_id == id)?
+        .worktree
+        .as_ref()
+        .filter(|t| !t.is_linked_worktree)?;
+    let others: Vec<_> = workspaces
+        .iter()
+        .filter(|w| w.workspace_id != id)
+        .filter(|w| {
+            w.worktree
+                .as_ref()
+                .is_some_and(|t| t.repo_key == tree.repo_key)
+        })
+        .collect();
+    if others.is_empty()
+        || others
+            .iter()
+            .any(|w| w.worktree.as_ref().is_some_and(|t| !t.is_linked_worktree))
+    {
+        return None;
+    }
+    let ids = others
+        .iter()
+        .map(|w| w.workspace_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "primary workspace has open linked workspaces {ids}; requires group close; keep idle panes because closing the last pane can close the group"
+    ))
 }
 
 fn workspaces(shell: &dyn Shell) -> Result<Vec<Workspace>> {
@@ -611,9 +671,8 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     // Process directories first: dogsled's own Git calls below run with `-C`, not `cd`.
     let cwds = process_cwds(node.shell);
     let mut seen = Seen::load(node, cwds, BTreeMap::new())?;
-    let workspaces = workspaces(node.shell)?;
     let mut plan = Plan::default();
-    let repos = repositories(node, &seen.panes, &workspaces, &mut plan)?;
+    let repos = repositories(node, &seen.panes, &seen.workspaces, &mut plan)?;
     let (repos, trees, evidence) = readable(node, repos, &mut plan);
     seen.evidence = evidence;
     let mut closing = Closing::default();
@@ -665,7 +724,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
             ));
         }
     }
-    idle(node, now, &seen, &workspaces, &closing, &mut plan)?;
+    idle(node, now, &seen, &closing, &mut plan)?;
     if scope == Scope::Sweep {
         return Ok(plan);
     }
@@ -1078,14 +1137,7 @@ fn idle_panes(node: &Node<'_>, now: u64, seen: &Seen) -> Result<BTreeMap<String,
 
 /// Idle panes, and workspaces whose every pane is idle. A workspace closes as one entry; the
 /// caller's workspace and those a worktree removal closes are not entries.
-fn idle(
-    node: &Node<'_>,
-    now: u64,
-    seen: &Seen,
-    workspaces: &[Workspace],
-    closing: &Closing,
-    plan: &mut Plan,
-) -> Result<()> {
+fn idle(node: &Node<'_>, now: u64, seen: &Seen, closing: &Closing, plan: &mut Plan) -> Result<()> {
     let panes = &seen.panes;
     let idle = idle_panes(node, now, seen)?;
     // Final launches close through recovery, never a whole-workspace close that skips locks.
@@ -1114,7 +1166,8 @@ fn idle(
         if !whole(workspace) {
             continue;
         }
-        let label = workspaces
+        let label = seen
+            .workspaces
             .iter()
             .find(|w| w.workspace_id == *workspace)
             .map_or("", |w| w.label.as_str());
@@ -1123,11 +1176,15 @@ fn idle(
             .map(|p| format!("{} {}", p.pane_id, idle[&p.pane_id]))
             .collect::<Vec<_>>()
             .join("; ");
+        let hold = workspace_group_hold(&seen.workspaces, workspace);
         plan.entries.push(entry(
             "workspaces",
             (*workspace).into(),
-            format!("{label}: {detail}"),
-            true,
+            match &hold {
+                Some(reason) => format!("{label}: {detail}; {reason}"),
+                None => format!("{label}: {detail}"),
+            },
+            hold.is_none(),
         ));
     }
     for (pane, detail) in &idle {
@@ -1140,8 +1197,16 @@ fn idle(
         {
             continue;
         }
-        plan.entries
-            .push(entry("panes", pane.clone(), detail.clone(), true));
+        let hold = seen.pane_group_hold(pane);
+        plan.entries.push(entry(
+            "panes",
+            pane.clone(),
+            match &hold {
+                Some(reason) => format!("{detail}; {reason}"),
+                None => detail.clone(),
+            },
+            hold.is_none(),
+        ));
     }
     Ok(())
 }
@@ -1688,6 +1753,9 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
         },
         "workspaces" => {
             let seen = Seen::load(node, None, BTreeMap::new())?;
+            if let Some(reason) = workspace_group_hold(&seen.workspaces, &candidate.id) {
+                return Err(Error::Invalid(format!("refuse {}: {reason}", candidate.id)));
+            }
             let idle = idle_panes(node, now, &seen)?;
             for pane in seen
                 .panes
@@ -1712,6 +1780,9 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
         }
         "panes" => {
             let seen = Seen::load(node, None, BTreeMap::new())?;
+            if let Some(reason) = seen.pane_group_hold(&candidate.id) {
+                return Err(Error::Invalid(format!("refuse {}: {reason}", candidate.id)));
+            }
             if !idle_panes(node, now, &seen)?.contains_key(&candidate.id) {
                 return Err(Error::Invalid(format!(
                     "refuse {}: pane is no longer idle",
@@ -1781,4 +1852,222 @@ pub fn render(plan: &Plan) -> String {
         );
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::Fake;
+    use serde_json::json;
+
+    struct Rig {
+        shell: Fake,
+        ledger: Ledger,
+        cleanup: crate::config::Cleanup,
+    }
+
+    impl Rig {
+        fn new(workspaces: serde_json::Value) -> Self {
+            let mut response = json!({"result":{}});
+            response["result"]["workspaces"] = workspaces;
+            let rig = Self {
+                shell: Fake::new(),
+                ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+                cleanup: crate::config::Cleanup::default(),
+            };
+            rig.shell
+                .on("herdr workspace list", &response.to_string())
+                .on("herdr agent list", r#"{"result":{"agents":[]}}"#);
+            rig.panes(&[("wVR:p1", "wVR", true)]);
+            rig
+        }
+
+        fn node(&self) -> Node<'_> {
+            Node {
+                shell: &self.shell,
+                ledger: &self.ledger,
+                thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+                home: "/",
+                cleanup: &self.cleanup,
+            }
+        }
+
+        fn panes(&self, panes: &[(&str, &str, bool)]) {
+            let panes: Vec<_> = panes.iter().map(|(id, workspace, idle)| {
+                self.shell.on(
+                    &format!("herdr pane process-info --pane {id}"),
+                    if *idle { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[]}}}"# }
+                    else { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[{"pid":2,"name":"pi"}]}}}"# },
+                );
+                json!({"pane_id":id,"workspace_id":workspace,"idle_shell":idle,"idle_since_ms":1})
+            }).collect();
+            self.shell.on(
+                "herdr pane list",
+                &json!({"result":{"panes":panes}}).to_string(),
+            );
+            let snapshot = Snapshot {
+                sampled_ms: 2_000_000,
+                probe: crate::probe::Probe {
+                    host: "local".into(),
+                    label: "local".into(),
+                    load1: 0.0,
+                    cores: 1,
+                    cpu_ticks: None,
+                    busy: None,
+                    memory: crate::probe::Memory::default(),
+                    disk_free_percent: 90.0,
+                    agents: crate::probe::AgentCounts::default(),
+                    agent_panes: vec![],
+                    reservations: vec![],
+                    panes: serde_json::from_value(json!(panes)).unwrap(),
+                },
+                jobs: vec![],
+            };
+            self.ledger.write("host.json", &snapshot).unwrap();
+        }
+
+        fn plan(&self) -> Plan {
+            let node = self.node();
+            let seen = Seen::load(&node, None, BTreeMap::new()).unwrap();
+            let mut plan = Plan::default();
+            idle(&node, 2_000_000, &seen, &Closing::default(), &mut plan).unwrap();
+            plan
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.ledger.dir);
+        }
+    }
+
+    fn workspace(id: &str, linked: bool) -> serde_json::Value {
+        json!({"workspace_id":id,"label":"jalgpall","worktree":{
+            "repo_root":"/repo","repo_key":"/repo/.git","is_linked_worktree":linked
+        }})
+    }
+
+    #[test]
+    fn primary_with_open_linked_workspace_is_kept_with_its_idle_pane() {
+        let rig = Rig::new(json!([workspace("wVR", false), workspace("wVS", true)]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVS:p1", "wVS", false)]);
+        let plan = rig.plan();
+        assert_eq!(plan.entries.len(), 1);
+        let primary = &plan.entries[0];
+        assert_eq!(
+            (&*primary.class, &*primary.id, primary.removable),
+            ("workspaces", "wVR", false)
+        );
+        let rendered = render(&plan);
+        assert!(
+            rendered.contains("open linked workspaces wVS; requires group close"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("closing the last pane can close the group"));
+        assert!(rendered.contains("[report/refuse]"));
+        let calls = rig.shell.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| *c == "herdr workspace list")
+                .count(),
+            1
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("herdr worktree ") || c.contains(" close "))
+        );
+    }
+
+    #[test]
+    fn primary_without_open_group_is_still_removable() {
+        let rig = Rig::new(json!([workspace("wVR", false)]));
+        let plan = rig.plan();
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].id, "wVR");
+        assert!(plan.entries[0].removable);
+    }
+
+    #[test]
+    fn linked_workspace_closed_later_in_a_pass_releases_primary_on_next_survey() {
+        // wVR failed before the same sweep closed wVS. A checkout remaining on disk
+        // without an open workspace does not hold the group on the next survey.
+        let rig = Rig::new(json!([workspace("wVR", false), workspace("wVS", true)]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVS:p1", "wVS", true)]);
+        let first = rig.plan();
+        assert!(
+            !first
+                .entries
+                .iter()
+                .find(|e| e.id == "wVR")
+                .unwrap()
+                .removable
+        );
+        assert!(
+            first
+                .entries
+                .iter()
+                .find(|e| e.id == "wVS")
+                .unwrap()
+                .removable
+        );
+        rig.shell.on(
+            "herdr workspace list",
+            &json!({"result":{"workspaces":[workspace("wVR", false)]}}).to_string(),
+        );
+        rig.panes(&[("wVR:p1", "wVR", true)]);
+        assert!(rig.plan().entries[0].removable);
+    }
+
+    #[test]
+    fn duplicate_primary_can_close_without_closing_the_group() {
+        let rig = Rig::new(json!([
+            workspace("wVR", false),
+            workspace("wVS", true),
+            workspace("wOther", false)
+        ]));
+        assert!(rig.plan().entries[0].removable);
+    }
+
+    #[test]
+    fn group_added_after_plan_is_rechecked_before_workspace_or_last_pane_close() {
+        let rig = Rig::new(json!([workspace("wVR", false)]));
+        let plan = rig.plan();
+        rig.shell.on(
+            "herdr workspace list",
+            &json!({"result":{"workspaces":[workspace("wVR", false), workspace("wVS", true)]}})
+                .to_string(),
+        );
+        let error = apply_one(&rig.node(), &plan, &plan.entries[0], 2_000_000).unwrap_err();
+        assert!(error.to_string().contains("requires group close"));
+        let panes = Plan {
+            entries: vec![entry("panes", "wVR:p1".into(), String::new(), true)],
+        };
+        let error = apply_one(&rig.node(), &panes, &panes.entries[0], 2_000_000).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("closing the last pane can close the group")
+        );
+        assert!(
+            !rig.shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains(" close "))
+        );
+    }
+
+    #[test]
+    fn grouped_primary_can_still_lose_an_idle_pane_when_another_pane_is_busy() {
+        let rig = Rig::new(json!([workspace("wVR", false), workspace("wVS", true)]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVR:p2", "wVR", false)]);
+        let plan = rig.plan();
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].class, "panes");
+        assert_eq!(plan.entries[0].id, "wVR:p1");
+        assert!(plan.entries[0].removable);
+    }
 }
