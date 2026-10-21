@@ -618,7 +618,7 @@ herdr plugin pane open --plugin dogsled --entrypoint sidebar --direction right -
 It reads only cached state: the service snapshots, the peer caches, and the todo files. It never probes a host. `tab` cycles Hosts, Agents & Jobs, Todos; `space` collapses; `⏎` focuses; `m` opens a menu; the mouse clicks, double-clicks, and scrolls. Colours come from the `[theme]` in Herdr’s `config.toml` (`catppuccin`, `catppuccin-latte`, `[theme.custom]` overrides; other names use the terminal’s ANSI palette).
 
 Pi atomically writes `{session, branch, revision, current, pane, sections}` (protocol v3) to `todo-lines/<pane-hash>.json` in Dogsled’s state directory.
-The service reads files for live agent panes into `todos.json`. Peers expose them through `dogsled host todos --json`. Missing presentations show as unavailable.
+The service reads files for live agent panes into `todo-sections.json`. Peers expose them through `dogsled host todos --json`. Missing presentations show as unavailable.
 Session shutdown and provider release remove the pane’s publication. `/dogsled` remains the interactive control panel in both display modes.
 
 Herdr 0.9.5 creates a new pane on every plugin open. Dogsled keeps a small `boards/<tab-hash>.json` registry keyed by Herdr tab ID.

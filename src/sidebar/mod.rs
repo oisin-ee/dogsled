@@ -40,13 +40,13 @@ enum Msg {
 
 /// Build the model's data from the cached status. Never probes or reaches a peer itself:
 /// `commands::status` reads the service snapshots and the peer caches in the ledger.
-fn read(fleet: &Fleet<'_>, limits: &Thresholds, owner: &str) -> Result<Data> {
+/// The todo cache is a separate source: when it cannot be read, Hosts and Agents & Jobs
+/// still draw, and the error comes back for the footer.
+fn read(fleet: &Fleet<'_>, limits: &Thresholds, owner: &str) -> Result<(Data, Option<String>)> {
     let now = now_ms();
     let status = crate::commands::status(fleet)?;
     let board = board::build(&status, Some(owner), now);
-    let todos = board::cached_todos(fleet.ledger)?
-        .into_iter()
-        .find(|todo| todo.pane == owner);
+    let (todos, todo_error) = owner_todos(board::cached_todos(fleet.ledger), owner);
     let mut hosts: Vec<HostRow> = status
         .hosts
         .iter()
@@ -62,7 +62,18 @@ fn read(fleet: &Fleet<'_>, limits: &Thresholds, owner: &str) -> Result<Data> {
         let row = hosts.remove(local);
         hosts.insert(0, row);
     }
-    Ok(Data::from_board(&board, todos, hosts))
+    Ok((Data::from_board(&board, todos, hosts), todo_error))
+}
+
+/// The owner's sections, or the cache error for the footer. Never fails the whole read.
+fn owner_todos(
+    cached: Result<Vec<board::TodoSections>>,
+    owner: &str,
+) -> (Option<board::TodoSections>, Option<String>) {
+    match cached {
+        Ok(todos) => (todos.into_iter().find(|todo| todo.pane == owner), None),
+        Err(error) => (None, Some(format!("todos: {error}"))),
+    }
 }
 
 fn reader(
@@ -80,13 +91,21 @@ fn reader(
         if fleet.is_none() {
             fleet = Fleet::discover(shell, ledger, policy, home.to_owned()).ok();
         }
-        let message = match &fleet {
-            Some(fleet) => {
-                read(fleet, &limits, owner).map_or_else(|e| Msg::Failed(e.to_string()), Msg::Data)
-            }
-            None => Msg::Failed("herdr machine list failed".into()),
+        let messages = match &fleet {
+            Some(fleet) => match read(fleet, &limits, owner) {
+                Ok((data, todo_error)) => {
+                    let mut messages = vec![Msg::Data(data)];
+                    messages.extend(todo_error.map(Msg::Failed));
+                    messages
+                }
+                Err(error) => vec![Msg::Failed(error.to_string())],
+            },
+            None => vec![Msg::Failed("herdr machine list failed".into())],
         };
-        if tx.send(message).is_err() {
+        if messages
+            .into_iter()
+            .any(|message| tx.send(message).is_err())
+        {
             return;
         }
         let until = Instant::now() + REFRESH;
@@ -250,4 +269,18 @@ pub fn command(
         stop.store(true, Ordering::Relaxed);
         outcome
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_todo_cache_error_becomes_a_notice_not_a_failed_read() {
+        let (todos, error) = owner_todos(Err(Error::Invalid("bad cache".into())), "w1:p1");
+        assert_eq!(todos, None);
+        assert_eq!(error.as_deref(), Some("todos: bad cache"));
+        let (todos, error) = owner_todos(Ok(Vec::new()), "w1:p1");
+        assert_eq!((todos, error), (None, None));
+    }
 }

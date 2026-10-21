@@ -75,6 +75,11 @@ pub struct TodoSections {
 
 const MAX_TODO_BYTES: u64 = 1024 * 1024;
 
+/// The service's cache of every live pane's sections. Protocol v3 changed its shape, so it has
+/// a new name: the sidebar can start before the service upgrades, and must not read the
+/// rendered-lines cache (`todos.json`) that an older service still writes.
+const TODO_CACHE: &str = "todo-sections.json";
+
 fn key(value: &str) -> String {
     Sha256::digest(value.as_bytes())
         .iter()
@@ -147,11 +152,11 @@ pub fn collect_todos(ledger: &Ledger) -> Result<()> {
             }
         }
     }
-    ledger.write("todos.json", &todos)
+    ledger.write(TODO_CACHE, &todos)
 }
 
 pub fn cached_todos(ledger: &Ledger) -> Result<Vec<TodoSections>> {
-    let todos: Vec<TodoSections> = ledger.read("todos.json")?.unwrap_or_default();
+    let todos: Vec<TodoSections> = ledger.read(TODO_CACHE)?.unwrap_or_default();
     for todo in &todos {
         validate_todo(todo)?;
     }
@@ -929,6 +934,14 @@ mod tests {
             .child("todo-lines")
             .write(&format!("{}.json", key("w1:p1")), &todo)
             .unwrap();
+        // An older service's rendered-lines cache is a different file, so it cannot hide these.
+        ledger
+            .write(
+                "todos.json",
+                &serde_json::json!([{"session": "s", "pane": "w1:p1", "lines": [], "width": 36}]),
+            )
+            .unwrap();
+        assert_eq!(cached_todos(&ledger).unwrap(), Vec::<TodoSections>::new());
         collect_todos(&ledger).unwrap();
         assert_eq!(cached_todos(&ledger).unwrap(), vec![todo.clone()]);
         let mut invalid = todo;
