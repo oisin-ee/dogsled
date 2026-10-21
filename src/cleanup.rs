@@ -23,6 +23,39 @@ pub struct Tree {
     pub head: String,
 }
 
+/// How a tree found after the plan relates to the planned tree.
+#[derive(Debug, PartialEq, Eq)]
+enum Drift {
+    Same,
+    /// The same repository, path, and branch at a new commit: live work, so a skip that the next
+    /// survey re-plans.
+    HeadMoved,
+    /// Another repository, path, or branch: another tree, so a failure.
+    Identity,
+}
+
+impl Tree {
+    /// Compare `now`, a fresh listing, with this planned tree. Every recheck uses this, so a new
+    /// commit is a skip and an identity change is a failure on each path.
+    fn drift(&self, now: &Tree) -> Drift {
+        if self.repo != now.repo || self.path != now.path || self.branch != now.branch {
+            Drift::Identity
+        } else if self.head != now.head {
+            Drift::HeadMoved
+        } else {
+            Drift::Same
+        }
+    }
+
+    /// The skip reason for `Drift::HeadMoved`.
+    fn head_moved(&self, subject: &str, now: &str) -> String {
+        format!(
+            "refuse {subject}: HEAD moved since the survey ({} -> {now})",
+            self.head
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub class: String,
@@ -1694,9 +1727,8 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
     else {
         return Ok(Recheck::Gone);
     };
-    if current.repo != planned.repo
-        || current.path != planned.path
-        || current.branch != planned.branch
+    let drift = planned.drift(&current);
+    if drift == Drift::Identity
         || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
         || current.head.is_empty()
     {
@@ -1707,11 +1739,10 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
     }
     // A new commit on the same branch is live work, like "not landed": a skip that the next
     // survey re-plans, not an identity change.
-    if current.head != planned.head {
-        return Ok(Recheck::Refused(format!(
-            "refuse {}: HEAD moved since the survey ({} -> {})",
-            planned.path, planned.head, current.head
-        )));
+    if drift == Drift::HeadMoved {
+        return Ok(Recheck::Refused(
+            planned.head_moved(&planned.path, &current.head),
+        ));
     }
     let evidence = crate::loss::Evidence::fetch(node.shell, &current.repo);
     if let Some(warning) = &evidence.warning {
@@ -1883,11 +1914,17 @@ fn delete_branch(shell: &dyn Shell, tree: &Tree) -> Result<Outcome> {
         eprintln!("{warning}");
     }
     let current = git(shell, &tree.repo, &["rev-parse", &reference])?;
-    if !current.ok() || current.stdout.trim() != tree.head {
+    if !current.ok() {
         return Err(Error::Invalid(format!(
             "refuse {}: branch identity changed",
             tree.branch
         )));
+    }
+    // A new commit on the branch is live work, like "not landed": a skip, not an identity change.
+    if current.stdout.trim() != tree.head {
+        return Ok(Outcome::Skipped(
+            tree.head_moved(&tree.branch, current.stdout.trim()),
+        ));
     }
     let loss = evidence.assess(shell, &reference, None)?;
     if !loss.loses_nothing() {
@@ -2064,11 +2101,25 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             requested.class, requested.id
         )));
     };
-    if current.tree != requested.tree {
-        return Err(Error::Invalid(format!(
+    let identity = || {
+        Error::Invalid(format!(
             "refuse {}: planned worktree identity changed",
             requested.id
-        )));
+        ))
+    };
+    match (&requested.tree, &current.tree) {
+        (None, None) => {}
+        (Some(planned), Some(now)) => match planned.drift(now) {
+            Drift::Same => {}
+            // A new commit after the plan is live work, as in the removal recheck.
+            Drift::HeadMoved => {
+                return Ok(Outcome::Skipped(
+                    planned.head_moved(&requested.id, &now.head),
+                ));
+            }
+            Drift::Identity => return Err(identity()),
+        },
+        _ => return Err(identity()),
     }
     // The fresh survey refuses it now: its state changed after the plan.
     if !current.removable {
@@ -2215,6 +2266,41 @@ mod tests {
     use super::*;
     use crate::shell::Fake;
     use serde_json::json;
+
+    fn planned_branch() -> Tree {
+        Tree {
+            repo: "/r".into(),
+            path: String::new(),
+            branch: "feature".into(),
+            head: "abc".into(),
+        }
+    }
+
+    #[test]
+    fn branch_tip_moved_after_the_plan_is_a_skip() {
+        let shell = Fake::new();
+        shell.on("git -C /r rev-parse refs/heads/feature", "def\n");
+        let outcome = delete_branch(&shell, &planned_branch()).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Skipped("refuse feature: HEAD moved since the survey (abc -> def)".into())
+        );
+    }
+
+    #[test]
+    fn branch_missing_after_the_plan_is_an_identity_failure() {
+        let shell = Fake::new();
+        shell.on_output(
+            "git -C /r rev-parse refs/heads/feature",
+            crate::shell::Output {
+                status: 128,
+                stdout: String::new(),
+                stderr: "unknown revision".into(),
+            },
+        );
+        let error = delete_branch(&shell, &planned_branch()).unwrap_err();
+        assert!(error.to_string().contains("branch identity changed"));
+    }
 
     struct Rig {
         shell: Fake,

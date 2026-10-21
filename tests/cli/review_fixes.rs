@@ -2,13 +2,15 @@ use super::watchdog::watchdog_rig;
 use super::*;
 
 #[test]
-fn removal_refuses_identity_changed_during_planning() {
+fn removal_skips_a_commit_made_during_planning() {
     let rig = watchdog_rig("identity-race");
     fs::write(rig.dir.join("change-during-plan"), "").unwrap();
     let out = rig.run(&["prune", "--yes", "worktrees"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("failed: refuse"));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("identity changed"));
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("skipped: refuse"));
+    assert!(stdout.contains("HEAD moved since the survey (abc -> def)"));
+    assert!(!stdout.contains("failed:"));
     assert!(!rig.log("git.log").contains("worktree remove"));
 }
 
