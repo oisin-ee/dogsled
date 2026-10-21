@@ -94,6 +94,20 @@ impl Rig {
             "herdr",
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/herdr.log"
+# The line Herdr types for `agent start`: the kind, then each argument shell-quoted.
+# A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
+if test "$1 $2" = 'agent start'; then
+  (
+    kind=$5; shift 8
+    typed=$kind
+    for arg in "$@"; do
+      q=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
+      typed="$typed '$q'"
+    done
+    printf '%s\n' "$typed" >> "$RIG/typed.log"
+    test "$(printf '%s\n' "$typed" | wc -c)" -le 1024
+  ) || { echo '{"error":{"code":"agent_start_input_failed","message":"line too long"}}' >&2; exit 1; }
+fi
 case "$*" in
   'machine list --json') cat "$RIG/machines.json" ;;
   'agent list') cat "${RIG_AGENTS:-$RIG/agents.json}" ;;
