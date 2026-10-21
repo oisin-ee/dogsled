@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Pi runs the stop gate on every completed stop. Before, it skipped stops that ended on the assistant's message, which is every normal stop in Pi 1.3, so Pi agents never requested a cleanup pass or heard gate reminders.
+
 ## 0.16.4 - 2026-10-20
 
 - Explicit close can retire the verified idle shell of an interrupted launch without deleting its checkout or inventing a task outcome. Unknown launch evidence and preparation holds remain intact for normal cleanup.

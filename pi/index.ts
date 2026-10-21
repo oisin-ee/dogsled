@@ -251,7 +251,10 @@ export default function dogsled(pi: ExtensionAPI) {
 		try { await units.settled(ctx); } catch (error) { ctx.ui.notify(`Dogsled unit acknowledgement pending: ${String(error)}`, "warning"); }
 	});
 	pi.on("agent_before_settle", async event => {
-		if (!owner || event.outcome !== "completed" || !event.context.canContinue || event.continue) return;
+		// `context.canContinue` describes the transcript before this handler's entries. A normal stop
+		// ends on the assistant, so it is false; the appended reminder is user context and makes the
+		// continuation valid. The gate must run on every completed stop: it also requests the sweep.
+		if (!owner || event.outcome !== "completed" || event.continue) return;
 		// The Rust gate owns selection and durable deduplication across all harnesses.
 		const result = await pi.exec(binary, ["hook", "gate"], { timeout: 6_000 });
 		if (result.code !== 0) throw new Error(`dogsled stop gate failed: ${result.stderr.trim() || `exit ${result.code}`}`);
