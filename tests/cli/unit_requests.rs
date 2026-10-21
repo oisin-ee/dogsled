@@ -212,13 +212,103 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
             .status
             .success()
     );
+    // A cancelled ticket never launched: the unit settles as not started, permanently.
     let (_, state) = operation(&rig, "observe", &execution_input(&executions[0]));
+    assert_eq!(state["phase"], "not_started");
+    assert_eq!(state["settlement"]["result"]["kind"], "not_started");
+    assert_eq!(
+        operation(&rig, "commit", &input).1["error"]["code"],
+        "REQUEST_CONFLICT"
+    );
+}
+
+fn committed_queued(name: &str) -> (Rig, Value, String) {
+    let rig = rig(name, true);
+    let execution = prepare(&rig);
+    let (code, receipt) = operation(&rig, "commit", &commit_input(&execution, 0));
+    assert_eq!(code, 0, "{receipt}");
+    assert_eq!(receipt["disposition"], "queued");
+    let ticket = receipt["ticket"].as_str().unwrap().to_owned();
+    (rig, execution, ticket)
+}
+
+fn set_ticket(rig: &Rig, state: &str, error: Value) {
+    let mut queue = rig.read("state/queue.json");
+    queue[0]["state"] = json!(state);
+    queue[0]["error"] = error;
+    rig.put("state/queue.json", &queue);
+}
+
+#[test]
+fn failed_launch_ticket_settles_unit_as_not_started_and_delivers_once() {
+    let (rig, execution, ticket) = committed_queued("unit-launch-failed");
+    let reason = "ssh netcup: exit 255: Connection closed by 100.119.94.92 port 2222";
+    set_ticket(&rig, "failed", json!(reason));
+    let (_, state) = operation(&rig, "observe", &execution_input(&execution));
+    assert_eq!(state["phase"], "not_started", "{state}");
+    let event = state["settlement"].clone();
+    assert_eq!(event["result"]["kind"], "not_started");
+    assert_eq!(event["execution"], execution);
+    assert_eq!(event["origin"], exported(0)["contract"]["ref"]);
+    let text = event["result"]["reason"].as_str().unwrap();
+    assert!(text.contains(reason) && text.contains(&ticket), "{text}");
+    // Replay is stable, and the owner receives it through the normal delivery lane.
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).1["settlement"],
+        event
+    );
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([event]));
+    let ack = json!({"execution":execution,"eventId":event["eventId"]});
+    assert_eq!(operation(&rig, "ack-settlement", &ack).1["applied"], true);
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+    assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+#[test]
+fn unfinished_or_possibly_launched_tickets_never_settle() {
+    // Negative control: a ticket still waiting for the service proves nothing.
+    let (rig, execution, _) = committed_queued("unit-pending-no-settle");
+    let (_, state) = operation(&rig, "observe", &execution_input(&execution));
+    assert_eq!(state["phase"], "queued");
+    assert!(state["settlement"].is_null());
+    // A failure after a launch request was saved may have reached the host.
+    let path = format!(
+        "state/admissions/{}.json",
+        execution["requestId"].as_str().unwrap()
+    );
+    let mut attempt = rig.read(&path);
+    attempt["launch"] = json!({"id":execution["requestId"],"action":{"type":"agent","kind":"pi","name":"n","message":"m"},"host":"local","cwd":"/tmp","pane":null,"workspace":null,"workspace_name":null,"owner":"w1:p1"});
+    rig.put(&path, &attempt);
+    set_ticket(&rig, "failed", json!("startup response lost"));
+    let (_, state) = operation(&rig, "observe", &execution_input(&execution));
     assert_eq!(state["phase"], "unresolved");
     assert!(state["settlement"].is_null());
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+}
+
+#[test]
+fn settling_does_not_touch_other_owners_or_prepared_units() {
+    let (rig, execution, _) = committed_queued("unit-settle-scope");
+    set_ticket(&rig, "cancelled", Value::Null);
+    let other = rig
+        .cmd(&["unit", "settlements"])
+        .env("HERDR_PANE_ID", "other")
+        .output()
+        .unwrap();
     assert_eq!(
-        operation(&rig, "commit", &input).1["disposition"],
-        "unresolved"
+        serde_json::from_slice::<Value>(&other.stdout).unwrap(),
+        json!([])
     );
+    // The owner still sees exactly its own event.
+    assert_eq!(
+        rig.json(&["unit", "settlements"])
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let _ = execution;
 }
 
 #[test]

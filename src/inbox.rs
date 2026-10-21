@@ -290,10 +290,13 @@ fn put(ledger: &Ledger, record: Record) -> Result<Record> {
         )));
     }
     if reader(ledger, &record.terminal)?.is_none() {
-        return Err(Error::Invalid(format!(
-            "{} has no dogsled inbox reader, so nothing would deliver the message; nothing was sent",
-            record.pane
-        )));
+        return Err(Error::Refused {
+            code: crate::error::Refusal::NoInboxReader,
+            detail: format!(
+                "{} has no dogsled inbox reader, so nothing would deliver the message; nothing was sent",
+                record.pane
+            ),
+        });
     }
     update(ledger, &record.terminal.clone(), |all| {
         if let Some(existing) = all.iter().find(|r| r.id == record.id) {
@@ -694,7 +697,7 @@ fn report(ledger: &Ledger, shell: &dyn crate::shell::Shell, s: &Sent, now: u64) 
     };
     match put_checked(ledger, shell, record) {
         // The sender itself may be gone; nobody is left to tell.
-        Ok(_) | Err(Error::Invalid(_)) => Ok(()),
+        Ok(_) | Err(Error::Invalid(_) | Error::Refused { .. }) => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -1043,7 +1046,7 @@ pub fn notify(
     };
     match put_checked(ledger, shell, record) {
         Ok(_) => Ok(true),
-        Err(Error::Invalid(_)) => Ok(false),
+        Err(Error::Invalid(_) | Error::Refused { .. }) => Ok(false),
         Err(e) => Err(e),
     }
 }

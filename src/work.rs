@@ -327,32 +327,69 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
     })
 }
 
-/// Keep the task in a file on the launch host: Herdr refuses a launch argument with a newline,
-/// and the file outlives the pane for review.
-pub(crate) fn task_file(ledger: &Ledger, id: &str, message: &str) -> Result<String> {
-    let dir = ledger.child("launches").dir;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{id}.task.md"));
-    std::fs::write(&path, message)?;
-    Ok(path.display().to_string())
+/// Herdr types `agent start` into the pane as one line. A terminal in canonical mode refuses a
+/// line over 1024 bytes (`agent_start_input_failed`). The task and the child contract never go on
+/// that line, so its length does not depend on them; what remains is the name, the profile's
+/// flags and paths on the launch host. This budget refuses a line those make too long. The
+/// margin covers the newline and Herdr's own quoting, which can differ from ours.
+pub const LINE_BUDGET: usize = 960;
+
+/// The bytes of the line Herdr types for `kind` with `args`, with each argument quoted for a
+/// POSIX shell.
+#[must_use]
+pub fn line_len(kind: &str, args: &[String]) -> usize {
+    kind.len()
+        + args
+            .iter()
+            .map(|arg| 1 + crate::shell::quote(arg).len())
+            .sum::<usize>()
 }
 
-/// The harness arguments after `--`: Pi's session name and profile flags, the child contract
-/// (`crate::done::CONTRACT`) as system instructions, then the task. A one-line task that cannot
-/// be read as an option or a file goes inline; any other is read from `task` (Pi's `@file`, or a
-/// pointer for Claude and Codex).
+/// The files on the launch host that hold the text a launch does not type: the task and the
+/// child contract. They outlive the pane for review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Files {
+    pub task: String,
+    pub contract: String,
+}
+
+impl Files {
+    /// The paths for launch `id` in the `launches` directory `dir`. Nothing is written.
+    #[must_use]
+    pub fn at(dir: &std::path::Path, id: &str) -> Self {
+        let path = |suffix: &str| dir.join(format!("{id}.{suffix}")).display().to_string();
+        Self {
+            task: path("task.md"),
+            contract: path("contract.md"),
+        }
+    }
+
+    /// Write the task and the child contract for launch `id`, and return their paths.
+    pub fn write(dir: &std::path::Path, id: &str, message: &str) -> Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let files = Self::at(dir, id);
+        std::fs::write(&files.task, message)?;
+        std::fs::write(&files.contract, crate::done::CONTRACT)?;
+        Ok(files)
+    }
+}
+
+/// The harness arguments after `--`: `lead` (the unit seed flags), Pi's session name and profile
+/// flags, the child contract (`crate::done::CONTRACT`) as system instructions, then the task.
+/// The task is always read from `files.task`: Pi's `@file`, or a pointer for Claude and Codex.
+/// Pi and Claude read the contract from `files.contract`. Codex has no file form for
+/// `developer_instructions`, so its contract stays inline; that text is fixed. No argument
+/// holds task text, so the line is the same for any task. A line over `LINE_BUDGET` is refused
+/// here, before Herdr can refuse it in the pane.
 pub fn agent_args(
     kind: &str,
     name: &str,
-    message: &str,
-    task: &str,
+    lead: &[String],
+    files: &Files,
     profile: Option<&crate::profiles::Profile>,
 ) -> Result<Vec<String>> {
-    let inline = !message.contains(['\n', '\r'])
-        && !message.starts_with(['-', '@'])
-        && message.len() <= 4_000;
-    let mut args = Vec::new();
-    match kind {
+    let mut args = lead.to_vec();
+    let task = match kind {
         "pi" => {
             args.extend(["--name".to_owned(), name.to_owned()]);
             args.extend(
@@ -360,21 +397,14 @@ pub fn agent_args(
                     .map(crate::profiles::Profile::pi_flags)
                     .unwrap_or_default(),
             );
-            args.extend([
-                "--append-system-prompt".to_owned(),
-                crate::done::CONTRACT.to_owned(),
-            ]);
-            args.push(if inline {
-                message.to_owned()
-            } else {
-                format!("@{task}")
-            });
+            args.extend(["--append-system-prompt".to_owned(), files.contract.clone()]);
+            format!("@{}", files.task)
         }
         "claude" | "codex" if profile.is_none() => {
             if kind == "claude" {
                 args.extend([
-                    "--append-system-prompt".to_owned(),
-                    crate::done::CONTRACT.to_owned(),
+                    "--append-system-prompt-file".to_owned(),
+                    files.contract.clone(),
                 ]);
             } else {
                 // Codex adds `developer_instructions` to its own; the value is TOML.
@@ -386,11 +416,10 @@ pub fn agent_args(
                     ),
                 ]);
             }
-            args.push(if inline {
-                message.to_owned()
-            } else {
-                format!("Your task is in {task}. Read that file and do the task.")
-            });
+            format!(
+                "Your task is in {}. Read that file and do the task.",
+                files.task
+            )
         }
         "claude" | "codex" => {
             return Err(Error::Invalid(
@@ -403,6 +432,15 @@ pub fn agent_args(
                 KINDS.join(", ")
             )));
         }
+    };
+    args.push(task);
+    let len = line_len(kind, &args);
+    if len > LINE_BUDGET {
+        return Err(Error::Invalid(format!(
+            "the {kind} launch line is {len} bytes, over the {LINE_BUDGET}-byte budget: Herdr \
+             types it as one terminal line, which holds at most 1024 bytes; the task is not on \
+             it, so shorten the name, the profile's flags or the state directory's path"
+        )));
     }
     Ok(args)
 }
@@ -893,4 +931,62 @@ pub fn job_host<'a>(fleet: &'a Fleet<'_>, id: &str, now: u64) -> Result<&'a Host
         }
     }
     Err(Error::Invalid(format!("unknown job {id}")))
+}
+
+#[cfg(test)]
+mod line_limit_tests {
+    use super::*;
+
+    fn files() -> Files {
+        Files::at(
+            std::path::Path::new("/state/launches"),
+            "r-1792603096562-36969-335",
+        )
+    }
+
+    fn build(kind: &str, name: &str) -> Result<Vec<String>> {
+        agent_args(kind, name, &[], &files(), None)
+    }
+
+    #[test]
+    fn the_line_is_the_same_for_every_task_and_fits() {
+        for kind in KINDS {
+            let args = build(kind, "cleanup-identity-rondo").unwrap();
+            assert!(line_len(kind, &args) <= LINE_BUDGET, "{kind}");
+            assert!(
+                args.last()
+                    .unwrap()
+                    .contains("r-1792603096562-36969-335.task.md")
+            );
+        }
+    }
+
+    #[test]
+    fn pi_and_claude_read_the_contract_from_a_file() {
+        for (kind, flag) in [
+            ("pi", "--append-system-prompt"),
+            ("claude", "--append-system-prompt-file"),
+        ] {
+            let args = build(kind, "n").unwrap();
+            let at = args.iter().position(|a| a == flag).unwrap();
+            assert_eq!(args[at + 1], files().contract, "{kind}");
+            assert!(
+                !args.iter().any(|a| a.contains("Dogsled started you")),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_name_is_refused() {
+        let error = build("pi", &"n".repeat(2_000)).unwrap_err().to_string();
+        assert!(error.contains("budget"), "{error}");
+    }
+
+    #[test]
+    fn a_long_state_path_is_refused_where_the_files_live() {
+        let dir = std::path::PathBuf::from(format!("/{}", "d".repeat(1_000)));
+        let files = Files::at(&dir, "r-1");
+        assert!(agent_args("pi", "n", &[], &files, None).is_err());
+    }
 }

@@ -64,6 +64,10 @@ Dogsled cannot know the exported digest after an external claim and before commi
 
 The provider must match execution and the complete origin before releasing a held claim. No matching claim produces no task mutation. A stale origin requires retained delivery. Returned and stopped settlements still require the original binding.
 
+## Launch that never happened
+
+A committed unit whose ticket ended `failed` or `cancelled` settles as `not_started`, with the ticket and its error as the reason. This needs the saved admission to hold no launch request and no result, so no worker can have started. The event is written under the admission lock by refresh, `unit observe`, and `unit settlements`. Delivery and acknowledgement follow the abandonment events above. A pending ticket, or a failure after a launch request was saved, stays `unresolved` until host evidence settles it. Such a unit cannot be committed again.
+
 ## Canonical export encoding
 
 Digest input follows schema declaration order: `version`, `provider`, `contract`, `prerequisites`, then `brief`. It omits `digest`. Nested objects follow their declared field order; arrays retain their order.

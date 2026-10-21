@@ -38,6 +38,7 @@ mod repository;
 mod runtime;
 mod service;
 mod shell;
+mod sidebar;
 mod sweep;
 mod transcript;
 mod unit_reply;
@@ -98,10 +99,11 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "error": error.to_string(), "deadline": matches!(error.root(), Error::Deadline(_)) })
-                );
+                let mut body = serde_json::json!({ "error": error.to_string(), "deadline": matches!(error.root(), Error::Deadline(_)) });
+                if let Error::Refused { code, .. } = error.root() {
+                    body["code"] = code.code().into();
+                }
+                println!("{body}");
             } else {
                 eprintln!("dogsled: {error}");
             }
@@ -192,6 +194,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         command @ Command::Board { .. } => {
             board::command(&shell, &ledger, &policy, home, command, cli.json)?;
         }
+        Command::Sidebar { owner } => sidebar::command(shell, &ledger, &policy, &home, owner)?,
         Command::Unit(command) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             return unit_request::run(&fleet, command);
