@@ -1655,13 +1655,23 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
     else {
         return Ok(Recheck::Gone);
     };
-    if current != *planned
+    if current.repo != planned.repo
+        || current.path != planned.path
+        || current.branch != planned.branch
         || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
         || current.head.is_empty()
     {
         return Err(Error::Invalid(format!(
             "refuse {}: worktree identity changed",
             planned.path
+        )));
+    }
+    // A new commit on the same branch is live work, like "not landed": a skip that the next
+    // survey re-plans, not an identity change.
+    if current.head != planned.head {
+        return Ok(Recheck::Refused(format!(
+            "refuse {}: HEAD moved since the survey ({} -> {})",
+            planned.path, planned.head, current.head
         )));
     }
     let evidence = crate::loss::Evidence::fetch(node.shell, &current.repo);
