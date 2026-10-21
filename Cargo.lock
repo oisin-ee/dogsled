@@ -253,6 +253,7 @@ dependencies = [
 name = "dogsled"
 version = "0.16.4"
 dependencies = [
+ "chrono",
  "clap",
  "nix",
  "rmcp",

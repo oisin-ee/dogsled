@@ -38,6 +38,14 @@ pub struct Policy {
     /// PATH, but `mise` itself is, so the default goes through `mise x`.
     pub remote_command: Vec<String>,
     pub cleanup: Cleanup,
+    pub quota: Quota,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Quota {
+    /// Non-secret `CLIProxy` origin. The management key belongs only in macOS Keychain.
+    pub management_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -61,6 +69,7 @@ impl Default for Policy {
                 .map(ToString::to_string)
                 .collect(),
             cleanup: Cleanup::default(),
+            quota: Quota::default(),
         }
     }
 }
