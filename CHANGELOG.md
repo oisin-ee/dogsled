@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- `place`, `agent`, `spawn`, and `run` with `--branch` no longer recreate a branch that exists only on `origin` from a stale local base. When the local branch is missing, dogsled fetches `origin` first. A branch on `origin` starts at `origin/<branch>` and tracks it, and `--base` is refused for it because the branch is not new. A new branch starts at `--base`, else the fetched tip of origin's default branch, never the local `main`, and has no upstream. Before, a branch that cleanup had removed locally came back at the stale local `main`, and a push from it could regress the remote branch. A failed fetch stops placement. A repository without `origin` keeps its local default branch.
+
 ## 0.20.0 - 2026-10-21
 
 - The Herdr plugin installs the checksum-verified release binary for its own version at `bin/dogsled` during install, building from source only when no archive exists, and its board pane runs that binary directly. Before, a shell wrapper ran whichever `dogsled` was on the Herdr server's `PATH`; an older binary rejected `--side` and the pane closed at once with no message. The shell wrappers are gone.

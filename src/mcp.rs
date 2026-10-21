@@ -91,10 +91,12 @@ pub struct Placement {
     /// Pin to a host label, such as `netcup`. Default: the host with the most room.
     #[serde(default)]
     pub host: Option<String>,
-    /// Create or reuse this branch in a linked worktree; a child with a branch is a writer.
+    /// Create or reuse this branch in a linked worktree; a child with a branch is a writer. A
+    /// branch that exists only on `origin` is reused from there, with that upstream.
     #[serde(default)]
     pub branch: Option<String>,
-    /// The base of a new branch. Default: the repository's default branch.
+    /// The base of a new branch. Default: the fetched tip of origin's default branch. Refused
+    /// for a branch that exists locally or on `origin`.
     #[serde(default)]
     pub base: Option<String>,
     /// The repository or directory to work in. Default: the server's working directory.

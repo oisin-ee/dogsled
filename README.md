@@ -514,8 +514,8 @@ Dogsled reads `dogsled.toml` from the main checkout, also for a worktree on an o
 
 With `--branch`, `place`, `agent`, and `run` use the branch's worktree on the selected host:
 
-1. Dogsled refuses an invalid branch name, `--base` for a branch that exists, a branch checked out in the main checkout, and a worktree that has another lock. It needs a reachable Herdr server.
-2. A branch that has a worktree reuses it without `setup`. Otherwise `git worktree add` makes `<dir>/<branch>` with each `/` as `-`. A new branch starts from `--base`, else the remote default branch's local name (else `main`).
+1. Dogsled refuses an invalid branch name, `--base` for a branch that exists locally or on `origin`, a branch checked out in the main checkout, and a worktree that has another lock. It needs a reachable Herdr server.
+2. A branch that has a worktree reuses it without `setup`. Otherwise `git worktree add` makes `<dir>/<branch>` with each `/` as `-`. When the local branch is missing, dogsled runs `git fetch origin` first. A branch that exists only on `origin` starts at `origin/<branch>` and tracks it. A new branch starts from `--base`, else the fetched tip of origin's default branch (`origin/HEAD`), never a stale local `main`. It has no upstream. A repository without `origin` uses its local default branch. A failed fetch stops placement.
 3. The worktree is locked with the reason `agent:worktree`. The lock marks it as agent-owned, and `git worktree remove` refuses it until close or prune unlocks it.
 4. `setup` runs in a new worktree. If a command fails, dogsled removes the new worktree and the branch it made, and placement fails. The reservation stays.
 5. `herdr worktree open --no-focus` opens the worktree as a Herdr workspace linked to the repository. When the main checkout had no open workspace, Herdr opens one as the anchor, and dogsled records its id in the Git common directory as `agent-worktree-anchor`. A workspace that already showed the worktree may belong to a running child, so that is an error.
