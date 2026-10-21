@@ -84,13 +84,57 @@ pub fn place(fleet: &Fleet, host: Option<&str>, now: u64) -> Result<Placement> {
     })
 }
 
-fn marker(host: &HostReport) -> &'static str {
-    if !host.reachable || host.service == "down" {
-        " ?"
-    } else if !host.headroom.as_ref().is_some_and(|h| h.eligible) {
-        " ▲"
-    } else {
-        ""
+/// Whether a host can take work, as `status --line` marks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostState {
+    Eligible,
+    /// Reachable, but admission would refuse new work (` ▲`).
+    NoHeadroom,
+    /// Not reachable, or its service is down (` ?`).
+    Unreachable,
+}
+
+impl HostState {
+    pub fn of(host: &HostReport) -> Self {
+        if !host.reachable || host.service == "down" {
+            Self::Unreachable
+        } else if !host.headroom.as_ref().is_some_and(|h| h.eligible) {
+            Self::NoHeadroom
+        } else {
+            Self::Eligible
+        }
+    }
+
+    /// The text `status --line` appends after the load.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Unreachable => " ?",
+            Self::NoHeadroom => " ▲",
+            Self::Eligible => "",
+        }
+    }
+}
+
+/// The first line of a host, as typed values. `status --line` and the sidebar both read it,
+/// so they never disagree and nothing parses the rendered text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBrief {
+    pub label: String,
+    /// Busy cores over cores (`11/12`), `load N/cores` before the first sample, or `-`.
+    pub load: String,
+    pub state: HostState,
+    /// False until the host has reported a probe; its line is then just `?`.
+    pub measured: bool,
+}
+
+impl HostBrief {
+    pub fn of(host: &HostReport) -> Self {
+        Self {
+            label: one_line(&host.host.label),
+            load: load(host),
+            state: HostState::of(host),
+            measured: host.probe.is_some(),
+        }
     }
 }
 
@@ -112,15 +156,11 @@ pub fn line(status: &Status) -> String {
             .hosts
             .iter()
             .map(|host| {
-                if host.probe.is_none() {
-                    format!("{} ?", one_line(&host.host.label))
+                let brief = HostBrief::of(host);
+                if brief.measured {
+                    format!("{} {}{}", brief.label, brief.load, brief.state.marker())
                 } else {
-                    format!(
-                        "{} {}{}",
-                        one_line(&host.host.label),
-                        load(host),
-                        marker(host)
-                    )
+                    format!("{} ?", brief.label)
                 }
             })
             .collect::<Vec<_>>()
@@ -152,12 +192,13 @@ fn summary(host: &HostReport) -> String {
             )
         },
     );
+    let brief = HostBrief::of(host);
     format!(
-        "{} {}{} {details} service: {}{}",
-        one_line(&host.host.label),
-        load(host),
-        marker(host),
-        host.service,
+        "{} {}{} {details} {}{}",
+        brief.label,
+        brief.load,
+        brief.state.marker(),
+        host.condition(),
         host.sampled_ms.map_or_else(String::new, |sampled| format!(
             " (snapshot {} ago)",
             crate::watchdog::age(crate::ledger::now_ms().saturating_sub(sampled))
@@ -165,7 +206,21 @@ fn summary(host: &HostReport) -> String {
     )
 }
 
+/// The fleet brief for `status --brief`: every host, the counts, and the last pass's findings.
 pub fn brief(status: &Status) -> String {
+    let mut rows = fleet(status);
+    if let Some(sweep) = &status.sweep
+        && (!sweep.applied.failures.is_empty()
+            || !sweep.applied.repositories.is_empty()
+            || !sweep.applied.unlinked.is_empty())
+    {
+        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings, {} held worktrees. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len(), sweep.applied.unlinked.len()));
+    }
+    format!("{}\n", rows.join("\n"))
+}
+
+/// The host rows and the work counts, without cleanup findings.
+pub fn fleet(status: &Status) -> Vec<String> {
     // Keep every host even when the fleet exceeds the prompt's line budget.
     // Larger fleets share rows; no host disappears into an omitted count.
     let mut rows = vec![String::new(); status.hosts.len().min(5)];
@@ -208,14 +263,7 @@ pub fn brief(status: &Status) -> String {
             .filter(|a| a.stalled_since_ms.is_some())
             .count()
     ));
-    if let Some(sweep) = &status.sweep
-        && (!sweep.applied.failures.is_empty()
-            || !sweep.applied.repositories.is_empty()
-            || !sweep.applied.unlinked.is_empty())
-    {
-        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings, {} held worktrees. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len(), sweep.applied.unlinked.len()));
-    }
-    format!("{}\n", rows.join("\n"))
+    rows
 }
 
 fn item_lines(status: &Status, lines: &mut Vec<String>) {

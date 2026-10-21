@@ -2,9 +2,9 @@
 
 id = "dogsled"
 name = "dogsled"
-version = "0.20.0"
+version = "0.21.0"
 min_herdr_version = "0.9.1"
-description = "Docks the dogsled work board beside Herdr's left sidebar."
+description = "Docks the dogsled sidebar beside Herdr's left sidebar."
 platforms = ["macos", "linux"]
 
 # Installs the checksum-verified release binary for this version at bin/dogsled,
@@ -20,10 +20,10 @@ title = "Toggle dogsled board"
 contexts = ["pane"]
 command = ["bin/dogsled", "board", "--toggle"]
 
-# Cached quotas, owned work, and provider-rendered todos. `board --open` splits it right of
-# the tab's leftmost pane, swaps it into that slot, and sizes it to 38 cells.
+# The sidebar app: Hosts, Agents & Jobs, and Todos in three framed panels. `board --open`
+# splits it right of the tab's leftmost pane, swaps it into that slot, and sizes it to 38 cells.
 [[panes]]
-id = "board"
+id = "sidebar"
 title = "dogsled"
 placement = "split"
-command = ["bin/dogsled", "board", "--side", "--watch"]
+command = ["bin/dogsled", "sidebar"]

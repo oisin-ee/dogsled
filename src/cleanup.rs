@@ -1422,6 +1422,42 @@ fn pane_holds(usage: &Usage, seen: &Seen, decider: Decider) -> Vec<String> {
     held
 }
 
+/// A shell in the checkout that the host snapshot reports idle for less than the shell rule's
+/// age is still in use. `place` marks its preparation used at once, so a worktree it just made
+/// holds only such a shell, and removal would race the owner's first commands. A shell with no
+/// reported age is not held: that is the existing rule.
+fn young_shells(node: &Node<'_>, usage: &Usage) -> Result<Vec<String>> {
+    let now = crate::ledger::now_ms();
+    let Some(snapshot) = node
+        .ledger
+        .read::<Snapshot>("host.json")?
+        .filter(|s| s.fresh(now))
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(usage
+        .holders
+        .iter()
+        .filter(|p| p.agent.is_none())
+        .filter(|p| {
+            snapshot
+                .probe
+                .panes
+                .iter()
+                .find(|s| s.pane_id == p.pane_id && s.idle_shell)
+                .and_then(|s| s.idle_since_ms)
+                .is_some_and(|since| now.saturating_sub(since) < crate::watchdog::IDLE_SHELL)
+        })
+        .map(|p| {
+            format!(
+                "{} is a shell idle for less than {}",
+                p.pane_id,
+                crate::watchdog::age(crate::watchdog::IDLE_SHELL)
+            )
+        })
+        .collect())
+}
+
 /// Holds are independent of loss and identical in both scopes.
 fn held(
     node: &Node<'_>,
@@ -1433,6 +1469,9 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = pane_holds(usage, seen, decider);
+    if matches!(decider, Decider::Cleanup) {
+        held.extend(young_shells(node, usage)?);
+    }
     if usage
         .holders
         .iter()

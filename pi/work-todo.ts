@@ -15,7 +15,14 @@ export interface TodoView {
 	update(state: unknown): void;
 	dispose(): void;
 }
+export type TodoStatus = "in_progress" | "pending" | "completed" | "abandoned";
+export const TODO_STATUSES: readonly TodoStatus[] = ["in_progress", "pending", "completed", "abandoned"];
+export interface TodoChild { status: TodoStatus; text: string; description?: string; unit: string | null }
+export interface TodoItem { status: TodoStatus; text: string; description?: string; review: boolean; unit: string | null; children: TodoChild[] }
+/** Typed rows the sidebar draws itself. Always four sections, in `TODO_STATUSES` order. */
+export interface TodoSection { status: TodoStatus; count: number; items: TodoItem[] }
 export interface TodoDisplay {
+	sections: TodoSection[];
 	empty: boolean;
 	summary: string;
 	current: string;
@@ -24,7 +31,7 @@ export interface TodoDisplay {
 	createView(host: TodoViewHost): TodoView;
 }
 export interface TodoSnapshot {
-	version: 2;
+	version: 3;
 	presenter: string;
 	request: string;
 	publisher: string;
@@ -34,31 +41,19 @@ export interface TodoSnapshot {
 	display: TodoDisplay;
 }
 
-export interface TodoLines {
+/** What the sidebar reads from the ledger: the provider's typed sections, never rendered lines. */
+export interface TodoPayload {
 	session: string;
 	branch: string | null;
 	revision: number;
 	current: string;
 	pane: string;
-	width: number;
-	lines: string[];
-}
-
-/** Serialize only the provider's presentation. Never inspect its opaque state. */
-export function renderTodoLines(next: TodoSnapshot, pane: string, host: TodoViewHost, width = 48): TodoLines {
-	const view = next.display.createView(host);
-	try {
-		const lines = view.render(width);
-		if (!Array.isArray(lines) || !lines.every(line => typeof line === "string")) throw new Error("Invalid todo render output");
-		return { session: next.session, branch: next.branch, revision: next.revision, current: next.display.current, pane, width, lines };
-	} finally { view.dispose(); }
+	sections: TodoSection[];
 }
 
 /** Atomic per-pane publication into Dogsled's ledger. One ordered writer per Pi session. */
 export class TodoPublisher {
 	private path: string | undefined;
-	private width = 48;
-	private height = 10_000;
 	private published: TodoSnapshot | undefined;
 	private queue = Promise.resolve();
 	private readonly pane: string;
@@ -66,20 +61,17 @@ export class TodoPublisher {
 	constructor(pane: string, failed: (error: unknown) => void) { this.pane = pane; this.failed = failed; }
 
 	configure(value: unknown): void {
-		if (!record(value) || typeof value["path"] !== "string"
-			|| !Number.isInteger(value["width"]) || Number(value["width"]) < 1 || Number(value["width"]) > 65535
-			|| !Number.isInteger(value["height"]) || Number(value["height"]) < 1 || Number(value["height"]) > 10_000) throw new Error("Invalid todo publication path");
-		if (this.path !== value["path"] || this.width !== value["width"] || this.height !== value["height"]) this.published = undefined;
+		if (!record(value) || typeof value["path"] !== "string") throw new Error("Invalid todo publication path");
+		if (this.path !== value["path"]) this.published = undefined;
 		this.path = value["path"];
-		this.width = Number(value["width"]);
-		this.height = Number(value["height"]);
 	}
 
-	publish(next: TodoSnapshot | undefined, theme: TodoViewHost["theme"]): void {
+	publish(next: TodoSnapshot | undefined): void {
 		const path = this.path;
 		if (!path || (next && next === this.published)) return;
-		// Render now, while this revision still owns the provider capability.
-		const payload = next ? renderTodoLines(next, this.pane, { theme, height: () => this.height, requestRender() {} }, this.width) : undefined;
+		const payload: TodoPayload | undefined = next
+			? { session: next.session, branch: next.branch, revision: next.revision, current: next.display.current, pane: this.pane, sections: next.display.sections }
+			: undefined;
 		this.published = next;
 		this.queue = this.queue.then(async () => {
 			if (!payload) { await rm(path, { force: true }); return; }
@@ -102,9 +94,14 @@ export class TodoPublisher {
 
 type Bus = ExtensionAPI["events"];
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
+function isSections(value: unknown): value is TodoSection[] {
+	return Array.isArray(value) && value.length === TODO_STATUSES.length
+		&& value.every((section, index) => record(section) && section["status"] === TODO_STATUSES[index]
+			&& Number.isSafeInteger(section["count"]) && Array.isArray(section["items"]));
+}
 function isDisplay(value: unknown): boolean {
 	return record(value) && typeof value["empty"] === "boolean" && typeof value["summary"] === "string"
-		&& typeof value["current"] === "string" && typeof value["text"] === "string" && "state" in value && typeof value["createView"] === "function";
+		&& typeof value["current"] === "string" && typeof value["text"] === "string" && isSections(value["sections"]) && "state" in value && typeof value["createView"] === "function";
 }
 function isView(value: unknown): value is TodoView {
 	return record(value) && ["render", "handleInput", "invalidate", "update", "dispose"].every(key => typeof value[key] === "function");
@@ -112,7 +109,7 @@ function isView(value: unknown): value is TodoView {
 
 /** Validate the independently installed provider's capability, never its task schema. */
 export function snapshot(value: unknown): TodoSnapshot | undefined {
-	if (!record(value) || value["version"] !== 2 || typeof value["presenter"] !== "string" || typeof value["request"] !== "string"
+	if (!record(value) || value["version"] !== 3 || typeof value["presenter"] !== "string" || typeof value["request"] !== "string"
 		|| typeof value["publisher"] !== "string" || typeof value["session"] !== "string"
 		|| (value["branch"] !== null && typeof value["branch"] !== "string")
 		|| !Number.isSafeInteger(value["revision"]) || Number(value["revision"]) < 1 || !isDisplay(value["display"])) return undefined;
@@ -169,7 +166,7 @@ export class WorkTodo {
 		this.retired.clear();
 		this.subscriptions = [
 			this.bus.on("oisin.todo.ready", value => {
-				if (!record(value) || value["version"] !== 2 || typeof value["publisher"] !== "string") { this.reject(); return; }
+				if (!record(value) || value["version"] !== 3 || typeof value["publisher"] !== "string") { this.reject(); return; }
 				if (this.retired.has(value["publisher"])) return;
 				this.ask();
 			}),
@@ -181,7 +178,7 @@ export class WorkTodo {
 				this.changed();
 			}),
 			this.bus.on("oisin.work.open", value => {
-				if (record(value) && value["version"] === 2 && value["presenter"] === this.presenter && value["request"] === this.request) this.open();
+				if (record(value) && value["version"] === 3 && value["presenter"] === this.presenter && value["request"] === this.request) this.open();
 			}),
 		];
 		this.ask();
@@ -190,7 +187,7 @@ export class WorkTodo {
 	private ask(): void {
 		this.release();
 		this.request = randomUUID();
-		this.bus.emit("oisin.work.request", { version: 2, presenter: this.presenter, request: this.request });
+		this.bus.emit("oisin.work.request", { version: 3, presenter: this.presenter, request: this.request });
 	}
 
 	private reject(error?: unknown): void {
@@ -233,7 +230,7 @@ export class WorkTodo {
 			if (this.current !== next) return;
 			this.changed();
 			if (this.current !== next) return;
-			this.bus.emit("oisin.work.claim", { version: 2, presenter: this.presenter, request: this.request, publisher: next.publisher, revision: next.revision });
+			this.bus.emit("oisin.work.claim", { version: 3, presenter: this.presenter, request: this.request, publisher: next.publisher, revision: next.revision });
 		} catch (error) { this.reject(error); }
 	}
 
@@ -254,7 +251,7 @@ export class WorkTodo {
 		const claimed = this.current !== undefined;
 		this.current = undefined;
 		this.disposeViews();
-		if (claimed) this.bus.emit("oisin.work.release", { version: 2, presenter: this.presenter, request: this.request });
+		if (claimed) this.bus.emit("oisin.work.release", { version: 3, presenter: this.presenter, request: this.request });
 	}
 
 	stop(): void {

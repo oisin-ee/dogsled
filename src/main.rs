@@ -38,6 +38,7 @@ mod repository;
 mod runtime;
 mod service;
 mod shell;
+mod sidebar;
 mod sweep;
 mod transcript;
 mod unit_reply;
@@ -192,6 +193,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         command @ Command::Board { .. } => {
             board::command(&shell, &ledger, &policy, home, command, cli.json)?;
         }
+        Command::Sidebar { owner } => sidebar::command(shell, &ledger, &policy, &home, owner)?,
         Command::Unit(command) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             return unit_request::run(&fleet, command);
@@ -259,8 +261,12 @@ fn hook(
             let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
             let status = commands::status(&fleet)?;
             let owner = std::env::var("HERDR_PANE_ID").ok();
+            let found = match (&owner, &status.sweep) {
+                (Some(owner), Some(report)) => gate::findings(ledger, shell, owner, report)?,
+                _ => gate::Findings::default(),
+            };
             print(false, &(), || {
-                context::format(harness, event, &status, owner.as_deref())
+                context::format(harness, event, &status, owner.as_deref(), &found)
             })
         }
     }
