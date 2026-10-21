@@ -48,6 +48,8 @@ pub struct HostReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
     pub jobs: Vec<crate::jobs::Job>,
+    #[serde(default)]
+    pub handoffs: Vec<crate::done::Mark>,
     /// When an unreachable peer is read again, after backoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_ms: Option<u64>,
@@ -202,6 +204,8 @@ struct Cached {
     available: bool,
     #[serde(default)]
     running: Option<bool>,
+    #[serde(default)]
+    handoffs: Vec<crate::done::Mark>,
     /// Safe words for a reachable host only; an unreachable one carries its `failure`.
     error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +401,7 @@ impl<'a> Fleet<'a> {
                 reachable: true,
                 available: true,
                 running: report.running,
+                handoffs: report.handoffs,
                 error: None,
                 failure: None,
                 retry: crate::backoff::Backoff::default(),
@@ -412,6 +417,7 @@ impl<'a> Fleet<'a> {
             available: false,
             running: None,
             error: None,
+            handoffs: Vec::new(),
             failure: Some(Failure::of(&e)),
             retry: crate::backoff::Backoff::default(),
         });
@@ -469,6 +475,7 @@ impl<'a> Fleet<'a> {
             error,
             failure,
             jobs,
+            handoffs: cached.handoffs,
             retry_ms: (!cached.reachable && cached.retry.attempts > 0)
                 .then_some(cached.retry.next_ms),
         }
@@ -528,9 +535,13 @@ impl<'a> Fleet<'a> {
                 return Ok(cached.clone());
             }
             let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
-            let (snapshot, reachable, available, running, error, failure) = match self
-                .remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
-            {
+            let (snapshot, reachable, available, running, handoffs, error, failure) = match self
+                .remote::<Option<
+                crate::node::SnapshotReport,
+            >>(
+                host,
+                &["snapshot".into()],
+            ) {
                 Ok(Some(report)) => {
                     let available = report.snapshot.is_some();
                     (
@@ -540,6 +551,7 @@ impl<'a> Fleet<'a> {
                         true,
                         available,
                         report.running,
+                        report.handoffs,
                         None,
                         None,
                     )
@@ -549,6 +561,7 @@ impl<'a> Fleet<'a> {
                     true,
                     false,
                     None,
+                    Vec::new(),
                     Some("host.json is missing; service: down".into()),
                     None,
                 ),
@@ -557,6 +570,7 @@ impl<'a> Fleet<'a> {
                     false,
                     false,
                     None,
+                    Vec::new(),
                     None,
                     Some(Failure::of(&e)),
                 ),
@@ -573,6 +587,7 @@ impl<'a> Fleet<'a> {
                 reachable,
                 available,
                 running,
+                handoffs,
                 error,
                 failure,
                 retry,

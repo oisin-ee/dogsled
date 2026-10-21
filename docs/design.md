@@ -99,6 +99,11 @@ Admission uses the shared status cache and SSH transport, unlike the local-only 
 `agent` also queues and supports `--wait`. All admission waits accept `--max` (default 30m).
 A service interruption during admission marks that ticket failed on restart, preventing an automatic duplicate launch.
 
+MCP `spawn` persists a ticket before startup, for both legacy requests and committed unit requests.
+The admission worker starts the child under the existing setup limit, independent of the MCP call budget.
+CLI agent launches remain synchronous. Startup errors retain their original classification and add recent pane output when available.
+An interrupted startup can recover that output on confirmation. Diagnostic reads do not change launch receipts, holds, or closure checks.
+
 ### 4. No wait without a deadline: stalls and check-ins
 
 Rule: an agent that owns an open child or job hears from dogsled at least every 30 min while it is idle, until that work ends. Nothing depends on the agent remembering.
@@ -108,7 +113,7 @@ Rule: an agent that owns an open child or job hears from dogsled at least every 
 - `dogsled agent` (spawn for Claude Code, Codex, and scripts): the caller's pane.
 - Children from elsewhere: `dogsled track <host> <pane>`.
 
-A job item closes when its job ends. An agent item closes when its pane closes, or when the sweep closes it. At each completed turn, the sweep captures the reply and puts it in the owner's inbox. It closes a clean reader, or a writer whose branch landed, only when the child called `dogsled done` during the turn that ended (`src/done.rs`). An idle child without `done` waits for input: a question, or replies from its own children. A writer with commits to land stays open under TO LAND.
+A job item closes when its job ends. `done` validates the caller’s agent checkout while the caller can still fix it. Its mark uses launch/item, pane, and harness session identity. The first idle/done observation seals it, even without restored counters. The child host captures the reply, closes the pane and agent checkout, and retains the branch. The owner imports the durable result and shows unlanded branches under TO LAND without a live child. Only inbox work accepted during the marked working turn can cancel the mark. Later messages are refused. Idle without `done` is never closure consent.
 
 **Stall.** An agent is stalled when Herdr shows it `working` or `unknown` and its transcript (`transcript` in host.json) has not changed for 10 min. The screen is not a signal: spinners and elapsed timers redraw it while a tool call hangs. An agent with no transcript is never marked stalled. Unit 3 confirms where Claude Code and Codex transcripts are, because Herdr may report only a session id for them.
 
@@ -148,17 +153,19 @@ Squash and stack candidates must change every path in the net diff of their run.
 
 A tip also lands through a local or remote-tracking ref that contains it and passes the integration check. The result names that ref. `git for-each-ref --contains` bounds the search. Direct checks of those refs cover transitive containers without recursion or alias loops. Each `loss::Evidence` pass caches direct proofs by resolved tip and default-branch object IDs. Aliases share proofs, but changed IDs require a new proof. No cache survives the pass. Shorter runs derive net changes from loaded first-parent diffs instead of a Git subprocess for every endpoint.
 
-Prune and the sweep use the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches. An open agent item holds its checkout in prune and the sweep, so only `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until its work lands. An idle or done agent that has not called `dogsled done` holds its checkout, except for an explicit `dogsled close`. Idle shells, done agents without open items, and workspaces alone are not holds. The process check skips each holder pane's shell, and every descendant of an agent pane's shell; a shell's background job still holds. Foreign locks prevent removal.
+Prune and the sweep use the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches. A preparation stops pending when its launch has a final receipt or its local preparation failed; a failed preparation also releases its own record. An open agent item holds its checkout in prune and the sweep, so only `close` ends it and keeps the reply. Automatic handoff retains the local branch, so unlanded commits do not hold the checkout. Shared checkouts release only the finished pane, in automatic and explicit close alike. A launch without a final receipt whose recorded terminal no longer runs in its pane (the pane is gone or replaced) has settled: start and recovery refuse that pane, so its preparation no longer holds. An idle or done agent that has not called `dogsled done` holds its checkout, except for an explicit `dogsled close`. Idle shells (past that age), done agents without open items, and workspaces alone are not holds. In prune and the sweep, a shell that the host snapshot reports idle for less than 15 minutes holds its checkout; a shell with no reported age does not, and an explicit `close` ignores this hold. The process check skips each holder pane's shell, and every descendant of an agent pane's shell; a shell's background job still holds. Foreign locks prevent removal.
 
-An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Missing or unreadable repositories produce warnings without stopping other repositories. Registrations remain unchanged.
+An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Unreadable repositories produce warnings without stopping other repositories. Absent remembered repositories produce removable registrations. Doctor changes no registrations.
 
-The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `panes`. Orphan close uses the same loss rule. Prune also shows non-removable findings, expired jobs, stale registrations, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
+Loss assessment and deletion recovery require the checkout's own `.git` and a Git top-level path that resolves to the checkout. Invalid identities return a path-specific refusal before status reads. They never count as clean or report a parent repository's changes. A worktree whose directory remains while Git no longer lists it, calls it prunable, or finds no `.git` file is an `unlinked` hold: never removed, never assessed for loss, and refused by `close` before anything closes.
+
+The sweep applies only removable `worktrees`, `branches`, `workspaces`, `panes`, and absent remembered `repositories`. Orphan close uses the same loss rule. Prune also shows non-removable findings, expired jobs, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
 
 Both scopes use one pane rule and exclude the caller and focused panes. An empty shell closes after its job ends, its directory disappears, its launch becomes final, or its agent item closes. A shell without a Dogsled record needs 15 minutes continuously at an empty prompt. Agents retain the one-day rule and require `done`, with no open children.
 
 Launch recovery owns final-shell checks for explicit close and cleanup. Refused, never-attempted, and unknown-outcome launches release empty panes under the request and pane locks. Recovery verifies terminal identity, agent absence, and foreground processes without changing receipts. An unfinished launch holds its checkout only before pane allocation completes or while the attempted start has its matching agent. Final launch panes close separately before worktree removal, not through a whole-workspace close.
 
-Every removal rechecks identity and safety. Worktree removal runs teardown, restores only deletion-only paths from held HEAD, closes holders, unlocks, removes without force, and deletes a held branch. Restoration refuses other dirt and uses literal paths. Both creation and removal use the existing setup budget. A failed entry does not stop the others. Completion-event behavior remains independent of doctor cleanup.
+Every removal rechecks identity and safety. Worktree removal runs teardown, restores only deletion-only paths from held HEAD, closes holders, unlocks, removes without force, and deletes a held branch. Restoration refuses other dirt and uses literal paths. Both creation and removal use the existing setup budget. A failed entry does not stop the others. A recheck refusal because state changed after the plan (now dirty, held, not landed, or busy, or its HEAD moved because of a new commit) keeps the entry and records it in `skipped`, not `failures`. A moved HEAD with the same repository, path, and branch reads `HEAD moved since the survey (<old> -> <new>)`, and the next survey re-plans the entry. Identity changes (repository, path, branch, main checkout, or empty HEAD), missing entries, command errors, and unreadable evidence stay failures. Another actor can remove a worktree after the survey or the recheck lists it, before the checks that run Git inside it. A Git error there is not a failure when a fresh listing no longer has the worktree and its path is absent. The survey then plans a registration drop for a registered worktree, and the recheck drops the registration and reports the worktree as already removed. A Git error in a worktree whose directory still exists stays unreadable in the survey and a failure in the recheck. Completion-event behavior remains independent of doctor cleanup.
 
 Stop writes a durable `sweep-request.json` and sends a local datagram to `sweep.sock`. The hook does not wait for cleanup.
 The service checks the durable request at startup, on notification, and on each publication iteration. It surveys only when a request exists.
@@ -166,10 +173,12 @@ A socket bind failure produces a warning instead of stopping the service. Stop r
 Requests during a pass remain pending until the worker completes another pass. A service lock prevents concurrent service instances.
 Each pass records its times, removals, failures, repository warnings, and landed-dirty findings in `sweeps.jsonl` and `sweep.json`.
 History entries include `ts_ms`; each new pass removes entries older than seven days. Successful removals never trigger a gate reminder.
-Status exposes the latest report. Prompt context summarizes failures and warnings on one line.
-The gate delivers warnings and failures once per distinct set through `gate.json`.
-Landed-dirty messages require equal resolved main-repository paths for the owner pane and the finding.
-Repository warnings request a dogsled agent to repair the registration, not manual state edits.
+Status exposes the latest report, and `status --brief` summarizes it on one line. Prompt context counts only the caller's own findings.
+The gate delivers findings once per recipient’s distinct set through `gate.json`.
+Failures preserve their cleanup entry identity in `failure_entries`, beside the existing failure strings.
+A notice reaches only the agent that created the work: the owner of an open item whose pane holds the worktree or pane, or the requester of a recorded launch into the worktree. An owner can itself be a child.
+Without a creator, no agent receives the notice. Host-level failures and repository warnings stay in status.
+The launch record keeps the creator after the child's pane closes, so landed-dirty findings still reach it.
 Dirty-worktree guidance preserves wanted changes and requires user approval before discarding abandoned work.
 
 Placement registers repositories in `repositories.json`, separately from worktree entries. Removal preserves repository registration.
@@ -177,7 +186,7 @@ Doctor also discovers repositories from the caller, live pane directories, Herdr
 The remote default branch defines merged state, with local `main` as the fallback. Unknown merge status prevents removal.
 Prune compares current Git path, branch, HEAD, and repository with the approved plan immediately before removal.
 Removal runs the repository's `dogsled.toml` `teardown` in the worktree, then a non-forced `git worktree remove`. A teardown failure keeps the worktree. The branch is deleted only when the integration check finds it integrated.
-Missing or unreadable disk paths remain report-only findings without discarding other candidates.
+Prune and the sweep remove absent remembered registrations after a locked recheck. Removal deletes no checkout data and preserves existing worktree records. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.
 
 ### 7. Prompt context
 

@@ -19,6 +19,62 @@ pub struct Notice {
     text: String,
 }
 
+/// The findings of one cleanup pass about work that one agent created, as `id: detail` lines.
+/// Findings about work that no agent created, or that another agent created, stay in
+/// `dogsled status`; they never reach an agent that did not create the work. Repository
+/// warnings and failures without a target are about the host, which no agent created.
+#[derive(Debug, Default)]
+pub struct Findings {
+    pub failures: BTreeSet<String>,
+    pub holds: BTreeSet<String>,
+    pub landed_dirty: BTreeSet<String>,
+}
+
+pub fn findings(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    owner: &str,
+    report: &crate::sweep::Report,
+) -> Result<Findings> {
+    let applied = &report.applied;
+    if applied.failure_entries.is_empty()
+        && applied.unlinked.is_empty()
+        && applied.landed_dirty.is_empty()
+    {
+        return Ok(Findings::default());
+    }
+    let items = crate::items::list(ledger)?;
+    let panes = crate::cleanup::current_panes(shell)?;
+    let launches = crate::launch::requests(ledger)?;
+    let recipient =
+        |entry: &crate::cleanup::Entry| created(entry, owner, &items, &panes, &launches);
+    let failures = applied
+        .failures
+        .iter()
+        .filter(|detail| {
+            applied
+                .failure_entries
+                .iter()
+                .any(|failure| &failure.detail == *detail && recipient(&failure.entry))
+        })
+        .cloned()
+        .collect();
+    let landed_dirty = applied
+        .landed_dirty
+        .iter()
+        .filter(|entry| recipient(entry))
+        .filter_map(|entry| {
+            let tree = entry.tree.as_ref()?;
+            Some(format!("{} (branch {}): its commits are already in the default branch. Dirty paths ({} total): {}", tree.path, tree.branch, entry.dirty_count.unwrap_or(entry.dirty_paths.len()), entry.dirty_paths.join(", ")))
+        })
+        .collect();
+    Ok(Findings {
+        failures,
+        holds: entries(&applied.unlinked, &recipient),
+        landed_dirty,
+    })
+}
+
 pub fn notices(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
@@ -27,60 +83,89 @@ pub fn notices(
     let Some(report) = crate::sweep::latest(ledger)? else {
         return Ok(Vec::new());
     };
+    let Findings {
+        failures,
+        holds,
+        landed_dirty,
+    } = findings(ledger, shell, owner, &report)?;
     let mut notices = Vec::new();
-
-    if !report.applied.failures.is_empty() {
-        let failures: BTreeSet<_> = report.applied.failures.iter().cloned().collect();
+    if !failures.is_empty() {
         notices.push(Notice {
             key: "failures",
             signature: failures.iter().map(|s| (s.clone(), None, false)).collect(),
             text: format!("Cleanup pass at {} ms failed:\n{}\nRead `dogsled status` for the last pass. Hand the fix to a dogsled agent. Do not bypass cleanup safeguards.", report.finished_ms, failures.into_iter().collect::<Vec<_>>().join("\n")),
         });
     }
-    if !report.applied.repositories.is_empty() {
-        let warnings: BTreeSet<_> = report
-            .applied
-            .repositories
-            .iter()
-            .map(|e| format!("{}: {}", e.id, e.detail))
-            .collect();
+    if !holds.is_empty() {
         notices.push(Notice {
-            key: "repositories",
-            signature: warnings.iter().map(|s| (s.clone(), None, false)).collect(),
-            text: format!("Cleanup repository warnings:\n{}\nCheck the repository entries in {} and {}, or cleanup.repositories in the configuration. Hand the fix to a dogsled agent: `dogsled agent --profile general --name <name> --message-file <brief>`. Name the repository and its state file entry in the brief. Do not edit the state by hand.", warnings.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("repositories.json").display(), ledger.dir.join("worktrees.json").display()),
+            key: "unlinked",
+            signature: holds.iter().map(|s| (s.clone(), None, false)).collect(),
+            text: format!("Cleanup holds worktrees that Git can no longer remove:\n{}\nThe owner decides what happens to each directory. Report it to the user; do not delete it yourself. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on it, and do not edit {} by hand.", holds.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("worktrees.json").display()),
         });
     }
-    if report.applied.landed_dirty.is_empty() {
-        return Ok(notices);
-    }
-    let panes = crate::cleanup::current_panes(shell)?;
-    let root = panes
-        .iter()
-        .find(|p| p.pane_id == owner)
-        .and_then(|p| p.foreground_cwd.as_deref().or(p.cwd.as_deref()))
-        .map(|path| crate::cleanup::main_root(shell, path))
-        .transpose()?
-        .flatten()
-        .and_then(|root| std::fs::canonicalize(root).ok());
-    let mut findings = BTreeSet::new();
-    for entry in &report.applied.landed_dirty {
-        let Some(tree) = &entry.tree else {
-            continue;
-        };
-        let repo = std::fs::canonicalize(&tree.repo).ok();
-        if root.is_none() || root != repo {
-            continue;
-        }
-        findings.insert(format!("{} (branch {}): its commits are already in the default branch. Dirty paths ({} total): {}", tree.path, tree.branch, entry.dirty_count.unwrap_or(entry.dirty_paths.len()), entry.dirty_paths.join(", ")));
-    }
-    if !findings.is_empty() {
+    if !landed_dirty.is_empty() {
         notices.push(Notice {
             key: "landed-dirty",
-            signature: findings.iter().map(|s| (s.clone(), None, true)).collect(),
-            text: format!("Landed worktrees still have dirty files:\n{}\nRead the dirty files. If they are wanted, commit them on a branch and land them. If the work is abandoned, ask the user before you discard it. Then run `dogsled close <pane>` or `dogsled prune worktrees`. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on the checkout.", findings.into_iter().collect::<Vec<_>>().join("\n")),
+            signature: landed_dirty.iter().map(|s| (s.clone(), None, true)).collect(),
+            text: format!("Landed worktrees still have dirty files:\n{}\nRead the dirty files. If they are wanted, commit them on a branch and land them. If the work is abandoned, ask the user before you discard it. Then run `dogsled close <pane>` or `dogsled prune worktrees`. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on the checkout.", landed_dirty.into_iter().collect::<Vec<_>>().join("\n")),
         });
     }
     Ok(notices)
+}
+
+/// The entries addressed to this recipient, as `id: detail` lines.
+fn entries(
+    entries: &[crate::cleanup::Entry],
+    recipient: &impl Fn(&crate::cleanup::Entry) -> bool,
+) -> BTreeSet<String> {
+    entries
+        .iter()
+        .filter(|entry| recipient(entry))
+        .map(|e| format!("{}: {}", e.id, e.detail))
+        .collect()
+}
+
+/// An entry concerns only the agent that created its work: the owner of a live local item
+/// whose pane holds the entry, or the requester of a launch into the entry's worktree.
+/// An agent that created nothing there hears nothing, whether Dogsled launched it or not.
+fn created(
+    entry: &crate::cleanup::Entry,
+    owner: &str,
+    items: &[crate::items::Item],
+    panes: &[crate::probe::Pane],
+    launches: &[crate::work::Launch],
+) -> bool {
+    let tree = entry
+        .tree
+        .as_ref()
+        .map(|tree| tree.path.as_str())
+        .or_else(|| (entry.class == "worktrees").then_some(entry.id.as_str()))
+        .filter(|path| !path.is_empty());
+    let holders: Vec<_> = match entry.class.as_str() {
+        "panes" => panes
+            .iter()
+            .filter(|pane| pane.pane_id == entry.id)
+            .collect(),
+        "workspaces" => panes
+            .iter()
+            .filter(|pane| pane.workspace_id.as_deref() == Some(entry.id.as_str()))
+            .collect(),
+        _ => tree
+            .map(|path| crate::worktree::holders(panes, path, None))
+            .unwrap_or_default(),
+    };
+    let holds = items
+        .iter()
+        .filter(|item| item.closed_ms.is_none() && item.host == crate::hosts::LOCAL)
+        .filter(|item| item.owner_pane == owner)
+        .any(|item| holders.iter().any(|pane| pane.pane_id == item.pane));
+    let requested = tree.is_some_and(|path| {
+        launches
+            .iter()
+            .filter(|launch| launch.owner == owner && launch.host == crate::hosts::LOCAL)
+            .any(|launch| crate::worktree::same(&launch.cwd, path))
+    });
+    holds || requested
 }
 
 /// The children to land, as one comparable value: each item with its commits and dirt.

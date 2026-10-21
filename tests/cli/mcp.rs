@@ -227,6 +227,98 @@ fn mcp_send_writes_one_inbox_record_from_the_callers_pane() {
 }
 
 #[test]
+fn mcp_spawn_with_capacity_hands_startup_to_the_service() {
+    for fails in [false, true] {
+        let rig = Rig::new(&format!("mcp-startup-handoff-{fails}"));
+        rig.snapshot("state/host.json", now(), 0.0, 8);
+        // Admission behavior is independent of the CI runner's real probe load/disk.
+        rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+        if fails {
+            launch_retry::npm_start_fails(&rig);
+        }
+        let mut client = Client::start(&rig);
+        let (result, error) = client.call("spawn", &json!({"name":"worker","task":"go"}));
+        assert!(!error, "{result}");
+        assert_eq!(result["queued"], true, "{result}");
+        let ticket = rig.read("state/queue.json")[0].clone();
+        assert_eq!(ticket["id"], result["ticket"]);
+        assert_eq!(ticket["state"], "pending");
+        assert!(!rig.log("herdr.log").contains("agent start"));
+        assert!(!rig.log("herdr.log").contains("tab create"));
+        let out = rig.run(&["serve", "--once", "--interval", "1"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ticket = rig.read("state/queue.json")[0].clone();
+        assert_eq!(
+            rig.log("herdr.log").matches("agent start worker ").count(),
+            1
+        );
+        if fails {
+            assert_eq!(ticket["state"], "pending", "{ticket}");
+            assert!(
+                ticket["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(launch_retry::NPM_FAILURE),
+                "{ticket}"
+            );
+            let id = ticket["request"]["id"].as_str().unwrap();
+            let progress = rig.read(&format!("state/launches/{id}.progress.json"));
+            assert!(
+                progress["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(launch_retry::NPM_FAILURE),
+                "{progress}"
+            );
+            assert_eq!(progress["confirmed"], false);
+            assert!(!rig.log("herdr.log").contains("pane close"));
+        } else {
+            assert_eq!(ticket["state"], "admitted", "{ticket}");
+            assert_eq!(ticket["result"]["pane"], "w2:p1");
+        }
+    }
+}
+
+#[test]
+fn mcp_prepared_spawn_with_capacity_queues_idempotently_before_startup() {
+    use super::unit_requests::*;
+    let rig = rig("mcp-prepared-handoff", false);
+    // Admission behavior is independent of the CI runner's real probe load/disk.
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    let execution = prepare(&rig);
+    let input = commit_input(&execution, 0);
+    let mut client = Client::start(&rig);
+    let (receipt, failed) = client.call("spawn", &json!({"preparedUnit":input}));
+    assert!(!failed, "{receipt}");
+    assert_eq!(receipt["disposition"], "queued");
+    assert_eq!(receipt["execution"], execution);
+    assert_eq!(admission(&rig, &execution)["unit"]["committed"], input);
+    assert_eq!(
+        client.call("spawn", &json!({"preparedUnit":input})).0,
+        receipt
+    );
+    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
+    assert!(!rig.log("herdr.log").contains("agent start"));
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ticket = rig.read("state/queue.json")[0].clone();
+    assert_eq!(ticket["state"], "admitted", "{ticket}");
+    let (launched, failed) = client.call("spawn", &json!({"preparedUnit":input}));
+    assert!(!failed, "{launched}");
+    assert_eq!(launched["disposition"], "launched");
+    assert_eq!(launched["pane"], "w2:p1");
+    assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+}
+
+#[test]
 fn mcp_spawn_returns_queued_at_once_when_every_host_is_full() {
     let rig = Rig::new("mcp-full");
     rig.snapshot("state/host.json", now(), 9999.0, 1);

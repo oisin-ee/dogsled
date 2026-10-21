@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod recovery;
-pub use recovery::{PaneLaunch, Survey, close_unfinished, final_pane};
+pub use recovery::{PaneLaunch, Survey, close_unfinished, final_pane, launched, requests};
+#[cfg(test)]
+mod diagnostic_tests;
 #[cfg(test)]
 mod pane_tests;
 
@@ -69,6 +71,33 @@ fn pending(progress: &Progress, agents: &[crate::probe::Agent]) -> bool {
     })
 }
 
+/// Find the durable launch identity for a pane, independent of Herdr's terminal ids.
+pub fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
+    let found = recovery::candidates(&ledger.child("launches"), Some(pane))?;
+    match found.as_slice() {
+        [] => Ok(None),
+        [(id, _)] => Ok(Some(id.clone())),
+        _ => Err(Error::Invalid(format!("{pane}: competing launch records"))),
+    }
+}
+
+/// A seeded worker's end-of-turn hook must persist its immutable terminal evidence before
+/// its process closes. This is host-local and does not wait for the owner's acknowledgement.
+pub fn handoff_ready(ledger: &Ledger, pane: &str) -> Result<bool> {
+    Ok(recovery::candidates(&ledger.child("launches"), Some(pane))?
+        .iter()
+        .all(|(_, progress)| {
+            progress.request.unit.is_none() || progress.terminal_receipt.is_some()
+        }))
+}
+
+/// A seeded result uses the acknowledged transcript branch, not its newest message.
+pub fn handoff_reply(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
+    Ok(recovery::candidates(&ledger.child("launches"), Some(pane))?
+        .into_iter()
+        .find_map(|(_, progress)| progress.terminal_receipt.map(|receipt| receipt.text)))
+}
+
 pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {
     let receipts = ledger.child("launches");
     receipts.with_lock(&request.id, || {
@@ -111,6 +140,9 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
                 Ok(())
             })?;
             progress.confirmed = true;
+            // Stamp after native start (or matching-agent recovery), on the pane's host.
+            // Persist with confirmation so retries return the same evidence to the owner.
+            progress.result["launch_confirmed_ms"] = json!(crate::ledger::now_ms());
             receipts.write(&progress_file, &progress)?;
         }
         // Parent registration can fail after startup; the confirmed result survives it.
@@ -130,7 +162,7 @@ fn refused(
     pane: Option<(&str, &str)>,
     error: Error,
 ) -> Result<Error> {
-    let Error::Command { stderr, .. } = &error else {
+    let Error::Command { stderr, .. } = error.root() else {
         return Ok(error);
     };
     let code = serde_json::from_str::<Value>(stderr)
@@ -287,14 +319,24 @@ fn start_or_reconcile(
     }
     if progress.attempted {
         // An idle shell could mean the task ran and exited, not that it never ran.
-        return Err(Error::Launch(format!(
-            "launch {}: no matching agent in {pane}; startup outcome is unknown; inspect before resubmitting; {}",
+        let previous = progress
+            .error
+            .as_deref()
+            .unwrap_or("startup response was interrupted");
+        // A replay may find diagnostics that were unavailable at the original deadline.
+        let detail = match startup_output(shell, pane) {
+            Some(output) if !previous.contains(&output) => {
+                format!("{previous}; startup output from {pane}:\n{output}")
+            }
+            _ => previous.to_owned(),
+        };
+        let error = Error::Launch(format!(
+            "launch {}: no matching agent in {pane}; startup outcome is unknown; inspect before resubmitting; {detail}",
             request.id,
-            progress
-                .error
-                .as_deref()
-                .unwrap_or("startup response was interrupted")
-        )));
+        ));
+        progress.error = Some(detail);
+        ledger.child("launches").write(file, progress)?;
+        return Err(error);
     }
     // Native agent.start owns shell readiness and its atomic busy refusal. An eager
     // process snapshot here rejects startup before that supported boundary can run.
@@ -323,11 +365,47 @@ fn start_or_reconcile(
     let receipts = ledger.child("launches");
     receipts.write(file, progress)?;
     if let Err(error) = shell.run_setup_ok("herdr", &args) {
+        let error = startup_error(shell, pane, error);
         progress.error = Some(error.to_string());
         receipts.write(file, progress)?;
         return Err(error);
     }
     Ok(())
+}
+
+fn startup_error(shell: &dyn Shell, pane: &str, error: Error) -> Error {
+    match startup_output(shell, pane) {
+        Some(output) => Error::Startup {
+            source: Box::new(error),
+            pane: pane.into(),
+            output,
+        },
+        None => error,
+    }
+}
+
+/// Read startup diagnostics from the terminal even when no agent was recognized.
+/// A missing pane or failed read must not replace the original launch failure.
+fn startup_output(shell: &dyn Shell, pane: &str) -> Option<String> {
+    let output = shell
+        .run_ok(
+            "herdr",
+            &[
+                "pane".into(),
+                "read".into(),
+                pane.into(),
+                "--source".into(),
+                "recent-unwrapped".into(),
+                "--lines".into(),
+                "120".into(),
+                "--format".into(),
+                "text".into(),
+            ],
+        )
+        .ok()?;
+    let text = crate::activity::plain(&output.stdout);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 fn validate_seed<'a>(

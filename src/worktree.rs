@@ -31,6 +31,8 @@ pub struct Listed {
     pub path: String,
     pub branch: Option<String>,
     pub lock: Option<String>,
+    /// Git calls it prunable: it is not a working tree any more, and `remove` refuses it.
+    pub prunable: bool,
 }
 
 fn git_words(dir: &Path, args: &[&str]) -> Vec<String> {
@@ -132,6 +134,8 @@ pub fn list(shell: &dyn Shell, checkout: &Path) -> Result<Vec<Listed>> {
                 current.branch = Some(branch.into());
             } else if let Some(reason) = line.strip_prefix("locked") {
                 current.lock = Some(reason.trim().into());
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                current.prunable = true;
             }
         }
     }
@@ -148,6 +152,35 @@ pub fn lock_reason(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Opt
 
 fn listed(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<bool> {
     Ok(list(shell, checkout)?.iter().any(|w| same(&w.path, path)))
+}
+
+/// Why `git worktree remove` cannot remove `path` although its directory remains: Git no
+/// longer lists it, calls it prunable, or its `.git` file is gone. `None` when Git still links
+/// it or the directory is absent.
+pub fn unlinked(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Option<&'static str>> {
+    if !Path::new(path).exists() {
+        return Ok(None);
+    }
+    let found = list(shell, checkout)?
+        .into_iter()
+        .find(|w| same(&w.path, path));
+    Ok(unlinked_reason(path, found.map(|w| w.prunable)))
+}
+
+/// Why Git cannot remove the existing directory `path`, from Git's entry for it: `None` when Git
+/// does not list it, otherwise whether Git calls it prunable.
+pub fn unlinked_reason(path: &str, prunable: Option<bool>) -> Option<&'static str> {
+    match prunable {
+        None => Some("worktree unregistered by git"),
+        Some(true) => Some("git marks the worktree prunable; git cannot remove it"),
+        Some(false)
+            if std::fs::symlink_metadata(Path::new(path).join(".git"))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Some("worktree has no .git file; git cannot remove it")
+        }
+        Some(false) => None,
+    }
 }
 
 /// Herdr's view of the repository's worktrees: each path and its open workspace.
@@ -286,6 +319,13 @@ pub fn remove(
     caller_workspace: Option<&str>,
     evidence: &crate::loss::Evidence,
 ) -> Result<Removed> {
+    // Git cannot remove it, and its content is unknown: close nothing, unlock nothing.
+    if let Some(reason) = unlinked(shell, &tree.checkout, &tree.path)? {
+        return Err(refuse(&format!(
+            "{}: {reason}; directory remains",
+            tree.path
+        )));
+    }
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
     if Path::new(&tree.path).is_dir() {
@@ -346,7 +386,8 @@ pub fn remove(
         )));
     }
     crate::cleanup::forget(ledger, &tree.path)?;
-    let branch_deleted = !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
+    let branch_deleted =
+        !evidence.keeps_branch() && !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
     let anchor_closed = close_anchor(shell, &tree.checkout, caller_workspace)?;
     Ok(Removed {
         branch_deleted,

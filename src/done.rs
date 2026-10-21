@@ -1,10 +1,5 @@
-//! A child's own word that its task is complete. An idle agent only waits for input: it may
-//! have asked a question, or it may wait for its own children. Only a `done` mark lets dogsled
-//! close an agent, or remove the checkout it works in, without being asked.
-//!
-//! The mark lives on the agent's host, keyed by its Herdr terminal. It covers the turn that
-//! called `done`. The first completion after the mark seals it. A later turn, or an inbox record
-//! delivered to the agent, ends it, so a child that gets more work must call `done` again.
+//! A durable, terminal handoff owned by the child's host. Idle without `done` is not consent.
+//! Identity is launch/item + pane + harness session, never the restorable Herdr terminal.
 
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
@@ -14,53 +9,70 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const FILE: &str = "done.json";
 
-/// What dogsled tells each child it starts, as one line: Herdr refuses an argument with a
-/// newline.
+/// One line because Herdr refuses newlines in an argument.
 pub const CONTRACT: &str = "Dogsled started you as a child agent. When your whole task is \
 complete, call the dogsled `done` tool (or run `dogsled done`) once, then end your turn with \
-your final reply. Do not call `done` when you stop to ask a question, wait for input, or still \
-own open children. Dogsled closes your pane and worktree only after `done`.";
+your final reply. Do not call `done` when you ask a question, wait for input, or own open \
+children. Commit your changes first. `done` hands your work back: Dogsled closes your pane \
+and agent worktree when this turn ends, keeps your branch, and leaves landing to your owner. \
+After that turn, messages cannot reopen you; more work needs a new child.";
 
-/// One agent's `done`, for the terminal that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Branch {
+    pub repo: String,
+    pub name: String,
+    pub ahead: u64,
+    pub landed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mark {
     pub pane: String,
-    /// Herdr's state counter when `done` ran. The completion of that turn has a higher number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<u64>,
-    /// The completion of the turn that called `done`, once it is seen.
+    /// Legacy completion number, also used for reply deduplication. Zero means counters reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed: Option<u64>,
     pub marked_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<Branch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<crate::items::Reply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_ms: Option<u64>,
 }
 
-/// Marks by Herdr terminal id.
 type Marks = BTreeMap<String, Mark>;
 
 fn waiting(agent: &Agent) -> bool {
     matches!(agent.state.as_str(), "idle" | "done")
 }
 
-/// `mark` against the agent now in its terminal. `None` ends it: a new turn started after the
-/// sealed one.
-fn judge(mark: &Mark, agent: &Agent) -> Option<Mark> {
-    if matches!(agent.state.as_str(), "working" | "blocked") {
-        return mark.sealed.is_none().then(|| mark.clone());
+fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
+    if let Some(id) = crate::launch::identity(ledger, pane)? {
+        return Ok(Some(id));
     }
-    let Some(seq) = agent.completion_seq.filter(|_| waiting(agent)) else {
-        return Some(mark.clone());
-    };
-    match mark.sealed {
-        Some(sealed) => (seq == sealed).then(|| mark.clone()),
-        None if mark.after.is_none_or(|after| seq > after) => Some(Mark {
-            sealed: Some(seq),
-            ..mark.clone()
-        }),
-        None => Some(mark.clone()),
-    }
+    Ok(crate::items::list(ledger)?
+        .into_iter()
+        .find(|i| i.pane == pane && i.host == crate::hosts::LOCAL && i.closed_ms.is_none())
+        .map(|i| i.id))
 }
 
-/// The panes that own open items or queued tickets on this host: they still wait for children.
+fn key(mark: &Mark) -> String {
+    // JSON tuples avoid ambiguous concatenation, and the key is never a file path.
+    serde_json::json!([mark.item, mark.pane, mark.session]).to_string()
+}
+
+fn matches(mark: &Mark, agent: &Agent) -> bool {
+    mark.pane == agent.pane && mark.session == agent.agent_session
+}
+
 fn owners(ledger: &Ledger) -> Result<BTreeMap<String, Vec<String>>> {
     let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for item in crate::items::list(ledger)?
@@ -68,7 +80,7 @@ fn owners(ledger: &Ledger) -> Result<BTreeMap<String, Vec<String>>> {
         .filter(|i| i.closed_ms.is_none())
     {
         owners
-            .entry(item.owner_pane.clone())
+            .entry(item.owner_pane)
             .or_default()
             .push(item.name.unwrap_or(item.pane));
     }
@@ -77,64 +89,79 @@ fn owners(ledger: &Ledger) -> Result<BTreeMap<String, Vec<String>>> {
         .filter(|t| matches!(t.state.as_str(), "pending" | "admitting"))
     {
         owners
-            .entry(ticket.request.owner.clone())
+            .entry(ticket.request.owner)
             .or_default()
             .push(format!("queued {}", ticket.id));
     }
     Ok(owners)
 }
 
-/// The marks that still hold, and the panes whose agents are done: sealed, still in that
-/// completion, and owning no open work.
-fn verdicts(ledger: &Ledger, marks: &Marks, agents: &[Agent]) -> Result<(Marks, BTreeSet<String>)> {
-    let owners = owners(ledger)?;
-    let mut kept = Marks::new();
-    let mut done = BTreeSet::new();
-    for (terminal, mark) in marks {
-        let Some(agent) = agents
-            .iter()
-            .find(|a| a.terminal_id.as_deref() == Some(terminal.as_str()))
-        else {
-            continue;
-        };
-        let Some(mark) = judge(mark, agent) else {
-            continue;
-        };
-        if mark.sealed.is_some()
-            && waiting(agent)
-            && agent.completion_seq == mark.sealed
-            && !owners.contains_key(&agent.pane)
-        {
-            done.insert(agent.pane.clone());
+/// Preserve unmatched legacy records until their pane is observable. Migration never deletes
+/// a mark, even if its old terminal disappeared before the first read by this version.
+fn migrate(ledger: &Ledger, marks: Marks, agents: &[Agent]) -> Result<Marks> {
+    let mut migrated = Marks::new();
+    for (old_key, mut mark) in marks {
+        if old_key != key(&mark) {
+            if let Some(agent) = agents.iter().find(|a| a.pane == mark.pane) {
+                mark.session.clone_from(&agent.agent_session);
+                mark.name.clone_from(&agent.name);
+                mark.item = identity(ledger, &mark.pane)?;
+            } else {
+                migrated.insert(old_key, mark);
+                continue;
+            }
         }
-        kept.insert(terminal.clone(), mark);
+        let new_key = key(&mark);
+        if migrated.contains_key(&new_key) {
+            migrated.insert(old_key, mark);
+        } else {
+            migrated.insert(new_key, mark);
+        }
     }
-    Ok((kept, done))
+    Ok(migrated)
 }
 
-/// The service's pass: seal and end marks, and say on each agent whether it is done.
+/// A successful mark was made while working. Its first idle/done observation ends that turn,
+/// even after restore with no `completion_seq`. Working/blocked/unknown never authorize close.
+/// Once sealed it is terminal: a later turn cannot revoke it, but busy panes still never close.
+fn seal(mark: &mut Mark, agent: &Agent) {
+    if mark.sealed.is_none() && waiting(agent) {
+        mark.sealed = Some(agent.completion_seq.unwrap_or(0));
+    }
+}
+
 pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
     ledger.with_lock("done", || {
-        let marks: Marks = ledger.read(FILE)?.unwrap_or_default();
-        let (kept, done) = verdicts(ledger, &marks, agents)?;
-        for agent in agents.iter_mut() {
-            agent.done = done.contains(&agent.pane);
+        let before: Marks = ledger.read(FILE)?.unwrap_or_default();
+        let mut marks = migrate(ledger, before.clone(), agents)?;
+        let owners = owners(ledger)?;
+        for agent in agents {
+            let mut done = false;
+            for mark in marks.values_mut().filter(|m| matches(m, agent)) {
+                seal(mark, agent);
+                done |=
+                    mark.sealed.is_some() && waiting(agent) && !owners.contains_key(&agent.pane);
+            }
+            agent.done = done;
         }
-        if kept != marks {
-            ledger.write(FILE, &kept)?;
+        if before != marks {
+            ledger.write(FILE, &marks)?;
         }
         Ok(())
     })
 }
 
-/// The panes on this host whose agents are done, judged against `agents`, a fresh list.
 pub fn finished(ledger: &Ledger, agents: &[Agent]) -> Result<BTreeSet<String>> {
-    let marks: Marks = ledger.read(FILE)?.unwrap_or_default();
-    Ok(verdicts(ledger, &marks, agents)?.1)
+    let mut agents = agents.to_vec();
+    observe(ledger, &mut agents)?;
+    Ok(agents
+        .into_iter()
+        .filter(|a| a.done)
+        .map(|a| a.pane)
+        .collect())
 }
 
-/// `dogsled done`: the agent in `pane` says its task is complete. Refused while it owns open
-/// children or queued work, because their replies would reach no one.
+/// Validate while the caller can still repair its work. No mark is written on a refusal.
 pub fn mark(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
@@ -142,172 +169,289 @@ pub fn mark(
     now: u64,
 ) -> Result<Mark> {
     let agent = crate::inbox::local_agent(shell, pane)?;
-    if waiting(&agent) {
+    if agent.state != "working" {
         return Err(Error::Invalid(format!(
             "{pane} is {}; call done during the turn that completes your task",
             agent.state
         )));
     }
-    let terminal = agent.terminal_id.clone().ok_or_else(|| {
-        Error::Invalid(format!(
-            "Herdr reports no terminal id for {pane}; upgrade Herdr"
-        ))
-    })?;
     if let Some(open) = owners(ledger)?.get(pane) {
         return Err(Error::Invalid(format!(
-            "{pane} still owns open work: {}. Wait for each child's reply, land or close it, \
-             then call done",
+            "{pane} still owns open work: {}. Finish or close each child and cancel queued work before calling done",
             open.join(", ")
         )));
     }
-    // The agent calls `done` during its turn. The next completion after this state seals it.
+    let session = agent.agent_session.clone().ok_or_else(|| {
+        Error::Invalid(format!(
+            "{pane}: Herdr reports no agent session; cannot record a durable done"
+        ))
+    })?;
+    let item = identity(ledger, pane)?;
+    let branch = preflight(shell, &agent)?;
     let mark = Mark {
         pane: pane.into(),
+        item,
+        session: Some(session),
+        name: agent.name,
         after: agent.state_change_seq,
         sealed: None,
         marked_ms: now,
+        branch,
+        reply: None,
+        closed_ms: None,
     };
     ledger.with_lock("done", || {
         let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
-        marks.insert(terminal, mark.clone());
+        if let Some(existing) = marks.get(&key(&mark))
+            && existing.sealed.is_some()
+        {
+            return Err(Error::Invalid(format!(
+                "{pane} finished; start a new child for more work"
+            )));
+        }
+        marks.insert(key(&mark), mark.clone());
         ledger.write(FILE, &marks)
     })?;
     Ok(mark)
 }
 
-/// End `terminal`'s mark: it received work after it called `done`.
-pub fn clear(ledger: &Ledger, terminal: &str) -> Result<()> {
+fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Option<Branch>> {
+    let panes = if agent.cwd.is_none() {
+        crate::cleanup::current_panes(shell)?
+    } else {
+        Vec::new()
+    };
+    let cwd = agent.cwd.as_deref().or_else(|| {
+        panes
+            .iter()
+            .find(|p| p.pane_id == agent.pane)
+            .and_then(|p| p.cwd.as_deref())
+    });
+    let Some(cwd) = cwd else { return Ok(None) };
+    let Some(tree) = crate::worktree::linked(shell, cwd)? else {
+        return Ok(None);
+    };
+    if crate::worktree::lock_reason(shell, &tree.checkout, &tree.path)?.as_deref()
+        != Some(crate::worktree::AGENT_LOCK)
+    {
+        return Ok(None);
+    }
+    let dirty = crate::loss::dirty_paths(shell, &tree.path, false)?;
+    if !dirty.is_empty() {
+        return Err(Error::Invalid(format!(
+            "{} has uncommitted or untracked changes: {}. Commit or preserve these changes before calling done",
+            tree.path,
+            dirty.join(", ")
+        )));
+    }
+    let repo = tree.checkout.display().to_string();
+    let evidence = crate::loss::Evidence::keeping_branch(&repo, &tree.branch);
+    let head = shell.run_ok(
+        "git",
+        &[
+            "-C".into(),
+            tree.path.clone(),
+            "rev-parse".into(),
+            "HEAD".into(),
+        ],
+    )?;
+    let loss = evidence.assess(shell, head.stdout.trim(), Some(&tree.path))?;
+    if !loss.loses_nothing() {
+        return Err(Error::Invalid(format!(
+            "{}: {}. Preserve the work before calling done",
+            tree.path,
+            loss.detail()
+        )));
+    }
+    let mut branch = Branch {
+        repo,
+        name: tree.branch,
+        ahead: 0,
+        landed: false,
+    };
+    refresh_branch(shell, &mut branch)?;
+    Ok(Some(branch))
+}
+
+fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> Result<()> {
+    let tip = format!("refs/heads/{}", branch.name);
+    branch.landed = crate::loss::Evidence::default_only(&branch.repo)
+        .assess(shell, &tip, None)?
+        .landed();
+    branch.ahead = if branch.landed {
+        0
+    } else {
+        let base = crate::integration::base(shell, &branch.repo)?;
+        shell
+            .run_ok(
+                "git",
+                &[
+                    "-C".into(),
+                    branch.repo.clone(),
+                    "rev-list".into(),
+                    "--count".into(),
+                    format!("{base}..{tip}"),
+                ],
+            )?
+            .stdout
+            .trim()
+            .parse()
+            .map_err(|_| Error::Invalid(format!("{}: invalid branch commit count", branch.repo)))?
+    };
+    Ok(())
+}
+
+pub fn list(ledger: &Ledger) -> Result<Vec<Mark>> {
+    Ok(ledger
+        .read::<Marks>(FILE)?
+        .unwrap_or_default()
+        .into_values()
+        .collect())
+}
+
+fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
     ledger.with_lock("done", || {
         let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
-        if marks.remove(terminal).is_some() {
+        // A message during the same turn may have removed it. Never resurrect it.
+        if let std::collections::btree_map::Entry::Occupied(mut entry) = marks.entry(key(mark)) {
+            let mut updated = mark.clone();
+            // Branch refresh can overlap a live inbox check. Never replace its terminal seal
+            // with an older unsealed observation from the start of this handoff pass.
+            updated.sealed = entry.get().sealed.or(updated.sealed);
+            updated.closed_ms = entry.get().closed_ms.or(updated.closed_ms);
+            entry.insert(updated);
             ledger.write(FILE, &marks)?;
         }
         Ok(())
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn agent(state: &str, completion: Option<u64>, change: u64) -> Agent {
-        Agent {
-            pane: "w2:p1".into(),
-            agent: Some("pi".into()),
-            state: state.into(),
-            terminal_id: Some("term_child".into()),
-            completion_seq: completion,
-            state_change_seq: Some(change),
-            ..Agent::default()
+/// Serialize inbox acceptance with sealing. Only new work accepted while the marked turn is
+/// still working cancels its mark. After idle/done (or an earlier seal), reject all messages,
+/// even if Herdr subsequently reports working. No post-turn claim can reopen a finished child.
+pub fn input<T>(
+    ledger: &Ledger,
+    agent: &Agent,
+    accept: impl FnOnce() -> Result<(T, bool)>,
+) -> Result<T> {
+    ledger.with_lock("done", || {
+        let before: Marks = ledger.read(FILE)?.unwrap_or_default();
+        let mut marks = migrate(ledger, before.clone(), std::slice::from_ref(agent))?;
+        for mark in marks.values_mut().filter(|m| matches(m, agent)) {
+            seal(mark, agent);
+            if mark.sealed.is_some() {
+                let name = mark
+                    .name
+                    .as_deref()
+                    .or(agent.name.as_deref())
+                    .unwrap_or(&agent.pane)
+                    .to_owned();
+                ledger.write(FILE, &marks)?;
+                return Err(Error::Invalid(format!(
+                    "{name} finished; start a new child for more work"
+                )));
+            }
         }
-    }
-
-    fn ledger() -> Ledger {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        std::fs::create_dir_all(&ledger.dir).unwrap();
-        ledger
-    }
-
-    fn put(ledger: &Ledger, mark: &Mark) {
-        ledger
-            .write(
-                FILE,
-                &Marks::from([("term_child".to_owned(), mark.clone())]),
-            )
-            .unwrap();
-    }
-
-    fn pass(ledger: &Ledger, agent: Agent) -> bool {
-        let mut agents = [agent];
-        observe(ledger, &mut agents).unwrap();
-        agents[0].done
-    }
-
-    fn mark_at(after: u64) -> Mark {
-        Mark {
-            pane: "w2:p1".into(),
-            after: Some(after),
-            sealed: None,
-            marked_ms: 1,
+        let (result, received) = accept()?;
+        if received && agent.state == "working" {
+            marks.retain(|_, m| !matches(m, agent));
         }
-    }
-
-    #[test]
-    fn an_idle_agent_without_a_mark_is_not_done() {
-        let ledger = ledger();
-        assert!(!pass(&ledger, agent("idle", Some(7), 7)));
-        assert!(!pass(&ledger, agent("done", Some(7), 7)));
-    }
-
-    #[test]
-    fn the_turn_that_called_done_seals_it_and_a_later_turn_ends_it() {
-        let ledger = ledger();
-        // `done` ran mid-turn, at state 10.
-        put(&ledger, &mark_at(10));
-        assert!(!pass(&ledger, agent("working", None, 10)));
-        // That turn completes: the agent is done, and stays done while it waits.
-        assert!(pass(&ledger, agent("idle", Some(12), 12)));
-        assert!(pass(&ledger, agent("done", Some(12), 12)));
-        // A new turn starts: the mark ends, and its completion is not done.
-        assert!(!pass(&ledger, agent("working", None, 13)));
-        assert!(!pass(&ledger, agent("idle", Some(15), 15)));
-        assert_eq!(ledger.read::<Marks>(FILE).unwrap(), Some(Marks::new()));
-    }
-
-    #[test]
-    fn a_question_after_done_is_a_new_completion_and_ends_the_mark() {
-        let ledger = ledger();
-        put(
-            &ledger,
-            &Mark {
-                sealed: Some(12),
-                ..mark_at(10)
-            },
-        );
-        // A later completion the service never saw working: not the sealed one.
-        assert!(!pass(&ledger, agent("idle", Some(20), 20)));
-    }
-
-    #[test]
-    fn an_agent_that_owns_open_children_is_not_done() {
-        let ledger = ledger();
-        put(
-            &ledger,
-            &Mark {
-                sealed: Some(12),
-                ..mark_at(10)
-            },
-        );
-        crate::items::record(
-            &ledger,
-            crate::items::Item {
-                id: "c".into(),
-                kind: "agent".into(),
-                host: "local".into(),
-                pane: "w3:p1".into(),
-                owner_pane: "w2:p1".into(),
-                ..crate::items::Item::default()
-            },
-        )
-        .unwrap();
-        assert!(!pass(&ledger, agent("idle", Some(12), 12)));
-        crate::items::close(&ledger, "local", "w3:p1", 2).unwrap();
-        assert!(pass(&ledger, agent("idle", Some(12), 12)));
-    }
-
-    #[test]
-    fn a_new_terminal_in_the_same_pane_drops_the_mark() {
-        let ledger = ledger();
-        put(
-            &ledger,
-            &Mark {
-                sealed: Some(12),
-                ..mark_at(10)
-            },
-        );
-        let mut other = agent("idle", Some(12), 12);
-        other.terminal_id = Some("term_new".into());
-        assert!(!pass(&ledger, other));
-        assert_eq!(ledger.read::<Marks>(FILE).unwrap(), Some(Marks::new()));
-    }
+        if marks != before {
+            ledger.write(FILE, &marks)?;
+        }
+        Ok(result)
+    })
 }
+
+/// Child-host action lane, independent of fleet discovery, owner availability and sweeps.
+/// Keep the result durably before closing; the owner's children lane imports it afterwards.
+pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
+    ledger.with_lock("handoff", || handoff_locked(ledger, shell, now))
+}
+
+fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
+    if list(ledger)?.is_empty() {
+        return Ok(());
+    }
+    let mut agents = crate::probe::agent_list(shell)?;
+    observe(ledger, &mut agents)?;
+    for mut mark in list(ledger)? {
+        if let Some(branch) = &mut mark.branch {
+            if let Err(error) = refresh_branch(shell, branch) {
+                eprintln!("dogsled handoff: branch {}: {error}", branch.name);
+            }
+            save(ledger, &mark)?;
+        }
+        if mark.closed_ms.is_some() {
+            continue;
+        }
+        let Some(agent) = agents.iter().find(|a| matches(&mark, a) && a.done) else {
+            continue;
+        };
+        if !crate::launch::handoff_ready(ledger, &mark.pane)? {
+            continue;
+        }
+        if mark.reply.is_none() {
+            let reply = if let Some(text) = crate::launch::handoff_reply(ledger, &mark.pane)? {
+                crate::sweep::Final {
+                    seq: mark.sealed.unwrap_or(0),
+                    text,
+                }
+            } else if let Some(reply) = crate::sweep::local_reply(shell, ledger, &mark.pane)? {
+                reply
+            } else {
+                continue;
+            };
+            mark.reply = Some(crate::items::Reply {
+                seq: reply.seq,
+                result_id: None,
+                text: reply.text,
+                captured_ms: now,
+                reported_ms: None,
+                done: true,
+            });
+            save(ledger, &mark)?;
+        }
+        if let (Some(id), Some(reply)) = (&mark.item, &mark.reply)
+            && !crate::items::list(ledger)?.iter().any(|i| {
+                i.id == *id
+                    && i.reply
+                        .as_ref()
+                        .is_some_and(|r| r.result_id.is_some() || (r.seq == reply.seq && r.done))
+            })
+        {
+            crate::items::set_reply(ledger, id, reply.clone())?;
+        }
+        if mark.branch.is_none() {
+            match preflight(shell, agent) {
+                Ok(branch) => {
+                    mark.branch = branch;
+                    save(ledger, &mark)?;
+                }
+                Err(error) => {
+                    eprintln!("dogsled handoff: {}: {error}", mark.pane);
+                    continue;
+                }
+            }
+        }
+        match crate::close::local(
+            shell,
+            ledger,
+            &mark.pane,
+            &crate::close::Caller::from_env(),
+            crate::close::Guard::Writer,
+        ) {
+            Ok(_) => {
+                mark.closed_ms = Some(now);
+                save(ledger, &mark)?;
+                crate::items::close(ledger, crate::hosts::LOCAL, &mark.pane, now)?;
+                eprintln!("dogsled handoff: closed {}", mark.pane);
+            }
+            Err(error) => eprintln!("dogsled handoff: {}: {error}", mark.pane),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

@@ -71,6 +71,27 @@ fn refused_unit(name: &str) -> (Rig, Value, Value) {
 }
 
 #[test]
+fn done_handoff_waits_for_host_terminal_evidence_not_owner_acknowledgement() {
+    let (rig, execution, input) = launched("seeded-done-handoff");
+    transcript(&rig, &execution, &entries());
+    rig.done("term_child", "w2:p1", 7);
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert!(!rig.log("herdr.log").contains("pane close"));
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    let out = rig.run(&["serve", "--once"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
+    let marks = rig.read("state/done.json");
+    let mark = marks.as_object().unwrap().values().next().unwrap();
+    assert!(mark["closed_ms"].is_u64());
+    assert_eq!(mark["reply"]["text"], "EXACT FINAL");
+}
+
+#[test]
 fn committed_native_refusal_settles_once_without_start_or_acceptance() {
     let (rig, execution, _) = refused_unit("refused-unit-settlement");
     let id = execution["requestId"].as_str().unwrap();
@@ -524,8 +545,8 @@ fn preparation_owners_coexist_and_release_only_their_records() {
 }
 
 #[test]
-fn successful_agent_place_and_failed_setup_release_only_owned_preparation() {
-    for action in ["agent", "place", "setup-failure"] {
+fn successful_agent_place_and_failed_preparation_release_only_owned_preparation() {
+    for action in ["agent", "place", "setup-failure", "already-open"] {
         let (rig, repo) = place::place_rig(&format!("preparation-release-{action}"));
         let path = repo.join(".worktrees/owned");
         let legacy = json!({"repo":repo,"path":path,"branch":"owned","head":""});
@@ -534,6 +555,10 @@ fn successful_agent_place_and_failed_setup_release_only_owned_preparation() {
         rig.put("state/preparations.json", &json!([legacy, other]));
         if action == "setup-failure" {
             fs::write(rig.dir.join("setup-fails"), "").unwrap();
+        }
+        // Herdr refusing the workspace ends this preparation: no launch can follow it.
+        if action == "already-open" {
+            fs::write(rig.dir.join("already-open"), "").unwrap();
         }
         let args = if action == "agent" {
             vec![
@@ -563,7 +588,11 @@ fn successful_agent_place_and_failed_setup_release_only_owned_preparation() {
         let (code, result) = rig.json(&args);
         assert_eq!(
             code,
-            if action == "setup-failure" { 2 } else { 0 },
+            if matches!(action, "setup-failure" | "already-open") {
+                2
+            } else {
+                0
+            },
             "{action}: {result}"
         );
         assert_eq!(

@@ -1,7 +1,7 @@
 //! `dogsled mcp`: the dogsled commands as MCP tools on stdio, for Pi, Claude Code, and Codex.
 //!
-//! Each tool calls the function its CLI subcommand calls and returns the same JSON. No tool
-//! waits: `spawn`, `run`, and `place` return `placed` or `queued` at once. The caller is the
+//! Tools share the CLI action code. `spawn` returns a durable ticket without waiting for
+//! startup; `run` and `place` return `placed` or `queued`. The caller is the
 //! pane in `HERDR_PANE_ID`, which the harness passes to this server. Tokio stays in this file;
 //! each call runs the synchronous code on a blocking thread.
 
@@ -224,7 +224,7 @@ impl Server {
 
     #[tool(
         description = "Start a Pi, Claude, or Codex child on the host with room, with its task. \
-        Returns at once: `queued` when every host is full. Its final reply reaches your inbox."
+        Returns a durable queued ticket at once. The service starts the child and reports its outcome; its final reply reaches your inbox."
     )]
     async fn spawn(&self, Parameters(args): Parameters<SpawnArgs>) -> Result<String, String> {
         self.call(move |fleet| {
@@ -232,7 +232,7 @@ impl Server {
                 SpawnArgs::Unit(args) => {
                     return Err(Error::Invalid(format!("PROVIDER_UNAVAILABLE: unit {} with placement {:?} requires the Dogsled Pi bridge", args.unit.id, args.placement)));
                 },
-                SpawnArgs::Prepared(args) => return crate::unit_request::commit(fleet, &args.prepared_unit),
+                SpawnArgs::Prepared(args) => return crate::unit_request::commit_queued(fleet, &args.prepared_unit),
                 SpawnArgs::Legacy(args) => args,
             };
             let placement = args.placement.args();
@@ -245,7 +245,7 @@ impl Server {
                 placement.host.as_deref(),
             )?;
             let request = crate::runtime::request(fleet, &placement, action)?;
-            crate::runtime::start(fleet, request, false)
+            crate::runtime::start_queued(fleet, request)
         })
         .await
     }
@@ -325,8 +325,8 @@ impl Server {
 
     #[tool(
         description = "Close a finished child now: its pane, its worktree, and its item. \
-        Refuses busy or dirty work. Dogsled closes finished children itself once their work \
-        lands; use this to drop one.",
+        Refuses busy or dirty work. Dogsled closes finished children at handoff; \
+        use this to end one explicitly.",
         annotations(destructive_hint = true)
     )]
     async fn close(&self, Parameters(args): Parameters<CloseArgs>) -> Result<String, String> {
@@ -340,7 +340,7 @@ impl Server {
     #[tool(
         description = "Say that your whole task is complete. Call it once, during the turn that \
         completes the task, then end the turn with your final reply. Dogsled closes you after \
-        that turn, once your work has landed. Do not call it when you stop to ask a question or \
+        that turn and keeps your branch for the owner to land. Do not call it when you stop to ask a question or \
         to wait for your own children: an idle agent without `done` stays open."
     )]
     async fn done(&self) -> Result<String, String> {

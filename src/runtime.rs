@@ -106,6 +106,12 @@ pub fn start(fleet: &Fleet, request: Request, waiting: bool) -> Result<Value> {
     start_using(fleet, request, waiting, work::submit)
 }
 
+/// Hand startup to the admission service instead of spending a tool call's budget.
+pub(crate) fn start_queued(fleet: &Fleet, request: Request) -> Result<Value> {
+    let ticket = work::enqueue(fleet.ledger, request, false, now_ms())?;
+    Ok(json!({"queued":true,"ticket":ticket}))
+}
+
 /// Only for a caller that already owns the request's admission lock.
 pub(crate) fn start_locked(fleet: &Fleet, request: Request) -> Result<Value> {
     start_using(fleet, request, false, |fleet, request, now| {
@@ -271,7 +277,11 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
         }
     };
     let host = fleet.find(&item.host)?;
-    let tail = crate::watchdog::item_tail(fleet, &item, host)?;
+    let tail = if item.kind == "agent" && item.closed_ms.is_some() {
+        String::new()
+    } else {
+        crate::watchdog::item_tail(fleet, &item, host)?
+    };
     Ok(json!({
         "name": item.name,
         "kind": item.kind,

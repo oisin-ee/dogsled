@@ -15,6 +15,7 @@ mod done;
 mod error;
 mod facts;
 mod gate;
+mod herdr_socket;
 mod hosts;
 mod inbox;
 mod integration;
@@ -91,7 +92,7 @@ fn main() -> ExitCode {
         Ok(code) => code,
         // Prompt context is optional: unavailable state must not block a turn.
         Err(_) if hook => ExitCode::SUCCESS,
-        Err(Error::Deadline(_)) if waiting => {
+        Err(ref error) if waiting && matches!(error.root(), Error::Deadline(_)) => {
             println!("still running");
             ExitCode::from(124)
         }
@@ -99,7 +100,7 @@ fn main() -> ExitCode {
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "error": error.to_string(), "deadline": matches!(error, Error::Deadline(_)) })
+                    serde_json::json!({ "error": error.to_string(), "deadline": matches!(error.root(), Error::Deadline(_)) })
                 );
             } else {
                 eprintln!("dogsled: {error}");
@@ -258,8 +259,12 @@ fn hook(
             let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
             let status = commands::status(&fleet)?;
             let owner = std::env::var("HERDR_PANE_ID").ok();
+            let found = match (&owner, &status.sweep) {
+                (Some(owner), Some(report)) => gate::findings(ledger, shell, owner, report)?,
+                _ => gate::Findings::default(),
+            };
             print(false, &(), || {
-                context::format(harness, event, &status, owner.as_deref())
+                context::format(harness, event, &status, owner.as_deref(), &found)
             })
         }
     }
@@ -329,7 +334,11 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             String::new,
         )?,
         HostCommand::Reply { pane } => {
-            print(true, &sweep::local_reply(node.shell, &pane)?, String::new)?;
+            print(
+                true,
+                &sweep::local_reply(node.shell, node.ledger, &pane)?,
+                String::new,
+            )?;
         }
         // Over SSH the caller has no pane or workspace on this host.
         HostCommand::Close {
@@ -356,7 +365,7 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
-            inbox::host(node.ledger, cmd)?;
+            inbox::host(node.ledger, node.shell, cmd)?;
         }
         HostCommand::Launch { request } => print(
             true,
