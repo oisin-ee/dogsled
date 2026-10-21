@@ -152,6 +152,8 @@ Prune and the sweep use the same holds: active panes or processes, the caller, a
 
 An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Unreadable repositories produce warnings without stopping other repositories. Absent remembered repositories produce removable registrations. Doctor changes no registrations.
 
+Loss assessment and deletion recovery require the checkout's own `.git` and a Git top-level path that resolves to the checkout. Invalid identities return a path-specific refusal before status reads. They never count as clean or report a parent repository's changes. A worktree whose directory remains while Git no longer lists it, calls it prunable, or finds no `.git` file is an `unlinked` hold: never removed, never assessed for loss, and refused by `close` before anything closes.
+
 The sweep applies only removable `worktrees`, `branches`, `workspaces`, `panes`, and absent remembered `repositories`. Orphan close uses the same loss rule. Prune also shows non-removable findings, expired jobs, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
 
 Both scopes use one pane rule and exclude the caller and focused panes. An empty shell closes after its job ends, its directory disappears, its launch becomes final, or its agent item closes. A shell without a Dogsled record needs 15 minutes continuously at an empty prompt. Agents retain the one-day rule and require `done`, with no open children.

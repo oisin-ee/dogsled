@@ -313,17 +313,24 @@ mod tests {
         assert_eq!(pretty("claude-opus-5-20260101"), "opus 5");
     }
 
-    fn linked(shell: &crate::shell::Fake, head: &str, base: &str) {
+    fn linked(shell: &crate::shell::Fake, cwd: &str, head: &str, base: &str) {
         shell
             .on(
-                "git -C /t symbolic-ref --quiet refs/remotes/origin/HEAD",
+                &format!("git -C {cwd} symbolic-ref --quiet refs/remotes/origin/HEAD"),
                 "refs/remotes/origin/main\n",
             )
             .on(
-                "git -C /t rev-parse HEAD refs/remotes/origin/main",
+                &format!("git -C {cwd} rev-parse HEAD refs/remotes/origin/main"),
                 &format!("{head}\n{base}\n"),
             )
-            .on("git -C /t status --porcelain --untracked-files=all -z", "");
+            .on(
+                &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
+                "",
+            )
+            .on(
+                &format!("git -C {cwd} rev-parse --show-toplevel"),
+                &format!("{cwd}\n"),
+            );
     }
 
     #[test]
@@ -350,24 +357,27 @@ mod tests {
     #[test]
     fn worktree_counts_commits_only_when_a_tip_moves() {
         let dir = std::env::temp_dir().join(crate::ledger::new_id());
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
         let cwd = dir.display().to_string();
         let shell = crate::shell::Fake::new();
-        // `linked` needs a real directory; the fake answers for `/t` once it resolves.
+        // The fixture has its own identity and resolves to its real root.
         shell.on(
             &format!("git -C {cwd} rev-parse --path-format=absolute --git-common-dir --git-dir --show-toplevel --abbrev-ref HEAD"),
-            "/r/.git\n/r/.git/worktrees/t\n/t\nfeat/x\n",
+            &format!("/r/.git\n/r/.git/worktrees/t\n{cwd}\nfeat/x\n"),
         ).on(&format!("git -C {cwd} rev-parse --path-format=absolute --git-common-dir"), "/r/.git\n");
-        linked(&shell, "h1", "b1");
+        linked(&shell, &cwd, "h1", "b1");
         shell
-            .on("git -C /t rev-list --count b1..h1", "2\n")
-            .on("git -C /t show-ref --verify --quiet refs/heads/feat/x", "")
+            .on(&format!("git -C {cwd} rev-list --count b1..h1"), "2\n")
             .on(
-                "git -C /t rev-parse refs/heads/feat/x refs/remotes/origin/main",
+                &format!("git -C {cwd} show-ref --verify --quiet refs/heads/feat/x"),
+                "",
+            )
+            .on(
+                &format!("git -C {cwd} rev-parse refs/heads/feat/x refs/remotes/origin/main"),
                 "h1\nb1\n",
             )
             .on_output(
-                "git -C /t merge-base --is-ancestor h1 b1",
+                &format!("git -C {cwd} merge-base --is-ancestor h1 b1"),
                 crate::shell::Output {
                     status: 0,
                     stdout: String::new(),
@@ -378,7 +388,7 @@ mod tests {
         assert_eq!((first.ahead, first.landed, first.dirty), (2, true, false));
         let calls = shell.calls.lock().unwrap().len();
         shell.on(
-            "git -C /t status --porcelain --untracked-files=all -z",
+            &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
             " M a\0",
         );
         let second = worktree(&shell, &cwd, Some(&first)).unwrap();
@@ -392,7 +402,7 @@ mod tests {
             "unchanged tips reuse the count and the landed check"
         );
         shell.on(
-            "git -C /t status --porcelain --untracked-files=all -z",
+            &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
             " D a\0D  b\0",
         );
         assert!(!worktree(&shell, &cwd, Some(&first)).unwrap().dirty);
@@ -402,7 +412,7 @@ mod tests {
         };
         assert!(worktree(&shell, &cwd, Some(&unheld)).unwrap().dirty);
         shell.on(
-            "git -C /t status --porcelain --untracked-files=all -z",
+            &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
             " D a\0 M b\0?? c\0",
         );
         assert!(worktree(&shell, &cwd, Some(&first)).unwrap().dirty);

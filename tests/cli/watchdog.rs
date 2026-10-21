@@ -63,13 +63,14 @@ case "$*" in
  *'rev-list --count refs/heads/feature --not --remotes') printf '1\n' ;;
  *'log -1 --format=%ct refs/heads/feature') printf '86400\n' ;;
  *'fetch --all --prune') ;;
+ *'rev-parse --show-toplevel') printf '%s\n' "$2" ;;
  *'status --porcelain --untracked-files=all -z')
  if test -f "$RIG/change-during-plan"; then touch "$RIG/changed"; fi
  if test -f "$RIG/dirty"; then printf ' M file\0'; fi ;;
  *) echo unexpected >&2; exit 2 ;;
 esac
 "#);
-    fs::create_dir_all(rig.dir.join("home/repo/tree")).unwrap();
+    fs::create_dir_all(rig.dir.join("home/repo/tree/.git")).unwrap();
     // A linked worktree has a `.git` file; without one Git cannot remove it.
     fs::write(
         rig.dir.join("home/repo/tree/.git"),
