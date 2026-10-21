@@ -1,0 +1,27 @@
+UNIT dogsled-quota: `dogsled quota` collector (dogsled repo, Rust).
+Base: origin/main 42e8050. Branch: feat/quota.
+Read first: src/cli.rs, src/main.rs, src/config.rs, src/hosts.rs (remote calls), src/service.rs (periodic work), src/ledger.rs (state dir), README configuration section, and CLIProxy's management API (https://raw.githubusercontent.com/router-for-me/CLIProxyAPIDocs/main/docs/en/management/api.md) plus QuotaMenu's QuotaService.swift (https://github.com/xuan-wei/CLIProxyAPI-QuotaMenu/blob/42566f3decc4d8eaac1c019c9ded00aa25ad9326/QuotaMenu/Services/QuotaService.swift) for request shapes. Do not copy Swift code; reimplement the HTTP calls.
+Behaviour:
+- Config: [quota] management_url (non-secret; dotfiles will set https://cliproxy-admin.tail10e7b9.ts.net). The management key is read only from the macOS Keychain: `security find-generic-password -s dogsled -a cliproxy-management -w`. The collector is active only when management_url is set AND that Keychain item is readable; otherwise `dogsled quota --json` behaves like --cached. Linux hosts never hold the key.
+- Collection: GET /v0/management/auth-files -> claude and codex accounts (skip disabled). For each, POST /v0/management/api-call with auth_index: Claude GET https://api.anthropic.com/api/oauth/usage with headers Authorization "Bearer $TOKEN$" and anthropic-beta "oauth-2025-04-20" (windows five_hour, seven_day, seven_day_opus, seven_day_sonnet: utilization + resets_at); Codex GET https://chatgpt.com/backend-api/wham/usage with Bearer $TOKEN$ (rate_limit.primary_window / secondary_window used_percent + reset_at). MiniMax: GET /v0/management/claude-api-key, pick entries whose base-url is https://api.minimax.io/anthropic, use their auth-index with api-call GET https://www.minimax.io/v1/token_plan/remains (Bearer $TOKEN$); map its windows to used_pct/resets_ms and keep unknown fields out. The /claude-api-key response contains raw keys: parse only base-url and auth-index, never log, store, or print anything else from it.
+- Check both the management HTTP status and the upstream status_code; per-account failures become an "error" string on that account's rows, not a command failure.
+- HTTP client: reuse what dogsled already uses for HTTP if anything; otherwise run curl through the existing Shell abstraction with the key passed via a header file descriptor or stdin config (never argv, never logs). Do not add a heavy HTTP dependency.
+- Cache: write the snapshot atomically to $DOGSLED_STATE/quota.json. The service on the collector host refreshes every 5 minutes, de-duplicates concurrent refreshes, backs off on errors, and then pushes the snapshot to every enabled remote host through the existing host transport (a hidden `dogsled quota --store` reading the snapshot from stdin on the remote side). `--cached` prints the local file; when the file is older than 15 minutes print it anyway (consumers show its age).
+- Human output: `dogsled quota` prints one line per pool/account/window with used %, reset time, and snapshot age.
+
+Shared quota contract (dogsled owns it; pi-tiers and the board read it):
+- `dogsled quota --json --cached` prints the last snapshot and never contacts CLIProxy. `dogsled quota --json` (laptop only) refreshes if older than 5 minutes; `--refresh` forces it.
+- Snapshot file: `$DOGSLED_STATE/quota.json` (default `~/.local/state/dogsled/quota.json`). Shape:
+  {"version":1,"fetched_ms":<u64>,"source":"<host label>","pools":[{"pool":"claude"|"codex"|"minimax","account":"<email or label>","window":"<provider window name, e.g. five_hour, seven_day, seven_day_opus, seven_day_sonnet, primary, secondary, interval, weekly>","used_pct":<f64 0..100>,"resets_ms":<u64|null>,"error":<string|null>}]}
+- A pool is exhausted when every account in that pool has at least one window with used_pct >= 100 and resets_ms in the future.
+Owned paths: src/quota.rs (new), src/cli.rs, src/main.rs, src/config.rs, src/service.rs, README.md (quota section), CHANGELOG.md (unreleased entry).
+Acceptance: `cargo test quota` passes, with tests over a fake Shell/HTTP proving: parsing of Claude, Codex, and MiniMax sample responses into the contract; per-account errors; no secret text appears in output, snapshot, or error strings (assert on a sentinel key value); the collector is inactive without the Keychain item; --store round-trips; --cached never calls the network.
+
+Rules for this unit:
+- Work only in your worktree. Stay inside the owned paths. Read the repository's AGENTS.md or README and its conventions before you edit.
+- Light checks only: the formatter or linter on the files you changed, the type check of the changed package, and the unit tests that cover your change. Do not run full suites, builds of other packages, e2e, dependency installs, or CI watching. The lead runs the repository gate once, after integration.
+- Commit hooks run on commit. If a hook fails, fix findings inside your scope; otherwise report blocked with the hook output. Never bypass hooks.
+- Commit with feat|fix|chore|docs|test(scope): description, push the branch, and open a DRAFT PR. Do not merge it.
+- Never read, print, or commit secrets. Do not fork, patch, or vendor third-party code.
+- Final reply: branch, head SHA, PR URL, files changed, the light checks you ran with results, and anything blocked or unverified. Do not spawn agents.
+- Plan of record: the agent-workforce plan (sections quoted below are authoritative).
