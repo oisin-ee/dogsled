@@ -27,11 +27,12 @@ pub enum Error {
         status: String,
         stderr: String,
     },
-    #[error("ssh {target}: {detail}")]
+    /// An ssh read failed. The error holds only a safe category: remote stderr and remote
+    /// error text can carry secrets, and an error reaches tickets, handoffs, logs, and JSON.
+    /// The raw text never enters this type; see `hosts::record_ssh_detail`.
+    #[error("ssh {target}: {failure}")]
     Ssh {
         target: String,
-        detail: String,
-        /// The safe category of the failure; status shows this and never `detail`.
         failure: crate::hosts::Failure,
     },
     #[error("unexpected output from {origin}: {detail}")]

@@ -115,12 +115,13 @@ esac
 "#);
     let (code, error) = rig.json(&args);
     assert_eq!(code, 2);
+    // The peer's clone failure text is remote text: the error names only a safe category.
+    let message = error["error"].as_str().unwrap();
     assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("clone https://example.invalid/repo.git failed: credentials")
+        message.contains("ssh netcup: remote command failed"),
+        "{error}"
     );
+    assert!(!message.contains("credentials"), "{error}");
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
     assert!(!rig.dir.join("state/placements.json").exists());
 }

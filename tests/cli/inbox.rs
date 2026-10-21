@@ -143,13 +143,13 @@ esac
 
     let (code, refused) = rig.json(&["send", "far", "--message", "hi"]);
     assert_eq!(code, 2);
+    // The peer's own refusal text is remote text: the error names only a safe category.
+    let message = refused["error"].as_str().unwrap();
     assert!(
-        refused["error"]
-            .as_str()
-            .unwrap()
-            .contains("no dogsled inbox reader"),
+        message.contains("ssh netcup: remote command failed"),
         "{refused}"
     );
+    assert!(!message.contains("no dogsled inbox reader"), "{refused}");
     fs::create_dir_all(rig.dir.join("remote-state/inbox")).unwrap();
     rig.put(
         "remote-state/inbox/term_far.reader.json",

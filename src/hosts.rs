@@ -142,6 +142,26 @@ impl std::fmt::Display for Failure {
     }
 }
 
+/// Environment variable naming a local file that receives the raw ssh and remote error text.
+/// Unset by default, so raw text goes nowhere. This is the only sink for it: it is never put
+/// in an `Error`, a ticket, a handoff, a unit record, or a log line.
+pub const SSH_DEBUG_FILE: &str = "DOGSLED_SSH_DEBUG_FILE";
+
+fn record_ssh_detail(target: &str, detail: &str) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os(SSH_DEBUG_FILE) else {
+        return;
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    if let Ok(mut file) = options.open(path) {
+        // A debug aid: a failed write must not change the failure being reported.
+        let _ = writeln!(file, "ssh {target}: {detail}");
+    }
+}
+
 /// `unreachable: <category>` for a host that could not be read.
 /// A host that answered but runs no service is `service: down`, never this.
 #[must_use]
@@ -325,19 +345,22 @@ impl<'a> Fleet<'a> {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 && value["deadline"] == true
             {
+                record_ssh_detail(
+                    &host.label,
+                    value["error"].as_str().unwrap_or("remote deadline"),
+                );
                 return Err(Error::Deadline(format!(
-                    "ssh {}: {}",
-                    host.label,
-                    value["error"].as_str().unwrap_or("remote deadline")
+                    "ssh {}: remote deadline",
+                    host.label
                 )));
             }
             let detail = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 .ok()
                 .and_then(|v| v["error"].as_str().map(str::to_owned))
                 .unwrap_or_else(|| out.stderr.trim().to_owned());
+            record_ssh_detail(&host.label, &format!("exit {}: {detail}", out.status));
             return Err(Error::Ssh {
                 target: host.label.clone(),
-                detail: format!("exit {}: {detail}", out.status),
                 failure: Failure::of_ssh(out.status, &out.stderr),
             });
         }
@@ -892,6 +915,73 @@ mod tests {
             .unwrap();
             assert!(!cache.contains("EXAMPLE_SECRET"), "{cache}");
             std::fs::remove_dir_all(ledger.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_ssh_error_never_carries_raw_text_to_any_sink() {
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        for (status, stdout, stderr, category) in [
+            (
+                255,
+                String::new(),
+                format!("Connection refused {SECRET}"),
+                "connection refused",
+            ),
+            (
+                255,
+                String::new(),
+                format!("{SECRET} unrecognised"),
+                "other",
+            ),
+            (
+                2,
+                String::new(),
+                format!("remote failed {SECRET}"),
+                "remote command failed",
+            ),
+            (
+                2,
+                format!("{{\"error\":\"{SECRET}\"}}"),
+                String::new(),
+                "remote command failed",
+            ),
+            (
+                3,
+                format!("{{\"deadline\":true,\"error\":\"{SECRET}\"}}"),
+                String::new(),
+                "deadline reached",
+            ),
+        ] {
+            let out = crate::shell::Output {
+                status,
+                stdout,
+                stderr,
+            };
+            let error =
+                Fleet::parse_remote::<serde_json::Value>(&host, &["x".into()], &out).unwrap_err();
+            // The sinks: ticket and attempt errors, handoff text, unit evidence log, unit JSON.
+            let sinks = [
+                error.to_string(),
+                format!("{error:?}"),
+                format!("attempt 1: {error}"),
+                format!("{error} (after 3 attempts)"),
+                format!("dogsled unit evidence r: {error}"),
+                serde_json::json!({"error":{"code":"LAUNCH_UNRESOLVED","message":error.to_string()}})
+                    .to_string(),
+            ];
+            for sink in sinks {
+                assert!(!sink.contains("EXAMPLE_SECRET"), "{sink}");
+            }
+            assert!(error.to_string().contains("ssh peer"), "{error}");
+            assert!(
+                error.to_string().contains(category) || matches!(error, Error::Deadline(_)),
+                "{error}"
+            );
         }
     }
 
