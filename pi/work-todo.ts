@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { rename, rm, writeFile } from "node:fs/promises";
 
 /** The provider owns rendering and state interpretation; this is an in-process capability. */
 export interface TodoViewHost {
@@ -31,6 +32,72 @@ export interface TodoSnapshot {
 	session: string;
 	branch: string | null;
 	display: TodoDisplay;
+}
+
+export interface TodoLines {
+	session: string;
+	branch: string | null;
+	revision: number;
+	current: string;
+	pane: string;
+	width: number;
+	lines: string[];
+}
+
+/** Serialize only the provider's presentation. Never inspect its opaque state. */
+export function renderTodoLines(next: TodoSnapshot, pane: string, host: TodoViewHost, width = 48): TodoLines {
+	const view = next.display.createView(host);
+	try {
+		const lines = view.render(width);
+		if (!Array.isArray(lines) || !lines.every(line => typeof line === "string")) throw new Error("Invalid todo render output");
+		return { session: next.session, branch: next.branch, revision: next.revision, current: next.display.current, pane, width, lines };
+	} finally { view.dispose(); }
+}
+
+/** Atomic per-pane publication into Dogsled's ledger. One ordered writer per Pi session. */
+export class TodoPublisher {
+	private path: string | undefined;
+	private width = 48;
+	private height = 10_000;
+	private published: TodoSnapshot | undefined;
+	private queue = Promise.resolve();
+	private readonly pane: string;
+	private readonly failed: (error: unknown) => void;
+	constructor(pane: string, failed: (error: unknown) => void) { this.pane = pane; this.failed = failed; }
+
+	configure(value: unknown): void {
+		if (!record(value) || typeof value["path"] !== "string"
+			|| !Number.isInteger(value["width"]) || Number(value["width"]) < 1 || Number(value["width"]) > 65535
+			|| !Number.isInteger(value["height"]) || Number(value["height"]) < 1 || Number(value["height"]) > 10_000) throw new Error("Invalid todo publication path");
+		if (this.path !== value["path"] || this.width !== value["width"] || this.height !== value["height"]) this.published = undefined;
+		this.path = value["path"];
+		this.width = Number(value["width"]);
+		this.height = Number(value["height"]);
+	}
+
+	publish(next: TodoSnapshot | undefined, theme: TodoViewHost["theme"]): void {
+		const path = this.path;
+		if (!path || (next && next === this.published)) return;
+		// Render now, while this revision still owns the provider capability.
+		const payload = next ? renderTodoLines(next, this.pane, { theme, height: () => this.height, requestRender() {} }, this.width) : undefined;
+		this.published = next;
+		this.queue = this.queue.then(async () => {
+			if (!payload) { await rm(path, { force: true }); return; }
+			const temporary = `${path}.${randomUUID()}.tmp`;
+			try {
+				await writeFile(temporary, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
+				await rename(temporary, path);
+			} finally { await rm(temporary, { force: true }); }
+		}).catch(error => { this.published = undefined; this.failed(error); });
+	}
+
+	async clear(): Promise<void> {
+		const path = this.path;
+		this.published = undefined;
+		this.queue = this.queue.then(async () => { if (path) await rm(path, { force: true }); }).catch(this.failed);
+		await this.queue;
+	}
+	async flushed(): Promise<void> { await this.queue; }
 }
 
 type Bus = ExtensionAPI["events"];

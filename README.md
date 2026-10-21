@@ -39,7 +39,7 @@ codex plugin add dogsled@dogsled
 Codex requires review and trust before it runs plugin hooks. See the [Codex hooks documentation](https://developers.openai.com/codex/hooks#plugin-hooks).
 The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#codex-plugin) describes plugin installation.
 
-Herdr (status-board popup):
+Herdr (right-side work board):
 
 ```sh
 herdr plugin install oisin-ee/dogsled --ref v0.17.0 --yes
@@ -572,8 +572,8 @@ The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its ex
 
 The extension adds host status before each prompt, registers the tools, and draws:
 
-- **The board widget** above the editor shows host meters, the current task, and agents and jobs grouped TO LAND, ATTENTION, RUNNING, and WAITING. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately. Empty providers hide the widget. Unavailable providers show an error.
-- **Alt+W or `/work`** expands or collapses that widget in place, without a popup or editor replacement. Alt+J/K moves selection, Alt+] changes views, and Alt+I shows inline details. Typing stays in the editor. Alt+S stops jobs, Alt+C cancels queued work, and Alt+M sends agent messages. Stop and cancel require confirmation. Completed job history starts collapsed.
+- **The right-side board** shows cached quotas, agents, jobs, and todos when `HERDR_ENV=1` and `HERDR_SOCKET_PATH` accepts a connection. Pi opens or reuses the tab’s split and sets no above-editor widget. Without Herdr, the existing widget shows host meters, the current task, and work groups. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately in the widget.
+- **Alt+W or `/work`** opens or reuses the Herdr split. Without Herdr, it expands or collapses the widget in place, without a popup or editor replacement. Alt+J/K moves selection, Alt+] changes views, and Alt+I shows inline details. Typing stays in the editor. Alt+S stops jobs, Alt+C cancels queued work, and Alt+M sends agent messages. Stop and cancel require confirmation. Completed job history starts collapsed.
 - **`/dogsled`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
 - **The inbox reader** and a renderer that shows each record's kind, sender, and text, folded past twelve lines.
 
@@ -583,13 +583,26 @@ Todos follow the active Pi session branch. Agents and jobs follow the calling He
 
 The Jobs view joins retained records to the current owner's ledger by host and job ID. It does not show unrelated fleet jobs. Job inspection uses `dogsled read` for a bounded log tail and shows the `dogsled logs` command for full output. Expired records and unavailable hosts produce explicit errors. The panel never starts a new process manager, edits todos, or writes into an agent terminal.
 
-The Herdr plugin keeps only the status-board popup:
+The Herdr plugin opens the right-side work board:
 
 ```sh
-herdr plugin pane open --plugin dogsled --entrypoint board
+dogsled board --open                     # open or reuse the caller’s tab split
+dogsled board --side --owner "$HERDR_PANE_ID" # print once
+herdr plugin pane open --plugin dogsled --entrypoint board --direction right --no-focus
 ```
 
-The popup runs `dogsled status --watch`. The pane-close release hooks and sidebar token configuration are removed.
+The split runs `dogsled board --side --watch` and refreshes every ten seconds. `--owner` defaults to the opening pane from Herdr’s plugin context.
+Quotas come only from `quota.json`; the board never calls a provider or reads credentials. The heading shows cache age and `STALE` after fifteen minutes.
+
+Pi renders each new todo revision through pi-todo’s `display.createView(host).render(width)`. Dogsled never reads or copies task state.
+The board publishes its width in the ledger; before that, Pi uses 48 columns. Resizing republishes the same provider view at the new width.
+Pi atomically writes `{session, branch, revision, current, pane, width, lines}` to `todo-lines/<pane-hash>.json` in Dogsled’s state directory.
+The service reads files for live agent panes into `todos.json`. Peers expose this presentation through `dogsled host todos --json`.
+The board shows each agent’s current line and prints the owner’s full provider-rendered lines unchanged, including ANSI styles. Missing presentations show as unavailable.
+Session shutdown and provider release remove the pane’s publication. `/dogsled` remains the interactive control panel in both display modes.
+
+Herdr 0.9.5 creates a new pane on every plugin open. Dogsled keeps a small `boards/<tab-hash>.json` registry keyed by Herdr tab ID.
+It stores the board pane and terminal IDs, verifies them against live panes before reuse, and removes a stale entry before opening another split.
 All three harness packages share `plugins/dogsled/skills/dogsled/SKILL.md`. It describes delegation, jobs, messages, and the queue.
 
 ## Build and development

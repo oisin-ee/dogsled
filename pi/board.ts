@@ -2,6 +2,20 @@
 // from `dogsled board --json`; this file only lays it out for a terminal width.
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { createConnection } from "node:net";
+
+/** A stale socket path is not a running Herdr session. Never probe outside Herdr. */
+export async function herdrAvailable(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
+	const path = env["HERDR_SOCKET_PATH"];
+	if (env["HERDR_ENV"] !== "1" || !path) return false;
+	return new Promise(resolve => {
+		const socket = createConnection(path);
+		const finish = (available: boolean) => { socket.destroy(); resolve(available); };
+		socket.once("connect", () => finish(true));
+		socket.once("error", () => finish(false));
+		socket.setTimeout(1_000, () => finish(false));
+	});
+}
 
 export type Group = "to_land" | "attention" | "running" | "waiting";
 

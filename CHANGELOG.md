@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. A pane Dogsled launched never opens a board: it keeps the widget, and its todo lines appear on the parent's board. `/dogsled` remains available in both modes.
+
 ## 0.17.0 - 2026-10-21
 
 - A profile's `prompt` can be a list of files. Each one is appended to the system prompt in order, so team profiles share a common prompt and add their own.

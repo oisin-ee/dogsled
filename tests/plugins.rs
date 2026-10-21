@@ -175,7 +175,7 @@ fn claude_and_codex_plugins_start_dogsled_mcp_with_the_callers_pane() {
 }
 
 #[test]
-fn dist_keeps_service_templates_and_herdr_keeps_its_board() {
+fn plugins_dist_keeps_service_templates_and_herdr_keeps_its_board() {
     let dist = toml("dist-workspace.toml");
     let includes = dist["dist"]["include"].as_array().unwrap();
     for path in [
@@ -187,6 +187,12 @@ fn dist_keeps_service_templates_and_herdr_keeps_its_board() {
     }
     let herdr = toml("herdr-plugin.toml");
     assert_eq!(herdr["id"].as_str(), Some("dogsled"));
+    assert_eq!(herdr["panes"][0]["placement"].as_str(), Some("split"));
+    assert!(herdr["panes"][0].get("width").is_none());
+    assert!(herdr["panes"][0].get("height").is_none());
+    let script = std::fs::read_to_string(root().join("plugin/board.sh")).unwrap();
+    assert!(script.contains("run_dogsled board --side --watch"));
+    assert!(!script.contains("status --watch"));
     assert!(
         root()
             .join(herdr["panes"][0]["command"][1].as_str().unwrap())

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EventEmitter } from "node:events";
+import { createServer } from "node:net";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import dogsled, { VERSION, versionMismatch } from "./index.ts";
 
@@ -22,6 +26,7 @@ function rig() {
 	let gate = "";
 	let missing = false;
 	let board: unknown = { hosts: [], rows: [] };
+	let opened: unknown = { pane_id: "w1:p2", terminal_id: "term-board" };
 	let version = `dogsled ${VERSION}\n`;
 	const events = new EventEmitter();
 	const api = {
@@ -39,6 +44,8 @@ function rig() {
 			if (missing) throw new Error("ENOENT");
 			if (args[0] === "hook") assert.equal(options?.timeout, 6_000);
 			const stdout = args[0] === "hook" ? (args[1] === "gate" ? gate : context)
+				: args[0] === "board" && args.includes("--open") ? JSON.stringify(opened)
+				: args[0] === "board" && args.includes("--todo-path") ? JSON.stringify({ path: "/nonexistent-dogsled-todo/pane.json", width: 48, height: 10_000 })
 				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
 				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-dogsled-inbox", file: "t.json" })
@@ -65,17 +72,82 @@ function rig() {
 	return { calls, widgets, notices, servers, commands, shortcuts, renderers, sent, ctx, next,
 		widget() { return component; },
 		gate: (text: string) => { gate = text; },
-		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, version: (text: string) => { version = text; },
+		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
 		} };
 }
 
 function withPane(t: { after: (fn: () => void) => void }) {
+	const herdr = process.env["HERDR_ENV"];
+	delete process.env["HERDR_ENV"];
+	t.after(() => { if (herdr === undefined) delete process.env["HERDR_ENV"]; else process.env["HERDR_ENV"] = herdr; });
 	const previous = process.env["HERDR_PANE_ID"];
 	process.env["HERDR_PANE_ID"] = "w1:p1";
 	t.after(() => { if (previous === undefined) delete process.env["HERDR_PANE_ID"]; else process.env["HERDR_PANE_ID"] = previous; });
 }
+
+test("Herdr owns the display: requests the side split and never sets a widget", async t => {
+	withPane(t);
+	const dir = await mkdtemp(join(tmpdir(), "dogsled-side-"));
+	const socket = join(dir, "herdr.sock");
+	const server = createServer(client => client.end());
+	await new Promise<void>(resolve => server.listen(socket, resolve));
+	const previous = process.env["HERDR_SOCKET_PATH"];
+	process.env["HERDR_ENV"] = "1";
+	process.env["HERDR_SOCKET_PATH"] = socket;
+	t.after(async () => {
+		if (previous === undefined) delete process.env["HERDR_SOCKET_PATH"]; else process.env["HERDR_SOCKET_PATH"] = previous;
+		await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+		await rm(dir, { recursive: true, force: true });
+	});
+	const r = rig();
+	await r.invoke("session_start");
+	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "board --open --owner w1:p1 --json"));
+	assert.equal(r.widgets.length, 0);
+	assert.ok(r.commands.has("dogsled"));
+	await r.commands.get("work").handler("", r.ctx);
+	assert.equal(r.widgets.length, 0);
+	await r.invoke("session_shutdown");
+	assert.equal(r.widgets.length, 0);
+});
+
+test("a Dogsled-launched child under Herdr keeps the widget: the board belongs to its parent", async t => {
+	withPane(t);
+	const dir = await mkdtemp(join(tmpdir(), "dogsled-child-"));
+	const socket = join(dir, "herdr.sock");
+	const server = createServer(client => client.end());
+	await new Promise<void>(resolve => server.listen(socket, resolve));
+	const previous = process.env["HERDR_SOCKET_PATH"];
+	process.env["HERDR_ENV"] = "1";
+	process.env["HERDR_SOCKET_PATH"] = socket;
+	t.after(async () => {
+		if (previous === undefined) delete process.env["HERDR_SOCKET_PATH"]; else process.env["HERDR_SOCKET_PATH"] = previous;
+		await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+		await rm(dir, { recursive: true, force: true });
+	});
+	const r = rig();
+	r.opened({ skipped: "child" });
+	r.board({ hosts: [], rows: [{ group: "running", kind: "agent", id: "one", name: "worker", what: "pi", host: "local", state: "working", activity: "", age_ms: 0 }] });
+	await r.invoke("session_start");
+	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "board --open --owner w1:p1 --json"));
+	assert.ok(r.widgets.some(call => typeof call[1] === "function" && call[2]?.placement === "aboveEditor"));
+	await r.invoke("session_shutdown");
+});
+
+test("an unreachable Herdr socket keeps the existing above-editor widget", async t => {
+	withPane(t);
+	const previous = process.env["HERDR_SOCKET_PATH"];
+	process.env["HERDR_ENV"] = "1";
+	process.env["HERDR_SOCKET_PATH"] = "/nonexistent-dogsled-herdr.sock";
+	t.after(() => { if (previous === undefined) delete process.env["HERDR_SOCKET_PATH"]; else process.env["HERDR_SOCKET_PATH"] = previous; });
+	const r = rig();
+	r.board({ hosts: [], rows: [{ group: "running", kind: "agent", id: "one", name: "worker", what: "pi", host: "local", state: "working", activity: "", age_ms: 0 }] });
+	await r.invoke("session_start");
+	assert.ok(r.widgets.some(call => typeof call[1] === "function" && call[2]?.placement === "aboveEditor"));
+	assert.ok(!r.calls.some(call => call.includes("--open")));
+	await r.invoke("session_shutdown");
+});
 
 test("registers the dogsled tools, the panel command, and the message renderer", () => {
 	const r = rig();
@@ -190,7 +262,7 @@ test("a failing board refresh is reported once and the timer recovers", async (t
 	const r = rig();
 	r.fail();
 	await r.invoke("session_start");
-	const boardFailures = () => r.notices.filter(n => String((n as unknown[])[0]).includes("dogsled board failed")).length;
+	const boardFailures = () => r.notices.filter(n => String((n as unknown[])[0]).startsWith("Error: dogsled board failed")).length;
 	assert.equal(boardFailures(), 1);
 	r.recover();
 	r.board({ hosts: [], rows: [{ group: "waiting", kind: "agent", id: "t1", name: "lints", what: "pi · sol", host: "any", state: "queued", activity: "for a host with room", age_ms: 0 }] });
