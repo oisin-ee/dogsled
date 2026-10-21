@@ -1751,80 +1751,78 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             Some(tree) => delete_branch(node.shell, tree),
             None => Err(Error::Invalid("a branch entry has no branch".into())),
         },
-        "workspaces" => {
-            let seen = Seen::load(node, None, BTreeMap::new())?;
-            if let Some(reason) = workspace_group_hold(&seen.workspaces, &candidate.id) {
-                return Err(Error::Invalid(format!("refuse {}: {reason}", candidate.id)));
-            }
-            let idle = idle_panes(node, now, &seen)?;
-            for pane in seen
-                .panes
-                .iter()
-                .filter(|p| p.workspace_id.as_deref() == Some(candidate.id.as_str()))
-            {
-                if !idle.contains_key(&pane.pane_id)
-                    || crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?
-                        == crate::launch::PaneLaunch::Final
-                {
-                    return Err(Error::Invalid(format!(
-                        "refuse {}: workspace is no longer idle",
-                        candidate.id
-                    )));
-                }
-            }
-            node.shell.run_ok(
-                "herdr",
-                &["workspace".into(), "close".into(), candidate.id.clone()],
-            )?;
-            Ok(format!("closed workspace {}", candidate.id))
-        }
-        "panes" => {
-            let seen = Seen::load(node, None, BTreeMap::new())?;
-            if let Some(reason) = seen.pane_group_hold(&candidate.id) {
-                return Err(Error::Invalid(format!("refuse {}: {reason}", candidate.id)));
-            }
-            if !idle_panes(node, now, &seen)?.contains_key(&candidate.id) {
-                return Err(Error::Invalid(format!(
-                    "refuse {}: pane is no longer idle",
-                    candidate.id
-                )));
-            }
-            match crate::launch::final_pane(node.ledger, node.shell, &candidate.id)? {
-                crate::launch::PaneLaunch::Final
-                    if crate::launch::close_unfinished(node.ledger, node.shell, &candidate.id)? =>
-                {
-                    return Ok(format!("closed pane {}", candidate.id));
-                }
-                crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved => {
-                    return Err(Error::Invalid(format!(
-                        "refuse {}: unresolved launch ownership",
-                        candidate.id
-                    )));
-                }
-                _ => (),
-            }
-            let agents = crate::probe::agent_list(node.shell)?;
-            let idle = if agents.iter().any(|a| a.pane == candidate.id) {
-                crate::done::finished(node.ledger, &agents)?.contains(&candidate.id)
-            } else {
-                crate::probe::foreground(node.shell, &candidate.id)?.is_none()
-            };
-            if !idle {
-                return Err(Error::Invalid(format!(
-                    "refuse {}: pane is busy, or its agent has not called done",
-                    candidate.id
-                )));
-            }
-            node.shell.run_ok(
-                "herdr",
-                &["pane".into(), "close".into(), candidate.id.clone()],
-            )?;
-            Ok(format!("closed pane {}", candidate.id))
-        }
+        "workspaces" => close_workspace(node, &candidate.id, now),
+        "panes" => close_pane(node, &candidate.id, now),
         "jobs" => remove_job(node, &candidate.id, now),
         "targets" => remove_target(&candidate.id),
         _ => Err(Error::Invalid("unknown cleanup class".into())),
     }
+}
+
+/// Re-check a planned workspace close against a fresh survey under the cleanup lock.
+fn close_workspace(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
+    let seen = Seen::load(node, None, BTreeMap::new())?;
+    if let Some(reason) = workspace_group_hold(&seen.workspaces, id) {
+        return Err(Error::Invalid(format!("refuse {id}: {reason}")));
+    }
+    let idle = idle_panes(node, now, &seen)?;
+    for pane in seen
+        .panes
+        .iter()
+        .filter(|p| p.workspace_id.as_deref() == Some(id))
+    {
+        if !idle.contains_key(&pane.pane_id)
+            || crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?
+                == crate::launch::PaneLaunch::Final
+        {
+            return Err(Error::Invalid(format!(
+                "refuse {id}: workspace is no longer idle"
+            )));
+        }
+    }
+    node.shell
+        .run_ok("herdr", &["workspace".into(), "close".into(), id.into()])?;
+    Ok(format!("closed workspace {id}"))
+}
+
+/// Re-check a planned pane close against a fresh survey under the cleanup lock.
+fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
+    let seen = Seen::load(node, None, BTreeMap::new())?;
+    if let Some(reason) = seen.pane_group_hold(id) {
+        return Err(Error::Invalid(format!("refuse {id}: {reason}")));
+    }
+    if !idle_panes(node, now, &seen)?.contains_key(id) {
+        return Err(Error::Invalid(format!(
+            "refuse {id}: pane is no longer idle"
+        )));
+    }
+    match crate::launch::final_pane(node.ledger, node.shell, id)? {
+        crate::launch::PaneLaunch::Final
+            if crate::launch::close_unfinished(node.ledger, node.shell, id)? =>
+        {
+            return Ok(format!("closed pane {id}"));
+        }
+        crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved => {
+            return Err(Error::Invalid(format!(
+                "refuse {id}: unresolved launch ownership"
+            )));
+        }
+        _ => (),
+    }
+    let agents = crate::probe::agent_list(node.shell)?;
+    let idle = if agents.iter().any(|a| a.pane == id) {
+        crate::done::finished(node.ledger, &agents)?.contains(id)
+    } else {
+        crate::probe::foreground(node.shell, id)?.is_none()
+    };
+    if !idle {
+        return Err(Error::Invalid(format!(
+            "refuse {id}: pane is busy, or its agent has not called done"
+        )));
+    }
+    node.shell
+        .run_ok("herdr", &["pane".into(), "close".into(), id.into()])?;
+    Ok(format!("closed pane {id}"))
 }
 
 pub fn render(plan: &Plan) -> String {
