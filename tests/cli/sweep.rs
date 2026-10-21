@@ -50,7 +50,7 @@ impl Drop for Worker {
 }
 
 #[test]
-fn serve_closes_ended_job_tabs_and_shells_in_deleted_directories_and_nothing_else() {
+fn serve_closes_ended_job_deleted_directory_and_old_shells_but_keeps_unfinished_agents() {
     let rig = shells_rig("sweep-panes");
     // The worktree that every pane's directory resolves to is unmerged: not this test's class.
     fs::write(rig.dir.join("unmerged"), "").unwrap();
@@ -79,7 +79,6 @@ fn serve_closes_ended_job_tabs_and_shells_in_deleted_directories_and_nothing_els
         &json!({"result":{"agents":[{"pane_id":"w6:p1","agent":"pi","agent_status":"idle",
             "terminal_id":"term_w6","completion_seq":1,"state_change_seq":1}]}}),
     );
-    rig.done("term_w6", "w6:p1", 1);
     fs::write(rig.dir.join("busy"), "w4:p2\n").unwrap();
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     let job = |id: &str, pane: &str, ended: Option<u64>| {
@@ -105,32 +104,130 @@ fn serve_closes_ended_job_tabs_and_shells_in_deleted_directories_and_nothing_els
     rig.put("state/host.json", &snapshot);
     let journal = requested_sweep(&rig);
     let log = rig.log("herdr.log");
-    for (kind, id) in [("pane", "w4:p1"), ("pane", "w4:p4"), ("workspace", "w5")] {
+    for (kind, id) in [
+        ("pane", "w4:p1"),
+        ("pane", "w4:p3"),
+        ("pane", "w4:p4"),
+        ("workspace", "w5"),
+    ] {
         assert!(log.contains(&format!("{kind} close {id}\n")), "{log}");
         assert!(
             journal.contains(&format!("dogsled sweep: closed {kind} {id}\n")),
             "{journal}"
         );
     }
-    // Busy, idle for a day, the caller's own, and a stale agent stay for `prune`.
-    for kept in ["w4:p2", "w4:p3", "w1:p1", "w6:p1", "w5:p"] {
+    // Busy shells, the caller's own pane, and agents without done stay in both scopes.
+    for kept in ["w4:p2", "w1:p1", "w6:p1", "w5:p"] {
         assert!(!log.contains(&format!("pane close {kept}")), "{log}");
     }
     for kept in ["w1", "w4", "w6"] {
         assert!(!log.contains(&format!("workspace close {kept}\n")), "{log}");
     }
-    // The job records stay until they expire, and `prune` still lists the idle shell and agent.
+    // The job records stay until they expire. The fake close retains the idle shell fixture.
     assert!(rig.dir.join("state/jobs/r-1.json").exists());
     let (_, plan) = rig.json(&["doctor"]);
-    for id in ["w4:p3", "w6"] {
-        assert!(
-            plan["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|e| e["id"] == id && e["removable"] == true),
-            "{plan}"
+    assert!(
+        plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == "w4:p3" && e["removable"] == true),
+        "{plan}"
+    );
+}
+
+#[test]
+fn sweep_recovers_final_launch_shells_without_rewriting_their_evidence() {
+    for state in ["unattempted", "unknown", "refused"] {
+        let (rig, tree) = close_rig(&format!("sweep-final-{state}"));
+        // Dirty work stays; only the stranded launch pane can close.
+        fs::write(tree.join("keep"), "unfinished work").unwrap();
+        rig.put(
+            "panes.json",
+            &json!({"result":{"panes":[{
+                "pane_id":"w2:p2","terminal_id":"term_launch","workspace_id":"w2","cwd":tree
+            }]}}),
         );
+        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+        let progress = json!({"request":{"id":"final","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+            "host":"local","cwd":tree,"owner":"w1:p1"},"pane":"w2:p2","terminal":"term_launch",
+            "attempted":state != "unattempted","confirmed":false,"result":{},"error":"response lost"});
+        rig.put("state/launches/final.progress.json", &progress);
+        if state == "refused" {
+            rig.put(
+                "state/launches/final.json",
+                &json!({"failed":"agent_pane_busy"}),
+            );
+        }
+        let receipt = fs::read(rig.dir.join("state/launches/final.json")).ok();
+        let journal = requested_sweep(&rig);
+        let log = rig.log("herdr.log");
+        assert!(
+            log.contains("pane close w2:p2"),
+            "{state}: {journal}\n{log}"
+        );
+        assert!(!log.contains("workspace close w2"), "{log}");
+        assert!(tree.join("keep").exists());
+        assert_eq!(rig.read("state/launches/final.progress.json"), progress);
+        assert_eq!(
+            fs::read(rig.dir.join("state/launches/final.json")).ok(),
+            receipt
+        );
+    }
+}
+
+#[test]
+fn sweep_uses_fifteen_minutes_and_keeps_focused_caller_busy_and_unfinished_agent_panes() {
+    let rig = shells_rig("sweep-fifteen-minutes");
+    fs::write(rig.dir.join("unmerged"), "").unwrap();
+    let home = rig.dir.join("home");
+    let mut live = vec![];
+    for (id, minutes, focused) in [
+        ("old", 15, false),
+        ("young", 14, false),
+        ("focused", 30, true),
+        ("busy", 30, false),
+        ("w1:p1", 30, false),
+        ("agent", 30, false),
+        ("parent", 30, false),
+    ] {
+        live.push(json!({"pane_id":id,"cwd":home,"focused":focused,"idle_shell":true,"idle_since_ms":NOW - minutes * 60_000}));
+    }
+    for pane in &mut live[5..] {
+        pane["agent"] = json!("pi");
+        pane["agent_status"] = json!("idle");
+    }
+    rig.put("panes.json", &json!({"result":{"panes":live}}));
+    rig.put("agents.json", &json!({"result":{"agents":[
+        {"pane_id":"agent","agent":"pi","agent_status":"idle","terminal_id":"term_agent","completion_seq":1},
+        {"pane_id":"parent","agent":"pi","agent_status":"idle","terminal_id":"term_parent","completion_seq":1}
+    ]}}));
+    rig.done("term_parent", "parent", 1);
+    rig.put("state/items.json", &json!([{"id":"child","kind":"agent","host":"remote","pane":"remote-child","owner_pane":"parent","created_ms":1}]));
+    fs::write(rig.dir.join("busy"), "busy\n").unwrap();
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
+    let mut snapshot = rig.read("state/host.json");
+    snapshot["probe"]["panes"] = json!(live);
+    snapshot["probe"]["agent_panes"] = json!([
+        {"pane":"agent","agent":"pi","state":"idle","state_since_ms":1},
+        {"pane":"parent","agent":"pi","state":"idle","state_since_ms":1}
+    ]);
+    rig.put("state/host.json", &snapshot);
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    let candidates: Vec<_> = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["class"] == "panes")
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(candidates, ["old"], "{plan}");
+    let journal = requested_sweep(&rig);
+    let log = rig.log("herdr.log");
+    assert!(log.contains("pane close old\n"), "{journal}\n{log}");
+    for kept in ["young", "focused", "busy", "w1:p1", "agent", "parent"] {
+        assert!(!log.contains(&format!("pane close {kept}\n")), "{log}");
     }
 }
 

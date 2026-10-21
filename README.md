@@ -323,15 +323,17 @@ A tip also counts as integrated when a local or remote-tracking ref contains it 
 Results use the remote-tracking branch, so `git fetch` keeps them current.
 A local branch with no worktree is removable when it is integrated or every commit is on a remote branch. Other branches are report-only. The default branch is never a candidate. Prune deletes a branch with `git branch -D` after it rechecks the planned commit.
 Prune and the sweep share the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches.
-An unfinished launch holds its checkout while its pane exists, because an interrupted start can still bring up an agent there. When its pane is gone, it holds nothing.
+An unfinished launch holds its checkout before pane allocation completes, or while its attempted start has the matching agent. An empty shell from a final launch holds nothing.
 An open agent item holds its checkout in prune and the sweep; `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until the default branch holds its work.
 An idle or done agent that has not called `dogsled done` holds its checkout in prune, the sweep, and an automatic close; only an explicit `dogsled close` takes it. An idle shell, a done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
 The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
 A registered worktree whose directory is gone is a stale registration. Prune drops the record only.
-A shell with no foreground command in an ended job's tab is idle at once: the job log keeps its output. So is a shell whose directory no longer exists.
-Other panes need more than 24 hours continuously idle or done, based on service observations and a fresh snapshot. An agent pane also needs a `done` mark.
-A shell pane is idle when the service found no foreground command at each sample for more than 24 hours, and it still has none. Herdr reports no activity time, so a command that starts and ends between samples does not count.
+Prune and the sweep use one pane rule. Both keep the caller's pane and focused panes.
+An empty shell closes when its job ended, its directory disappeared, its launch is final, or its agent item closed.
+A final launch was refused, never attempted, or has an unknown outcome with no agent in its terminal. Cleanup preserves launch receipts and checks terminal ownership under the launch locks.
+A shell without a Dogsled record closes after 15 minutes continuously at an empty prompt, based on service observations and a fresh check. Herdr reports no activity time, so a command that starts and ends between samples does not count.
+An agent pane still needs more than 24 hours continuously idle or done and a `done` mark. An agent with open children stays open.
 A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
 Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known dogsled-owned paths.
 A `targets` entry is build output: a directory with a `CACHEDIR.TAG` that starts with the cache-directory signature, directly under a main checkout or a linked worktree, such as Rust's `target/`.
@@ -360,7 +362,7 @@ The socket is optional. A bind failure produces a warning, and pending requests 
 A Stop request failure produces a warning without preventing existing gate or inbox messages from reaching the agent.
 Each requested pass builds the doctor plan in sweep scope. It applies only entries whose removal loses nothing:
 
-- `panes` and `workspaces`: a shell at an empty prompt in an ended job's tab, or in a directory that no longer exists. A workspace closes whole when every pane in it is one of these.
+- `panes` and `workspaces`: the shared pane rule above. A workspace closes whole only when every pane qualifies. Final launch panes close separately under their launch locks.
 - `worktrees` and `branches`: the shared loss rule and holds described above, identical to prune.
 - Orphaned children: a child that called `done`, whose owner is gone, and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
@@ -372,7 +374,7 @@ The report includes start and finish times, removals, failures, repository warni
 The service also writes removals, failures, and repository warnings to stderr.
 Child completion and orphan checks remain independent of requested doctor cleanup.
 An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
-Prune also handles idle panes after a day, ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
+Prune also handles ended jobs, stale registrations, and `targets`. Disk, process, and repository findings are report-only.
 
 ## Placement
 

@@ -82,6 +82,107 @@ fn receipt_and_pane_locks_span_every_verification_and_native_close() {
 }
 
 #[test]
+fn final_unattempted_and_refused_shells_close_under_both_locks_without_changing_evidence() {
+    for refused in [false, true] {
+        let ledger = fixture();
+        let receipts = ledger.child("launches");
+        let mut progress = receipts
+            .read::<Progress>("own.progress.json")
+            .unwrap()
+            .unwrap();
+        progress.attempted = false;
+        receipts.write("own.progress.json", &progress).unwrap();
+        if refused {
+            receipts
+                .write(
+                    "own.json",
+                    &Receipt::Refused {
+                        failed: "agent_pane_busy".into(),
+                    },
+                )
+                .unwrap();
+        }
+        let before = std::fs::read(receipts.dir.join("own.progress.json")).unwrap();
+        let receipt = std::fs::read(receipts.dir.join("own.json")).ok();
+        let shell = LockedShell {
+            ledger: ledger.clone(),
+            closed: AtomicUsize::new(0),
+        };
+        assert!(close_unfinished(&ledger, &shell, "w2:p2").unwrap());
+        assert_eq!(shell.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            std::fs::read(receipts.dir.join("own.progress.json")).unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read(receipts.dir.join("own.json")).ok(), receipt);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+}
+
+#[test]
+fn pending_paths_require_an_allocating_launch_or_its_matching_attempted_agent() {
+    let ledger = fixture();
+    let receipts = ledger.child("launches");
+    let mut progress = receipts
+        .read::<Progress>("own.progress.json")
+        .unwrap()
+        .unwrap();
+    let matching = crate::probe::Agent {
+        pane: "w2:p2".into(),
+        name: Some("worker".into()),
+        agent: Some("pi".into()),
+        terminal_id: Some("term_shell".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::launch::pending_paths(&ledger, &[]).unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        crate::launch::pending_paths(&ledger, std::slice::from_ref(&matching)).unwrap(),
+        ["/checkout"]
+    );
+    for field in ["pane", "name", "kind", "terminal"] {
+        let mut changed = matching.clone();
+        match field {
+            "pane" => changed.pane = "w3:p1".into(),
+            "name" => changed.name = Some("foreign".into()),
+            "kind" => changed.agent = Some("claude".into()),
+            _ => changed.terminal_id = Some("replacement".into()),
+        }
+        assert_eq!(
+            crate::launch::pending_paths(&ledger, &[changed]).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+    progress.attempted = false;
+    receipts.write("own.progress.json", &progress).unwrap();
+    assert_eq!(
+        crate::launch::pending_paths(&ledger, &[matching]).unwrap(),
+        Vec::<String>::new()
+    );
+    progress.pane = None;
+    receipts.write("own.progress.json", &progress).unwrap();
+    assert_eq!(
+        crate::launch::pending_paths(&ledger, &[]).unwrap(),
+        ["/checkout"]
+    );
+    receipts
+        .write(
+            "own.json",
+            &Receipt::Refused {
+                failed: "agent_pane_busy".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        crate::launch::pending_paths(&ledger, &[]).unwrap(),
+        Vec::<String>::new()
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
 fn occupied_receipt_lock_prevents_all_terminal_operations() {
     let mut ledger = fixture();
     let lock = std::fs::OpenOptions::new()

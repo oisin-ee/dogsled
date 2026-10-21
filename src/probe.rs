@@ -30,6 +30,8 @@ impl AgentCounts {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pane {
     pub pane_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub focused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
