@@ -468,15 +468,18 @@ Peers need a dogsled version that supports quota storage. No management credenti
 The version-1 contract contains `version`, `fetched_ms`, `source`, and `pools`.
 `source` identifies the collector by hostname. Each row contains these fields:
 
-- `pool`: `claude`, `codex`, or `minimax`.
+- `pool`: the lowercase CLIProxy provider name, such as `claude`, `codex`, or a plugin provider. Consumers must accept any string.
 - `account` and `window`: the account label and provider window name.
 - `used_pct`: a number from 0 to 100.
 - `resets_ms`: Unix milliseconds, or `null` when unavailable.
 - `error`: a safe error description, or `null`.
 
 Claude windows are `five_hour`, `seven_day`, `seven_day_opus`, and `seven_day_sonnet`.
-Codex windows are `primary` and `secondary`. MiniMax windows are `interval` and `weekly`.
-MiniMax account labels use `minimax-N`, where N is the position in the configured API-key list.
+Codex windows are `primary` and `secondary`.
+Dogsled reads Claude and Codex through CLIProxy `api-call`. For every other enabled credential that CLIProxy marks `supports_quota`, it calls `POST /v0/management/quota/fetch` with the credential's `auth_index`. It needs no change for a new provider.
+Each bucket becomes one row. The window is the bucket window. With more than one group, it is `<group>-<window>`, where the group is its lowercase `[a-z0-9_-]` display name.
+`used_pct` is `(1 - remainingFraction) * 100`, limited to 0..100. `resets_ms` comes from `resetTime`.
+Plugin account labels follow the same redaction as Claude and Codex labels. A failed fetch gives one error row with the window `quota`.
 A failed account has error rows with zero usage and no reset time. Consumers must treat these rows as unknown, not available quota.
 A pool is exhausted when every account has a window at 100% with a reset time in the future.
 Human output shows each window, reset time, and snapshot age. No snapshot produces an empty version-1 snapshot with `fetched_ms: 0`.

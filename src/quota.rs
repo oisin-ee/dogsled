@@ -29,20 +29,29 @@ const CURL_ARGS: &[&str] = &["-q", "--config", "-"];
 
 type Collected<T> = std::result::Result<T, String>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Pool {
+/// Error rows for a plugin credential use this window: its real windows are unknown.
+const PLUGIN_ERROR_WINDOW: &str = "quota";
+
+/// Providers dogsled reads through `CLIProxy` `api-call`, with fixed windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pool {
     Claude,
     Codex,
-    Minimax,
 }
 
 impl Pool {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
-            Self::Minimax => "minimax",
         }
     }
 
@@ -55,15 +64,46 @@ impl Pool {
                 "seven_day_sonnet",
             ],
             Self::Codex => &["primary", "secondary"],
-            Self::Minimax => &["interval", "weekly"],
         }
+    }
+}
+
+/// A non-empty lowercase `[a-z0-9_-]` name of at most 64 bytes.
+fn slug_ok(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Lowercases text and replaces each run of other characters with one `-`.
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.trim().chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-');
+    out[..out.len().min(64)].trim_end_matches('-').to_owned()
+}
+
+/// Claude and Codex keep their fixed windows. Any other pool is a plugin provider.
+fn window_ok(pool: &str, window: &str) -> bool {
+    match Pool::parse(pool) {
+        Some(pool) => pool.windows().contains(&window),
+        None => slug_ok(pool) && slug_ok(window),
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Row {
-    pub pool: Pool,
+    /// The `CLIProxy` provider, lowercased. Consumers must accept any string.
+    pub pool: String,
     pub account: String,
     pub window: String,
     pub used_pct: f64,
@@ -96,7 +136,7 @@ impl Snapshot {
             || self.pools.iter().any(|row| {
                 !label(&row.account)
                     || row.account.is_empty()
-                    || !row.pool.windows().contains(&row.window.as_str())
+                    || !window_ok(&row.pool, &row.window)
                     || !row.used_pct.is_finite()
                     || !(0.0..=100.0).contains(&row.used_pct)
                     || row.error.as_ref().is_some_and(|error| !label(error))
@@ -122,7 +162,7 @@ impl Snapshot {
             let _ = writeln!(
                 out,
                 "{} / {} / {}: {:.1}% used, resets {reset}, age {age}s{}",
-                row.pool.name(),
+                row.pool,
                 row.account,
                 row.window,
                 row.used_pct,
@@ -264,7 +304,6 @@ impl<'a> Management<'a> {
         let url = match pool {
             Pool::Claude => "https://api.anthropic.com/api/oauth/usage",
             Pool::Codex => "https://chatgpt.com/backend-api/wham/usage",
-            Pool::Minimax => "https://www.minimax.io/v1/token_plan/remains",
         };
         let mut header = json!({"Authorization":"Bearer $TOKEN$"});
         if pool == Pool::Claude {
@@ -280,22 +319,36 @@ impl<'a> Management<'a> {
         serde_json::from_str(&response.body).map_err(|_| "invalid upstream response".into())
     }
 
-    fn rows(&self, pool: Pool, account: &str, auth_index: &str, now: u64) -> Vec<Row> {
+    fn rows(&self, pool: Pool, account: &str, auth_index: &str) -> Vec<Row> {
         let result = self
             .usage(pool, auth_index)
-            .and_then(|body| parse_usage(pool, account, &body, now));
+            .and_then(|body| parse_usage(pool, account, &body));
         result.unwrap_or_else(|error| error_rows(pool, account, &error))
+    }
+
+    /// `CLIProxy`'s own normalized quota route, for credentials a plugin serves.
+    fn plugin_rows(&self, provider: &str, account: &str, auth_index: &str) -> Vec<Row> {
+        let fail = |error: &str| plugin_error(provider, account, error);
+        if auth_index.is_empty() {
+            return fail("missing auth index");
+        }
+        let response: QuotaFetch =
+            match self.request("quota/fetch", Some(&json!({"auth_index": auth_index}))) {
+                Ok(response) => response,
+                Err(error) => return fail(&error),
+            };
+        plugin_buckets(provider, account, &response).unwrap_or_else(|error| fail(&error))
     }
 
     fn collect(&self, now: u64, source: &str) -> Collected<Snapshot> {
         let files: AuthFiles = self.request("auth-files", None)?;
         let mut pools = Vec::new();
         for file in files.files.into_iter().filter(|file| !file.disabled) {
-            let pool = match file.provider.as_str() {
-                "claude" => Pool::Claude,
-                "codex" => Pool::Codex,
-                _ => continue,
-            };
+            let provider = file.provider.to_lowercase();
+            let fixed = Pool::parse(&provider);
+            if fixed.is_none() && !file.supports_quota {
+                continue;
+            }
             let account = [file.email, file.label, file.account, file.name]
                 .into_iter()
                 .flatten()
@@ -307,24 +360,10 @@ impl<'a> Management<'a> {
             } else {
                 "redacted".into()
             };
-            pools.extend(self.rows(pool, &account, &file.auth_index, now));
-        }
-        match self.request::<ApiKeys>("claude-api-key", None) {
-            Ok(keys) => {
-                for (index, entry) in keys.entries.into_iter().enumerate() {
-                    if entry.base_url.trim_end_matches('/') != "https://api.minimax.io/anthropic" {
-                        continue;
-                    }
-                    // Only base-url and auth-index are deserialized. No raw key or label is retained.
-                    pools.extend(self.rows(
-                        Pool::Minimax,
-                        &format!("minimax-{}", index + 1),
-                        &entry.auth_index,
-                        now,
-                    ));
-                }
-            }
-            Err(error) => pools.extend(error_rows(Pool::Minimax, "discovery", &error)),
+            pools.extend(match fixed {
+                Some(pool) => self.rows(pool, &account, &file.auth_index),
+                None => self.plugin_rows(&provider, &account, &file.auth_index),
+            });
         }
         Ok(Snapshot {
             version: 1,
@@ -363,31 +402,98 @@ struct AuthFile {
     provider: String,
     auth_index: String,
     disabled: bool,
+    supports_quota: bool,
     email: Option<String>,
     label: Option<String>,
     account: Option<String>,
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ApiKeys {
-    #[serde(rename = "claude-api-key")]
-    entries: Vec<ApiKey>,
+/// `CLIProxy` `QuotaFetchResponse`: only the fields dogsled reads.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct QuotaFetch {
+    groups: Vec<QuotaGroup>,
 }
 
-#[derive(Deserialize)]
-struct ApiKey {
-    #[serde(rename = "base-url", default)]
-    base_url: String,
-    #[serde(rename = "auth-index", default)]
-    auth_index: String,
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct QuotaGroup {
+    #[serde(alias = "display_name", rename = "displayName")]
+    display_name: String,
+    buckets: Vec<QuotaBucket>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct QuotaBucket {
+    window: String,
+    #[serde(alias = "remaining_fraction", rename = "remainingFraction")]
+    remaining_fraction: Option<f64>,
+    #[serde(alias = "reset_time", rename = "resetTime")]
+    reset_time: Option<String>,
+}
+
+fn plugin_error(provider: &str, account: &str, error: &str) -> Vec<Row> {
+    vec![Row {
+        pool: provider.into(),
+        account: account.into(),
+        window: PLUGIN_ERROR_WINDOW.into(),
+        used_pct: 0.0,
+        resets_ms: None,
+        error: Some(error.into()),
+    }]
+}
+
+fn plugin_buckets(provider: &str, account: &str, response: &QuotaFetch) -> Collected<Vec<Row>> {
+    let grouped = response.groups.len() > 1;
+    let mut rows = Vec::new();
+    for group in &response.groups {
+        for bucket in &group.buckets {
+            let window = slug(&bucket.window);
+            let window = if grouped {
+                let group = slug(&group.display_name);
+                if group.is_empty() {
+                    return Err("invalid quota group".into());
+                }
+                format!("{group}-{window}")
+            } else {
+                window
+            };
+            let remaining = bucket
+                .remaining_fraction
+                .filter(|n| n.is_finite())
+                .ok_or_else(|| "invalid quota usage".to_string())?;
+            let resets_ms = match bucket.reset_time.as_deref().filter(|t| !t.is_empty()) {
+                None => None,
+                Some(text) => Some(
+                    chrono::DateTime::parse_from_rfc3339(text)
+                        .ok()
+                        .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
+                        .ok_or_else(|| "invalid quota reset".to_string())?,
+                ),
+            };
+            rows.push(Row {
+                pool: provider.into(),
+                account: account.into(),
+                window,
+                used_pct: ((1.0 - remaining) * 100.0).clamp(0.0, 100.0),
+                resets_ms,
+                error: None,
+            });
+        }
+    }
+    if rows.is_empty() || rows.iter().any(|row| !window_ok(&row.pool, &row.window)) {
+        return Err("no quota windows".into());
+    }
+    Ok(rows)
 }
 
 fn error_rows(pool: Pool, account: &str, error: &str) -> Vec<Row> {
     pool.windows()
         .iter()
         .map(|window| Row {
-            pool,
+            pool: pool.name().into(),
             account: account.into(),
             window: (*window).into(),
             used_pct: 0.0,
@@ -397,10 +503,7 @@ fn error_rows(pool: Pool, account: &str, error: &str) -> Vec<Row> {
         .collect()
 }
 
-fn parse_usage(pool: Pool, account: &str, body: &Value, now: u64) -> Collected<Vec<Row>> {
-    if pool == Pool::Minimax {
-        return minimax(account, body, now);
-    }
+fn parse_usage(pool: Pool, account: &str, body: &Value) -> Collected<Vec<Row>> {
     let mut rows = Vec::new();
     for window in pool.windows() {
         let (value, used_key, reset_key) = match pool {
@@ -410,7 +513,6 @@ fn parse_usage(pool: Pool, account: &str, body: &Value, now: u64) -> Collected<V
                 "used_percent",
                 "reset_at",
             ),
-            Pool::Minimax => return minimax(account, body, now),
         };
         if value.is_null() {
             continue;
@@ -429,81 +531,19 @@ fn parse_usage(pool: Pool, account: &str, body: &Value, now: u64) -> Collected<V
                         .as_str()
                         .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
                         .and_then(|date| u64::try_from(date.timestamp_millis()).ok()),
-                    _ => reset.as_u64().and_then(|seconds| seconds.checked_mul(1000)),
+                    Pool::Codex => reset.as_u64().and_then(|seconds| seconds.checked_mul(1000)),
                 }
                 .ok_or_else(|| "invalid quota reset".to_string())?,
             )
         };
         rows.push(Row {
-            pool,
+            pool: pool.name().into(),
             account: account.into(),
             window: (*window).into(),
             used_pct: used.clamp(0.0, 100.0),
             resets_ms,
             error: None,
         });
-    }
-    if rows.is_empty() {
-        return Err("no quota windows".into());
-    }
-    Ok(rows)
-}
-
-fn minimax(account: &str, body: &Value, now: u64) -> Collected<Vec<Row>> {
-    if body
-        .pointer("/base_resp/status_code")
-        .and_then(Value::as_u64)
-        .is_some_and(|code| code != 0)
-    {
-        return Err("MiniMax quota request failed".into());
-    }
-    let models = body["model_remains"]
-        .as_array()
-        .ok_or_else(|| "invalid MiniMax quota".to_string())?;
-    let mut rows: Vec<Row> = Vec::new();
-    for model in models {
-        for (window, prefix, end, remains) in [
-            ("interval", "current_interval", "end_time", "remains_time"),
-            (
-                "weekly",
-                "current_weekly",
-                "weekly_end_time",
-                "weekly_remains_time",
-            ),
-        ] {
-            let percent = model[format!("{prefix}_remaining_percent")].as_f64();
-            let total = model[format!("{prefix}_total_count")].as_f64();
-            // Despite its name, usage_count is remaining quota in the remains API.
-            let remaining = model[format!("{prefix}_usage_count")].as_f64();
-            let used = percent.map(|p| 100.0 - p).or_else(|| {
-                total
-                    .zip(remaining)
-                    .filter(|(total, _)| *total > 0.0)
-                    .map(|(total, remaining)| 100.0 * (total - remaining) / total)
-            });
-            let Some(used) = used.filter(|n| n.is_finite()) else {
-                continue;
-            };
-            let resets_ms = model[end]
-                .as_u64()
-                .or_else(|| model[remains].as_u64().and_then(|ms| now.checked_add(ms)));
-            let row = Row {
-                pool: Pool::Minimax,
-                account: account.into(),
-                window: window.into(),
-                used_pct: used.clamp(0.0, 100.0),
-                resets_ms,
-                error: None,
-            };
-            // MiniMax repeats shared plan windows per model. Keep the most constrained one.
-            if let Some(existing) = rows.iter_mut().find(|r| r.window == window) {
-                if row.used_pct > existing.used_pct {
-                    *existing = row;
-                }
-            } else {
-                rows.push(row);
-            }
-        }
     }
     if rows.is_empty() {
         return Err("no quota windows".into());
@@ -652,7 +692,7 @@ mod tests {
     use std::sync::Mutex;
 
     const SECRET: &str = "quota-secret-sentinel";
-    const RAW_KEY: &str = "minimax-secret-sentinel";
+    const RAW_KEY: &str = "plugin-secret-sentinel";
 
     #[derive(Debug, Default)]
     struct HttpShell {
@@ -690,7 +730,6 @@ mod tests {
 
         fn minimal(&self) {
             self.reply(&json!({"files":[]}), 200);
-            self.reply(&json!({"claude-api-key":[]}), 200);
         }
     }
 
@@ -791,26 +830,15 @@ mod tests {
             }}),
             200,
         );
-        f.shell.reply(&json!({"claude-api-key":[
-            {"base-url":"https://api.minimax.io/anthropic","auth-index":"m","api-key":RAW_KEY,"label":RAW_KEY},
-            {"base-url":"https://elsewhere.example","api-key":RAW_KEY}
-        ]}), 200);
-        f.shell.usage(&json!({"base_resp":{"status_code":0},"model_remains":[{
-            "current_interval_total_count":100,"current_interval_usage_count":80,"end_time":1_800_000_000_000_u64,
-            "current_weekly_remaining_percent":30,"weekly_remains_time":60000,
-            "unknown":RAW_KEY
-        }]}), 200);
         let snapshot = f.collector().read(false, false, 1_000_000).unwrap();
-        assert_eq!(snapshot.pools.len(), 8);
+        assert_eq!(snapshot.pools.len(), 6);
         assert_eq!(snapshot.pools[0].resets_ms, Some(1_767_225_600_000));
         assert_eq!(snapshot.pools[0].used_pct, 25.5);
         assert_eq!(snapshot.pools[1].used_pct, 100.0);
         assert_eq!(snapshot.pools[2].resets_ms, Some(1_767_312_000_125));
         assert_eq!(snapshot.pools[3].used_pct, 0.0);
         assert_eq!(snapshot.pools[4].resets_ms, Some(1_800_000_000_000));
-        assert_eq!(snapshot.pools[6].used_pct, 20.0);
-        assert_eq!(snapshot.pools[7].used_pct, 70.0);
-        assert_eq!(snapshot.pools[7].resets_ms, Some(1_060_000));
+        assert_eq!(snapshot.pools[5].used_pct, 20.0);
         assert_eq!(
             f.shell.stored.lock().unwrap().as_slice(),
             std::slice::from_ref(&snapshot)
@@ -829,7 +857,8 @@ mod tests {
         assert!(requests[1].contains("oauth-2025-04-20"));
         assert!(requests[1].contains("$TOKEN$"));
         assert!(requests[2].contains("wham/usage"));
-        assert!(requests[4].contains("token_plan/remains"));
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|r| !r.contains("claude-api-key")));
     }
 
     #[test]
@@ -844,13 +873,8 @@ mod tests {
         );
         f.shell.usage(&json!({"error":SECRET}), 401);
         f.shell.reply(&json!({"error":SECRET}), 503);
-        f.shell.reply(&json!({"claude-api-key":[{"base-url":"https://api.minimax.io/anthropic","auth-index":"m","api-key":RAW_KEY}]}), 200);
-        f.shell.usage(
-            &json!({"base_resp":{"status_code":1004,"status_msg":RAW_KEY}}),
-            200,
-        );
         let snapshot = f.collector().read(false, false, 1000).unwrap();
-        assert_eq!(snapshot.pools.len(), 8);
+        assert_eq!(snapshot.pools.len(), 6);
         assert!(snapshot.pools.iter().all(|row| row.error.is_some()));
         assert_eq!(
             snapshot.pools[0].error.as_deref(),
@@ -863,6 +887,153 @@ mod tests {
         let printed = serde_json::to_string(&snapshot).unwrap() + &snapshot.render(1000);
         assert!(!printed.contains(SECRET));
         assert!(!printed.contains(RAW_KEY));
+    }
+
+    fn plugin_files() -> Value {
+        json!({"files":[
+            {"provider":"claude","email":"c@example.com","auth_index":"c","supports_quota":true},
+            {"provider":"MiniMax","email":"mm@example.com","auth_index":"p","supports_quota":true,"quota_provider":"minimax"},
+            {"provider":"minimax","email":"off","auth_index":"x","supports_quota":true,"disabled":true},
+            {"provider":"other","email":"none","auth_index":"n"}
+        ]})
+    }
+
+    #[test]
+    fn quota_plugin_credential_maps_groups_and_buckets_to_rows() {
+        let f = Fixture::new();
+        f.shell.reply(&plugin_files(), 200);
+        f.shell.usage(
+            &json!({"five_hour":{"utilization":10,"resets_at":null}}),
+            200,
+        );
+        f.shell.reply(
+            &json!({"groups":[
+                {"displayName":"Text Models","buckets":[
+                    {"window":"interval","remainingFraction":0.25,"resetTime":"2026-01-01T00:00:00Z"},
+                    {"window":"weekly","remainingFraction":-0.5}]},
+                {"display_name":"Image","buckets":[
+                    {"window":"daily","remaining_fraction":1.5,"reset_time":"2026-01-02T00:00:00Z"}]}
+            ]}),
+            200,
+        );
+        let snapshot = f.collector().read(false, false, 1000).unwrap();
+        let plugin: Vec<_> = snapshot
+            .pools
+            .iter()
+            .filter(|r| r.pool == "minimax")
+            .collect();
+        assert_eq!(plugin.len(), 3);
+        assert_eq!(plugin[0].account, "mm@example.com");
+        assert_eq!(plugin[0].window, "text-models-interval");
+        assert_eq!(plugin[0].used_pct, 75.0);
+        assert_eq!(plugin[0].resets_ms, Some(1_767_225_600_000));
+        assert_eq!(plugin[1].window, "text-models-weekly");
+        assert_eq!(plugin[1].used_pct, 100.0);
+        assert_eq!(plugin[1].resets_ms, None);
+        assert_eq!(plugin[2].window, "image-daily");
+        assert_eq!(plugin[2].used_pct, 0.0);
+        assert!(plugin.iter().all(|r| r.error.is_none()));
+        assert_eq!(cached(&f.ledger).unwrap(), snapshot);
+        let requests = f.shell.requests.lock().unwrap();
+        // auth-files, claude api-call, one plugin fetch: claude keeps api-call, and
+        // disabled and unsupported credentials are skipped.
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].contains("/v0/management/api-call"));
+        assert!(requests[2].contains("/v0/management/quota/fetch"));
+        assert!(requests[2].contains(r#"{\"auth_index\":\"p\"}"#));
+        assert!(requests.iter().all(|r| !r.contains("claude-api-key")));
+        assert!(!requests.iter().any(|r| r.contains(r#"\"x\""#)));
+    }
+
+    #[test]
+    fn quota_plugin_single_group_uses_bare_window() {
+        let f = Fixture::new();
+        f.shell.reply(
+            &json!({"files":[{"provider":"minimax","email":"m","auth_index":"p","supports_quota":true}]}),
+            200,
+        );
+        f.shell.reply(
+            &json!({"groups":[{"displayName":"All","buckets":[{"window":"5h","remainingFraction":0.5}]}]}),
+            200,
+        );
+        let snapshot = f.collector().read(false, false, 1000).unwrap();
+        assert_eq!(snapshot.pools.len(), 1);
+        assert_eq!(snapshot.pools[0].window, "5h");
+        assert_eq!(snapshot.pools[0].used_pct, 50.0);
+    }
+
+    #[test]
+    fn quota_plugin_fetch_failures_become_redacted_error_rows() {
+        for (status, body) in [
+            (502, json!({"error":SECRET})),
+            (501, json!({"error":RAW_KEY})),
+            (200, json!({"groups":[]})),
+            (
+                200,
+                json!({"groups":[{"displayName":"a","buckets":[{"window":"w"}]}]}),
+            ),
+        ] {
+            let f = Fixture::new();
+            f.shell.reply(
+                &json!({"files":[
+                    {"provider":"minimax","label":SECRET,"auth_index":"p","supports_quota":true},
+                    {"provider":"zed","email":"z","auth_index":"q","supports_quota":true}
+                ]}),
+                200,
+            );
+            f.shell.reply(&body, status);
+            f.shell.reply(
+                &json!({"groups":[{"displayName":"a","buckets":[{"window":"w","remainingFraction":0.9}]}]}),
+                200,
+            );
+            let snapshot = f.collector().read(false, false, 1000).unwrap();
+            assert_eq!(snapshot.pools.len(), 2);
+            assert_eq!(snapshot.pools[0].pool, "minimax");
+            assert_eq!(snapshot.pools[0].account, "redacted");
+            assert!(snapshot.pools[0].error.is_some());
+            assert_eq!(snapshot.pools[0].used_pct, 0.0);
+            // One failing account does not hide the next one.
+            assert_eq!(snapshot.pools[1].pool, "zed");
+            assert!(snapshot.pools[1].error.is_none());
+            let printed = serde_json::to_string(&snapshot).unwrap() + &snapshot.render(1000);
+            assert!(!printed.contains(SECRET));
+            assert!(!printed.contains(RAW_KEY));
+            for entry in std::fs::read_dir(&f.ledger.dir).unwrap() {
+                let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+                assert!(!text.contains(SECRET));
+                assert!(!text.contains(RAW_KEY));
+            }
+        }
+    }
+
+    #[test]
+    fn quota_plugin_rows_validate_and_slugs_are_safe() {
+        assert_eq!(slug(" Text  Models!/"), "text-models");
+        assert_eq!(slug("A_b-C9"), "a_b-c9");
+        assert_eq!(slug("!!!"), "");
+        assert!(window_ok("minimax", "text-models-interval"));
+        assert!(!window_ok("minimax", "Bad Window"));
+        assert!(!window_ok("Bad Pool", "w"));
+        assert!(!window_ok("claude", "interval"));
+        assert!(window_ok("codex", "primary"));
+        let f = Fixture::new();
+        let snapshot = Snapshot {
+            fetched_ms: 1,
+            source: "mac".into(),
+            pools: vec![Row {
+                pool: "minimax".into(),
+                account: "a".into(),
+                window: "interval".into(),
+                used_pct: 1.0,
+                resets_ms: None,
+                error: None,
+            }],
+            version: 1,
+        };
+        assert_eq!(
+            store(&f.ledger, serde_json::to_vec(&snapshot).unwrap().as_slice()).unwrap(),
+            snapshot
+        );
     }
 
     #[test]
@@ -913,7 +1084,7 @@ mod tests {
             fetched_ms: 1000,
             source: "mac".into(),
             pools: vec![Row {
-                pool: Pool::Claude,
+                pool: "claude".into(),
                 account: "me".into(),
                 window: "five_hour".into(),
                 used_pct: 100.0,
@@ -954,10 +1125,10 @@ mod tests {
         assert_eq!(f.shell.stored.lock().unwrap().len(), 1);
         f.collector().read(false, false, 20_000).unwrap();
         assert_eq!(f.shell.stored.lock().unwrap().len(), 2);
-        assert_eq!(f.shell.requests.lock().unwrap().len(), 2);
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 1);
         f.shell.minimal();
         f.collector().read(false, true, 20_001).unwrap();
-        assert_eq!(f.shell.requests.lock().unwrap().len(), 4);
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 2);
         f.shell.reply(&json!({"error":SECRET}), 500);
         let error = f
             .collector()
@@ -967,10 +1138,10 @@ mod tests {
         assert!(!error.contains(SECRET));
         assert_eq!(cached(&f.ledger).unwrap().fetched_ms, 20_001);
         f.collector().read(false, false, 400_001).unwrap();
-        assert_eq!(f.shell.requests.lock().unwrap().len(), 5);
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 3);
         f.shell.minimal();
         f.collector().read(false, false, 420_000).unwrap();
-        assert_eq!(f.shell.requests.lock().unwrap().len(), 7);
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 4);
     }
 
     #[test]
@@ -983,7 +1154,7 @@ mod tests {
                 scope.spawn(move || fixture.collector().read(false, false, 1000).unwrap());
             }
         });
-        assert_eq!(f.shell.requests.lock().unwrap().len(), 2);
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 1);
         assert_eq!(f.shell.stored.lock().unwrap().len(), 1);
     }
 
