@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- `dogsled board --open` now docks the board in the leftmost slot of the tab, 38 cells wide, beside Herdr’s own sidebar. Before, it split the owner pane 50/50 on the right. It splits the tab’s top-left pane, swaps the new pane into that slot, and sets the split ratio over the Herdr socket. It never re-creates other panes. A new `toggle` plugin action (`dogsled board --toggle`) closes this tab’s live board or opens it. A Herdr failure is an error, with no fallback to the old split. `--open` and `--toggle` now need `HERDR_SOCKET_PATH`.
+
 ## 0.20.0 - 2026-10-21
 
 - The Herdr plugin installs the checksum-verified release binary for its own version at `bin/dogsled` during install, building from source only when no archive exists, and its board pane runs that binary directly. Before, a shell wrapper ran whichever `dogsled` was on the Herdr server's `PATH`; an older binary rejected `--side` and the pane closed at once with no message. The shell wrappers are gone.

@@ -39,7 +39,7 @@ codex plugin add dogsled@dogsled
 Codex requires review and trust before it runs plugin hooks. See the [Codex hooks documentation](https://developers.openai.com/codex/hooks#plugin-hooks).
 The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#codex-plugin) describes plugin installation.
 
-Herdr (right-side work board):
+Herdr (left-docked work board):
 
 ```sh
 herdr plugin install oisin-ee/dogsled --ref v0.20.0 --yes
@@ -592,7 +592,7 @@ The caller is the harness's `HERDR_PANE_ID`. Pi registers the server from its ex
 
 The extension adds host status before each prompt, registers the tools, and draws:
 
-- **The right-side board** shows cached quotas, agents, jobs, and todos when `HERDR_ENV=1` and `HERDR_SOCKET_PATH` accepts a connection. Pi opens or reuses the tab’s split and sets no above-editor widget. Without Herdr, the existing widget shows host meters, the current task, and work groups. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately in the widget.
+- **The right-side board** shows cached quotas, agents, jobs, and todos when `HERDR_ENV=1` and `HERDR_SOCKET_PATH` accepts a connection. Pi opens or reuses the tab’s board, docked at the left edge beside Herdr’s own sidebar at 38 cells, and sets no above-editor widget. Without Herdr, the existing widget shows host meters, the current task, and work groups. Agent/job data refreshes every ten seconds. Compatible pi-todo snapshots update immediately in the widget.
 - **Alt+W or `/work`** opens or reuses the Herdr split. Without Herdr, it expands or collapses the widget in place, without a popup or editor replacement. Alt+J/K moves selection, Alt+] changes views, and Alt+I shows inline details. Typing stays in the editor. Alt+S stops jobs, Alt+C cancels queued work, and Alt+M sends agent messages. Stop and cancel require confirmation. Completed job history starts collapsed.
 - **`/dogsled`**, the control panel, with four tabs: Status (hosts with their retry state, then your rows; Enter on a host reads it again now), Hosts (reconnect, rename, enable, disable, add), Profiles (Enter edits `prompt.md`), and Inbox. The widget steps aside while the panel is open.
 - **The inbox reader** and a renderer that shows each record's kind, sender, and text, folded past twelve lines.
@@ -603,10 +603,10 @@ Todos follow the active Pi session branch. Agents and jobs follow the calling He
 
 The Jobs view joins retained records to the current owner's ledger by host and job ID. It does not show unrelated fleet jobs. Job inspection uses `dogsled read` for a bounded log tail and shows the `dogsled logs` command for full output. Expired records and unavailable hosts produce explicit errors. The panel never starts a new process manager, edits todos, or writes into an agent terminal.
 
-The Herdr plugin opens the right-side work board:
+The Herdr plugin docks the work board at the left edge of the tab, 38 cells wide. Its `toggle` action closes or reopens it:
 
 ```sh
-dogsled board --open                     # open or reuse the caller’s tab split
+dogsled board --open                     # open or reuse the caller’s docked board (`--toggle` closes it)
 dogsled board --side --owner "$HERDR_PANE_ID" # print once
 herdr plugin pane open --plugin dogsled --entrypoint board --direction right --no-focus
 ```
