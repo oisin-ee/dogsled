@@ -28,35 +28,67 @@ pub fn notices(
         return Ok(Vec::new());
     };
     let mut notices = Vec::new();
-
-    if !report.applied.failures.is_empty() {
-        let failures: BTreeSet<_> = report.applied.failures.iter().cloned().collect();
+    let operator = !crate::launch::launched(ledger, owner)?;
+    let items = crate::items::list(ledger)?;
+    let panes = if report.applied.failure_entries.is_empty()
+        && report.applied.repositories.is_empty()
+        && report.applied.unlinked.is_empty()
+        && report.applied.landed_dirty.is_empty()
+    {
+        Vec::new()
+    } else {
+        crate::cleanup::current_panes(shell)?
+    };
+    let recipient =
+        |entry: &crate::cleanup::Entry| concerns(entry, owner, operator, &items, &panes);
+    let failures: BTreeSet<_> = report
+        .applied
+        .failures
+        .iter()
+        .filter(|detail| {
+            let targets: Vec<_> = report
+                .applied
+                .failure_entries
+                .iter()
+                .filter(|failure| &failure.detail == *detail)
+                .collect();
+            if targets.is_empty() {
+                operator
+            } else {
+                targets.iter().any(|failure| recipient(&failure.entry))
+            }
+        })
+        .cloned()
+        .collect();
+    if !failures.is_empty() {
         notices.push(Notice {
             key: "failures",
             signature: failures.iter().map(|s| (s.clone(), None, false)).collect(),
             text: format!("Cleanup pass at {} ms failed:\n{}\nRead `dogsled status` for the last pass. Hand the fix to a dogsled agent. Do not bypass cleanup safeguards.", report.finished_ms, failures.into_iter().collect::<Vec<_>>().join("\n")),
         });
     }
-    if !report.applied.repositories.is_empty() {
-        let warnings: BTreeSet<_> = report
-            .applied
-            .repositories
-            .iter()
-            .map(|e| format!("{}: {}", e.id, e.detail))
-            .collect();
+    let warnings: BTreeSet<_> = report
+        .applied
+        .repositories
+        .iter()
+        .filter(|entry| recipient(entry))
+        .map(|e| format!("{}: {}", e.id, e.detail))
+        .collect();
+    if !warnings.is_empty() {
         notices.push(Notice {
             key: "repositories",
             signature: warnings.iter().map(|s| (s.clone(), None, false)).collect(),
             text: format!("Cleanup repository warnings:\n{}\nCheck the repository entries in {} and {}, or cleanup.repositories in the configuration. Hand the fix to a dogsled agent: `dogsled agent --profile general --name <name> --message-file <brief>`. Name the repository and its state file entry in the brief. Do not edit the state by hand.", warnings.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("repositories.json").display(), ledger.dir.join("worktrees.json").display()),
         });
     }
-    if !report.applied.unlinked.is_empty() {
-        let holds: BTreeSet<_> = report
-            .applied
-            .unlinked
-            .iter()
-            .map(|e| format!("{}: {}", e.id, e.detail))
-            .collect();
+    let holds: BTreeSet<_> = report
+        .applied
+        .unlinked
+        .iter()
+        .filter(|entry| recipient(entry))
+        .map(|e| format!("{}: {}", e.id, e.detail))
+        .collect();
+    if !holds.is_empty() {
         notices.push(Notice {
             key: "unlinked",
             signature: holds.iter().map(|s| (s.clone(), None, false)).collect(),
@@ -66,7 +98,6 @@ pub fn notices(
     if report.applied.landed_dirty.is_empty() {
         return Ok(notices);
     }
-    let panes = crate::cleanup::current_panes(shell)?;
     let root = panes
         .iter()
         .find(|p| p.pane_id == owner)
@@ -94,6 +125,47 @@ pub fn notices(
         });
     }
     Ok(notices)
+}
+
+/// A targeted notice belongs to a live item's owner, even if that owner is itself a child.
+/// Without an owner, only a pane Dogsled did not launch can act on host cleanup.
+fn concerns(
+    entry: &crate::cleanup::Entry,
+    owner: &str,
+    operator: bool,
+    items: &[crate::items::Item],
+    panes: &[crate::probe::Pane],
+) -> bool {
+    let holders: Vec<_> = match entry.class.as_str() {
+        "panes" => panes
+            .iter()
+            .filter(|pane| pane.pane_id == entry.id)
+            .collect(),
+        "workspaces" => panes
+            .iter()
+            .filter(|pane| pane.workspace_id.as_deref() == Some(entry.id.as_str()))
+            .collect(),
+        _ => entry
+            .tree
+            .as_ref()
+            .map(|tree| tree.path.as_str())
+            .or_else(|| (entry.class == "worktrees").then_some(entry.id.as_str()))
+            .filter(|path| !path.is_empty())
+            .map(|path| crate::worktree::holders(panes, path, None))
+            .unwrap_or_default(),
+    };
+    let owners: BTreeSet<_> = items
+        .iter()
+        .filter(|item| item.closed_ms.is_none() && item.host == crate::hosts::LOCAL)
+        .filter(|item| holders.iter().any(|pane| pane.pane_id == item.pane))
+        .filter(|item| panes.iter().any(|pane| pane.pane_id == item.owner_pane))
+        .map(|item| item.owner_pane.as_str())
+        .collect();
+    if owners.is_empty() {
+        operator
+    } else {
+        owners.contains(owner)
+    }
 }
 
 /// The children to land, as one comparable value: each item with its commits and dirt.
