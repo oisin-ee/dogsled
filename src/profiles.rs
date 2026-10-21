@@ -17,17 +17,45 @@ pub struct Profile {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
-    /// The system prompt file, relative to the profile's directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
+    /// The system prompt files, relative to the profile's directory: one name or a list. Each
+    /// file is appended in order, so profiles can share a prompt such as `../_shared/lead.md`.
+    #[serde(default, skip_serializing_if = "Prompts::is_empty")]
+    pub prompt: Prompts,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pi_args: Vec<String>,
     /// `reader` or `writer`. Without it, a child with a branch is a writer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// The resolved prompt file, when it exists.
+    /// The resolved prompt files, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_paths: Vec<String>,
+    /// The profile's own prompt: the last file, which the board's profile panel edits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_path: Option<String>,
+}
+
+/// `"prompt": "prompt.md"` or `"prompt": ["../_shared/lead.md", "prompt.md"]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Prompts {
+    #[default]
+    None,
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Prompts {
+    fn is_empty(&self) -> bool {
+        self.files().is_empty()
+    }
+
+    fn files(&self) -> &[String] {
+        match self {
+            Self::None => &[],
+            Self::One(file) => std::slice::from_ref(file),
+            Self::Many(files) => files,
+        }
+    }
 }
 
 /// `~/.config/dogsled/profiles`, beside the config file.
@@ -67,7 +95,7 @@ pub fn load_from(dir: &Path, name: &str) -> Result<Profile> {
             "profile {name}: role must be reader or writer, not {role}"
         )));
     }
-    if let Some(prompt) = &profile.prompt {
+    for prompt in profile.prompt.files() {
         let path = home.join(prompt);
         if !path.is_file() {
             return Err(Error::Invalid(format!(
@@ -75,8 +103,9 @@ pub fn load_from(dir: &Path, name: &str) -> Result<Profile> {
                 path.display()
             )));
         }
-        profile.prompt_path = Some(path.display().to_string());
+        profile.prompt_paths.push(path.display().to_string());
     }
+    profile.prompt_path = profile.prompt_paths.last().cloned();
     Ok(profile)
 }
 
@@ -116,14 +145,13 @@ impl Profile {
     /// The Pi flags this profile sets, before the session name and the task.
     pub fn pi_flags(&self) -> Vec<String> {
         let mut args = Vec::new();
-        for (flag, value) in [
-            ("--model", &self.model),
-            ("--thinking", &self.thinking),
-            ("--append-system-prompt", &self.prompt_path),
-        ] {
+        for (flag, value) in [("--model", &self.model), ("--thinking", &self.thinking)] {
             if let Some(value) = value {
                 args.extend([flag.to_owned(), value.clone()]);
             }
+        }
+        for path in &self.prompt_paths {
+            args.extend(["--append-system-prompt".to_owned(), path.clone()]);
         }
         args.extend(self.pi_args.iter().cloned());
         args
@@ -190,6 +218,34 @@ mod tests {
             ]
         );
         assert_eq!(load_from(&dir, "bare").unwrap().pi_flags(), [] as [&str; 0]);
+        std::fs::create_dir_all(dir.join("_shared")).unwrap();
+        std::fs::write(dir.join("_shared/lead.md"), "Lead.").unwrap();
+        write(
+            &dir,
+            "lead",
+            r#"{"prompt":["../_shared/lead.md","prompt.md"]}"#,
+            true,
+        );
+        let lead = load_from(&dir, "lead").unwrap();
+        let shared = dir.join("lead/../_shared/lead.md").display().to_string();
+        let own = dir.join("lead/prompt.md").display().to_string();
+        assert_eq!(
+            lead.pi_flags(),
+            [
+                "--append-system-prompt",
+                &shared,
+                "--append-system-prompt",
+                &own
+            ]
+        );
+        assert_eq!(lead.prompt_path.as_deref(), Some(own.as_str()));
+        write(&dir, "half", r#"{"prompt":["prompt.md","gone.md"]}"#, true);
+        assert!(
+            load_from(&dir, "half")
+                .unwrap_err()
+                .to_string()
+                .contains("gone.md does not exist")
+        );
         assert!(
             load_from(&dir, "broken")
                 .unwrap_err()
@@ -219,6 +275,8 @@ mod tests {
             [
                 ("bare".into(), false),
                 ("broken".into(), true),
+                ("half".into(), true),
+                ("lead".into(), false),
                 ("odd".into(), true),
                 ("reviewer".into(), false)
             ]
