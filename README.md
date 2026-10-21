@@ -345,8 +345,10 @@ Prune displays a plan and asks before removal. `--yes` skips that question, not 
 Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and local-only commits remain untouched.
 Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any identity change stops removal.
 Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when its commits are held, and the idle anchor. Dogsled checks that the worktree is gone afterwards.
-Each entry is independent. A failed or refused entry does not stop the others; prune reports each failure, then exits with status 2.
-`--json` returns `{results,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
+Each entry is independent. A failed or refused entry does not stop the others.
+A recheck can refuse an entry because its state changed after the plan: the worktree is now dirty, held, or not landed, or the pane is now busy. Prune keeps that entry and reports it as `skipped:` with the reason. A skip is not a failure.
+An identity change, a missing entry, a command error, or unreadable evidence is a failure. Prune reports each failure, then exits with status 2.
+`--json` returns `{results,skipped,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
 
 Placement records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
@@ -367,7 +369,7 @@ Each requested pass builds the doctor plan in sweep scope. It applies only entri
 - Stale repository and worktree registrations: remove only records whose paths are absent, with the same locked recheck as prune.
 - Orphaned children: a child that called `done`, whose owner is gone, and whose checkout passes the shared loss rule. Close runs teardown and removes its workspace, checkout, and item.
 
-The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others.
+The sweep runs the same checks as `close` and `prune`. It never closes the service's own pane or workspace, or a worktree that the service works in. It skips a worktree it cannot check, and a failure on one entry does not stop the others. An entry that its recheck refuses because live work changed it after the survey is a skip, not a failure: the pass lists it as `skipped:`, and the stop gate ignores it.
 The service keeps seven days of completed passes in `sweeps.jsonl` and the latest pass in `sweep.json`.
 Each history entry has a `ts_ms` timestamp; each new pass removes entries older than seven days.
 The report includes start and finish times, removals, failures, repository warnings, and landed-dirty findings.

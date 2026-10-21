@@ -179,6 +179,9 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
     for result in &applied.results {
         eprintln!("dogsled sweep: {result}");
     }
+    for skipped in &applied.skipped {
+        eprintln!("dogsled sweep: skipped: {skipped}");
+    }
     for failure in &applied.failures {
         eprintln!("dogsled sweep: failed: {failure}");
     }

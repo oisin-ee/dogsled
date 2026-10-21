@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- A cleanup recheck that refuses an entry because its state changed after the plan is a skip, not a failure. Live work can make a planned worktree dirty or held, or a pane busy, before the removal. The entry stays, and the pass and prune list it as `skipped:` with the same `refuse` reason. `Applied` has a new `skipped` list, and the stop gate and the status failure count ignore it. Identity changes, missing entries, command errors, and unreadable evidence still fail. The recheck is as strict as before.
+
 ## 0.19.0 - 2026-10-21
 
 - `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.
