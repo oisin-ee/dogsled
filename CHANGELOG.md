@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.
+- Quota no longer discovers MiniMax through `claude-api-key` or parses `token_plan/remains`. A MiniMax CLIProxy plugin appears on the board without a dogsled change.
+
 ## 0.18.1 - 2026-10-21
 
 - Prune and automatic cleanup remove remembered repository and worktree registrations only when their paths are absent. Removal rechecks absence under the registry locks and deletes no checkout data. Doctor lists the removable records without changing them. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.
