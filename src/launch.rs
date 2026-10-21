@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod recovery;
-pub use recovery::{PaneLaunch, close_unfinished, final_pane};
+pub use recovery::{PaneLaunch, Survey, close_unfinished, final_pane};
 #[cfg(test)]
 mod pane_tests;
 
@@ -53,31 +53,20 @@ enum Receipt {
 
 /// Hold only an allocating launch or an attempted start with its matching live agent.
 /// A stranded empty shell cannot finish startup and does not hold the checkout.
-pub fn pending_paths(ledger: &Ledger, agents: &[crate::probe::Agent]) -> Result<Vec<String>> {
-    let receipts = ledger.child("launches");
-    let mut paths = Vec::new();
-    for (id, progress) in recovery::candidates(&receipts, None)? {
-        if receipts.read::<Receipt>(&format!("{id}.json"))?.is_some() {
-            continue;
-        }
-        let live = progress.pane.as_ref().is_none_or(|pane| {
-            progress.attempted
-                && agents.iter().any(|agent| {
-                    let Action::Agent { name, kind, .. } = &progress.request.action else {
-                        return false;
-                    };
-                    agent.pane == *pane
-                        && agent.name.as_ref() == Some(name)
-                        && agent.agent.as_ref() == Some(kind)
-                        && progress.terminal.is_some()
-                        && agent.terminal_id == progress.terminal
-                })
-        });
-        if live {
-            paths.push(progress.request.cwd);
-        }
-    }
-    Ok(paths)
+fn pending(progress: &Progress, agents: &[crate::probe::Agent]) -> bool {
+    progress.pane.as_ref().is_none_or(|pane| {
+        progress.attempted
+            && agents.iter().any(|agent| {
+                let Action::Agent { name, kind, .. } = &progress.request.action else {
+                    return false;
+                };
+                agent.pane == *pane
+                    && agent.name.as_ref() == Some(name)
+                    && agent.agent.as_ref() == Some(kind)
+                    && progress.terminal.is_some()
+                    && agent.terminal_id == progress.terminal
+            })
+    })
 }
 
 pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {

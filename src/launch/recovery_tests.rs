@@ -120,6 +120,36 @@ fn final_unattempted_and_refused_shells_close_under_both_locks_without_changing_
 }
 
 #[test]
+fn survey_retains_one_launch_snapshot_but_recovery_rereads_before_closing() {
+    let ledger = fixture();
+    let panes = vec![crate::probe::Pane {
+        pane_id: "w2:p2".into(),
+        cwd: Some("/checkout".into()),
+        ..Default::default()
+    }];
+    let terminals = std::collections::BTreeMap::from([("w2:p2".into(), "term_shell".into())]);
+    let survey = Survey::load(&ledger, &panes, &terminals, &[]).unwrap();
+    assert_eq!(survey.pane("w2:p2"), PaneLaunch::Final);
+    assert_eq!(survey.pane("unrecorded"), PaneLaunch::Unrecorded);
+    ledger
+        .child("launches")
+        .write("own.json", &Receipt::Started(json!({"pane":"w2:p2"})))
+        .unwrap();
+    assert_eq!(survey.pane("w2:p2"), PaneLaunch::Final);
+    let shell = LockedShell {
+        ledger: ledger.clone(),
+        closed: AtomicUsize::new(0),
+    };
+    assert!(!close_unfinished(&ledger, &shell, "w2:p2").unwrap());
+    assert_eq!(shell.closed.load(Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+fn pending_paths(ledger: &Ledger, agents: &[crate::probe::Agent]) -> Result<Vec<String>> {
+    Ok(Survey::load(ledger, &[], &std::collections::BTreeMap::new(), agents)?.pending_paths)
+}
+
+#[test]
 fn pending_paths_require_an_allocating_launch_or_its_matching_attempted_agent() {
     let ledger = fixture();
     let receipts = ledger.child("launches");
@@ -134,12 +164,9 @@ fn pending_paths_require_an_allocating_launch_or_its_matching_attempted_agent() 
         terminal_id: Some("term_shell".into()),
         ..Default::default()
     };
+    assert_eq!(pending_paths(&ledger, &[]).unwrap(), Vec::<String>::new());
     assert_eq!(
-        crate::launch::pending_paths(&ledger, &[]).unwrap(),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        crate::launch::pending_paths(&ledger, std::slice::from_ref(&matching)).unwrap(),
+        pending_paths(&ledger, std::slice::from_ref(&matching)).unwrap(),
         ["/checkout"]
     );
     for field in ["pane", "name", "kind", "terminal"] {
@@ -151,22 +178,19 @@ fn pending_paths_require_an_allocating_launch_or_its_matching_attempted_agent() 
             _ => changed.terminal_id = Some("replacement".into()),
         }
         assert_eq!(
-            crate::launch::pending_paths(&ledger, &[changed]).unwrap(),
+            pending_paths(&ledger, &[changed]).unwrap(),
             Vec::<String>::new()
         );
     }
     progress.attempted = false;
     receipts.write("own.progress.json", &progress).unwrap();
     assert_eq!(
-        crate::launch::pending_paths(&ledger, &[matching]).unwrap(),
+        pending_paths(&ledger, &[matching]).unwrap(),
         Vec::<String>::new()
     );
     progress.pane = None;
     receipts.write("own.progress.json", &progress).unwrap();
-    assert_eq!(
-        crate::launch::pending_paths(&ledger, &[]).unwrap(),
-        ["/checkout"]
-    );
+    assert_eq!(pending_paths(&ledger, &[]).unwrap(), ["/checkout"]);
     receipts
         .write(
             "own.json",
@@ -175,10 +199,7 @@ fn pending_paths_require_an_allocating_launch_or_its_matching_attempted_agent() 
             },
         )
         .unwrap();
-    assert_eq!(
-        crate::launch::pending_paths(&ledger, &[]).unwrap(),
-        Vec::<String>::new()
-    );
+    assert_eq!(pending_paths(&ledger, &[]).unwrap(), Vec::<String>::new());
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
 

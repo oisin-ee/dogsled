@@ -33,9 +33,15 @@ pub(super) fn candidates(receipts: &Ledger, pane: Option<&str>) -> Result<Vec<(S
 }
 
 fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> {
-    let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
-    Ok(matches!(receipt, Some(Receipt::Refused { .. }))
-        || (receipt.is_none() && !progress.confirmed && progress.terminal_receipt.is_none()))
+    Ok(recoverable(
+        progress,
+        receipts.read::<Receipt>(&format!("{id}.json"))?.as_ref(),
+    ))
+}
+
+fn recoverable(progress: &Progress, receipt: Option<&Receipt>) -> bool {
+    matches!(receipt, Some(Receipt::Refused { .. }))
+        || (receipt.is_none() && !progress.confirmed && progress.terminal_receipt.is_none())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +50,77 @@ pub enum PaneLaunch {
     Started,
     Final,
     Unresolved,
+}
+
+/// One read-only survey of launch ownership. Destructive recovery still re-reads under locks.
+pub struct Survey {
+    states: std::collections::BTreeMap<String, PaneLaunch>,
+    pub pending_paths: Vec<String>,
+}
+
+impl Survey {
+    pub fn load(
+        ledger: &Ledger,
+        panes: &[crate::probe::Pane],
+        terminals: &std::collections::BTreeMap<String, String>,
+        agents: &[crate::probe::Agent],
+    ) -> Result<Self> {
+        let receipts = ledger.child("launches");
+        let items = crate::items::list(ledger)?;
+        let mut survey = Self {
+            states: std::collections::BTreeMap::new(),
+            pending_paths: Vec::new(),
+        };
+        for (id, progress) in candidates(&receipts, None)? {
+            let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+            if receipt.is_none() && super::pending(&progress, agents) {
+                survey.pending_paths.push(progress.request.cwd.clone());
+            }
+            let Some(pane) = progress.pane.as_ref() else {
+                continue;
+            };
+            let state = if matches!(receipt, Some(Receipt::Started(_))) {
+                PaneLaunch::Started
+            } else if recoverable(&progress, receipt.as_ref())
+                && progress.request.id == id
+                && progress
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|t| !t.is_empty() && terminals.get(pane) == Some(t))
+                && panes.iter().any(|p| {
+                    p.pane_id == *pane
+                        && p.agent.is_none()
+                        && p.cwd
+                            .as_deref()
+                            .is_some_and(|cwd| crate::worktree::same(cwd, &progress.request.cwd))
+                })
+                && !agents.iter().any(|a| a.pane == *pane)
+                && !items.iter().any(|i| {
+                    i.host == crate::hosts::LOCAL
+                        && i.pane == *pane
+                        && i.closed_ms.is_none()
+                        && i.id != id
+                })
+            {
+                PaneLaunch::Final
+            } else {
+                PaneLaunch::Unresolved
+            };
+            survey
+                .states
+                .entry(pane.clone())
+                .and_modify(|s| *s = PaneLaunch::Unresolved)
+                .or_insert(state);
+        }
+        Ok(survey)
+    }
+
+    pub fn pane(&self, pane: &str) -> PaneLaunch {
+        self.states
+            .get(pane)
+            .copied()
+            .unwrap_or(PaneLaunch::Unrecorded)
+    }
 }
 
 /// Final launches must still own the idle shell. Successful records prevent recordless
