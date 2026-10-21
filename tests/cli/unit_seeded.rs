@@ -1159,3 +1159,213 @@ fn not_started_settlement_delivery_has_origin_without_digest() {
     );
     assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
 }
+
+/// The seeded worker in `state`, published so `send` can resolve it, with a Pi inbox reader.
+fn worker_state(rig: &Rig, state: &str) {
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"][0]["agent_status"] = json!(state);
+    rig.put("agents.json", &agents);
+    let agent = &agents["result"]["agents"][0];
+    rig.snapshot("state/host.json", now(), 0.0, 2);
+    let mut host = rig.read("state/host.json");
+    host["probe"]["agent_panes"] = json!([{"pane":"w2:p1","agent":"pi","state":state,"name":agent["name"],"terminal_id":"term_child"}]);
+    rig.put("state/host.json", &host);
+    fs::create_dir_all(rig.dir.join("state/inbox")).unwrap();
+    rig.put(
+        "state/inbox/term_child.reader.json",
+        &json!({"pane":"w2:p1","harness":"pi","registered_ms":1}),
+    );
+}
+
+/// A seeded worker that called `done` during its turn and then went idle, with no terminal
+/// acknowledgement: its unit has not returned.
+fn done_unreturned(name: &str) -> (Rig, Value, Value) {
+    let (rig, execution, input) = launched(name);
+    transcript(&rig, &execution, &entries());
+    worker_state(&rig, "working");
+    let out = rig
+        .cmd(&["done"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    worker_state(&rig, "idle");
+    (rig, execution, input)
+}
+
+fn send_from(rig: &Rig, pane: &str, text: &str) -> (i32, Value) {
+    let out = rig
+        .cmd(&["send", "w2:p1", "--message", text, "--json"])
+        .env("HERDR_PANE_ID", pane)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null),
+    )
+}
+
+fn worker_claim(rig: &Rig) -> Output {
+    rig.cmd(&["inbox", "claim", "--harness", "pi", "--json"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap()
+}
+
+fn inbox(rig: &Rig) -> Value {
+    serde_json::from_slice(
+        &fs::read(rig.dir.join("state/inbox/term_child.json")).unwrap_or_default(),
+    )
+    .unwrap_or_else(|_| json!([]))
+}
+
+fn serve_once(rig: &Rig) {
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn published_done(rig: &Rig) -> bool {
+    rig.read("state/host.json")["probe"]["agent_panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["pane"] == "w2:p1" && a["done"] == true)
+}
+
+fn assert_refused(rig: &Rig, pane: &str, expected: &str) {
+    let marks = rig.read("state/done.json");
+    let messages = inbox(rig);
+    let (code, refused) = send_from(rig, pane, "continue");
+    assert_eq!(code, 2, "{refused}");
+    let error = refused["error"].as_str().unwrap_or_default();
+    assert!(error.contains(expected), "{error}");
+    assert_eq!(rig.read("state/done.json"), marks);
+    assert_eq!(inbox(rig), messages);
+}
+
+#[test]
+fn done_without_terminal_evidence_stays_open_until_its_owner_continues_it() {
+    let (rig, _, _) = done_unreturned("seed-continue");
+    serve_once(&rig);
+    assert!(!rig.log("herdr.log").contains("pane close"));
+    assert!(!published_done(&rig));
+    let marks = rig.read("state/done.json");
+    let mark = marks.as_object().unwrap().values().next().unwrap();
+    assert!(mark["sealed"].is_null(), "{mark}");
+    worker_state(&rig, "idle");
+    // Negative controls: neither another agent nor the worker itself can reopen it.
+    assert_refused(&rig, "w3:p1", "only its owner w1:p1 can continue it");
+    let before = rig.read("state/done.json");
+    assert!(!worker_claim(&rig).status.success());
+    assert_eq!(rig.read("state/done.json"), before);
+    // An owner record that is not stored cannot cancel the mark.
+    let reader = rig.dir.join("state/inbox/term_child.reader.json");
+    fs::remove_file(&reader).unwrap();
+    assert_ne!(send_from(&rig, "w1:p1", "lost").0, 0);
+    assert_eq!(rig.read("state/done.json"), before);
+    worker_state(&rig, "idle");
+    // The owner continues the same execution: the same pane, session, and checkout.
+    let (code, sent) = send_from(&rig, "w1:p1", "fix the build configuration");
+    assert_eq!(code, 0, "{sent}");
+    assert_eq!(rig.read("state/done.json"), json!({}));
+    let out = worker_claim(&rig);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let claimed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(claimed[0]["text"], "fix the build configuration");
+    // Continuation is not a retry: the execution started once and its pane never closed.
+    assert_eq!(rig.log("herdr.log").matches("agent start").count(), 1);
+    assert!(!rig.log("herdr.log").contains("pane close"));
+}
+
+#[test]
+fn legacy_sealed_done_without_terminal_evidence_is_continued_only_by_its_owner() {
+    let (rig, execution, _) = launched("seed-legacy");
+    transcript(&rig, &execution, &entries());
+    // The shape an earlier release wrote: sealed at the first idle, with no receipt.
+    rig.done("term_child", "w2:p1", 7);
+    worker_state(&rig, "idle");
+    serve_once(&rig);
+    assert!(!rig.log("herdr.log").contains("pane close"));
+    assert!(!published_done(&rig));
+    let marks = rig.read("state/done.json");
+    assert_eq!(
+        marks.as_object().unwrap().values().next().unwrap()["sealed"],
+        7
+    );
+    worker_state(&rig, "idle");
+    assert_refused(&rig, "w3:p1", "only its owner w1:p1 can continue it");
+    let (code, sent) = send_from(&rig, "w1:p1", "continue");
+    assert_eq!(code, 0, "{sent}");
+    assert_eq!(rig.read("state/done.json"), json!({}));
+    assert!(worker_claim(&rig).status.success());
+}
+
+#[test]
+fn returned_unit_refuses_its_owner_and_closes_with_the_exact_reply() {
+    let (rig, execution, input) = done_unreturned("seed-returned");
+    worker_state(&rig, "working");
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    assert_refused(&rig, "w1:p1", "returned its unit");
+    worker_state(&rig, "idle");
+    // The first idle input observation seals a returned unit; the message is still refused.
+    let messages = inbox(&rig);
+    let (code, refused) = send_from(&rig, "w1:p1", "continue");
+    assert_eq!(code, 2, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("finished; start a new child")
+    );
+    assert_eq!(inbox(&rig), messages);
+    let marks = rig.read("state/done.json");
+    assert_eq!(
+        marks.as_object().unwrap().values().next().unwrap()["sealed"],
+        7
+    );
+    assert_refused(&rig, "w1:p1", "finished; start a new child for more work");
+    serve_once(&rig);
+    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
+    let marks = rig.read("state/done.json");
+    assert_eq!(
+        marks.as_object().unwrap().values().next().unwrap()["reply"]["text"],
+        "EXACT FINAL"
+    );
+}
+
+#[test]
+fn unavailable_or_mismatched_unit_evidence_refuses_continuation_and_close() {
+    for case in ["progress", "seed", "terminal", "malformed"] {
+        let (rig, execution, _) = done_unreturned(&format!("seed-evidence-{case}"));
+        let id = execution["requestId"].as_str().unwrap();
+        let launches = rig.dir.join("state/launches");
+        match case {
+            "progress" => fs::remove_file(launches.join(format!("{id}.progress.json"))).unwrap(),
+            "seed" => fs::remove_file(launches.join(format!("{id}.unit.json"))).unwrap(),
+            "malformed" => fs::write(launches.join(format!("{id}.progress.json")), "{").unwrap(),
+            _ => {
+                let mut agents = rig.read("agents.json");
+                agents["result"]["agents"][0]["terminal_id"] = json!("term_other");
+                rig.put("agents.json", &agents);
+            }
+        }
+        assert_refused(&rig, "w1:p1", "unit evidence");
+        assert!(!worker_claim(&rig).status.success(), "{case}");
+        // The service may report the bad evidence; it must never close the worker.
+        rig.run(&["serve", "--once", "--interval", "1"]);
+        assert!(!rig.log("herdr.log").contains("pane close"), "{case}");
+    }
+}

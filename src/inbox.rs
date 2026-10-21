@@ -264,7 +264,15 @@ pub fn reader(ledger: &Ledger, terminal: &str) -> Result<Option<Reader>> {
 fn put_checked(ledger: &Ledger, shell: &dyn crate::shell::Shell, record: Record) -> Result<Record> {
     // Read live state: an ended turn seals done before a message can reopen it.
     let agent = local_agent(shell, &record.pane)?;
-    crate::done::input(ledger, &agent, || put(ledger, record).map(|r| (r, true)))
+    let from = record.from.pane.clone();
+    crate::done::input(
+        ledger,
+        &agent,
+        crate::done::Input::Put {
+            from: from.as_deref(),
+        },
+        || put(ledger, record).map(|r| (r, true)),
+    )
 }
 
 fn put(ledger: &Ledger, record: Record) -> Result<Record> {
@@ -759,7 +767,7 @@ pub fn claim_for(
         pane: pane.into(),
         registered_ms: now,
     };
-    crate::done::input(ledger, &agent, || {
+    crate::done::input(ledger, &agent, crate::done::Input::Claim, || {
         let records = claim(ledger, &terminal, &reader, now)?;
         let received = !records.is_empty();
         Ok((records, received))

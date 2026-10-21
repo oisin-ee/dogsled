@@ -121,13 +121,44 @@ fn migrate(ledger: &Ledger, marks: Marks, agents: &[Agent]) -> Result<Marks> {
     Ok(migrated)
 }
 
+/// The pane's unit evidence. An error stays an error: it never reads as a plain pane.
+type Evidence = std::result::Result<crate::launch::Execution, String>;
+
+fn evidence(ledger: &Ledger, mark: &Mark, agent: &Agent) -> Evidence {
+    crate::launch::execution(ledger, mark.item.as_deref(), agent).map_err(|e| e.to_string())
+}
+
+/// `done` can end a plain pane's work. A unit execution ends only when its worker
+/// acknowledged the sealed terminal boundary; until then its owner can still continue it.
+fn closable(evidence: &Evidence) -> bool {
+    matches!(
+        evidence,
+        Ok(crate::launch::Execution::Plain | crate::launch::Execution::Returned)
+    )
+}
+
 /// A successful mark was made while working. Its first idle/done observation ends that turn,
 /// even after restore with no `completion_seq`. Working/blocked/unknown never authorize close.
 /// Once sealed it is terminal: a later turn cannot revoke it, but busy panes still never close.
-fn seal(mark: &mut Mark, agent: &Agent) {
-    if mark.sealed.is_none() && waiting(agent) {
+/// An unreturned unit is not sealed. A seal written before this rule stays, and `terminal`
+/// decides.
+fn seal(mark: &mut Mark, agent: &Agent, evidence: &Evidence) {
+    if mark.sealed.is_none() && waiting(agent) && closable(evidence) {
         mark.sealed = Some(agent.completion_seq.unwrap_or(0));
     }
+}
+
+fn terminal(mark: &Mark, evidence: &Evidence) -> bool {
+    mark.sealed.is_some() && closable(evidence)
+}
+
+/// Who offers input to a marked pane.
+#[derive(Debug, Clone, Copy)]
+pub enum Input<'a> {
+    /// The pane's own inbox reader claims records.
+    Claim,
+    /// A sender puts a record; `from` is its pane, if it has one.
+    Put { from: Option<&'a str> },
 }
 
 pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
@@ -138,9 +169,11 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
         for agent in agents {
             let mut done = false;
             for mark in marks.values_mut().filter(|m| matches(m, agent)) {
-                seal(mark, agent);
-                done |=
-                    mark.sealed.is_some() && waiting(agent) && !owners.contains_key(&agent.pane);
+                let evidence = evidence(ledger, mark, agent);
+                seal(mark, agent, &evidence);
+                done |= terminal(mark, &evidence)
+                    && waiting(agent)
+                    && !owners.contains_key(&agent.pane);
             }
             agent.done = done;
         }
@@ -327,33 +360,68 @@ fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
 }
 
 /// Serialize inbox acceptance with sealing. Only new work accepted while the marked turn is
-/// still working cancels its mark. After idle/done (or an earlier seal), reject all messages,
-/// even if Herdr subsequently reports working. No post-turn claim can reopen a finished child.
+/// still working cancels a plain pane's mark. After idle/done (or an earlier seal), reject all
+/// messages, even if Herdr subsequently reports working. No post-turn claim can reopen a
+/// finished child.
+///
+/// A unit execution that has not returned is not finished. Only its execution owner may
+/// continue or cancel its mark, by putting a record. Every check runs before `accept`, so a
+/// refusal leaves the mark and the inbox unchanged.
 pub fn input<T>(
     ledger: &Ledger,
     agent: &Agent,
+    input: Input<'_>,
     accept: impl FnOnce() -> Result<(T, bool)>,
 ) -> Result<T> {
     ledger.with_lock("done", || {
         let before: Marks = ledger.read(FILE)?.unwrap_or_default();
         let mut marks = migrate(ledger, before.clone(), std::slice::from_ref(agent))?;
+        let mut refusal = None;
+        let mut continued = false;
         for mark in marks.values_mut().filter(|m| matches(m, agent)) {
-            seal(mark, agent);
-            if mark.sealed.is_some() {
-                let name = mark
-                    .name
-                    .as_deref()
-                    .or(agent.name.as_deref())
-                    .unwrap_or(&agent.pane)
-                    .to_owned();
-                ledger.write(FILE, &marks)?;
-                return Err(Error::Invalid(format!(
-                    "{name} finished; start a new child for more work"
-                )));
+            let evidence = evidence(ledger, mark, agent);
+            seal(mark, agent, &evidence);
+            let name = mark
+                .name
+                .as_deref()
+                .or(agent.name.as_deref())
+                .unwrap_or(&agent.pane)
+                .to_owned();
+            refusal = if terminal(mark, &evidence) {
+                Some(format!("{name} finished; start a new child for more work"))
+            } else {
+                match (evidence, input) {
+                    (Ok(crate::launch::Execution::Plain), _) => None,
+                    (Ok(crate::launch::Execution::Returned), _) => Some(format!(
+                        "{name} returned its unit; start a new child for more work"
+                    )),
+                    (Err(error), _) => Some(format!(
+                        "{name} called done, and its unit evidence is unavailable: {error}; nothing was accepted"
+                    )),
+                    (
+                        Ok(crate::launch::Execution::Unreturned { owner }),
+                        Input::Put { from: Some(from) },
+                    ) if from == owner => {
+                        continued = true;
+                        None
+                    }
+                    (Ok(crate::launch::Execution::Unreturned { owner }), _) => Some(format!(
+                        "{name} called done before its unit returned; only its owner {owner} can continue it; nothing was accepted"
+                    )),
+                }
+            };
+            if refusal.is_some() {
+                break;
             }
         }
+        if let Some(refusal) = refusal {
+            if marks != before {
+                ledger.write(FILE, &marks)?;
+            }
+            return Err(Error::Invalid(refusal));
+        }
         let (result, received) = accept()?;
-        if received && agent.state == "working" {
+        if received && (agent.state == "working" || continued) {
             marks.retain(|_, m| !matches(m, agent));
         }
         if marks != before {

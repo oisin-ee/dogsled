@@ -84,19 +84,36 @@ fn idle_without_done_and_orchestrators_stay_open() {
 fn inbox_cancels_only_during_the_done_turn_and_never_after_it() {
     let ledger = ledger();
     put(&ledger, mark_at());
-    input(&ledger, &agent("working"), || Ok(((), true))).unwrap();
+    input(
+        &ledger,
+        &agent("working"),
+        Input::Put { from: None },
+        || Ok(((), true)),
+    )
+    .unwrap();
     assert_eq!(list(&ledger).unwrap(), []);
     put(&ledger, mark_at());
-    let refused = input(&ledger, &agent("idle"), || -> Result<((), bool)> {
-        panic!("must not deliver")
-    });
+    let refused = input(
+        &ledger,
+        &agent("idle"),
+        Input::Put { from: None },
+        || -> Result<((), bool)> { panic!("must not deliver") },
+    );
     assert!(
         refused
             .unwrap_err()
             .to_string()
             .contains("worker finished; start a new child for more work")
     );
-    assert!(input(&ledger, &agent("working"), || Ok(((), true))).is_err());
+    assert!(
+        input(
+            &ledger,
+            &agent("working"),
+            Input::Put { from: None },
+            || Ok(((), true))
+        )
+        .is_err()
+    );
     assert_eq!(list(&ledger).unwrap().len(), 1);
 }
 
@@ -108,7 +125,15 @@ fn an_overlapping_branch_refresh_cannot_erase_a_terminal_seal() {
     finished(&ledger, &[agent("idle")]).unwrap();
     save(&ledger, &older).unwrap();
     assert_eq!(list(&ledger).unwrap()[0].sealed, Some(0));
-    assert!(input(&ledger, &agent("working"), || Ok(((), true))).is_err());
+    assert!(
+        input(
+            &ledger,
+            &agent("working"),
+            Input::Put { from: None },
+            || Ok(((), true))
+        )
+        .is_err()
+    );
 }
 
 #[test]
