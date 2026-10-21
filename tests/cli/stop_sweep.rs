@@ -29,6 +29,40 @@ fn serve(rig: &Rig) -> String {
     String::from_utf8(out.stderr).unwrap()
 }
 
+/// Record that `owner` launched a child into `tree`: the ledger's proof that it created the work.
+/// The child's pane is gone, so the record holds nothing.
+fn launched_into(rig: &Rig, id: &str, owner: &str, tree: &Path) {
+    fs::create_dir_all(tree).unwrap();
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    rig.put(
+        &format!("state/launches/{id}.progress.json"),
+        &json!({
+            "request":{"id":id,"action":{"type":"agent","kind":"pi","name":id,"message":"go"},
+                "host":"local","cwd":tree,"owner":owner},
+            "pane":format!("gone:{id}"),"terminal":id,"attempted":true,"confirmed":true,
+                "result":{},"error":null
+        }),
+    );
+}
+
+/// The latest pass failed on each worktree with its detail.
+fn failed_pass(rig: &Rig, failed: &[(&Path, &str)]) {
+    let entries: Vec<Value> = failed
+        .iter()
+        .map(|(tree, detail)| {
+            json!({"entry":{"class":"worktrees","id":tree,"detail":detail,"removable":true,
+                "tree":{"repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x"}},
+                "detail":detail})
+        })
+        .collect();
+    let details: Vec<&str> = failed.iter().map(|(_, detail)| *detail).collect();
+    rig.put(
+        "state/sweep.json",
+        &json!({"started_ms":1,"finished_ms":2,"results":[],"failures":details,
+            "failure_entries":entries,"repositories":[],"landed_dirty":[]}),
+    );
+}
+
 #[test]
 fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
     let (rig, tree) = close_rig("stop-request");
@@ -91,15 +125,20 @@ esac
     let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
     assert!(human.contains("Last cleanup:"));
     assert!(human.contains(failure));
+    let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
+    assert!(
+        brief.contains("1 failures, 0 repository warnings"),
+        "{brief}"
+    );
+    // No agent created the host, so a host-level failure stays in status and reaches no agent.
     let context = rig
         .cmd(&["hook", "context", "--harness", "pi"])
         .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p1")
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&context.stdout).contains("1 failures, 0 repository warnings"));
-    let message = gate(&rig, "w1:p1");
-    assert!(message.contains("survey-unavailable"), "{message}");
-    assert!(message.contains("Do not bypass cleanup safeguards"));
+    let context = String::from_utf8_lossy(&context.stdout);
+    assert!(!context.contains("Cleanup at"), "{context}");
     assert_eq!(gate(&rig, "w1:p1"), "");
 }
 
@@ -143,6 +182,10 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
         human.contains(&format!("hold: {}", tree.display())),
         "{human}"
     );
+    // Only the agent that launched work into the worktree hears about it.
+    assert_eq!(gate(&rig, "w1:p1"), "");
+    launched_into(&rig, "creator", "w1:p1", &tree);
+    assert_eq!(gate(&rig, "w2:p1"), "");
     let message = gate(&rig, "w1:p1");
     assert!(message.contains(&reason), "{message}");
     assert!(message.contains("do not delete it yourself"));
@@ -161,7 +204,7 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
 }
 
 #[test]
-fn missing_configured_repository_warns_once_per_set_and_does_not_stop_other_cleanup() {
+fn missing_configured_repository_stays_in_status_and_does_not_stop_other_cleanup() {
     let (rig, tree) = close_rig("stop-missing-repo");
     let missing = rig.dir.join("gone-repo");
     let repo = rig.dir.join("home/repo");
@@ -179,31 +222,7 @@ fn missing_configured_repository_warns_once_per_set_and_does_not_stop_other_clea
             .unwrap()
             .contains(missing.to_str().unwrap())
     );
-    let message = gate(&rig, "w1:p1");
-    for expected in [
-        missing.to_str().unwrap(),
-        "repositories.json",
-        "configured in cleanup.repositories but not a Git checkout",
-        "dogsled agent --profile general --name <name> --message-file <brief>",
-        "Do not edit the state by hand",
-    ] {
-        assert!(message.contains(expected), "{expected}: {message}");
-    }
-    assert_eq!(gate(&rig, "w1:p1"), "");
-    // A new set speaks once; returning to the first set never loops the Stop hook.
-    let second = rig.dir.join("another-gone-repo");
-    rig.put("state/repositories.json", &json!([missing, second, repo]));
-    rig.config(&format!(
-        "[cleanup]\nrepositories = [{}, {}]\n",
-        json!(missing),
-        json!(second)
-    ));
-    serve(&rig);
-    assert!(gate(&rig, "w1:p1").contains(second.to_str().unwrap()));
-    assert_eq!(gate(&rig, "w1:p1"), "");
-    rig.put("state/repositories.json", &json!([missing, repo]));
-    rig.config(&format!("[cleanup]\nrepositories = [{}]\n", json!(missing)));
-    serve(&rig);
+    // No agent created a configured repository: the warning stays in status only.
     assert_eq!(gate(&rig, "w1:p1"), "");
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["sweep"]["repositories"][0]["id"], json!(missing));
@@ -240,9 +259,10 @@ fn cleanup_failure_report_preserves_worktree_identity_for_notice_routing() {
 }
 
 #[test]
-fn cleanup_notice_routes_to_item_owner_and_operator_but_not_unrelated_children() {
+fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
     let rig = Rig::new("cleanup-notice-routing");
     let checkout = rig.dir.join("home/child-checkout");
+    let elsewhere = rig.dir.join("home/elsewhere");
     fs::create_dir_all(&checkout).unwrap();
     rig.put(
         "panes.json",
@@ -253,25 +273,15 @@ fn cleanup_notice_routes_to_item_owner_and_operator_but_not_unrelated_children()
             {"pane_id":"w4:p1","terminal_id":"worker","cwd":checkout}
         ]}}),
     );
-    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
-    for (id, pane) in [
-        ("unrelated", "w2:p1"),
-        ("owner", "w3:p1"),
-        ("worker", "w4:p1"),
-    ] {
-        rig.put(
-            &format!("state/launches/{id}.progress.json"),
-            &json!({
-                "request":{"id":id,"action":{"type":"agent","kind":"pi","name":id,"message":"go"},
-                    "host":"local","cwd":checkout,"owner":"w1:p1"},
-                "pane":pane,"terminal":id,"attempted":true,"confirmed":true,"result":{},"error":null
-            }),
-        );
-    }
+    // w3 launched the worker into the checkout. w1 launched w2 and w3 elsewhere, so it created
+    // agents but not this work. Dogsled launched none of w1's own work.
+    launched_into(&rig, "unrelated", "w1:p1", &elsewhere);
+    launched_into(&rig, "owner", "w1:p1", &elsewhere);
+    launched_into(&rig, "worker", "w3:p1", &checkout);
     rig.put(
         "state/items.json",
         &json!([
-            {"id":"child","kind":"agent","host":"local","pane":"w4:p1","owner_pane":"w3:p1",
+            {"id":"worker","kind":"agent","host":"local","pane":"w4:p1","owner_pane":"w3:p1",
                 "name":"worker","created_ms":1,"closed_ms":null}
         ]),
     );
@@ -291,9 +301,25 @@ fn cleanup_notice_routes_to_item_owner_and_operator_but_not_unrelated_children()
                 "kind":"unlinked","tree":{"repo":"/host","path":"/host/orphan","branch":"feat/orphan"}}
         ]}),
     );
-    // An unrelated child must not consume the owner's or operator's delivery history.
+    // Neither a pane Dogsled did not launch, an unrelated child, nor the child working in the
+    // checkout created it. None of them hears, and none consumes the owner's history.
+    assert_eq!(gate(&rig, "w1:p1"), "");
     assert_eq!(gate(&rig, "w2:p1"), "");
     assert_eq!(gate(&rig, "w4:p1"), "");
+    let context = |pane: &str| {
+        let out = rig
+            .cmd(&["hook", "context", "--harness", "pi"])
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", pane)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    assert!(!context("w1:p1").contains("Cleanup at"));
+    assert!(
+        context("w3:p1").contains("Cleanup at 2 ms: 1 failures and 1 held worktrees in your work")
+    );
     let owner = gate(&rig, "w3:p1");
     assert!(owner.contains("child teardown refused"), "{owner}");
     assert!(!owner.contains("host survey failed"), "{owner}");
@@ -301,46 +327,42 @@ fn cleanup_notice_routes_to_item_owner_and_operator_but_not_unrelated_children()
     assert!(owner.contains("child checkout unlinked"), "{owner}");
     assert!(!owner.contains("orphan unlinked"), "{owner}");
     assert_eq!(gate(&rig, "w3:p1"), "");
-    let operator = gate(&rig, "w1:p1");
-    assert!(operator.contains("host survey failed"), "{operator}");
-    assert!(operator.contains("/host/repository"), "{operator}");
-    assert!(!operator.contains("child teardown refused"), "{operator}");
-    assert!(operator.contains("orphan unlinked"), "{operator}");
-    assert!(!operator.contains("child checkout unlinked"), "{operator}");
-    assert_eq!(gate(&rig, "w1:p1"), "");
-    // With no live owner the targeted failure falls back to the operator, not the child.
+    // After the worker's pane closes, the launch record still names the creator.
     let mut panes = rig.read("panes.json");
     panes["result"]["panes"]
         .as_array_mut()
         .unwrap()
-        .retain(|pane| pane["pane_id"] != "w3:p1");
+        .retain(|pane| pane["pane_id"] != "w4:p1");
     rig.put("panes.json", &panes);
-    assert_eq!(gate(&rig, "w2:p1"), "");
-    assert!(gate(&rig, "w1:p1").contains("child teardown refused"));
+    assert_eq!(gate(&rig, "w1:p1"), "");
+    assert_eq!(gate(&rig, "w3:p1"), "");
+    fs::remove_file(rig.dir.join("state/gate.json")).unwrap();
+    assert!(gate(&rig, "w3:p1").contains("child teardown refused"));
     assert_eq!(gate(&rig, "w1:p1"), "");
 }
 
 #[test]
-fn landed_dirty_reaches_only_owners_in_the_same_main_repository() {
+fn landed_dirty_reaches_only_the_agent_that_created_the_worktree() {
     let (rig, tree) = close_rig("stop-landed-dirty");
     let repo = rig.dir.join("home/repo");
-    let other = rig.dir.join("home/other");
-    fs::create_dir_all(&other).unwrap();
-    git(&other, &["init", "-q", "-b", "main"]);
     let alias = rig.dir.join("repo-link");
     std::os::unix::fs::symlink(&repo, &alias).unwrap();
     rig.put(
         "panes.json",
         &json!({"result":{"panes":[
-            {"pane_id":"w1:p1","terminal_id":"same","cwd":alias},
-            {"pane_id":"w3:p1","terminal_id":"other","cwd":other}
+            {"pane_id":"w1:p1","terminal_id":"creator","cwd":alias},
+            {"pane_id":"w3:p1","terminal_id":"researcher","cwd":repo}
         ]}}),
     );
     rig.put("state/repositories.json", &json!([repo]));
+    // The creator recorded the launch through a symlinked path; it still names the worktree.
+    launched_into(&rig, "creator", "w1:p1", &alias.join(".worktrees/x"));
     fs::write(tree.join("notes.txt"), "keep this work").unwrap();
     gate(&rig, "w1:p1");
     serve(&rig);
     assert!(tree.exists());
+    // An agent in the same repository that created nothing there hears nothing.
+    assert_eq!(gate(&rig, "w3:p1"), "");
     let message = gate(&rig, "w1:p1");
     for expected in [
         tree.to_str().unwrap(),
@@ -357,14 +379,13 @@ fn landed_dirty_reaches_only_owners_in_the_same_main_repository() {
         assert!(message.contains(expected), "{expected}: {message}");
     }
     assert_eq!(gate(&rig, "w1:p1"), "");
-    assert_eq!(gate(&rig, "w3:p1"), "");
+    // A pane that later works inside the worktree did not create it either.
     let mut panes = rig.read("panes.json");
     panes["result"]["panes"]
         .as_array_mut()
         .unwrap()
         .push(json!({"pane_id":"w4:p1","terminal_id":"linked","cwd":tree}));
     rig.put("panes.json", &panes);
-    assert!(gate(&rig, "w4:p1").contains("notes.txt"));
     assert_eq!(gate(&rig, "w4:p1"), "");
     let report = rig.read("state/sweep.json");
     assert_eq!(report["landed_dirty"][0]["kind"], "landed_dirty");
@@ -381,7 +402,17 @@ fn claude_and_codex_stop_deliver_cleanup_and_request_the_next_pass() {
             {"pane_id":"w2:p1","agent":"codex","agent_status":"idle","terminal_id":"term_child"}
         ]}}),
     );
-    rig.put("state/sweep.json", &json!({"started_ms":1,"finished_ms":2,"results":[],"failures":["survey unavailable"],"repositories":[],"landed_dirty":[]}));
+    let owner = rig.dir.join("home/owner-tree");
+    let child = rig.dir.join("home/child-tree");
+    launched_into(&rig, "owner-work", "w1:p1", &owner);
+    launched_into(&rig, "child-work", "w2:p1", &child);
+    failed_pass(
+        &rig,
+        &[
+            (&owner, "survey unavailable: w1:p1"),
+            (&child, "survey unavailable: w2:p1"),
+        ],
+    );
     for (harness, pane) in [("claude", "w1:p1"), ("codex", "w2:p1")] {
         let run = || {
             rig.cmd(&["hook", "inbox", "--harness", harness, "--event", "Stop"])
@@ -398,12 +429,12 @@ fn claude_and_codex_stop_deliver_cleanup_and_request_the_next_pass() {
         );
         let value: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(value["decision"], "block");
+        let reason = value["reason"].as_str().unwrap();
         assert!(
-            value["reason"]
-                .as_str()
-                .unwrap()
-                .contains("survey unavailable")
+            reason.contains(&format!("survey unavailable: {pane}")),
+            "{reason}"
         );
+        assert_eq!(reason.matches("survey unavailable").count(), 1, "{reason}");
         assert!(rig.dir.join("state/sweep-request.json").exists());
         assert_eq!(run().stdout, [] as [u8; 0]);
     }
@@ -531,7 +562,9 @@ fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
                 {"pane_id":"w1:p1","agent":harness,"agent_status":"idle","terminal_id":"term_owner"}
             ]}}),
         );
-        rig.put("state/sweep.json", &json!({"started_ms":1,"finished_ms":2,"results":[],"failures":["previous survey failed"],"repositories":[],"landed_dirty":[]}));
+        let tree = rig.dir.join("home/owned-tree");
+        launched_into(&rig, "owned", "w1:p1", &tree);
+        failed_pass(&rig, &[(&tree, "previous survey failed")]);
         if harness != "pi" {
             rig.snapshot("state/host.json", now(), 0.0, 8);
             let mut snapshot = rig.read("state/host.json");

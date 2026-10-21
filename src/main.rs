@@ -259,8 +259,12 @@ fn hook(
             let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
             let status = commands::status(&fleet)?;
             let owner = std::env::var("HERDR_PANE_ID").ok();
+            let found = match (&owner, &status.sweep) {
+                (Some(owner), Some(report)) => gate::findings(ledger, shell, owner, report)?,
+                _ => gate::Findings::default(),
+            };
             print(false, &(), || {
-                context::format(harness, event, &status, owner.as_deref())
+                context::format(harness, event, &status, owner.as_deref(), &found)
             })
         }
     }

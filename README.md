@@ -557,13 +557,11 @@ Claude Code and Codex include the reminder in their existing `Stop` inbox respon
 The reminder requests a review, a commit from dirty children, integration, or an explicit blocker or deferral.
 It never commits, merges, closes, or discards work itself. Clean readers and working children do not trigger it.
 
-The gate reports failures, repository warnings, `unlinked` holds, and landed-dirty findings from the latest completed pass, without waiting for the requested pass.
-A worktree failure or `unlinked` hold goes to its open item’s owner when that owner exists. Otherwise it goes only to an operator pane.
-Host-level repository warnings also go only to operators: panes Dogsled did not launch. Unrelated children receive neither notice.
-Landed-dirty findings keep their repository-root filter.
-Successful removals remain in status and the journal; they do not continue an agent turn.
-Repository warnings name the repository and state entries, and request delegation to a dogsled agent instead of manual state edits.
-Landed-dirty findings reach only panes in the same main repository, including linked worktrees and symlink paths.
+The gate reports failures, `unlinked` holds, and landed-dirty findings from the latest completed pass, without waiting for the requested pass.
+A finding reaches only the agent that created its work. That agent owns an open item whose pane holds the worktree or pane, or its launch record started a child in the worktree.
+An agent that created nothing there hears nothing, whether Dogsled launched it or not. A research agent in the same repository gets no cleanup message.
+Host-level failures and repository warnings have no creator. They stay in `dogsled status` and `status --brief` and reach no agent.
+Prompt context shows the same owner-scoped counts. Successful removals remain in status and the journal; they do not continue an agent turn.
 The message asks the owner to read and preserve wanted changes, or obtain user approval before discarding abandoned work.
 It forbids forced worktree removal, `git clean`, and `rm -rf` on the checkout.
 Cleanup reminders use separate, once-per-set histories in `gate.json`, so an unchanged warning cannot cause a continuation loop.
