@@ -264,13 +264,11 @@ pub fn reader(ledger: &Ledger, terminal: &str) -> Result<Option<Reader>> {
 fn put_checked(ledger: &Ledger, shell: &dyn crate::shell::Shell, record: Record) -> Result<Record> {
     // Read live state: an ended turn seals done before a message can reopen it.
     let agent = local_agent(shell, &record.pane)?;
-    let from = record.from.pane.clone();
+    let from = record.from.clone();
     crate::done::input(
         ledger,
         &agent,
-        crate::done::Input::Put {
-            from: from.as_deref(),
-        },
+        crate::done::Input::Put { from: Some(&from) },
         || put(ledger, record).map(|r| (r, true)),
     )
 }

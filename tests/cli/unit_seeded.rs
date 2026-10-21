@@ -1290,6 +1290,98 @@ fn done_without_terminal_evidence_stays_open_until_its_owner_continues_it() {
     assert!(!rig.log("herdr.log").contains("pane close"));
 }
 
+/// A record sent from `pane` on `host`, put through the host command a peer runs over SSH.
+fn put_from(rig: &Rig, pane: &str, host: &str, text: &str) -> Output {
+    let record = json!({
+        "id":"rec-1","terminal":"term_child","pane":"w2:p1",
+        "from":{"pane":pane,"host":host},"kind":"message","text":text,
+        "created_ms":1,"state":"pending"
+    });
+    rig.cmd(&["host", "inbox-put", "--record", &record.to_string()])
+        .output()
+        .unwrap()
+}
+
+fn assert_put_refused(rig: &Rig, pane: &str, host: &str) {
+    let marks = rig.read("state/done.json");
+    let messages = inbox(rig);
+    let out = put_from(rig, pane, host, "continue");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("only its owner"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(rig.read("state/done.json"), marks);
+    assert_eq!(inbox(rig), messages);
+}
+
+fn owner_progress(rig: &Rig, execution: &Value) -> (String, Value) {
+    let id = execution["requestId"].as_str().unwrap();
+    let file = format!("state/launches/{id}.progress.json");
+    let progress = rig.read(&file);
+    (file, progress)
+}
+
+#[test]
+fn the_owner_pane_id_on_another_host_cannot_continue_the_worker() {
+    let (rig, execution, _) = done_unreturned("seed-foreign-host");
+    let (_, progress) = owner_progress(&rig, &execution);
+    let host = progress["request"]["owner_host"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    worker_state(&rig, "idle");
+    // Same pane ID as the owner, but another machine: a different agent.
+    assert_put_refused(&rig, "w1:p1", "another-machine");
+    // The real owner, on the recorded host, still continues it.
+    let out = put_from(&rig, "w1:p1", &host, "continue");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(rig.read("state/done.json"), json!({}));
+}
+
+#[test]
+fn a_launch_record_without_an_owner_host_refuses_every_sender() {
+    let (rig, execution, _) = done_unreturned("seed-legacy-owner");
+    let (file, mut progress) = owner_progress(&rig, &execution);
+    let host = progress["request"]["owner_host"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    progress["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("owner_host");
+    rig.put(&file, &progress);
+    worker_state(&rig, "idle");
+    assert_put_refused(&rig, "w1:p1", &host);
+    assert_refused(&rig, "w1:p1", "only its owner w1:p1 can continue it");
+}
+
+#[test]
+fn an_owner_on_a_remote_host_continues_the_worker_and_a_local_namesake_cannot() {
+    let (rig, execution, _) = done_unreturned("seed-remote-owner");
+    let (file, mut progress) = owner_progress(&rig, &execution);
+    progress["request"]["owner_host"] = json!("owner-machine");
+    rig.put(&file, &progress);
+    worker_state(&rig, "idle");
+    // A local sender with the owner's pane ID is not the owner.
+    assert_refused(&rig, "w1:p1", "only its owner w1:p1 can continue it");
+    let out = put_from(&rig, "w1:p1", "owner-machine", "remote continue");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(rig.read("state/done.json"), json!({}));
+    let claimed: Value = serde_json::from_slice(&worker_claim(&rig).stdout).unwrap();
+    assert_eq!(claimed[0]["text"], "remote continue");
+}
+
 #[test]
 fn legacy_sealed_done_without_terminal_evidence_is_continued_only_by_its_owner() {
     let (rig, execution, _) = launched("seed-legacy");

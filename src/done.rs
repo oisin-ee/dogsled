@@ -157,8 +157,11 @@ fn terminal(mark: &Mark, evidence: &Evidence) -> bool {
 pub enum Input<'a> {
     /// The pane's own inbox reader claims records.
     Claim,
-    /// A sender puts a record; `from` is its pane, if it has one.
-    Put { from: Option<&'a str> },
+    /// A sender puts a record; `from` is the whole sender, because a pane ID is unique only
+    /// on its own host.
+    Put {
+        from: Option<&'a crate::inbox::Sender>,
+    },
 }
 
 pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
@@ -398,14 +401,19 @@ pub fn input<T>(
                     (Err(error), _) => Some(format!(
                         "{name} called done, and its unit evidence is unavailable: {error}; nothing was accepted"
                     )),
+                    // Pane and host must both match the stored originating owner. A launch
+                    // record with no owner host proves nobody, so it refuses every sender.
                     (
-                        Ok(crate::launch::Execution::Unreturned { owner }),
+                        Ok(crate::launch::Execution::Unreturned {
+                            owner,
+                            host: Some(host),
+                        }),
                         Input::Put { from: Some(from) },
-                    ) if from == owner => {
+                    ) if from.pane.as_deref() == Some(owner.as_str()) && from.host == host => {
                         continued = true;
                         None
                     }
-                    (Ok(crate::launch::Execution::Unreturned { owner }), _) => Some(format!(
+                    (Ok(crate::launch::Execution::Unreturned { owner, .. }), _) => Some(format!(
                         "{name} called done before its unit returned; only its owner {owner} can continue it; nothing was accepted"
                     )),
                 }

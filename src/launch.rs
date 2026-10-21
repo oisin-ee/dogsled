@@ -182,8 +182,9 @@ pub fn handoff_ready(ledger: &Ledger, pane: &str) -> Result<bool> {
 pub enum Execution {
     /// No unit execution was launched in the pane.
     Plain,
-    /// The unit has not returned. Only `owner` may continue it.
-    Unreturned { owner: String },
+    /// The unit has not returned. Only `owner` may continue it. `host` is the originating
+    /// owner's hostname; a launch record without one cannot prove any sender is its owner.
+    Unreturned { owner: String, host: Option<String> },
     /// The worker acknowledged its sealed terminal boundary.
     Returned,
 }
@@ -254,6 +255,7 @@ pub fn execution(
     match &progress.terminal_receipt {
         None => Ok(Execution::Unreturned {
             owner: seed.execution.owner_id.clone(),
+            host: progress.request.owner_host.clone(),
         }),
         Some(receipt) if receipt.ack.execution == seed.execution => Ok(Execution::Returned),
         Some(_) => Err(crate::unit_transport::conflict(&format!(

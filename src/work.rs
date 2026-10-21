@@ -47,6 +47,10 @@ pub struct Request {
     pub workspace: Option<String>,
     pub workspace_name: Option<String>,
     pub owner: String,
+    /// The hostname of the machine where `owner` asked for the work. A pane ID is unique
+    /// only on its own host. Requests written before this field have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_host: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +68,10 @@ pub struct Launch {
     pub workspace: Option<String>,
     pub workspace_name: Option<String>,
     pub owner: String,
+    /// The originating owner's hostname, copied from its request. Launch records written
+    /// before this field have none, and nothing can prove their owner's host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -695,6 +703,7 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
         workspace: host.is_local().then(|| request.workspace.clone()).flatten(),
         workspace_name: request.workspace_name.clone(),
         owner: request.owner.clone(),
+        owner_host: request.owner_host.clone(),
     })
 }
 
