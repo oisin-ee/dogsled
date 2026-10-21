@@ -243,7 +243,7 @@ Peer reads run in parallel through SSH and the configured `remote_command`.
 A shared, locked cache permits at most one read per peer per ten seconds, including concurrent callers.
 Status never probes peers itself.
 
-`service: up` means a process holds the host's service lock. A free lock or unreachable peer means `service: down`.
+`service: up` means a process holds the host's service lock. A free lock on a host that answers means `service: down`. A peer that SSH cannot read shows `unreachable: <category>` (for example `timeout` or `connection refused`, never the raw SSH text) instead, with the age of its last snapshot when one exists.
 Status shows snapshot age separately, including when the service runs. Peers without the liveness field retain the 30-second age fallback during upgrades.
 Admission still requires a snapshot no older than 30 seconds. Finished-child cleanup can use an older snapshot from a running service.
 Close rechecks the live pane, the child's `done` mark, and the loss guard before it acts.
