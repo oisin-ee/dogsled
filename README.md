@@ -175,6 +175,8 @@ Each refusal happens before a change. If a `teardown` command fails, the worktre
 After removal, close drops the worktree's registration, as prune does.
 The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted,anchor_closed?}|null,pane_closed}`. A remote host runs the same steps over SSH.
 
+The last pane of a primary workspace can require closure of its linked workspaces. Dogsled confirms that group closure only after every member passes its safety checks. Busy panes, dirty checkouts, pending launches, preparation holds, focused workspaces, and the caller prevent group closure. Additional agents must call `done`. Refusals name the affected workspaces and close nothing. Group closure retains linked checkouts and branches unless normal worktree removal already owns them. Duplicate primaries close individually, without group confirmation.
+
 The service admits tickets in FIFO order using the same placement policy.
 The order holds per host. A ticket waits only behind earlier tickets that could take one of its hosts. A full host does not hold back a ticket that is pinned to another host with room.
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.

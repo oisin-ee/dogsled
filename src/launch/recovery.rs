@@ -259,7 +259,7 @@ fn close_selected(
             }
             verify_items(ledger, pane, progress)?;
             verify_shell(shell, pane, progress)?;
-            shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+            crate::worktree::close_pane(shell, ledger, pane, &crate::close::Caller::from_env())?;
             eprintln!("{pane}: closed final launch pane; checkout retained at {}; launch evidence unchanged", progress.request.cwd);
             Ok(true)
         })

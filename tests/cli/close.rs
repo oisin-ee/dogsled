@@ -68,6 +68,214 @@ esac
     (rig, tree)
 }
 
+/// A sole primary and its linked workspace. The caller lives outside this group.
+fn group_rig(name: &str) -> (Rig, PathBuf) {
+    let (rig, tree) = close_rig(name);
+    let repo = rig.dir.join("home/repo").canonicalize().unwrap();
+    // The primary must be clean too; its own linked checkout is not unique primary content.
+    fs::write(repo.join(".gitignore"), ".worktrees/\n").unwrap();
+    git(&repo, &["add", ".gitignore"]);
+    git(&repo, &["commit", "-q", "-m", "ignore linked checkouts"]);
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
+            {"pane_id":"w5:p1","terminal_id":"term_primary","workspace_id":"w5","cwd":repo},
+            {"pane_id":"w2:p1","terminal_id":"term_linked","workspace_id":"w2","cwd":tree}
+        ]}}),
+    );
+    rig.put("workspaces.json", &json!({"result":{"workspaces":[
+        {"workspace_id":"w5","focused":false,"pane_count":1,"worktree":{
+            "repo_key":"repo","repo_root":repo,"checkout_path":repo,"is_linked_worktree":false}},
+        {"workspace_id":"w2","focused":false,"pane_count":1,"worktree":{
+            "repo_key":"repo","repo_root":repo,"checkout_path":tree,"is_linked_worktree":true}}
+    ]}}));
+    rig.put(
+        "worktrees.json",
+        &json!({"result":{"worktrees":[
+            {"path":repo,"open_workspace_id":"w5","is_linked_worktree":false},
+            {"path":tree,"open_workspace_id":"w2","is_linked_worktree":true}
+        ]}}),
+    );
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script("herdr", &script.replace("  'pane process-info'*)", "  'status --json') cat \"$RIG/status.json\" ;;\n  'pane close w5:p1') printf '%s\\n' '{\"error\":{\"code\":\"confirmation_required\",\"message\":\"closing this pane would close a worktree group\"}}' >&2; exit 1 ;;\n  'pane process-info'*)"));
+    (rig, tree)
+}
+
+#[test]
+fn last_primary_pane_uses_supported_socket_group_confirmation() {
+    use std::io::{BufRead as _, Write as _};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let (rig, tree) = group_rig("group-confirm");
+    let socket = rig.dir.join("herdr.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    rig.put("status.json", &json!({"server":{"socket":socket}}));
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        if line.is_empty() {
+            return Value::Null;
+        }
+        let request: Value = serde_json::from_str(&line).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({"id":request["id"],"result":{"type":"ok"}})
+        )
+        .unwrap();
+        request
+    });
+    let out = rig.run(&["close", "w5:p1"]);
+    // Release the test server if the command refused before opening the socket.
+    drop(UnixStream::connect(&socket));
+    let request = server.join().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(request["method"], "workspace.close");
+    assert_eq!(
+        request["params"],
+        json!({"workspace_id":"w5","close_group":true})
+    );
+    let log = rig.log("herdr.log");
+    assert!(
+        !log.contains("pane close"),
+        "must not attempt an implicit group close: {log}"
+    );
+    assert!(
+        !log.contains("workspace close"),
+        "CLI has no confirmation flag: {log}"
+    );
+    assert!(
+        tree.exists(),
+        "confirmation closes workspaces, not checkouts"
+    );
+    assert!(branch_exists(&rig, "feat/x"));
+    assert!(!rig.dir.join("hook.log").exists());
+}
+
+#[test]
+fn group_confirmation_refuses_busy_dirty_held_or_unfinished_linked_members_without_closing() {
+    for blocked in [
+        "busy", "dirty", "held", "not-done", "caller", "focused", "deleted", "launch",
+    ] {
+        let (rig, tree) = group_rig(&format!("group-refuse-{blocked}"));
+        match blocked {
+            "busy" | "not-done" => {
+                let mut panes = rig.read("panes.json");
+                panes["result"]["panes"][2]["agent"] = json!("pi");
+                panes["result"]["panes"][2]["agent_status"] =
+                    json!(if blocked == "busy" { "working" } else { "idle" });
+                rig.put("panes.json", &panes);
+            }
+            "dirty" => fs::write(tree.join("unique"), "must stay").unwrap(),
+            "deleted" => fs::remove_file(tree.join("dogsled.toml")).unwrap(),
+            "held" => rig.put(
+                "state/preparations.json",
+                &json!([{
+                    "repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x","head":""
+                }]),
+            ),
+            "caller" => {
+                let mut workspaces = rig.read("workspaces.json");
+                workspaces["result"]["workspaces"][1]["workspace_id"] = json!("w1");
+                rig.put("workspaces.json", &workspaces);
+            }
+            "focused" => {
+                let mut workspaces = rig.read("workspaces.json");
+                workspaces["result"]["workspaces"][1]["focused"] = json!(true);
+                rig.put("workspaces.json", &workspaces);
+            }
+            "launch" => {
+                unfinished_launch(&rig, "group", &tree, "w2:p1");
+                let mut progress = rig.read("state/launches/group.progress.json");
+                progress["terminal"] = json!("term_linked");
+                rig.put("state/launches/group.progress.json", &progress);
+            }
+            _ => unreachable!(),
+        }
+        let out = rig.run(&["close", "w5:p1"]);
+        assert_eq!(out.status.code(), Some(2), "{blocked}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("worktree group"), "{blocked}: {stderr}");
+        assert!(
+            stderr.contains(if blocked == "caller" { "w1" } else { "w2" }),
+            "{blocked}: {stderr}"
+        );
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("pane close")
+                && !log.contains("workspace close")
+                && !log.contains("status --json"),
+            "{blocked}: {log}"
+        );
+        assert!(tree.exists());
+        assert!(!rig.dir.join("hook.log").exists());
+    }
+}
+
+#[test]
+fn group_confirmation_refuses_changed_membership_or_terminal_identity() {
+    for changed in ["membership", "terminal"] {
+        let (rig, _) = group_rig(&format!("group-change-{changed}"));
+        let mut workspaces = rig.read("workspaces.json");
+        let mut panes = rig.read("panes.json");
+        if changed == "membership" {
+            workspaces["result"]["workspaces"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        } else {
+            panes["result"]["panes"][2]["terminal_id"] = json!("replacement");
+        }
+        rig.put("workspaces-after.json", &workspaces);
+        rig.put("panes-changed.json", &panes);
+        let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+        rig.script("herdr", &script.replace("'workspace list') cat \"$RIG/workspaces.json\" ;;", "'workspace list')\n    count=0; if test -f \"$RIG/group-surveys\"; then read -r count < \"$RIG/group-surveys\"; fi\n    count=$((count + 1)); printf '%s\\n' \"$count\" > \"$RIG/group-surveys\"\n    if test \"$count\" -eq 4; then\n      cp \"$RIG/panes-changed.json\" \"$RIG/panes.json\"\n      cat \"$RIG/workspaces-after.json\"\n    else cat \"$RIG/workspaces.json\"; fi ;;"));
+        let out = rig.run(&["close", "w5:p1"]);
+        assert_eq!(out.status.code(), Some(2), "{changed}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("changed during preflight"),
+            "{changed}: {stderr}"
+        );
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("pane close")
+                && !log.contains("workspace close")
+                && !log.contains("status --json"),
+            "{changed}: {log}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_primary_closes_individually_without_group_confirmation() {
+    let (rig, _) = group_rig("group-duplicate");
+    let mut workspaces = rig.read("workspaces.json");
+    let mut duplicate = workspaces["result"]["workspaces"][0].clone();
+    duplicate["workspace_id"] = json!("w6");
+    workspaces["result"]["workspaces"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    rig.put("workspaces.json", &workspaces);
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script(
+        "herdr",
+        &script.replace(
+            "  'pane close w5:p1')",
+            "  'pane close w5:p1') printf '{}\\n'; exit 0 ;;\n  'unused')",
+        ),
+    );
+    let out = rig.run(&["close", "w5:p1"]);
+    assert!(out.status.success(), "{out:?}");
+    let log = rig.log("herdr.log");
+    assert!(log.contains("pane close w5:p1"));
+    assert!(!log.contains("status --json"));
+}
+
 /// Move `main` past `feat/x`, so the branch is an ancestor of it: integrated.
 fn advance_main(rig: &Rig) {
     git(

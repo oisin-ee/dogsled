@@ -106,7 +106,7 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
                         .terminal
                         .as_deref()
                         .map(|terminal| (pane.as_str(), terminal));
-                    return Err(refused(&receipts, shell, &file, owned, error)?);
+                    return Err(refused(ledger, &receipts, shell, &file, owned, error)?);
                 }
                 Ok(())
             })?;
@@ -127,6 +127,7 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
 /// close only its still-owned idle shell, whether allocated or prepared. Unknown or occupied panes
 /// survive the final refusal. Any other error passes through unchanged.
 fn refused(
+    ledger: &Ledger,
     receipts: &Ledger,
     shell: &dyn Shell,
     file: &str,
@@ -150,7 +151,7 @@ fn refused(
         },
     )?;
     let closed = pane.map_or(Ok(()), |(pane, expected)| {
-        close_refused_pane(shell, pane, expected)
+        close_refused_pane(ledger, shell, pane, expected)
     });
     Ok(Error::Invalid(match closed {
         Ok(()) => failed,
@@ -158,7 +159,12 @@ fn refused(
     }))
 }
 
-fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
+fn close_refused_pane(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    pane: &str,
+    expected: &str,
+) -> Result<()> {
     if std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
         || crate::cleanup::current_panes(shell)?
             .iter()
@@ -182,7 +188,7 @@ fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<(
     if terminal(shell, pane)? != expected {
         return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
     }
-    shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+    crate::worktree::close_pane(shell, ledger, pane, &crate::close::Caller::from_env())?;
     Ok(())
 }
 

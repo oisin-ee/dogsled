@@ -473,7 +473,7 @@ pub fn current_panes(shell: &dyn Shell) -> Result<Vec<Pane>> {
     Ok(pane_snapshot(shell)?.0)
 }
 
-fn pane_snapshot(shell: &dyn Shell) -> Result<(Vec<Pane>, BTreeMap<String, String>)> {
+pub(crate) fn pane_snapshot(shell: &dyn Shell) -> Result<(Vec<Pane>, BTreeMap<String, String>)> {
     let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
     let raw = value
@@ -1780,8 +1780,12 @@ fn close_workspace(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
             )));
         }
     }
-    node.shell
-        .run_ok("herdr", &["workspace".into(), "close".into(), id.into()])?;
+    crate::worktree::close_workspace(
+        node.shell,
+        node.ledger,
+        id,
+        &crate::close::Caller::from_env(),
+    )?;
     Ok(format!("closed workspace {id}"))
 }
 
@@ -1820,8 +1824,12 @@ fn close_pane(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
             "refuse {id}: pane is busy, or its agent has not called done"
         )));
     }
-    node.shell
-        .run_ok("herdr", &["pane".into(), "close".into(), id.into()])?;
+    crate::worktree::close_pane(
+        node.shell,
+        node.ledger,
+        id,
+        &crate::close::Caller::from_env(),
+    )?;
     Ok(format!("closed pane {id}"))
 }
 

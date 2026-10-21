@@ -139,7 +139,7 @@ pub fn local(
         None => None,
     };
     let Some(tree) = tree.filter(|_| lock.is_some()) else {
-        shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+        worktree::close_pane(shell, ledger, pane, caller)?;
         return Ok(Closed {
             pane: pane.into(),
             worktree: None,

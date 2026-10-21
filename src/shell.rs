@@ -28,6 +28,13 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
     /// `Err` only when the process could not be started.
     fn run(&self, program: &str, args: &[String]) -> Result<Output>;
 
+    /// Send one newline-delimited request to Herdr's local socket. Tests override this seam.
+    fn herdr_request(&self, _request: &serde_json::Value) -> Result<serde_json::Value> {
+        Err(Error::Invalid(
+            "shell does not support Herdr socket requests".into(),
+        ))
+    }
+
     /// Run with a caller-owned wall-clock budget.
     fn run_bounded(
         &self,
@@ -97,6 +104,30 @@ pub struct System {
 }
 
 impl Shell for System {
+    fn herdr_request(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        use std::io::{BufRead as _, Write as _};
+        let status = self.run_ok("herdr", &["status".into(), "--json".into()])?;
+        let status: serde_json::Value = serde_json::from_str(&status.stdout)?;
+        let path = status
+            .pointer("/server/socket")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::Invalid("Herdr status has no server socket".into()))?;
+        let mut socket = std::os::unix::net::UnixStream::connect(path)?;
+        socket.set_write_timeout(Some(self.budget.remaining("Herdr socket write")?))?;
+        serde_json::to_writer(&mut socket, request)?;
+        socket.write_all(b"\n")?;
+        socket.set_read_timeout(Some(self.budget.remaining("Herdr socket read")?))?;
+        let mut response = String::new();
+        std::io::BufReader::new(socket).read_line(&mut response)?;
+        let response: serde_json::Value = serde_json::from_str(&response)?;
+        if response.get("id") != request.get("id") || response.get("result").is_none() {
+            return Err(Error::Invalid(format!(
+                "Herdr socket request failed: {response}"
+            )));
+        }
+        Ok(response)
+    }
+
     fn budget(&self) -> crate::budget::Budget {
         self.budget
     }
@@ -265,6 +296,11 @@ impl Fake {
 
 #[cfg(test)]
 impl Shell for Fake {
+    fn herdr_request(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        let out = self.run_ok("herdr-socket", &[request.to_string()])?;
+        Ok(serde_json::from_str(&out.stdout)?)
+    }
+
     fn run_bounded(
         &self,
         program: &str,

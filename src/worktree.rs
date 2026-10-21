@@ -236,6 +236,326 @@ pub fn busy(shell: &dyn Shell, pane: &Pane) -> Result<Option<String>> {
     Ok(crate::probe::foreground(shell, &pane.pane_id)?.map(|name| format!("running {name}")))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct CloseWorkspace {
+    workspace_id: String,
+    #[serde(default)]
+    focused: bool,
+    #[serde(default)]
+    pane_count: usize,
+    worktree: Option<CloseTree>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct CloseTree {
+    repo_key: String,
+    repo_root: String,
+    #[serde(default)]
+    checkout_path: String,
+    is_linked_worktree: bool,
+}
+
+fn close_workspaces(shell: &dyn Shell) -> Result<Vec<CloseWorkspace>> {
+    let out = shell.run_ok("herdr", &["workspace".into(), "list".into()])?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    Ok(serde_json::from_value(
+        value
+            .pointer("/result/workspaces")
+            .cloned()
+            .ok_or_else(|| Error::Invalid("Herdr workspace list has no workspaces".into()))?,
+    )?)
+}
+
+fn close_group(workspaces: &[CloseWorkspace], id: &str) -> Vec<CloseWorkspace> {
+    let Some(tree) = workspaces
+        .iter()
+        .find(|w| w.workspace_id == id)
+        .and_then(|w| w.worktree.as_ref())
+        .filter(|t| !t.is_linked_worktree)
+    else {
+        return Vec::new();
+    };
+    let mut members: Vec<_> = workspaces
+        .iter()
+        .filter(|w| {
+            w.worktree
+                .as_ref()
+                .is_some_and(|t| t.repo_key == tree.repo_key)
+        })
+        .cloned()
+        .collect();
+    // With another primary, Herdr closes this primary alone; never request group intent.
+    if members.len() < 2
+        || members
+            .iter()
+            .filter(|w| w.worktree.as_ref().is_some_and(|t| !t.is_linked_worktree))
+            .count()
+            != 1
+    {
+        return Vec::new();
+    }
+    members.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+    members
+}
+
+/// Close a pane without allowing an implicit last-pane close to take unchecked workspaces.
+/// The caller has already authorized this pane; every additional agent must have called done.
+pub fn close_pane(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &crate::close::Caller,
+) -> Result<()> {
+    let panes = crate::cleanup::current_panes(shell)?;
+    let target = panes
+        .iter()
+        .find(|p| p.pane_id == pane)
+        .ok_or_else(|| refuse(&format!("pane {pane} no longer exists")))?;
+    if let Some(workspace) = target.workspace_id.as_deref()
+        && panes
+            .iter()
+            .filter(|p| p.workspace_id.as_deref() == Some(workspace))
+            .count()
+            == 1
+        && confirm_group(shell, ledger, workspace, Some(pane), caller, &panes)?
+    {
+        return Ok(());
+    }
+    shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+    Ok(())
+}
+
+/// Workspace close and last-pane close share the same group preflight and confirmation.
+pub fn close_workspace(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    workspace: &str,
+    caller: &crate::close::Caller,
+) -> Result<()> {
+    let panes = crate::cleanup::current_panes(shell)?;
+    if !confirm_group(shell, ledger, workspace, None, caller, &panes)? {
+        shell.run_ok(
+            "herdr",
+            &["workspace".into(), "close".into(), workspace.into()],
+        )?;
+    }
+    Ok(())
+}
+
+fn confirm_group(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    workspace: &str,
+    authorized_pane: Option<&str>,
+    caller: &crate::close::Caller,
+    panes: &[Pane],
+) -> Result<bool> {
+    let members = close_group(&close_workspaces(shell)?, workspace);
+    if members.is_empty() {
+        return Ok(false);
+    }
+    let ids = members
+        .iter()
+        .map(|w| w.workspace_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let identities = group_panes(shell, &members)?;
+    if identities.len()
+        != panes
+            .iter()
+            .filter(|p| {
+                members
+                    .iter()
+                    .any(|w| p.workspace_id.as_deref() == Some(&w.workspace_id))
+            })
+            .count()
+        || identities.iter().any(|(pane, _)| !panes.contains(pane))
+    {
+        return Err(refuse(&format!(
+            "worktree group [{ids}]: panes changed before preflight"
+        )));
+    }
+    check_group(
+        shell,
+        ledger,
+        workspace,
+        authorized_pane,
+        caller,
+        panes,
+        &members,
+    )
+    .map_err(|error| refuse(&format!("worktree group [{ids}]: {error}")))?;
+    // Herdr has no conditional group-close request. Narrow the inspection window and
+    // refuse changed membership, pane activity, focus, or provenance before confirmation.
+    if close_group(&close_workspaces(shell)?, workspace) != members
+        || group_panes(shell, &members)? != identities
+    {
+        return Err(refuse(&format!(
+            "worktree group [{ids}]: membership or panes changed during preflight"
+        )));
+    }
+    if identities.iter().any(|(_, terminal)| terminal.is_none()) {
+        return Err(refuse(&format!(
+            "worktree group [{ids}]: missing terminal identity"
+        )));
+    }
+    shell.herdr_request(&serde_json::json!({"id":"dogsled-close-group","method":"workspace.close","params":{"workspace_id":workspace,"close_group":true}}))?;
+    Ok(true)
+}
+
+fn group_panes(
+    shell: &dyn Shell,
+    members: &[CloseWorkspace],
+) -> Result<Vec<(Pane, Option<String>)>> {
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    let mut result: Vec<_> = panes
+        .into_iter()
+        .filter(|p| {
+            members
+                .iter()
+                .any(|w| p.workspace_id.as_deref() == Some(&w.workspace_id))
+        })
+        .map(|p| {
+            let terminal = terminals.get(&p.pane_id).cloned();
+            (p, terminal)
+        })
+        .collect();
+    result.sort_by(|a, b| a.0.pane_id.cmp(&b.0.pane_id));
+    Ok(result)
+}
+
+fn check_group(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    workspace: &str,
+    authorized_pane: Option<&str>,
+    caller: &crate::close::Caller,
+    panes: &[Pane],
+    members: &[CloseWorkspace],
+) -> Result<()> {
+    for member in members {
+        let holders: Vec<_> = panes
+            .iter()
+            .filter(|p| p.workspace_id.as_deref() == Some(&member.workspace_id))
+            .collect();
+        if member.focused
+            || caller.workspace.as_deref() == Some(&member.workspace_id)
+            || holders.len() != member.pane_count
+            || holders.is_empty()
+        {
+            return Err(refuse(&format!(
+                "{} is focused, is the caller's workspace, or has incomplete pane information",
+                member.workspace_id
+            )));
+        }
+        for pane in holders {
+            if pane.focused || caller.pane.as_deref() == Some(&pane.pane_id) {
+                return Err(refuse(&format!(
+                    "{} is focused or belongs to the caller",
+                    pane.pane_id
+                )));
+            }
+            if let Some(reason) = busy(shell, pane)? {
+                return Err(refuse(&format!("{} is busy ({reason})", pane.pane_id)));
+            }
+        }
+    }
+    let agents = crate::probe::agent_list(shell)?;
+    let done = crate::done::finished(ledger, &agents)?;
+    for pane in panes.iter().filter(|p| {
+        members
+            .iter()
+            .any(|w| p.workspace_id.as_deref() == Some(&w.workspace_id))
+    }) {
+        let agent = agents.iter().find(|a| a.pane == pane.pane_id);
+        if let Some(agent) = agent
+            && !matches!(agent.state.as_str(), "idle" | "done")
+        {
+            return Err(refuse(&format!(
+                "{} is busy ({})",
+                pane.pane_id, agent.state
+            )));
+        }
+        if (pane.agent.is_some() || agent.is_some())
+            && authorized_pane != Some(pane.pane_id.as_str())
+            && !done.contains(&pane.pane_id)
+        {
+            return Err(refuse(&format!("{} has not called done", pane.pane_id)));
+        }
+        if matches!(
+            crate::launch::final_pane(ledger, shell, &pane.pane_id)?,
+            crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved
+        ) {
+            return Err(refuse(&format!(
+                "{} requires launch recovery",
+                pane.pane_id
+            )));
+        }
+    }
+    check_group_trees(shell, ledger, workspace, authorized_pane, caller, members)
+}
+
+fn check_group_trees(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    workspace: &str,
+    authorized_pane: Option<&str>,
+    caller: &crate::close::Caller,
+    members: &[CloseWorkspace],
+) -> Result<()> {
+    let primary = members
+        .iter()
+        .find_map(|w| w.worktree.as_ref().filter(|t| !t.is_linked_worktree))
+        .ok_or_else(|| refuse("group has no primary"))?;
+    let inventory = list(shell, Path::new(&primary.repo_root))?;
+    let evidence = crate::loss::Evidence::fetch(shell, &primary.repo_root);
+    if let Some(warning) = &evidence.warning {
+        eprintln!("{warning}");
+    }
+    for member in members {
+        let provenance = member
+            .worktree
+            .as_ref()
+            .ok_or_else(|| refuse("group has no provenance"))?;
+        let listed = inventory
+            .iter()
+            .find(|t| same(&t.path, &provenance.checkout_path))
+            .ok_or_else(|| {
+                refuse(&format!(
+                    "{}: checkout is absent from Git inventory",
+                    member.workspace_id
+                ))
+            })?;
+        let branch = listed
+            .branch
+            .as_deref()
+            .ok_or_else(|| refuse(&format!("{}: detached checkout", member.workspace_id)))?;
+        let tree = Linked {
+            checkout: primary.repo_root.clone().into(),
+            path: listed.path.clone(),
+            branch: branch.into(),
+        };
+        let loss = evidence.assess(shell, &format!("refs/heads/{branch}"), Some(&tree.path))?;
+        // Group confirmation closes workspaces, not checkouts: never repair or force dirt.
+        if !crate::loss::dirty_paths(shell, &tree.path, false)?.is_empty() || !loss.loses_nothing()
+        {
+            return Err(refuse(&format!(
+                "{} ({}): dirty or unheld checkout: {}",
+                member.workspace_id,
+                tree.path,
+                loss.detail()
+            )));
+        }
+        let guard = if member.workspace_id == workspace && authorized_pane.is_some() {
+            crate::close::Guard::Clean
+        } else {
+            crate::close::Guard::Pushed
+        };
+        crate::cleanup::close_holds(shell, ledger, &tree, caller, guard, &loss)?;
+    }
+    Ok(())
+}
+
 /// The Git common directory of the repository at `checkout`.
 pub fn common_dir(shell: &dyn Shell, checkout: &Path) -> Result<PathBuf> {
     let out = git(
@@ -286,6 +606,11 @@ pub fn remove(
     caller_workspace: Option<&str>,
     evidence: &crate::loss::Evidence,
 ) -> Result<Removed> {
+    let caller = crate::close::Caller {
+        workspace: caller_workspace.map(str::to_owned),
+        ..crate::close::Caller::from_env()
+    };
+    check_removal_groups(shell, ledger, workspace, holders, &caller)?;
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
     if Path::new(&tree.path).is_dir() {
@@ -295,17 +620,11 @@ pub fn remove(
     for pane in holders {
         let outside = workspace.is_none() || pane.workspace_id.as_deref() != workspace;
         if outside && open.iter().any(|p| p.pane_id == pane.pane_id) {
-            shell.run_ok(
-                "herdr",
-                &["pane".into(), "close".into(), pane.pane_id.clone()],
-            )?;
+            close_pane(shell, ledger, &pane.pane_id, &caller)?;
         }
     }
     if let Some(workspace) = workspace {
-        shell.run_ok(
-            "herdr",
-            &["workspace".into(), "close".into(), workspace.into()],
-        )?;
+        close_workspace(shell, ledger, workspace, &caller)?;
     }
     let lock = lock_reason(shell, &tree.checkout, &tree.path)?;
     match lock.as_deref() {
@@ -347,11 +666,46 @@ pub fn remove(
     }
     crate::cleanup::forget(ledger, &tree.path)?;
     let branch_deleted = !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
-    let anchor_closed = close_anchor(shell, &tree.checkout, caller_workspace)?;
+    let anchor_closed = close_anchor(shell, ledger, &tree.checkout, caller_workspace)?;
     Ok(Removed {
         branch_deleted,
         anchor_closed,
     })
+}
+
+/// Validate affected groups before teardown or the first holder closes. A partial workspace
+/// removal cannot close a group, so it must not inherit the group's additional restrictions.
+fn check_removal_groups(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    workspace: Option<&str>,
+    holders: &[&Pane],
+    caller: &crate::close::Caller,
+) -> Result<()> {
+    if workspace.is_none() && holders.is_empty() {
+        return Ok(());
+    }
+    let open = crate::cleanup::current_panes(shell)?;
+    let workspaces = close_workspaces(shell)?;
+    let ids: std::collections::BTreeSet<_> = workspace
+        .into_iter()
+        .chain(holders.iter().filter_map(|p| p.workspace_id.as_deref()))
+        .collect();
+    for id in ids {
+        if workspace != Some(id)
+            && open.iter().any(|p| {
+                p.workspace_id.as_deref() == Some(id)
+                    && !holders.iter().any(|holder| holder.pane_id == p.pane_id)
+            })
+        {
+            continue;
+        }
+        let members = close_group(&workspaces, id);
+        if !members.is_empty() {
+            check_group(shell, ledger, id, None, caller, &open, &members)?;
+        }
+    }
+    Ok(())
 }
 
 fn git_ok(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<()> {
@@ -399,6 +753,7 @@ fn delete_held(shell: &dyn Shell, tree: &Linked, evidence: &crate::loss::Evidenc
 /// longer names the main checkout's workspace is dropped.
 fn close_anchor(
     shell: &dyn Shell,
+    ledger: &Ledger,
     checkout: &Path,
     caller_workspace: Option<&str>,
 ) -> Result<Option<String>> {
@@ -439,9 +794,14 @@ fn close_anchor(
     if !idle || !agentless {
         return Ok(None);
     }
-    shell.run_ok(
-        "herdr",
-        &["workspace".into(), "close".into(), anchor.clone()],
+    close_workspace(
+        shell,
+        ledger,
+        &anchor,
+        &crate::close::Caller {
+            workspace: caller_workspace.map(str::to_owned),
+            ..crate::close::Caller::from_env()
+        },
     )?;
     std::fs::remove_file(&file)?;
     Ok(Some(anchor))
@@ -451,6 +811,41 @@ fn close_anchor(
 mod tests {
     use super::*;
     use crate::shell::{Fake, Output};
+
+    #[test]
+    fn last_pane_close_refuses_a_busy_linked_workspace_before_closing_anything() {
+        let shell = Fake::new();
+        shell.on(
+            "herdr pane list",
+            r#"{"result":{"panes":[
+                {"pane_id":"w1:p1","workspace_id":"w1"},
+                {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":"working"}
+            ]}}"#,
+        );
+        shell.on("herdr pane process-info --pane w1:p1", r#"{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"sh"}]}}}"#);
+        shell.on(
+            "herdr workspace list",
+            r#"{"result":{"workspaces":[
+                {"workspace_id":"w1","pane_count":1,"worktree":{"repo_key":"repo","repo_root":"/repo","checkout_path":"/repo","is_linked_worktree":false}},
+                {"workspace_id":"w2","pane_count":1,"worktree":{"repo_key":"repo","repo_root":"/repo","checkout_path":"/repo/.worktrees/child","is_linked_worktree":true}}
+            ]}}"#,
+        );
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let error =
+            close_pane(&shell, &ledger, "w1:p1", &crate::close::Caller::default()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("w2"), "{message}");
+        assert!(message.contains("busy"), "{message}");
+        assert!(
+            shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| { !call.contains("pane close") && !call.contains("workspace close") }),
+            "a blocked group must not receive a close request"
+        );
+    }
 
     #[test]
     fn removal_gets_the_setup_limit_not_the_routine_limit() {
