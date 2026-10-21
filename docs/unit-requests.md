@@ -116,6 +116,23 @@ A seeded worker can call `dogsled done` before its unit is sealed. The worker ho
 
 Only the execution owner can continue such a worker. The owner is the originating pane ID (`execution.ownerId`) on the originating host. The launch record stores both, and the host compares the full sender (pane and hostname) before it changes anything, because a pane ID is unique only on its own host. A launch record from an earlier release has no owner host, so it refuses every sender. The owner sends a message or a task to the same pane. The worker host then removes the mark, and the same execution continues in the same session, worktree, and branch. The host refuses input from any other sender, and the worker's own inbox claim, and changes nothing. A mark sealed by an earlier release without a receipt follows the same rule.
 
+#### Legacy continuation on the origin host
+
+An owner can continue such a worker with `dogsled legacy-continue <pane> --message <text>`. The command works only on the origin host: the host whose ledger holds the original admission and whose panes run both the owner and the worker. Ordinary `send` still refuses the worker. The command adds nothing to any record: it does not write an owner host, a launch, a session, a seal, a return, or a settlement.
+
+The command accepts the input only when all of these conditions are true:
+
+- The caller is the pane in `execution.ownerId`, on this host.
+- Herdr reports a Pi agent in that pane now, and the header of its transcript names the admission's origin `sessionId`. An earlier snapshot, an environment value, or a log line is not evidence.
+- The original admission is in `admissions/<request>.json` on this host. It is committed, and it is not abandoned, returned, or settled. Its export and binding validate, and it selected this host.
+- The admitted request and the saved launch have no owner host. The saved launch is equal to the host launch record, field by field. The committed envelope is equal to the launch seed and to `launches/<request>.unit.json`.
+- The launch is started and confirmed, and it has no terminal receipt. The pane, terminal, Pi name, and done mark agree with the launch. The launch item is open, and it is the only open item of the pane.
+- The worker terminal has an inbox reader.
+
+The host takes the locks in this order: `admissions/<request>`, `done`, `launches/<request>`, `inbox/<terminal>`. No other path takes them in the opposite order. It reads all evidence again under the locks. It observes the owner and the worker again immediately before it stores the input. A terminal acknowledgement holds `launches/<request>`, so it cannot pass between the check and the input.
+
+The record ID comes from the request, the owner, the message, and the done mark. If the command stops after it stores the input, a retry finds the same record and removes the mark. If the worker called `done` again later, a replay of the same message is refused, and the later mark stays. The inbox keeps final records for 24 hours, so this protection has the same limit. A refusal changes no mark, record, or inbox. A worker on another host, or an admission that selected another host, is refused: this command has no remote path.
+
 Before the host accepts input, it binds the pane to exactly one seeded launch. The done mark, terminal, agent name, durable seed, and receipt must agree. When the evidence is missing, unreadable, competing, or mismatched, the host refuses the input and does not close the pane. After the receipt exists, the host refuses all input, and the normal handoff closes the pane.
 
 Evidence reads reject malformed, partial, duplicate, cyclic, missing, or oversized data. Limits are 32 MiB per transcript, 1 MiB per line, and 100,000 entries. Failed reads retain the binding. The receipt atomically stores acknowledgement, exact reply text, reply entry ID, and session ID. Repeated acknowledgement returns that receipt. Changed acknowledgement fails.

@@ -1,7 +1,7 @@
 use super::unit_requests::*;
 use super::*;
 
-fn launched(name: &str) -> (Rig, Value, Value) {
+pub(super) fn launched(name: &str) -> (Rig, Value, Value) {
     let rig = rig(name, false);
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
@@ -9,7 +9,7 @@ fn launched(name: &str) -> (Rig, Value, Value) {
     (rig, execution, input)
 }
 
-fn transcript(rig: &Rig, execution: &Value, entries: &[Value]) -> PathBuf {
+pub(super) fn transcript(rig: &Rig, execution: &Value, entries: &[Value]) -> PathBuf {
     let id = execution["requestId"].as_str().unwrap();
     let path = rig
         .dir
@@ -31,7 +31,7 @@ fn transcript(rig: &Rig, execution: &Value, entries: &[Value]) -> PathBuf {
     path
 }
 
-fn entries() -> Vec<Value> {
+pub(super) fn entries() -> Vec<Value> {
     vec![
         json!({"type":"message","id":"old","parentId":null,"message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OLD"}]}}),
         json!({"type":"custom","id":"seal","parentId":"old","customType":"opaque-provider-state"}),
@@ -42,11 +42,11 @@ fn entries() -> Vec<Value> {
     ]
 }
 
-fn acknowledgement(execution: &Value, input: &Value) -> Value {
+pub(super) fn acknowledgement(execution: &Value, input: &Value) -> Value {
     json!({"execution":execution,"unitRef":input["binding"]["contract"],"digest":input["exported"]["digest"],"sealEntryId":"seal","sessionLeafId":"leaf"})
 }
 
-fn ack(rig: &Rig, input: &Value) -> (i32, Value) {
+pub(super) fn ack(rig: &Rig, input: &Value) -> (i32, Value) {
     let out = rig
         .cmd(&["unit", "terminal-ack", "--input", &input.to_string()])
         .env("HERDR_PANE_ID", "w2:p1")
@@ -1161,7 +1161,7 @@ fn not_started_settlement_delivery_has_origin_without_digest() {
 }
 
 /// The seeded worker in `state`, published so `send` can resolve it, with a Pi inbox reader.
-fn worker_state(rig: &Rig, state: &str) {
+pub(super) fn worker_state(rig: &Rig, state: &str) {
     let mut agents = rig.read("agents.json");
     agents["result"]["agents"][0]["agent_status"] = json!(state);
     rig.put("agents.json", &agents);
@@ -1179,7 +1179,7 @@ fn worker_state(rig: &Rig, state: &str) {
 
 /// A seeded worker that called `done` during its turn and then went idle, with no terminal
 /// acknowledgement: its unit has not returned.
-fn done_unreturned(name: &str) -> (Rig, Value, Value) {
+pub(super) fn done_unreturned(name: &str) -> (Rig, Value, Value) {
     let (rig, execution, input) = launched(name);
     transcript(&rig, &execution, &entries());
     worker_state(&rig, "working");
@@ -1197,7 +1197,7 @@ fn done_unreturned(name: &str) -> (Rig, Value, Value) {
     (rig, execution, input)
 }
 
-fn send_from(rig: &Rig, pane: &str, text: &str) -> (i32, Value) {
+pub(super) fn send_from(rig: &Rig, pane: &str, text: &str) -> (i32, Value) {
     let out = rig
         .cmd(&["send", "w2:p1", "--message", text, "--json"])
         .env("HERDR_PANE_ID", pane)
@@ -1209,21 +1209,21 @@ fn send_from(rig: &Rig, pane: &str, text: &str) -> (i32, Value) {
     )
 }
 
-fn worker_claim(rig: &Rig) -> Output {
+pub(super) fn worker_claim(rig: &Rig) -> Output {
     rig.cmd(&["inbox", "claim", "--harness", "pi", "--json"])
         .env("HERDR_PANE_ID", "w2:p1")
         .output()
         .unwrap()
 }
 
-fn inbox(rig: &Rig) -> Value {
+pub(super) fn inbox(rig: &Rig) -> Value {
     serde_json::from_slice(
         &fs::read(rig.dir.join("state/inbox/term_child.json")).unwrap_or_default(),
     )
     .unwrap_or_else(|_| json!([]))
 }
 
-fn serve_once(rig: &Rig) {
+pub(super) fn serve_once(rig: &Rig) {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
@@ -1233,7 +1233,7 @@ fn serve_once(rig: &Rig) {
     );
 }
 
-fn published_done(rig: &Rig) -> bool {
+pub(super) fn published_done(rig: &Rig) -> bool {
     rig.read("state/host.json")["probe"]["agent_panes"]
         .as_array()
         .unwrap()
@@ -1241,7 +1241,7 @@ fn published_done(rig: &Rig) -> bool {
         .any(|a| a["pane"] == "w2:p1" && a["done"] == true)
 }
 
-fn assert_refused(rig: &Rig, pane: &str, expected: &str) {
+pub(super) fn assert_refused(rig: &Rig, pane: &str, expected: &str) {
     let marks = rig.read("state/done.json");
     let messages = inbox(rig);
     let (code, refused) = send_from(rig, pane, "continue");
@@ -1316,7 +1316,7 @@ fn assert_put_refused(rig: &Rig, pane: &str, host: &str) {
     assert_eq!(inbox(rig), messages);
 }
 
-fn owner_progress(rig: &Rig, execution: &Value) -> (String, Value) {
+pub(super) fn owner_progress(rig: &Rig, execution: &Value) -> (String, Value) {
     let id = execution["requestId"].as_str().unwrap();
     let file = format!("state/launches/{id}.progress.json");
     let progress = rig.read(&file);

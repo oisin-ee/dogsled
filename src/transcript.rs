@@ -1,6 +1,32 @@
 //! Resolve an exact session identity, never a latest-session guess.
 
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
+
+/// The longest session header line read. Evidence reads use the same 1 MiB line limit.
+const MAX_HEADER: u64 = 1024 * 1024;
+
+/// The session ID in the header of the Pi transcript at `path`: its first line, a complete
+/// `session` entry. A link, a non-file, an oversized, partial, or malformed header is an error.
+pub fn pi_session_id(path: &str) -> crate::error::Result<String> {
+    let invalid =
+        |detail: &str| crate::error::Error::Invalid(format!("Pi transcript {path}: {detail}"));
+    if !std::fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(invalid("not a regular file"));
+    }
+    let mut line = String::new();
+    std::io::BufReader::new(std::fs::File::open(path)?.take(MAX_HEADER + 1))
+        .read_line(&mut line)?;
+    if line.len() as u64 > MAX_HEADER || !line.ends_with('\n') {
+        return Err(invalid("the session header is partial or too long"));
+    }
+    let header: serde_json::Value =
+        serde_json::from_str(&line).map_err(|_| invalid("the session header is malformed"))?;
+    match (header["type"].as_str(), header["id"].as_str()) {
+        (Some("session"), Some(id)) if !id.is_empty() => Ok(id.to_owned()),
+        _ => Err(invalid("the first entry is not a session header")),
+    }
+}
 
 pub fn resolve(agent: Option<&str>, kind: &str, value: &str) -> Option<String> {
     if kind == "path" {
