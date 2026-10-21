@@ -109,18 +109,19 @@ printf '%s\n' "$*" >> "$RIG/ssh.log"
 case "$*" in
  *'host snapshot'*) cat "$RIG/remote.json" ;;
  *'host reserve'*) cat "$RIG/reserve.json" ;;
- *'host checkout'*) printf '%s\n' '{"error":"netcup: clone https://example.invalid/repo.git failed: credentials"}'; exit 2 ;;
+ *'host checkout'*) printf '%s\n' '{"error":"netcup: clone https://example.invalid/repo.git failed: credentials","code":"CLONE_FAILED"}'; exit 2 ;;
  *) echo 'must not prepare after clone failure' >&2; exit 2 ;;
 esac
 "#);
     let (code, error) = rig.json(&args);
     assert_eq!(code, 2);
+    // The peer's code maps to a fixed message; its own text, which can hold a secret, is hidden.
+    let message = error["error"].as_str().unwrap();
     assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("clone https://example.invalid/repo.git failed: credentials")
+        message.contains("could not clone the repository"),
+        "{error}"
     );
+    assert!(!message.contains("credentials"), "{error}");
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
     assert!(!rig.dir.join("state/placements.json").exists());
 }

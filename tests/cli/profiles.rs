@@ -38,14 +38,19 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
     assert_eq!(result["model"], "alias/sol");
     let prompt = rig.dir.join("profiles/reviewer/prompt.md");
     let log = rig.log("herdr.log");
-    // The profile's prompt, then the child contract, then the task.
+    // The profile's prompt, then the child contract as a file, then the task as a file.
+    let line = start_line(&log, "rev");
+    let task = line.rsplit_once(" @").unwrap().1;
+    let contract = task.replace(".task.md", ".contract.md");
     assert_eq!(
-        start_line(&log, "rev"),
+        line,
         format!(
-            "agent start rev --kind pi --pane w2:p1 -- --name rev --model alias/sol --thinking medium --append-system-prompt {} --append-system-prompt {CONTRACT} Review the diff.",
+            "agent start rev --kind pi --pane w2:p1 -- --name rev --model alias/sol --thinking medium --append-system-prompt {} --append-system-prompt {contract} @{task}",
             prompt.display()
         )
     );
+    assert_eq!(fs::read_to_string(task).unwrap(), "Review the diff.");
+    assert_eq!(fs::read_to_string(contract).unwrap(), CONTRACT);
     assert!(!log.contains("agent prompt"), "{log}");
     let item = &rig.read("state/items.json")[0];
     assert_eq!(
@@ -62,25 +67,6 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
             &json!("reader")
         )
     );
-    // A multi-line task goes through a file: Herdr refuses an argument with a newline.
-    let mut cmd = rig.cmd(&["agent", "--name", "multi", "--message-file", "-", "--json"]);
-    let mut child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"Line one.\nLine two.\n").unwrap();
-    assert!(child.wait_with_output().unwrap().status.success());
-    let log = rig.log("herdr.log");
-    let line = start_line(&log, "multi");
-    let task = line.rsplit_once(" @").unwrap().1;
-    assert_eq!(
-        line,
-        format!(
-            "agent start multi --kind pi --pane w2:p1 -- --name multi --append-system-prompt {CONTRACT} @{task}"
-        )
-    );
-    assert_eq!(fs::read_to_string(task).unwrap(), "Line one.\nLine two.\n");
     // Profiles are for Pi; an unknown profile fails before anything starts.
     let (code, refused) = rig.json(&[
         "agent",
@@ -166,4 +152,154 @@ fn an_ambiguous_launch_is_reconciled_with_backoff_without_repeating_the_task() {
     );
     assert_eq!(rig.log("herdr.log").matches("agent start w ").count(), 1);
     assert_eq!(rig.log("herdr.log").matches("tab create").count(), 1);
+}
+
+#[test]
+fn a_3kb_task_launches_on_a_line_herdr_accepts() {
+    let rig = Rig::new("long-task");
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let task = "word ".repeat(600);
+    let (code, result) = rig.json(&["agent", "--name", "long", "--message", &task]);
+    assert_eq!(code, 0, "{result}");
+    let log = rig.log("herdr.log");
+    let line = start_line(&log, "long");
+    assert!(line.len() < 1024, "{} bytes: {line}", line.len());
+    let path = line.rsplit_once(" @").unwrap().1;
+    assert_eq!(fs::read_to_string(path).unwrap(), task);
+}
+
+#[test]
+fn a_multiline_task_goes_through_a_file() {
+    let rig = Rig::new("multiline-task");
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    // A multi-line task goes through a file: Herdr refuses an argument with a newline.
+    let mut cmd = rig.cmd(&["agent", "--name", "multi", "--message-file", "-", "--json"]);
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"Line one.\nLine two.\n").unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
+    let log = rig.log("herdr.log");
+    let line = start_line(&log, "multi");
+    let task = line.rsplit_once(" @").unwrap().1;
+    let contract = task.replace(".task.md", ".contract.md");
+    assert_eq!(
+        line,
+        format!(
+            "agent start multi --kind pi --pane w2:p1 -- --name multi --append-system-prompt {contract} @{task}"
+        )
+    );
+    assert_eq!(fs::read_to_string(task).unwrap(), "Line one.\nLine two.\n");
+    assert_eq!(fs::read_to_string(contract).unwrap(), CONTRACT);
+}
+
+/// The one line Herdr types for the rig's only launch, as the stub shell-quoted it.
+fn typed_line(rig: &Rig) -> String {
+    let log = rig.log("typed.log");
+    assert_eq!(log.lines().count(), 1, "{log}");
+    log.trim_end_matches('\n').to_owned()
+}
+
+#[test]
+fn a_3kb_task_is_typed_as_a_short_line_for_every_kind() {
+    for kind in ["pi", "claude", "codex"] {
+        let rig = Rig::new(&format!("typed-{kind}"));
+        rig.snapshot("state/host.json", now(), 0.0, 8);
+        let task = "word ".repeat(600);
+        let (code, result) = rig.json(&[
+            "agent",
+            "--kind",
+            kind,
+            "--name",
+            "long",
+            "--message",
+            &task,
+        ]);
+        assert_eq!(code, 0, "{kind}: {result}");
+        let line = typed_line(&rig);
+        assert!(line.len() < 1024, "{kind}: {} bytes: {line}", line.len());
+        assert!(!line.contains("word word"), "{kind}: {line}");
+        let files: Vec<_> = fs::read_dir(rig.dir.join("state/launches"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().ends_with(".task.md"))
+            .collect();
+        assert_eq!(files.len(), 1, "{kind}");
+        assert_eq!(fs::read_to_string(&files[0]).unwrap(), task, "{kind}");
+    }
+}
+
+#[test]
+fn quotes_backticks_and_newlines_reach_the_task_file_unchanged() {
+    let task = "it's \"quoted\" and `ticked` $HOME $(x)\nsecond 'line'\n\\ end\n";
+    for kind in ["pi", "claude", "codex"] {
+        let rig = Rig::new(&format!("exact-{kind}"));
+        rig.snapshot("state/host.json", now(), 0.0, 8);
+        let (code, result) = rig.json(&[
+            "agent",
+            "--kind",
+            kind,
+            "--name",
+            "exact",
+            "--message",
+            task,
+        ]);
+        assert_eq!(code, 0, "{kind}: {result}");
+        let line = typed_line(&rig);
+        assert!(
+            !line.contains('\n') && !line.contains("ticked") && !line.contains("quoted"),
+            "{kind}: {line}"
+        );
+        let path = fs::read_dir(rig.dir.join("state/launches"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().ends_with(".task.md"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), task, "{kind}");
+    }
+}
+
+#[test]
+fn a_peer_launch_is_not_refused_for_a_long_caller_path() {
+    // The caller's state directory is long; the peer's own paths are what its line holds.
+    let rig = Rig::new("long-caller-path");
+    rig.peer();
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let deep = rig
+        .dir
+        .join("d".repeat(200))
+        .join("e".repeat(200))
+        .join("f".repeat(200));
+    fs::create_dir_all(&deep).unwrap();
+    let copy = Command::new("cp")
+        .arg("-R")
+        .arg(rig.dir.join("state/."))
+        .arg(&deep)
+        .status()
+        .unwrap();
+    assert!(copy.success());
+    let task = "word ".repeat(600);
+    let out = rig
+        .cmd(&[
+            "agent",
+            "--host",
+            "netcup",
+            "--name",
+            "far",
+            "--message",
+            &task,
+            "--json",
+        ])
+        .env("DOGSLED_STATE", &deep)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(rig.log("ssh.log").contains("host launch"), "{text}");
 }
