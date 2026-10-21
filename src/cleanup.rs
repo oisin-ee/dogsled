@@ -343,8 +343,15 @@ pub(crate) fn main_root(shell: &dyn Shell, path: &str) -> Result<Option<String>>
         .map(|parent| parent.display().to_string()))
 }
 
+/// Only ENOENT is stale. Other errors and dangling symlinks remain reportable.
+/// Forgetting a record deletes no data, even if an absent path is on an unmounted volume.
+/// Placement remembers the path again if it returns.
+fn missing(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// Registered and configured repositories, and those of live panes, Herdr workspaces, and the
-/// caller. Doctor does not scan home.
+/// caller. Doctor does not scan home or change registrations.
 fn repositories(
     node: &Node<'_>,
     panes: &[Pane],
@@ -354,6 +361,28 @@ fn repositories(
     let recorded: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
     let mut repos: BTreeSet<String> = node.ledger.read("repositories.json")?.unwrap_or_default();
     repos.extend(recorded.iter().map(|t| t.repo.clone()));
+    repos.retain(|repo| {
+        if !missing(repo) {
+            return true;
+        }
+        plan.entries.push(entry(
+            "repositories",
+            repo.clone(),
+            "missing remembered repository; drops stale entries from repositories.json and worktrees.json".into(),
+            true,
+        ));
+        false
+    });
+    for tree in &recorded {
+        if missing(&tree.path) && !missing(&tree.repo) {
+            plan.entries.push(entry(
+                "worktrees",
+                tree.path.clone(),
+                "missing registered worktree; drops the stale registration".into(),
+                true,
+            ));
+        }
+    }
     for configured in &node.cleanup.repositories {
         let path = configured.strip_prefix("~/").map_or_else(
             || configured.clone(),
@@ -740,7 +769,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     Ok(plan)
 }
 
-/// The classes the sweep never applies: expired jobs, stale registrations, disk, and processes.
+/// The classes the sweep never applies: expired jobs, disk, and processes.
 fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result<()> {
     for job in crate::jobs::list(node.ledger)? {
         if job.ended_ms.is_some_and(|t| now.saturating_sub(t) > DAY) {
@@ -763,16 +792,6 @@ fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result
         .ledger
         .read::<Vec<Tree>>("worktrees.json")?
         .unwrap_or_default();
-    for tree in &owned {
-        if !Path::new(&tree.path).exists() {
-            plan.entries.push(entry(
-                "worktrees",
-                tree.path.clone(),
-                "missing registered worktree; drops the stale registration".into(),
-                true,
-            ));
-        }
-    }
     disk(node, &owned, plan)?;
     processes(node.shell, &seen.panes, plan)
 }
@@ -1593,12 +1612,33 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
     ))
 }
 
+fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
+    node.ledger.with_lock("repositories", || {
+        node.ledger.with_lock("worktrees", || {
+            if !missing(repo) {
+                return Err(Error::Invalid(format!(
+                    "refuse {repo}: the repository is no longer missing"
+                )));
+            }
+            let mut repos: BTreeSet<String> =
+                node.ledger.read("repositories.json")?.unwrap_or_default();
+            let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
+            repos.remove(repo);
+            // An existing worktree may still hold content even when its main checkout is gone.
+            trees.retain(|tree| tree.repo != repo || !missing(&tree.path));
+            node.ledger.write("worktrees.json", &trees)?;
+            node.ledger.write("repositories.json", &repos)
+        })
+    })?;
+    Ok(format!("dropped stale repository registration {repo}"))
+}
+
 fn drop_registration(node: &Node<'_>, path: &str) -> Result<String> {
     node.ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-        if Path::new(path).exists() {
+        if !missing(path) {
             return Err(Error::Invalid(format!(
-                "refuse {path}: the worktree exists again"
+                "refuse {path}: the worktree is no longer missing"
             )));
         }
         trees.retain(|t| t.path != path);
@@ -1696,7 +1736,13 @@ pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
 }
 
 /// The classes the sweep applies. Everything else waits for `prune`.
-pub const SWEPT: [&str; 4] = ["worktrees", "branches", "workspaces", "panes"];
+pub const SWEPT: [&str; 5] = [
+    "worktrees",
+    "branches",
+    "workspaces",
+    "panes",
+    "repositories",
+];
 
 /// The `serve` sweep: survey in `Sweep` scope and apply each removable entry with the same
 /// checks as `prune`. Each entry is independent, so one failure does not stop the others.
@@ -1706,7 +1752,7 @@ pub fn sweep(node: &Node<'_>, now: u64) -> Result<Applied> {
         repositories: plan
             .entries
             .iter()
-            .filter(|e| e.class == "repositories")
+            .filter(|e| e.class == "repositories" && !e.removable)
             .cloned()
             .collect(),
         landed_dirty: plan
@@ -1765,6 +1811,7 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
         },
         "workspaces" => close_workspace(node, &candidate.id, now),
         "panes" => close_pane(node, &candidate.id, now),
+        "repositories" => drop_repository(node, &candidate.id),
         "jobs" => remove_job(node, &candidate.id, now),
         "targets" => remove_target(&candidate.id),
         _ => Err(Error::Invalid("unknown cleanup class".into())),
@@ -1955,6 +2002,330 @@ mod tests {
         json!({"workspace_id":id,"label":"jalgpall","worktree":{
             "repo_root":"/repo","repo_key":"/repo/.git","is_linked_worktree":linked
         }})
+    }
+
+    #[test]
+    fn missing_remembered_repository_is_removable_but_configuration_is_not() {
+        let mut rig = Rig::new(json!([]));
+        let missing = rig.ledger.dir.join("missing").display().to_string();
+        remember(
+            &rig.ledger,
+            Tree {
+                repo: missing.clone(),
+                path: format!("{missing}/tree"),
+                branch: "feature".into(),
+                head: String::new(),
+            },
+        )
+        .unwrap();
+        rig.cleanup.repositories.push(missing.clone());
+        let mut plan = Plan::default();
+        let repos = repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        assert!(!repos.contains(&missing));
+        let stale = plan
+            .entries
+            .iter()
+            .find(|e| e.class == "repositories" && e.id == missing && e.removable)
+            .unwrap();
+        assert!(plan.entries.iter().any(|e| e.class == "repositories"
+            && e.id == missing
+            && !e.removable
+            && e.detail.contains("cleanup.repositories")));
+        // Surveying must not change registrations; only applying the candidate may do so.
+        assert_eq!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap(),
+            BTreeSet::from([missing.clone()])
+        );
+        apply_one(&rig.node(), &plan, stale, 100).unwrap();
+        assert!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [] as [Tree; 0]
+        );
+        let mut next = Plan::default();
+        repositories(&rig.node(), &[], &[], &mut next).unwrap();
+        let configured: Vec<_> = next.entries.iter().filter(|e| e.id == missing).collect();
+        assert_eq!(configured.len(), 1);
+        assert!(!configured[0].removable);
+        assert_eq!(rig.cleanup.repositories, [missing]);
+    }
+
+    #[test]
+    fn sweep_forgets_missing_registrations_but_keeps_configured_and_discovered_warnings() {
+        let mut rig = Rig::new(json!([]));
+        rig.panes(&[]);
+        let repo = rig
+            .ledger
+            .dir
+            .join("deleted-fixture/repo")
+            .display()
+            .to_string();
+        let tree = Tree {
+            repo: repo.clone(),
+            path: format!("{repo}/tree"),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree).unwrap();
+        rig.cleanup.repositories.push(repo.clone());
+        rig.shell
+            .on("df -Pk /", "FS 1000 500 400 60% /\n")
+            .on("ps -axo pid=,ppid=,pcpu=,comm=", "")
+            .on_output(
+                &format!("git -C {repo} rev-parse --path-format=absolute --git-common-dir"),
+                crate::shell::Output {
+                    status: 128,
+                    stdout: String::new(),
+                    stderr: "No such file or directory".into(),
+                },
+            );
+        rig.shell.on(
+            "herdr workspace list",
+            &json!({"result":{"workspaces":[{"workspace_id":"external","worktree":{
+                "repo_root":repo,"repo_key":"external","is_linked_worktree":false
+            }}]}})
+            .to_string(),
+        );
+        let planned = doctor(&rig.node(), 100).unwrap();
+        assert!(planned.entries.iter().any(|e| e.id == repo && e.removable));
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        let applied = sweep(&rig.node(), 100).unwrap();
+        assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+        assert!(applied.results.iter().any(|result| result.contains(&repo)));
+        let warnings: Vec<_> = applied
+            .repositories
+            .iter()
+            .filter(|e| e.id == repo)
+            .collect();
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|e| !e.removable));
+        assert!(
+            warnings
+                .iter()
+                .any(|e| e.detail.contains("cleanup.repositories"))
+        );
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [] as [Tree; 0]
+        );
+        assert!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(rig.cleanup.repositories, [repo]);
+    }
+
+    #[test]
+    fn stale_registry_removal_rechecks_absence_and_keeps_other_records() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("gone").display().to_string();
+        let surviving = rig.ledger.dir.join("surviving").display().to_string();
+        std::fs::create_dir_all(&surviving).unwrap();
+        let live_tree = Tree {
+            repo: surviving.clone(),
+            path: surviving.clone(),
+            branch: "main".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, live_tree.clone()).unwrap();
+        remember(
+            &rig.ledger,
+            Tree {
+                repo: repo.clone(),
+                path: format!("{repo}/tree"),
+                branch: "feature".into(),
+                head: String::new(),
+            },
+        )
+        .unwrap();
+        let mut plan = Plan::default();
+        repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        let stale = plan.entries.iter().find(|e| e.id == repo).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_dir(&repo).unwrap();
+        apply_one(&rig.node(), &plan, stale, 100).unwrap();
+        assert_eq!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap(),
+            BTreeSet::from([surviving])
+        );
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [live_tree]
+        );
+    }
+
+    #[test]
+    fn missing_repository_does_not_forget_an_existing_worktree() {
+        let rig = Rig::new(json!([]));
+        let path = rig.ledger.dir.join("surviving-tree");
+        std::fs::create_dir_all(&path).unwrap();
+        let tree = Tree {
+            repo: rig.ledger.dir.join("gone-repo").display().to_string(),
+            path: path.display().to_string(),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        drop_repository(&rig.node(), &tree.repo).unwrap();
+        assert!(path.is_dir());
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [tree]
+        );
+    }
+
+    #[test]
+    fn unreadable_and_existing_repository_paths_are_report_only() {
+        let rig = Rig::new(json!([]));
+        let directory = rig.ledger.dir.join("directory");
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = rig.ledger.dir.join("file");
+        std::fs::write(&file, "not a checkout").unwrap();
+        let symlink = rig.ledger.dir.join("dangling");
+        std::os::unix::fs::symlink(rig.ledger.dir.join("absent"), &symlink).unwrap();
+        // ENOTDIR is not evidence that a registration is safe to forget.
+        let paths: BTreeSet<String> = [directory, file.join("child"), file, symlink]
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        rig.ledger.write("repositories.json", &paths).unwrap();
+        let mut plan = Plan::default();
+        let repos = repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        let resolved: BTreeSet<_> = paths
+            .iter()
+            .map(|path| {
+                std::fs::canonicalize(path)
+                    .map_or_else(|_| path.clone(), |p| p.display().to_string())
+            })
+            .collect();
+        assert!(resolved.is_subset(&repos));
+        readable(&rig.node(), repos, &mut plan);
+        for path in &resolved {
+            assert!(plan.entries.iter().any(|e| e.id == *path && !e.removable));
+            assert!(!plan.entries.iter().any(|e| e.id == *path && e.removable));
+        }
+        assert_eq!(
+            rig.ledger
+                .read::<BTreeSet<String>>("repositories.json")
+                .unwrap()
+                .unwrap(),
+            paths
+        );
+    }
+
+    #[test]
+    fn unreadable_parent_keeps_repository_and_worktree_registrations() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let rig = Rig::new(json!([]));
+        let parent = rig.ledger.dir.join("unreadable");
+        std::fs::create_dir_all(&parent).unwrap();
+        let tree = Tree {
+            repo: parent.join("repo").display().to_string(),
+            path: parent.join("tree").display().to_string(),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::symlink_metadata(&tree.repo);
+        let mut plan = Plan::default();
+        let result = repositories(&rig.node(), &[], &[], &mut plan);
+        // Restore before assertions so the fixture can always be removed.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            denied.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(result.unwrap().contains(&tree.repo));
+        assert!(plan.entries.iter().all(|e| !e.removable));
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [tree]
+        );
+    }
+
+    #[test]
+    fn missing_worktree_registration_is_rechecked_without_removing_existing_paths() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let tree = Tree {
+            repo: repo.display().to_string(),
+            path: repo.join("tree").display().to_string(),
+            branch: "feature".into(),
+            head: String::new(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        let mut plan = Plan::default();
+        repositories(&rig.node(), &[], &[], &mut plan).unwrap();
+        let stale = plan.entries.iter().find(|e| e.id == tree.path).unwrap();
+        assert!(stale.removable);
+        std::fs::create_dir(&tree.path).unwrap();
+        assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            std::slice::from_ref(&tree)
+        );
+        std::fs::remove_dir(&tree.path).unwrap();
+        apply_one(&rig.node(), &plan, stale, 100).unwrap();
+        assert_eq!(
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap(),
+            [] as [Tree; 0]
+        );
+        assert!(repo.is_dir());
     }
 
     #[test]

@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## 0.18.0 - 2026-10-21
 
+- Prune and automatic cleanup remove remembered repository and worktree registrations only when their paths are absent. Removal rechecks absence under the registry locks and deletes no checkout data. Doctor lists the removable records without changing them. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.
+
 - Agent items now retain the child host's launch-confirmation timestamp. Reconciliation ignores absent-pane snapshots from before confirmation, including late remote admissions and clock skew. Legacy items and job completion keep their existing rules.
 - `done` is a durable terminal handoff. It checks worktree safety before acceptance, survives restored terminals, and rejects messages after the final turn. The child host closes its pane and agent worktree while retaining its branch. Closed branches stay on the owner’s TO LAND board until integrated or deleted. The close path shares cleanup’s linked-workspace group hold.
 - Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. A pane Dogsled launched never opens a board: it keeps the widget, and its todo lines appear on the parent's board. `/dogsled` remains available in both modes.
