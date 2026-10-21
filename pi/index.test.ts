@@ -117,10 +117,18 @@ test("stop gate continues with a visible reminder and preserves prior boundary e
 	r.gate("");
 	assert.equal(await r.invoke("agent_before_settle", event), undefined);
 	const count = r.calls.length;
-	for (const patch of [{ outcome: "aborted" }, { outcome: "error" }, { context: { canContinue: false } }, { continue: true }]) {
+	for (const patch of [{ outcome: "aborted" }, { outcome: "error" }, { continue: true }]) {
 		assert.equal(await r.invoke("agent_before_settle", { ...event, ...patch }), undefined);
 	}
 	assert.equal(r.calls.length, count);
+	// A normal stop ends on the assistant, so Pi reports the pre-reminder context as not continuable.
+	const assistantFinal = { ...event, context: { canContinue: false } };
+	r.gate("");
+	const before = r.calls.length;
+	assert.equal(await r.invoke("agent_before_settle", assistantFinal), undefined);
+	assert.deepEqual(r.calls.slice(before).map(c => c.slice(1)), [["hook", "gate"]]);
+	r.gate("Before you stop: child (uncommitted).\n");
+	assert.deepEqual(await r.invoke("agent_before_settle", assistantFinal), { entries: [...event.entries, { type: "custom_message", customType: "dogsled", content: "Before you stop: child (uncommitted).", display: true }], continue: true });
 	r.fail();
 	await assert.rejects(r.invoke("agent_before_settle", event), /stop gate failed/);
 	r.missing();

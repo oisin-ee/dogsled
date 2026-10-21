@@ -479,7 +479,7 @@ The CLI never reads stdin. Claude Code and Codex receive `hookSpecificOutput` JS
 Pi receives plain text through its `before_agent_start` extension. All three use the same snapshot reader and formatter.
 
 Before an orchestrator stops, the stop gate checks its own TO LAND children.
-Pi calls `dogsled hook gate` from `agent_before_settle` and adds a visible message that continues the run.
+Pi calls `dogsled hook gate` from `agent_before_settle` on every completed stop, which also requests a cleanup pass. A reminder is added as a visible message that continues the run.
 Claude Code and Codex include the reminder in their existing `Stop` inbox response.
 The reminder requests a review, a commit from dirty children, integration, or an explicit blocker or deferral.
 It never commits, merges, closes, or discards work itself. Clean readers and working children do not trigger it.
