@@ -117,7 +117,7 @@ A wait deadline does not cancel its job or ticket. `cancel` only cancels pending
 ### Agents and profiles
 
 `dogsled agent` starts a child with `herdr agent start <name> --kind pi|claude|codex --pane <pane> -- <args>`. The task is a launch argument, so nothing is typed into the new pane.
-A task with a newline, a leading `-` or `@`, or more than 4000 characters goes to `launches/<id>.task.md`. Pi reads it as `@<file>`; Claude and Codex get a one-line pointer to it.
+Herdr types the launch as one terminal line of at most 1024 bytes, so no task text goes on it. The task is always `launches/<id>.task.md` on the host that runs the child; Pi reads it as `@<file>`, and Claude and Codex get a one-line pointer to it. Pi and Claude read the child contract from `launches/<id>.contract.md` (Codex has no file form, so its fixed contract stays inline). The host that runs the child refuses a name, profile or state path that makes the line over 960 bytes, before it creates a pane.
 `--message-file PATH` (or `-` for stdin) reads the task from a file.
 A failed `herdr agent start` is retried with backoff, three tries in all. After the last, the ticket fails and the owner's inbox says so. A refusal or a deadline fails at once.
 Herdr refuses a start before it types into the pane, for example `agent_pane_busy` or `agent_name_taken`. That refusal is final: dogsled records it as the launch result, closes the empty pane it created, and does not retry. Any other failure leaves the outcome unknown, so dogsled keeps the pane and reconciles it on the next try.
@@ -243,7 +243,7 @@ Peer reads run in parallel through SSH and the configured `remote_command`.
 A shared, locked cache permits at most one read per peer per ten seconds, including concurrent callers.
 Status never probes peers itself.
 
-`service: up` means a process holds the host's service lock. A free lock or unreachable peer means `service: down`.
+`service: up` means a process holds the host's service lock. A free lock on a host that answers means `service: down`. A peer that SSH cannot read shows `unreachable: <category>` (for example `timeout` or `connection refused`, never the raw SSH text) instead, with the age of its last snapshot when one exists.
 Status shows snapshot age separately, including when the service runs. Peers without the liveness field retain the 30-second age fallback during upgrades.
 Admission still requires a snapshot no older than 30 seconds. Finished-child cleanup can use an older snapshot from a running service.
 Close rechecks the live pane, the child's `done` mark, and the loss guard before it acts.
