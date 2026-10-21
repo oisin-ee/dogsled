@@ -128,7 +128,9 @@ fn context_without_snapshot_exits_silently() {
 #[test]
 fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
     let rig = Rig::new("context-output");
-    rig.snapshot("state/host.json", now(), 1.0, 8);
+    // A minute-old snapshot renders its age as `1m` for half a minute either side, so the brief
+    // stays identical across the calls below however slowly a loaded machine runs them.
+    rig.snapshot("state/host.json", now() - 60_000, 1.0, 8);
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     for harness in ["claude", "codex", "pi"] {
         for event in ["SessionStart", "UserPromptSubmit"] {
