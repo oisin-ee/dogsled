@@ -55,7 +55,8 @@ Git tip caching remains in place, but dirty-state checks run each tick because u
 
 `dogsled place [--host H] [--branch B] [--base B] [--repo R]` picks the host with the most headroom, writes a short
 reservation (default 90 s) on it, and prints the host. With `--branch` it also creates the worktree on that host
-with `git worktree add`, runs the repository's `dogsled.toml` `setup`, opens it as a Herdr workspace, and prints its
+with `git worktree add`, reusing `origin/<branch>` when only the remote has it and otherwise starting at `--base` or the
+fetched tip of origin's default branch, runs the repository's `dogsled.toml` `setup`, opens it as a Herdr workspace, and prints its
 path and pane.
 
 If the host has no checkout of the repository, dogsled clones it from the caller's origin into the same path relative to home first.

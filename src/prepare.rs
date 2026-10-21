@@ -148,23 +148,9 @@ pub fn local(
     let existing = worktree::list(shell, &checkout)?
         .into_iter()
         .find(|w| w.branch.as_deref() == Some(branch));
-    let has_branch = existing.is_some()
-        || git(
-            &checkout,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{branch}"),
-            ],
-        )
-        .run(shell)?
-        .ok();
-    if has_branch && base.is_some() {
-        return Err(Error::Invalid(format!(
-            "branch {branch} exists; omit --base"
-        )));
-    }
+    let has_branch =
+        existing.is_some() || has_ref(shell, &checkout, &format!("refs/heads/{branch}"))?;
+    let start = start(shell, &checkout, branch, base, has_branch)?;
     // Publish the intended path before creating or reusing it. Cleanup must not race setup
     // or the transport gap before launch has recorded its receipt.
     let pending = crate::cleanup::Tree {
@@ -186,13 +172,91 @@ pub fn local(
     record(ledger, pending, request_id)?;
     // A failed preparation is final: its admission never resumes it, so it holds nothing.
     // Only an interrupted preparation leaves its hold for inspection.
-    make(
-        shell, &checkout, &settings, existing, branch, base, has_branch,
-    )
-    .or_else(|error| {
+    make(shell, &checkout, &settings, existing, branch, &start).or_else(|error| {
         used(ledger, &held, request_id)?;
         Err(error)
     })
+}
+
+/// Where the branch of a new worktree comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Start {
+    /// The local branch exists.
+    Local,
+    /// Only `origin` has the branch: the local branch starts at this remote-tracking ref and
+    /// tracks it.
+    Remote(String),
+    /// The branch is new: it starts at this base, with no upstream.
+    New(String),
+}
+
+impl Start {
+    /// The local branch that this placement creates, which a failed setup deletes again. A
+    /// branch that existed before placement is never deleted.
+    fn created<'a>(&self, branch: &'a str) -> Option<&'a str> {
+        (*self != Self::Local).then_some(branch)
+    }
+}
+
+/// Decide where the branch starts. A branch that exists locally or on `origin` is reused and
+/// takes no base. A new branch starts at `base`, or at the current tip of the remote default
+/// branch, never at a stale local copy of it.
+fn start(
+    shell: &dyn Shell,
+    checkout: &Path,
+    branch: &str,
+    base: Option<&str>,
+    has_branch: bool,
+) -> Result<Start> {
+    if has_branch {
+        return match base {
+            Some(_) => Err(Error::Invalid(format!(
+                "branch {branch} exists; omit --base"
+            ))),
+            None => Ok(Start::Local),
+        };
+    }
+    let fetched = fetch(shell, checkout)?;
+    let remote = format!("refs/remotes/origin/{branch}");
+    if fetched && has_ref(shell, checkout, &remote)? {
+        return match base {
+            Some(_) => Err(Error::Invalid(format!(
+                "branch {branch} exists on origin; omit --base"
+            ))),
+            None => Ok(Start::Remote(remote)),
+        };
+    }
+    Ok(Start::New(match base {
+        Some(base) => base.to_string(),
+        None => default_base(shell, checkout, fetched)?,
+    }))
+}
+
+/// Fetch `origin` so that its branches and default branch are current. `false` means the
+/// repository has no `origin`, and only local refs exist.
+fn fetch(shell: &dyn Shell, checkout: &Path) -> Result<bool> {
+    if !git(checkout, &["remote", "get-url", "origin"])
+        .run(shell)?
+        .ok()
+    {
+        return Ok(false);
+    }
+    git(checkout, &["fetch", "--quiet", "origin"])
+        .setup_ok(shell)
+        .map_err(|error| {
+            Error::Invalid(format!(
+                "git fetch origin failed, so the current origin branches are unknown: {error}"
+            ))
+        })?;
+    Ok(true)
+}
+
+fn has_ref(shell: &dyn Shell, checkout: &Path, reference: &str) -> Result<bool> {
+    Ok(
+        git(checkout, &["show-ref", "--verify", "--quiet", reference])
+            .run(shell)?
+            .ok(),
+    )
 }
 
 /// Create or reuse the worktree, run setup in a new one, and open it in Herdr.
@@ -202,8 +266,7 @@ fn make(
     settings: &crate::repository::Settings,
     existing: Option<worktree::Listed>,
     branch: &str,
-    base: Option<&str>,
-    has_branch: bool,
+    start: &Start,
 ) -> Result<Prepared> {
     let (path, created) = if let Some(found) = existing {
         (reuse(shell, checkout, found)?, false)
@@ -214,15 +277,14 @@ fn make(
             .display()
             .to_string();
         let mut args = vec!["worktree", "add", "--lock", "--reason", AGENT_LOCK];
-        let start;
-        if has_branch {
-            args.extend([path.as_str(), branch]);
-        } else {
-            start = match base {
-                Some(base) => base.to_string(),
-                None => default_branch(shell, checkout)?,
-            };
-            args.extend(["-b", branch, path.as_str(), start.as_str()]);
+        match start {
+            Start::Local => args.extend([path.as_str(), branch]),
+            Start::Remote(remote) => {
+                args.extend(["--track", "-b", branch, path.as_str(), remote.as_str()]);
+            }
+            Start::New(base) => {
+                args.extend(["--no-track", "-b", branch, path.as_str(), base.as_str()]);
+            }
         }
         git(checkout, &args).setup_ok(shell)?;
         (path, true)
@@ -235,7 +297,7 @@ fn make(
         };
         if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
         {
-            discard(shell, checkout, &path, (!has_branch).then_some(branch))?;
+            discard(shell, checkout, &path, start.created(branch))?;
             return Err(Error::Invalid(format!(
                 "{error}; the new worktree was removed"
             )));
@@ -348,14 +410,29 @@ fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<
     Ok(found.path)
 }
 
-/// The local name of the repository's default branch, the base of a new branch.
-fn default_branch(shell: &dyn Shell, checkout: &Path) -> Result<String> {
+/// The base of a new branch: the fetched tip of `origin`'s default branch, or the local
+/// default branch when the repository has no `origin`. A clone without `origin/HEAD` asks
+/// `origin` for its default branch.
+fn default_base(shell: &dyn Shell, checkout: &Path, fetched: bool) -> Result<String> {
     let base = crate::integration::base(shell, &checkout.display().to_string())?;
-    Ok(base
-        .strip_prefix("refs/remotes/origin/")
-        .or_else(|| base.strip_prefix("refs/heads/"))
-        .unwrap_or(&base)
-        .to_string())
+    if !fetched || base.starts_with("refs/remotes/origin/") {
+        return Ok(base);
+    }
+    let out = git(checkout, &["ls-remote", "--symref", "origin", "HEAD"]).run(shell)?;
+    let head = out.ok().then(|| {
+        out.stdout.lines().find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")
+                .and_then(|rest| rest.strip_suffix("\tHEAD"))
+                .map(|name| format!("refs/remotes/origin/{name}"))
+        })
+    });
+    match head.flatten() {
+        Some(remote) if has_ref(shell, checkout, &remote)? => Ok(remote),
+        _ => Err(Error::Invalid(format!(
+            "cannot find the default branch of origin in {}; pass --base",
+            checkout.display()
+        ))),
+    }
 }
 
 /// Remove a worktree that `place` just made and whose setup failed. It holds nothing yet, so

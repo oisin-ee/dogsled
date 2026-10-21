@@ -32,7 +32,7 @@ dogsled profiles
 ```
 
 - `--kind pi|claude|codex` (default pi). `--profile NAME` (Pi only) sets the model, thinking, and system prompt from `~/.config/dogsled/profiles/NAME` on the host that runs it.
-- `--branch B [--base B]` gives the child its own worktree and workspace. Without it, the child runs in `--cwd` (default yours) and is a reader.
+- `--branch B [--base B]` gives the child its own worktree and workspace. A branch that exists only on origin is reused from there; a new branch starts at `--base`, else the fetched tip of origin's default branch. Without it, the child runs in `--cwd` (default yours) and is a reader.
 - Long or multi-line tasks: `--message-file PATH` or `-`. Dogsled passes the task as a launch argument or a task file; nothing is typed.
 - `--host H` pins the host. Without it, dogsled chooses the host with most room.
 - It returns `{host,pane,name}` at once, or `{"queued":true,"ticket":…}` and exit 1 when every host is full. The service starts the ticket later and your inbox says so.

@@ -29,20 +29,19 @@ fn git(dir: &Path, args: &[&str]) -> String {
 pub(super) fn place_rig(name: &str) -> (Rig, PathBuf) {
     let rig = Rig::new(name);
     let repo = rig.dir.join("home/repo space");
+    let origin = rig.dir.join("origin.git");
     fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "--bare", "-b", "main"]);
     git(&repo, &["init", "-q", "-b", "main"]);
     git(
         &repo,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://example.invalid/repo.git",
-        ],
+        &["remote", "add", "origin", origin.to_str().unwrap()],
     );
     fs::write(repo.join("dogsled.toml"), SETUP).unwrap();
     git(&repo, &["add", "dogsled.toml"]);
     git(&repo, &["commit", "-q", "-m", "init"]);
+    git(&repo, &["push", "-q", "-u", "origin", "main"]);
     rig.snapshot("state/host.json", now(), 0.0, 8);
     rig.script(
         "herdr",
@@ -151,11 +150,9 @@ fn place_bases_new_branches_reuses_existing_ones_and_refuses_foreign_work() {
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "second"]);
     assert_eq!(place(&rig, &repo, "from-base", Some("HEAD~1")).0, 0);
     assert_eq!(git(&repo, &["rev-parse", "from-base"]), first);
+    // The default base is origin's default branch, not the unpushed local main.
     assert_eq!(place(&rig, &repo, "from-main", None).0, 0);
-    assert_eq!(
-        git(&repo, &["rev-parse", "from-main"]),
-        git(&repo, &["rev-parse", "main"])
-    );
+    assert_eq!(git(&repo, &["rev-parse", "from-main"]), first);
     // An existing branch takes no base.
     let (code, error) = place(&rig, &repo, "from-base", Some("main"));
     assert_eq!(code, 2);
@@ -215,6 +212,129 @@ fn place_bases_new_branches_reuses_existing_ones_and_refuses_foreign_work() {
     );
 }
 
+/// Another clone of the rig's origin, which pushes work that the rig's checkout has not fetched.
+fn other_clone(rig: &Rig) -> PathBuf {
+    let other = rig.dir.join("other");
+    git(
+        &rig.dir,
+        &[
+            "clone",
+            "-q",
+            rig.dir.join("origin.git").to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    other
+}
+
+fn upstream(repo: &Path, branch: &str) -> Option<String> {
+    let out = isolated("git")
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    out.status
+        .success()
+        .then(|| String::from_utf8(out.stdout).unwrap().trim().to_string())
+}
+
+#[test]
+fn place_reuses_a_branch_that_exists_only_on_origin() {
+    let (rig, repo) = place_rig("place-remote-only");
+    let other = other_clone(&rig);
+    git(&other, &["switch", "-q", "-c", "feat/remote"]);
+    git(
+        &other,
+        &["commit", "-q", "--allow-empty", "-m", "remote work"],
+    );
+    git(&other, &["push", "-q", "origin", "feat/remote"]);
+    let pushed = git(&other, &["rev-parse", "HEAD"]);
+    // The branch is not new, so a base does not apply.
+    let (code, error) = place(&rig, &repo, "feat/remote", Some("main"));
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("branch feat/remote exists on origin; omit --base"),
+        "{error}"
+    );
+    assert_eq!(git(&repo, &["branch", "--list", "feat/remote"]), "");
+    let (code, placed) = place(&rig, &repo, "feat/remote", None);
+    assert_eq!(code, 0, "{placed}");
+    assert_eq!(git(&repo, &["rev-parse", "feat/remote"]), pushed);
+    assert_eq!(
+        upstream(&repo, "feat/remote").as_deref(),
+        Some("origin/feat/remote")
+    );
+    let tree = repo.join(".worktrees/feat-remote");
+    assert_eq!(git(&tree, &["rev-parse", "HEAD"]), pushed);
+}
+
+#[test]
+fn place_bases_a_branch_missing_everywhere_on_origin_default_without_upstream() {
+    let (rig, repo) = place_rig("place-missing");
+    let (code, placed) = place(&rig, &repo, "feat/new", None);
+    assert_eq!(code, 0, "{placed}");
+    assert_eq!(
+        git(&repo, &["rev-parse", "feat/new"]),
+        git(&repo, &["rev-parse", "origin/main"])
+    );
+    // A new branch must not track the default branch it started from.
+    assert_eq!(upstream(&repo, "feat/new"), None);
+}
+
+#[test]
+fn a_failed_fetch_stops_placement_of_a_missing_branch() {
+    let (rig, repo) = place_rig("place-fetch-fails");
+    git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            rig.dir.join("gone.git").to_str().unwrap(),
+        ],
+    );
+    // Without a reachable origin, placement cannot tell a new branch from a remote one.
+    let (code, error) = place(&rig, &repo, "feat/offline", None);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("git fetch origin failed, so the current origin branches are unknown"),
+        "{error}"
+    );
+    assert_eq!(git(&repo, &["branch", "--list", "feat/offline"]), "");
+    assert!(!repo.join(".worktrees/feat-offline").exists());
+    assert!(!rig.log("herdr.log").contains("worktree open"));
+    // An existing local branch needs no fetch.
+    git(&repo, &["branch", "feat/local"]);
+    let (code, placed) = place(&rig, &repo, "feat/local", None);
+    assert_eq!(code, 0, "{placed}");
+}
+
+#[test]
+fn place_bases_a_new_branch_on_the_fetched_origin_tip_not_a_stale_local_main() {
+    let (rig, repo) = place_rig("place-stale-main");
+    let stale = git(&repo, &["rev-parse", "main"]);
+    let other = other_clone(&rig);
+    git(&other, &["commit", "-q", "--allow-empty", "-m", "landed"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    let tip = git(&other, &["rev-parse", "HEAD"]);
+    assert_ne!(tip, stale);
+    let (code, placed) = place(&rig, &repo, "feat/fresh", None);
+    assert_eq!(code, 0, "{placed}");
+    assert_eq!(git(&repo, &["rev-parse", "feat/fresh"]), tip);
+    // The local main stays as it was: placement only fetches.
+    assert_eq!(git(&repo, &["rev-parse", "main"]), stale);
+}
+
 #[test]
 fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation() {
     let (rig, repo) = place_rig("place-setup-fails");
@@ -241,6 +361,44 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert_eq!(place(&rig, &repo, "kept", None).0, 2);
     assert!(!repo.join(".worktrees/kept").exists());
     assert_ne!(git(&repo, &["branch", "--list", "kept"]), "");
+}
+
+#[test]
+fn setup_failure_deletes_the_local_branch_made_from_origin_and_keeps_origin() {
+    let (rig, repo) = place_rig("place-setup-fails-remote");
+    let other = other_clone(&rig);
+    git(&other, &["switch", "-q", "-c", "feat/remote"]);
+    git(
+        &other,
+        &["commit", "-q", "--allow-empty", "-m", "remote work"],
+    );
+    git(&other, &["push", "-q", "origin", "feat/remote"]);
+    let pushed = git(&other, &["rev-parse", "HEAD"]);
+    fs::write(rig.dir.join("setup-fails"), "").unwrap();
+    let (code, error) = place(&rig, &repo, "feat/remote", None);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("the new worktree was removed"),
+        "{error}"
+    );
+    assert!(!repo.join(".worktrees/feat-remote").exists());
+    // Placement made the local branch, so it goes; origin's branch is untouched.
+    assert_eq!(git(&repo, &["branch", "--list", "feat/remote"]), "");
+    assert_eq!(git(&repo, &["rev-parse", "origin/feat/remote"]), pushed);
+    assert_eq!(
+        git(&other, &["ls-remote", "origin", "refs/heads/feat/remote"])
+            .split_whitespace()
+            .next(),
+        Some(pushed.trim())
+    );
+    // With setup fixed, the same branch is placed from origin again.
+    fs::remove_file(rig.dir.join("setup-fails")).unwrap();
+    let (code, placed) = place(&rig, &repo, "feat/remote", None);
+    assert_eq!(code, 0, "{placed}");
+    assert_eq!(git(&repo, &["rev-parse", "feat/remote"]), pushed);
 }
 
 #[test]
