@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- The `prune` path now treats a commit made after the plan as a skip too, as the removal recheck already did. Before, `apply_one` compared the whole planned tree, so a moved `head` on the same repository, path and branch was reported as `planned worktree identity changed` and alerted the owner. Now the entry is skipped with `refuse <id>: HEAD moved since the survey (<old> -> <new>)` and the worktree stays. A branch entry whose tip moved after the plan is skipped the same way, instead of `branch identity changed`. One `Tree` comparison serves all three checks. A changed repository, path or branch, or a tree that appears or disappears, is still a failure.
+
 - An SSH read error now holds only a safe category, such as `ssh peer: connection refused`. Before, `Error::Ssh` carried raw remote stderr and remote error text in its `Display`, so a secret in a banner or a failing command could reach ticket errors, inbox handoffs, unit-evidence logs, and unit JSON. A remote deadline error no longer repeats the remote text either. The raw text is written only to the local file named by `DOGSLED_SSH_DEBUG_FILE` (mode 0600), and only when that variable is set. A peer's own refusals now carry a structured `code` in their JSON error (`NO_INBOX_READER`, `CLONE_FAILED`). The caller maps a known code to a fixed message, so a missing inbox reader and a failed clone still say what happened; unknown remote text shows only as `remote command failed`. The clone failure shows no git output. Older ticket and unit records are not rewritten.
 
 ## 0.21.0 - 2026-10-22

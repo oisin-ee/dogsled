@@ -350,7 +350,7 @@ Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune neve
 
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
 Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and local-only commits remain untouched.
-Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any change stops removal. A changed repository, path, or branch is an identity change and a failure. A HEAD that moved because of a new commit is live work and a skip.
+Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any change stops removal. A changed repository, path, or branch is an identity change and a failure. A HEAD that moved because of a new commit is live work and a skip, on every check: the plan comparison, the removal recheck, and the branch-tip check.
 Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when its commits are held, and the idle anchor. Dogsled checks that the worktree is gone afterwards.
 Each entry is independent. A failed or refused entry does not stop the others.
 A recheck can refuse an entry because its state changed after the plan: the worktree is now dirty, held, or not landed, the pane is now busy, or a new commit moved HEAD after the plan. Prune keeps that entry and reports it as `skipped:` with the reason. A skip is not a failure.
