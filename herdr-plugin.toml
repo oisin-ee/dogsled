@@ -4,7 +4,7 @@ id = "dogsled"
 name = "dogsled"
 version = "0.20.0"
 min_herdr_version = "0.9.1"
-description = "Opens the dogsled right-side work board."
+description = "Docks the dogsled work board beside Herdr's left sidebar."
 platforms = ["macos", "linux"]
 
 # Installs the checksum-verified release binary for this version at bin/dogsled,
@@ -12,7 +12,16 @@ platforms = ["macos", "linux"]
 [[build]]
 command = ["sh", "plugin/fetch.sh"]
 
-# Cached quotas, owned work, and provider-rendered todos. Herdr splits right by default.
+# Closes this tab's docked board, or opens it. The owner comes from
+# `board --toggle` takes the owner from HERDR_PLUGIN_CONTEXT_JSON / HERDR_PANE_ID.
+[[actions]]
+id = "toggle"
+title = "Toggle dogsled board"
+contexts = ["pane"]
+command = ["bin/dogsled", "board", "--toggle"]
+
+# Cached quotas, owned work, and provider-rendered todos. `board --open` splits it right of
+# the tab's leftmost pane, swaps it into that slot, and sizes it to 38 cells.
 [[panes]]
 id = "board"
 title = "dogsled"
