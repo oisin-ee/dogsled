@@ -273,11 +273,52 @@ fn fetch_fixture(name: &str, triple: &str, corrupt: bool) -> (PathBuf, PathBuf) 
     (plugin, dir.join("releases"))
 }
 
+/// First match for `name` on the test process's own PATH.
+fn find_tool(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+/// A directory holding exactly the external commands `plugin/fetch.sh` calls, and no cargo.
+fn fetch_tools(dir: &Path) -> PathBuf {
+    let tools = dir.join("bin");
+    std::fs::create_dir_all(&tools).unwrap();
+    let checksum = ["sha256sum", "shasum"]
+        .into_iter()
+        .find(|name| find_tool(name).is_some());
+    for name in [
+        "dirname", "sed", "head", "uname", "curl", "mktemp", "mkdir", "cp", "chmod", "mv", "rm",
+        "cut", "tar", "xz",
+    ]
+    .into_iter()
+    .chain(checksum)
+    {
+        // A missing tool stays missing, so the fetch fails where it is needed.
+        if let Some(found) = find_tool(name) {
+            let link = tools.join(name);
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(found, link).unwrap();
+        }
+    }
+    assert!(
+        !tools.join("cargo").exists(),
+        "a missed download must fail, not build"
+    );
+    tools
+}
+
 fn run_fetch(plugin: &Path, releases: &Path) -> std::process::Output {
-    // No cargo on PATH: a missed download must fail rather than build.
-    Command::new("/bin/sh")
+    let tools = fetch_tools(plugin.parent().unwrap());
+    let shell = Path::new("/bin/sh");
+    let shell = if shell.exists() {
+        shell.to_path_buf()
+    } else {
+        find_tool("sh").unwrap()
+    };
+    Command::new(shell)
         .arg(plugin.join("plugin/fetch.sh"))
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", &tools)
         .env("DOGSLED_RELEASES", format!("file://{}", releases.display()))
         .output()
         .unwrap()
