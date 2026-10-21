@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod recovery;
-pub use recovery::close_unfinished;
+pub use recovery::{PaneLaunch, Survey, close_unfinished, final_pane};
 #[cfg(test)]
 mod pane_tests;
 
@@ -51,37 +51,22 @@ enum Receipt {
     Started(Value),
 }
 
-/// Unfinished host-owned receipts protect their checkout while their pane exists: an
-/// interrupted start can still bring up an agent there. Without a pane, or before one was
-/// recorded, nothing can start, and only a receipt still allocating keeps its hold.
-pub fn pending_paths(ledger: &Ledger, panes: &[crate::probe::Pane]) -> Result<Vec<String>> {
-    let receipts = ledger.child("launches");
-    let entries = match std::fs::read_dir(&receipts.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut paths = Vec::new();
-    for entry in entries {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        let Some(id) = name.strip_suffix(".progress.json") else {
-            continue;
-        };
-        if receipts.read::<Receipt>(&format!("{id}.json"))?.is_some() {
-            continue;
-        }
-        let Some(progress) = receipts.read::<Progress>(&name)? else {
-            continue;
-        };
-        let live = progress
-            .pane
-            .as_ref()
-            .is_none_or(|pane| panes.iter().any(|p| p.pane_id == *pane));
-        if live {
-            paths.push(progress.request.cwd);
-        }
-    }
-    Ok(paths)
+/// Hold only an allocating launch or an attempted start with its matching live agent.
+/// A stranded empty shell cannot finish startup and does not hold the checkout.
+fn pending(progress: &Progress, agents: &[crate::probe::Agent]) -> bool {
+    progress.pane.as_ref().is_none_or(|pane| {
+        progress.attempted
+            && agents.iter().any(|agent| {
+                let Action::Agent { name, kind, .. } = &progress.request.action else {
+                    return false;
+                };
+                agent.pane == *pane
+                    && agent.name.as_ref() == Some(name)
+                    && agent.agent.as_ref() == Some(kind)
+                    && progress.terminal.is_some()
+                    && agent.terminal_id == progress.terminal
+            })
+    })
 }
 
 pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {
@@ -113,18 +98,18 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
         })?;
         // A confirmed start must not run again, even if the agent finished and exited.
         if !progress.confirmed {
-            if let Err(error) = with_pane(ledger, &pane, || {
-                start_or_reconcile(ledger, shell, &mut progress, &pane, &progress_file)
-            }) {
-                // A prepared pane belongs to its worktree's workspace; only an allocated one is ours.
-                let owned = request
-                    .pane
-                    .is_none()
-                    .then_some(progress.terminal.as_deref())
-                    .flatten()
-                    .map(|terminal| (pane.as_str(), terminal));
-                return Err(refused(&receipts, shell, &file, owned, error)?);
-            }
+            with_pane(ledger, &pane, || {
+                if let Err(error) =
+                    start_or_reconcile(ledger, shell, &mut progress, &pane, &progress_file)
+                {
+                    let owned = progress
+                        .terminal
+                        .as_deref()
+                        .map(|terminal| (pane.as_str(), terminal));
+                    return Err(refused(&receipts, shell, &file, owned, error)?);
+                }
+                Ok(())
+            })?;
             progress.confirmed = true;
             receipts.write(&progress_file, &progress)?;
         }
@@ -136,7 +121,7 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
 }
 
 /// A start that Herdr refused is final: no agent ran, so record the refusal as the receipt and
-/// close only a still-owned idle shell allocated by this launch. Unknown or occupied panes
+/// close only its still-owned idle shell, whether allocated or prepared. Unknown or occupied panes
 /// survive the final refusal. Any other error passes through unchanged.
 fn refused(
     receipts: &Ledger,
@@ -171,6 +156,13 @@ fn refused(
 }
 
 fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
+    if std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
+        || crate::cleanup::current_panes(shell)?
+            .iter()
+            .any(|p| p.pane_id == pane && p.focused)
+    {
+        return Err(Error::Invalid(format!("{pane}: caller or focused pane")));
+    }
     if terminal(shell, pane)? != expected {
         return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
     }

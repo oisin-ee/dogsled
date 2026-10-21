@@ -183,11 +183,29 @@ struct Seen {
     evidence: BTreeMap<String, crate::loss::Evidence>,
     /// Agent panes that called `done` and ended that turn. Any other idle agent waits for input.
     done: BTreeSet<String>,
+    agents: Vec<Agent>,
+    launches: crate::launch::Survey,
 }
 
-/// The agent panes on this host that are done (`crate::done`).
-fn done_panes(shell: &dyn Shell, ledger: &Ledger) -> Result<BTreeSet<String>> {
-    crate::done::finished(ledger, &crate::probe::agent_list(shell)?)
+impl Seen {
+    fn load(
+        node: &Node<'_>,
+        cwds: Option<Vec<Proc>>,
+        evidence: BTreeMap<String, crate::loss::Evidence>,
+    ) -> Result<Self> {
+        let (panes, terminals) = pane_snapshot(node.shell)?;
+        let agents = crate::probe::agent_list(node.shell)?;
+        let done = crate::done::finished(node.ledger, &agents)?;
+        let launches = crate::launch::Survey::load(node.ledger, &panes, &terminals, &agents)?;
+        Ok(Self {
+            panes,
+            cwds,
+            evidence,
+            done,
+            agents,
+            launches,
+        })
+    }
 }
 
 pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
@@ -392,14 +410,28 @@ fn entry(class: &str, id: String, detail: String, removable: bool) -> Entry {
 }
 
 pub fn current_panes(shell: &dyn Shell) -> Result<Vec<Pane>> {
+    Ok(pane_snapshot(shell)?.0)
+}
+
+fn pane_snapshot(shell: &dyn Shell) -> Result<(Vec<Pane>, BTreeMap<String, String>)> {
     let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
-    Ok(serde_json::from_value(
-        value
-            .pointer("/result/panes")
-            .cloned()
-            .ok_or_else(|| Error::Invalid("pane list has no panes".into()))?,
-    )?)
+    let raw = value
+        .pointer("/result/panes")
+        .cloned()
+        .ok_or_else(|| Error::Invalid("pane list has no panes".into()))?;
+    let terminals = raw
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            Some((
+                p["pane_id"].as_str()?.to_owned(),
+                p["terminal_id"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    Ok((serde_json::from_value(raw)?, terminals))
 }
 
 fn stale(agent: &Agent, now: u64) -> bool {
@@ -578,17 +610,12 @@ fn readable(
 pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     // Process directories first: dogsled's own Git calls below run with `-C`, not `cd`.
     let cwds = process_cwds(node.shell);
-    let panes = current_panes(node.shell)?;
+    let mut seen = Seen::load(node, cwds, BTreeMap::new())?;
     let workspaces = workspaces(node.shell)?;
     let mut plan = Plan::default();
-    let repos = repositories(node, &panes, &workspaces, &mut plan)?;
+    let repos = repositories(node, &seen.panes, &workspaces, &mut plan)?;
     let (repos, trees, evidence) = readable(node, repos, &mut plan);
-    let seen = Seen {
-        panes,
-        cwds,
-        evidence,
-        done: done_panes(node.shell, node.ledger)?,
-    };
+    seen.evidence = evidence;
     let mut closing = Closing::default();
     let found = parallel(&trees, |tree| disposition(node, tree, &seen));
     let mut removed = BTreeSet::new();
@@ -638,15 +665,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
             ));
         }
     }
-    idle(
-        node,
-        scope,
-        now,
-        &seen.panes,
-        &workspaces,
-        &closing,
-        &mut plan,
-    )?;
+    idle(node, now, &seen, &workspaces, &closing, &mut plan)?;
     if scope == Scope::Sweep {
         return Ok(plan);
     }
@@ -921,70 +940,123 @@ fn branches(
     Ok(())
 }
 
-/// Panes whose closing loses nothing. At once: a shell at an empty prompt in an ended job's tab,
-/// whose output the job log keeps, or in a directory that no longer exists. From a fresh
-/// service snapshot: agents idle or done for a day, and shells with no foreground command at
-/// any sample for a day. The sweep takes only the immediate rules, and never the caller's pane.
-fn idle_panes(
+/// The single shell rule for prune and sweep. Launch ownership is checked before other
+/// reasons so a replaced terminal or an unresolved successful start cannot fall through.
+fn idle_shell(
     node: &Node<'_>,
-    scope: Scope,
+    pane: &Pane,
+    launch: crate::launch::PaneLaunch,
+    since: Option<u64>,
+    jobs: &[crate::jobs::Job],
+    items: &[crate::items::Item],
     now: u64,
-    panes: &[Pane],
-) -> Result<BTreeMap<String, String>> {
-    let caller = std::env::var("HERDR_PANE_ID").ok();
-    let mut idle = BTreeMap::new();
-    let ended: BTreeMap<String, crate::jobs::Job> = crate::jobs::list(node.ledger)?
-        .into_iter()
-        .filter(|job| job.ended_ms.is_some())
-        .map(|job| (job.pane.clone(), job))
-        .collect();
-    for pane in panes.iter().filter(|p| p.agent.is_none()) {
-        if scope == Scope::Sweep && caller.as_deref() == Some(pane.pane_id.as_str()) {
-            continue;
+) -> Option<String> {
+    if !matches!(
+        crate::probe::foreground(node.shell, &pane.pane_id),
+        Ok(None)
+    ) {
+        return None;
+    }
+    match launch {
+        crate::launch::PaneLaunch::Final => {
+            return Some("final launch; evidence retained".into());
         }
-        let reason = if let Some(job) = ended.get(&pane.pane_id) {
+        crate::launch::PaneLaunch::Unresolved => return None,
+        _ => (),
+    }
+    if let Some(job) = jobs
+        .iter()
+        .find(|j| j.pane == pane.pane_id && j.ended_ms.is_some())
+    {
+        return Some(format!(
+            "job {} ended{}; its log keeps the output",
+            job.id,
+            job.exit
+                .map_or(String::new(), |code| format!(" with exit {code}"))
+        ));
+    }
+    if pane
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| !Path::new(cwd).exists())
+    {
+        return Some("shell in a deleted directory".into());
+    }
+    let own: Vec<_> = items
+        .iter()
+        .filter(|i| i.host == crate::hosts::LOCAL && i.pane == pane.pane_id)
+        .collect();
+    if own.iter().any(|i| i.closed_ms.is_none()) {
+        return None;
+    }
+    if own
+        .iter()
+        .any(|i| i.kind == "agent" && i.closed_ms.is_some())
+    {
+        return Some("agent item closed".into());
+    }
+    if launch != crate::launch::PaneLaunch::Unrecorded
+        || !own.is_empty()
+        || jobs.iter().any(|j| j.pane == pane.pane_id)
+    {
+        return None;
+    }
+    since
+        .filter(|since| now.saturating_sub(*since) >= crate::watchdog::IDLE_SHELL)
+        .map(|since| {
             format!(
-                "job {} ended{}; its log keeps the output",
-                job.id,
-                job.exit
-                    .map_or(String::new(), |code| format!(" with exit {code}"))
+                "shell idle for {}",
+                crate::watchdog::age(now.saturating_sub(since))
             )
-        } else if pane
-            .cwd
-            .as_deref()
-            .is_some_and(|cwd| !Path::new(cwd).exists())
-        {
-            "shell in a deleted directory".to_string()
-        } else {
-            continue;
-        };
-        // It is still a shell at an empty prompt.
-        if matches!(
-            crate::probe::foreground(node.shell, &pane.pane_id),
-            Ok(None)
+        })
+}
+
+/// Both scopes exclude the caller and focused pane. Agent cleanup still requires `done`.
+fn idle_panes(node: &Node<'_>, now: u64, seen: &Seen) -> Result<BTreeMap<String, String>> {
+    let panes = &seen.panes;
+    let agents = &seen.agents;
+    let caller = std::env::var("HERDR_PANE_ID").ok();
+    let eligible = |pane: &Pane| !pane.focused && caller.as_deref() != Some(pane.pane_id.as_str());
+    let mut idle = BTreeMap::new();
+    let jobs = crate::jobs::list(node.ledger)?;
+    let items = crate::items::list(node.ledger)?;
+    let snapshot = node
+        .ledger
+        .read::<Snapshot>("host.json")?
+        .filter(|s| s.fresh(now));
+    for pane in panes
+        .iter()
+        .filter(|p| eligible(p) && p.agent.is_none() && !agents.iter().any(|a| a.pane == p.pane_id))
+    {
+        let since = snapshot.as_ref().and_then(|s| {
+            s.probe
+                .panes
+                .iter()
+                .find(|p| p.pane_id == pane.pane_id && p.idle_shell)
+                .and_then(|p| p.idle_since_ms)
+        });
+        if let Some(reason) = idle_shell(
+            node,
+            pane,
+            seen.launches.pane(&pane.pane_id),
+            since,
+            &jobs,
+            &items,
+            now,
         ) {
             idle.insert(pane.pane_id.clone(), reason);
         }
     }
-    if scope == Scope::Sweep {
-        return Ok(idle);
-    }
-    let Some(snapshot) = node
-        .ledger
-        .read::<Snapshot>("host.json")?
-        .filter(|s| s.fresh(now))
-    else {
+    let Some(snapshot) = snapshot else {
         return Ok(idle);
     };
-    let agents = crate::probe::agent_list(node.shell)?;
     // An idle agent that has not called `done` waits for input, however long.
-    let done = crate::done::finished(node.ledger, &agents)?;
-    for agent in snapshot
-        .probe
-        .agent_panes
-        .iter()
-        .filter(|a| stale(a, now) && done.contains(&a.pane))
-    {
+    let done = &seen.done;
+    for agent in snapshot.probe.agent_panes.iter().filter(|a| {
+        stale(a, now)
+            && done.contains(&a.pane)
+            && panes.iter().any(|p| p.pane_id == a.pane && eligible(p))
+    }) {
         if agents.iter().any(|a| {
             a.pane == agent.pane
                 && a.state == agent.state
@@ -1001,34 +1073,6 @@ fn idle_panes(
             );
         }
     }
-    for sampled in &snapshot.probe.panes {
-        if idle.contains_key(&sampled.pane_id) {
-            continue;
-        }
-        let Some(since) = sampled
-            .idle_since_ms
-            .filter(|t| now.saturating_sub(*t) > DAY)
-        else {
-            continue;
-        };
-        // It is still a shell at an empty prompt.
-        if panes
-            .iter()
-            .any(|p| p.pane_id == sampled.pane_id && p.agent.is_none())
-            && matches!(
-                crate::probe::foreground(node.shell, &sampled.pane_id),
-                Ok(None)
-            )
-        {
-            idle.insert(
-                sampled.pane_id.clone(),
-                format!(
-                    "shell idle for {}",
-                    crate::watchdog::age(now.saturating_sub(since))
-                ),
-            );
-        }
-    }
     Ok(idle)
 }
 
@@ -1036,14 +1080,20 @@ fn idle_panes(
 /// caller's workspace and those a worktree removal closes are not entries.
 fn idle(
     node: &Node<'_>,
-    scope: Scope,
     now: u64,
-    panes: &[Pane],
+    seen: &Seen,
     workspaces: &[Workspace],
     closing: &Closing,
     plan: &mut Plan,
 ) -> Result<()> {
-    let idle = idle_panes(node, scope, now, panes)?;
+    let panes = &seen.panes;
+    let idle = idle_panes(node, now, seen)?;
+    // Final launches close through recovery, never a whole-workspace close that skips locks.
+    let launches: BTreeSet<_> = panes
+        .iter()
+        .filter(|p| seen.launches.pane(&p.pane_id) == crate::launch::PaneLaunch::Final)
+        .map(|p| p.pane_id.clone())
+        .collect();
     let caller = std::env::var("HERDR_WORKSPACE_ID").ok();
     let mut members: BTreeMap<&str, Vec<&Pane>> = BTreeMap::new();
     for pane in panes {
@@ -1054,9 +1104,11 @@ fn idle(
     let whole = |workspace: &str| {
         caller.as_deref() != Some(workspace)
             && !closing.workspaces.contains(workspace)
-            && members[workspace]
-                .iter()
-                .all(|p| idle.contains_key(&p.pane_id) && !closing.panes.contains(&p.pane_id))
+            && members[workspace].iter().all(|p| {
+                idle.contains_key(&p.pane_id)
+                    && !closing.panes.contains(&p.pane_id)
+                    && !launches.contains(&p.pane_id)
+            })
     };
     for (workspace, members) in &members {
         if !whole(workspace) {
@@ -1131,17 +1183,30 @@ enum Decider {
     Close { guard: crate::close::Guard },
 }
 
-/// Holds are independent of loss and identical in both scopes.
-fn held(
-    node: &Node<'_>,
-    tree: &Tree,
-    usage: &Usage,
-    seen: &Seen,
-    loss: &crate::loss::Assessment,
-    caller: &crate::close::Caller,
-    decider: Decider,
-) -> Result<Vec<String>> {
+/// Pane ownership holds: focus, unresolved launches, and agents still waiting for input.
+fn pane_holds(usage: &Usage, seen: &Seen, decider: Decider) -> Vec<String> {
     let mut held = usage.in_use.clone();
+    for pane in &usage.holders {
+        if pane.focused && matches!(decider, Decider::Cleanup) {
+            held.push(format!("{} is focused", pane.pane_id));
+        }
+        if pane.agent.is_none() {
+            let launch = seen.launches.pane(&pane.pane_id);
+            let blocked = match decider {
+                Decider::Cleanup => launch == crate::launch::PaneLaunch::Unresolved,
+                Decider::Close {
+                    guard: crate::close::Guard::Clean,
+                } => false,
+                Decider::Close { .. } => matches!(
+                    launch,
+                    crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved
+                ),
+            };
+            if blocked {
+                held.push(format!("{} requires launch recovery", pane.pane_id));
+            }
+        }
+    }
     if !matches!(
         decider,
         Decider::Close {
@@ -1156,6 +1221,20 @@ fn held(
                 .map(|p| format!("{} waits for input; it has not called done", p.pane_id)),
         );
     }
+    held
+}
+
+/// Holds are independent of loss and identical in both scopes.
+fn held(
+    node: &Node<'_>,
+    tree: &Tree,
+    usage: &Usage,
+    seen: &Seen,
+    loss: &crate::loss::Assessment,
+    caller: &crate::close::Caller,
+    decider: Decider,
+) -> Result<Vec<String>> {
+    let mut held = pane_holds(usage, seen, decider);
     if usage
         .holders
         .iter()
@@ -1211,7 +1290,9 @@ fn held(
     if crate::prepare::pending_trees(node.ledger)?
         .iter()
         .any(|pending| crate::worktree::same(&pending.path, &tree.path))
-        || crate::launch::pending_paths(node.ledger, &seen.panes)?
+        || seen
+            .launches
+            .pending_paths
             .iter()
             .any(|path| crate::worktree::same(path, &tree.path))
     {
@@ -1248,12 +1329,7 @@ pub fn close_holds(
         branch: linked.branch.clone(),
         head: String::new(),
     };
-    let seen = Seen {
-        panes: current_panes(shell)?,
-        cwds: process_cwds(shell),
-        evidence: BTreeMap::new(),
-        done: done_panes(shell, ledger)?,
-    };
+    let seen = Seen::load(&node, process_cwds(shell), BTreeMap::new())?;
     let usage = usage(&node, &tree, &seen)?;
     let holds = held(
         &node,
@@ -1350,12 +1426,11 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss:
     if let Some(warning) = &evidence.warning {
         eprintln!("{warning}");
     }
-    let seen = Seen {
-        cwds: process_cwds(node.shell),
-        panes: current_panes(node.shell)?,
-        evidence: BTreeMap::from([(current.repo.clone(), evidence)]),
-        done: done_panes(node.shell, node.ledger)?,
-    };
+    let seen = Seen::load(
+        node,
+        process_cwds(node.shell),
+        BTreeMap::from([(current.repo.clone(), evidence)]),
+    )?;
     let found = disposition(node, &current, &seen)?;
     if !found.removable {
         return Err(Error::Invalid(format!(
@@ -1387,7 +1462,27 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
         path: tree.path.clone(),
         branch: tree.branch.clone(),
     };
-    let holders: Vec<&Pane> = held.holders.iter().collect();
+    let mut holders = Vec::new();
+    for pane in &held.holders {
+        let launch = crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?;
+        match launch {
+            crate::launch::PaneLaunch::Final if pane.agent.is_none() => {
+                if !crate::launch::close_unfinished(node.ledger, node.shell, &pane.pane_id)? {
+                    return Err(Error::Invalid(format!(
+                        "{}: launch changed before removal",
+                        pane.pane_id
+                    )));
+                }
+            }
+            crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved => {
+                return Err(Error::Invalid(format!(
+                    "{}: unresolved launch ownership",
+                    pane.pane_id
+                )));
+            }
+            _ => holders.push(pane),
+        }
+    }
     let removed = crate::worktree::remove(
         node.shell,
         node.ledger,
@@ -1592,6 +1687,23 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             None => Err(Error::Invalid("a branch entry has no branch".into())),
         },
         "workspaces" => {
+            let seen = Seen::load(node, None, BTreeMap::new())?;
+            let idle = idle_panes(node, now, &seen)?;
+            for pane in seen
+                .panes
+                .iter()
+                .filter(|p| p.workspace_id.as_deref() == Some(candidate.id.as_str()))
+            {
+                if !idle.contains_key(&pane.pane_id)
+                    || crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?
+                        == crate::launch::PaneLaunch::Final
+                {
+                    return Err(Error::Invalid(format!(
+                        "refuse {}: workspace is no longer idle",
+                        candidate.id
+                    )));
+                }
+            }
             node.shell.run_ok(
                 "herdr",
                 &["workspace".into(), "close".into(), candidate.id.clone()],
@@ -1599,6 +1711,16 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             Ok(format!("closed workspace {}", candidate.id))
         }
         "panes" => {
+            let seen = Seen::load(node, None, BTreeMap::new())?;
+            if !idle_panes(node, now, &seen)?.contains_key(&candidate.id) {
+                return Err(Error::Invalid(format!(
+                    "refuse {}: pane is no longer idle",
+                    candidate.id
+                )));
+            }
+            if crate::launch::close_unfinished(node.ledger, node.shell, &candidate.id)? {
+                return Ok(format!("closed pane {}", candidate.id));
+            }
             let agents = crate::probe::agent_list(node.shell)?;
             let idle = if agents.iter().any(|a| a.pane == candidate.id) {
                 crate::done::finished(node.ledger, &agents)?.contains(&candidate.id)

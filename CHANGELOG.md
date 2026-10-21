@@ -10,6 +10,8 @@ All notable changes to this project are documented in this file.
 - Pure tracked deletions lose nothing when the default branch or refreshed remote refs hold HEAD. Cleanup restores only those deleted paths before unforced removal. Other dirt still prevents removal. Board facts use the same loss rule.
 - Squash detection compares the branch's net paths and before/after objects. Merges from main and reverted edits no longer block exact squash proofs.
 - A tip also counts as landed through an integrated local or remote-tracking ref that contains it. The result names that ref.
+- Prune and sweep use one idle-pane rule. Unfocused shells without Dogsled records close after 15 minutes at an empty prompt. Caller panes and agents without `done` stay open.
+- Final launches release their verified empty panes and checkout holds. Prepared-pane refusals close their own idle terminal. Recovery retains launch receipts and checks ownership under both launch locks.
 
 - Service status uses the service lock instead of snapshot age. Status shows age separately, and finished children can close despite late snapshots. Admission and freshness-sensitive readers retain the 30-second limit. Older peers retain age-based liveness during upgrades.
 - Tick observations deduplicate shared checkouts and bound parallel checkout and shell-pane reads by available CPUs. Dirty checks and automatic-close guards remain unchanged.

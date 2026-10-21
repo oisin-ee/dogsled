@@ -152,7 +152,11 @@ Prune and the sweep use the same holds: active panes or processes, the caller, a
 
 An unheld dirty checkout whose work is in the default branch produces a `landed_dirty` finding. It includes the repository, path, branch or HEAD, dirty-path count, and up to ten paths. Missing or unreadable repositories produce warnings without stopping other repositories. Registrations remain unchanged.
 
-The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `panes`. Orphan close uses the same loss rule. Prune also shows non-removable findings, stale-agent panes, expired jobs, stale registrations, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
+The sweep applies only removable `worktrees`, `branches`, `workspaces`, and `panes`. Orphan close uses the same loss rule. Prune also shows non-removable findings, expired jobs, stale registrations, and unused tagged build output. Disk and process findings are report-only. Prune never kills processes.
+
+Both scopes use one pane rule and exclude the caller and focused panes. An empty shell closes after its job ends, its directory disappears, its launch becomes final, or its agent item closes. A shell without a Dogsled record needs 15 minutes continuously at an empty prompt. Agents retain the one-day rule and require `done`, with no open children.
+
+Launch recovery owns final-shell checks for explicit close and cleanup. Refused, never-attempted, and unknown-outcome launches release empty panes under the request and pane locks. Recovery verifies terminal identity, agent absence, and foreground processes without changing receipts. An unfinished launch holds its checkout only before pane allocation completes or while the attempted start has its matching agent. Final launch panes close separately before worktree removal, not through a whole-workspace close.
 
 Every removal rechecks identity and safety. Worktree removal runs teardown, restores only deletion-only paths from held HEAD, closes holders, unlocks, removes without force, and deletes a held branch. Restoration refuses other dirt and uses literal paths. Both creation and removal use the existing setup budget. A failed entry does not stop the others. Completion-event behavior remains independent of doctor cleanup.
 

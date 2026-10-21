@@ -144,7 +144,14 @@ fn shell_initialization_is_owned_by_native_agent_start() {
 
 #[test]
 fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
-    for case in ["busy", "foreign", "uninspectable", "empty", "replaced"] {
+    for case in [
+        "busy",
+        "foreign",
+        "uninspectable",
+        "empty",
+        "replaced",
+        "focused",
+    ] {
         let rig = Rig::new(&format!("refused-preserve-{case}"));
         refusing_start(&rig);
         let mutation = match case {
@@ -153,6 +160,9 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
             }
             "replaced" => {
                 "printf '%s\\n' '{\"result\":{\"panes\":[{\"pane_id\":\"w2:p1\",\"terminal_id\":\"replacement\"}]}}' > \"$RIG/panes.json\"; "
+            }
+            "focused" => {
+                "printf '%s\\n' '{\"result\":{\"panes\":[{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\",\"focused\":true}]}}' > \"$RIG/panes.json\"; "
             }
             _ => "",
         };
@@ -205,7 +215,7 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
 }
 
 #[test]
-fn refused_start_never_closes_a_prepared_pane() {
+fn refused_start_closes_its_idle_prepared_pane_and_records_the_refusal() {
     let rig = Rig::new("refused-prepared");
     refusing_start(&rig);
     let mut request = host_request(&rig);
@@ -213,9 +223,14 @@ fn refused_start_never_closes_a_prepared_pane() {
     request["terminal"] = json!("term_child");
     let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
     assert_eq!(code, 2, "{error}");
-    assert!(rig.read("state/launches/recover-one.json")["failed"].is_string());
+    assert!(
+        rig.read("state/launches/recover-one.json")["failed"]
+            .as_str()
+            .unwrap()
+            .contains("agent_pane_busy")
+    );
     let log = rig.log("herdr.log");
-    assert!(!log.contains("pane close"), "{log}");
+    assert!(log.contains("pane close w2:p1"), "{log}");
     assert!(!log.contains("tab create"), "{log}");
 }
 

@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 mod tests;
 
 pub const MINUTE: u64 = 60_000;
+pub const IDLE_SHELL: u64 = 15 * MINUTE;
 const CHECK_IN: u64 = 30 * MINUTE;
 
 fn stall_limit() -> u64 {

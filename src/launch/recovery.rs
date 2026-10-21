@@ -1,4 +1,4 @@
-//! Explicit recovery ends only the terminal of an interrupted launch. Its outcome stays unknown.
+//! Final launch shells share recovery and cleanup ownership checks. Receipts stay unchanged.
 
 use super::{Progress, Receipt, idle, terminal, with_pane};
 use crate::error::{Error, Result};
@@ -9,7 +9,7 @@ use crate::shell::Shell;
 #[path = "recovery_tests.rs"]
 mod tests;
 
-fn candidates(receipts: &Ledger, pane: &str) -> Result<Vec<(String, Progress)>> {
+pub(super) fn candidates(receipts: &Ledger, pane: Option<&str>) -> Result<Vec<(String, Progress)>> {
     let entries = match std::fs::read_dir(&receipts.dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -24,7 +24,7 @@ fn candidates(receipts: &Ledger, pane: &str) -> Result<Vec<(String, Progress)>> 
         let Some(progress) = receipts.read::<Progress>(&name)? else {
             continue;
         };
-        if progress.pane.as_deref() == Some(pane) {
+        if pane.is_none_or(|pane| progress.pane.as_deref() == Some(pane)) {
             crate::jobs::validate_id(id)?;
             found.push((id.to_owned(), progress));
         }
@@ -33,10 +33,124 @@ fn candidates(receipts: &Ledger, pane: &str) -> Result<Vec<(String, Progress)>> 
 }
 
 fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> {
-    Ok(progress.attempted
-        && !progress.confirmed
-        && progress.terminal_receipt.is_none()
-        && receipts.read::<Receipt>(&format!("{id}.json"))?.is_none())
+    Ok(recoverable(
+        progress,
+        receipts.read::<Receipt>(&format!("{id}.json"))?.as_ref(),
+    ))
+}
+
+fn recoverable(progress: &Progress, receipt: Option<&Receipt>) -> bool {
+    matches!(receipt, Some(Receipt::Refused { .. }))
+        || (receipt.is_none() && !progress.confirmed && progress.terminal_receipt.is_none())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneLaunch {
+    Unrecorded,
+    Started,
+    Final,
+    Unresolved,
+}
+
+/// One read-only survey of launch ownership. Destructive recovery still re-reads under locks.
+pub struct Survey {
+    states: std::collections::BTreeMap<String, PaneLaunch>,
+    pub pending_paths: Vec<String>,
+}
+
+impl Survey {
+    pub fn load(
+        ledger: &Ledger,
+        panes: &[crate::probe::Pane],
+        terminals: &std::collections::BTreeMap<String, String>,
+        agents: &[crate::probe::Agent],
+    ) -> Result<Self> {
+        let receipts = ledger.child("launches");
+        let items = crate::items::list(ledger)?;
+        let mut survey = Self {
+            states: std::collections::BTreeMap::new(),
+            pending_paths: Vec::new(),
+        };
+        for (id, progress) in candidates(&receipts, None)? {
+            let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+            if receipt.is_none() && super::pending(&progress, agents) {
+                survey.pending_paths.push(progress.request.cwd.clone());
+            }
+            let Some(pane) = progress.pane.as_ref() else {
+                continue;
+            };
+            let state = if matches!(receipt, Some(Receipt::Started(_))) {
+                PaneLaunch::Started
+            } else if recoverable(&progress, receipt.as_ref())
+                && progress.request.id == id
+                && progress
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|t| !t.is_empty() && terminals.get(pane) == Some(t))
+                && panes.iter().any(|p| {
+                    p.pane_id == *pane
+                        && p.agent.is_none()
+                        && p.cwd
+                            .as_deref()
+                            .is_some_and(|cwd| crate::worktree::same(cwd, &progress.request.cwd))
+                })
+                && !agents.iter().any(|a| a.pane == *pane)
+                && !items.iter().any(|i| {
+                    i.host == crate::hosts::LOCAL
+                        && i.pane == *pane
+                        && i.closed_ms.is_none()
+                        && i.id != id
+                })
+            {
+                PaneLaunch::Final
+            } else {
+                PaneLaunch::Unresolved
+            };
+            survey
+                .states
+                .entry(pane.clone())
+                .and_modify(|s| *s = PaneLaunch::Unresolved)
+                .or_insert(state);
+        }
+        Ok(survey)
+    }
+
+    pub fn pane(&self, pane: &str) -> PaneLaunch {
+        self.states
+            .get(pane)
+            .copied()
+            .unwrap_or(PaneLaunch::Unrecorded)
+    }
+}
+
+/// Final launches must still own the idle shell. Successful records prevent recordless
+/// age-based cleanup; unresolved ownership also prevents closing by another shell rule.
+pub fn final_pane(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<PaneLaunch> {
+    let receipts = ledger.child("launches");
+    let found = candidates(&receipts, Some(pane))?;
+    if found.is_empty() {
+        return Ok(PaneLaunch::Unrecorded);
+    }
+    let [(id, progress)] = found.as_slice() else {
+        return Ok(PaneLaunch::Unresolved);
+    };
+    if matches!(
+        receipts.read::<Receipt>(&format!("{id}.json"))?,
+        Some(Receipt::Started(_))
+    ) {
+        return Ok(PaneLaunch::Started);
+    }
+    Ok(
+        if unfinished(&receipts, id, progress)?
+            && progress.request.id == *id
+            && verify_items(ledger, pane, progress).is_ok()
+            && verify_shell(shell, pane, progress).is_ok()
+        {
+            PaneLaunch::Final
+        } else {
+            PaneLaunch::Unresolved
+        },
+    )
 }
 
 /// Same-request work is serialized by its receipt lock; different Dogsled requests that
@@ -45,7 +159,7 @@ fn unfinished(receipts: &Ledger, id: &str, progress: &Progress) -> Result<bool> 
 /// No receipt, preparation, branch or checkout is changed by this operation.
 pub fn close_unfinished(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<bool> {
     let receipts = ledger.child("launches");
-    let found = candidates(&receipts, pane)?;
+    let found = candidates(&receipts, Some(pane))?;
     let mut selected = None;
     for (id, progress) in &found {
         if unfinished(&receipts, id, progress)? {
@@ -80,7 +194,7 @@ fn close_selected(
     let receipts = ledger.child("launches");
     receipts.with_lock(id, || {
         with_pane(ledger, pane, || {
-            let found = candidates(&receipts, pane)?;
+            let found = candidates(&receipts, Some(pane))?;
             let [(current_id, progress)] = found.as_slice() else {
                 return Err(Error::Invalid(format!("{pane}: launch ownership changed; nothing was closed")));
             };
@@ -95,7 +209,7 @@ fn close_selected(
             verify_items(ledger, pane, progress)?;
             verify_shell(shell, pane, progress)?;
             shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
-            eprintln!("{pane}: closed interrupted launch pane; checkout retained at {}; launch outcome remains unknown", progress.request.cwd);
+            eprintln!("{pane}: closed final launch pane; checkout retained at {}; launch evidence unchanged", progress.request.cwd);
             Ok(true)
         })
     })
@@ -129,7 +243,9 @@ fn verify_shell(shell: &dyn Shell, pane: &str, progress: &Progress) -> Result<()
         .iter()
         .find(|p| p.pane_id == pane)
         .ok_or_else(|| Error::Invalid(format!("{pane}: pane disappeared")))?;
-    if current.agent.is_some()
+    if current.focused
+        || std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
+        || current.agent.is_some()
         || !current
             .cwd
             .as_deref()

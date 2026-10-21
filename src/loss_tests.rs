@@ -328,6 +328,99 @@ fn refreshed_remote_counts_but_gone_upstream_and_failed_fetch_do_not() {
     assert!(repo.assess().loses_nothing());
 }
 
+#[derive(Debug)]
+struct ShellPanes {
+    home: String,
+}
+impl Shell for ShellPanes {
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        let value = if program == "herdr" && args == ["pane", "list"] {
+            Some(serde_json::json!({"result":{"panes":[
+                {"pane_id":"old-shell","cwd":self.home},
+                {"pane_id":"young-shell","cwd":self.home},
+                {"pane_id":"focused-shell","cwd":self.home,"focused":true}
+            ]}}))
+        } else if program == "herdr" && args.starts_with(&["pane".into(), "process-info".into()]) {
+            Some(
+                serde_json::json!({"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}),
+            )
+        } else {
+            None
+        };
+        match value {
+            Some(value) => Ok(Output {
+                status: 0,
+                stdout: value.to_string(),
+                stderr: String::new(),
+            }),
+            None => System.run(program, args),
+        }
+    }
+}
+
+#[test]
+fn prune_and_sweep_have_identical_idle_pane_candidates_at_the_fifteen_minute_boundary() {
+    let repo = Repo::new();
+    let ledger = Ledger::new(repo.root.join("state"));
+    let now = 2_000_000;
+    let snapshot = crate::node::Snapshot {
+        sampled_ms: now,
+        probe: crate::probe::Probe {
+            host: "local".into(),
+            label: "local".into(),
+            load1: 0.0,
+            cores: 1,
+            cpu_ticks: None,
+            busy: None,
+            memory: crate::probe::Memory::default(),
+            disk_free_percent: 90.0,
+            agents: crate::probe::AgentCounts::default(),
+            agent_panes: vec![],
+            reservations: vec![],
+            panes: [
+                ("old-shell", 15),
+                ("young-shell", 14),
+                ("focused-shell", 30),
+            ]
+            .into_iter()
+            .map(|(pane_id, minutes)| crate::probe::Pane {
+                pane_id: pane_id.into(),
+                idle_shell: true,
+                idle_since_ms: Some(now - minutes * 60_000),
+                ..Default::default()
+            })
+            .collect(),
+        },
+        jobs: vec![],
+    };
+    ledger.write("host.json", &snapshot).unwrap();
+    let shell = ShellPanes {
+        home: repo.root.display().to_string(),
+    };
+    let cleanup = crate::config::Cleanup::default();
+    let node = crate::node::Node {
+        shell: &shell,
+        ledger: &ledger,
+        thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+        home: &shell.home,
+        cleanup: &cleanup,
+    };
+    let decisions = |scope| {
+        survey(&node, scope, now)
+            .unwrap()
+            .entries
+            .into_iter()
+            .filter(|e| matches!(e.class.as_str(), "panes" | "workspaces"))
+            .map(|e| (e.id, e.detail))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        decisions(Scope::Prune),
+        [("old-shell".into(), "shell idle for 15m".into())]
+    );
+    assert_eq!(decisions(Scope::Prune), decisions(Scope::Sweep));
+}
+
 #[test]
 fn survey_continues_past_missing_repositories_and_scopes_agree() {
     let repo = Repo::new();

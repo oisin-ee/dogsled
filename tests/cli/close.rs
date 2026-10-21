@@ -300,21 +300,23 @@ fn unfinished_launch(rig: &Rig, id: &str, tree: &Path, pane: &str) {
 }
 
 #[test]
-fn an_unfinished_launch_holds_its_checkout_only_while_its_pane_exists() {
+fn an_unfinished_launch_holds_its_checkout_only_with_the_matching_agent() {
     let (rig, tree) = close_rig("close-unfinished-launch");
     advance_main(&rig);
     panes(&rig, "idle", &tree);
     item(&rig, "local");
-    // Its pane w2:p2 is live: the outcome is unknown, so the checkout stays.
+    // Startup has no receipt yet, but its matching agent still runs in w2:p2.
     unfinished_launch(&rig, "live", &tree, "w2:p2");
+    rig.put("agents.json", &json!({"result":{"agents":[{
+        "pane_id":"w2:p2","terminal_id":"term_gone","name":"worker","agent":"pi","agent_status":"idle"
+    }]}}));
     let out = rig.run(&["close", "w2:p1"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("pending preparation or launch"), "{stderr}");
     assert!(tree.exists());
-    // Its pane is gone: nothing can start there any more.
-    fs::remove_file(rig.dir.join("state/launches/live.progress.json")).unwrap();
-    unfinished_launch(&rig, "gone", &tree, "w9:p9");
+    // Its agent is gone: an empty shell cannot finish startup and no longer holds the path.
+    rig.put("agents.json", &json!({"result":{"agents":[]}}));
     let (code, closed) = rig.json(&["close", "w2:p1"]);
     assert_eq!(code, 0, "{closed}");
     assert_eq!(closed["worktree"]["branch_deleted"], true);
@@ -379,7 +381,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
         "terminal",
         "agent",
         "item",
-        "pre-start",
+        "focused",
         "automatic",
         "missing-process",
         "foreign-pgid",
@@ -410,11 +412,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
                 let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
                 rig.script("herdr", &script.replace("'workspace close'*|'pane close'*) printf '{}\\n' ;;", "'pane close'*) exit 2 ;;\n  'workspace close'*) printf '{}\\n' ;;"));
             }
-            "pre-start" => {
-                let mut progress = rig.read("state/launches/own.progress.json");
-                progress["attempted"] = json!(false);
-                rig.put("state/launches/own.progress.json", &progress);
-            }
+            "focused" => pane["focused"] = json!(true),
             _ => (),
         }
         rig.put("panes.json", &json!({"result":{"panes":[pane]}}));
@@ -436,7 +434,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
 }
 
 #[test]
-fn unresolved_unattempted_or_unreceipted_launch_cannot_fall_through_to_plain_pane_close() {
+fn final_unattempted_launch_recovers_but_confirmed_unreceipted_launch_cannot_fall_through() {
     for confirmed in [false, true] {
         let (rig, tree) = close_rig("close-unresolved-plain-pane");
         let repo = rig.dir.join("home/repo").canonicalize().unwrap();
@@ -452,9 +450,11 @@ fn unresolved_unattempted_or_unreceipted_launch_cannot_fall_through_to_plain_pan
         progress["confirmed"] = json!(confirmed);
         rig.put("state/launches/own.progress.json", &progress);
         let out = rig.run(&["close", "w2:p2"]);
-        assert_eq!(out.status.code(), Some(2));
-        assert!(!rig.log("herdr.log").contains("pane close"));
+        assert_eq!(out.status.success(), !confirmed, "{out:?}");
+        assert_eq!(rig.log("herdr.log").contains("pane close"), !confirmed);
         assert!(tree.exists());
+        assert_eq!(rig.read("state/launches/own.progress.json"), progress);
+        assert!(!rig.dir.join("state/launches/own.json").exists());
     }
 }
 

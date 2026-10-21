@@ -119,14 +119,15 @@ fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
     rig.snapshot("state/host.json", NOW, 0.0, 1);
     let mut snapshot = rig.read("state/host.json");
     snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
+    snapshot["probe"]["agent_panes"][0]["pane"] = json!("w2:p1");
     rig.put("state/host.json", &snapshot);
     rig.put(
         "agents.json",
-        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"idle",
-            "terminal_id":"term_owner","completion_seq":1,"state_change_seq":1}]}}),
+        &json!({"result":{"agents":[{"pane_id":"w2:p1","agent":"pi","agent_status":"idle",
+            "terminal_id":"term_child","completion_seq":1,"state_change_seq":1}]}}),
     );
-    // Idle for a day after it called `done`: `prune` may close it.
-    rig.done("term_owner", "w1:p1", 1);
+    // A non-caller idle for a day after it called `done`: either scope may close it.
+    rig.done("term_child", "w2:p1", 1);
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     rig.put("state/jobs/old.json", &json!({"id":"old","cmd":["test"],"cwd":"/","host":"local","owner":"w1:p1","pane":"job-pane","state":"idle","exit":0,"signal":null,"reason":null,"started_ms":1,"ended_ms":2,"timeout_ms":null,"idle_timeout_ms":null}));
     fs::write(rig.dir.join("state/jobs/old.log"), "hello").unwrap();
@@ -429,7 +430,6 @@ fn doctor_closes_an_all_idle_workspace_whole_and_other_idle_panes_alone() {
                 "w3",
                 "done-work: w3:p1 shell idle for 48h; w3:p2 shell idle for 48h"
             ),
-            ("panes", "w1:p1", "shell idle for 48h"),
             ("panes", "w4:p1", "shell idle for 48h"),
         ],
         "{plan}"
@@ -441,7 +441,8 @@ fn doctor_closes_an_all_idle_workspace_whole_and_other_idle_panes_alone() {
         String::from_utf8_lossy(&out.stderr)
     );
     let log = rig.log("herdr.log");
-    for closed in ["workspace close w3", "pane close w1:p1", "pane close w4:p1"] {
+    assert!(!log.contains("pane close w1:p1"), "{log}");
+    for closed in ["workspace close w3", "pane close w4:p1"] {
         assert!(log.contains(closed), "{log}");
     }
     assert!(
