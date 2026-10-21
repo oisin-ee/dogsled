@@ -3,7 +3,7 @@
 
 id = "dogsled"
 name = "dogsled"
-version = "0.18.0"
+version = "0.18.1"
 min_herdr_version = "0.9.1"
 description = "Opens the dogsled right-side work board."
 platforms = ["macos", "linux"]
