@@ -34,16 +34,75 @@ struct Progress {
 }
 
 /// Herdr's codes for an `agent start` it refused before typing into the pane. Any other
-/// failure may come after the agent began, so its outcome stays unknown.
-const REFUSALS: [&str; 7] = [
+/// failure may come after the agent began, so its outcome stays unknown. `agent_pane_busy` is
+/// not final: the shell may still be starting, so the start is retried on the same pane.
+const REFUSALS: [&str; 6] = [
     "invalid_agent_name",
     "unsupported_agent_kind",
     "invalid_agent_argument",
     "invalid_agent_timeout",
     "agent_pane_not_found",
-    "agent_pane_busy",
     "agent_name_taken",
 ];
+
+/// How long a busy pane may keep its shell initializing before the launch gives up.
+const BUSY_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+const BUSY_FIRST_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
+const BUSY_MAX_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn busy_window() -> std::time::Duration {
+    // Test rigs only. Production always waits `BUSY_WINDOW`.
+    std::env::var("DOGSLED_TEST_BUSY_WINDOW_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(BUSY_WINDOW, std::time::Duration::from_millis)
+}
+
+fn is_busy(error: &Error) -> bool {
+    let Error::Command { stderr, .. } = error.root() else {
+        return false;
+    };
+    serde_json::from_str::<Value>(stderr)
+        .ok()
+        .and_then(|v| v.pointer("/error/code")?.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("agent_pane_busy")
+}
+
+/// Run `agent start`, repeating it on the same pane while Herdr reports the shell busy. Herdr
+/// typed nothing into a busy pane, so a repeat cannot start the agent twice.
+fn start_while_busy(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    args: &[String],
+    pane: &str,
+    window: std::time::Duration,
+) -> Result<()> {
+    let began = std::time::Instant::now();
+    let mut pause = BUSY_FIRST_PAUSE;
+    loop {
+        match shell.run_setup_ok("herdr", args) {
+            Err(error) if is_busy(&error) => {
+                let elapsed = began.elapsed();
+                let Some(left) = window.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
+                    return Err(Error::Launch(format!(
+                        "{pane} was still not an available shell after {:.1}s; the pane stays open: {error}",
+                        elapsed.as_secs_f32()
+                    )));
+                };
+                ledger.budget.remaining("agent start").map_err(|_| {
+                    Error::Launch(format!(
+                        "{pane} was still not an available shell when the command deadline passed after {:.1}s; the pane stays open",
+                        elapsed.as_secs_f32()
+                    ))
+                })?;
+                std::thread::sleep(pause.min(left));
+                pause = (pause * 2).min(BUSY_MAX_PAUSE);
+            }
+            other => return other.map(drop),
+        }
+    }
+}
 
 /// A finished launch: its result, or the refusal that ended it.
 #[derive(Debug, Serialize, Deserialize)]
@@ -364,7 +423,14 @@ fn start_or_reconcile(
     progress.attempted = true;
     let receipts = ledger.child("launches");
     receipts.write(file, progress)?;
-    if let Err(error) = shell.run_setup_ok("herdr", &args) {
+    if let Err(error) = start_while_busy(ledger, shell, &args, pane, busy_window()) {
+        if matches!(error, Error::Launch(_)) {
+            // Herdr never typed into the pane, so the launch may be tried again.
+            progress.attempted = false;
+            progress.error = Some(error.to_string());
+            receipts.write(file, progress)?;
+            return Err(error);
+        }
         let error = startup_error(shell, pane, error);
         progress.error = Some(error.to_string());
         receipts.write(file, progress)?;

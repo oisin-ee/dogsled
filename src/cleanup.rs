@@ -2117,9 +2117,30 @@ fn close_workspace(node: &Node<'_>, id: &str, now: u64) -> Result<Outcome> {
             )));
         }
     }
-    node.shell
-        .run_ok("herdr", &["workspace".into(), "close".into(), id.into()])?;
+    match node
+        .shell
+        .run_ok("herdr", &["workspace".into(), "close".into(), id.into()])
+    {
+        Ok(_) => (),
+        // Herdr closes a workspace with its last pane, so it may be gone already: the goal holds.
+        Err(error) if refused_with(&error, "workspace_not_found") => {
+            return Ok(Outcome::Done(format!("workspace {id} was already closed")));
+        }
+        Err(error) => return Err(error),
+    }
     Ok(Outcome::Done(format!("closed workspace {id}")))
+}
+
+/// Whether Herdr refused a command with this error code.
+fn refused_with(error: &Error, code: &str) -> bool {
+    let Error::Command { stderr, .. } = error.root() else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(stderr)
+        .ok()
+        .and_then(|v| v.pointer("/error/code")?.as_str().map(str::to_owned))
+        .as_deref()
+        == Some(code)
 }
 
 /// Re-check a planned pane close against a fresh survey under the cleanup lock.
@@ -2689,6 +2710,43 @@ mod tests {
                 .iter()
                 .any(|c| c.starts_with("herdr worktree ") || c.contains(" close "))
         );
+    }
+
+    fn gone_workspace_rig() -> Rig {
+        let rig = Rig::new(json!([workspace("wVR", false)]));
+        rig.shell.on_output(
+            "herdr workspace close wVR",
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: r#"{"error":{"code":"workspace_not_found","message":"workspace wVR not found"}}"#.into(),
+            },
+        );
+        rig
+    }
+
+    #[test]
+    fn closing_a_workspace_that_is_already_gone_counts_as_closed() {
+        let rig = gone_workspace_rig();
+        let outcome = close_workspace(&rig.node(), "wVR", 2_000_000).unwrap();
+        assert!(
+            matches!(&outcome, Outcome::Done(m) if m.contains("already closed")),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn another_workspace_close_failure_still_fails() {
+        let rig = gone_workspace_rig();
+        rig.shell.on_output(
+            "herdr workspace close wVR",
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: r#"{"error":{"code":"server_unavailable","message":"down"}}"#.into(),
+            },
+        );
+        assert!(close_workspace(&rig.node(), "wVR", 2_000_000).is_err());
     }
 
     #[test]

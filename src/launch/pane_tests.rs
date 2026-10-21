@@ -177,3 +177,82 @@ fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 }
+
+#[derive(Debug)]
+struct BusyShell {
+    busy: usize,
+    starts: AtomicUsize,
+}
+
+impl Shell for BusyShell {
+    fn run(&self, _program: &str, _args: &[String]) -> Result<Output> {
+        let start = self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(if start < self.busy {
+            Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: r#"{"error":{"code":"agent_pane_busy","message":"agent target pane w2:p2 is not an available shell"}}"#.into(),
+            }
+        } else {
+            Output {
+                status: 0,
+                stdout: "{}".into(),
+                stderr: String::new(),
+            }
+        })
+    }
+}
+
+fn start_args() -> Vec<String> {
+    vec!["agent".into(), "start".into()]
+}
+
+#[test]
+fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
+    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let shell = BusyShell {
+        busy: 2,
+        starts: AtomicUsize::new(0),
+    };
+    let window = std::time::Duration::from_secs(5);
+    start_while_busy(&ledger, &shell, &start_args(), "w2:p2", window).unwrap();
+    assert_eq!(shell.starts.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
+    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let shell = BusyShell {
+        busy: usize::MAX,
+        starts: AtomicUsize::new(0),
+    };
+    let window = std::time::Duration::from_millis(300);
+    let error = start_while_busy(&ledger, &shell, &start_args(), "w2:p2", window).unwrap_err();
+    let Error::Launch(message) = &error else {
+        panic!("expected a launch error, got {error:?}");
+    };
+    assert!(message.contains("w2:p2"), "{message}");
+    assert!(message.contains("after 0."), "{message}");
+    assert!(shell.starts.load(Ordering::SeqCst) >= 2);
+}
+
+#[derive(Debug)]
+struct TakenShell;
+
+impl Shell for TakenShell {
+    fn run(&self, _program: &str, _args: &[String]) -> Result<Output> {
+        Ok(Output {
+            status: 1,
+            stdout: String::new(),
+            stderr: r#"{"error":{"code":"agent_name_taken","message":"taken"}}"#.into(),
+        })
+    }
+}
+
+#[test]
+fn only_a_busy_refusal_is_repeated() {
+    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let window = std::time::Duration::from_secs(5);
+    let error = start_while_busy(&ledger, &TakenShell, &start_args(), "w2:p2", window).unwrap_err();
+    assert!(matches!(error, Error::Command { .. }), "{error:?}");
+}
