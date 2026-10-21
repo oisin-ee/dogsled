@@ -4,6 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- A long task launches reliably. Herdr types the launch as one terminal line of at most 1024 bytes, and the child contract alone used about 600 of them, so a task of a few hundred bytes failed with `agent_start_input_failed`. Pi now reads the contract from `launches/<id>.contract.md`, and a task goes inline only when the whole line stays under 960 bytes; any other task is read from its file. A name or profile that makes the fixed part too long is refused before the ticket queues.
 - Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. A pane Dogsled launched never opens a board: it keeps the widget, and its todo lines appear on the parent's board. `/dogsled` remains available in both modes.
 
 ## 0.17.0 - 2026-10-21
