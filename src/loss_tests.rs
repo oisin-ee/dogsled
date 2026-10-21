@@ -992,6 +992,61 @@ fn prune_commit_after_the_plan_is_skipped_not_an_identity_change() {
     assert!(fixture.repo.tree.exists());
 }
 
+/// The sweep plan for the fixture's branch once its worktree is gone: a removable branch entry.
+fn branch_plan(fixture: &Landed) -> crate::cleanup::Plan {
+    git(
+        &fixture.repo.repo,
+        &["worktree", "remove", fixture.repo.tree.to_str().unwrap()],
+    );
+    let mut plan = survey(&fixture.node(&System), Scope::Sweep, 100).unwrap();
+    let marker = fixture.repo.root.file_name().unwrap().to_str().unwrap();
+    plan.entries
+        .retain(|e| e.class == "branches" && e.id.contains(marker));
+    assert_eq!(plan.entries.len(), 1);
+    assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
+    plan
+}
+
+#[test]
+fn sweep_branch_unchanged_after_the_plan_is_deleted() {
+    let fixture = Landed::new();
+    let plan = branch_plan(&fixture);
+    let applied = crate::cleanup::apply_survey(&fixture.node(&System), &plan, 100);
+    assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+    assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+    assert_eq!(
+        git(&fixture.repo.repo, &["branch", "--list", "feature"]),
+        ""
+    );
+}
+
+#[test]
+fn sweep_branch_moved_after_the_plan_is_skipped_and_kept() {
+    let fixture = Landed::new();
+    let plan = branch_plan(&fixture);
+    let planned = plan.entries[0].tree.as_ref().unwrap().head.clone();
+    // The owner commits on the branch between the plan and the apply.
+    git(&fixture.repo.repo, &["switch", "-q", "feature"]);
+    git(
+        &fixture.repo.repo,
+        &["commit", "-q", "--allow-empty", "-m", "moved"],
+    );
+    git(&fixture.repo.repo, &["switch", "-q", "main"]);
+    let moved = git(&fixture.repo.repo, &["rev-parse", "feature"]);
+    assert_ne!(moved.trim(), planned);
+    let applied = crate::cleanup::apply_survey(&fixture.node(&System), &plan, 100);
+    assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+    assert!(applied.results.is_empty(), "{:?}", applied.results);
+    assert_eq!(applied.skipped.len(), 1, "{:?}", applied.skipped);
+    assert!(
+        applied.skipped[0].contains("HEAD moved since the survey ("),
+        "{}",
+        applied.skipped[0]
+    );
+    // Never deleted, and still at the owner's commit.
+    assert_eq!(git(&fixture.repo.repo, &["rev-parse", "feature"]), moved);
+}
+
 #[test]
 fn prune_branch_switch_after_the_plan_still_fails() {
     let fixture = Landed::new();
