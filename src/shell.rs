@@ -176,15 +176,13 @@ impl System {
         let result = match recv.recv_timeout(timeout) {
             Ok(result) => result.map_err(Error::from),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let pid = i32::try_from(pid).map_err(|e| Error::Invalid(e.to_string()))?;
-                match nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGKILL,
-                ) {
-                    Ok(()) | Err(nix::errno::Errno::ESRCH) => (),
-                    Err(e) => return Err(Error::Invalid(e.to_string())),
+                let deadline = Error::Deadline(operation);
+                if let Err(error) = kill_group(pid) {
+                    // Do not join a worker whose process may still be running. Keep
+                    // cleanup failures distinct from an ordinary waiting deadline.
+                    return Err(Error::Invalid(format!("{deadline}; {error}")));
                 }
-                Err(Error::Deadline(operation))
+                Err(deadline)
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 Err(Error::Invalid("command worker disconnected".into()))
@@ -199,6 +197,31 @@ impl System {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
+    }
+}
+
+/// Kill an owned command group, accepting a group that has already disappeared.
+pub(crate) fn kill_group(pid: u32) -> Result<()> {
+    kill_group_with(pid, nix::sys::signal::killpg)
+}
+
+fn kill_group_with(
+    pid: u32,
+    mut signal: impl FnMut(nix::unistd::Pid, Option<nix::sys::signal::Signal>) -> nix::Result<()>,
+) -> Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::Signal;
+    use nix::unistd::Pid;
+
+    let pid = i32::try_from(pid).map_err(|e| Error::Invalid(e.to_string()))?;
+    let group = Pid::from_raw(pid);
+    match signal(group, Some(Signal::SIGKILL)) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        // Darwin can find the group but lose its last live member during iteration,
+        // returning EPERM instead of ESRCH. A signal-free probe must confirm the
+        // whole group is gone; the leader's exit alone says nothing about descendants.
+        Err(Errno::EPERM) if signal(group, None) == Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(Error::Invalid(format!("kill process group {pid}: {error}"))),
     }
 }
 
@@ -307,6 +330,69 @@ pub fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_group_accepts_success_and_absent_groups_without_probing() {
+        use nix::errno::Errno;
+        use nix::sys::signal::Signal;
+
+        for outcome in [Ok(()), Err(Errno::ESRCH)] {
+            let mut calls = Vec::new();
+            assert!(
+                kill_group_with(42, |group, signal| {
+                    calls.push((group.as_raw(), signal));
+                    outcome
+                })
+                .is_ok()
+            );
+            assert_eq!(calls, [(42, Some(Signal::SIGKILL))]);
+        }
+    }
+
+    #[test]
+    fn kill_group_accepts_eperm_only_when_the_group_is_confirmed_absent() {
+        use nix::errno::Errno;
+        use nix::sys::signal::Signal;
+
+        for probe in [
+            Err(Errno::ESRCH),
+            Ok(()),
+            Err(Errno::EPERM),
+            Err(Errno::EIO),
+        ] {
+            let mut calls = Vec::new();
+            let result = kill_group_with(42, |group, signal| {
+                calls.push((group.as_raw(), signal));
+                if signal.is_some() {
+                    Err(Errno::EPERM)
+                } else {
+                    probe
+                }
+            });
+            assert_eq!(calls, [(42, Some(Signal::SIGKILL)), (42, None)]);
+            if probe == Err(Errno::ESRCH) {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(Error::Invalid(message))
+                    if message == format!("kill process group 42: {}", Errno::EPERM)));
+            }
+        }
+    }
+
+    #[test]
+    fn kill_group_reports_other_errors_without_probing() {
+        use nix::errno::Errno;
+        use nix::sys::signal::Signal;
+
+        let mut calls = Vec::new();
+        let result = kill_group_with(42, |group, signal| {
+            calls.push((group.as_raw(), signal));
+            Err(Errno::EINVAL)
+        });
+        assert_eq!(calls, [(42, Some(Signal::SIGKILL))]);
+        assert!(matches!(result, Err(Error::Invalid(message))
+            if message == format!("kill process group 42: {}", Errno::EINVAL)));
+    }
 
     #[test]
     fn quote_leaves_safe_words_alone() {

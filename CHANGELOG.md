@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.17.0 - 2026-10-21
 
 - Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. `/dogsled` remains available in both modes.
 
@@ -15,7 +15,6 @@ All notable changes to this project are documented in this file.
 - A tip also counts as landed through an integrated local or remote-tracking ref that contains it. The result names that ref.
 - Prune and sweep use one idle-pane rule. Unfocused shells without Dogsled records close after 15 minutes at an empty prompt. Caller panes and agents without `done` stay open.
 - Final launches release their verified empty panes and checkout holds. Prepared-pane refusals close their own idle terminal. Recovery retains launch receipts and checks ownership under both launch locks.
-
 - Service status uses the service lock instead of snapshot age. Status shows age separately, and finished children can close despite late snapshots. Admission and freshness-sensitive readers retain the 30-second limit. Older peers retain age-based liveness during upgrades.
 - Tick observations deduplicate shared checkouts and bound parallel checkout and shell-pane reads by available CPUs. Dirty checks and automatic-close guards remain unchanged.
 

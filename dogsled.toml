@@ -1,0 +1,4 @@
+# Dogsled worktree setup for this repository. The Pi shim checks (`mise run check:pi`)
+# and the pre-commit hook need the locked TypeScript toolchain in each new worktree.
+[worktree]
+setup = ["npm ci --no-audit --no-fund"]
