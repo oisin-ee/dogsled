@@ -324,6 +324,65 @@ fn an_unfinished_launch_holds_its_checkout_only_with_the_matching_agent() {
 }
 
 #[test]
+fn a_settled_preparation_no_longer_holds_its_landed_checkout() {
+    let (rig, tree) = close_rig("close-settled-preparation");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    let repo = rig.dir.join("home/repo");
+    let hold = |id: Option<&str>| {
+        let mut hold = json!({"repo":repo,"path":tree,"branch":"feat/x","head":""});
+        if let Some(id) = id {
+            hold["request_id"] = json!(id);
+        }
+        hold
+    };
+    // Each request settled without releasing its hold: Herdr refused the start, Herdr refused
+    // the prepared workspace, and a legacy path-only record's checkout launched.
+    unfinished_launch(&rig, "refused", &tree, "w9:p1");
+    rig.put(
+        "state/launches/refused.json",
+        &json!({"failed":"herdr agent start: agent_pane_busy"}),
+    );
+    unfinished_launch(&rig, "started", &tree, "w9:p2");
+    rig.put(
+        "state/launches/started.json",
+        &json!({"host":"local","name":"worker","pane":"w9:p2"}),
+    );
+    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
+    rig.put(
+        "state/admissions/failed.json",
+        &json!({"request":{},"host":{"id":"local","label":"local"},"launch":null,
+            "error":"Herdr workspace w2 already shows the checkout; a child may own it"}),
+    );
+    // A launch with no final receipt is unresolved, and its preparation still holds.
+    unfinished_launch(&rig, "live", &tree, "w9:p3");
+    let holds = json!([
+        hold(Some("refused")),
+        hold(Some("failed")),
+        hold(None),
+        hold(Some("live"))
+    ]);
+    rig.put("state/preparations.json", &holds);
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("pending preparation or launch"), "{stderr}");
+    assert!(tree.exists());
+    // Once that launch is final too, nothing holds the landed checkout. Settled records are
+    // ignored as evidence, never edited.
+    rig.put(
+        "state/launches/live.json",
+        &json!({"host":"local","name":"worker","pane":"w9:p3"}),
+    );
+    let (code, closed) = rig.json(&["close", "w2:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    assert_eq!(closed["worktree"]["branch_deleted"], true);
+    assert!(!tree.exists());
+    assert_eq!(rig.read("state/preparations.json"), holds);
+}
+
+#[test]
 fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_receipt() {
     let (rig, tree) = close_rig("close-own-unfinished-launch");
     advance_main(&rig);

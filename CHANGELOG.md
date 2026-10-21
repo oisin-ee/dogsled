@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Settled preparations no longer hold landed checkouts. A preparation that fails releases its own hold. Cleanup and close ignore a hold whose launch has a final receipt, or whose local preparation failed. A legacy hold without a request id ends when any launch of its checkout is final. Interrupted preparations, launches without a final receipt, and seeded unit refusals that their peer has not settled still hold. No state file is rewritten.
+
 ## 0.18.1 - 2026-10-21
 
 - Prune and automatic cleanup remove remembered repository and worktree registrations only when their paths are absent. Removal rechecks absence under the registry locks and deletes no checkout data. Doctor lists the removable records without changing them. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only.

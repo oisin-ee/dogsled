@@ -751,7 +751,7 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
         plan.entries.push(e);
     }
     for repo in &repos {
-        if let Err(error) = branches(node, repo, &seen.evidence[repo], &mut plan) {
+        if let Err(error) = branches(node, repo, &seen.evidence[repo], &seen.launches, &mut plan) {
             plan.entries.push(entry(
                 "repositories",
                 repo.clone(),
@@ -959,10 +959,11 @@ fn branches(
     node: &Node<'_>,
     repo: &str,
     evidence: &crate::loss::Evidence,
+    launches: &crate::launch::Survey,
     plan: &mut Plan,
 ) -> Result<()> {
     let shell = node.shell;
-    let pending = crate::prepare::pending_trees(node.ledger)?;
+    let pending = crate::prepare::pending_trees(node.ledger, launches)?;
     let checked_out: BTreeSet<String> =
         listed(shell, repo)?.into_iter().map(|t| t.branch).collect();
     let base = crate::integration::base(shell, repo)?;
@@ -1383,7 +1384,7 @@ fn held(
             held.push(format!("not landed by its owner {}", item.owner_pane));
         }
     }
-    if crate::prepare::pending_trees(node.ledger)?
+    if crate::prepare::pending_trees(node.ledger, &seen.launches)?
         .iter()
         .any(|pending| crate::worktree::same(&pending.path, &tree.path))
         || seen

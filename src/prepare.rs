@@ -182,9 +182,31 @@ pub fn local(
         branch: branch.into(),
         head: String::new(),
     };
+    let held = pending.path.clone();
     record(ledger, pending, request_id)?;
+    // A failed preparation is final: its admission never resumes it, so it holds nothing.
+    // Only an interrupted preparation leaves its hold for inspection.
+    make(
+        shell, &checkout, &settings, existing, branch, base, has_branch,
+    )
+    .or_else(|error| {
+        used(ledger, &held, request_id)?;
+        Err(error)
+    })
+}
+
+/// Create or reuse the worktree, run setup in a new one, and open it in Herdr.
+fn make(
+    shell: &dyn Shell,
+    checkout: &Path,
+    settings: &crate::repository::Settings,
+    existing: Option<worktree::Listed>,
+    branch: &str,
+    base: Option<&str>,
+    has_branch: bool,
+) -> Result<Prepared> {
     let (path, created) = if let Some(found) = existing {
-        (reuse(shell, &checkout, found)?, false)
+        (reuse(shell, checkout, found)?, false)
     } else {
         let path = checkout
             .join(&settings.worktree.dir)
@@ -198,29 +220,28 @@ pub fn local(
         } else {
             start = match base {
                 Some(base) => base.to_string(),
-                None => default_branch(shell, &checkout)?,
+                None => default_branch(shell, checkout)?,
             };
             args.extend(["-b", branch, path.as_str(), start.as_str()]);
         }
-        git(&checkout, &args).setup_ok(shell)?;
+        git(checkout, &args).setup_ok(shell)?;
         (path, true)
     };
     if created {
         let values = Values {
-            main: &checkout,
+            main: checkout,
             path: &path,
             branch,
         };
         if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
         {
-            discard(shell, &checkout, &path, (!has_branch).then_some(branch))?;
-            used(ledger, &path, request_id)?;
+            discard(shell, checkout, &path, (!has_branch).then_some(branch))?;
             return Err(Error::Invalid(format!(
                 "{error}; the new worktree was removed"
             )));
         }
     }
-    open(shell, &checkout, &path)
+    open(shell, checkout, &path)
 }
 
 fn record(
@@ -266,9 +287,24 @@ pub fn on_host(
 }
 
 /// Preparations stay pending until the host has confirmed the launch or returned a placement.
-pub fn pending_trees(ledger: &crate::ledger::Ledger) -> Result<Vec<crate::cleanup::Tree>> {
+/// A record whose launch is final, or whose local preparation failed, has settled and holds
+/// nothing, even when the release that should have followed never ran. Interrupted and
+/// unresolved preparations keep their hold.
+pub fn pending_trees(
+    ledger: &crate::ledger::Ledger,
+    launches: &crate::launch::Survey,
+) -> Result<Vec<crate::cleanup::Tree>> {
     let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-    Ok(records.into_iter().map(|record| record.tree).collect())
+    let mut pending = Vec::new();
+    for record in records {
+        let id = record.request_id.as_deref();
+        let settled = launches.consumed(id, &record.tree.path)
+            || id.map_or(Ok(false), |id| crate::work::preparation_failed(ledger, id))?;
+        if !settled {
+            pending.push(record.tree);
+        }
+    }
+    Ok(pending)
 }
 
 /// Release only this preparation owner. Legacy path-only callers cannot clear identified holds.
