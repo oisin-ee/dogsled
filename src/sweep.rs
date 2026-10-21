@@ -188,6 +188,9 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
     for warning in &applied.repositories {
         eprintln!("dogsled sweep: warning: {}: {}", warning.id, warning.detail);
     }
+    for hold in &applied.unlinked {
+        eprintln!("dogsled sweep: hold: {}: {}", hold.id, hold.detail);
+    }
     let finished_ms = crate::ledger::now_ms();
     let report = Report {
         ts_ms: finished_ms,
