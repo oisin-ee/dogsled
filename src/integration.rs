@@ -205,7 +205,7 @@ fn check_direct(
     // Branch positions: 0 is the fork, k is the branch's k-th commit.
     let mut points = vec![fork];
     points.extend(branch.iter().map(|c| c.id.clone()));
-    let Some(applied) = runs(shell, repo, &points, &net, &candidates)? else {
+    let Some(applied) = runs(shell, repo, &points, &branch, &net, &candidates)? else {
         return Ok(merge_tree_unchanged(shell, repo, base, reference)?
             .then_some(Integrated::MergeTree { base: name }));
     };
@@ -398,6 +398,7 @@ fn runs(
     shell: &dyn Shell,
     repo: &str,
     points: &[String],
+    branch: &[Commit],
     whole: &Changes,
     candidates: &[Commit],
 ) -> Result<Option<Vec<String>>> {
@@ -411,17 +412,20 @@ fn runs(
         if start > 0 && reached[start].is_none() {
             continue;
         }
+        // Only a reachable start needs a diff. Shorten its net with the already loaded
+        // first-parent changes, rather than spawning Git for every possible end.
+        let mut net = if start == 0 {
+            whole.clone()
+        } else {
+            changes(shell, repo, &points[start], &points[last])?
+        };
         for end in (start + 1..=last).rev() {
+            if end < last {
+                rewind(&mut net, &branch[end].changes);
+            }
             if reached[end].is_some() {
                 continue;
             }
-            let partial;
-            let net = if start == 0 && end == last {
-                whole
-            } else {
-                partial = changes(shell, repo, &points[start], &points[end])?;
-                &partial
-            };
             // A run that reverts itself changes nothing, so no commit applies it.
             if net.is_empty() {
                 continue;
@@ -431,7 +435,7 @@ fn runs(
                 if candidate.parent.is_empty() || !net.keys().all(|p| candidate.paths.contains(p)) {
                     continue;
                 }
-                if applies(shell, repo, net, candidate)? {
+                if applies(shell, repo, &net, candidate)? {
                     reached[end] = Some((start, candidate.id.clone()));
                     break;
                 }
@@ -462,6 +466,23 @@ struct Change {
 }
 
 type Changes = BTreeMap<String, Change>;
+
+/// Move the net diff's end to its first parent, keeping its start fixed. A path absent
+/// from the net currently equals its start; undoing its last change can expose work
+/// that a later commit reverted. Compare modes too, including additions and deletions.
+fn rewind(net: &mut Changes, last: &Changes) {
+    for (path, change) in last {
+        let value = net.entry(path.clone()).or_insert_with(|| Change {
+            modes: (change.modes.1.clone(), change.modes.1.clone()),
+            objects: (change.objects.1.clone(), change.objects.1.clone()),
+        });
+        value.modes.1.clone_from(&change.modes.0);
+        value.objects.1.clone_from(&change.objects.0);
+        if value.modes.0 == value.modes.1 && value.objects.0 == value.objects.1 {
+            net.remove(path);
+        }
+    }
+}
 
 /// The net paths and before/after objects changed by `from..to`.
 fn changes(shell: &dyn Shell, repo: &str, from: &str, to: &str) -> Result<Changes> {
@@ -695,6 +716,41 @@ mod tests {
         repo.git(&["switch", "-q", "main"]);
         repo.git(&["merge", "-q", "--squash", "feat"]);
         repo
+    }
+
+    #[test]
+    fn shortened_nets_match_git_across_main_merges_reverts_and_file_modes() {
+        let repo = branch_with_main_merge("shortened-nets");
+        repo.git(&["commit", "-q", "-m", "squash"]);
+        repo.git(&["switch", "-q", "feat"]);
+        repo.commit("a", "1\n2\n3\n", "revert own edit");
+        repo.git(&["update-index", "--chmod=+x", "b"]);
+        repo.git(&["commit", "-q", "-m", "mode"]);
+        repo.git(&["mv", "upstream", "renamed"]);
+        repo.git(&["commit", "-q", "-m", "rename"]);
+        repo.git(&["rm", "-q", "a"]);
+        repo.git(&["commit", "-q", "-m", "delete"]);
+        let fork = repo.git(&["merge-base", "main", "feat"]);
+        let branch = commits(
+            &Isolated,
+            repo.path(),
+            &format!("{fork}..feat"),
+            &["--first-parent"],
+            &[],
+        )
+        .unwrap();
+        let mut points = vec![fork];
+        points.extend(branch.iter().map(|c| c.id.clone()));
+        for start in 0..branch.len() {
+            let mut net = changes(&Isolated, repo.path(), &points[start], "feat").unwrap();
+            for end in (start + 1..=branch.len()).rev() {
+                assert_eq!(
+                    net,
+                    changes(&Isolated, repo.path(), &points[start], &points[end]).unwrap()
+                );
+                rewind(&mut net, &branch[end - 1].changes);
+            }
+        }
     }
 
     #[test]
