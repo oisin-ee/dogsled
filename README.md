@@ -11,13 +11,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.18.0
+mise use github:oisin-ee/dogsled@v0.18.1
 ```
 
 Pi (extension, tools, and skill), from npm or as part of `@oisin-ee/oisinpi`:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.18.0
+pi install npm:@oisin-ee/pi-dogsled@0.18.1
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -25,14 +25,14 @@ At session start the extension compares its version with `dogsled --version` and
 Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/dogsled#v0.18.0
+claude plugin marketplace add oisin-ee/dogsled#v0.18.1
 claude plugin install dogsled@dogsled
 ```
 
 Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/dogsled --ref v0.18.0
+codex plugin marketplace add oisin-ee/dogsled --ref v0.18.1
 codex plugin add dogsled@dogsled
 ```
 
@@ -42,7 +42,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (right-side work board):
 
 ```sh
-herdr plugin install oisin-ee/dogsled --ref v0.18.0 --yes
+herdr plugin install oisin-ee/dogsled --ref v0.18.1 --yes
 ```
 
 Harness plugins use the binary on `PATH`. They do not install it or start host services.
