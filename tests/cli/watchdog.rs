@@ -47,6 +47,9 @@ case "$*" in
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
  *'rev-parse refs/heads/feature refs/remotes/origin/main') printf 'abc\nmain\n' ;;
  *'merge-base refs/remotes/origin/main refs/heads/feature') printf 'fork\n' ;;
+ *'diff --no-ext-diff --no-textconv --raw -z --no-renames --no-abbrev fork refs/heads/feature --')
+ printf ':100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0file\0' ;;
+ *'for-each-ref --contains refs/heads/feature --format=%(objectname) %(refname) refs/heads/ refs/remotes/') printf 'abc refs/heads/feature\n' ;;
  *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --first-parent fork..refs/heads/feature --')
  printf '\001abc fork\0\n:100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0file\0' ;;
  *'log --no-ext-diff --no-textconv --reverse --no-renames --raw --no-abbrev --diff-merges=first-parent -z --format=%x01%H %P --no-merges fork..refs/remotes/origin/main -- :(literal)file') ;;

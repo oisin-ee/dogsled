@@ -7,7 +7,10 @@
 //! changed. One run is a squash of the whole branch. Several runs are a stack whose lower
 //! branches merged first. Pull request hosts and merge styles do not matter.
 //!
-//! Each path merges on its own, from blob ids in `git log --raw`, with `git merge-file` only
+//! Runs compare their net diff, not every historical path, so merges from main do not count
+//! as branch work. A tip also lands through a containing ref whose work is integrated.
+//!
+//! Each path merges on its own, from blob ids in Git's raw diffs, with `git merge-file` only
 //! where both sides changed a file. A doubtful path is a conflict, so the error is to keep a
 //! branch, never to remove one. Finally, a clean `git merge-tree` result identical to the
 //! default branch's tree proves that merging the branch would change nothing.
@@ -30,6 +33,8 @@ pub enum Integrated {
     Stacked { base: String, commits: Vec<String> },
     /// A clean merge into `base` produces its existing tree.
     MergeTree { base: String },
+    /// A local or remote-tracking ref contains this tip and is itself integrated.
+    Contained { reference: String },
 }
 
 fn abbreviated(commit: &str) -> &str {
@@ -40,6 +45,7 @@ impl std::fmt::Display for Integrated {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Deleted => write!(f, "deleted"),
+            Self::Contained { reference } => write!(f, "integrated through {reference}"),
             Self::Ancestor { base } => write!(f, "merged into {base}"),
             Self::MergeTree { base } => {
                 write!(f, "integrated into {base} by merge-tree (no changes)")
@@ -106,13 +112,56 @@ pub fn check(shell: &dyn Shell, repo: &str, branch: &str) -> Result<Option<Integ
 /// The same integration proof for a branch, detached HEAD, or immutable commit ID.
 /// Equality is ancestry too: pending preparation is a hold, not unheld work.
 pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Option<Integrated>> {
-    let branch = reference;
     let base = base(shell, repo)?;
-    let name = short(&base);
+    if let Some(integrated) = check_direct(shell, repo, reference, &base)? {
+        return Ok(Some(integrated));
+    }
+    let containing = git(
+        shell,
+        repo,
+        &[
+            "for-each-ref",
+            "--contains",
+            reference,
+            "--format=%(objectname) %(refname)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )?;
+    if !containing.ok() {
+        return Err(failed(repo, "list containing refs", &containing));
+    }
+    let mut seen = BTreeSet::new();
+    for line in containing.stdout.lines() {
+        let Some((tip, containing_ref)) = line.split_once(' ') else {
+            return Err(Error::Invalid(format!("{repo}: invalid containing ref")));
+        };
+        if containing_ref == reference || tip == reference || !seen.insert(tip) {
+            continue;
+        }
+        // No recursion: every transitive container also contains the original tip and
+        // is already in this list. Aliases cannot prove each other integrated.
+        if check_direct(shell, repo, containing_ref, &base)?.is_some() {
+            return Ok(Some(Integrated::Contained {
+                reference: containing_ref.into(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn check_direct(
+    shell: &dyn Shell,
+    repo: &str,
+    reference: &str,
+    base: &str,
+) -> Result<Option<Integrated>> {
+    let branch = reference;
+    let name = short(base);
     let ancestor = git(
         shell,
         repo,
-        &["merge-base", "--is-ancestor", reference, &base],
+        &["merge-base", "--is-ancestor", reference, base],
     )?;
     match ancestor.status {
         0 => return Ok(Some(Integrated::Ancestor { base: name })),
@@ -125,7 +174,7 @@ pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Optio
             ));
         }
     }
-    let fork = git(shell, repo, &["merge-base", &base, reference])?;
+    let fork = git(shell, repo, &["merge-base", base, reference])?;
     // Unrelated histories share no fork point, so nothing on base can apply the branch.
     if fork.status == 1 {
         return Ok(None);
@@ -134,18 +183,11 @@ pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Optio
         return Err(failed(repo, &format!("find the fork of {branch}"), &fork));
     }
     let fork = fork.stdout.trim().to_string();
-    let branch = commits(
-        shell,
-        repo,
-        &format!("{fork}..{reference}"),
-        &["--first-parent"],
-        &[],
-    )?;
-    let touched: BTreeSet<String> = branch.iter().flat_map(|c| c.paths.clone()).collect();
-    if touched.is_empty() {
+    let net = changes(shell, repo, &fork, reference)?;
+    if net.is_empty() {
         return Ok(Some(Integrated::Ancestor { base: name }));
     }
-    let pathspec: Vec<String> = touched.iter().map(|p| format!(":(literal){p}")).collect();
+    let pathspec: Vec<String> = net.keys().map(|p| format!(":(literal){p}")).collect();
     let candidates = commits(
         shell,
         repo,
@@ -153,11 +195,18 @@ pub fn check_ref(shell: &dyn Shell, repo: &str, reference: &str) -> Result<Optio
         &["--no-merges"],
         &pathspec,
     )?;
+    let branch = commits(
+        shell,
+        repo,
+        &format!("{fork}..{reference}"),
+        &["--first-parent"],
+        &[],
+    )?;
     // Branch positions: 0 is the fork, k is the branch's k-th commit.
     let mut points = vec![fork];
     points.extend(branch.iter().map(|c| c.id.clone()));
-    let Some(applied) = runs(shell, repo, &points, &branch, &candidates)? else {
-        return Ok(merge_tree_unchanged(shell, repo, &base, reference)?
+    let Some(applied) = runs(shell, repo, &points, &net, &candidates)? else {
+        return Ok(merge_tree_unchanged(shell, repo, base, reference)?
             .then_some(Integrated::MergeTree { base: name }));
     };
     Ok(Some(match <[String; 1]>::try_from(applied) {
@@ -349,9 +398,12 @@ fn runs(
     shell: &dyn Shell,
     repo: &str,
     points: &[String],
-    branch: &[Commit],
+    whole: &Changes,
     candidates: &[Commit],
 ) -> Result<Option<Vec<String>>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
     let last = points.len() - 1;
     // reached[j] is the run start and the commit that reach position j.
     let mut reached: Vec<Option<(usize, String)>> = vec![None; points.len()];
@@ -363,29 +415,21 @@ fn runs(
             if reached[end].is_some() {
                 continue;
             }
-            let touched: BTreeSet<&String> =
-                branch[start..end].iter().flat_map(|c| &c.paths).collect();
-            let mut net = None;
-            // Newest candidate first, as `git log` lists them without --reverse.
+            let partial;
+            let net = if start == 0 && end == last {
+                whole
+            } else {
+                partial = changes(shell, repo, &points[start], &points[end])?;
+                &partial
+            };
+            // A run that reverts itself changes nothing, so no commit applies it.
+            if net.is_empty() {
+                continue;
+            }
+            // Newest candidate first.
             for candidate in candidates.iter().rev() {
-                if candidate.parent.is_empty()
-                    || !touched.iter().all(|p| candidate.paths.contains(*p))
-                {
+                if candidate.parent.is_empty() || !net.keys().all(|p| candidate.paths.contains(p)) {
                     continue;
-                }
-                // A run that reverts itself changes nothing, so no commit applies it.
-                let net = match &net {
-                    Some(net) => net,
-                    None => net.insert(changes(
-                        shell,
-                        repo,
-                        &points[start],
-                        &points[end],
-                        &touched,
-                    )?),
-                };
-                if net.is_empty() {
-                    break;
                 }
                 if applies(shell, repo, net, candidate)? {
                     reached[end] = Some((start, candidate.id.clone()));
@@ -419,16 +463,9 @@ struct Change {
 
 type Changes = BTreeMap<String, Change>;
 
-/// What `from..to` changed on `paths`.
-fn changes(
-    shell: &dyn Shell,
-    repo: &str,
-    from: &str,
-    to: &str,
-    paths: &BTreeSet<&String>,
-) -> Result<Changes> {
-    let pathspec: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
-    let mut args = vec![
+/// The net paths and before/after objects changed by `from..to`.
+fn changes(shell: &dyn Shell, repo: &str, from: &str, to: &str) -> Result<Changes> {
+    let args = [
         "diff",
         "--no-ext-diff",
         "--no-textconv",
@@ -440,7 +477,6 @@ fn changes(
         to,
         "--",
     ];
-    args.extend(pathspec.iter().map(String::as_str));
     let out = git(shell, repo, &args)?;
     if !out.ok() {
         return Err(failed(repo, &format!("list changes {from}..{to}"), &out));
@@ -645,6 +681,107 @@ mod tests {
         repo.commit("c", "later\n", "after squash");
         repo.git(&["switch", "-q", "main"]);
         assert_eq!(repo.check("feat"), None);
+    }
+
+    fn branch_with_main_merge(name: &str) -> Repo {
+        let repo = Repo::new(name);
+        repo.git(&["switch", "-q", "-c", "feat"]);
+        repo.commit("a", "1\n2\nthree\n", "own first");
+        repo.git(&["switch", "-q", "main"]);
+        repo.commit("upstream", "main only\n", "upstream change");
+        repo.git(&["switch", "-q", "feat"]);
+        repo.git(&["merge", "-q", "--no-ff", "-m", "merge main", "main"]);
+        repo.commit("b", "own second\n", "own second");
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["merge", "-q", "--squash", "feat"]);
+        repo
+    }
+
+    #[test]
+    fn squash_after_merging_main_compares_only_the_branch_net_work() {
+        let repo = branch_with_main_merge("squash-main-merge");
+        repo.git(&["commit", "-q", "-m", "squash"]);
+        let squash = repo.git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            repo.check("feat"),
+            Some(Integrated::Applied {
+                base: "main".into(),
+                commit: squash,
+            })
+        );
+    }
+
+    #[test]
+    fn squash_after_merging_main_without_one_changed_line_is_not_integrated() {
+        let repo = branch_with_main_merge("squash-main-partial");
+        // Both paths still change, but the squash omits the branch's last line.
+        repo.commit("a", "one\n2\n3\n", "incomplete squash");
+        assert_eq!(repo.check("feat"), None);
+    }
+
+    #[test]
+    fn a_reverted_path_does_not_prevent_the_net_squash_proof() {
+        let repo = Repo::new("squash-reverted-path");
+        repo.git(&["switch", "-q", "-c", "feat"]);
+        repo.commit("a", "temporary\n", "temporary edit");
+        repo.commit("b", "kept\n", "own work");
+        repo.commit("a", "1\n2\n3\n", "revert temporary edit");
+        repo.git(&["switch", "-q", "main"]);
+        repo.git(&["merge", "-q", "--squash", "feat"]);
+        repo.git(&["commit", "-q", "-m", "squash"]);
+        assert!(applied(repo.check("feat").as_ref()));
+    }
+
+    #[test]
+    fn a_tip_lands_through_a_squashed_local_or_remote_containing_ref() {
+        for remote in [false, true] {
+            let repo = Repo::new(if remote {
+                "contained-remote"
+            } else {
+                "contained-local"
+            });
+            repo.git(&["switch", "-q", "-c", "lower"]);
+            repo.commit("a", "lower\n", "lower");
+            let lower = repo.git(&["rev-parse", "HEAD"]);
+            repo.git(&["switch", "-q", "-c", "upper"]);
+            repo.commit("a", "upper replaces lower\n", "upper");
+            repo.git(&["switch", "-q", "main"]);
+            repo.git(&["merge", "-q", "--squash", "upper"]);
+            repo.git(&["commit", "-q", "-m", "squash upper"]);
+            let reference = if remote {
+                repo.git(&["update-ref", "refs/remotes/origin/upper", "upper"]);
+                repo.git(&["branch", "-D", "upper"]);
+                "refs/remotes/origin/upper"
+            } else {
+                "refs/heads/upper"
+            };
+            let found = repo.check("lower").unwrap();
+            assert_eq!(
+                found,
+                Integrated::Contained {
+                    reference: reference.into()
+                }
+            );
+            assert_eq!(found.to_string(), format!("integrated through {reference}"));
+            assert_eq!(
+                check_ref(&Isolated, repo.path(), &lower).unwrap(),
+                Some(found)
+            );
+        }
+    }
+
+    #[test]
+    fn containing_refs_and_aliases_without_integration_do_not_prove_each_other() {
+        let repo = Repo::new("contained-unmerged");
+        repo.git(&["switch", "-q", "-c", "lower"]);
+        repo.commit("a", "lower\n", "lower");
+        repo.git(&["branch", "alias"]);
+        repo.git(&["update-ref", "refs/remotes/origin/alias", "HEAD"]);
+        repo.git(&["switch", "-q", "-c", "upper"]);
+        repo.commit("b", "upper\n", "upper");
+        repo.git(&["switch", "-q", "main"]);
+        assert_eq!(repo.check("lower"), None);
+        assert_eq!(repo.check("upper"), None);
     }
 
     #[test]

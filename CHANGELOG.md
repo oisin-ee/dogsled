@@ -7,6 +7,8 @@ All notable changes to this project are documented in this file.
 - Pi runs the stop gate on every completed stop. Before, it skipped stops that ended on the assistant's message, which is every normal stop in Pi 1.3, so Pi agents never requested a cleanup pass or heard gate reminders.
 - Worktree removal uses the existing 10-minute setup limit instead of the 30-second routine limit, including cleanup after failed setup.
 - Pure tracked deletions lose nothing when the default branch or refreshed remote refs hold HEAD. Cleanup restores only those deleted paths before unforced removal. Other dirt still prevents removal. Board facts use the same loss rule.
+- Squash detection compares the branch's net paths and before/after objects. Merges from main and reverted edits no longer block exact squash proofs.
+- A tip also counts as landed through an integrated local or remote-tracking ref that contains it. The result names that ref.
 
 - Service status uses the service lock instead of snapshot age. Status shows age separately, and finished children can close despite late snapshots. Admission and freshness-sensitive readers retain the 30-second limit. Older peers retain age-based liveness during upgrades.
 - Tick observations deduplicate shared checkouts and bound parallel checkout and shell-pane reads by available CPUs. Dirty checks and automatic-close guards remain unchanged.
