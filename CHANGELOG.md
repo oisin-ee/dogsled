@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-- `dogsled status` now says `unreachable: <short ssh error>` for a peer that SSH cannot read, with its last snapshot age. `service: down` stays only for a host that answers while its service is not running. A sleeping peer no longer looks like a stopped service.
+- `dogsled status` now says `unreachable: <category>` for a peer that SSH cannot read, with its last snapshot age. The category is one of timeout, connection refused, host not resolved, authentication failed, remote command failed, unexpected output, deadline reached, or other. Status never shows raw SSH or remote error text, which can hold secrets. `service: down` stays only for a host that answers while its service is not running. A sleeping peer no longer looks like a stopped service.
 - Herdr now hosts a right-side Dogsled board with cached quota age, stale marking, work rows, and pi-todo’s unchanged rendered lines. Pi reuses each tab’s split and keeps the existing widget only without reachable Herdr. A pane Dogsled launched never opens a board: it keeps the widget, and its todo lines appear on the parent's board. `/dogsled` remains available in both modes.
 
 ## 0.17.0 - 2026-10-21

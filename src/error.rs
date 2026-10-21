@@ -28,7 +28,12 @@ pub enum Error {
         stderr: String,
     },
     #[error("ssh {target}: {detail}")]
-    Ssh { target: String, detail: String },
+    Ssh {
+        target: String,
+        detail: String,
+        /// The safe category of the failure; status shows this and never `detail`.
+        failure: crate::hosts::Failure,
+    },
     #[error("unexpected output from {origin}: {detail}")]
     Parse { origin: String, detail: String },
     #[error("unknown host {0}; see `dogsled status`")]

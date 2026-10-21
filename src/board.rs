@@ -1116,6 +1116,7 @@ mod tests {
             }),
             headroom: None,
             error: None,
+            failure: None,
             jobs: Vec::new(),
             retry_ms: None,
         }
