@@ -358,9 +358,84 @@ fn settlement(unit: &Prepared) -> Result<Value> {
     })
 }
 
+/// The reason a committed unit never started, when its own durable facts prove it: the ticket
+/// that carried it ended `failed` or `cancelled`, and no launch request was ever saved. A saved
+/// launch may have reached a host, so its outcome stays unknown until host evidence settles it.
+fn unlaunched(attempt: &Attempt, ticket: &work::Ticket) -> Option<String> {
+    let unit = attempt.unit.as_ref()?;
+    if unit.committed.is_none()
+        || unit.abandoned.is_some()
+        || unit.returned.is_some()
+        || unit.terminal_receipt.is_some()
+        || attempt.launch.is_some()
+        || attempt.result.is_some()
+        || ticket.request.id != unit.execution.request_id
+    {
+        return None;
+    }
+    match ticket.state.as_str() {
+        "failed" => Some(format!(
+            "launch failed before the worker started: ticket {}: {}",
+            ticket.id,
+            ticket.error.as_deref().unwrap_or("no error recorded")
+        )),
+        "cancelled" => Some(format!(
+            "launch cancelled before the worker started: ticket {}",
+            ticket.id
+        )),
+        _ => None,
+    }
+}
+
+/// Settle each committed unit whose ticket ended without a launch as `not_started`, so the
+/// owner's provider releases its claim and can retry. Failed and cancelled tickets are final:
+/// `enqueue` reuses them, `commit` returns their receipt, and admission never claims them, so
+/// no later launch can contradict this event. The admission lock orders it with commit.
+pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
+    let tickets = work::queue(ledger)?;
+    if !tickets
+        .iter()
+        .any(|t| matches!(t.state.as_str(), "failed" | "cancelled"))
+    {
+        return Ok(());
+    }
+    let attempts = ledger.child("admissions");
+    for ticket in tickets
+        .iter()
+        .filter(|t| matches!(t.state.as_str(), "failed" | "cancelled"))
+    {
+        let id = &ticket.request.id;
+        let file = format!("{id}.json");
+        if crate::jobs::validate_id(id).is_err() {
+            continue;
+        }
+        attempts.with_lock(id, || {
+            let Some(mut attempt) = attempts.read::<Attempt>(&file)? else {
+                return Ok(());
+            };
+            let Some(reason) = unlaunched(&attempt, ticket) else {
+                return Ok(());
+            };
+            let Some(unit) = attempt.unit.as_mut() else {
+                return Ok(());
+            };
+            unit.abandoned = Some(NotStarted {
+                version: 1,
+                event_id: format!("{}-not-started", unit.execution.request_id),
+                origin: unit.origin.clone(),
+                execution: unit.execution.clone(),
+                result: NotStartedResult::NotStarted { reason },
+            });
+            attempts.write(&file, &attempt)
+        })?;
+    }
+    Ok(())
+}
+
 /// Existing inbox/refresh lane imports immutable host evidence. Missing or unreachable
 /// hosts prove nothing; this never manufactures stopped from probes or closed items.
 pub fn refresh(fleet: &Fleet) -> Result<()> {
+    settle_unlaunched(fleet.ledger)?;
     let attempts = fleet.ledger.child("admissions");
     for file in records(&attempts)? {
         let Some(attempt) = attempts.read::<Attempt>(&file)? else {
