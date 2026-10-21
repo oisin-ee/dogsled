@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.21.0 - 2026-10-22
 
 - A long task launches reliably. Herdr types the launch as one terminal line of at most 1024 bytes, and the child contract alone used about 600 of them, so a task of a few hundred bytes failed with `agent_start_input_failed`. The task now always goes to `launches/<id>.task.md`, and Pi and Claude read the contract from `launches/<id>.contract.md`, so the line no longer depends on the task. The host that runs the child checks the line against its own paths before it creates a pane; the caller's paths never refuse a peer launch.
 - Prune and the sweep no longer plan to remove a worktree while the host snapshot reports a shell in it idle for less than 15 minutes. Before, the worktree that `place` made held only an idle shell, so a pass could plan its removal seconds after the owner started work there, and the apply-time check then failed with `worktree identity changed` when the owner's first commit moved HEAD. Such a shell now holds the checkout until it has been idle for 15 minutes, the shell rule's age; a shell with no reported age holds nothing, as before. An explicit `close` and the identity check are unchanged.
