@@ -329,6 +329,7 @@ An idle or done agent that has not called `dogsled done` holds its checkout in p
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
 The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
 A registered worktree whose path is absent is a stale registration. Prune and the sweep remove the record only.
+A planned worktree that something else removes before its removal runs is not a failure. When Git no longer lists it and its path is absent, the pass drops its registration and reports it as already removed. When Git no longer lists it but its path still exists, the removal is refused.
 Prune and the sweep use one pane rule. Both keep the caller's pane and focused panes.
 An empty shell closes when its job ended, its directory disappeared, its launch is final, or its agent item closed.
 A final launch was refused, never attempted, or has an unknown outcome with no agent in its terminal. Cleanup preserves launch receipts and checks terminal ownership under the launch locks.

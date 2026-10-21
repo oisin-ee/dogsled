@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - A cleanup recheck that refuses an entry because its state changed after the plan is a skip, not a failure. Live work can make a planned worktree dirty or held, or a pane busy, before the removal. The entry stays, and the pass and prune list it as `skipped:` with the same `refuse` reason. `Applied` has a new `skipped` list, and the stop gate and the status failure count ignore it. Identity changes, missing entries, command errors, and unreadable evidence still fail. The recheck is as strict as before.
+- A cleanup pass no longer fails with `worktree identity disappeared` when another actor removes a planned worktree after the survey. When Git no longer lists the worktree and its path is absent, the pass drops the registration and reports it as already removed. A path that Git no longer lists but that still exists is still refused.
 
 ## 0.19.0 - 2026-10-21
 
