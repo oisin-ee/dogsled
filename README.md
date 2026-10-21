@@ -432,6 +432,57 @@ repositories = []  # for example "~/.config/mise"; `~/` is the home directory
 
 Host policy has no worktree hooks. A `[hooks]` table is an unknown key, so it is an error. Worktree setup and teardown belong to each repository.
 
+### Quota snapshots
+
+```toml
+[quota]
+management_url = "https://cliproxy-admin.tail10e7b9.ts.net"
+```
+
+The URL is an HTTPS origin, without a path or credentials. No management key belongs in configuration.
+Only macOS collects quota, and only when this Keychain lookup succeeds:
+
+```sh
+security find-generic-password -s dogsled -a cliproxy-management -w
+```
+
+This command prints the key. Dogsled captures it internally and never logs it.
+Create the generic-password item through Keychain Access, with service `dogsled` and account `cliproxy-management`.
+The collector passes the key to curl through stdin, never command arguments or a file.
+Linux hosts never read the key. A missing URL or unreadable Keychain item makes quota commands use the local cache.
+
+```sh
+dogsled quota
+dogsled quota --json
+dogsled quota --json --cached
+dogsled quota --refresh
+```
+
+`--cached` reads only `$DOGSLED_STATE/quota.json`, even when it is older than 15 minutes.
+Without `--cached`, the collector refreshes snapshots older than five minutes. `--refresh` forces collection.
+The service also refreshes every five minutes. A shared lock prevents concurrent collection, and failed collection backs off.
+Each successful collection pushes the snapshot to enabled Herdr peers over SSH. Failed pushes retry with backoff.
+Peers need a dogsled version that supports quota storage. No management credential leaves the collector.
+
+The version-1 contract contains `version`, `fetched_ms`, `source`, and `pools`.
+`source` identifies the collector by hostname. Each row contains these fields:
+
+- `pool`: `claude`, `codex`, or `minimax`.
+- `account` and `window`: the account label and provider window name.
+- `used_pct`: a number from 0 to 100.
+- `resets_ms`: Unix milliseconds, or `null` when unavailable.
+- `error`: a safe error description, or `null`.
+
+Claude windows are `five_hour`, `seven_day`, `seven_day_opus`, and `seven_day_sonnet`.
+Codex windows are `primary` and `secondary`. MiniMax windows are `interval` and `weekly`.
+MiniMax account labels use `minimax-N`, where N is the position in the configured API-key list.
+A failed account has error rows with zero usage and no reset time. Consumers must treat these rows as unknown, not available quota.
+A pool is exhausted when every account has a window at 100% with a reset time in the future.
+Human output shows each window, reset time, and snapshot age. No snapshot produces an empty version-1 snapshot with `fetched_ms: 0`.
+
+The hidden `quota --store` command accepts one validated snapshot on stdin and writes it atomically.
+Older pushed snapshots cannot replace newer snapshots. The SSH transport uses the same writer through `host quota-store`.
+
 ### Repository configuration
 
 An optional `dogsled.toml` at the root of the repository's main checkout configures its worktrees. Without the file, the defaults apply.

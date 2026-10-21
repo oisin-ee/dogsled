@@ -39,6 +39,19 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
         self.run(program, args)
     }
 
+    /// Input is never part of argv or diagnostics. Implementations must bound writing and
+    /// waiting together, and must not log the input.
+    fn run_input_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        let _ = (program, args, input, timeout);
+        Err(Error::Invalid("shell does not support stdin input".into()))
+    }
+
     /// Setup has a separate ceiling; the command deadline still takes precedence.
     fn run_setup(&self, program: &str, args: &[String]) -> Result<Output> {
         self.run_bounded(
@@ -93,23 +106,72 @@ impl Shell for System {
         args: &[String],
         timeout: std::time::Duration,
     ) -> Result<Output> {
+        self.execute(program, args, None, timeout)
+    }
+
+    fn run_input_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        self.execute(program, args, Some(input), timeout)
+    }
+
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        self.run_bounded(program, args, self.budget.remaining(program)?)
+    }
+}
+
+impl System {
+    fn execute(
+        &self,
+        program: &str,
+        args: &[String],
+        input: Option<&[u8]>,
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        use std::io::Write as _;
         use std::os::unix::process::CommandExt as _;
         let operation = format!("{program} {}", args.join(" "));
         let timeout = self.budget.with_limit(&operation, timeout)?;
         if timeout.is_zero() {
             return Err(Error::Deadline(operation));
         }
-        let child = Command::new(program)
+        let mut child = Command::new(program)
             .args(args)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()?;
         let pid = child.id();
+        let writer = input.map(|input| {
+            let input = input.to_vec();
+            let stdin = child.stdin.take();
+            std::thread::spawn(move || -> std::io::Result<()> {
+                if let Some(mut stdin) = stdin {
+                    stdin.write_all(&input)?;
+                }
+                Ok(())
+            })
+        });
         let (send, recv) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let _ = send.send(child.wait_with_output());
+            let output = child.wait_with_output();
+            let written = writer.map(std::thread::JoinHandle::join);
+            let result = output.and_then(|output| {
+                if let Some(written) = written {
+                    written.map_err(|_| std::io::Error::other("stdin worker failed"))??;
+                }
+                Ok(output)
+            });
+            let _ = send.send(result);
         });
         let result = match recv.recv_timeout(timeout) {
             Ok(result) => result.map_err(Error::from),
@@ -137,10 +199,6 @@ impl Shell for System {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
-    }
-
-    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
-        self.run_bounded(program, args, self.budget.remaining(program)?)
     }
 }
 
@@ -194,6 +252,16 @@ impl Shell for Fake {
             limits.push((format!("{program} {}", args.join(" ")), timeout));
         }
         self.run(program, args)
+    }
+
+    fn run_input_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        _input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        self.run_bounded(program, args, timeout)
     }
 
     /// Files are scripted under the key `read <path>`.

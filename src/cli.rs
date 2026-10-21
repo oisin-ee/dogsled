@@ -25,6 +25,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Read quota windows from the collector or the local snapshot.
+    Quota(QuotaArgs),
     /// Publish local measurements, reconcile owned work, and admit queued actions.
     Serve {
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
@@ -218,6 +220,19 @@ pub enum Command {
     Host(HostCommand),
 }
 
+#[derive(Debug, Args)]
+pub struct QuotaArgs {
+    /// Never access Keychain or the network.
+    #[arg(long, conflicts_with_all = ["refresh", "store"])]
+    pub cached: bool,
+    /// Refresh even when the snapshot is younger than five minutes.
+    #[arg(long, conflicts_with = "store")]
+    pub refresh: bool,
+    /// Receive a validated snapshot on stdin.
+    #[arg(long, hide = true)]
+    pub store: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum UnitCommand {
     /// Uncommitted requests for this owner, for confirmed runtime-boundary recovery.
@@ -339,6 +354,8 @@ pub enum HookCommand {
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
     Snapshot,
+    /// SSH transport for quota --store.
+    QuotaStore,
     /// Put one inbox record, sent from another host.
     InboxPut {
         #[arg(long)]

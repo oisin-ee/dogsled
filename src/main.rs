@@ -32,6 +32,7 @@ mod plan;
 mod prepare;
 mod probe;
 mod profiles;
+mod quota;
 mod repository;
 mod runtime;
 mod service;
@@ -145,6 +146,10 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         cleanup: &policy.cleanup,
     };
     match cli.command {
+        Command::Quota(args) => {
+            let snapshot = quota::command(&shell, &ledger, &policy, &home, &args)?;
+            print(cli.json, &snapshot, || snapshot.render(now_ms()))?;
+        }
         Command::Serve { interval, once } => service::serve(
             &node,
             &policy,
@@ -419,6 +424,11 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             String::new,
         )?,
         HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,
+        HostCommand::QuotaStore => print(
+            true,
+            &quota::store(node.ledger, std::io::stdin().lock())?,
+            String::new,
+        )?,
         HostCommand::Reserve { id, thresholds } => {
             let node = Node {
                 thresholds: thresholds.over(node.thresholds),

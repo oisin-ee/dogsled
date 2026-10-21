@@ -5,6 +5,7 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - A profile's `prompt` can be a list of files. Each one is appended to the system prompt in order, so team profiles share a common prompt and add their own.
+- `dogsled quota` collects Claude, Codex, and MiniMax quota on a configured Mac through a Keychain-only management key. Versioned snapshots refresh every five minutes, persist atomically, and reach enabled peers over SSH. Cached reads never contact the provider. Account errors exclude credentials and response bodies.
 - Pi runs the stop gate on every completed stop. Before, it skipped stops that ended on the assistant's message, which is every normal stop in Pi 1.3, so Pi agents never requested a cleanup pass or heard gate reminders.
 - Worktree removal uses the existing 10-minute setup limit instead of the 30-second routine limit, including cleanup after failed setup.
 - Pure tracked deletions lose nothing when the default branch or refreshed remote refs hold HEAD. Cleanup restores only those deleted paths before unforced removal. Other dirt still prevents removal. Board facts use the same loss rule.

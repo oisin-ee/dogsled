@@ -19,9 +19,16 @@ enum Lane {
     Admission,
     Children,
     Inbox,
+    Quota,
 }
 
-const LANES: [Lane; 4] = [Lane::Watchdog, Lane::Admission, Lane::Children, Lane::Inbox];
+const LANES: [Lane; 5] = [
+    Lane::Watchdog,
+    Lane::Admission,
+    Lane::Children,
+    Lane::Inbox,
+    Lane::Quota,
+];
 
 enum Event {
     Finished(usize, Result<()>),
@@ -84,6 +91,9 @@ impl Drop for Listener {
 
 fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result<()> {
     let shell = System::default();
+    if lane == Lane::Quota {
+        return crate::quota::read(&shell, ledger, policy, &home, false, false).map(|_| ());
+    }
     let fleet = if items::list(ledger)?.is_empty()
         && work::queue(ledger)?.is_empty()
         && !crate::inbox::pending(ledger)?
@@ -108,6 +118,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
         Lane::Admission => work::tick(&fleet, now_ms()),
         Lane::Children => crate::sweep::children(&fleet, now_ms()),
         Lane::Inbox => crate::inbox::tick(&fleet, now_ms()),
+        Lane::Quota => Ok(()),
     }
 }
 
