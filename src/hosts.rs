@@ -354,6 +354,13 @@ impl<'a> Fleet<'a> {
                     host.label
                 )));
             }
+            let refusal = serde_json::from_str::<serde_json::Value>(&out.stdout)
+                .ok()
+                .and_then(|v| {
+                    v["code"]
+                        .as_str()
+                        .and_then(crate::error::Refusal::from_code)
+                });
             let detail = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 .ok()
                 .and_then(|v| v["error"].as_str().map(str::to_owned))
@@ -362,6 +369,7 @@ impl<'a> Fleet<'a> {
             return Err(Error::Ssh {
                 target: host.label.clone(),
                 failure: Failure::of_ssh(out.status, &out.stderr),
+                refusal,
             });
         }
         serde_json::from_str(&out.stdout).map_err(|e| Error::Parse {
@@ -624,6 +632,7 @@ impl<'a> Fleet<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Refusal;
     use crate::ledger::new_id;
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
@@ -982,6 +991,41 @@ mod tests {
                 error.to_string().contains(category) || matches!(error, Error::Deadline(_)),
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn a_peer_refusal_code_maps_to_a_fixed_message_and_unknown_text_stays_hidden() {
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let read = |stdout: String| {
+            let out = crate::shell::Output {
+                status: 2,
+                stdout,
+                stderr: String::new(),
+            };
+            Fleet::parse_remote::<serde_json::Value>(&host, &["x".into()], &out)
+                .unwrap_err()
+                .to_string()
+        };
+        for refusal in [Refusal::NoInboxReader, Refusal::CloneFailed] {
+            let shown = read(format!(
+                "{{\"error\":\"{SECRET}\",\"code\":\"{}\"}}",
+                refusal.code()
+            ));
+            assert_eq!(shown, format!("ssh peer: {}", refusal.message()));
+            assert!(!shown.contains("EXAMPLE_SECRET"), "{shown}");
+        }
+        for stdout in [
+            format!("{{\"error\":\"{SECRET}\",\"code\":\"SOMETHING_NEW\"}}"),
+            format!("{{\"error\":\"{SECRET}\",\"code\":7}}"),
+            format!("{{\"error\":\"{SECRET}\"}}"),
+        ] {
+            let shown = read(stdout);
+            assert_eq!(shown, "ssh peer: remote command failed");
         }
     }
 
