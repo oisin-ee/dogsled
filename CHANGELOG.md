@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- A cleanup pass no longer fails with `worktree identity disappeared` when another actor removes a planned worktree after the survey. When Git no longer lists the worktree and its path is absent, the pass drops the registration and reports it as already removed. A path that Git no longer lists but that still exists is still refused.
+
 ## 0.19.0 - 2026-10-21
 
 - `dogsled quota` reports every enabled CLIProxy credential that CLIProxy marks `supports_quota`, other than Claude and Codex, through CLIProxy's `quota/fetch` route. Each bucket is a row with the lowercased provider as its pool. A failed fetch gives an error row for that account. Snapshot version 1 and the Claude and Codex rows are unchanged.

@@ -1499,16 +1499,25 @@ fn disposition(node: &Node<'_>, tree: &Tree, seen: &Seen) -> Result<Disposition>
     })
 }
 
-fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss::Evidence)> {
-    let current = repository_trees(node.shell, &planned.repo)?
+/// The planned worktree's holders and fresh evidence, or `None` when it is already gone:
+/// Git no longer lists it and its path is absent. A path that Git no longer lists but that
+/// still exists is refused, because it may hold content.
+fn validate_tree(
+    node: &Node<'_>,
+    planned: &Tree,
+) -> Result<Option<(Usage, crate::loss::Evidence)>> {
+    let Some(current) = repository_trees(node.shell, &planned.repo)?
         .into_iter()
         .find(|t| t.path == planned.path)
-        .ok_or_else(|| {
-            Error::Invalid(format!(
-                "refuse {}: worktree identity disappeared",
-                planned.path
-            ))
-        })?;
+    else {
+        if missing(&planned.path) {
+            return Ok(None);
+        }
+        return Err(Error::Invalid(format!(
+            "refuse {}: worktree identity disappeared",
+            planned.path
+        )));
+    };
     let repo = crate::prepare::main_checkout(node.shell, &current.path)?;
     if current != *planned
         || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
@@ -1540,7 +1549,7 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<(Usage, crate::loss:
         .into_values()
         .next()
         .ok_or_else(|| Error::Invalid("missing loss evidence".into()))?;
-    Ok((found.usage, evidence))
+    Ok(Some((found.usage, evidence)))
 }
 
 /// Drop a removed worktree's registration. Its repository stays registered.
@@ -1553,7 +1562,14 @@ pub fn forget(ledger: &Ledger, path: &str) -> Result<()> {
 }
 
 fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<String> {
-    let (held, evidence) = validate_tree(node, tree)?;
+    let Some((held, evidence)) = validate_tree(node, tree)? else {
+        // Another actor removed it after the survey. The goal holds; reconcile the record.
+        drop_registration(node, &tree.path)?;
+        return Ok(format!(
+            "{} was already removed; dropped its registration",
+            tree.path
+        ));
+    };
     let linked = crate::worktree::Linked {
         checkout: tree.repo.clone().into(),
         path: tree.path.clone(),
@@ -2327,6 +2343,55 @@ mod tests {
             [] as [Tree; 0]
         );
         assert!(repo.is_dir());
+    }
+
+    #[test]
+    fn planned_worktree_removed_by_another_actor_is_reconciled_not_failed() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.display().to_string();
+        let tree = Tree {
+            repo: repo.clone(),
+            path: format!("{repo}/.worktrees/tiers-case"),
+            branch: "tiers-case".into(),
+            head: "abc".into(),
+        };
+        remember(&rig.ledger, tree.clone()).unwrap();
+        // The survey planned the removal; then the worktree left Git's list before apply.
+        rig.shell.on(
+            &format!("git -C {repo} worktree list --porcelain -z"),
+            &format!("worktree {repo}\0HEAD abc\0branch refs/heads/main\0\0"),
+        );
+        let mut planned = entry("worktrees", tree.path.clone(), "no holds".into(), true);
+        planned.tree = Some(tree.clone());
+        let plan = Plan {
+            entries: vec![planned.clone()],
+        };
+        let registered = || {
+            rig.ledger
+                .read::<Vec<Tree>>("worktrees.json")
+                .unwrap()
+                .unwrap()
+        };
+
+        // Unlisted but still on disk: it may hold content, so the refusal stays.
+        std::fs::create_dir_all(&tree.path).unwrap();
+        let refused = apply_one(&rig.node(), &plan, &planned, 100).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("worktree identity disappeared")
+        );
+        assert_eq!(registered(), std::slice::from_ref(&tree));
+        assert!(Path::new(&tree.path).is_dir());
+
+        // Gone from Git and disk: the pass succeeds and forgets the record.
+        std::fs::remove_dir(&tree.path).unwrap();
+        let result = apply_one(&rig.node(), &plan, &planned, 100).unwrap();
+        assert!(result.contains("already removed"), "{result}");
+        assert_eq!(registered(), [] as [Tree; 0]);
+        assert!(Path::new(&repo).is_dir());
     }
 
     #[test]
