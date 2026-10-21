@@ -135,7 +135,15 @@ pub fn owner(explicit: Option<String>, all: bool) -> Result<Option<String>> {
 
 /// Herdr 0.9.5 creates a new plugin pane on every open. Keep one per live tab,
 /// under the ledger lock, and validate its terminal identity before reuse.
+/// A pane Dogsled launched is a child agent: the board belongs to its parent's
+/// session, so a child never opens one (it would poll the fleet unseen).
 pub fn open(ledger: &Ledger, shell: &dyn Shell, owner: &str) -> Result<serde_json::Value> {
+    if !matches!(
+        crate::launch::final_pane(ledger, shell, owner)?,
+        crate::launch::PaneLaunch::Unrecorded
+    ) {
+        return Ok(serde_json::json!({"skipped": "child"}));
+    }
     ledger.with_lock("board-open", || {
         let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
         let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
@@ -1030,6 +1038,35 @@ mod tests {
             .unwrap();
         open(&ledger, &shell, "w1:p1").unwrap();
         assert_eq!(shell.opens.load(std::sync::atomic::Ordering::Relaxed), 2);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn board_open_skips_a_pane_dogsled_launched() {
+        #[derive(Debug)]
+        struct NoHerdr;
+        impl Shell for NoHerdr {
+            fn run(&self, _: &str, args: &[String]) -> Result<crate::shell::Output> {
+                panic!("a child pane must not reach Herdr: {args:?}")
+            }
+        }
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        ledger
+            .child("launches")
+            .write(
+                "r-1-1-0.progress.json",
+                &serde_json::json!({
+                    "request":{"id":"r-1-1-0","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+                        "host":"local","cwd":"/checkout","pane":"w2:p2","terminal":"term_child","owner":"w1:p1"},
+                    "pane":"w2:p2","terminal":"term_child","attempted":true,"confirmed":true,
+                    "result":{},"error":null
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            open(&ledger, &NoHerdr, "w2:p2").unwrap(),
+            serde_json::json!({"skipped": "child"})
+        );
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 

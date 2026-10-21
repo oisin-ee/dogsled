@@ -225,10 +225,22 @@ export default function dogsled(pi: ExtensionAPI) {
 		return refresh;
 	}
 
+	/** Dogsled answers `skipped` for a pane it launched: a child keeps the widget path. */
+	async function openSide(ctx: ExtensionContext): Promise<boolean> {
+		if (!owner) return false;
+		try {
+			const opened: unknown = JSON.parse(await exec(["board", "--open", "--owner", owner, "--json"]));
+			return typeof opened === "object" && opened !== null && typeof (opened as Record<string, unknown>)["pane_id"] === "string";
+		} catch (error) {
+			ctx.ui.notify(`Dogsled side board unavailable: ${String(error)}`, "error");
+			return false;
+		}
+	}
+
 	pi.on("session_start", async (event, ctx) => {
 		units.start(event.reason);
 		const wasSide = sideDisplay;
-		sideDisplay = Boolean(owner) && ctx.mode === "tui" && await herdrAvailable();
+		sideDisplay = Boolean(owner) && ctx.mode === "tui" && await herdrAvailable() && await openSide(ctx);
 		if (ctx.mode === "tui" && (!sideDisplay || (!wasSide && requestWorkRender))) ctx.ui.setWidget("dogsled", undefined);
 		await publisher.clear();
 		requestWorkRender = undefined;
@@ -245,10 +257,6 @@ export default function dogsled(pi: ExtensionAPI) {
 		context = ctx;
 		board = { hosts: [], rows: [] };
 		failure = owner ? undefined : "Dogsled needs a Herdr owner pane";
-		if (owner && sideDisplay) {
-			try { await exec(["board", "--open", "--owner", owner, "--json"]); }
-			catch (error) { ctx.ui.notify(`Dogsled side board unavailable: ${String(error)}`, "error"); }
-		}
 		todos.start(ctx);
 		if (!owner) { draw(ctx); return; }
 		timer = setInterval(() => { void update(ctx); }, REFRESH_MS);

@@ -26,6 +26,7 @@ function rig() {
 	let gate = "";
 	let missing = false;
 	let board: unknown = { hosts: [], rows: [] };
+	let opened: unknown = { pane_id: "w1:p2", terminal_id: "term-board" };
 	let version = `dogsled ${VERSION}\n`;
 	const events = new EventEmitter();
 	const api = {
@@ -43,6 +44,7 @@ function rig() {
 			if (missing) throw new Error("ENOENT");
 			if (args[0] === "hook") assert.equal(options?.timeout, 6_000);
 			const stdout = args[0] === "hook" ? (args[1] === "gate" ? gate : context)
+				: args[0] === "board" && args.includes("--open") ? JSON.stringify(opened)
 				: args[0] === "board" && args.includes("--todo-path") ? JSON.stringify({ path: "/nonexistent-dogsled-todo/pane.json", width: 48, height: 10_000 })
 				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
@@ -70,7 +72,7 @@ function rig() {
 	return { calls, widgets, notices, servers, commands, shortcuts, renderers, sent, ctx, next,
 		widget() { return component; },
 		gate: (text: string) => { gate = text; },
-		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, version: (text: string) => { version = text; },
+		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: unknown = {}) {
 			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
 		} };
@@ -108,6 +110,29 @@ test("Herdr owns the display: requests the side split and never sets a widget", 
 	assert.equal(r.widgets.length, 0);
 	await r.invoke("session_shutdown");
 	assert.equal(r.widgets.length, 0);
+});
+
+test("a Dogsled-launched child under Herdr keeps the widget: the board belongs to its parent", async t => {
+	withPane(t);
+	const dir = await mkdtemp(join(tmpdir(), "dogsled-child-"));
+	const socket = join(dir, "herdr.sock");
+	const server = createServer(client => client.end());
+	await new Promise<void>(resolve => server.listen(socket, resolve));
+	const previous = process.env["HERDR_SOCKET_PATH"];
+	process.env["HERDR_ENV"] = "1";
+	process.env["HERDR_SOCKET_PATH"] = socket;
+	t.after(async () => {
+		if (previous === undefined) delete process.env["HERDR_SOCKET_PATH"]; else process.env["HERDR_SOCKET_PATH"] = previous;
+		await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+		await rm(dir, { recursive: true, force: true });
+	});
+	const r = rig();
+	r.opened({ skipped: "child" });
+	r.board({ hosts: [], rows: [{ group: "running", kind: "agent", id: "one", name: "worker", what: "pi", host: "local", state: "working", activity: "", age_ms: 0 }] });
+	await r.invoke("session_start");
+	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "board --open --owner w1:p1 --json"));
+	assert.ok(r.widgets.some(call => typeof call[1] === "function" && call[2]?.placement === "aboveEditor"));
+	await r.invoke("session_shutdown");
 });
 
 test("an unreachable Herdr socket keeps the existing above-editor widget", async t => {
