@@ -67,13 +67,7 @@ pub fn notices(
             text: format!("Cleanup pass at {} ms failed:\n{}\nRead `dogsled status` for the last pass. Hand the fix to a dogsled agent. Do not bypass cleanup safeguards.", report.finished_ms, failures.into_iter().collect::<Vec<_>>().join("\n")),
         });
     }
-    let warnings: BTreeSet<_> = report
-        .applied
-        .repositories
-        .iter()
-        .filter(|entry| recipient(entry))
-        .map(|e| format!("{}: {}", e.id, e.detail))
-        .collect();
+    let warnings = entries(&report.applied.repositories, &recipient);
     if !warnings.is_empty() {
         notices.push(Notice {
             key: "repositories",
@@ -81,13 +75,7 @@ pub fn notices(
             text: format!("Cleanup repository warnings:\n{}\nCheck the repository entries in {} and {}, or cleanup.repositories in the configuration. Hand the fix to a dogsled agent: `dogsled agent --profile general --name <name> --message-file <brief>`. Name the repository and its state file entry in the brief. Do not edit the state by hand.", warnings.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("repositories.json").display(), ledger.dir.join("worktrees.json").display()),
         });
     }
-    let holds: BTreeSet<_> = report
-        .applied
-        .unlinked
-        .iter()
-        .filter(|entry| recipient(entry))
-        .map(|e| format!("{}: {}", e.id, e.detail))
-        .collect();
+    let holds = entries(&report.applied.unlinked, &recipient);
     if !holds.is_empty() {
         notices.push(Notice {
             key: "unlinked",
@@ -125,6 +113,18 @@ pub fn notices(
         });
     }
     Ok(notices)
+}
+
+/// The entries addressed to this recipient, as `id: detail` lines.
+fn entries(
+    entries: &[crate::cleanup::Entry],
+    recipient: &impl Fn(&crate::cleanup::Entry) -> bool,
+) -> BTreeSet<String> {
+    entries
+        .iter()
+        .filter(|entry| recipient(entry))
+        .map(|e| format!("{}: {}", e.id, e.detail))
+        .collect()
 }
 
 /// A targeted notice belongs to a live item's owner, even if that owner is itself a child.
