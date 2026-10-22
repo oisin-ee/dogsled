@@ -604,6 +604,80 @@ esac
 }
 
 #[test]
+fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
+    let rig = watchdog_rig("sweep-transition-checkout-secret");
+    // The survey reads the idle root for usage and process ownership. The
+    // removal recheck then sees a command whose arguments contain a sentinel.
+    rig.script("herdr", r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+ 'machine list --json') cat "$RIG/machines.json" ;;
+ 'agent list') cat "$RIG/agents.json" ;;
+ 'pane list') cat "$RIG/panes.json" ;;
+ 'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w3","label":"done-work"}]}}' ;;
+ 'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
+ 'pane process-info --pane '*)
+ count=0
+ test -f "$RIG/reads" && count=$(cat "$RIG/reads")
+ count=$((count + 1))
+ printf '%s' "$count" > "$RIG/reads"
+ if test "$count" -lt 3; then
+  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}\n'
+ else
+  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"sh","argv":["sh","-c","curl -H token:sweep-argv-secret https://example.invalid"]}]}}}\n'
+ fi ;;
+ 'pane close'*|'workspace close'*) printf '{}\n' ;;
+ *) echo unexpected >&2; exit 2 ;;
+esac
+"#);
+    idle_snapshot(&rig, "w3:p1");
+    let tree = rig.dir.join("home/repo/tree");
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","cwd":tree}]}}),
+    );
+    let journal = requested_sweep(&rig);
+    let hold = format!("refuse {}: ", tree.display());
+    let busy = "w3:p1 is busy (running sh)";
+    assert!(journal.contains(&format!("skipped: {hold}")), "{journal}");
+    assert!(journal.contains(busy), "{journal}");
+    assert!(tree.join(".git").exists());
+    assert_eq!(rig.read("state/worktrees.json")[0]["path"], json!(tree));
+    let herdr = rig.log("herdr.log");
+    let git = rig.log("git.log");
+    assert!(!herdr.contains("pane close w3:p1"), "{herdr}");
+    assert!(!herdr.contains("workspace close w3\n"), "{herdr}");
+    assert!(!git.contains("worktree remove"), "{git}");
+    for output in [&journal, &herdr, &git] {
+        assert!(!output.contains("sweep-argv-secret"), "{output}");
+    }
+    let latest = rig.read("state/sweep.json");
+    let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
+    assert!(!history.contains("sweep-argv-secret"), "{history}");
+    let reports: Vec<Value> = history
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(!reports.is_empty(), "{history}");
+    assert_eq!(reports.last().unwrap(), &latest);
+    for report in std::iter::once(&latest).chain(&reports) {
+        let skipped = report["skipped"].as_array().unwrap();
+        assert!(
+            skipped.iter().any(|entry| {
+                let reason = entry.as_str().unwrap();
+                reason.starts_with(&hold) && reason.contains(busy)
+            }),
+            "{report}"
+        );
+        assert_eq!(report["failures"], json!([]), "{report}");
+        assert!(
+            !report.to_string().contains("sweep-argv-secret"),
+            "{report}"
+        );
+    }
+}
+
+#[test]
 fn prune_keeps_a_pane_whose_root_process_runs_a_command() {
     let rig = root_process_rig("prune-command-pane");
     idle_snapshot(&rig, "w3:p1");
