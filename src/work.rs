@@ -82,6 +82,9 @@ pub struct Ticket {
     pub state: String,
     pub waiting: bool,
     pub waiting_until_ms: Option<u64>,
+    /// The last host reservation refusals, not a later status snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<String>,
     pub notified: bool,
     pub result: Option<Value>,
     pub error: Option<String>,
@@ -106,11 +109,18 @@ pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
     ledger.with_lock("queue", || {
         let mut tickets = queue(ledger)?;
-        if let Some(ticket) = tickets.iter().find(|t| t.request.id == request.id) {
+        if let Some(ticket) = tickets.iter_mut().find(|t| t.request.id == request.id) {
             if serde_json::to_value(&ticket.request)? != serde_json::to_value(&request)? {
                 return Err(crate::unit_transport::conflict("queued request changed"));
             }
-            return Ok(ticket.id.clone());
+            let id = ticket.id.clone();
+            // Placement may have queued the refusal before the caller selected a wait.
+            if waiting && !ticket.waiting {
+                ticket.waiting = true;
+                ticket.waiting_until_ms = waiting_until(ledger, now);
+                ledger.write("queue.json", &tickets)?;
+            }
+            return Ok(id);
         }
         let id = new_id();
         tickets.push(Ticket {
@@ -119,16 +129,8 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             created_ms: now,
             state: "pending".into(),
             waiting,
-            waiting_until_ms: if waiting {
-                ledger.budget.deadline.map(|end| {
-                    now.saturating_add(
-                        end.saturating_duration_since(std::time::Instant::now())
-                            .as_millis() as u64,
-                    )
-                })
-            } else {
-                None
-            },
+            waiting_until_ms: waiting.then(|| waiting_until(ledger, now)).flatten(),
+            wait_reason: None,
             notified: false,
             result: None,
             error: None,
@@ -137,6 +139,44 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
         ledger.write("queue.json", &tickets)?;
         Ok(id)
     })
+}
+
+fn waiting_until(ledger: &Ledger, now: u64) -> Option<u64> {
+    ledger.budget.deadline.map(|end| {
+        now.saturating_add(
+            end.saturating_duration_since(std::time::Instant::now())
+                .as_millis() as u64,
+        )
+    })
+}
+
+/// Save the actual placement refusals even when the first caller has not queued yet.
+fn defer(
+    fleet: &Fleet,
+    request: &Request,
+    hosts: &[crate::hosts::HostReport],
+    now: u64,
+) -> Result<()> {
+    let pinned = request.host.as_deref().map(|h| fleet.find(h)).transpose()?;
+    let reason = hosts
+        .iter()
+        .filter(|h| pinned.is_none_or(|p| p.id == h.host.id))
+        .map(|h| {
+            let reason = h
+                .headroom
+                .as_ref()
+                .and_then(|r| r.reason.as_deref())
+                .or(h.error.as_deref())
+                .unwrap_or("reservation refused");
+            format!("{}: {reason}", h.host.label)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let id = enqueue(fleet.ledger, request.clone(), false, now)?;
+    update_ticket(fleet.ledger, &id, |t| {
+        t.wait_reason = (!reason.is_empty()).then_some(reason);
+    })?;
+    Ok(())
 }
 
 /// Queue `request` after its first launch failed, so the service retries it with backoff.
@@ -523,11 +563,11 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
     if matches!(request.action, Action::Place) {
         let Placement::Placed {
             host, reservation, ..
-        } = commands::place(fleet, request.host.as_deref(), now)?
+        } = placement(fleet, request, now)?
         else {
             return Ok(None);
         };
-        let launch = prepare_launch(fleet, request, &host)?;
+        let launch = prepare_launch(fleet, request, &host).map_err(prelaunch_error)?;
         if host.is_local() {
             crate::prepare::used(fleet.ledger, &launch.cwd, Some(&launch.id))?;
         } else {
@@ -555,7 +595,7 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     let attempts = fleet.ledger.child("admissions");
     let file = format!("{}.json", request.id);
-    if let Some(attempt) = attempts.read::<Attempt>(&file)? {
+    if let Some(mut attempt) = attempts.read::<Attempt>(&file)? {
         if attempt.request != serde_json::to_value(request)? {
             return Err(Error::Invalid(format!(
                 "request {} changed after placement",
@@ -570,19 +610,43 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
                 return Ok(Some(result.clone()));
             }
         }
-        if !matches!(request.action, Action::Agent { .. }) {
+        if attempt.launch.is_some() && !matches!(request.action, Action::Agent { .. }) {
             return Err(Error::Invalid(format!(
                 "request {} already attempted a non-reconcilable launch; inspect before resubmitting",
                 request.id
             )));
         }
-        if let Some(host) = &attempt.host {
-            let launch = attempt.launch.as_ref().ok_or_else(|| Error::Invalid(format!(
-                    "request {} stopped during preparation on {}; inspect that host before resubmitting: {}",
-                    request.id, host.label,
-                    attempt.error.as_deref().unwrap_or("preparation outcome is unknown")
-                )))?;
-            let result = finish(fleet, request, host, launch, now)?;
+        if let Some(host) = attempt.host.clone() {
+            if attempt.launch.is_none() {
+                // A returned remote failure is safe to repeat: checkout validates identity,
+                // and preparation replays its request-keyed receipt. An interrupted local
+                // preparation, or one with no returned error, still requires inspection.
+                let retry_queued = queue(fleet.ledger)?.iter().any(|t| {
+                    t.request.id == request.id
+                        && t.retry.attempts > 0
+                        && matches!(t.state.as_str(), "pending" | "admitting")
+                });
+                if host.is_local() || attempt.error.is_none() || !retry_queued {
+                    return Err(Error::Invalid(format!(
+                        "request {} stopped during preparation on {}; inspect that host before resubmitting: {}",
+                        request.id,
+                        host.label,
+                        attempt
+                            .error
+                            .as_deref()
+                            .unwrap_or("preparation outcome is unknown")
+                    )));
+                }
+                attempt.launch =
+                    Some(prepare_launch(fleet, request, &host).map_err(prelaunch_error)?);
+                attempt.error = None;
+                attempts.write(&file, &attempt)?;
+            }
+            let launch = attempt
+                .launch
+                .as_ref()
+                .ok_or_else(|| Error::Invalid("missing prepared launch".into()))?;
+            let result = finish(fleet, request, &host, launch, now)?;
             save_result(&attempts, &file, attempt, &result)?;
             return Ok(Some(result));
         }
@@ -608,7 +672,7 @@ fn begin(
     file: &str,
     now: u64,
 ) -> Result<Option<Value>> {
-    let placed = commands::place(fleet, request.host.as_deref(), now)?;
+    let placed = placement(fleet, request, now)?;
     let Placement::Placed { host, .. } = placed else {
         return Ok(None);
     };
@@ -627,7 +691,7 @@ fn begin(
         Err(error) => {
             attempt.error = Some(error.to_string());
             attempts.write(file, &attempt)?;
-            return Err(error);
+            return Err(prelaunch_error(error));
         }
     };
     attempt.launch = Some(launch_request.clone());
@@ -635,6 +699,25 @@ fn begin(
     let result = finish(fleet, request, &host, &launch_request, now)?;
     save_result(attempts, file, attempt, &result)?;
     Ok(Some(result))
+}
+
+fn placement(fleet: &Fleet, request: &Request, now: u64) -> Result<Placement> {
+    let placed = commands::place(fleet, request.host.as_deref(), &request.id, now)
+        .map_err(prelaunch_error)?;
+    if let Placement::Full { hosts, .. } = &placed {
+        defer(fleet, request, hosts, now)?;
+    }
+    Ok(placed)
+}
+
+/// Only transport errors are retryable before a launch receipt exists. Local setup errors
+/// and the peer's structured refusals remain terminal.
+fn prelaunch_error(error: Error) -> Error {
+    if matches!(error.root(), Error::Ssh { refusal: None, .. }) {
+        Error::Launch(error.to_string())
+    } else {
+        error
+    }
 }
 
 fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launch> {
@@ -814,8 +897,13 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 .child("admissions")
                 .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
             let recoverable = matches!(ticket.request.action, Action::Agent { .. })
-                && saved
-                    .is_some_and(|a| a.launch.is_some() || (a.unit.is_some() && a.host.is_none()));
+                && saved.is_some_and(|a| {
+                    a.launch.is_some()
+                        || (a.unit.is_some() && a.host.is_none())
+                        || (ticket.retry.attempts > 0
+                            && a.error.is_some()
+                            && a.host.as_ref().is_some_and(|h| !h.is_local()))
+                });
             ticket = update_ticket(fleet.ledger, &ticket.id, |t| {
                 t.state = if recoverable { "pending" } else { "failed" }.into();
                 t.error = Some("service stopped during admission; inspect the selected host before resubmitting".into());
@@ -843,6 +931,8 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
             Ok(Some(result)) => {
                 t.state = "admitted".into();
                 t.result = Some(result);
+                t.wait_reason = None;
+                t.error = None;
             }
             Ok(None) => t.state = "pending".into(),
             // A refused request fails at once; a failed launch, SSH, or Herdr call is retried.
@@ -875,7 +965,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
 fn retryable(error: &Error) -> bool {
     matches!(
         error.root(),
-        Error::Command { .. } | Error::Ssh { .. } | Error::Io(_)
+        Error::Command { .. } | Error::Ssh { refusal: None, .. } | Error::Io(_)
     )
 }
 

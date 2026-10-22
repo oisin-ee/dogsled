@@ -671,12 +671,14 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
         ),
     };
     let target = request.host.as_deref().map(|h| label(hosts, h));
-    let reason = hosts
-        .iter()
-        .filter(|h| target.as_deref().is_none_or(|t| h.host.label == t))
-        .filter_map(|h| h.headroom.as_ref()?.reason.as_ref().map(|r| (h, r)))
-        .map(|(h, r)| format!("{}: {r}", h.host.label))
-        .next();
+    let reason = ticket.wait_reason.clone().or_else(|| {
+        hosts
+            .iter()
+            .filter(|h| target.as_deref().is_none_or(|t| h.host.label == t))
+            .filter_map(|h| h.headroom.as_ref()?.reason.as_ref().map(|r| (h, r)))
+            .map(|(h, r)| format!("{}: {r}", h.host.label))
+            .next()
+    });
     Row {
         group: Group::Waiting,
         kind: kind.into(),

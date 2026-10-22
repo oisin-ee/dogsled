@@ -1,5 +1,347 @@
 use super::*;
 
+fn remote_agent(rig: &Rig, repo: Option<&Path>) -> (i32, Value) {
+    let mut args = vec![
+        "agent",
+        "--host",
+        "netcup",
+        "--name",
+        "worker",
+        "--message",
+        "go",
+    ];
+    if let Some(repo) = repo {
+        args.extend([
+            "--cwd",
+            repo.to_str().unwrap(),
+            "--branch",
+            "remote-complete",
+            "--base",
+            "main",
+        ]);
+    }
+    rig.json(&args)
+}
+
+#[test]
+fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() {
+    let rig = Rig::new("reservation-refusal");
+    rig.peer();
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.put(
+        "reserve.json",
+        &json!({"reserved":false,"headroom":{
+            "host":"8103","headroom":0.0,"eligible":false,"live_agents":0,
+            "reason":"reservation raced with another request"
+        }}),
+    );
+    let (code, result) = remote_agent(&rig, None);
+    assert_eq!(code, 1, "{result}");
+    let ticket = rig.read("state/queue.json")[0].clone();
+    assert_eq!(
+        ticket["wait_reason"],
+        "netcup: reservation raced with another request"
+    );
+    let (_, board) = rig.json(&["board", "--all"]);
+    assert_eq!(board["hosts"][1]["eligible"], true, "{board}");
+    assert_eq!(
+        board["rows"][0]["activity"],
+        "for netcup: reservation raced with another request"
+    );
+    assert!(!ticket["wait_reason"].as_str().unwrap().contains("local:"));
+    rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "admitted", "{ticket}");
+    assert!(ticket.get("wait_reason").is_none(), "{ticket}");
+}
+
+#[test]
+fn unpinned_refusal_keeps_one_line_per_host() {
+    let rig = Rig::new("all-host-refusals");
+    rig.peer();
+    rig.snapshot("state/host.json", now(), 100.0, 8);
+    rig.put("reserve.json", &json!({"reserved":false,"headroom":{
+        "host":"8103","headroom":0.0,"eligible":false,"live_agents":0,"reason":"peer reservation refused"
+    }}));
+    let (code, queued) = rig.json(&["agent", "--name", "worker", "--message", "go"]);
+    assert_eq!(code, 1, "{queued}");
+    let ticket = rig.read("state/queue.json")[0].clone();
+    let lines: Vec<_> = ticket["wait_reason"].as_str().unwrap().lines().collect();
+    assert_eq!(lines.len(), 2, "{ticket}");
+    assert!(lines[0].starts_with("local: "), "{ticket}");
+    assert_eq!(lines[1], "netcup: peer reservation refused");
+}
+
+#[test]
+fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
+    let rig = Rig::new("legacy-wait-reason");
+    rig.peer();
+    rig.snapshot("state/host.json", now(), 20.0, 8);
+    rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    assert_eq!(remote_agent(&rig, None).0, 1);
+    let mut queue = rig.read("state/queue.json");
+    queue[0].as_object_mut().unwrap().remove("wait_reason");
+    rig.put("state/queue.json", &queue);
+    let (_, board) = rig.json(&["board", "--all"]);
+    assert_eq!(
+        board["rows"][0]["activity"], "for a host with room",
+        "{board}"
+    );
+    rig.snapshot("remote.json", now(), 100.0, 16);
+    rig.expire_cache();
+    let (_, board) = rig.json(&["board", "--all"]);
+    let reason = board["rows"][0]["activity"].as_str().unwrap();
+    assert!(reason.starts_with("for netcup: "), "{board}");
+    assert!(!reason.contains("local:"), "{board}");
+}
+
+#[test]
+fn ssh_failure_before_launch_retries_reservation_checkout_and_preparation() {
+    for step in ["reserve", "checkout", "prepare"] {
+        let rig = Rig::new(&format!("early-ssh-{step}"));
+        let repo = rig.dir.join("home/repo");
+        repository(&repo);
+        rig.peer();
+        rig.snapshot("state/host.json", now(), 0.0, 8);
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        rig.script("ssh", &script.replace(
+            &format!("  *'host {step}'*)"),
+            &format!("  *'host {step}'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo 'connection reset' >&2; exit 255; fi;"),
+        ));
+        let (code, result) = remote_agent(&rig, Some(&repo));
+        assert_eq!(code, 1, "{step}: {result}");
+        let ticket = rig.read("state/queue.json")[0].clone();
+        assert_eq!(ticket["state"], "pending", "{step}: {ticket}");
+        assert_eq!(ticket["retry"]["attempts"], 1, "{step}: {ticket}");
+        let ticket = advance(&rig);
+        assert_eq!(ticket["state"], "admitted", "{step}: {ticket}");
+        let log = rig.log("ssh.log");
+        assert_eq!(log.matches("host launch").count(), 1, "{log}");
+        assert_eq!(log.matches(&format!("host {step}")).count(), 2, "{log}");
+        if step == "reserve" {
+            let calls: Vec<_> = log.lines().filter(|s| s.contains("host reserve")).collect();
+            let ids: Vec<_> = calls
+                .iter()
+                .map(|s| {
+                    s.split(" --id ")
+                        .nth(1)
+                        .unwrap()
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(ids[0], ids[1], "same reservation ID: {log}");
+            assert!(calls.iter().all(|s| s.contains("netcup-dev")), "{log}");
+        } else {
+            assert_eq!(log.matches("host reserve").count(), 1, "{log}");
+        }
+    }
+}
+
+#[test]
+fn persistent_prelaunch_ssh_failure_exhausts_the_launch_attempt_budget() {
+    for step in ["reserve", "prepare"] {
+        let rig = Rig::new(&format!("early-ssh-exhausted-{step}"));
+        let repo = rig.dir.join("home/repo");
+        repository(&repo);
+        rig.peer();
+        rig.snapshot("state/host.json", now(), 0.0, 8);
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        rig.script(
+            "ssh",
+            &script.replace(
+                &format!("  *'host {step}'*)"),
+                &format!("  *'host {step}'*) echo 'connection refused' >&2; exit 255;"),
+            ),
+        );
+        assert_eq!(remote_agent(&rig, Some(&repo)).0, 1);
+        assert_eq!(advance(&rig)["retry"]["attempts"], 2);
+        let ticket = advance(&rig);
+        assert_eq!(ticket["state"], "failed", "{ticket}");
+        assert!(
+            ticket["error"]
+                .as_str()
+                .unwrap()
+                .ends_with("(after 3 attempts)"),
+            "{ticket}"
+        );
+        assert_eq!(
+            rig.log("ssh.log").matches(&format!("host {step}")).count(),
+            3
+        );
+        assert!(!rig.log("ssh.log").contains("host launch"));
+    }
+}
+
+#[test]
+fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
+    for (case, response) in [
+        (
+            "deadline",
+            r#"{"error":"deadline reached","deadline":true}"#,
+        ),
+        (
+            "refusal",
+            r#"{"error":"private remote detail","code":"CLONE_FAILED"}"#,
+        ),
+    ] {
+        let rig = Rig::new(&format!("early-terminal-{case}"));
+        rig.peer();
+        rig.snapshot("state/host.json", now(), 0.0, 8);
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        rig.script(
+            "ssh",
+            &script.replace(
+                "  *'host reserve'*)",
+                &format!("  *'host reserve'*) echo '{response}'; exit 2;"),
+            ),
+        );
+        let (code, result) = remote_agent(&rig, None);
+        assert_eq!(code, 2, "{case}: {result}");
+        assert!(!rig.dir.join("state/queue.json").exists(), "{case}");
+    }
+    let rig = Rig::new("queued-invalid");
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.put(
+        "state/queue.json",
+        &json!([{
+            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},
+                "host":"local","branch":"bad..branch","base":null,"cwd":repo,
+                "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
+                "workspace":null,"workspace_name":null,"owner":"w1:p1"},
+            "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
+            "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
+        }]),
+    );
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    assert_eq!(ticket["retry"]["attempts"], 0, "{ticket}");
+    assert!(
+        ticket["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a valid branch name")
+    );
+}
+
+#[test]
+fn lost_successful_reservation_reply_reuses_one_hold_on_the_selected_host() {
+    let rig = Rig::new("reserve-response-lost");
+    rig.peer();
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    rig.snapshot("peer-state/host.json", now(), 0.0, 16);
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let handler = format!(
+        r#"  *'host reserve'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" > "$RIG/reserve-response"
+    status=$?
+    test "$status" = 0 || exit "$status"
+    if ! test -f "$RIG/reply-lost"; then touch "$RIG/reply-lost"; echo lost >&2; exit 255; fi
+    cat "$RIG/reserve-response" ;;"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    rig.script(
+        "ssh",
+        &script.replace("  *'host reserve'*) cat \"$RIG/reserve.json\" ;;", &handler),
+    );
+    let (code, queued) = remote_agent(&rig, None);
+    assert_eq!(code, 1, "{queued}");
+    assert_eq!(rig.read("state/queue.json")[0]["retry"]["attempts"], 1);
+    let before = rig.read("peer-state/placements.json");
+    assert_eq!(before.as_array().unwrap().len(), 1);
+    // Replay must not be new admission, even when a fresh status has no headroom.
+    rig.snapshot("peer-state/host.json", now(), 100.0, 16);
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "admitted", "{ticket}");
+    assert_eq!(rig.read("peer-state/placements.json"), before);
+    assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 2);
+    assert_eq!(rig.log("ssh.log").matches("host launch").count(), 1);
+}
+
+#[test]
+fn completed_preparation_receipt_replays_only_the_same_request() {
+    let (rig, repo) = place::place_rig("preparation-receipt");
+    let args = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "receipt-owned",
+        "--base",
+        "main",
+        "--request-id",
+        "same-request",
+    ];
+    let (code, prepared) = rig.json(&args);
+    assert_eq!(code, 0, "{prepared}");
+    fs::write(rig.dir.join("already-open"), "").unwrap();
+    let (code, replay) = rig.json(&args);
+    assert_eq!(code, 0, "{replay}");
+    assert_eq!(replay, prepared);
+    assert_eq!(rig.log("setup.log").lines().count(), 1);
+    assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
+    let mut changed = args;
+    changed[7] = "HEAD~1";
+    let (code, error) = rig.json(&changed);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("preparation request changed")
+    );
+    changed = args;
+    changed[9] = "another-request";
+    let (code, error) = rig.json(&changed);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("exists; omit --base")
+    );
+}
+
+#[test]
+fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
+    let (rig, repo) = place::place_rig("prepare-response-lost");
+    rig.peer();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let handler = format!(
+        r#"  *'host prepare'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" > "$RIG/prepare-response"
+    status=$?
+    test "$status" = 0 || exit "$status"
+    if ! test -f "$RIG/reply-lost"; then touch "$RIG/reply-lost"; touch "$RIG/already-open"; echo lost >&2; exit 255; fi
+    cat "$RIG/prepare-response" ;;"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    // The peer runs real preparation in its own ledger; SSH drops its first successful reply.
+    rig.script("ssh", &script.replace("  *'host prepare'*) printf '%s\\n' '{\"pane_id\":\"w9:p1\",\"terminal_id\":\"term_remote\",\"path\":\"/remote/tree\"}' ;;", &handler));
+    let (code, queued) = remote_agent(&rig, Some(&repo));
+    assert_eq!(code, 1, "{queued}");
+    assert_eq!(rig.read("state/queue.json")[0]["retry"]["attempts"], 1);
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "admitted", "{ticket}");
+    assert_eq!(rig.log("setup.log").lines().count(), 1);
+    assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
+    assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 1);
+    assert_eq!(rig.log("ssh.log").matches("host prepare").count(), 2);
+    let id = ticket["request"]["id"].as_str().unwrap();
+    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    assert_eq!(attempt["launch"]["terminal"], "term_tree");
+    assert_eq!(attempt["launch"]["pane"], "w8:p1");
+}
+
 fn advance(rig: &Rig) -> Value {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let next = rig.read("state/queue.json")[0]["retry"]["next_ms"]

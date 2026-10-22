@@ -124,9 +124,54 @@ pub fn local(
     base: Option<&str>,
     request_id: Option<&str>,
 ) -> Result<Prepared> {
-    if let Some(id) = request_id {
-        crate::jobs::validate_id(id)?;
-    }
+    let Some(id) = request_id else {
+        return local_once(shell, ledger, repo, branch, base, None);
+    };
+    crate::jobs::validate_id(id)?;
+    let receipts = ledger.child("preparation-receipts");
+    receipts.with_lock(id, || {
+        let file = format!("{id}.json");
+        let request = (
+            main_checkout(shell, repo)?,
+            branch.to_owned(),
+            base.map(str::to_owned),
+        );
+        if let Some(receipt) = receipts.read::<PreparationReceipt>(&file)? {
+            if receipt.request != request {
+                return Err(crate::unit_transport::conflict(
+                    "preparation request changed",
+                ));
+            }
+            return Ok(receipt.prepared);
+        }
+        let prepared = local_once(shell, ledger, repo, branch, base, Some(id))?;
+        receipts.write(
+            &file,
+            &PreparationReceipt {
+                request,
+                prepared: prepared.clone(),
+            },
+        )?;
+        Ok(prepared)
+    })
+}
+
+/// A completed preparation is replayed only for the same request and inputs. A lost SSH
+/// reply must not create another workspace or reject the branch that this request created.
+#[derive(Debug, Serialize, Deserialize)]
+struct PreparationReceipt {
+    request: (PathBuf, String, Option<String>),
+    prepared: Prepared,
+}
+
+fn local_once(
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    repo: &str,
+    branch: &str,
+    base: Option<&str>,
+    request_id: Option<&str>,
+) -> Result<Prepared> {
     let invalid = branch.is_empty()
         || branch.starts_with('-')
         || !shell

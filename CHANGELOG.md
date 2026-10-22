@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- Fixed queued wait reasons to retain each host's reservation refusal. Transient SSH failures during reservation, checkout, or preparation now retry with backoff. Retries keep the selected host and reservation, and replay completed preparations by request ID.
+
 - A committed unit whose worker pane closed without a final reply now settles as `stopped`, so its owner can release the unit.
 
 ## 0.23.0 - 2026-10-22
