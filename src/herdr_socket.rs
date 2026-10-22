@@ -1,7 +1,7 @@
 //! A small blocking client for Herdr's socket API: newline-delimited JSON over
 //! the Unix socket at `HERDR_SOCKET_PATH`, one request and one response per
 //! connection. It carries only the methods that have no CLI form:
-//! `layout.export`, `pane.layout`, and `layout.set_split_ratio`.
+//! `layout.export`, `pane.layout`, `layout.set_split_ratio`, and `pane.focus`.
 
 use crate::error::{Error, Result};
 use serde_json::{Value, json};
@@ -97,6 +97,11 @@ impl Client {
                 &json!({"tab_id": tab_id, "path": path, "ratio": ratio}),
             )?,
         )
+    }
+
+    /// Focus `pane_id`, switching to its tab. The reply is a `pane_info` with no layout.
+    pub fn focus_pane(&self, pane_id: &str) -> Result<Value> {
+        self.call("pane.focus", &json!({"pane_id": pane_id}))
     }
 }
 
@@ -242,6 +247,19 @@ mod tests {
             "pane.layout"
         );
         assert_eq!(server.methods(), ["layout.export", "pane.layout"]);
+    }
+
+    #[test]
+    fn herdr_socket_focuses_a_pane_by_its_id() {
+        let server = fake::Server::start(|method, params| {
+            assert_eq!(method, "pane.focus");
+            assert_eq!(params["pane_id"], "w1:p1");
+            json!({"result": {"type": "pane_info", "pane": {"pane_id": "w1:p1"}}})
+        });
+        let pane = server.client().focus_pane("w1:p1").unwrap();
+        assert_eq!(pane["type"], "pane_info");
+        assert_eq!(pane["pane"]["pane_id"], "w1:p1");
+        assert_eq!(server.methods(), ["pane.focus"]);
     }
 
     #[test]
