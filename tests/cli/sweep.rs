@@ -565,35 +565,59 @@ fn the_sweep_keeps_a_pane_whose_command_started_after_the_plan() {
     assert!(!journal.contains("closed workspace w3"), "{journal}");
 }
 
-#[test]
-fn the_sweep_keeps_a_pane_whose_command_starts_between_the_plan_and_the_close() {
-    // Herdr reports the pane as idle while the plan is made, and as busy when the
-    // close is checked. The command started after the plan.
-    let rig = watchdog_rig("sweep-transition-pane");
-    rig.script("herdr", r#"#!/bin/sh
+/// A rig whose pane starts a command between the sweep's plan and its close.
+///
+/// The transition is marked by the sweep's own phases, not by a count of reads.
+/// The survey reads the workspaces before it checks idle panes; the apply-time
+/// recheck reads them again after the plan is complete. The first read marks the
+/// survey, and every read after it marks the recheck. Only the recheck sees the
+/// command, so the plan and the refusal are the same on every run, whatever else
+/// reads processes at the same time.
+fn post_plan_command_rig(name: &str, argv: &str) -> Rig {
+    let rig = watchdog_rig(name);
+    let script = format!(
+        r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/herdr.log"
 case "$*" in
  'machine list --json') cat "$RIG/machines.json" ;;
  'agent list') cat "$RIG/agents.json" ;;
  'pane list') cat "$RIG/panes.json" ;;
- 'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w3","label":"done-work"}]}}' ;;
- 'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
+ 'workspace list')
+ if ! mkdir "$RIG/survey-started" 2>/dev/null; then
+  touch "$RIG/recheck-started"
+ fi
+ printf '%s\n' '{{"result":{{"workspaces":[{{"workspace_id":"w3","label":"done-work"}}]}}}}' ;;
+ 'worktree list --cwd'*) printf '%s\n' '{{"result":{{"worktrees":[]}}}}' ;;
  'pane process-info --pane '*)
- count=0
- test -f "$RIG/reads" && count=$(cat "$RIG/reads")
- count=$((count + 1))
- printf '%s' "$count" > "$RIG/reads"
- if test "$count" -lt 3; then
-  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}\n'
+ if test -f "$RIG/recheck-started"; then
+  touch "$RIG/recheck-busy"
+  printf '{{"result":{{"process_info":{{"shell_pid":10,"foreground_processes":[{{"pid":10,"name":"sh","argv":{argv}}}]}}}}}}\n'
  else
-  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"sh","argv":["sh","-c","sleep 60"]}]}}}\n'
+  test ! -d "$RIG/survey-started" || touch "$RIG/survey-idle"
+  printf '{{"result":{{"process_info":{{"shell_pid":10,"foreground_processes":[{{"pid":10,"name":"zsh","argv":["zsh"]}}]}}}}}}\n'
  fi ;;
- 'pane close'*|'workspace close'*) printf '{}\n' ;;
+ 'pane close'*|'workspace close'*) printf '{{}}\n' ;;
  *) echo unexpected >&2; exit 2 ;;
 esac
-"#);
+"#
+    );
+    rig.script("herdr", &script);
+    rig
+}
+
+/// The markers prove the sweep planned an idle pane and rechecked a busy one.
+fn assert_post_plan_command(rig: &Rig) {
+    for marker in ["survey-idle", "recheck-started", "recheck-busy"] {
+        assert!(rig.dir.join(marker).exists(), "missing {marker}");
+    }
+}
+
+#[test]
+fn the_sweep_keeps_a_pane_whose_command_starts_between_the_plan_and_the_close() {
+    let rig = post_plan_command_rig("sweep-transition-pane", r#"["sh","-c","sleep 60"]"#);
     idle_snapshot(&rig, "w3:p1");
     let journal = requested_sweep(&rig);
+    assert_post_plan_command(&rig);
     let log = rig.log("herdr.log");
     assert!(!log.contains("workspace close w3\n"), "{log}");
     assert!(!journal.contains("closed workspace w3"), "{journal}");
@@ -605,31 +629,10 @@ esac
 
 #[test]
 fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
-    let rig = watchdog_rig("sweep-transition-checkout-secret");
-    // The survey reads the idle root for usage and process ownership. The
-    // removal recheck then sees a command whose arguments contain a sentinel.
-    rig.script("herdr", r#"#!/bin/sh
-printf '%s\n' "$*" >> "$RIG/herdr.log"
-case "$*" in
- 'machine list --json') cat "$RIG/machines.json" ;;
- 'agent list') cat "$RIG/agents.json" ;;
- 'pane list') cat "$RIG/panes.json" ;;
- 'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w3","label":"done-work"}]}}' ;;
- 'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
- 'pane process-info --pane '*)
- count=0
- test -f "$RIG/reads" && count=$(cat "$RIG/reads")
- count=$((count + 1))
- printf '%s' "$count" > "$RIG/reads"
- if test "$count" -lt 3; then
-  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}\n'
- else
-  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"sh","argv":["sh","-c","curl -H token:sweep-argv-secret https://example.invalid"]}]}}}\n'
- fi ;;
- 'pane close'*|'workspace close'*) printf '{}\n' ;;
- *) echo unexpected >&2; exit 2 ;;
-esac
-"#);
+    let rig = post_plan_command_rig(
+        "sweep-transition-checkout-secret",
+        r#"["sh","-c","curl -H token:sweep-argv-secret https://example.invalid"]"#,
+    );
     idle_snapshot(&rig, "w3:p1");
     let tree = rig.dir.join("home/repo/tree");
     rig.put(
@@ -637,6 +640,7 @@ esac
         &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","cwd":tree}]}}),
     );
     let journal = requested_sweep(&rig);
+    assert_post_plan_command(&rig);
     let hold = format!("refuse {}: ", tree.display());
     let busy = "w3:p1 is busy (running sh)";
     assert!(journal.contains(&format!("skipped: {hold}")), "{journal}");
