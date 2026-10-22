@@ -412,6 +412,11 @@ pub enum HostCommand {
         #[arg(long)]
         input: String,
     },
+    /// Read the seeded terminal evidence of many executions on this host in one call.
+    UnitReceipts {
+        #[arg(long)]
+        input: String,
+    },
     /// The final reply of the finished agent in a pane.
     Reply {
         pane: String,

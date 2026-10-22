@@ -347,6 +347,14 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             )?,
             String::new,
         )?,
+        HostCommand::UnitReceipts { input } => print(
+            true,
+            &launch::unit_receipts(
+                node.ledger,
+                &serde_json::from_str::<launch::ExecutionsInput>(&input)?.executions,
+            ),
+            String::new,
+        )?,
         HostCommand::Reply { pane } => {
             print(
                 true,
@@ -422,7 +430,10 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             print(true, &tail, String::new)?;
         }
         HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
-        HostCommand::Reply { .. } | HostCommand::Close { .. } | HostCommand::UnitReceipt { .. } => {
+        HostCommand::Reply { .. }
+        | HostCommand::Close { .. }
+        | HostCommand::UnitReceipt { .. }
+        | HostCommand::UnitReceipts { .. } => {
             child(cmd, node)?;
         }
         HostCommand::Prune { plan } => print(

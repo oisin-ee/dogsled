@@ -432,11 +432,34 @@ pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
     Ok(())
 }
 
+/// Which committed unit admissions a refresh asks hosts about.
+#[derive(Clone, Copy)]
+pub enum Scope<'a> {
+    All,
+    Owner(&'a str),
+    Execution(&'a ExecutionRef),
+}
+
+impl Scope<'_> {
+    fn includes(self, execution: &ExecutionRef) -> bool {
+        match self {
+            Self::All => true,
+            Self::Owner(owner) => execution.owner_id == owner,
+            Self::Execution(wanted) => execution == wanted,
+        }
+    }
+}
+
 /// Existing inbox/refresh lane imports immutable host evidence. Missing or unreachable
 /// hosts prove nothing; this never manufactures stopped from probes or closed items.
-pub fn refresh(fleet: &Fleet) -> Result<()> {
+/// An acknowledged settlement needs no repair: the owner acknowledges only after
+/// `settlements` ran a refresh, so such units are skipped in every scope.
+/// Every in-scope remote unit on one host is read with one ssh call; units outside
+/// the scope or already acknowledged never enter a host's batch.
+pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
     settle_unlaunched(fleet.ledger)?;
     let attempts = fleet.ledger.child("admissions");
+    let mut remote: Vec<(crate::hosts::Host, Vec<Pending>)> = Vec::new();
     for file in records(&attempts)? {
         let Some(attempt) = attempts.read::<Attempt>(&file)? else {
             continue;
@@ -444,71 +467,133 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
         let Some(unit) = attempt.unit.as_ref() else {
             continue;
         };
-        if unit.committed.is_none() {
+        if unit.committed.is_none()
+            || unit.settlement_ack.is_some()
+            || !scope.includes(&unit.execution)
+        {
             continue;
         }
         let Some(host) = attempt.host.as_ref() else {
             continue;
         };
-        let receipt = if host.is_local() {
-            crate::launch::unit_receipt(fleet.ledger, &unit.execution)
+        let pending = Pending {
+            file,
+            execution: unit.execution.clone(),
+            saved: unit.terminal_receipt.clone(),
+        };
+        if host.is_local() {
+            let receipt = crate::launch::unit_receipt(fleet.ledger, &pending.execution);
+            settle(fleet.ledger, &pending, receipt)?;
+        } else if let Some((_, units)) = remote.iter_mut().find(|(known, _)| known == host) {
+            units.push(pending);
         } else {
-            fleet.remote(
-                host,
-                &[
-                    "unit-receipt".into(),
-                    "--input".into(),
-                    json!({"execution":unit.execution}).to_string(),
-                ],
-            )
-        };
-        let receipt: crate::unit_reply::HostEvidence = match receipt {
-            Ok(Some(receipt)) => receipt,
-            Ok(None) => match &unit.terminal_receipt {
-                Some(saved) => crate::unit_reply::HostEvidence::Returned(Box::new(saved.clone())),
-                None => continue,
-            },
-            // Rejection belongs to this request, not every admission sharing refresh.
-            // Never use rejected/unknown host evidence to authorize a fallback import.
-            Err(error @ Error::Invalid(_)) => {
-                eprintln!(
-                    "dogsled unit evidence {}: {error}",
-                    unit.execution.request_id
-                );
+            remote.push((host.clone(), vec![pending]));
+        }
+    }
+    for (host, units) in remote {
+        let executions: Vec<_> = units.iter().map(|unit| &unit.execution).collect();
+        let entries: Vec<crate::launch::ReceiptEntry> = match fleet.remote(
+            &host,
+            &[
+                "unit-receipts".into(),
+                "--input".into(),
+                json!({ "executions": executions }).to_string(),
+            ],
+        ) {
+            Ok(entries) => entries,
+            // An unreachable host, or an old peer without `unit-receipts`, proves nothing.
+            // Skip only this host; never fall back to a saved receipt or a per-unit read.
+            Err(error @ (Error::Ssh { .. } | Error::Parse { .. } | Error::Deadline(_))) => {
+                let ids: Vec<_> = units
+                    .iter()
+                    .map(|unit| unit.execution.request_id.as_str())
+                    .collect();
+                eprintln!("dogsled unit evidence {}: {error}", ids.join(" "));
                 continue;
             }
-            Err(error @ (Error::Ssh { .. } | Error::Parse { .. } | Error::Deadline(_)))
-                if !host.is_local() =>
-            {
-                eprintln!(
-                    "dogsled unit evidence {}: {error}",
-                    unit.execution.request_id
-                );
+            Err(error) => return Err(error),
+        };
+        for unit in &units {
+            let id = &unit.execution.request_id;
+            let Some(entry) = entries.iter().find(|entry| entry.request_id == *id) else {
+                eprintln!("dogsled unit evidence {id}: ssh {}: no entry", host.label);
                 continue;
-            }
-            // Local storage, serialization and lock failures remain operation failures.
-            Err(error) => return Err(error),
-        };
-        let imported = match receipt {
-            crate::unit_reply::HostEvidence::Returned(receipt) => {
-                import_receipt(fleet.ledger, &file, *receipt)
-            }
-            crate::unit_reply::HostEvidence::Refused(receipt) => {
-                import_refusal(fleet.ledger, &file, *receipt)
-            }
-        };
-        match imported {
-            Ok(()) => (),
-            Err(error @ Error::Invalid(_)) => {
-                eprintln!(
-                    "dogsled unit evidence {}: {error}",
-                    unit.execution.request_id
-                );
-            }
-            Err(error) => return Err(error),
+            };
+            let receipt = match (&entry.evidence, &entry.invalid, &entry.failed) {
+                (evidence, None, None) => Ok(evidence.clone()),
+                (None, Some(reason), None) => Err(Error::Invalid(reason.clone())),
+                // Remote error text can carry secrets; log only the category.
+                (None, None, Some(_)) => {
+                    eprintln!(
+                        "dogsled unit evidence {id}: ssh {}: host could not read evidence",
+                        host.label
+                    );
+                    continue;
+                }
+                _ => {
+                    eprintln!(
+                        "dogsled unit evidence {id}: ssh {}: malformed entry",
+                        host.label
+                    );
+                    continue;
+                }
+            };
+            settle(fleet.ledger, unit, receipt)?;
         }
     }
     Ok(())
+}
+
+/// One committed unit whose host evidence `refresh` reads.
+struct Pending {
+    file: String,
+    execution: ExecutionRef,
+    saved: Option<crate::unit_reply::Receipt>,
+}
+
+/// Import one unit's host evidence. Rejection belongs to this request, not every
+/// admission sharing refresh.
+fn settle(
+    ledger: &Ledger,
+    unit: &Pending,
+    receipt: Result<Option<crate::unit_reply::HostEvidence>>,
+) -> Result<()> {
+    let receipt: crate::unit_reply::HostEvidence = match receipt {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => match &unit.saved {
+            Some(saved) => crate::unit_reply::HostEvidence::Returned(Box::new(saved.clone())),
+            None => return Ok(()),
+        },
+        // Never use rejected/unknown host evidence to authorize a fallback import.
+        Err(error @ Error::Invalid(_)) => {
+            eprintln!(
+                "dogsled unit evidence {}: {error}",
+                unit.execution.request_id
+            );
+            return Ok(());
+        }
+        // Local storage, serialization and lock failures remain operation failures.
+        Err(error) => return Err(error),
+    };
+    let imported = match receipt {
+        crate::unit_reply::HostEvidence::Returned(receipt) => {
+            import_receipt(ledger, &unit.file, *receipt)
+        }
+        crate::unit_reply::HostEvidence::Refused(receipt) => {
+            import_refusal(ledger, &unit.file, *receipt)
+        }
+    };
+    match imported {
+        Ok(()) => Ok(()),
+        Err(error @ Error::Invalid(_)) => {
+            eprintln!(
+                "dogsled unit evidence {}: {error}",
+                unit.execution.request_id
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refusal) -> Result<()> {
@@ -674,8 +759,8 @@ fn pending_preparations(ledger: &Ledger) -> Result<Value> {
 }
 
 pub fn settlements(fleet: &Fleet) -> Result<Value> {
-    refresh(fleet)?;
     let owner = owner()?;
+    refresh(fleet, Scope::Owner(&owner))?;
     let attempts = fleet.ledger.child("admissions");
     let mut pending = Vec::new();
     for file in records(&attempts)? {
@@ -756,11 +841,9 @@ fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
         )?)?),
         UnitCommand::Commit { input } => commit(fleet, &decode(&input)?),
         UnitCommand::Observe { input } => {
-            refresh(fleet)?;
-            observe(
-                fleet.ledger,
-                &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,
-            )
+            let input = decode::<crate::unit_transport::ExecutionInput>(&input)?;
+            refresh(fleet, Scope::Execution(&input.execution))?;
+            observe(fleet.ledger, &input.execution)
         }
         UnitCommand::TerminalAck { input } => Ok(serde_json::to_value(
             crate::launch::terminal_ack(fleet.ledger, fleet.shell, &decode(&input)?)?,

@@ -818,6 +818,51 @@ pub fn terminal_ack(
     })
 }
 
+/// One execution's answer in a batched host read. Exactly one of `evidence`, `invalid`
+/// and `failed` describes the outcome; all empty means the host has no evidence yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptEntry {
+    pub request_id: String,
+    pub evidence: Option<crate::unit_reply::HostEvidence>,
+    /// The host rejected this request's evidence; the text is dogsled's own rejection.
+    pub invalid: Option<String>,
+    /// The host could not read this request's evidence, such as a storage failure.
+    pub failed: Option<String>,
+}
+
+/// The input of `host unit-receipts`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionsInput {
+    pub executions: Vec<crate::unit_transport::ExecutionRef>,
+}
+
+/// Peer refresh reads every execution on this host in one call. Each execution is
+/// read alone: one bad entry never fails its neighbours.
+pub fn unit_receipts(
+    ledger: &Ledger,
+    executions: &[crate::unit_transport::ExecutionRef],
+) -> Vec<ReceiptEntry> {
+    executions
+        .iter()
+        .map(|execution| {
+            let mut entry = ReceiptEntry {
+                request_id: execution.request_id.clone(),
+                evidence: None,
+                invalid: None,
+                failed: None,
+            };
+            match unit_receipt(ledger, execution) {
+                Ok(evidence) => entry.evidence = evidence,
+                Err(Error::Invalid(reason)) => entry.invalid = Some(reason),
+                Err(error) => entry.failed = Some(error.to_string()),
+            }
+            entry
+        })
+        .collect()
+}
+
 /// Peer refresh reads immutable execution evidence, even after its pane closes.
 /// A final native refusal repairs only this request's preparation, never its pane.
 pub fn unit_receipt(
@@ -927,4 +972,55 @@ fn terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
         .and_then(|p| p["terminal_id"].as_str())
         .map(str::to_owned)
         .ok_or_else(|| Error::Invalid(format!("{pane}: cannot establish launch terminal identity")))
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use crate::unit_transport::ExecutionRef;
+
+    fn execution(request_id: &str) -> ExecutionRef {
+        ExecutionRef {
+            executor: "dogsled".into(),
+            owner_id: "owner".into(),
+            request_id: request_id.into(),
+        }
+    }
+
+    #[test]
+    fn unit_receipts_answers_each_execution_without_failing_neighbours() {
+        let dir = std::env::temp_dir().join(crate::ledger::new_id());
+        let ledger = Ledger::new(dir.clone());
+        // A progress path that is a directory cannot be read: a storage failure.
+        std::fs::create_dir_all(dir.join("launches/r-broken.progress.json")).unwrap();
+        let executions = [
+            execution("r-first"),
+            execution("../escape"),
+            execution("r-broken"),
+            execution("r-last"),
+        ];
+        let entries = unit_receipts(&ledger, &executions);
+        let ids: Vec<_> = entries.iter().map(|e| e.request_id.as_str()).collect();
+        assert_eq!(ids, ["r-first", "../escape", "r-broken", "r-last"]);
+        for quiet in [&entries[0], &entries[3]] {
+            assert_eq!(
+                (&quiet.evidence, &quiet.invalid, &quiet.failed),
+                (&None, &None, &None)
+            );
+        }
+        assert_eq!(entries[1].invalid.as_deref(), Some("invalid job id"));
+        assert!(entries[1].evidence.is_none() && entries[1].failed.is_none());
+        assert!(entries[2].failed.is_some(), "{:?}", entries[2]);
+        assert!(entries[2].evidence.is_none() && entries[2].invalid.is_none());
+        let wire = serde_json::to_value(&entries[1]).unwrap();
+        assert_eq!(
+            wire,
+            json!({"requestId":"../escape","evidence":null,"invalid":"invalid job id","failed":null})
+        );
+        assert_eq!(
+            serde_json::from_value::<ReceiptEntry>(wire).unwrap(),
+            entries[1]
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
