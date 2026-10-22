@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- The cleanup sweep no longer closes a pane whose root process is a running command, such as the `dogsled sidebar` pane. Before, a pane counted as an idle shell whenever no foreground process had a different pid from the pane's shell pid. Herdr runs a plugin pane's command as the pane's own root process, so the sidebar looked like an idle shell, and the sweep closed the sidebar and every workspace that held it. Now only a shell that waits at its prompt is idle: a root process with another name, a shell that runs a command such as `sh -c "..."`, and process information that does not name the root process all keep the pane.
+- The idle-shell rule accepts only a shell that waits at its prompt, and a cleanup report names the program of a running command without its arguments. Before, any argument the rule did not recognise still counted as an idle shell, so a shell that ran a script such as `zsh build.sh` looked idle. Now a shell with an unknown option, a script, a command string, or malformed arguments keeps its pane. A report names the program only, so an argument with a secret no longer reaches it.
+
 ## 0.23.1 - 2026-10-22
 
 - Fixed queued wait reasons to retain each host's reservation refusal. Transient SSH failures during reservation, checkout, or preparation retry with backoff. Remote command failures, authentication failures, invalid requests, conflicts, and deadlines remain terminal. Before preparation retries, the selected host revalidates the same reservation ID. An expired reservation that the host refuses keeps its request queued with the refusal reason. Preparation records its intent before side effects and refuses interrupted work without completion proof. Completed preparations still replay by request ID.

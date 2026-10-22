@@ -60,7 +60,7 @@ case "$*" in
   'workspace close'*|'pane close'*) printf '{}\n' ;;
   'pane process-info'*)
     if test -f "$RIG/process-info.json"; then cat "$RIG/process-info.json"
-    else printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_process_group_id":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}'; fi ;;
+    else printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_process_group_id":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}'; fi ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
@@ -475,7 +475,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
             }])),
             "missing-process" => rig.put("process-info.json", &json!({"result":{"process_info":{}}})),
             "foreign-pgid" => rig.put("process-info.json", &json!({"result":{"process_info":{
-                "shell_pid":10,"foreground_process_group_id":99,"foreground_processes":[{"pid":10,"name":"zsh"}]
+                "shell_pid":10,"foreground_process_group_id":99,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]
             }}})),
             "malformed" => fs::write(rig.dir.join("state/launches/bad.progress.json"), "{").unwrap(),
             "close-fails" => {

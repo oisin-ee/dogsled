@@ -432,6 +432,273 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     assert_eq!(rig.read("state/worktrees.json"), json!([]));
 }
 
+/// A Herdr whose `process-info` reports a root process for each pane. A pane named in
+/// `$RIG/busy` runs a command, a pane named in `$RIG/script` runs a script, and every
+/// other pane waits at its prompt.
+fn root_process_rig(name: &str) -> Rig {
+    let rig = watchdog_rig(name);
+    rig.script("herdr", r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+ 'machine list --json') cat "$RIG/machines.json" ;;
+ 'agent list') cat "$RIG/agents.json" ;;
+ 'pane list') cat "$RIG/panes.json" ;;
+ 'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w3","label":"done-work"}]}}' ;;
+ 'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
+ 'pane process-info --pane '*)
+ if grep -qx "$4" "$RIG/busy" 2>/dev/null; then
+  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"sh","argv":["sh","-c","curl -H token:s3cr3t https://example.invalid"]}]}}}\n'
+ elif grep -qx "$4" "$RIG/script" 2>/dev/null; then
+  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh","build.sh"]}]}}}\n'
+ else
+  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}\n'
+ fi ;;
+ 'pane close'*|'workspace close'*) printf '{}\n' ;;
+ *) echo unexpected >&2; exit 2 ;;
+esac
+"#);
+    rig
+}
+
+/// A pane whose snapshot says it idled two days ago, and whose workspace holds it.
+fn idle_snapshot(rig: &Rig, pane: &str) {
+    let home = rig.dir.join("home");
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":pane,"workspace_id":"w3","cwd":home}]}}),
+    );
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
+    let mut snapshot = rig.read("state/host.json");
+    snapshot["probe"]["agent_panes"] = json!([]);
+    snapshot["probe"]["panes"] = json!([{
+        "pane_id":pane,"workspace_id":"w3","cwd":home,
+        "idle_shell":true,"idle_since_ms":NOW - 48 * 60 * 60 * 1000
+    }]);
+    rig.put("state/host.json", &snapshot);
+}
+
+#[test]
+fn the_sweep_keeps_a_pane_whose_root_process_runs_a_command() {
+    let rig = root_process_rig("sweep-command-pane");
+    // The snapshot says the pane idled two days ago. The live evidence says its root
+    // process runs a command, so the pane keeps its work.
+    idle_snapshot(&rig, "w3:p1");
+    fs::write(rig.dir.join("busy"), "w3:p1\n").unwrap();
+    let journal = requested_sweep(&rig);
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane close w3:p1"), "{log}");
+    assert!(!log.contains("workspace close w3\n"), "{log}");
+    assert!(!journal.contains("closed pane w3:p1"), "{journal}");
+    // The pane is not a removal candidate at all.
+    let (_, plan) = rig.json(&["doctor"]);
+    let ids: Vec<_> = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["class"] == "panes" || e["class"] == "workspaces")
+        .map(|e| e["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(!ids.iter().any(|id| id == "w3:p1" || id == "w3"), "{ids:?}");
+}
+
+#[test]
+fn the_sweep_keeps_a_pane_whose_root_process_runs_a_script() {
+    let rig = root_process_rig("sweep-script-pane");
+    // A shell that runs a script is not waiting at its prompt, whatever its name says.
+    idle_snapshot(&rig, "w3:p1");
+    fs::write(rig.dir.join("script"), "w3:p1\n").unwrap();
+    let journal = requested_sweep(&rig);
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane close w3:p1"), "{log}");
+    assert!(!log.contains("workspace close w3\n"), "{log}");
+    assert!(!journal.contains("closed pane w3:p1"), "{journal}");
+}
+
+#[test]
+fn a_hold_never_shows_the_arguments_of_a_command() {
+    let rig = root_process_rig("sweep-secret-pane");
+    let tree = rig.dir.join("home/repo/tree");
+    // The pane works in the checkout and runs a command. The hold that keeps the
+    // checkout names the program, never its arguments.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","cwd":tree}]}}),
+    );
+    fs::write(rig.dir.join("busy"), "w3:p1\n").unwrap();
+    let (_, plan) = rig.json(&["doctor"]);
+    let rendered = serde_json::to_string(&plan).unwrap();
+    assert!(rendered.contains("is busy (running sh)"), "{rendered}");
+    assert!(!rendered.contains("s3cr3t"), "{rendered}");
+}
+
+#[test]
+fn the_sweep_closes_a_pane_whose_root_process_waits_at_a_prompt() {
+    let rig = root_process_rig("sweep-idle-pane");
+    idle_snapshot(&rig, "w3:p1");
+    let journal = requested_sweep(&rig);
+    let log = rig.log("herdr.log");
+    // The pane is the workspace's last pane, so the workspace closes with it.
+    assert!(log.contains("workspace close w3\n"), "{log}");
+    assert!(
+        journal.contains("dogsled sweep: closed workspace w3"),
+        "{journal}"
+    );
+}
+
+#[test]
+fn the_sweep_keeps_a_pane_whose_command_started_after_the_plan() {
+    let rig = root_process_rig("sweep-late-command");
+    idle_snapshot(&rig, "w3:p1");
+    // The pane waits at its prompt while the plan is made, so the plan lists it.
+    let (_, plan) = rig.json(&["doctor"]);
+    let listed = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["id"] == "w3" && e["removable"] == true);
+    assert!(listed, "{plan}");
+    // Its command starts after the plan. The apply-time recheck must keep it.
+    fs::write(rig.dir.join("busy"), "w3:p1\n").unwrap();
+    let journal = requested_sweep(&rig);
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("workspace close w3\n"), "{log}");
+    assert!(!journal.contains("closed workspace w3"), "{journal}");
+}
+
+/// A rig whose pane starts a command between the sweep's plan and its close.
+///
+/// The transition is marked by the sweep's own phases, not by a count of reads.
+/// The survey reads the workspaces before it checks idle panes; the apply-time
+/// recheck reads them again after the plan is complete. The first read marks the
+/// survey, and every read after it marks the recheck. Only the recheck sees the
+/// command, so the plan and the refusal are the same on every run, whatever else
+/// reads processes at the same time.
+fn post_plan_command_rig(name: &str, argv: &str) -> Rig {
+    let rig = watchdog_rig(name);
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+ 'machine list --json') cat "$RIG/machines.json" ;;
+ 'agent list') cat "$RIG/agents.json" ;;
+ 'pane list') cat "$RIG/panes.json" ;;
+ 'workspace list')
+ if ! mkdir "$RIG/survey-started" 2>/dev/null; then
+  touch "$RIG/recheck-started"
+ fi
+ printf '%s\n' '{{"result":{{"workspaces":[{{"workspace_id":"w3","label":"done-work"}}]}}}}' ;;
+ 'worktree list --cwd'*) printf '%s\n' '{{"result":{{"worktrees":[]}}}}' ;;
+ 'pane process-info --pane '*)
+ if test -f "$RIG/recheck-started"; then
+  touch "$RIG/recheck-busy"
+  printf '{{"result":{{"process_info":{{"shell_pid":10,"foreground_processes":[{{"pid":10,"name":"sh","argv":{argv}}}]}}}}}}\n'
+ else
+  test ! -d "$RIG/survey-started" || touch "$RIG/survey-idle"
+  printf '{{"result":{{"process_info":{{"shell_pid":10,"foreground_processes":[{{"pid":10,"name":"zsh","argv":["zsh"]}}]}}}}}}\n'
+ fi ;;
+ 'pane close'*|'workspace close'*) printf '{{}}\n' ;;
+ *) echo unexpected >&2; exit 2 ;;
+esac
+"#
+    );
+    rig.script("herdr", &script);
+    rig
+}
+
+/// The markers prove the sweep planned an idle pane and rechecked a busy one.
+fn assert_post_plan_command(rig: &Rig) {
+    for marker in ["survey-idle", "recheck-started", "recheck-busy"] {
+        assert!(rig.dir.join(marker).exists(), "missing {marker}");
+    }
+}
+
+#[test]
+fn the_sweep_keeps_a_pane_whose_command_starts_between_the_plan_and_the_close() {
+    let rig = post_plan_command_rig("sweep-transition-pane", r#"["sh","-c","sleep 60"]"#);
+    idle_snapshot(&rig, "w3:p1");
+    let journal = requested_sweep(&rig);
+    assert_post_plan_command(&rig);
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("workspace close w3\n"), "{log}");
+    assert!(!journal.contains("closed workspace w3"), "{journal}");
+    assert!(
+        journal.contains("skipped: refuse w3: workspace is no longer idle"),
+        "{journal}"
+    );
+}
+
+#[test]
+fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
+    let rig = post_plan_command_rig(
+        "sweep-transition-checkout-secret",
+        r#"["sh","-c","curl -H token:sweep-argv-secret https://example.invalid"]"#,
+    );
+    idle_snapshot(&rig, "w3:p1");
+    let tree = rig.dir.join("home/repo/tree");
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","cwd":tree}]}}),
+    );
+    let journal = requested_sweep(&rig);
+    assert_post_plan_command(&rig);
+    let hold = format!("refuse {}: ", tree.display());
+    let busy = "w3:p1 is busy (running sh)";
+    assert!(journal.contains(&format!("skipped: {hold}")), "{journal}");
+    assert!(journal.contains(busy), "{journal}");
+    assert!(tree.join(".git").exists());
+    assert_eq!(rig.read("state/worktrees.json")[0]["path"], json!(tree));
+    let herdr = rig.log("herdr.log");
+    let git = rig.log("git.log");
+    assert!(!herdr.contains("pane close w3:p1"), "{herdr}");
+    assert!(!herdr.contains("workspace close w3\n"), "{herdr}");
+    assert!(!git.contains("worktree remove"), "{git}");
+    for output in [&journal, &herdr, &git] {
+        assert!(!output.contains("sweep-argv-secret"), "{output}");
+    }
+    let latest = rig.read("state/sweep.json");
+    let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
+    assert!(!history.contains("sweep-argv-secret"), "{history}");
+    let reports: Vec<Value> = history
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(!reports.is_empty(), "{history}");
+    assert_eq!(reports.last().unwrap(), &latest);
+    for report in std::iter::once(&latest).chain(&reports) {
+        let skipped = report["skipped"].as_array().unwrap();
+        assert!(
+            skipped.iter().any(|entry| {
+                let reason = entry.as_str().unwrap();
+                reason.starts_with(&hold) && reason.contains(busy)
+            }),
+            "{report}"
+        );
+        assert_eq!(report["failures"], json!([]), "{report}");
+        assert!(
+            !report.to_string().contains("sweep-argv-secret"),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn prune_keeps_a_pane_whose_root_process_runs_a_command() {
+    let rig = root_process_rig("prune-command-pane");
+    idle_snapshot(&rig, "w3:p1");
+    fs::write(rig.dir.join("busy"), "w3:p1\n").unwrap();
+    let out = rig.run(&["prune", "--yes", "panes", "workspaces"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane close w3:p1"), "{log}");
+    assert!(!log.contains("workspace close w3\n"), "{log}");
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(!printed.contains("s3cr3t"), "{printed}");
+}
+
 #[test]
 fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones() {
     let (rig, tree) = close_rig("sweep-branches");

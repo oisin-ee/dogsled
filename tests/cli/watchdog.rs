@@ -13,7 +13,7 @@ case "$*" in
  'pane read'*) printf '1\n2\n3\n4\n5\n' ;;
  'pane report-metadata'*|'notification show'*|'agent prompt'*|'pane close'*) printf '{}\n' ;;
  'pane process-info --pane gone') printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane not found"}}' >&2; exit 1 ;;
- 'pane process-info'*) printf '{"result":{"process_info":{"shell_pid":%s,"foreground_processes":[]}}}\n' "$(cat "$RIG/shell_pid" 2>/dev/null || echo 10)" ;;
+ 'pane process-info'*) printf '{"result":{"process_info":{"shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv":["zsh"]}]}}}\n' "$(cat "$RIG/shell_pid" 2>/dev/null || echo 10)" "$(cat "$RIG/shell_pid" 2>/dev/null || echo 10)" ;;
  'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
  'workspace list') cat "$RIG/workspaces.json" 2>/dev/null || printf '%s\n' '{"result":{"workspaces":[]}}' ;;
  'workspace close'*) printf '{}\n' ;;
@@ -355,7 +355,7 @@ case "$*" in
  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w3","label":"done-work"}]}}' ;;
  'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
  'pane process-info --pane '*)
- if grep -qx "$4" "$RIG/busy" 2>/dev/null; then fg='{"pid":11,"name":"vim"}'; else fg=''; fi
+ if grep -qx "$4" "$RIG/busy" 2>/dev/null; then fg='{"pid":11,"name":"vim","argv":["vim"]}'; else fg='{"pid":10,"name":"zsh","argv":["zsh"]}'; fi
  printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[%s]}}}\n' "$fg" ;;
  'pane close'*|'workspace close'*) printf '{}\n' ;;
  *) echo unexpected >&2; exit 2 ;;
@@ -550,4 +550,71 @@ fn doctor_closes_ended_job_tabs_and_shells_in_deleted_directories_at_once() {
     }
     // The job record and log stay until they expire.
     assert!(rig.dir.join("state/jobs/r-1.json").exists());
+}
+
+#[test]
+fn the_sweep_keeps_a_sidebar_pane_whose_root_process_is_a_running_command() {
+    let rig = shells_rig("sidebar-pane");
+    let home = rig.dir.join("home");
+    // Herdr runs a plugin pane's command as the pane's own root process, so the sidebar
+    // reports its own pid as the shell pid and has no other foreground process.
+    rig.script("herdr", r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+ 'machine list --json') cat "$RIG/machines.json" ;;
+ 'agent list') cat "$RIG/agents.json" ;;
+ 'pane list') cat "$RIG/panes.json" ;;
+ 'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w3","label":"done-work"}]}}' ;;
+ 'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
+ 'pane process-info --pane '*)
+ case "$4" in
+  'w3:p1') printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"dogsled","argv":["bin/dogsled","sidebar"]}]}}}\n' ;;
+  *) printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}\n' ;;
+ esac ;;
+ 'pane close'*|'workspace close'*) printf '{}\n' ;;
+ *) echo unexpected >&2; exit 2 ;;
+esac
+"#);
+    let pane =
+        |id: &str, workspace: &str| json!({"pane_id":id,"workspace_id":workspace,"cwd":home});
+    let live = [pane("w3:p1", "w3"), pane("w4:p1", "w4")];
+    rig.put("panes.json", &json!({"result":{"panes":live}}));
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
+    let mut snapshot = rig.read("state/host.json");
+    snapshot["probe"]["agent_panes"] = json!([]);
+    // The last sample saw both panes as idle shells.
+    snapshot["probe"]["panes"] = json!(
+        live.iter()
+            .map(|p| {
+                let mut p = p.clone();
+                p["idle_shell"] = json!(true);
+                p["idle_since_ms"] = json!(NOW - 48 * 60 * 60 * 1000);
+                p
+            })
+            .collect::<Vec<_>>()
+    );
+    rig.put("state/host.json", &snapshot);
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    // The sidebar pane is not a candidate. The ordinary idle shell still is.
+    let panes: Vec<_> = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["class"] == "panes" || e["class"] == "workspaces")
+        .map(|e| e["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        !panes.iter().any(|id| id == "w3:p1" || id == "w3"),
+        "{panes:?} in {plan}"
+    );
+    let out = rig.run(&["prune", "--yes", "panes", "workspaces"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane close w3:p1"), "{log}");
+    assert!(!log.contains("workspace close w3"), "{log}");
 }

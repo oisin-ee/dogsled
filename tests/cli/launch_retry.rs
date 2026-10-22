@@ -837,8 +837,8 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
 fn shell_initialization_is_owned_by_native_agent_start() {
     let rig = Rig::new("native-shell-startup");
     rig.script("herdr", &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
-        "[{\"pid\":10,\"name\":\"zsh\"}]",
-        "[{\"pid\":10,\"name\":\"zsh\"},{\"pid\":11,\"name\":\"bash\",\"cmdline\":\"brew shellenv\"}]",
+        "[{\"pid\":10,\"name\":\"zsh\",\"argv\":[\"zsh\"]}]",
+        "[{\"pid\":10,\"name\":\"zsh\",\"argv\":[\"zsh\"]},{\"pid\":11,\"name\":\"bash\",\"cmdline\":\"brew shellenv\"}]",
     ));
     let request = host_request(&rig);
     let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
@@ -881,14 +881,14 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
             );
         let script = match case {
             "busy" => script.replace(
-                "[{\"pid\":10,\"name\":\"zsh\"}]",
-                "[{\"pid\":22,\"name\":\"vim\"}]",
+                "[{\"pid\":10,\"name\":\"zsh\",\"argv\":[\"zsh\"]}]",
+                "[{\"pid\":22,\"name\":\"vim\",\"argv\":[\"vim\"]}]",
             ),
             "uninspectable" => script.replace(
                 "'pane process-info'*) printf",
                 "'pane process-info'*) exit 2 ;;\n  'unused'*) printf",
             ),
-            "empty" => script.replace("[{\"pid\":10,\"name\":\"zsh\"}]", "[]"),
+            "empty" => script.replace("[{\"pid\":10,\"name\":\"zsh\",\"argv\":[\"zsh\"]}]", "[]"),
             _ => script,
         };
         rig.script("herdr", &script);
@@ -1025,8 +1025,8 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
         &fs::read_to_string(rig.dir.join("bin/herdr"))
             .unwrap()
             .replace(
-                "[{\"pid\":10,\"name\":\"zsh\"}]",
-                "[{\"pid\":11,\"name\":\"pi\"}]",
+                "[{\"pid\":10,\"name\":\"zsh\",\"argv\":[\"zsh\"]}]",
+                "[{\"pid\":11,\"name\":\"pi\",\"argv\":[\"pi\"]}]",
             ),
     );
     let (_, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);

@@ -340,6 +340,7 @@ Prune and the sweep use one pane rule. Both keep the caller's pane and focused p
 An empty shell closes when its job ended, its directory disappeared, its launch is final, or its agent item closed.
 A final launch was refused, never attempted, or has an unknown outcome with no agent in its terminal. Cleanup preserves launch receipts and checks terminal ownership under the launch locks.
 A shell without a Dogsled record closes after 15 minutes continuously at an empty prompt, based on service observations and a fresh check. Herdr reports no activity time, so a command that starts and ends between samples does not count.
+A pane is an empty prompt only when its root process is a shell that waits there. A shell that runs a command, such as `sh -c "..."`, a shell that runs a script, and a shell with an unknown option all keep the pane. A report names the program of a running command, never its arguments.
 An agent pane still needs more than 24 hours continuously idle or done and a `done` mark. An agent with open children stays open.
 A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
 Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known dogsled-owned paths.
