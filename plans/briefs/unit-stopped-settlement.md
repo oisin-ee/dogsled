@@ -1,6 +1,6 @@
 # A committed unit whose worker pane is gone settles as `stopped`
 
-Status: dispatched. **Base: `origin/main` 2375c23cb24ad53c6662c21f42e2cade08fdb575** (v0.23.0: #137, #138 and #139 are merged).
+Status: implemented. Merged as #140 (`fix(unit): settle a committed unit whose worker pane is gone`, merge `0dc9206`); in no release yet. Base the writer started from: `origin/main` 2375c23cb24ad53c6662c21f42e2cade08fdb575 (v0.23.0).
 
 **Dispatcher.** wJ9:p2S dispatches this unit. wPS:p1 reviews the commit at its exact head.
 
