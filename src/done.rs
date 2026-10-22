@@ -22,6 +22,7 @@ pub struct Branch {
     pub repo: String,
     pub name: String,
     pub ahead: u64,
+    /// Settled: integrated into the default branch, or no local/origin branch remains.
     pub landed: bool,
 }
 
@@ -314,11 +315,47 @@ fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Option<Br
 }
 
 fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> Result<()> {
-    let tip = format!("refs/heads/{}", branch.name);
-    branch.landed = crate::loss::Evidence::default_only(&branch.repo)
+    let mut tip = None;
+    for reference in [
+        format!("refs/heads/{}", branch.name),
+        format!("refs/remotes/origin/{}", branch.name),
+    ] {
+        let exists = shell.run(
+            "git",
+            &[
+                "-C".into(),
+                branch.repo.clone(),
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                reference.clone(),
+            ],
+        )?;
+        match exists.status {
+            0 => {
+                tip = Some(reference);
+                break;
+            }
+            1 => (),
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "{}: cannot inspect branch {}: {}",
+                    branch.repo,
+                    branch.name,
+                    exists.stderr.trim()
+                )));
+            }
+        }
+    }
+    let Some(tip) = tip else {
+        branch.landed = true;
+        branch.ahead = 0;
+        return Ok(());
+    };
+    let landed = crate::loss::Evidence::default_only(&branch.repo)
         .assess(shell, &tip, None)?
         .landed();
-    branch.ahead = if branch.landed {
+    let ahead = if landed {
         0
     } else {
         let base = crate::integration::base(shell, &branch.repo)?;
@@ -338,6 +375,8 @@ fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> Resul
             .parse()
             .map_err(|_| Error::Invalid(format!("{}: invalid branch commit count", branch.repo)))?
     };
+    branch.landed = landed;
+    branch.ahead = ahead;
     Ok(())
 }
 
@@ -521,7 +560,9 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
     let mut agents = crate::probe::agent_list(shell)?;
     observe(ledger, &mut agents)?;
     for mut mark in list(ledger)? {
-        if let Some(branch) = &mut mark.branch {
+        if let Some(branch) = &mut mark.branch
+            && !(mark.closed_ms.is_some() && branch.landed)
+        {
             if let Err(error) = refresh_branch(shell, branch) {
                 eprintln!("dogsled handoff: branch {}: {error}", branch.name);
             }
