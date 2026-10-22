@@ -309,6 +309,12 @@ fn dock(
             }
             std::fs::remove_file(registry.dir.join(&file))?;
         }
+        let focused = panes
+            .iter()
+            .find(|pane| pane["focused"] == true)
+            .and_then(|pane| pane["pane_id"].as_str())
+            .unwrap_or(owner)
+            .to_owned();
         let target = leftmost_pane(&socket.layout_export(owner)?["root"])
             .unwrap_or(owner)
             .to_owned();
@@ -354,6 +360,7 @@ fn dock(
             Error::Invalid("herdr pane.layout: dock split width not found".into())
         })?;
         socket.set_split_ratio(tab, &path, dock_ratio(width))?;
+        socket.focus_pane(&focused)?;
         registry.write(&file, pane)?;
         Ok(pane.clone())
     })
@@ -990,7 +997,7 @@ mod tests {
         let shell = crate::shell::Fake::new();
         let panes = |extra: bool| {
             let mut panes = vec![
-                serde_json::json!({"pane_id":"w1:p1","terminal_id":"term-owner","tab_id":"w1:t1"}),
+                serde_json::json!({"pane_id":"w1:p1","terminal_id":"term-owner","tab_id":"w1:t1","focused":true}),
             ];
             if extra {
                 panes.push(serde_json::json!({"pane_id":"w1:p2","terminal_id":"term-board","tab_id":"w1:t1"}));
@@ -1022,6 +1029,7 @@ mod tests {
             "layout.set_split_ratio" => {
                 serde_json::json!({"result":{"type":"layout_split_ratio_set","layout":{}}})
             }
+            "pane.focus" => serde_json::json!({"result":{"type":"pane_info","pane":{}}}),
             other => panic!("unexpected socket method {other}"),
         });
         Dock {
@@ -1038,9 +1046,23 @@ mod tests {
 
         fn ratio_request(&self) -> serde_json::Value {
             let requests = self.socket.requests.lock().unwrap();
-            let last = requests.last().unwrap();
-            assert_eq!(last["method"], "layout.set_split_ratio");
-            last["params"].clone()
+            let request = requests
+                .iter()
+                .find(|request| request["method"] == "layout.set_split_ratio")
+                .expect("a set_split_ratio request");
+            request["params"].clone()
+        }
+
+        /// The `pane.focus` requests this rig sent, in order.
+        fn focus_requests(&self) -> Vec<serde_json::Value> {
+            self.socket
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request["method"] == "pane.focus")
+                .cloned()
+                .collect()
         }
 
         fn finish(self) {
@@ -1073,6 +1095,69 @@ mod tests {
         assert!((params["ratio"].as_f64().unwrap() - 38.0 / 120.0).abs() < 1e-6);
         let methods = rig.socket.methods();
         assert!(!methods.iter().any(|method| method == "layout.apply"));
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_restores_the_focus_the_caller_had() {
+        let rig = dock_rig(
+            leaf("w1:p1"),
+            split("right", leaf("w1:p2"), leaf("w1:p1")),
+            "split_0_root",
+            120,
+            "w1:p1",
+        );
+        rig.open();
+        let requests = rig.socket.requests.lock().unwrap().clone();
+        let last = requests.last().unwrap();
+        assert_eq!(last["method"], "pane.focus");
+        assert_eq!(last["params"]["pane_id"], "w1:p1");
+        assert_eq!(rig.focus_requests().len(), 1);
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_restores_the_focus_of_whichever_pane_had_it() {
+        let rig = dock_rig(
+            leaf("w1:p1"),
+            split("right", leaf("w1:p2"), leaf("w1:p1")),
+            "split_0_root",
+            120,
+            "w1:p1",
+        );
+        rig.shell.on(
+            "herdr pane list",
+            &serde_json::json!({"result":{"panes":[
+                {"pane_id":"w1:p1","terminal_id":"term-owner","tab_id":"w1:t1","focused":false},
+                {"pane_id":"w1:p9","terminal_id":"term-other","tab_id":"w1:t1","focused":true}]}})
+            .to_string(),
+        );
+        rig.open();
+        let requests = rig.focus_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["params"]["pane_id"], "w1:p9");
+        rig.finish();
+    }
+
+    #[test]
+    fn board_open_falls_back_to_the_owner_when_no_pane_has_focus() {
+        let rig = dock_rig(
+            leaf("w1:p1"),
+            split("right", leaf("w1:p2"), leaf("w1:p1")),
+            "split_0_root",
+            120,
+            "w1:p1",
+        );
+        rig.shell.on(
+            "herdr pane list",
+            &serde_json::json!({"result":{"panes":[
+                {"pane_id":"w1:p1","terminal_id":"term-owner","tab_id":"w1:t1","focused":false}]}})
+            .to_string(),
+        );
+        rig.open();
+        let requests = rig.focus_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["params"]["pane_id"], "w1:p1");
         rig.finish();
     }
 
@@ -1144,6 +1229,10 @@ mod tests {
         assert_eq!(rig.open(), saved);
         assert_eq!(*rig.shell.calls.lock().unwrap(), ["herdr pane list"]);
         assert_eq!(rig.socket.methods().len(), 0);
+        assert!(
+            rig.focus_requests().is_empty(),
+            "a reused dock takes no focus"
+        );
         rig.finish();
     }
 
@@ -1179,6 +1268,7 @@ mod tests {
         let toggle =
             |rig: &Dock| toggle(&rig.ledger, &rig.shell, &rig.socket.client(), "w1:p1").unwrap();
         assert_eq!(toggle(&rig)["pane_id"], "w1:p2", "no dock: opens");
+        let focus_after_open = rig.focus_requests().len();
         rig.shell.on(
             "herdr pane list",
             &serde_json::json!({"result":{"panes":[
@@ -1202,6 +1292,11 @@ mod tests {
                 .dir
                 .join(format!("{}.json", key("w1:t1")))
                 .exists()
+        );
+        assert_eq!(
+            rig.focus_requests().len(),
+            focus_after_open,
+            "closing a dock takes no focus"
         );
         rig.finish();
     }
