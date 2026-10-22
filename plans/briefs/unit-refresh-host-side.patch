@@ -1,0 +1,103 @@
+diff --git a/src/cli.rs b/src/cli.rs
+index ba0d853..9b644f7 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -412,6 +412,11 @@ pub enum HostCommand {
+         #[arg(long)]
+         input: String,
+     },
++    /// Read immutable seeded terminal evidence for many executions in one call.
++    UnitReceipts {
++        #[arg(long)]
++        input: String,
++    },
+     /// The final reply of the finished agent in a pane.
+     Reply {
+         pane: String,
+diff --git a/src/launch.rs b/src/launch.rs
+index c67a326..71b4113 100644
+--- a/src/launch.rs
++++ b/src/launch.rs
+@@ -818,6 +818,51 @@ pub fn terminal_ack(
+     })
+ }
+ 
++/// One host answer for a batch of refresh reads. Each entry is scoped to its own request.
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct ReceiptEntry {
++    pub request_id: String,
++    #[serde(default)]
++    pub evidence: Option<crate::unit_reply::HostEvidence>,
++    /// The host rejected this request's evidence.
++    #[serde(default)]
++    pub invalid: Option<String>,
++    /// The host could not read this request's evidence.
++    #[serde(default)]
++    pub failed: Option<String>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct ExecutionsInput {
++    pub executions: Vec<crate::unit_transport::ExecutionRef>,
++}
++
++/// Batch form of `unit_receipt`: one failing request never fails its neighbours.
++pub fn unit_receipts(
++    ledger: &Ledger,
++    executions: &[crate::unit_transport::ExecutionRef],
++) -> Vec<ReceiptEntry> {
++    executions
++        .iter()
++        .map(|execution| {
++            let mut entry = ReceiptEntry {
++                request_id: execution.request_id.clone(),
++                evidence: None,
++                invalid: None,
++                failed: None,
++            };
++            match unit_receipt(ledger, execution) {
++                Ok(evidence) => entry.evidence = evidence,
++                Err(Error::Invalid(message)) => entry.invalid = Some(message),
++                Err(error) => entry.failed = Some(error.to_string()),
++            }
++            entry
++        })
++        .collect()
++}
++
+ /// Peer refresh reads immutable execution evidence, even after its pane closes.
+ /// A final native refusal repairs only this request's preparation, never its pane.
+ pub fn unit_receipt(
+diff --git a/src/main.rs b/src/main.rs
+index 3a4a936..72c747f 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -347,6 +347,14 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
+             )?,
+             String::new,
+         )?,
++        HostCommand::UnitReceipts { input } => print(
++            true,
++            &launch::unit_receipts(
++                node.ledger,
++                &serde_json::from_str::<launch::ExecutionsInput>(&input)?.executions,
++            ),
++            String::new,
++        )?,
+         HostCommand::Reply { pane } => {
+             print(
+                 true,
+@@ -422,7 +430,10 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
+             print(true, &tail, String::new)?;
+         }
+         HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
+-        HostCommand::Reply { .. } | HostCommand::Close { .. } | HostCommand::UnitReceipt { .. } => {
++        HostCommand::Reply { .. }
++        | HostCommand::Close { .. }
++        | HostCommand::UnitReceipt { .. }
++        | HostCommand::UnitReceipts { .. } => {
+             child(cmd, node)?;
+         }
+         HostCommand::Prune { plan } => print(
