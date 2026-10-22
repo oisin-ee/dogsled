@@ -432,9 +432,29 @@ pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
     Ok(())
 }
 
+/// Which committed unit admissions a refresh asks hosts about.
+#[derive(Clone, Copy)]
+pub enum Scope<'a> {
+    All,
+    Owner(&'a str),
+    Execution(&'a ExecutionRef),
+}
+
+impl Scope<'_> {
+    fn includes(self, execution: &ExecutionRef) -> bool {
+        match self {
+            Self::All => true,
+            Self::Owner(owner) => execution.owner_id == owner,
+            Self::Execution(wanted) => execution == wanted,
+        }
+    }
+}
+
 /// Existing inbox/refresh lane imports immutable host evidence. Missing or unreachable
 /// hosts prove nothing; this never manufactures stopped from probes or closed items.
-pub fn refresh(fleet: &Fleet) -> Result<()> {
+/// An acknowledged settlement needs no repair: the owner acknowledges only after
+/// `settlements` ran a refresh, so such units are skipped in every scope.
+pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
     settle_unlaunched(fleet.ledger)?;
     let attempts = fleet.ledger.child("admissions");
     for file in records(&attempts)? {
@@ -444,7 +464,10 @@ pub fn refresh(fleet: &Fleet) -> Result<()> {
         let Some(unit) = attempt.unit.as_ref() else {
             continue;
         };
-        if unit.committed.is_none() {
+        if unit.committed.is_none()
+            || unit.settlement_ack.is_some()
+            || !scope.includes(&unit.execution)
+        {
             continue;
         }
         let Some(host) = attempt.host.as_ref() else {
@@ -674,8 +697,8 @@ fn pending_preparations(ledger: &Ledger) -> Result<Value> {
 }
 
 pub fn settlements(fleet: &Fleet) -> Result<Value> {
-    refresh(fleet)?;
     let owner = owner()?;
+    refresh(fleet, Scope::Owner(&owner))?;
     let attempts = fleet.ledger.child("admissions");
     let mut pending = Vec::new();
     for file in records(&attempts)? {
@@ -756,11 +779,9 @@ fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
         )?)?),
         UnitCommand::Commit { input } => commit(fleet, &decode(&input)?),
         UnitCommand::Observe { input } => {
-            refresh(fleet)?;
-            observe(
-                fleet.ledger,
-                &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,
-            )
+            let input = decode::<crate::unit_transport::ExecutionInput>(&input)?;
+            refresh(fleet, Scope::Execution(&input.execution))?;
+            observe(fleet.ledger, &input.execution)
         }
         UnitCommand::TerminalAck { input } => Ok(serde_json::to_value(
             crate::launch::terminal_ack(fleet.ledger, fleet.shell, &decode(&input)?)?,

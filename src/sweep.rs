@@ -207,7 +207,7 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
 /// done, clean, and pushed, close exactly as `dogsled close` would. Orphans that stay are
 /// recorded for status and check-ins.
 pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
-    crate::unit_request::refresh(fleet)?;
+    crate::unit_request::refresh(fleet, crate::unit_request::Scope::All)?;
     crate::done::handoff(fleet.ledger, fleet.shell, now)?;
     crate::items::handoffs(fleet.ledger, &fleet.status(now)?)?;
     let items: Vec<Item> = crate::items::list(fleet.ledger)?

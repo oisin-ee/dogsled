@@ -351,16 +351,22 @@ fn invalid_evidence_is_request_scoped_and_other_owners_can_receive_and_ack() {
         let out = run(&["unit", "settlements"]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "{stderr}");
-        assert!(
-            stderr.contains(local_id)
-                && stderr.contains("host refusal lacks consistent launch provenance"),
-            "{stderr}"
-        );
-        assert!(
-            stderr.contains(remote_id)
-                && stderr.contains("host refusal does not match selected launch"),
-            "{stderr}"
-        );
+        if owner == "w1:p1" {
+            assert!(
+                stderr.contains(local_id)
+                    && stderr.contains("host refusal lacks consistent launch provenance"),
+                "{stderr}"
+            );
+            assert!(
+                stderr.contains(remote_id)
+                    && stderr.contains("host refusal does not match selected launch"),
+                "{stderr}"
+            );
+        } else {
+            // Another owner's units are outside this owner's refresh scope.
+            assert!(!stderr.contains(local_id), "{stderr}");
+            assert!(!stderr.contains(remote_id), "{stderr}");
+        }
         let events: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
         assert_eq!(events[0]["execution"], expected);
