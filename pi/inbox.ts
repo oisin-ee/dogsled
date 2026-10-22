@@ -82,6 +82,8 @@ export class InboxReader {
 				if (name === file) void this.drain(ctx);
 			});
 			this.watcher.on("error", () => { this.watcher?.close(); this.watcher = undefined; });
+			// Catch writes between the initial claim and watcher registration.
+			await this.drain(ctx);
 		} catch {
 			// The periodic refresh still drains the inbox; without a watch, delivery waits for it.
 		}
