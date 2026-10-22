@@ -515,7 +515,7 @@ impl Shell for ShellPanes {
             ]}}))
         } else if program == "herdr" && args.starts_with(&["pane".into(), "process-info".into()]) {
             Some(
-                serde_json::json!({"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}),
+                serde_json::json!({"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}),
             )
         } else {
             None
@@ -881,7 +881,7 @@ impl Shell for ShellIn {
             ]}}))
         } else if program == "herdr" && args.starts_with(&["pane".into(), "process-info".into()]) {
             Some(
-                serde_json::json!({"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh"}]}}}),
+                serde_json::json!({"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}),
             )
         } else {
             None

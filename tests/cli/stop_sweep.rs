@@ -110,7 +110,7 @@ case "$*" in
  'machine list --json') printf '[]\n' ;;
  'agent list') printf '{"result":{"agents":[]}}\n' ;;
  'pane list') cat "$RIG/panes.json" ;;
- 'pane process-info'*) printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[]}}}\n' ;;
+ 'pane process-info'*) printf '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}\n' ;;
  'workspace list') echo survey-unavailable >&2; exit 1 ;;
  *) exit 2 ;;
 esac

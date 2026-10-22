@@ -2340,8 +2340,10 @@ mod tests {
             let panes: Vec<_> = panes.iter().map(|(id, workspace, idle)| {
                 self.shell.on(
                     &format!("herdr pane process-info --pane {id}"),
-                    if *idle { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[]}}}"# }
-                    else { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[{"pid":2,"name":"pi"}]}}}"# },
+                    // An idle shell is its own foreground process. A busy pane runs another
+                    // program in front of the shell.
+                    if *idle { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[{"pid":1,"name":"zsh","argv":["zsh"]}]}}}"# }
+                    else { r#"{"result":{"process_info":{"shell_pid":1,"foreground_processes":[{"pid":2,"name":"pi","argv":["pi"]}]}}}"# },
                 );
                 json!({"pane_id":id,"workspace_id":workspace,"idle_shell":idle,"idle_since_ms":1})
             }).collect();
