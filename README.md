@@ -11,13 +11,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.23.0
+mise use github:oisin-ee/dogsled@v0.23.1
 ```
 
 Pi (extension, tools, and skill), from npm or as part of `@oisin-ee/oisinpi`:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.23.0
+pi install npm:@oisin-ee/pi-dogsled@0.23.1
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -25,14 +25,14 @@ At session start the extension compares its version with `dogsled --version` and
 Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/dogsled#v0.23.0
+claude plugin marketplace add oisin-ee/dogsled#v0.23.1
 claude plugin install dogsled@dogsled
 ```
 
 Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/dogsled --ref v0.23.0
+codex plugin marketplace add oisin-ee/dogsled --ref v0.23.1
 codex plugin add dogsled@dogsled
 ```
 
@@ -42,7 +42,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (left-docked work board):
 
 ```sh
-herdr plugin install oisin-ee/dogsled --ref v0.23.0 --yes
+herdr plugin install oisin-ee/dogsled --ref v0.23.1 --yes
 ```
 
 The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build step (`plugin/fetch.sh`) installs its own binary at `bin/dogsled`: the release archive for the manifest version, checked against its published SHA-256. When that release has no archive for the platform, it runs `cargo build --release --locked` instead, which needs Rust at the crate's `rust-version` or newer. A checksum mismatch stops the install. `DOGSLED_RELEASES` replaces the download base, such as a mirror. `herdr plugin link` skips build steps, so run `sh plugin/fetch.sh` in a linked checkout. No plugin starts host services.
