@@ -2,13 +2,15 @@
 
 Status: ready, not dispatched.
 
-**Precondition.** This is commit 3 on branch `fix/unit-settlements-scope`. Start only after both earlier commits are pushed:
-- commit 1: refresh scope plus the `settlement_ack` skip (brief `plans/briefs/unit-settlements-scope.md` on that branch);
-- commit 2: one `unit-receipts` ssh per host (brief `plans/briefs/unit-refresh-ssh-fanout.md`).
+**Dispatcher.** wJ9:p2S dispatches this unit. wPS:p1 reviews the commit at its exact head.
 
-The lead writes the head SHA of commit 2 into the dispatch. Start from that SHA. Do not redo or change commits 1 and 2.
+**Precondition.** Start only after both fan-out PRs have merged to `main` and shipped as release 0.23.0:
+- #138 `fix/unit-settlements-scope`: refresh scope plus the `settlement_ack` skip ("commit 1" below);
+- #139 `fix/unit-refresh-batch`: one `unit-receipts` ssh per host ("commit 2" below).
 
-Line references below are checked at `origin/main` 4e2be38. Commits 1 and 2 change `src/unit_request.rs`, `src/launch.rs`, `src/cli.rs` and `src/main.rs`, so find each named function again at the base head.
+The dispatcher writes the `origin/main` SHA after that merge into the dispatch. Start from that SHA. Do not change the merged fan-out code beyond what this brief needs.
+
+Line references below are checked at `origin/main` 4e2be38, before #138 and #139. Those PRs change `src/unit_request.rs`, `src/launch.rs`, `src/cli.rs` and `src/main.rs`, so find each named function again at the base SHA.
 
 ## Outcome
 
@@ -106,7 +108,7 @@ Keep green with no change: `invalid_host_evidence_never_falls_back_to_cached_ret
 - `src/launch.rs`, `src/launch/recovery.rs` (only to share `lost_pane`), `src/cleanup.rs` (only to share `pane_snapshot`)
 - `src/unit_reply.rs`, `src/unit_request.rs`, `src/unit_transport.rs`, `src/main.rs` (only the `unit_receipt` call), `src/close.rs` (only if needed)
 - `tests/cli/unit_seeded.rs`, `docs/unit-requests.md` (:160 paragraph, and :65 if needed)
-- Do not edit `CHANGELOG.md`; commits 1 and 2 leave it to the lead too. Put this Fixed line in your reply: "A committed unit whose worker pane closed without a final reply now settles as `stopped`, so its owner can release the unit."
+- `CHANGELOG.md`: one Fixed line under `## Unreleased` (add the heading above 0.23.0 if it is missing): "A committed unit whose worker pane closed without a final reply now settles as `stopped`, so its owner can release the unit."
 
 Do not edit `src/board.rs` or `src/herdr_socket.rs`. Netcup writer w15F:p1 (branch `fix/sidebar-keep-focus`) owns them. Its tests stub `herdr pane list` in `src/board.rs`'s own test shell. That is a separate parser (`src/board.rs:282`) and shares no code with `cleanup::pane_snapshot`.
 
@@ -116,10 +118,12 @@ Do not edit `src/board.rs` or `src/herdr_socket.rs`. Netcup writer w15F:p1 (bran
 
 ## Publish
 
-- Branch `fix/unit-settlements-scope`, at the commit-2 SHA the lead writes into the dispatch. Before you push, check that `origin/fix/unit-settlements-scope` is still at that SHA. If it moved, stop and reply `blocked`.
-- One commit: `fix(unit): settle a committed unit whose worker pane is gone`. The body says where the proof lives and why (see Design 1). Push to the same branch. Hooks must pass; never bypass them.
-- No new PR, release, tag, version bump, install or host change. The branch's draft PR gets a third section from the lead.
+- New branch `fix/unit-stopped-settlement`, made from the `origin/main` SHA in the dispatch.
+- One commit: `fix(unit): settle a committed unit whose worker pane is gone`. The body says where the proof lives and why (see Design 1). Push it. Hooks must pass; never bypass them.
+- Open one DRAFT PR against `main`. Its body has: the bug and the two held admissions as evidence; where the proof lives and why; the test names; the deploy order (peers first, then the Mac); and the gate command with its result at the head.
+- Run the gate (`mise run check:rust`) once at the head through `dogsled run` on netcup or momokaya-2, not on the Mac. A Mac build freeze is in force.
+- No merge, ready-for-review, release, tag, version bump, install or host change.
 
 ## Reply
 
-Commit SHA, a diff summary for each file, the test names, and the check results. Or `blocked: <reason>`. Never end a turn without one of these.
+Commit SHA, draft PR URL, a diff summary for each file, the test names, the check results and the gate result. Or `blocked: <reason>`. Never end a turn without one of these.
