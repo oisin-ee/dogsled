@@ -20,8 +20,12 @@ pub const NARROW: u16 = 24;
 const AGENTS_SHARE: f32 = 0.6;
 /// Hosts auto-collapses to one line per host when the other panels would get fewer rows.
 const HOSTS_REST_MIN: u16 = 12;
-/// Cells in a host's memory meter.
+/// Cells in a host's memory and disk meters.
 const METER: usize = 8;
+/// Nerd Font `nf-md-memory`.
+const MEM_ICON: &str = "\u{f035b}";
+/// Nerd Font `nf-md-harddisk`.
+const DISK_ICON: &str = "\u{f02ca}";
 /// Columns between the progress bar and its `n of m` label.
 const BAR_GAP: usize = 5;
 
@@ -281,7 +285,7 @@ fn host_lines(model: &Model, pal: &Palette, width: usize, compact: bool) -> Vec<
     out
 }
 
-/// Line 2: the memory meter and free disk, or why there is none. Longer forms give way to
+/// Line 2: the memory and disk meters, or why there is none. Longer forms give way to
 /// shorter ones as the pane narrows.
 fn host_detail(row: &HostRow, pal: &Palette, room: usize) -> Vec<Span<'static>> {
     if row.unreachable() {
@@ -294,29 +298,44 @@ fn host_detail(row: &HostRow, pal: &Palette, room: usize) -> Vec<Span<'static>> 
     let (Some((used, memory)), Some((free, disk))) = (row.memory, row.disk) else {
         return vec![Span::styled(fit("no snapshot", room), fg(pal.overlay0))];
     };
-    let filled = ((used.clamp(0.0, 1.0) * METER as f64).round() as usize).min(METER);
-    let mut mem = vec![
-        Span::styled("mem ", fg(pal.overlay1)),
-        Span::styled("▰".repeat(filled), fg(level_color(pal, memory))),
-        Span::styled("▱".repeat(METER - filled), fg(pal.surface1)),
-        Span::styled(format!(" {:.0}%", used * 100.0), fg(pal.overlay1)),
-    ];
-    let disk_color = if disk == Level::Ok {
-        pal.overlay1
-    } else {
-        level_color(pal, disk)
-    };
-    let mem_width: usize = mem.iter().map(Span::width).sum();
-    for text in [
-        format!("  disk {free:.0}% free"),
-        format!("  disk {free:.0}%"),
-    ] {
-        if mem_width + cells(&text) <= room {
-            mem.push(Span::styled(text, fg(disk_color)));
+    let mut line = meter(pal, MEM_ICON, used, memory, true);
+    let mem_width: usize = line.iter().map(Span::width).sum();
+    // The disk meter fills by the share of the disk in use, so it reads like the memory
+    // meter. It gives up its percent first, and then goes away, as the pane narrows.
+    for percent in [true, false] {
+        let disk_meter = meter(pal, DISK_ICON, 1.0 - free / 100.0, disk, percent);
+        let disk_width: usize = disk_meter.iter().map(Span::width).sum();
+        if mem_width + 2 + disk_width <= room {
+            line.push(Span::raw("  "));
+            line.extend(disk_meter);
             break;
         }
     }
-    mem
+    line
+}
+
+/// An icon, a meter of `METER` cells filled to `fraction`, and the percent when asked for.
+fn meter(
+    pal: &Palette,
+    icon: &str,
+    fraction: f64,
+    level: Level,
+    percent: bool,
+) -> Vec<Span<'static>> {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let filled = ((fraction * METER as f64).round() as usize).min(METER);
+    let mut spans = vec![
+        Span::styled(format!("{icon} "), fg(pal.overlay1)),
+        Span::styled("▰".repeat(filled), fg(level_color(pal, level))),
+        Span::styled("▱".repeat(METER - filled), fg(pal.surface1)),
+    ];
+    if percent {
+        spans.push(Span::styled(
+            format!(" {:.0}%", fraction * 100.0),
+            fg(pal.overlay1),
+        ));
+    }
+    spans
 }
 
 // ── agents ──────────────────────────────────────────────────────────────────────────────
