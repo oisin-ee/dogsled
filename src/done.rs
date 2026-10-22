@@ -162,6 +162,10 @@ pub enum Input<'a> {
     Put {
         from: Option<&'a crate::inbox::Sender>,
     },
+    /// The local owner continues a unit execution whose launch record predates the owner
+    /// host. `continue_legacy` is the only caller: its acceptance proves the original
+    /// admission and the owner's live session under the launch lock.
+    Legacy { from: &'a crate::inbox::Sender },
 }
 
 pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
@@ -376,12 +380,49 @@ pub fn input<T>(
     input: Input<'_>,
     accept: impl FnOnce() -> Result<(T, bool)>,
 ) -> Result<T> {
+    if matches!(input, Input::Legacy { .. }) {
+        return Err(Error::Invalid(
+            "legacy continuation needs its own guarded acceptance".into(),
+        ));
+    }
+    guarded(ledger, agent, input, |_| accept())
+}
+
+/// Continue the one done mark of a legacy unit execution in `agent`'s pane. A mark must
+/// belong to an unreturned launch with no owner host, and `from` must be its owner pane on
+/// this host. `accept` gets that exact mark, or `None` when the pane has no mark, while the
+/// done lock is held. It must prove the original admission and decide from its durable
+/// receipt. It returns whether its acceptance consumed the mark: only then is that mark, and
+/// no other, removed, and only if it is unchanged.
+pub fn continue_legacy<T>(
+    ledger: &Ledger,
+    agent: &Agent,
+    from: &crate::inbox::Sender,
+    accept: impl FnOnce(Option<&Mark>) -> Result<(T, bool)>,
+) -> Result<T> {
+    guarded(ledger, agent, Input::Legacy { from }, accept)
+}
+
+fn guarded<T>(
+    ledger: &Ledger,
+    agent: &Agent,
+    input: Input<'_>,
+    accept: impl FnOnce(Option<&Mark>) -> Result<(T, bool)>,
+) -> Result<T> {
     ledger.with_lock("done", || {
         let before: Marks = ledger.read(FILE)?.unwrap_or_default();
         let mut marks = migrate(ledger, before.clone(), std::slice::from_ref(agent))?;
         let mut refusal = None;
         let mut continued = false;
-        for mark in marks.values_mut().filter(|m| matches(m, agent)) {
+        let mut legacy = None;
+        let matched = marks.values().filter(|m| matches(m, agent)).count();
+        if matches!(input, Input::Legacy { .. }) && matched > 1 {
+            return Err(Error::Invalid(format!(
+                "{}: competing done marks; nothing was accepted",
+                agent.pane
+            )));
+        }
+        for (key, mark) in marks.iter_mut().filter(|(_, m)| matches(m, agent)) {
             let evidence = evidence(ledger, mark, agent);
             seal(mark, agent, &evidence);
             let name = mark
@@ -394,6 +435,27 @@ pub fn input<T>(
                 Some(format!("{name} finished; start a new child for more work"))
             } else {
                 match (evidence, input) {
+                    // Legacy continuation exists only for a launch record that predates the
+                    // owner host. Every other execution keeps the ordinary rules.
+                    (
+                        Ok(crate::launch::Execution::Unreturned {
+                            owner,
+                            host: None,
+                        }),
+                        Input::Legacy { from },
+                    ) if from.pane.as_deref() == Some(owner.as_str())
+                        && from.host == crate::inbox::hostname()
+                        && mark.closed_ms.is_none() =>
+                    {
+                        legacy = Some((key.clone(), mark.clone()));
+                        None
+                    }
+                    (Ok(crate::launch::Execution::Unreturned { host: Some(_), .. }), Input::Legacy { .. }) => Some(format!(
+                        "{name}'s launch record names its owner host; continue it with dogsled send; nothing was accepted"
+                    )),
+                    (Ok(crate::launch::Execution::Plain), Input::Legacy { .. }) => Some(format!(
+                        "{name} has no unit execution; continue it with dogsled send; nothing was accepted"
+                    )),
                     (Ok(crate::launch::Execution::Plain), _) => None,
                     (Ok(crate::launch::Execution::Returned), _) => Some(format!(
                         "{name} returned its unit; start a new child for more work"
@@ -428,8 +490,15 @@ pub fn input<T>(
             }
             return Err(Error::Invalid(refusal));
         }
-        let (result, received) = accept()?;
-        if received && (agent.state == "working" || continued) {
+        // Legacy input without a refusal reaches here with its one mark, or with no matching
+        // mark at all: its receipt decides whether that is a finished retry.
+        let (result, received) = accept(legacy.as_ref().map(|(_, mark)| mark))?;
+        if let Some((key, mark)) = &legacy {
+            // The acceptance consumed this mark. Remove exactly it, and only if unchanged.
+            if received && marks.get(key) == Some(mark) {
+                marks.remove(key);
+            }
+        } else if received && (agent.state == "working" || continued) {
             marks.retain(|_, m| !matches(m, agent));
         }
         if marks != before {

@@ -224,6 +224,23 @@ pub enum Command {
         #[arg(long, default_value = "message", value_parser = ["message", "task"])]
         kind: String,
     },
+    /// Continue, as its owner, a seeded worker on this host that called `done` before its unit
+    /// returned and whose launch record predates the owner host. `send` refuses such a worker.
+    /// The original admission must be on this host, and you must run the session that started
+    /// the unit.
+    LegacyContinue {
+        /// The worker's Herdr pane on this host.
+        pane: String,
+        /// A file with the message, or `-` for stdin.
+        #[arg(long, value_name = "PATH", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
+        /// The message text.
+        #[arg(long, required_unless_present = "message_file")]
+        message: Option<String>,
+        /// `message` for information, `task` for work to do.
+        #[arg(long, default_value = "message", value_parser = ["message", "task"])]
+        kind: String,
+    },
     /// Read and acknowledge this agent's inbox.
     #[command(subcommand)]
     Inbox(InboxCommand),

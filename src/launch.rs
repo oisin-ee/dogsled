@@ -264,6 +264,56 @@ pub fn execution(
     }
 }
 
+/// Hold launch `id`'s lock while `f` decides on input to its legacy unreturned execution in
+/// `agent`'s pane. `f` gets the exact saved launch request, as stored. Under the lock the launch
+/// must still bind the pane, be started and confirmed, have no owner host, and have no
+/// terminal receipt, so a terminal acknowledgement cannot pass between check and input.
+pub fn with_legacy_unreturned<T>(
+    ledger: &Ledger,
+    id: &str,
+    agent: &crate::probe::Agent,
+    f: impl FnOnce(&Value) -> Result<T>,
+) -> Result<T> {
+    crate::jobs::validate_id(id)?;
+    let receipts = ledger.child("launches");
+    receipts.with_lock(id, || {
+        if !matches!(
+            execution(ledger, Some(id), agent)?,
+            Execution::Unreturned { host: None, .. }
+        ) {
+            return Err(crate::unit_transport::conflict(&format!(
+                "unit launch {id} is not an unreturned launch without an owner host"
+            )));
+        }
+        let saved = receipts
+            .read::<Value>(&format!("{id}.progress.json"))?
+            .ok_or_else(|| crate::unit_transport::conflict("host launch record missing"))?;
+        let progress: Progress = serde_json::from_value(saved.clone())?;
+        let started = match receipts.read::<Receipt>(&format!("{id}.json"))? {
+            Some(Receipt::Started(result)) => result == progress.result,
+            _ => false,
+        };
+        if !started
+            || !progress.attempted
+            || !progress.confirmed
+            || progress.terminal_receipt.is_some()
+            || progress.request.id != id
+            || progress.pane.as_deref() != Some(agent.pane.as_str())
+            || progress
+                .request
+                .pane
+                .as_deref()
+                .is_some_and(|p| p != agent.pane)
+            || saved["request"].get("owner_host").is_some()
+        {
+            return Err(crate::unit_transport::conflict(&format!(
+                "unit launch {id} is not a started, confirmed, unreturned legacy launch"
+            )));
+        }
+        f(&saved["request"])
+    })
+}
+
 /// A seeded result uses the acknowledged transcript branch, not its newest message.
 pub fn handoff_reply(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     Ok(recovery::candidates(&ledger.child("launches"), Some(pane))?

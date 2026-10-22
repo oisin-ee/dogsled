@@ -274,6 +274,41 @@ fn put_checked(ledger: &Ledger, shell: &dyn crate::shell::Shell, record: Record)
 }
 
 fn put(ledger: &Ledger, record: Record) -> Result<Record> {
+    deliverable(ledger, &record)?;
+    update(ledger, &record.terminal.clone(), |all| {
+        if let Some(existing) = all.iter().find(|r| r.id == record.id) {
+            return Ok(existing.clone());
+        }
+        all.push(record.clone());
+        Ok(record)
+    })
+}
+
+/// Put one legacy continuation record. The caller's durable receipt owns replay protection and
+/// fixes the record ID. A retry after a crash finds the same record and changes nothing.
+pub(crate) fn put_continuation(ledger: &Ledger, record: Record) -> Result<Record> {
+    deliverable(ledger, &record)?;
+    update(ledger, &record.terminal.clone(), |all| {
+        if let Some(existing) = all.iter().find(|r| r.id == record.id) {
+            if existing.pane != record.pane
+                || existing.from != record.from
+                || existing.kind != record.kind
+                || existing.text != record.text
+            {
+                return Err(crate::unit_transport::conflict(
+                    "a different record has this continuation ID",
+                ));
+            }
+            return Ok(existing.clone());
+        }
+        all.push(record.clone());
+        Ok(record)
+    })
+}
+
+/// Refuse a record that nothing would deliver: too long, for a terminal that is not in this
+/// host's latest snapshot, or for a terminal with no reader.
+pub(crate) fn deliverable(ledger: &Ledger, record: &Record) -> Result<()> {
     validate_terminal(&record.terminal)?;
     if record.text.len() > MAX_TEXT {
         return Err(Error::Invalid(format!(
@@ -304,13 +339,7 @@ fn put(ledger: &Ledger, record: Record) -> Result<Record> {
             ),
         });
     }
-    update(ledger, &record.terminal.clone(), |all| {
-        if let Some(existing) = all.iter().find(|r| r.id == record.id) {
-            return Ok(existing.clone());
-        }
-        all.push(record.clone());
-        Ok(record)
-    })
+    Ok(())
 }
 
 /// Register the reader for `terminal` and claim its deliverable records: pending ones, and
@@ -591,13 +620,20 @@ pub fn send(
         reason: None,
         check: Backoff::default(),
     };
-    fleet.ledger.with_lock("outbox", || {
-        let mut all = outbox(fleet.ledger)?;
-        all.push(sent.clone());
-        all.retain(|s| s.state.open() || now.saturating_sub(s.created_ms) < KEEP_MS);
-        fleet.ledger.write(OUTBOX, &all)
-    })?;
+    record_sent(fleet.ledger, &sent, now)?;
     Ok(sent)
+}
+
+/// Keep `sent` in this host's outbox, once: a retried record keeps its first entry.
+pub(crate) fn record_sent(ledger: &Ledger, sent: &Sent, now: u64) -> Result<()> {
+    ledger.with_lock("outbox", || {
+        let mut all = outbox(ledger)?;
+        if !all.iter().any(|s| s.id == sent.id) {
+            all.push(sent.clone());
+        }
+        all.retain(|s| s.state.open() || now.saturating_sub(s.created_ms) < KEEP_MS);
+        ledger.write(OUTBOX, &all)
+    })
 }
 
 /// Ask each target host for the state of this host's open sent records, with backoff per

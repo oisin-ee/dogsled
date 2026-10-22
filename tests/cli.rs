@@ -13,6 +13,8 @@ mod inbox;
 mod jobs;
 #[path = "cli/launch_retry.rs"]
 mod launch_retry;
+#[path = "cli/legacy_continue.rs"]
+mod legacy_continue;
 #[path = "cli/lifecycle.rs"]
 mod lifecycle;
 #[path = "cli/machines.rs"]

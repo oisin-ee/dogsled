@@ -11,6 +11,7 @@ mod close;
 mod commands;
 mod config;
 mod context;
+mod continuation;
 mod done;
 mod error;
 mod facts;
@@ -212,6 +213,16 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             let text = inbox::message_text(message, message_file)?;
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             let sent = inbox::send_to(&fleet, &target, host.as_deref(), &kind, text, now_ms())?;
+            print(cli.json, &sent, || sent.line())?;
+        }
+        Command::LegacyContinue {
+            pane,
+            message_file,
+            message,
+            kind,
+        } => {
+            let text = inbox::message_text(message, message_file)?;
+            let sent = continuation::legacy(&ledger, &shell, &pane, &kind, &text, now_ms())?;
             print(cli.json, &sent, || sent.line())?;
         }
         Command::Hook(cmd) => hook(cmd, &ledger, &shell, &policy, home)?,
