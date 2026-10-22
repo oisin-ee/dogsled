@@ -1119,6 +1119,142 @@ fn existing_service_refresh_imports_receipt_and_does_not_close_unsealed_unit() {
     );
 }
 
+/// Prepare and commit one unit in `rig` as `owner`; returns the commit exit code and execution.
+fn commit_as(rig: &Rig, owner: &str, call: &str) -> (i32, Value) {
+    let run = |args: &[&str]| rig.cmd(args).env("HERDR_PANE_ID", owner).output().unwrap();
+    let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{}});
+    let out = run(&[
+        "unit",
+        "prepare",
+        "--input",
+        &input.to_string(),
+        "--tool-call-id",
+        call,
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let commit = commit_input(&execution, 0).to_string();
+    let out = run(&["unit", "commit", "--input", &commit]);
+    (out.status.code().unwrap(), execution)
+}
+
+/// Point a committed unit's admission at the remote host, as a remote placement records it.
+fn place_remote(rig: &Rig, execution: &Value) -> Value {
+    let mut attempt = admission(rig, execution);
+    attempt["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
+    attempt["launch"]["host"] = json!("8103");
+    let id = execution["requestId"].as_str().unwrap();
+    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    attempt
+}
+
+/// The logging `ssh` stub answers every `host unit-receipt` with `remote-receipt.json`.
+fn receipt_ssh(rig: &Rig) {
+    rig.script(
+        "ssh",
+        &fs::read_to_string(rig.dir.join("bin/ssh"))
+            .unwrap()
+            .replace(
+                "case \"$*\" in",
+                "case \"$*\" in\n  *'host unit-receipt'*) cat \"$RIG/remote-receipt.json\" ;;",
+            ),
+    );
+}
+
+#[test]
+fn settlements_reads_only_the_callers_unacknowledged_remote_units() {
+    let (rig, own, _) = refused_unit("scope-own");
+    let (other_rig, _, _) = refused_unit("scope-other");
+    let (code, other) = commit_as(&other_rig, "other-owner", "other-call");
+    assert_eq!(code, 2, "{other}");
+    let (acked_rig, acked, _) = refused_unit("scope-acked");
+    merge_records(&rig, &other_rig, "state/admissions");
+    merge_records(&rig, &acked_rig, "state/admissions");
+    let own_attempt = place_remote(&rig, &own);
+    place_remote(&rig, &other);
+    let mut acked_attempt = place_remote(&rig, &acked);
+    acked_attempt["unit"]["settlement_ack"] = json!("already-acknowledged");
+    let acked_id = acked["requestId"].as_str().unwrap();
+    rig.put(&format!("state/admissions/{acked_id}.json"), &acked_attempt);
+    rig.put(
+        "remote-receipt.json",
+        &json!({"kind":"refused","launch":own_attempt["launch"],"failed":"native refusal"}),
+    );
+    receipt_ssh(&rig);
+    let out = rig
+        .cmd(&["unit", "settlements"])
+        .env("HERDR_PANE_ID", "w1:p1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = rig.log("ssh.log");
+    assert!(log.contains(own["requestId"].as_str().unwrap()), "{log}");
+    assert!(!log.contains(other["requestId"].as_str().unwrap()), "{log}");
+    assert!(!log.contains(acked_id), "{log}");
+    let events: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let events = events.as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["execution"] == own && event["result"]["kind"] == "not_started"),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn observe_reads_only_its_own_execution() {
+    let (rig, first, _) = refused_unit("observe-first");
+    let (second_rig, second, _) = refused_unit("observe-second");
+    merge_records(&rig, &second_rig, "state/admissions");
+    let attempt = place_remote(&rig, &first);
+    place_remote(&rig, &second);
+    rig.put(
+        "remote-receipt.json",
+        &json!({"kind":"refused","launch":attempt["launch"],"failed":"native refusal"}),
+    );
+    receipt_ssh(&rig);
+    let (code, observed) = operation(&rig, "observe", &execution_input(&first));
+    assert_eq!(code, 0, "{observed}");
+    let log = rig.log("ssh.log");
+    assert!(log.contains(first["requestId"].as_str().unwrap()), "{log}");
+    assert!(
+        !log.contains(second["requestId"].as_str().unwrap()),
+        "{log}"
+    );
+}
+
+#[test]
+fn service_refresh_still_reads_every_owners_units() {
+    let rig = rig("scope-service", false);
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    let (code, execution) = commit_as(&rig, "other-owner", "other-call");
+    assert_eq!(code, 0, "{execution}");
+    assert_eq!(execution["ownerId"], "other-owner");
+    let input = commit_input(&execution, 0);
+    transcript(&rig, &execution, &entries());
+    let (code, receipt) = ack(&rig, &acknowledgement(&execution, &input));
+    assert_eq!(code, 0, "{receipt}");
+    assert!(admission(&rig, &execution)["unit"]["returned"].is_null());
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        admission(&rig, &execution)["unit"]["returned"]["result"]["kind"],
+        "returned"
+    );
+}
+
 #[test]
 fn fresh_launch_refuses_existing_session_and_changed_artifact() {
     for changed_artifact in [false, true] {
