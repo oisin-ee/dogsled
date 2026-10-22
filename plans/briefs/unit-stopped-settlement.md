@@ -1,13 +1,28 @@
 # A committed unit whose worker pane is gone settles as `stopped`
 
-Status: ready, not dispatched. Dispatch after `fix/unit-refresh-batch` (wJ9:p2D) is on origin.
-Line references are checked at `origin/main` 4e2be38. Re-check them on the base head at dispatch, because the base branch changes `src/unit_request.rs`, `src/launch.rs`, `src/cli.rs` and `src/main.rs`.
+Status: ready, not dispatched.
+
+**Precondition.** This is commit 3 on branch `fix/unit-settlements-scope`. Start only after both earlier commits are pushed:
+- commit 1: refresh scope plus the `settlement_ack` skip (brief `plans/briefs/unit-settlements-scope.md` on that branch);
+- commit 2: one `unit-receipts` ssh per host (brief `plans/briefs/unit-refresh-ssh-fanout.md`).
+
+The lead writes the head SHA of commit 2 into the dispatch. Start from that SHA. Do not redo or change commits 1 and 2.
+
+Line references below are checked at `origin/main` 4e2be38. Commits 1 and 2 change `src/unit_request.rs`, `src/launch.rs`, `src/cli.rs` and `src/main.rs`, so find each named function again at the base head.
 
 ## Outcome
 
 If a committed unit's worker pane is gone and its worker never sealed a final reply, the owner gets exactly one `stopped` settlement. pi-todo then releases the unit to Pending. Nothing changes for a live pane, for a sealed reply, or when the host gives no proof.
 
 ## Bug and evidence
+
+No other path settles these records:
+- `unit_request::abandon` (:297) refuses a committed request.
+- `import_refusal` needs an unconfirmed launch.
+- `settle_unlaunched` needs no saved launch.
+- A pi-todo leaf closed by the lead does not change the dogsled admission.
+
+Checked 14:05 on the Mac ledger: both records below are still committed, with `abandoned` null, no `returned`, no `terminal_receipt` and no `settlement_ack`. Each all-owner service refresh still makes one ssh per tick for the momokaya-2 record.
 
 - Mac admission `r-1792657889925-39225-0` (owner wJ9:p2D, host momokaya-2, pane w45:p1) has `unit.committed` set and `abandoned` null.
 - On momokaya-2, the worker's `dogsled unit terminal-ack` failed with REQUEST_CONFLICT "acknowledged boundary has no final assistant reply". Then `dogsled close w45:p1` removed the pane, the worktree and the branch.
@@ -30,7 +45,7 @@ The execution host owns the proof of termination. The owner imports that proof l
 `unit_receipt(ledger, execution)` has no shell today. Add `shell: &dyn Shell`, and pass it from every caller:
 - `child()` in `src/main.rs` (:340-349);
 - the local branch of `refresh` in `src/unit_request.rs` (:455-456), which uses `fleet.shell`;
-- the base branch's batch read, wherever it calls `unit_receipt`.
+- `launch::unit_receipts` from commit 2, which calls `unit_receipt` once per execution, and its `HostCommand::UnitReceipts` route in `src/main.rs`.
 
 Inside the existing `receipts.with_lock(request_id)`, after the refusal branch, when ALL of these are true:
 - there is no `terminal_receipt` and no final refusal file;
@@ -56,10 +71,13 @@ Then persist on `Progress` (:26) a new field `stopped: Option<Stopped>` (`#[serd
 - It saves `Prepared.stopped: Option<Returned>` (serde default, skip if none). The result is `ReturnedResult::Stopped { reason }`, which you add in `src/unit_transport.rs:281` next to `Returned`. The eventId is `{request_id}-stopped` and the binding is `committed.binding`.
 - `settlement()` (:353) returns `returned`, else `stopped`, else `abandoned`.
 - `import_receipt` (:578) and `import_refusal` reject when `stopped` is saved. This is a contradiction, logged per request; the record stays unchanged.
-- The base branch's skip rule (its version of "this unit needs no host read") treats a saved `stopped` as final: no host call, no import.
+- In `refresh`, a unit with a saved `stopped` is final: no host read, no import. That includes the per-host batch from commit 2. Commit 1 already skips it after the owner acks.
 - `unit observe` reports phase `stopped`.
 - Owner-side faults import nothing: a transport error, `Invalid`, a parse error, a batch failure, or an old host that does not know the evidence. This is the existing match.
-- An owner on 0.22.0 cannot parse the new variant. That is a parse error with no import, which is the correct result for mixed versions.
+- Mixed versions:
+  - An owner on 0.22.0 reads each unit with its own `unit-receipt` call. It cannot parse the new variant, so that one unit gets a parse error and no import. Its other units are unaffected.
+  - A new owner sends one `unit-receipts` batch to a new peer, and each entry decodes on its own.
+  - The deploy order from commit 2 (peers first, then the Mac) applies unchanged.
 
 ### Decision to confirm at review
 
@@ -88,7 +106,9 @@ Keep green with no change: `invalid_host_evidence_never_falls_back_to_cached_ret
 - `src/launch.rs`, `src/launch/recovery.rs` (only to share `lost_pane`), `src/cleanup.rs` (only to share `pane_snapshot`)
 - `src/unit_reply.rs`, `src/unit_request.rs`, `src/unit_transport.rs`, `src/main.rs` (only the `unit_receipt` call), `src/close.rs` (only if needed)
 - `tests/cli/unit_seeded.rs`, `docs/unit-requests.md` (:160 paragraph, and :65 if needed)
-- `CHANGELOG.md`: one `## Unreleased` Fixed entry. If the base branch already added `## Unreleased`, add a line under it.
+- Do not edit `CHANGELOG.md`; commits 1 and 2 leave it to the lead too. Put this Fixed line in your reply: "A committed unit whose worker pane closed without a final reply now settles as `stopped`, so its owner can release the unit."
+
+Do not edit `src/board.rs` or `src/herdr_socket.rs`. Netcup writer w15F:p1 (branch `fix/sidebar-keep-focus`) owns them. Its tests stub `herdr pane list` in `src/board.rs`'s own test shell. That is a separate parser (`src/board.rs:282`) and shares no code with `cleanup::pane_snapshot`.
 
 ## Checks (only these; the lead runs the full gate)
 
@@ -96,9 +116,9 @@ Keep green with no change: `invalid_host_evidence_never_falls_back_to_cached_ret
 
 ## Publish
 
-- Branch `fix/unit-stopped-settlement`, made from `origin/fix/unit-refresh-batch` at the SHA the lead writes into the dispatch.
-- One commit: `fix(unit): settle a committed unit whose worker pane is gone`. Push it. Hooks must pass; never bypass them.
-- No PR, release, tag, version bump, install or host change. The lead opens a draft PR, stacked on the base branch until that branch lands.
+- Branch `fix/unit-settlements-scope`, at the commit-2 SHA the lead writes into the dispatch. Before you push, check that `origin/fix/unit-settlements-scope` is still at that SHA. If it moved, stop and reply `blocked`.
+- One commit: `fix(unit): settle a committed unit whose worker pane is gone`. The body says where the proof lives and why (see Design 1). Push to the same branch. Hooks must pass; never bypass them.
+- No new PR, release, tag, version bump, install or host change. The branch's draft PR gets a third section from the lead.
 
 ## Reply
 
