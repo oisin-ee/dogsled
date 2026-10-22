@@ -28,6 +28,10 @@ pub struct Prepared {
     pub terminal_receipt: Option<crate::unit_reply::Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_ack: Option<String>,
+    /// The settlement for host proof that the worker ended without a sealed reply. Final:
+    /// refresh no longer reads its host, and later returned or refusal evidence is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<crate::unit_transport::Returned>,
 }
 
 fn owner() -> Result<String> {
@@ -124,6 +128,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
                 returned: None,
                 terminal_receipt: None,
                 settlement_ack: None,
+                stopped: None,
             }),
         };
         attempts.write(&format!("{}.json", execution.request_id), &attempt)?;
@@ -260,6 +265,8 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
     let receipt = receipt(ledger, &attempt)?;
     let phase = if unit.returned.is_some() {
         "returned"
+    } else if unit.stopped.is_some() {
+        "stopped"
     } else if unit.abandoned.is_some() {
         "not_started"
     } else if unit.committed.is_none() {
@@ -353,6 +360,8 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
 fn settlement(unit: &Prepared) -> Result<Value> {
     Ok(if let Some(event) = &unit.returned {
         serde_json::to_value(event)?
+    } else if let Some(event) = &unit.stopped {
+        serde_json::to_value(event)?
     } else {
         serde_json::to_value(&unit.abandoned)?
     })
@@ -366,6 +375,7 @@ fn unlaunched(attempt: &Attempt, ticket: &work::Ticket) -> Option<String> {
     if unit.committed.is_none()
         || unit.abandoned.is_some()
         || unit.returned.is_some()
+        || unit.stopped.is_some()
         || unit.terminal_receipt.is_some()
         || attempt.launch.is_some()
         || attempt.result.is_some()
@@ -451,9 +461,11 @@ impl Scope<'_> {
 }
 
 /// Existing inbox/refresh lane imports immutable host evidence. Missing or unreachable
-/// hosts prove nothing; this never manufactures stopped from probes or closed items.
+/// hosts prove nothing; this never manufactures stopped from owner-side probes or closed
+/// items. Only the execution host proves a stop, and the owner imports that proof.
 /// An acknowledged settlement needs no repair: the owner acknowledges only after
-/// `settlements` ran a refresh, so such units are skipped in every scope.
+/// `settlements` ran a refresh, so such units are skipped in every scope. A saved stop is
+/// final, so its unit is skipped too.
 /// Every in-scope remote unit on one host is read with one ssh call; units outside
 /// the scope or already acknowledged never enter a host's batch.
 pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
@@ -469,6 +481,7 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
         };
         if unit.committed.is_none()
             || unit.settlement_ack.is_some()
+            || unit.stopped.is_some()
             || !scope.includes(&unit.execution)
         {
             continue;
@@ -482,7 +495,19 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
             saved: unit.terminal_receipt.clone(),
         };
         if host.is_local() {
-            let receipt = crate::launch::unit_receipt(fleet.ledger, &pending.execution);
+            let receipt =
+                crate::launch::unit_receipt(fleet.ledger, fleet.shell, &pending.execution);
+            // A failed, timed-out or unparsable pane snapshot proves nothing and belongs to
+            // this request, as a remote host's `failed` entry does.
+            if let Err(error @ (Error::Command { .. } | Error::Deadline(_) | Error::Parse { .. })) =
+                &receipt
+            {
+                eprintln!(
+                    "dogsled unit evidence {}: host could not read evidence: {error}",
+                    pending.execution.request_id
+                );
+                continue;
+            }
             settle(fleet.ledger, &pending, receipt)?;
         } else if let Some((_, units)) = remote.iter_mut().find(|(known, _)| known == host) {
             units.push(pending);
@@ -582,6 +607,9 @@ fn settle(
         crate::unit_reply::HostEvidence::Refused(receipt) => {
             import_refusal(ledger, &unit.file, *receipt)
         }
+        crate::unit_reply::HostEvidence::Stopped(stopped) => {
+            import_stopped(ledger, &unit.file, *stopped)
+        }
     };
     match imported {
         Ok(()) => Ok(()),
@@ -635,6 +663,7 @@ fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refus
             || seed.execution != unit.execution
             || seed.binding.contract != unit.origin
             || unit.returned.is_some()
+            || unit.stopped.is_some()
             || unit.terminal_receipt.is_some()
         {
             return Err(conflict("contradictory or mismatched refusal evidence"));
@@ -660,6 +689,71 @@ fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refus
     })
 }
 
+/// Import the host's proof that a confirmed worker stopped without a sealed reply. The checks
+/// match `import_refusal`, except that the launch was confirmed, so the admission may hold a
+/// result. Returned or refusal evidence already saved contradicts it.
+fn import_stopped(ledger: &Ledger, file: &str, stopped: crate::unit_reply::Stopped) -> Result<()> {
+    let attempts = ledger.child("admissions");
+    let id = &stopped.launch.id;
+    crate::jobs::validate_id(id)?;
+    if file != format!("{id}.json") {
+        return Err(conflict("stop belongs to another admission"));
+    }
+    attempts.with_lock(id, || {
+        let mut current = attempts
+            .read::<Attempt>(file)?
+            .ok_or_else(|| conflict("admission disappeared"))?;
+        if current.launch.as_ref() != Some(&stopped.launch)
+            || current
+                .host
+                .as_ref()
+                .is_none_or(|host| host.id != stopped.launch.host)
+            || stopped.reason.is_empty()
+        {
+            return Err(conflict("host stop does not match selected launch"));
+        }
+        let unit = current
+            .unit
+            .as_mut()
+            .ok_or_else(|| conflict("unit admission disappeared"))?;
+        let committed = unit
+            .committed
+            .as_ref()
+            .ok_or_else(|| conflict("unit is not committed"))?;
+        let seed = stopped
+            .launch
+            .unit
+            .as_ref()
+            .ok_or_else(|| conflict("stop seed missing"))?;
+        seed.validate(&stopped.launch.id, &stopped.launch.owner)?;
+        if seed != &crate::unit_transport::Seed::from(committed.clone())
+            || seed.execution != unit.execution
+            || seed.binding.contract != unit.origin
+            || unit.abandoned.is_some()
+            || unit.returned.is_some()
+            || unit.terminal_receipt.is_some()
+        {
+            return Err(conflict("contradictory or mismatched stop evidence"));
+        }
+        let event = crate::unit_transport::Returned {
+            version: 1,
+            event_id: format!("{}-stopped", unit.execution.request_id),
+            binding: committed.binding.clone(),
+            result: crate::unit_transport::ReturnedResult::Stopped {
+                reason: stopped.reason,
+            },
+        };
+        if unit.stopped.as_ref().is_some_and(|saved| saved != &event) {
+            return Err(conflict("contradictory stop evidence"));
+        }
+        if unit.stopped.is_none() {
+            unit.stopped = Some(event);
+            attempts.write(file, &current)?;
+        }
+        Ok(())
+    })
+}
+
 fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Receipt) -> Result<()> {
     let attempts = ledger.child("admissions");
     let id = receipt.ack.execution.request_id.clone();
@@ -676,6 +770,7 @@ fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Recei
             .as_ref()
             .ok_or_else(|| conflict("unit is not committed"))?;
         if unit.abandoned.is_some()
+            || unit.stopped.is_some()
             || receipt.ack.execution != unit.execution
             || receipt.ack.unit_ref != unit.origin
             || receipt.ack.digest != committed.exported.digest
@@ -854,5 +949,85 @@ fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
             fleet.ledger,
             &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,
         )?)?),
+    }
+}
+
+#[cfg(test)]
+mod stopped_tests {
+    use super::*;
+
+    const ID: &str = "r-1792657889925-39225-0";
+
+    fn export() -> Value {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/unit-exports.json")).unwrap();
+        let mut export: Value =
+            serde_json::from_str(fixtures[0]["canonical"].as_str().unwrap()).unwrap();
+        export["digest"] = fixtures[0]["digest"].clone();
+        export
+    }
+
+    /// A committed admission, with a saved `stopped` settlement when `stopped` is set, and
+    /// the host receipt that would otherwise import as `returned`.
+    fn admission(stopped: bool) -> (Ledger, crate::unit_reply::Receipt) {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let export = export();
+        let execution = json!({"executor":"dogsled","ownerId":"w1:p1","requestId":ID});
+        let binding = json!({"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]});
+        let mut unit = json!({
+            "origin":export["contract"]["ref"],"execution":execution,"placement":{},
+            "tool_call_id":"call-1","abandoned":null,
+            "committed":{"execution":execution,"binding":binding,"exported":export},
+        });
+        if stopped {
+            unit["stopped"] = json!({"version":1,"eventId":format!("{ID}-stopped"),"binding":binding,
+                "result":{"kind":"stopped","reason":"worker pane closed without a final reply"}});
+        }
+        let attempt: Attempt =
+            serde_json::from_value(json!({"request":{},"launch":null,"error":null,"unit":unit}))
+                .unwrap();
+        ledger
+            .child("admissions")
+            .write(&format!("{ID}.json"), &attempt)
+            .unwrap();
+        let receipt = crate::unit_reply::Receipt {
+            ack: crate::unit_transport::TerminalAck {
+                execution: serde_json::from_value(execution).unwrap(),
+                unit_ref: serde_json::from_value(export["contract"]["ref"].clone()).unwrap(),
+                digest: export["digest"].as_str().unwrap().into(),
+                seal_entry_id: "seal".into(),
+                session_leaf_id: "leaf".into(),
+            },
+            session_id: ID.into(),
+            reply_entry_id: "reply".into(),
+            text: "FINAL".into(),
+        };
+        (ledger, receipt)
+    }
+
+    #[test]
+    fn returned_receipt_after_stop_is_rejected_and_the_record_is_unchanged() {
+        let file = format!("{ID}.json");
+        // Control: the same receipt imports when no stop is saved.
+        let (ledger, receipt) = admission(false);
+        import_receipt(&ledger, &file, receipt).unwrap();
+        let attempt: Attempt = ledger.child("admissions").read(&file).unwrap().unwrap();
+        assert!(attempt.unit.unwrap().returned.is_some());
+        std::fs::remove_dir_all(&ledger.dir).ok();
+
+        let (ledger, receipt) = admission(true);
+        let path = ledger.child("admissions").dir.join(&file);
+        let before = std::fs::read(&path).unwrap();
+        let error = import_receipt(&ledger, &file, receipt).unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let attempt: Attempt = ledger.child("admissions").read(&file).unwrap().unwrap();
+        let unit = attempt.unit.unwrap();
+        assert!(unit.returned.is_none() && unit.terminal_receipt.is_none());
+        assert_eq!(
+            settlement(&unit).unwrap()["eventId"],
+            format!("{ID}-stopped")
+        );
+        std::fs::remove_dir_all(&ledger.dir).ok();
     }
 }

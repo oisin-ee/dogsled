@@ -279,7 +279,13 @@ pub struct Returned {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReturnedResult {
-    Returned { evidence: Evidence },
+    Returned {
+        evidence: Evidence,
+    },
+    /// The host proved the worker ended without a sealed reply.
+    Stopped {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]

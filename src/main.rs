@@ -343,6 +343,7 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             true,
             &launch::unit_receipt(
                 node.ledger,
+                node.shell,
                 &serde_json::from_str::<unit_transport::ExecutionInput>(&input)?.execution,
             )?,
             String::new,
@@ -351,6 +352,7 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             true,
             &launch::unit_receipts(
                 node.ledger,
+                node.shell,
                 &serde_json::from_str::<launch::ExecutionsInput>(&input)?.executions,
             ),
             String::new,

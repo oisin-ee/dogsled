@@ -1759,3 +1759,229 @@ exit 2
     assert_eq!(receipt_calls(&rig), 1);
     assert_eq!(admission(&rig, &execution), before);
 }
+
+/// Herdr's pane list without the worker pane `w2:p1`, or with `terminal` in it.
+fn worker_pane(rig: &Rig, terminal: Option<&str>) {
+    let mut panes = vec![json!({"pane_id":"w1:p1","terminal_id":"term_owner"})];
+    if let Some(terminal) = terminal {
+        panes.push(json!({"pane_id":"w2:p1","terminal_id":terminal}));
+    }
+    rig.put("panes.json", &json!({"result":{"panes":panes}}));
+}
+
+fn host_progress(rig: &Rig, execution: &Value) -> Value {
+    rig.read(&format!(
+        "state/launches/{}.progress.json",
+        execution["requestId"].as_str().unwrap()
+    ))
+}
+
+fn assert_stopped(events: &Value, execution: &Value, input: &Value) {
+    let id = execution["requestId"].as_str().unwrap();
+    assert_eq!(
+        events,
+        &json!([{
+            "version":1,
+            "eventId":format!("{id}-stopped"),
+            "binding":input["binding"],
+            "result":{"kind":"stopped","reason":"worker pane closed without a final reply"}
+        }])
+    );
+}
+
+#[test]
+fn committed_unit_whose_pane_is_gone_settles_stopped_once() {
+    let (rig, execution, input) = launched("stopped-pane-gone");
+    worker_pane(&rig, None);
+    let (code, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{events}");
+    assert_stopped(&events, &execution, &input);
+    let saved = host_progress(&rig, &execution);
+    assert_eq!(saved["stopped"]["kind"], "stopped");
+    let lists = rig.log("herdr.log").matches("pane list").count();
+    // A saved stop is final: no second host read, and the same single event.
+    assert_eq!(rig.json(&["unit", "settlements"]).1, events);
+    assert_eq!(rig.log("herdr.log").matches("pane list").count(), lists);
+    let (_, observed) = operation(&rig, "observe", &execution_input(&execution));
+    assert_eq!(observed["phase"], "stopped");
+    assert_eq!(observed["settlement"], events[0]);
+    let ack = json!({"execution":execution,"eventId":events[0]["eventId"]});
+    assert_eq!(
+        operation(&rig, "ack-settlement", &ack).1,
+        json!({"applied":true})
+    );
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+    assert_eq!(host_progress(&rig, &execution), saved);
+}
+
+#[test]
+fn host_receipt_returns_a_saved_stop_without_another_probe() {
+    let (rig, execution, _) = launched("stopped-host-idempotent");
+    worker_pane(&rig, None);
+    let read = || {
+        rig.json(&[
+            "host",
+            "unit-receipt",
+            "--input",
+            &execution_input(&execution).to_string(),
+        ])
+    };
+    let (code, first) = read();
+    assert_eq!(code, 0, "{first}");
+    assert_eq!(first["kind"], "stopped");
+    // Even a pane that came back cannot undo the saved proof, and is not read again.
+    worker_pane(&rig, Some("term_child"));
+    let lists = rig.log("herdr.log").matches("pane list").count();
+    assert_eq!(read().1, first);
+    assert_eq!(rig.log("herdr.log").matches("pane list").count(), lists);
+}
+
+#[test]
+fn pane_replaced_by_another_terminal_settles_stopped() {
+    let (rig, execution, input) = launched("stopped-pane-replaced");
+    worker_pane(&rig, Some("term_other"));
+    let (code, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{events}");
+    assert_stopped(&events, &execution, &input);
+}
+
+#[test]
+fn live_pane_or_failed_pane_list_settles_nothing() {
+    for case in ["live", "failed", "unparsable"] {
+        let (rig, execution, _) = launched(&format!("stopped-none-{case}"));
+        match case {
+            "live" => worker_pane(&rig, Some("term_child")),
+            "failed" => rig.script(
+                "herdr",
+                &fs::read_to_string(rig.dir.join("bin/herdr"))
+                    .unwrap()
+                    .replace(
+                        "'pane list') cat \"$RIG/panes.json\" ;;",
+                        "'pane list') echo herdr-down >&2; exit 1 ;;",
+                    ),
+            ),
+            _ => fs::write(rig.dir.join("panes.json"), "not json").unwrap(),
+        }
+        let before = admission(&rig, &execution);
+        let out = rig.run(&["unit", "settlements"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{case}: {stderr}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+            json!([]),
+            "{case}"
+        );
+        let id = execution["requestId"].as_str().unwrap();
+        assert_eq!(
+            stderr.contains(&format!(
+                "dogsled unit evidence {id}: host could not read evidence"
+            )),
+            case != "live",
+            "{case}: {stderr}"
+        );
+        assert_eq!(admission(&rig, &execution), before, "{case}");
+        assert!(host_progress(&rig, &execution).get("stopped").is_none());
+        let (_, observed) = operation(&rig, "observe", &execution_input(&execution));
+        assert_ne!(observed["phase"], "stopped", "{case}");
+        assert!(observed["settlement"].is_null(), "{case}");
+    }
+}
+
+#[test]
+fn sealed_reply_then_closed_pane_settles_returned_not_stopped() {
+    let (rig, execution, input) = launched("stopped-after-receipt");
+    transcript(&rig, &execution, &entries());
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    worker_pane(&rig, None);
+    let (code, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{events}");
+    assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
+    assert_eq!(events[0]["result"]["kind"], "returned");
+    assert!(host_progress(&rig, &execution).get("stopped").is_none());
+}
+
+#[test]
+fn unconfirmed_or_unidentified_launch_never_settles_stopped() {
+    for case in ["unconfirmed", "no-terminal"] {
+        let (rig, execution, _) = launched(&format!("stopped-unproven-{case}"));
+        let id = execution["requestId"].as_str().unwrap();
+        let path = format!("state/launches/{id}.progress.json");
+        let mut progress = rig.read(&path);
+        match case {
+            "unconfirmed" => progress["confirmed"] = json!(false),
+            _ => progress["terminal"] = Value::Null,
+        }
+        rig.put(&path, &progress);
+        worker_pane(&rig, None);
+        let (code, events) = rig.json(&["unit", "settlements"]);
+        assert_eq!(code, 0, "{case}: {events}");
+        assert_eq!(events, json!([]), "{case}");
+        assert!(host_progress(&rig, &execution).get("stopped").is_none());
+    }
+}
+
+#[test]
+fn terminal_ack_after_stop_is_refused() {
+    let (rig, execution, input) = launched("stopped-then-ack");
+    transcript(&rig, &execution, &entries());
+    worker_pane(&rig, None);
+    let (_, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(events[0]["result"]["kind"], "stopped", "{events}");
+    let saved = host_progress(&rig, &execution);
+    let (code, refused) = ack(&rig, &acknowledgement(&execution, &input));
+    assert_ne!(code, 0, "{refused}");
+    assert_eq!(refused["error"]["code"], "REQUEST_CONFLICT", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("stopped launch"),
+        "{refused}"
+    );
+    assert_eq!(host_progress(&rig, &execution), saved);
+}
+
+#[test]
+fn returned_evidence_after_stop_leaves_the_record_unchanged() {
+    let (rig, execution, input) = launched("stopped-then-returned");
+    transcript(&rig, &execution, &entries());
+    worker_pane(&rig, None);
+    let (_, stopped) = rig.json(&["unit", "settlements"]);
+    assert_stopped(&stopped, &execution, &input);
+    // A contradicting host now reports a sealed reply for the stopped execution.
+    let id = execution["requestId"].as_str().unwrap();
+    let path = format!("state/launches/{id}.progress.json");
+    worker_pane(&rig, Some("term_child"));
+    let mut progress = rig.read(&path);
+    progress.as_object_mut().unwrap().remove("stopped");
+    rig.put(&path, &progress);
+    assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
+    let before = admission(&rig, &execution);
+    let (code, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{events}");
+    assert_eq!(events, stopped);
+    assert_eq!(admission(&rig, &execution), before);
+    assert!(!rig.log("state/items.json").contains("EXACT FINAL"));
+}
+
+#[test]
+fn remote_stop_imports_once_and_an_unreachable_host_settles_nothing() {
+    let (rig, execution, input) = launched("stopped-remote");
+    remote_refused(&rig, &execution, "8103", "host-a");
+    batch_ssh(&rig);
+    let before = admission(&rig, &execution);
+    let id = execution["requestId"].as_str().unwrap();
+    let events = rejected_refresh(&rig, &["unit", "settlements"], id, "ssh host-a");
+    assert_eq!(events, json!([]));
+    assert_eq!(admission(&rig, &execution), before);
+    let attempt = remote_refused(&rig, &execution, "8103", "host-b");
+    let stop = json!({"kind":"stopped","launch":attempt["launch"],"reason":"worker pane closed without a final reply"});
+    rig.put("remote-receipt.json", &json!([entry(&execution, &stop)]));
+    let (code, events) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{events}");
+    assert_stopped(&events, &execution, &input);
+    assert_eq!(receipt_calls(&rig), 2);
+    // Final: the next refresh does not ask the host again.
+    assert_eq!(rig.json(&["unit", "settlements"]).1, events);
+    assert_eq!(receipt_calls(&rig), 2);
+}

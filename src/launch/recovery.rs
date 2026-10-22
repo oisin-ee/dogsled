@@ -109,7 +109,7 @@ fn consumed(progress: &Progress, receipt: Option<&Receipt>) -> bool {
 /// The launch's recorded terminal no longer runs in its pane: the pane is gone or another
 /// terminal replaced it. Start and recovery refuse such a pane, so the launch can never start
 /// or use its checkout. A missing saved identity proves nothing.
-fn lost_pane(
+pub(super) fn lost_pane(
     progress: &Progress,
     panes: &[crate::probe::Pane],
     terminals: &std::collections::BTreeMap<String, String>,

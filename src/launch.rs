@@ -33,7 +33,14 @@ struct Progress {
     error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal_receipt: Option<crate::unit_reply::Receipt>,
+    /// The host's proof that the confirmed worker ended without a sealed reply. Written once
+    /// by `unit_receipt` under the launch lock; `terminal_ack` refuses after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopped: Option<crate::unit_reply::Stopped>,
 }
+
+/// The reason a unit settles `stopped`.
+const STOPPED_REASON: &str = "worker pane closed without a final reply";
 
 /// Herdr's codes for an `agent start` it refused before typing into the pane. Any other
 /// failure may come after the agent began, so its outcome stays unknown. `agent_pane_busy` is
@@ -498,6 +505,7 @@ fn allocate(
         result,
         error: None,
         terminal_receipt: None,
+        stopped: None,
     };
     receipts.write(file, &progress)?;
     let (pane, terminal) = work::pane(shell, request)?;
@@ -764,6 +772,11 @@ pub fn terminal_ack(
                 "refused launch cannot acknowledge a return",
             ));
         }
+        if progress.stopped.is_some() {
+            return Err(crate::unit_transport::conflict(
+                "stopped launch cannot acknowledge a return",
+            ));
+        }
         let pane = progress
             .pane
             .as_deref()
@@ -842,6 +855,7 @@ pub struct ExecutionsInput {
 /// read alone: one bad entry never fails its neighbours.
 pub fn unit_receipts(
     ledger: &Ledger,
+    shell: &dyn Shell,
     executions: &[crate::unit_transport::ExecutionRef],
 ) -> Vec<ReceiptEntry> {
     executions
@@ -853,7 +867,7 @@ pub fn unit_receipts(
                 invalid: None,
                 failed: None,
             };
-            match unit_receipt(ledger, execution) {
+            match unit_receipt(ledger, shell, execution) {
                 Ok(evidence) => entry.evidence = evidence,
                 Err(Error::Invalid(reason)) => entry.invalid = Some(reason),
                 Err(error) => entry.failed = Some(error.to_string()),
@@ -865,11 +879,18 @@ pub fn unit_receipts(
 
 /// Peer refresh reads immutable execution evidence, even after its pane closes.
 /// A final native refusal repairs only this request's preparation, never its pane.
+///
+/// This host owns the proof that a confirmed worker stopped without a sealed reply. Panes
+/// leave by `dogsled close`, by a crash, or by a tab closed by hand, so the proof is taken
+/// here, on the next read after the pane left, under the launch lock that also orders
+/// `terminal_ack`. One successful pane snapshot must show the saved pane missing or running
+/// another terminal. A failed or unparsable snapshot is an error, never a stop.
 pub fn unit_receipt(
     ledger: &Ledger,
+    shell: &dyn Shell,
     execution: &crate::unit_transport::ExecutionRef,
 ) -> Result<Option<crate::unit_reply::HostEvidence>> {
-    use crate::unit_reply::{HostEvidence, Refusal, RefusalKind};
+    use crate::unit_reply::{HostEvidence, Refusal, RefusalKind, Stopped, StoppedKind};
     crate::jobs::validate_id(&execution.request_id)?;
     let receipts = ledger.child("launches");
     receipts.with_lock(&execution.request_id, || {
@@ -927,9 +948,52 @@ pub fn unit_receipt(
             crate::unit_request::crash_point("refusal-hold-released");
             return Ok(Some(HostEvidence::Refused(Box::new(evidence))));
         }
-        Ok(progress
-            .terminal_receipt
-            .map(|receipt| HostEvidence::Returned(Box::new(receipt))))
+        if let Some(receipt) = &progress.terminal_receipt {
+            return Ok(Some(HostEvidence::Returned(Box::new(receipt.clone()))));
+        }
+        // Idempotent: a saved stop is returned again without another probe.
+        if let Some(stopped) = &progress.stopped {
+            return Ok(Some(HostEvidence::Stopped(Box::new(stopped.clone()))));
+        }
+        if final_receipt.is_some_and(|value| value.get("failed").is_some())
+            || !progress.attempted
+            || !progress.confirmed
+        {
+            return Ok(None);
+        }
+        let (panes, terminals) = pane_proof(shell)?;
+        if !recovery::lost_pane(&progress, &panes, &terminals) {
+            return Ok(None);
+        }
+        let stopped = Stopped {
+            kind: StoppedKind::Stopped,
+            launch: progress.request.clone(),
+            reason: STOPPED_REASON.into(),
+        };
+        let mut progress = progress;
+        progress.stopped = Some(stopped.clone());
+        receipts.write(
+            &format!("{}.progress.json", execution.request_id),
+            &progress,
+        )?;
+        Ok(Some(HostEvidence::Stopped(Box::new(stopped))))
+    })
+}
+
+/// One pane snapshot for the stop proof. Output that does not parse is a parse error from
+/// Herdr, kept apart from local storage errors; a failed or timed-out command passes through.
+fn pane_proof(
+    shell: &dyn Shell,
+) -> Result<(
+    Vec<crate::probe::Pane>,
+    std::collections::BTreeMap<String, String>,
+)> {
+    crate::cleanup::pane_snapshot(shell).map_err(|error| match error {
+        Error::Json(_) | Error::Invalid(_) => Error::Parse {
+            origin: "herdr pane list".into(),
+            detail: error.to_string(),
+        },
+        other => other,
     })
 }
 
@@ -999,7 +1063,7 @@ mod receipt_tests {
             execution("r-broken"),
             execution("r-last"),
         ];
-        let entries = unit_receipts(&ledger, &executions);
+        let entries = unit_receipts(&ledger, &crate::shell::Fake::new(), &executions);
         let ids: Vec<_> = entries.iter().map(|e| e.request_id.as_str()).collect();
         assert_eq!(ids, ["r-first", "../escape", "r-broken", "r-last"]);
         for quiet in [&entries[0], &entries[3]] {

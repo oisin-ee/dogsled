@@ -29,6 +29,7 @@ pub struct Receipt {
 #[serde(untagged)]
 pub enum HostEvidence {
     Refused(Box<Refusal>),
+    Stopped(Box<Stopped>),
     Returned(Box<Receipt>),
 }
 
@@ -44,6 +45,22 @@ pub struct Refusal {
 #[serde(rename_all = "snake_case")]
 pub enum RefusalKind {
     Refused,
+}
+
+/// The host's proof that a confirmed launch ended without a sealed reply: its worker pane is
+/// gone or another terminal replaced it, and no terminal receipt exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stopped {
+    pub kind: StoppedKind,
+    pub launch: Launch,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoppedKind {
+    Stopped,
 }
 
 pub fn capture(
@@ -223,4 +240,88 @@ fn correlated_reply(
             .ok_or_else(|| conflict("seal is not an ancestor of the final reply"))?;
     }
     reply.ok_or_else(|| conflict("no reply after seal on acknowledged branch"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::unit_transport::{ExecutionRef, UnitRef};
+
+    fn launch() -> Launch {
+        Launch {
+            id: "r-1".into(),
+            unit: None,
+            action: crate::work::Action::Place,
+            host: "local".into(),
+            cwd: "/repo".into(),
+            pane: Some("w2:p1".into()),
+            terminal: Some("term_child".into()),
+            workspace: None,
+            workspace_name: None,
+            owner: "w1:p1".into(),
+            owner_host: None,
+        }
+    }
+
+    fn receipt() -> Receipt {
+        Receipt {
+            ack: TerminalAck {
+                execution: ExecutionRef {
+                    executor: "dogsled".into(),
+                    owner_id: "w1:p1".into(),
+                    request_id: "r-1".into(),
+                },
+                unit_ref: UnitRef {
+                    session_id: "s".into(),
+                    unit_id: "u".into(),
+                    revision: 1,
+                    contract_entry_id: "e".into(),
+                },
+                digest: "d".into(),
+                seal_entry_id: "seal".into(),
+                session_leaf_id: "leaf".into(),
+            },
+            session_id: "r-1".into(),
+            reply_entry_id: "reply".into(),
+            text: "FINAL".into(),
+        }
+    }
+
+    #[test]
+    fn host_evidence_variants_decode_only_as_themselves() {
+        let variants = [
+            HostEvidence::Refused(Box::new(Refusal {
+                kind: RefusalKind::Refused,
+                launch: launch(),
+                failed: "native refusal".into(),
+            })),
+            HostEvidence::Stopped(Box::new(Stopped {
+                kind: StoppedKind::Stopped,
+                launch: launch(),
+                reason: "worker pane closed without a final reply".into(),
+            })),
+            HostEvidence::Returned(Box::new(receipt())),
+        ];
+        for variant in &variants {
+            let wire = serde_json::to_value(variant).unwrap();
+            assert_eq!(
+                &serde_json::from_value::<HostEvidence>(wire.clone()).unwrap(),
+                variant
+            );
+        }
+        let stopped = serde_json::to_value(&variants[1]).unwrap();
+        assert_eq!(stopped["kind"], "stopped");
+        assert!(serde_json::from_value::<Refusal>(stopped.clone()).is_err());
+        assert!(serde_json::from_value::<Receipt>(stopped).is_err());
+        let refused = serde_json::to_value(&variants[0]).unwrap();
+        assert!(serde_json::from_value::<Stopped>(refused.clone()).is_err());
+        assert!(serde_json::from_value::<Receipt>(refused).is_err());
+        let returned = serde_json::to_value(&variants[2]).unwrap();
+        assert!(serde_json::from_value::<Stopped>(returned.clone()).is_err());
+        assert!(serde_json::from_value::<Refusal>(returned).is_err());
+        // A refusal relabelled as stopped is not a stop: its fields differ.
+        let mut relabelled = serde_json::to_value(&variants[0]).unwrap();
+        relabelled["kind"] = serde_json::json!("stopped");
+        assert!(serde_json::from_value::<HostEvidence>(relabelled).is_err());
+    }
 }
