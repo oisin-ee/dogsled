@@ -2934,4 +2934,79 @@ mod tests {
         assert_eq!(plan.entries[0].id, "wVR:p1");
         assert!(plan.entries[0].removable);
     }
+
+    /// Herdr reports the root process of a pane. An idle shell is its own foreground
+    /// process; a shell that runs a command is one with a command argument.
+    fn root_process(runs_a_command: bool) -> String {
+        let process = if runs_a_command {
+            r#"{"pid":1,"name":"sh","argv":["sh","-c","sleep 60"]}"#
+        } else {
+            r#"{"pid":1,"name":"zsh","argv":["zsh"]}"#
+        };
+        format!(
+            r#"{{"result":{{"process_info":{{"shell_pid":1,"foreground_processes":[{process}]}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_pane_that_starts_a_command_after_the_plan_is_skipped_not_closed() {
+        let rig = Rig::new(json!([]));
+        // wVR:p2 runs a program, so the workspace is not idle as a whole and its idle
+        // pane wVR:p1 is a removal candidate of its own.
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVR:p2", "wVR", false)]);
+        rig.shell.on("herdr pane close wVR:p1", r#"{"result":{}}"#);
+        let plan = rig.plan();
+        let pane = plan
+            .entries
+            .iter()
+            .find(|e| e.class == "panes")
+            .expect("the idle pane is a candidate");
+        assert_eq!(pane.id, "wVR:p1");
+        assert!(pane.removable, "{}", pane.detail);
+        // The pane's root process starts a command after the survey.
+        rig.shell
+            .on("herdr pane process-info --pane wVR:p1", &root_process(true));
+        let outcome = apply_one(&rig.node(), &plan, pane, 2_000_000).unwrap();
+        match outcome {
+            Outcome::Skipped(reason) => {
+                assert!(reason.contains("no longer idle"), "{reason}");
+            }
+            Outcome::Done(result) => panic!("not skipped: {result}"),
+        }
+        assert!(
+            !rig.shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("pane close wVR:p1")),
+            "the pane was closed"
+        );
+    }
+
+    #[test]
+    fn an_idle_shell_after_the_plan_is_still_closed() {
+        let rig = Rig::new(json!([]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVR:p2", "wVR", false)]);
+        rig.shell.on("herdr pane close wVR:p1", r#"{"result":{}}"#);
+        let plan = rig.plan();
+        let pane = plan
+            .entries
+            .iter()
+            .find(|e| e.class == "panes")
+            .expect("the idle pane is a candidate");
+        let outcome = apply_one(&rig.node(), &plan, pane, 2_000_000).unwrap();
+        assert!(
+            matches!(&outcome, Outcome::Done(result) if result.contains("closed pane wVR:p1")),
+            "{outcome:?}"
+        );
+        assert!(
+            rig.shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("pane close wVR:p1"))
+        );
+    }
 }

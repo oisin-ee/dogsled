@@ -109,10 +109,10 @@ pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
     let processes = info["foreground_processes"]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
-    let shell_pid = info["shell_pid"].as_u64();
+    let shell_pid = info["shell_pid"].as_u64().filter(|pid| *pid > 0);
     let Some(root) = processes
         .iter()
-        .find(|process| process["pid"].as_u64() == shell_pid)
+        .find(|process| shell_pid.is_some() && process["pid"].as_u64() == shell_pid)
     else {
         // The root process is not the foreground: a command runs in front of it, or the
         // evidence does not say what the pane runs. Then the pane is kept.
@@ -123,7 +123,7 @@ pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
         ));
     };
     if !waits_at_a_prompt(root) {
-        return Ok(Some(process_detail(root)));
+        return Ok(Some(process_name(root)));
     }
     // The shell waits at its prompt. Another process in the same foreground group means it
     // is not waiting.
@@ -160,49 +160,67 @@ fn is_shell_name(name: &str) -> bool {
 
 /// True when the process is a shell that waits at its prompt.
 ///
-/// A shell that runs a command, such as `sh -c "..."`, does not wait. A shell whose
-/// arguments are unknown does not prove that it waits: the pane is kept.
+/// The evidence must be positive: a known shell, started with no argument that runs
+/// something. A shell that runs a command, such as `sh -c "..."` or `zsh script.zsh`,
+/// does not wait. A shell whose arguments are unknown, malformed, or not recognised does
+/// not prove that it waits: the pane is kept.
 fn waits_at_a_prompt(process: &serde_json::Value) -> bool {
-    if !is_shell_name(&process_name(process)) {
+    let name = process_name(process);
+    if !is_shell_name(&name) {
         return false;
     }
-    let args = argv(process);
-    if args.is_empty() {
+    let Some(args) = argv(process) else {
+        return false;
+    };
+    let Some((program, flags)) = args.split_first() else {
+        return false;
+    };
+    // The first argument names the program. It must agree with the reported name.
+    let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    if !program.trim_start_matches('-').eq_ignore_ascii_case(&name) {
         return false;
     }
-    !args.iter().skip(1).any(|arg| runs_a_command(arg))
+    // Only a known prompt-only invocation proves idle evidence. An unknown option, a
+    // script, a command string, or an option operand keeps the pane.
+    flags.is_empty()
+        || (POSIX_SHELLS.contains(&name.to_ascii_lowercase().as_str())
+            && flags.iter().all(|flag| waits_at_a_prompt_flag(flag)))
 }
 
-/// True when the argument tells a shell to run a command instead of waiting at a prompt.
-fn runs_a_command(arg: &str) -> bool {
-    // A POSIX shell takes the command in `-c`, alone or in a short cluster: `-lc`, `-ic`.
-    if arg.strip_prefix('-').is_some_and(|rest| {
-        !rest.is_empty() && rest.chars().all(|c| "lic".contains(c)) && rest.contains('c')
-    }) {
-        return true;
+/// The shells whose options are known to leave them at a prompt. Other shells, such as
+/// `pwsh` and `cmd`, run a command with their own options, so their arguments keep the pane.
+const POSIX_SHELLS: [&str; 9] = [
+    "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "csh", "tcsh",
+];
+
+/// True when the option leaves the shell at its prompt. Only the interactive and login
+/// options are known to do so. Every other option, including `-c`, may run a command.
+fn waits_at_a_prompt_flag(flag: &str) -> bool {
+    if flag.starts_with("--") {
+        return matches!(
+            flag.to_ascii_lowercase().as_str(),
+            "--login" | "--interactive"
+        );
     }
-    matches!(
-        arg.to_ascii_lowercase().as_str(),
-        "/c" | "-command" | "-encodedcommand"
-    )
+    flag.strip_prefix('-').is_some_and(|flags| {
+        !flags.is_empty() && flags.chars().all(|flag| matches!(flag, 'i' | 'l'))
+    })
 }
 
 /// The arguments of a process, from `argv` or from its command line. The first entry is the
 /// program itself.
-fn argv(process: &serde_json::Value) -> Vec<String> {
-    if let Some(argv) = process["argv"].as_array() {
-        let args: Vec<String> = argv
+fn argv(process: &serde_json::Value) -> Option<Vec<&str>> {
+    if let Some(value) = process.get("argv") {
+        return value
+            .as_array()?
             .iter()
-            .filter_map(|arg| arg.as_str().map(str::to_string))
+            .map(serde_json::Value::as_str)
             .collect();
-        if !args.is_empty() {
-            return args;
-        }
     }
-    process["cmdline"]
-        .as_str()
-        .map(|line| line.split_whitespace().map(str::to_string).collect())
-        .unwrap_or_default()
+    // A command line is not structured argv. Only a bare executable is unambiguous;
+    // do not infer argument boundaries by splitting quoted shell text.
+    let line = process["cmdline"].as_str()?;
+    (!line.is_empty() && !line.chars().any(char::is_whitespace)).then(|| vec![line])
 }
 
 /// The name of a process, from its program name.
@@ -216,17 +234,6 @@ fn process_name(process: &serde_json::Value) -> String {
         .unwrap_or(name)
         .trim_start_matches('-')
         .to_string()
-}
-
-/// A readable description of the process a pane runs, with its arguments when they are
-/// known.
-fn process_detail(process: &serde_json::Value) -> String {
-    let name = process_name(process);
-    let args = argv(process);
-    match args.split_first() {
-        Some((_, rest)) if !rest.is_empty() => format!("{name} {}", rest.join(" ")),
-        _ => name,
-    }
 }
 
 /// Stable service contract, independent of Herdr's raw response fields.
@@ -714,10 +721,7 @@ mod tests {
                 &serde_json::json!([{"pid":10,"name":"dogsled","argv":["bin/dogsled","sidebar"]}]),
             ),
         );
-        assert_eq!(
-            foreground(&shell, "w1:p1").unwrap(),
-            Some("dogsled sidebar".into())
-        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("dogsled".into()));
     }
 
     #[test]
@@ -730,10 +734,8 @@ mod tests {
                 &serde_json::json!([{"pid":10,"name":"sh","argv":["sh","-c","sleep 60"]}]),
             ),
         );
-        assert_eq!(
-            foreground(&shell, "w1:p1").unwrap(),
-            Some("sh -c sleep 60".into())
-        );
+        // The diagnostic names the program, never its arguments.
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("sh".into()));
     }
 
     #[test]
@@ -746,10 +748,7 @@ mod tests {
                 &serde_json::json!([{"pid":10,"name":"bash","argv":["bash","-lc","run"]}]),
             ),
         );
-        assert_eq!(
-            foreground(&shell, "w1:p1").unwrap(),
-            Some("bash -lc run".into())
-        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("bash".into()));
     }
 
     #[test]
@@ -761,6 +760,131 @@ mod tests {
             &process_info(10, &serde_json::json!([{"pid":10,"name":"zsh"}])),
         );
         assert!(foreground(&shell, "w1:p1").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_shell_with_an_unknown_option_does_not_prove_an_idle_pane() {
+        let shell = Fake::new();
+        // `-x` is not a known prompt-only option, so the shell may be running something.
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"zsh","argv":["zsh","-x"]}]),
+            ),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("zsh".into()));
+    }
+
+    #[test]
+    fn a_shell_that_runs_a_script_does_not_prove_an_idle_pane() {
+        let shell = Fake::new();
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"zsh","argv":["zsh","build.sh"]}]),
+            ),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("zsh".into()));
+    }
+
+    #[test]
+    fn a_shell_with_an_interactive_option_still_waits_at_a_prompt() {
+        let shell = Fake::new();
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"zsh","argv":["zsh","-l"]}]),
+            ),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), None);
+    }
+
+    #[test]
+    fn a_shell_with_a_full_path_still_waits_at_a_prompt() {
+        let shell = Fake::new();
+        // Herdr reports the full path of the shell in `argv`.
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"zsh","argv":["/bin/zsh"]}]),
+            ),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_arguments_do_not_prove_an_idle_pane() {
+        let shell = Fake::new();
+        // An argument that is not a string is malformed evidence.
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"zsh","argv":["zsh",7]}]),
+            ),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("zsh".into()));
+    }
+
+    #[test]
+    fn a_command_line_without_arguments_does_not_prove_an_idle_pane() {
+        let shell = Fake::new();
+        // The command line carries arguments, but their boundaries are unknown.
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"zsh","cmdline":"zsh -c sleep 60"}]),
+            ),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("zsh".into()));
+    }
+
+    #[test]
+    fn a_bare_command_line_waits_at_a_prompt() {
+        let shell = Fake::new();
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"zsh","cmdline":"/bin/zsh"}]),
+            ),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), None);
+    }
+
+    #[test]
+    fn a_pane_without_a_root_pid_does_not_prove_an_idle_pane() {
+        let shell = Fake::new();
+        // No shell pid, so the evidence does not name the root process.
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &serde_json::json!({"result": {"process_info": {"foreground_processes": [
+                {"pid":10,"name":"zsh","argv":["zsh"]}
+            ]}}})
+            .to_string(),
+        );
+        assert_eq!(foreground(&shell, "w1:p1").unwrap(), Some("zsh".into()));
+    }
+
+    #[test]
+    fn a_diagnostic_never_shows_the_arguments_of_a_command() {
+        let shell = Fake::new();
+        // The arguments can carry a secret. The diagnostic names the program only.
+        shell.on(
+            "herdr pane process-info --pane w1:p1",
+            &process_info(
+                10,
+                &serde_json::json!([{"pid":10,"name":"sh","argv":["sh","-c","curl -H 'token: s3cr3t'"]}]),
+            ),
+        );
+        let detail = foreground(&shell, "w1:p1").unwrap().unwrap();
+        assert_eq!(detail, "sh");
+        assert!(!detail.contains("s3cr3t"), "{detail}");
     }
 
     #[test]
