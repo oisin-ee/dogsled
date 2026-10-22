@@ -2,11 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.23.0 - 2026-10-22
 
 - Opening the sidebar no longer takes the focus from the pane that opened it. Before, `dogsled board --open` and `--toggle` opened the sidebar pane without focus and then swapped it into the leftmost slot, but a Herdr swap always focuses the pane it moves, so the sidebar took the keyboard and the pane that asked for the board lost it. Now Dogsled remembers which pane had the focus before the swap and gives it the focus back over the Herdr socket. A dock that is already open, and a toggle that closes one, change no focus.
-
 - The Hosts panel shows memory and disk as two matching meters, each with a Nerd Font icon and no text label. Before, line 2 read `mem ▰▰▰▰▰▰▱▱ 76%  disk 22% free`: two words named the values, and the disk had no meter at all, only free-space text. Now the memory icon (`nf-md-memory`, U+F035B) and the disk icon (`nf-md-harddisk`, U+F02CA) name them. The disk meter fills by the share of the disk in use and its percent is that same share, so a full bar means a full disk as it already does for memory, and both meters mean the same thing. Each meter takes the colour of its own admission threshold, so a disk low on space turns yellow and then red like memory does. A narrow pane gives up the disk percent first, and then the disk meter.
+- `unit settlements` and `unit observe` read only the caller's unacknowledged units, and a refresh reads each remote host with one `unit-receipts` ssh call instead of one call per unit. Before, every Pi prompt ran about 30 sequential ssh calls to netcup for every owner's units, which flooded its sshd (MaxStartups drops, `ssh netcup: other`) and made Pi wait about 22 s at startup and on each prompt. A 0.23.0 caller needs `unit-receipts` on its peers, so upgrade netcup and momokaya-2 before the Mac. A 0.22.0 peer is logged and skipped, not read.
 
 ## 0.22.0 - 2026-10-22
 
