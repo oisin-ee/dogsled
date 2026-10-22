@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdtempSync, rmSync, watch, writeFileSync } from "node:fs";
+import { mkdtempSync, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -74,34 +74,38 @@ test("a running session is steered, and a record re-offered while Pi holds it is
 	r.reader.stop();
 });
 
-test("a change to the inbox file triggers a drain; other files and other messages are ignored", { timeout: 30_000 }, async t => {
-	const changes = new EventEmitter();
-	const r = rig(undefined, (dir, listener) => {
-		// Keep the real watcher alive while this test awaits events, not a polling timer.
-		return watch(dir, { persistent: true }, (event, name) => {
-			listener(event, name);
-			if (name === "other.json") changes.emit("other");
-		});
+test("a change to the inbox file triggers a drain; other files and other messages are ignored", async t => {
+	let listener!: Parameters<WatchDirectory>[1];
+	const r = rig("/inbox", (_dir, onChange) => {
+		listener = onChange;
+		return Object.assign(new EventEmitter(), { close() {} }) as FSWatcher;
 	});
-	t.after(() => {
-		r.reader.stop();
-		rmSync(r.dir, { recursive: true, force: true });
-	});
+	t.after(() => r.reader.stop());
 	await r.reader.start(r.ctx);
 	const callsBeforeOtherFile = r.calls.length;
 	r.queue(record("w1"));
-	const ignored = once(changes, "other", { signal: t.signal });
-	writeFileSync(join(r.dir, "other.json"), "[]");
-	await ignored;
+	listener("change", "other.json");
 	assert.equal(r.calls.length, callsBeforeOtherFile, "other files do not trigger a claim");
 	assert.equal(r.sent.length, 0);
 	const delivered = once(r.messages, "sent", { signal: t.signal });
-	writeFileSync(join(r.dir, "term_a.json"), "[]");
+	listener("change", "term_a.json");
 	await delivered;
 	assert.deepEqual(r.sent.map(s => s.message.details.records[0].id), ["w1"]);
 	assert.deepEqual(deliveredIds({ role: "user", content: "x" }), []);
 	assert.deepEqual(deliveredIds({ role: "custom", customType: "other", details: { records: [{ id: "x" }] } }), []);
 	await r.reader.ended({ role: "assistant" });
+	assert.deepEqual(acks(r.calls), []);
+});
+
+test("a message arriving before the watcher is armed is drained without another change", async t => {
+	const r = rig("/inbox", () => {
+		// The initial claim finished, but no watcher could observe this arrival yet.
+		r.queue(record("w1"));
+		return Object.assign(new EventEmitter(), { close() {} }) as FSWatcher;
+	});
+	t.after(() => r.reader.stop());
+	await r.reader.start(r.ctx);
+	assert.deepEqual(r.sent.map(s => s.message.details.records[0].id), ["w1"]);
 	assert.deepEqual(acks(r.calls), []);
 });
 
