@@ -188,14 +188,23 @@ fn row_of(buf: &Buffer, needle: &str) -> u16 {
     find(buf, needle).1
 }
 
+/// The cell where `needle` starts on row `y`.
+fn find_on(buf: &Buffer, needle: &str, y: u16) -> u16 {
+    let row = &rows(buf)[usize::from(y)];
+    match row.find(needle) {
+        Some(byte) => u16::try_from(row[..byte].chars().count()).unwrap(),
+        None => panic!("{needle:?} not drawn on row {y}:\n{}", rows(buf).join("\n")),
+    }
+}
+
 const FULL: &str = "\
 ╭ Hosts ──────────────────────── 3 ╮
 │▌ local                  11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%  disk 22% free │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%  \u{f02ca} ▰▰▰▰▰▰▱▱ 78%  │
 │▌ netcup                 14/16 ▲  │
-│▌ mem ▰▰▰▰▰▱▱▱ 65%  disk 24% free │
+│▌ \u{f035b} ▰▰▰▰▰▱▱▱ 65%  \u{f02ca} ▰▰▰▰▰▰▱▱ 76%  │
 │▌ momokaya-2               2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%  disk 39% free │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%  \u{f02ca} ▰▰▰▰▰▱▱▱ 61%  │
 ╰──────────────────────────────────╯
 ╭ Agents & Jobs ──────────────── 4 ╮
 │▌ web-tests               to land │
@@ -231,11 +240,11 @@ const FULL: &str = "\
 const SELECTED: &str = "\
 ╭ Hosts ──────────────────────── 3 ╮
 │▌ local                  11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%  disk 22% free │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%  \u{f02ca} ▰▰▰▰▰▰▱▱ 78%  │
 │▌ netcup                 14/16 ▲  │
-│▌ mem ▰▰▰▰▰▱▱▱ 65%  disk 24% free │
+│▌ \u{f035b} ▰▰▰▰▰▱▱▱ 65%  \u{f02ca} ▰▰▰▰▰▰▱▱ 76%  │
 │▌ momokaya-2               2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%  disk 39% free │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%  \u{f02ca} ▰▰▰▰▰▱▱▱ 61%  │
 ╰──────────────────────────────────╯
 ╭ Agents & Jobs ──────────────── 4 ╮
 │▌ web-tests               to land │
@@ -271,11 +280,11 @@ const SELECTED: &str = "\
 const TODOS_COLLAPSED: &str = "\
 ╭ Hosts ──────────────────────── 3 ╮
 │▌ local                  11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%  disk 22% free │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%  \u{f02ca} ▰▰▰▰▰▰▱▱ 78%  │
 │▌ netcup                 14/16 ▲  │
-│▌ mem ▰▰▰▰▰▱▱▱ 65%  disk 24% free │
+│▌ \u{f035b} ▰▰▰▰▰▱▱▱ 65%  \u{f02ca} ▰▰▰▰▰▰▱▱ 76%  │
 │▌ momokaya-2               2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%  disk 39% free │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%  \u{f02ca} ▰▰▰▰▰▱▱▱ 61%  │
 ╰──────────────────────────────────╯
 ╭ Agents & Jobs ──────────────── 4 ╮
 │▌ web-tests               to land │
@@ -311,11 +320,11 @@ const TODOS_COLLAPSED: &str = "\
 const EXPANDED: &str = "\
 ╭ Hosts ──────────────────────── 3 ╮
 │▌ local                  11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%  disk 22% free │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%  \u{f02ca} ▰▰▰▰▰▰▱▱ 78%  │
 │▌ netcup                 14/16 ▲  │
-│▌ mem ▰▰▰▰▰▱▱▱ 65%  disk 24% free │
+│▌ \u{f035b} ▰▰▰▰▰▱▱▱ 65%  \u{f02ca} ▰▰▰▰▰▰▱▱ 76%  │
 │▌ momokaya-2               2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%  disk 39% free │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%  \u{f02ca} ▰▰▰▰▰▱▱▱ 61%  │
 ╰──────────────────────────────────╯
 ╭ Agents & Jobs ──────────────── 4 ╮
 │▌ web-tests               to land │
@@ -355,11 +364,11 @@ const EXPANDED: &str = "\
 const EMPTY: &str = "\
 ╭ Hosts ──────────────────────── 3 ╮
 │▌ local                  11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%  disk 22% free │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%  \u{f02ca} ▰▰▰▰▰▰▱▱ 78%  │
 │▌ netcup                 14/16 ▲  │
-│▌ mem ▰▰▰▰▰▱▱▱ 65%  disk 24% free │
+│▌ \u{f035b} ▰▰▰▰▰▱▱▱ 65%  \u{f02ca} ▰▰▰▰▰▰▱▱ 76%  │
 │▌ momokaya-2               2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%  disk 39% free │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%  \u{f02ca} ▰▰▰▰▰▱▱▱ 61%  │
 ╰──────────────────────────────────╯
 ╭ Agents & Jobs ──────────────── 0 ╮
 │         No agents or jobs        │
@@ -386,11 +395,11 @@ const EMPTY: &str = "\
 const STALE: &str = "\
 ╭ Hosts ──────────────────────── 3 ╮
 │▌ local                  11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%  disk 22% free │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%  \u{f02ca} ▰▰▰▰▰▰▱▱ 78%  │
 │▌ netcup                       ?  │
 │▌ no reply 2m                     │
 │▌ momokaya-2               2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%  disk 39% free │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%  \u{f02ca} ▰▰▰▰▰▱▱▱ 61%  │
 ╰──────────────────────────────────╯
 ╭ Agents & Jobs ──────────────── 4 ╮
 │▌ web-tests               to land │
@@ -485,11 +494,11 @@ const AUTO_COLLAPSED: &str = "\
 const W24: &str = "\
 ╭ Hosts ──────────── 3 ╮
 │▌ local      11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%    │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%      │
 │▌ netcup     14/16 ▲  │
-│▌ mem ▰▰▰▰▰▱▱▱ 65%    │
+│▌ \u{f035b} ▰▰▰▰▰▱▱▱ 65%      │
 │▌ momokaya-2   2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%    │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%      │
 ╰──────────────────────╯
 ╭ Agents & Jobs ──── 4 ╮
 │▌ web-tests   to land │
@@ -525,11 +534,11 @@ const W24: &str = "\
 const W23: &str = "\
 ╭ Hosts ─────────── 3 ╮
 │▌ local     11/12 ▲  │
-│▌ mem ▰▰▰▰▰▰▱▱ 76%   │
+│▌ \u{f035b} ▰▰▰▰▰▰▱▱ 76%     │
 │▌ netcup    14/16 ▲  │
-│▌ mem ▰▰▰▰▰▱▱▱ 65%   │
+│▌ \u{f035b} ▰▰▰▰▰▱▱▱ 65%     │
 │▌ momokaya-2  2/7    │
-│▌ mem ▰▰▰▰▱▱▱▱ 55%   │
+│▌ \u{f035b} ▰▰▰▰▱▱▱▱ 55%     │
 ╰─────────────────────╯
 ╭ Agents & Jobs ─── 4 ╮
 │▌ web-tests          │
@@ -650,8 +659,45 @@ fn host_rows_colour_the_bar_and_meter_by_state() {
     assert_eq!(style(&b, x + 6, y).0, CAT.surface1);
     let (x, y) = find(&b, "76%");
     assert_eq!(style(&b, x, y).0, CAT.overlay1);
-    let (x, y) = find(&b, "22% free");
-    assert_eq!(style(&b, x, y).0, CAT.overlay1);
+    // The disk meter matches the memory meter: 22% free is 78% in use, six cells filled.
+    let disk = find_on(&b, DISK_ICON, y);
+    assert_eq!(style(&b, disk, y).0, CAT.overlay1);
+    assert_eq!(style(&b, disk + 2, y).0, CAT.green);
+    assert_eq!(style(&b, disk + 7, y).0, CAT.green);
+    assert_eq!(style(&b, disk + 8, y).0, CAT.surface1);
+    let percent = find_on(&b, "78%", y);
+    assert_eq!(style(&b, percent, y).0, CAT.overlay1);
+}
+
+#[test]
+fn the_disk_meter_fills_by_the_share_of_the_disk_in_use() {
+    let b = buf("full");
+    // local: 22% free is 78% in use. netcup: 24% free is 76% in use.
+    let local = find_on(&b, DISK_ICON, 2);
+    assert_eq!(style(&b, local + 2, 2).0, CAT.green);
+    assert_eq!(style(&b, local + 8, 2).0, CAT.surface1);
+    let netcup = find_on(&b, DISK_ICON, 4);
+    assert_eq!(style(&b, netcup + 2, 4).0, CAT.green);
+    assert_eq!(style(&b, netcup + 8, 4).0, CAT.surface1);
+    // Both meters are eight cells wide, so they line up.
+    let mem = find_on(&b, MEM_ICON, 2);
+    assert_eq!(local - mem, 2 + 8 + 1 + 3 + 2);
+    assert_eq!(find_on(&b, "78%", 2) - local, 2 + 8 + 1);
+}
+
+#[test]
+fn a_narrow_pane_drops_the_disk_percent_and_then_the_disk_meter() {
+    // 34 columns: the disk meter keeps its cells, but not the percent.
+    let b = draw(&fixture(), 34, 37, &CAT);
+    let row = rows(&b)[2].clone();
+    assert!(row.contains(&format!("{DISK_ICON} ▰▰▰▰▰▰▱▱")), "{row}");
+    assert!(!row.contains("78%"), "{row}");
+    assert!(row.contains("76%"), "{row}");
+    // 30 columns: the disk meter has no room left, so it goes away.
+    let b = draw(&fixture(), 30, 37, &CAT);
+    let row = rows(&b)[2].clone();
+    assert!(!row.contains(DISK_ICON), "{row}");
+    assert!(row.contains(&format!("{MEM_ICON} ▰▰▰▰▰▰▱▱ 76%")), "{row}");
 }
 
 #[test]
@@ -666,13 +712,16 @@ fn memory_and_disk_turn_yellow_then_red_at_the_admission_limits() {
     assert_eq!((y, style(&b, x, y).0), (2, CAT.yellow));
     let (x, y) = find(&b, "▰▰▰▰▰▰▰▰");
     assert_eq!((y, style(&b, x, y).0), (4, CAT.red));
-    let (x, y) = find(&b, "20% free");
-    assert_eq!((y, style(&b, x, y).0), (2, CAT.yellow));
-    let (x, y) = find(&b, "10% free");
-    assert_eq!((y, style(&b, x, y).0), (4, CAT.red));
+    // The disk meter takes the colour of its own level: 20% free is yellow, 10% is red.
+    let disk = find_on(&b, DISK_ICON, 2);
+    assert_eq!(style(&b, disk + 2, 2).0, CAT.yellow);
+    let disk = find_on(&b, DISK_ICON, 4);
+    assert_eq!(style(&b, disk + 2, 4).0, CAT.red);
     // The percent stays quiet.
     let (x, y) = find(&b, "95%");
     assert_eq!(style(&b, x, y).0, CAT.overlay1);
+    let x = find_on(&b, "80%", 2);
+    assert_eq!(style(&b, x, 2).0, CAT.overlay1);
 }
 
 #[test]
