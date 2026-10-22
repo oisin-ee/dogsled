@@ -2,7 +2,6 @@
 
 use crate::error::Result;
 use crate::hosts::{Fleet, Host, HostReport};
-use crate::ledger::new_id;
 use crate::plan;
 use crate::prepare::Prepared;
 use serde::Serialize;
@@ -45,30 +44,85 @@ pub enum Placement {
     },
 }
 
-pub fn place(fleet: &Fleet, host: Option<&str>, now: u64) -> Result<Placement> {
+/// Persist selection before reservation so an ambiguous SSH reply repeats the same host and
+/// reservation ID. The host owns same-ID reservation replay under its admission lock.
+#[derive(Debug, serde::Deserialize, Serialize)]
+struct ReservationAttempt {
+    host: String,
+}
+
+pub fn place(fleet: &Fleet, host: Option<&str>, id: &str, now: u64) -> Result<Placement> {
+    crate::jobs::validate_id(id)?;
+    let selections = fleet.ledger.child("placement-attempts");
+    selections.with_lock(id, || place_locked(fleet, host, id, now, &selections))
+}
+
+fn place_locked(
+    fleet: &Fleet,
+    host: Option<&str>,
+    id: &str,
+    now: u64,
+    selections: &crate::ledger::Ledger,
+) -> Result<Placement> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
+    let file = format!("{id}.json");
+    let saved = selections
+        .read::<Option<ReservationAttempt>>(&file)?
+        .flatten();
+    if let Some(saved) = &saved {
+        let selected = fleet.find(&saved.host)?;
+        if pinned.is_some_and(|h| h.id != selected.id) {
+            return Err(crate::unit_transport::conflict("reservation host changed"));
+        }
+    }
+    // A saved selection binds host identity, not the lifetime of its hold. Only the host's
+    // admission lock can replay a live hold or admit the same ID again after it expires.
+    let pinned = saved
+        .as_ref()
+        .map(|s| fleet.find(&s.host))
+        .transpose()?
+        .or(pinned);
     let mut reports = fleet.status(now)?;
+    if saved.is_some() {
+        reports.retain(|r| pinned.is_some_and(|h| h.id == r.host.id));
+    }
     let mut candidates: Vec<_> = reports
         .iter()
         .filter(|r| pinned.is_none_or(|h| h.id == r.host.id))
         .filter_map(|r| r.headroom.clone())
         .collect();
-    while let Some(choice) = plan::choose(&candidates) {
-        let host = fleet.find(&choice.host)?;
-        let id = new_id();
-        let outcome = fleet.reserve(host, &id, now)?;
+    let replay = saved.is_some();
+    let mut retry_host = saved.map(|s| s.host);
+    while let Some(selected) = retry_host
+        .take()
+        .or_else(|| plan::choose(&candidates).map(|c| c.host.clone()))
+    {
+        let host = fleet.find(&selected)?;
+        selections.write(
+            &file,
+            &Some(ReservationAttempt {
+                host: host.id.clone(),
+            }),
+        )?;
+        let outcome = fleet.reserve(host, id, now)?;
         if outcome.reserved {
             let prepared = Prepared::default();
             return Ok(Placement::Placed {
                 host: host.clone(),
-                reservation: id,
+                reservation: id.into(),
                 prepared,
             });
         }
         if let Some(report) = reports.iter_mut().find(|r| r.host.id == host.id) {
             report.headroom = outcome.headroom;
         }
+        if replay {
+            // Keep the original host through a new admission refusal. A queued retry must
+            // not migrate a checkout whose preparation may already have reached that host.
+            break;
+        }
         candidates.retain(|c| c.host != host.id);
+        selections.write(&file, &Option::<ReservationAttempt>::None)?;
     }
     if let Some(error) = reports
         .iter()

@@ -148,7 +148,17 @@ impl Node<'_> {
     }
 
     pub fn reserve(&self, id: &str, now: u64) -> Result<ReserveOutcome> {
+        crate::jobs::validate_id(id)?;
         self.ledger.with_lock("host", || {
+            let reservations = self.live_reservations(now)?;
+            // The caller may have lost a successful SSH reply. Replaying a live hold is
+            // not new admission: do not append it, refresh its TTL, or require a fresh probe.
+            if reservations.iter().any(|r| r.id == id) {
+                return Ok(ReserveOutcome {
+                    reserved: true,
+                    headroom: None,
+                });
+            }
             let Some(mut snapshot) = self
                 .ledger
                 .read::<Snapshot>("host.json")?
@@ -161,7 +171,7 @@ impl Node<'_> {
             };
             // Agent discovery cannot retire reservations: a new agent's first
             // build is not in the busy fraction until it runs.
-            snapshot.probe.reservations = self.live_reservations(now)?;
+            snapshot.probe.reservations = reservations;
             let headroom = evaluate(&snapshot.probe, &self.thresholds);
             if headroom.eligible {
                 snapshot.probe.reservations.push(Reservation {
@@ -200,6 +210,66 @@ mod tests {
             reservations: Vec::new(),
             panes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn same_id_reservation_is_atomic_and_does_not_extend_or_duplicate_the_hold() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let shell = crate::shell::Fake::new();
+        let policy = crate::config::Policy {
+            memory_reserve_bytes: 0,
+            ..crate::config::Policy::default()
+        };
+        let node = Node {
+            shell: &shell,
+            ledger: &ledger,
+            thresholds: Thresholds::from(&policy),
+            home: "/",
+            cleanup: &policy.cleanup,
+        };
+        ledger
+            .write(
+                "host.json",
+                &Snapshot {
+                    sampled_ms: 100,
+                    probe: Probe {
+                        busy: Some(0.0),
+                        ..probe(None)
+                    },
+                    jobs: Vec::new(),
+                },
+            )
+            .unwrap();
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| node.reserve("same", 100)))
+                .collect();
+            for call in calls {
+                assert!(call.join().unwrap().unwrap().reserved);
+            }
+        });
+        let holds: Vec<Reservation> = ledger.read("placements.json").unwrap().unwrap();
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].id, "same");
+        assert_eq!(holds[0].created_ms, 100);
+        // An existing hold is not new admission and does not need a fresh probe.
+        assert!(node.reserve("same", 100 + STALE_MS + 1).unwrap().reserved);
+        let holds: Vec<Reservation> = ledger.read("placements.json").unwrap().unwrap();
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].created_ms, 100);
+        assert!(
+            !node
+                .reserve("another", 100 + STALE_MS + 1)
+                .unwrap()
+                .reserved
+        );
+        assert!(
+            !node
+                .reserve("same", 100 + policy.reservation_ttl_ms)
+                .unwrap()
+                .reserved
+        );
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
     }
 
     #[test]
