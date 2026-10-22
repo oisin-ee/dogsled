@@ -142,14 +142,27 @@ pub fn local(
                     "preparation request changed",
                 ));
             }
-            return Ok(receipt.prepared);
+            return receipt.prepared.ok_or_else(|| {
+                Error::Invalid(format!(
+                    "request {id} stopped during preparation; inspect this host before resubmitting"
+                ))
+            });
         }
+        // Persist intent before setup, worktree creation, or Herdr can change host state.
+        // Without a completed receipt, a later call cannot prove those effects finished.
+        receipts.write(
+            &file,
+            &PreparationReceipt {
+                request: request.clone(),
+                prepared: None,
+            },
+        )?;
         let prepared = local_once(shell, ledger, repo, branch, base, Some(id))?;
         receipts.write(
             &file,
             &PreparationReceipt {
                 request,
-                prepared: prepared.clone(),
+                prepared: Some(prepared.clone()),
             },
         )?;
         Ok(prepared)
@@ -161,7 +174,7 @@ pub fn local(
 #[derive(Debug, Serialize, Deserialize)]
 struct PreparationReceipt {
     request: (PathBuf, String, Option<String>),
-    prepared: Prepared,
+    prepared: Option<Prepared>,
 }
 
 fn local_once(

@@ -49,7 +49,6 @@ pub enum Placement {
 #[derive(Debug, serde::Deserialize, Serialize)]
 struct ReservationAttempt {
     host: String,
-    reserved: bool,
 }
 
 pub fn place(fleet: &Fleet, host: Option<&str>, id: &str, now: u64) -> Result<Placement> {
@@ -75,20 +74,24 @@ fn place_locked(
         if pinned.is_some_and(|h| h.id != selected.id) {
             return Err(crate::unit_transport::conflict("reservation host changed"));
         }
-        if saved.reserved {
-            return Ok(Placement::Placed {
-                host: selected.clone(),
-                reservation: id.into(),
-                prepared: Prepared::default(),
-            });
-        }
     }
+    // A saved selection binds host identity, not the lifetime of its hold. Only the host's
+    // admission lock can replay a live hold or admit the same ID again after it expires.
+    let pinned = saved
+        .as_ref()
+        .map(|s| fleet.find(&s.host))
+        .transpose()?
+        .or(pinned);
     let mut reports = fleet.status(now)?;
+    if saved.is_some() {
+        reports.retain(|r| pinned.is_some_and(|h| h.id == r.host.id));
+    }
     let mut candidates: Vec<_> = reports
         .iter()
         .filter(|r| pinned.is_none_or(|h| h.id == r.host.id))
         .filter_map(|r| r.headroom.clone())
         .collect();
+    let replay = saved.is_some();
     let mut retry_host = saved.map(|s| s.host);
     while let Some(selected) = retry_host
         .take()
@@ -99,18 +102,10 @@ fn place_locked(
             &file,
             &Some(ReservationAttempt {
                 host: host.id.clone(),
-                reserved: false,
             }),
         )?;
         let outcome = fleet.reserve(host, id, now)?;
         if outcome.reserved {
-            selections.write(
-                &file,
-                &Some(ReservationAttempt {
-                    host: host.id.clone(),
-                    reserved: true,
-                }),
-            )?;
             let prepared = Prepared::default();
             return Ok(Placement::Placed {
                 host: host.clone(),
@@ -120,6 +115,11 @@ fn place_locked(
         }
         if let Some(report) = reports.iter_mut().find(|r| r.host.id == host.id) {
             report.headroom = outcome.headroom;
+        }
+        if replay {
+            // Keep the original host through a new admission refusal. A queued retry must
+            // not migrate a checkout whose preparation may already have reached that host.
+            break;
         }
         candidates.retain(|c| c.host != host.id);
         selections.write(&file, &Option::<ReservationAttempt>::None)?;

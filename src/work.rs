@@ -563,7 +563,7 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
     if matches!(request.action, Action::Place) {
         let Placement::Placed {
             host, reservation, ..
-        } = placement(fleet, request, now)?
+        } = placement(fleet, request, request.host.as_deref(), now)?
         else {
             return Ok(None);
         };
@@ -637,6 +637,12 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
                             .unwrap_or("preparation outcome is unknown")
                     )));
                 }
+                if matches!(
+                    placement(fleet, request, Some(&host.id), now)?,
+                    Placement::Full { .. }
+                ) {
+                    return Ok(None);
+                }
                 attempt.launch =
                     Some(prepare_launch(fleet, request, &host).map_err(prelaunch_error)?);
                 attempt.error = None;
@@ -672,7 +678,7 @@ fn begin(
     file: &str,
     now: u64,
 ) -> Result<Option<Value>> {
-    let placed = placement(fleet, request, now)?;
+    let placed = placement(fleet, request, request.host.as_deref(), now)?;
     let Placement::Placed { host, .. } = placed else {
         return Ok(None);
     };
@@ -701,9 +707,8 @@ fn begin(
     Ok(Some(result))
 }
 
-fn placement(fleet: &Fleet, request: &Request, now: u64) -> Result<Placement> {
-    let placed = commands::place(fleet, request.host.as_deref(), &request.id, now)
-        .map_err(prelaunch_error)?;
+fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
+    let placed = commands::place(fleet, host, &request.id, now).map_err(prelaunch_error)?;
     if let Placement::Full { hosts, .. } = &placed {
         defer(fleet, request, hosts, now)?;
     }
@@ -713,7 +718,7 @@ fn placement(fleet: &Fleet, request: &Request, now: u64) -> Result<Placement> {
 /// Only transport errors are retryable before a launch receipt exists. Local setup errors
 /// and the peer's structured refusals remain terminal.
 fn prelaunch_error(error: Error) -> Error {
-    if matches!(error.root(), Error::Ssh { refusal: None, .. }) {
+    if transient_ssh(&error) {
         Error::Launch(error.to_string())
     } else {
         error
@@ -963,9 +968,23 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
 /// A launch that failed after placement: Herdr did not start the agent in time, or the SSH
 /// launch call failed. Refusals and deadlines are not retried.
 fn retryable(error: &Error) -> bool {
+    transient_ssh(error) || matches!(error.root(), Error::Command { .. } | Error::Io(_))
+}
+
+/// Retry only SSH transport categories. Authentication, remote commands, malformed replies,
+/// structured refusals, and deadlines are terminal, even when wrapped in startup diagnostics.
+fn transient_ssh(error: &Error) -> bool {
+    use crate::hosts::Failure;
     matches!(
         error.root(),
-        Error::Command { .. } | Error::Ssh { refusal: None, .. } | Error::Io(_)
+        Error::Ssh {
+            failure: Failure::Timeout
+                | Failure::ConnectionRefused
+                | Failure::HostNotResolved
+                | Failure::Other,
+            refusal: None,
+            ..
+        }
     )
 }
 

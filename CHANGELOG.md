@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-- Fixed queued wait reasons to retain each host's reservation refusal. Transient SSH failures during reservation, checkout, or preparation now retry with backoff. Retries keep the selected host and reservation, and replay completed preparations by request ID.
+- Fixed queued wait reasons to retain each host's reservation refusal. Transient SSH failures during reservation, checkout, or preparation retry with backoff. Remote command failures, authentication failures, invalid requests, conflicts, and deadlines remain terminal. Before preparation retries, the selected host revalidates the same reservation ID. An expired reservation that the host refuses keeps its request queued with the refusal reason. Preparation records its intent before side effects and refuses interrupted work without completion proof. Completed preparations still replay by request ID.
 
 - A committed unit whose worker pane closed without a final reply now settles as `stopped`, so its owner can release the unit.
 

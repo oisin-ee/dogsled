@@ -134,7 +134,7 @@ fn ssh_failure_before_launch_retries_reservation_checkout_and_preparation() {
             assert_eq!(ids[0], ids[1], "same reservation ID: {log}");
             assert!(calls.iter().all(|s| s.contains("netcup-dev")), "{log}");
         } else {
-            assert_eq!(log.matches("host reserve").count(), 1, "{log}");
+            assert_eq!(log.matches("host reserve").count(), 2, "{log}");
         }
     }
 }
@@ -225,6 +225,199 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
             .unwrap()
             .contains("not a valid branch name")
     );
+}
+
+#[test]
+fn terminal_ssh_categories_never_enter_the_retry_queue() {
+    for step in ["reserve", "checkout", "prepare", "launch"] {
+        for (case, response, status) in [
+            ("command", "echo 'private remote failure' >&2", 2),
+            ("auth", "echo 'Permission denied (publickey)' >&2", 255),
+            (
+                "invalid",
+                "echo '{\"error\":\"private invalid request\"}'",
+                2,
+            ),
+            (
+                "conflict",
+                "echo '{\"error\":\"private conflict\",\"code\":\"CONFLICT\"}'",
+                2,
+            ),
+            (
+                "deadline",
+                "echo '{\"error\":\"private deadline\",\"deadline\":true}'",
+                2,
+            ),
+        ] {
+            let rig = Rig::new(&format!("terminal-{step}-{case}"));
+            let repo = rig.dir.join("home/repo");
+            repository(&repo);
+            rig.peer();
+            rig.snapshot("state/host.json", now(), 0.0, 8);
+            let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+            rig.script(
+                "ssh",
+                &script.replace(
+                    &format!("  *'host {step}'*)"),
+                    &format!("  *'host {step}'*) {response}; exit {status};"),
+                ),
+            );
+            let (code, error) = remote_agent(&rig, Some(&repo));
+            assert_eq!(code, 2, "{step}/{case}: {error}");
+            assert!(!rig.dir.join("state/queue.json").exists(), "{step}/{case}");
+            assert!(!error.to_string().contains("private"), "{error}");
+            assert_eq!(
+                rig.log("ssh.log").matches(&format!("host {step}")).count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn expired_preparation_reservations_revalidate_on_the_same_host_and_keep_refusals() {
+    for action in ["agent", "place"] {
+        let rig = Rig::new(&format!("expired-preparation-{action}"));
+        let repo = rig.dir.join("home/repo");
+        repository(&repo);
+        rig.peer();
+        rig.snapshot("state/host.json", now(), 0.0, 8);
+        fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+        rig.snapshot("peer-state/host.json", now(), 0.0, 16);
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        let reserve = format!(
+            r#"  *'host reserve'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;"#,
+            env!("CARGO_BIN_EXE_dogsled")
+        );
+        rig.script("ssh", &script
+            .replace("case \"$*\" in", "case \"$*\" in\n  *'host prepared'*) printf '{}\\n' ;;")
+            .replace("  *'host reserve'*) cat \"$RIG/reserve.json\" ;;", &reserve)
+            .replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
+        let (code, queued) = if action == "agent" {
+            remote_agent(&rig, Some(&repo))
+        } else {
+            rig.json(&[
+                "place",
+                "--host",
+                "netcup",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--branch",
+                "remote-complete",
+                "--base",
+                "main",
+            ])
+        };
+        assert_eq!(code, 1, "{action}: {queued}");
+        let mut holds = rig.read("peer-state/placements.json");
+        holds[0]["created_ms"] = json!(1);
+        rig.put("peer-state/placements.json", &holds);
+        // Admission now refuses this host despite the caller's eligible cached snapshot.
+        let mut snapshot = rig.read("peer-state/host.json");
+        snapshot["probe"]["disk_free_percent"] = json!(-1.0);
+        rig.put("peer-state/host.json", &snapshot);
+        let ticket = advance(&rig);
+        assert_eq!(ticket["state"], "pending", "{action}: {ticket}");
+        let reason = ticket["wait_reason"].as_str().unwrap();
+        assert!(reason.starts_with("netcup: "), "{ticket}");
+        assert!(!reason.contains("local:"), "{ticket}");
+        assert_eq!(ticket["retry"]["attempts"], 1, "{ticket}");
+        let log = rig.log("ssh.log");
+        assert_eq!(log.matches("host reserve").count(), 2, "{log}");
+        assert_eq!(log.matches("host checkout").count(), 1, "{log}");
+        assert!(!log.contains("host prepare"), "{log}");
+        assert!(!log.contains("host launch"), "{log}");
+        let calls: Vec<_> = log.lines().filter(|s| s.contains("host reserve")).collect();
+        let ids: Vec<_> = calls
+            .iter()
+            .map(|call| {
+                call.split(" --id ")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ids[0], ids[1], "{log}");
+        assert!(
+            calls.iter().all(|call| call.contains("netcup-dev")),
+            "{log}"
+        );
+        rig.snapshot("peer-state/host.json", now(), 0.0, 16);
+        let ticket = advance(&rig);
+        assert_eq!(ticket["state"], "admitted", "{action}: {ticket}");
+        assert!(ticket.get("wait_reason").is_none(), "{ticket}");
+        assert_eq!(
+            rig.read("peer-state/placements.json")
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn interrupted_preparation_refuses_to_adopt_or_rerun_incomplete_setup() {
+    for base in [Some("main"), None] {
+        let (rig, repo) = place::place_rig(if base.is_some() {
+            "interrupted-with-base"
+        } else {
+            "interrupted-without-base"
+        });
+        let config = fs::read_to_string(repo.join("dogsled.toml")).unwrap();
+        fs::write(repo.join("dogsled.toml"), config.replace("setup = [", "setup = [\n  \"if test -f \\\"$RIG/state/preparation-receipts/interrupted.json\\\"; then cp \\\"$RIG/state/preparation-receipts/interrupted.json\\\" \\\"$RIG/intent-at-setup.json\\\"; fi; kill -KILL $PPID\"," )).unwrap();
+        let mut args = vec![
+            "host",
+            "prepare",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--branch",
+            "incomplete",
+            "--request-id",
+            "interrupted",
+        ];
+        if let Some(base) = base {
+            args.extend(["--base", base]);
+        }
+        let out = rig.run(&args);
+        assert!(!out.status.success());
+        let tree = repo.join(".worktrees/incomplete");
+        assert!(
+            tree.is_dir(),
+            "preparation intent must exist before worktree creation: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            rig.dir.join("intent-at-setup.json").exists(),
+            "preparation intent must precede setup"
+        );
+        let receipt = rig.read("intent-at-setup.json");
+        assert!(receipt["prepared"].is_null(), "{receipt}");
+        let pending = rig.read("state/preparations.json");
+        fs::write(tree.join("keep-me"), "unfinished setup output").unwrap();
+        fs::write(repo.join("dogsled.toml"), config).unwrap();
+        let (code, error) = rig.json(&args);
+        assert_eq!(code, 2, "{error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("stopped during preparation"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(tree.join("keep-me")).unwrap(),
+            "unfinished setup output"
+        );
+        assert_eq!(rig.read("state/preparations.json"), pending);
+        assert!(!rig.dir.join("setup.log").exists());
+        assert!(!rig.log("herdr.log").contains("worktree open"));
+    }
 }
 
 #[test]
@@ -334,7 +527,7 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(rig.log("setup.log").lines().count(), 1);
     assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
-    assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 1);
+    assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 2);
     assert_eq!(rig.log("ssh.log").matches("host prepare").count(), 2);
     let id = ticket["request"]["id"].as_str().unwrap();
     let attempt = rig.read(&format!("state/admissions/{id}.json"));
