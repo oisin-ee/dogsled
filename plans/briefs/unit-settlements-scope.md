@@ -19,9 +19,9 @@
    - owner A's `unit settlements` makes no SSH call for owner B's open remote unit, and none for A's own acknowledged remote unit, while still returning A's pending event;
    - `unit observe` for one execution makes no SSH call for other remote units;
    - the service refresh still imports owner B's remote receipt.
-4. `CHANGELOG.md` under `## Unreleased`, Fixed: `unit settlements` and `unit observe` no longer query every host for every owner's units; Pi no longer waits on them at startup and on each prompt.
+4. Do not edit `CHANGELOG.md`; another open unit owns it. Put this Fixed line in the PR description, and the lead adds it at landing: `unit settlements` and `unit observe` no longer query every host for every owner's units, so Pi no longer waits on them at startup and on each prompt.
 
-**Owned paths.** `src/unit_request.rs`, `src/sweep.rs`, `src/inbox.rs`, `tests/cli/unit_seeded.rs`, `CHANGELOG.md`.
+**Owned paths.** `src/unit_request.rs`, `src/sweep.rs`, `src/inbox.rs`, `tests/cli/unit_seeded.rs`.
 
 **Acceptance.** `cargo test --locked --test cli unit_seeded` passes, including the new tests.
 
