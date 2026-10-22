@@ -39,6 +39,238 @@ fn put(ledger: &Ledger, mark: Mark) {
         .unwrap();
 }
 
+#[derive(Debug)]
+struct BranchRepo {
+    path: std::path::PathBuf,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::shell::Shell for BranchRepo {
+    fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("{program} {}", args.join(" ")));
+        if program == "herdr" {
+            assert_eq!(args, ["agent", "list"]);
+            return Ok(crate::shell::Output {
+                status: 0,
+                stdout: r#"{"result":{"agents":[]}}"#.into(),
+                stderr: String::new(),
+            });
+        }
+        let mut command = std::process::Command::new(program);
+        // A commit hook's repository environment must not leak into this fixture.
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+        let out = command.args(args).output()?;
+        Ok(crate::shell::Output {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+}
+
+impl BranchRepo {
+    fn new() -> Self {
+        let repo = Self {
+            path: std::env::temp_dir().join(crate::ledger::new_id()),
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        std::fs::create_dir(&repo.path).unwrap();
+        repo.git(&["init", "--quiet", "-b", "main"]);
+        repo.git(&[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
+        repo
+    }
+
+    fn git(&self, args: &[&str]) {
+        use crate::shell::Shell as _;
+        let mut words = vec!["-C".into(), self.path.display().to_string()];
+        words.extend(args.iter().map(ToString::to_string));
+        self.run_ok("git", &words).unwrap();
+    }
+
+    fn mark(&self, ledger: &Ledger) {
+        let mut mark = mark_at();
+        mark.closed_ms = Some(2);
+        mark.branch = Some(Branch {
+            repo: self.path.display().to_string(),
+            name: "feature".into(),
+            ahead: 7,
+            landed: false,
+        });
+        put(ledger, mark);
+    }
+}
+
+impl Drop for BranchRepo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[test]
+fn closed_handoff_deleted_local_landed_branch_settles_once() {
+    let ledger = ledger();
+    let repo = BranchRepo::new();
+    repo.git(&["branch", "feature"]);
+    repo.git(&["update-ref", "refs/remotes/origin/feature", "main"]);
+    repo.git(&["branch", "-d", "feature"]);
+    repo.mark(&ledger);
+
+    handoff(&ledger, &repo, 3).unwrap();
+    let branch = list(&ledger).unwrap().remove(0).branch.unwrap();
+    assert!(branch.landed);
+    assert_eq!(branch.ahead, 0);
+    repo.calls.lock().unwrap().clear();
+    handoff(&ledger, &repo, 4).unwrap();
+    assert_eq!(*repo.calls.lock().unwrap(), ["herdr agent list"]);
+}
+
+#[test]
+fn closed_handoff_pushed_only_branch_still_has_one_commit_to_land() {
+    let ledger = ledger();
+    let repo = BranchRepo::new();
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    std::fs::write(repo.path.join("feature.txt"), "work\n").unwrap();
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&[
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--quiet",
+        "-m",
+        "feature",
+    ]);
+    repo.git(&["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["branch", "-D", "feature"]);
+    repo.mark(&ledger);
+
+    handoff(&ledger, &repo, 3).unwrap();
+    let branch = list(&ledger).unwrap().remove(0).branch.unwrap();
+    assert!(!branch.landed);
+    assert_eq!(branch.ahead, 1);
+}
+
+#[test]
+fn closed_handoff_missing_both_refs_settles_and_leaves_the_board() {
+    let ledger = ledger();
+    let repo = BranchRepo::new();
+    repo.mark(&ledger);
+
+    handoff(&ledger, &repo, 3).unwrap();
+    let mark = list(&ledger).unwrap().remove(0);
+    let branch = mark.branch.as_ref().unwrap();
+    assert!(branch.landed);
+    assert_eq!(branch.ahead, 0);
+
+    let status = crate::commands::Status {
+        hosts: vec![],
+        items: vec![crate::items::Item {
+            id: "launch".into(),
+            kind: "agent".into(),
+            closed_ms: mark.closed_ms,
+            branch: mark.branch,
+            ..Default::default()
+        }],
+        queue: vec![],
+        orphans: vec![],
+        sweep: None,
+    };
+    assert_eq!(crate::board::build(&status, None, 3).rows, []);
+    repo.calls.lock().unwrap().clear();
+    handoff(&ledger, &repo, 4).unwrap();
+    assert_eq!(*repo.calls.lock().unwrap(), ["herdr agent list"]);
+}
+
+#[test]
+fn handoff_local_ref_takes_precedence_over_a_landed_origin_ref() {
+    let ledger = ledger();
+    let repo = BranchRepo::new();
+    repo.git(&["update-ref", "refs/remotes/origin/feature", "main"]);
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    std::fs::write(repo.path.join("feature.txt"), "local work\n").unwrap();
+    repo.git(&["add", "feature.txt"]);
+    repo.git(&[
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "--quiet",
+        "-m",
+        "feature",
+    ]);
+    repo.mark(&ledger);
+
+    handoff(&ledger, &repo, 3).unwrap();
+    let branch = list(&ledger).unwrap().remove(0).branch.unwrap();
+    assert!(!branch.landed);
+    assert_eq!(branch.ahead, 1);
+}
+
+#[test]
+fn unclosed_settled_handoff_still_refreshes_its_branch() {
+    let ledger = ledger();
+    let repo = BranchRepo::new();
+    repo.mark(&ledger);
+    let mut mark = list(&ledger).unwrap().remove(0);
+    mark.closed_ms = None;
+    mark.branch.as_mut().unwrap().landed = true;
+    put(&ledger, mark);
+    repo.calls.lock().unwrap().clear();
+
+    handoff(&ledger, &repo, 3).unwrap();
+    assert!(
+        repo.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.contains("show-ref"))
+    );
+    assert!(list(&ledger).unwrap()[0].closed_ms.is_none());
+}
+
+#[test]
+fn branch_refresh_keeps_real_git_failures_as_errors_without_settling() {
+    for status in [2, 128] {
+        let shell = Fake::new();
+        shell.on_output(
+            "git -C /repo show-ref --verify --quiet refs/heads/feature",
+            crate::shell::Output {
+                status,
+                stdout: String::new(),
+                stderr: "repository is unavailable".into(),
+            },
+        );
+        let mut branch: Branch = serde_json::from_value(json!({
+            "repo": "/repo", "name": "feature", "ahead": 7, "landed": false
+        }))
+        .unwrap();
+        let before = branch.clone();
+        let error = refresh_branch(&shell, &mut branch).unwrap_err();
+        assert!(error.to_string().contains("repository is unavailable"));
+        assert_eq!(branch, before);
+    }
+}
+
 #[test]
 fn restored_terminal_without_counters_seals_the_same_session() {
     let ledger = ledger();
