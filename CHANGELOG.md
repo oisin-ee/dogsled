@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- A committed unit whose worker pane closed without a final reply now settles as `stopped`, so its owner can release the unit.
+
 ## 0.23.0 - 2026-10-22
 
 - Opening the sidebar no longer takes the focus from the pane that opened it. Before, `dogsled board --open` and `--toggle` opened the sidebar pane without focus and then swapped it into the leftmost slot, but a Herdr swap always focuses the pane it moves, so the sidebar took the keyboard and the pane that asked for the board lost it. Now Dogsled remembers which pane had the focus before the swap and gives it the focus back over the Herdr socket. A dock that is already open, and a toggle that closes one, change no focus.

@@ -579,7 +579,9 @@ pub fn current_panes(shell: &dyn Shell) -> Result<Vec<Pane>> {
     Ok(pane_snapshot(shell)?.0)
 }
 
-fn pane_snapshot(shell: &dyn Shell) -> Result<(Vec<Pane>, BTreeMap<String, String>)> {
+/// One `herdr pane list` read: the panes, and each pane's terminal id. Cleanup and the unit
+/// stop proof share it.
+pub fn pane_snapshot(shell: &dyn Shell) -> Result<(Vec<Pane>, BTreeMap<String, String>)> {
     let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
     let raw = value
