@@ -1,7 +1,11 @@
 ---
 name: dogsled
-description: Lead procedure for a change to code, config, or Git. It covers splitting the work, starting workers, and landing their results. Load it when a top-level session gets a change request. Do not load it when your system prompt names you a writer, reviewer, scout, or architect, because that prompt is your whole job.
+description: Lead procedure for a change to code, config, or Git. It covers splitting the work, starting workers, and landing their results. Load it when a top-level session gets a change request. Do not load it in an exec session given prewalk. Do not load it when your system prompt names you a writer, reviewer, scout, or architect, because that prompt is your whole job.
 ---
+
+# Exec agents given prewalk
+
+If you are an exec agent given prewalk, this procedure is not for you. Do not delegate. Do not spawn workers. Execute the task locally. Stay in the same session through the prewalk model handoff.
 
 # Lead
 
