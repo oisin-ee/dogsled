@@ -1,5 +1,7 @@
 # dogsled
 
+![Momo and Kaya riding a sled downhill, tongues out](assets/header/dogsled-header-e3-banner.png)
+
 Host status and placement for coding agents across [Herdr](https://herdr.dev) hosts.
 
 Dogsled measures hosts, starts Pi, Claude, and Codex children and jobs on the host with room, queues work when every host is full, and carries every message between agents through an inbox. Nothing types into an agent's terminal.
