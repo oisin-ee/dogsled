@@ -438,6 +438,263 @@ fn checkout_identity_and_clone_failures_never_show_credential_origins() {
     }
 }
 
+/// A returned preparation failure is retained on the host. The same request replays the
+/// original safe cause, and the replay runs no preparation work.
+#[test]
+fn a_retained_failure_replays_its_cause_without_preparing_again() {
+    let (rig, repo) = place::place_rig("diagnostic-retained-failure");
+    let args = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "missing",
+        "--request-id",
+        "retained",
+    ];
+    let (code, original) = rig.json(&args);
+    assert_eq!(code, 2, "{original}");
+    assert_eq!(original["diagnostic"]["cause"], "base_unavailable");
+    assert_eq!(original["diagnostic"]["request_id"], "retained");
+    let receipt = rig.read("state/preparation-receipts/retained.json");
+    assert!(receipt["prepared"].is_null(), "{receipt}");
+    assert_eq!(receipt["failure"]["kind"], "other", "{receipt}");
+    assert_eq!(
+        receipt["failure"]["diagnostic"]["cause"], "base_unavailable",
+        "{receipt}"
+    );
+    // The host state now allows the preparation to succeed. A replay must not use it.
+    let git = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["branch", "missing"])
+        .output()
+        .unwrap();
+    assert!(git.status.success());
+    let herdr = rig.log("herdr.log");
+    let setup = rig.log("setup.log");
+    let (code, replay) = rig.json(&args);
+    assert_eq!(code, 2, "{replay}");
+    assert_eq!(replay["diagnostic"], original["diagnostic"]);
+    assert_eq!(rig.log("herdr.log"), herdr, "the replay prepared again");
+    assert_eq!(rig.log("setup.log"), setup);
+    assert!(!repo.join(".worktrees/worker").exists());
+}
+
+/// A successful preparation still replays as a success, with no second preparation.
+#[test]
+fn a_successful_preparation_still_replays_as_a_success() {
+    let (rig, repo) = place::place_rig("diagnostic-retained-success");
+    let args = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--request-id",
+        "successful",
+    ];
+    let (code, original) = rig.json(&args);
+    assert_eq!(code, 0, "{original}");
+    let herdr = rig.log("herdr.log");
+    let setup = rig.log("setup.log");
+    let (code, replay) = rig.json(&args);
+    assert_eq!(code, 0, "{replay}");
+    assert_eq!(replay, original, "{replay}");
+    assert_eq!(rig.log("herdr.log"), herdr, "the replay prepared again");
+    assert_eq!(rig.log("setup.log"), setup);
+}
+
+/// The same request with a changed input is a conflict, not a replay.
+#[test]
+fn a_retained_failure_still_refuses_a_changed_request() {
+    let (rig, repo) = place::place_rig("diagnostic-retained-conflict");
+    let base = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "missing",
+        "--request-id",
+        "retained",
+    ];
+    let (code, original) = rig.json(&base);
+    assert_eq!(code, 2, "{original}");
+    let herdr = rig.log("herdr.log");
+    let mut changed = base;
+    changed[7] = "main";
+    let (code, conflict) = rig.json(&changed);
+    assert_eq!(code, 2, "{conflict}");
+    assert!(
+        conflict["error"]
+            .as_str()
+            .unwrap()
+            .contains("preparation request changed"),
+        "{conflict}"
+    );
+    assert_eq!(rig.log("herdr.log"), herdr);
+}
+
+/// An old receipt without an outcome proves nothing. It stays uncertain, and it is not
+/// read as a success or as a recorded failure.
+#[test]
+fn a_receipt_without_an_outcome_stays_uncertain() {
+    let (rig, repo) = place::place_rig("diagnostic-legacy-receipt");
+    let args = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "missing",
+        "--request-id",
+        "legacy",
+    ];
+    let (code, original) = rig.json(&args);
+    assert_eq!(code, 2, "{original}");
+    // A receipt written before failures were retained holds no outcome.
+    let receipt = rig.read("state/preparation-receipts/legacy.json");
+    let mut legacy = receipt.clone();
+    legacy.as_object_mut().unwrap().remove("failure");
+    fs::write(
+        rig.dir.join("state/preparation-receipts/legacy.json"),
+        serde_json::to_vec_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+    let herdr = rig.log("herdr.log");
+    let (code, uncertain) = rig.json(&args);
+    assert_eq!(code, 2, "{uncertain}");
+    assert!(
+        uncertain["error"]
+            .as_str()
+            .unwrap()
+            .contains("stopped during preparation"),
+        "{uncertain}"
+    );
+    assert!(uncertain.get("diagnostic").is_none(), "{uncertain}");
+    assert_eq!(rig.log("herdr.log"), herdr);
+}
+
+/// A receipt cannot hold a success and a failure at once.
+#[test]
+fn a_contradictory_receipt_is_refused() {
+    let (rig, repo) = place::place_rig("diagnostic-contradictory");
+    let args = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "missing",
+        "--request-id",
+        "contradictory",
+    ];
+    let (code, original) = rig.json(&args);
+    assert_eq!(code, 2, "{original}");
+    let mut receipt = rig.read("state/preparation-receipts/contradictory.json");
+    receipt["prepared"] = json!({"pane_id":"w8:p1","terminal_id":"term_tree"});
+    fs::write(
+        rig.dir
+            .join("state/preparation-receipts/contradictory.json"),
+        serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+    let (code, refused) = rig.json(&args);
+    assert_eq!(code, 2, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("contradictory preparation receipt"),
+        "{refused}"
+    );
+}
+
+/// A failure without a typed diagnostic keeps its safe classification and correlation, and
+/// withholds its detail. The secret in the failing command never reaches the receipt.
+#[test]
+fn a_failure_without_a_diagnostic_keeps_only_safe_information() {
+    let (rig, repo) = place::place_rig("diagnostic-untyped-failure");
+    let config = fs::read_to_string(repo.join("dogsled.toml")).unwrap();
+    fs::write(
+        repo.join("dogsled.toml"),
+        config.replace(
+            "setup = [",
+            "setup = [\n  \"printf 'SETUP_SECRET' >&2; exit 1\",",
+        ),
+    )
+    .unwrap();
+    let args = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--request-id",
+        "untyped",
+    ];
+    let (code, original) = rig.json(&args);
+    assert_eq!(code, 2, "{original}");
+    let receipt = rig.read("state/preparation-receipts/untyped.json");
+    assert!(!receipt.to_string().contains("SETUP_SECRET"), "{receipt}");
+    assert_eq!(receipt["failure"]["detail_withheld"], true, "{receipt}");
+    assert_eq!(receipt["failure"]["request_id"], "untyped", "{receipt}");
+    let herdr = rig.log("herdr.log");
+    let (code, replay) = rig.json(&args);
+    assert_eq!(code, 2, "{replay}");
+    assert!(
+        replay["error"]
+            .as_str()
+            .unwrap()
+            .contains("untrusted detail withheld"),
+        "{replay}"
+    );
+    assert!(!replay.to_string().contains("SETUP_SECRET"), "{replay}");
+    assert_eq!(rig.log("herdr.log"), herdr);
+}
+
+/// A failure whose outcome cannot be written is reported as unrecorded. The report must not
+/// claim that the original cause is retained.
+#[test]
+fn a_failure_whose_outcome_cannot_be_written_is_reported_as_unrecorded() {
+    let (rig, repo) = place::place_rig("diagnostic-unrecorded");
+    let config = fs::read_to_string(repo.join("dogsled.toml")).unwrap();
+    fs::write(
+        repo.join("dogsled.toml"),
+        config.replace(
+            "setup = [",
+            "setup = [\n  \"rm -f \\\"$RIG/state/preparation-receipts/unrecorded.json\\\"; mkdir -p \\\"$RIG/state/preparation-receipts/unrecorded.json\\\"; exit 1\",",
+        ),
+    )
+    .unwrap();
+    let (code, error) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--request-id",
+        "unrecorded",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains("cause was not recorded"), "{error}");
+    assert!(text.contains("inspect this host"), "{error}");
+}
+
 fn advance(rig: &Rig) -> Value {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
