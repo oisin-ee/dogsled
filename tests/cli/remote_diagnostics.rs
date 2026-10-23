@@ -188,6 +188,81 @@ fn real_remote_preparation_causes_are_safe_through_transport() {
     }
 }
 
+/// The peer fails to prepare and cannot record the outcome. The caller on the other side of
+/// the transport must see that persistence failure itself, with its own correlation, and
+/// without any of the peer's own text.
+#[test]
+fn real_remote_unrecorded_failure_preserves_warning_and_correlation() {
+    let (rig, repo) = place::place_rig("diagnostic-real-unrecorded");
+    rig.peer();
+    real_peer_prepare(&rig);
+    // The peer's private setup fails, and its receipt store cannot hold an outcome.
+    fs::write(
+        repo.join("dogsled.toml"),
+        r#"[worktree]
+setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; chmod 555 \"$DOGSLED_STATE/preparation-receipts\"; exit 1"]
+"#,
+    )
+    .unwrap();
+    let (code, error) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "main",
+        "--name",
+        "worker",
+        "--message",
+        "TASK_SECRET",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(
+        error["diagnostic"]["cause"], "outcome_unrecorded",
+        "{error}"
+    );
+    assert_eq!(error["diagnostic"]["operation"], "prepare");
+    assert_eq!(error["diagnostic"]["host"], "netcup");
+    assert_eq!(error["diagnostic"]["status"], 2);
+    assert_eq!(error["diagnostic"]["context"]["branch"], "worker");
+    assert_eq!(error["diagnostic"]["context"]["base"], "main");
+    let request = error["diagnostic"]["request_id"].as_str().unwrap();
+    assert!(!request.is_empty(), "{error}");
+    // The peer recorded the intent, and no outcome: the failure stayed unrecorded.
+    let receipts = rig.dir.join("peer-state/preparation-receipts");
+    let receipt = receipts.join(format!("{request}.json"));
+    let intent = fs::read_to_string(&receipt).unwrap();
+    assert!(intent.contains("\"prepared\": null"), "{intent}");
+    assert!(!intent.contains("\"failure\""), "{intent}");
+    fs::set_permissions(
+        &receipts,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains("cause was not recorded"), "{error}");
+    assert!(
+        text.contains("inspect this host before resubmitting"),
+        "{error}"
+    );
+    assert!(text.contains("untrusted detail withheld"), "{error}");
+    for private in [
+        "SCRIPT_SECRET",
+        "PATH_SECRET",
+        "TASK_SECRET",
+        "https://user:",
+        "blocked",
+        repo.to_str().unwrap(),
+    ] {
+        assert!(!error.to_string().contains(private), "{error}");
+    }
+    assert!(!rig.log("ssh.log").contains("host launch"));
+    assert!(!rig.dir.join("state/queue.json").exists());
+}
+
 #[test]
 fn malformed_unknown_and_secret_envelopes_never_import_peer_text() {
     for (index, diagnostic) in [

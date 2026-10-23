@@ -34,6 +34,9 @@ pub enum Cause {
     CheckoutIdentityMismatch,
     CloneFailed,
     SetupFailed,
+    /// The preparation failed and its outcome could not be recorded. The intent stays
+    /// uncertain, so this cause says so instead of naming a preparation failure.
+    OutcomeUnrecorded,
     Unavailable,
 }
 
@@ -196,6 +199,7 @@ impl Diagnostic {
                             | Cause::BranchExists
                             | Cause::WorkspaceOccupied
                             | Cause::SetupFailed
+                            | Cause::OutcomeUnrecorded
                     ),
                     Operation::Checkout => matches!(
                         d.cause,
@@ -253,6 +257,10 @@ impl fmt::Display for Diagnostic {
             Cause::SetupFailed => {
                 "repository setup command failed; inspect setup on the selected host"
             }
+            Cause::OutcomeUnrecorded => {
+                "the preparation failed and its cause was not recorded; \
+                 inspect this host before resubmitting"
+            }
             Cause::Unavailable => "remote command failed",
         };
         let code = match self.cause {
@@ -262,6 +270,7 @@ impl fmt::Display for Diagnostic {
             Cause::CheckoutIdentityMismatch => "checkout_identity_mismatch",
             Cause::CloneFailed => "clone_failed",
             Cause::SetupFailed => "setup_failed",
+            Cause::OutcomeUnrecorded => "outcome_unrecorded",
             Cause::Unavailable => "unavailable",
         };
         write!(f, "{:?}: {code}: ", self.operation)?;
@@ -316,5 +325,56 @@ pub fn shell_operation(program: &str) -> &'static str {
         "mise" => "mise",
         "sh" => "shell",
         _ => "command",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(cause: Cause) -> serde_json::Value {
+        serde_json::json!({"version":1,"operation":"prepare","cause":cause,
+            "context":{"branch":"worker","base":"main"}})
+    }
+
+    #[test]
+    fn an_unrecorded_outcome_is_a_known_preparation_cause() {
+        let args = vec![
+            "prepare".to_owned(),
+            "--branch".to_owned(),
+            "worker".to_owned(),
+            "--base".to_owned(),
+            "main".to_owned(),
+            "--request-id".to_owned(),
+            "r-1".to_owned(),
+        ];
+        let diagnostic = Diagnostic::remote(
+            Some(&envelope(Cause::OutcomeUnrecorded)),
+            &args,
+            Some(2),
+            "netcup",
+        );
+        assert_eq!(diagnostic.cause, Cause::OutcomeUnrecorded);
+        assert_eq!(diagnostic.host.as_deref(), Some("netcup"));
+        assert_eq!(diagnostic.request_id.as_deref(), Some("r-1"));
+        assert_eq!(diagnostic.status, Some(2));
+        assert_eq!(diagnostic.context.branch.as_deref(), Some("worker"));
+        let text = diagnostic.to_string();
+        assert!(text.contains("outcome_unrecorded"), "{text}");
+        assert!(text.contains("cause was not recorded"), "{text}");
+        assert!(
+            text.contains("inspect this host before resubmitting"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_outcome_is_not_accepted_for_another_operation() {
+        let value = serde_json::json!({"version":1,"operation":"checkout",
+            "cause":"outcome_unrecorded","context":{}});
+        let args = vec!["checkout".to_owned()];
+        let diagnostic = Diagnostic::remote(Some(&value), &args, Some(2), "netcup");
+        assert_eq!(diagnostic.cause, Cause::Unavailable);
+        assert_eq!(diagnostic.omission, Omission::InvalidEnvelope);
     }
 }

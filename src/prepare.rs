@@ -172,17 +172,20 @@ pub fn local(
                 // the original cause instead of preparing the branch again.
                 let error = error.correlate(Some(id));
                 let failure = error.retained(Operation::Prepare, Some(id));
-                if let Err(write) = receipts.write(
-                    &file,
-                    &PreparationReceipt {
-                        request,
-                        prepared: None,
-                        failure: Some(failure),
-                    },
-                ) {
+                if receipts
+                    .write(
+                        &file,
+                        &PreparationReceipt {
+                            request,
+                            prepared: None,
+                            failure: Some(failure),
+                        },
+                    )
+                    .is_err()
+                {
                     // The outcome is not retained. The intent stays uncertain, and the report
                     // says so instead of claiming a durable cause.
-                    return Err(unretained(&write));
+                    return Err(unretained(branch, base, id));
                 }
                 Err(error)
             }
@@ -219,14 +222,23 @@ fn replay(id: &str, receipt: &PreparationReceipt) -> Result<Prepared> {
     }
 }
 
-/// The preparation failed and its cause could not be recorded. The intent stays uncertain,
-/// so the report must not claim that the original cause is retained. The error carries no
-/// diagnostic: a diagnostic would replace this message and hide the persistence failure.
-fn unretained(write: &Error) -> Error {
-    Error::Invalid(format!(
-        "the preparation failed and its cause was not recorded: {write}; \
+/// The preparation failed and its outcome could not be recorded. The intent stays uncertain,
+/// so the report must not claim that the original cause is retained, and it must not carry
+/// the write error's text or the discarded preparation cause. It reports its own cause, so a
+/// caller on the other side of the peer boundary sees the persistence failure itself.
+fn unretained(branch: &str, base: Option<&str>, request_id: &str) -> Error {
+    let diagnostic = Diagnostic::new(
+        Operation::Prepare,
+        Cause::OutcomeUnrecorded,
+        Context::new(Some(branch), base, None),
+    )
+    .request(Some(request_id));
+    Error::Invalid(
+        "the preparation failed and its cause was not recorded; \
          inspect this host before resubmitting"
-    ))
+            .into(),
+    )
+    .with_diagnostic(diagnostic)
 }
 
 fn local_once(
