@@ -4,14 +4,14 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// A `dogsled mcp` client: one JSON-RPC line in, one response line out.
-struct Client {
+pub(super) struct Client {
     child: std::process::Child,
     out: BufReader<std::process::ChildStdout>,
     next: u64,
 }
 
 impl Client {
-    fn start(rig: &Rig) -> Self {
+    pub(super) fn start(rig: &Rig) -> Self {
         let mut child = rig
             .cmd(&["mcp"])
             .stdin(Stdio::piped())
@@ -55,7 +55,7 @@ impl Client {
         }
     }
     /// A tool's JSON result, and whether it is a tool error.
-    fn call(&mut self, tool: &str, arguments: &Value) -> (Value, bool) {
+    pub(super) fn call(&mut self, tool: &str, arguments: &Value) -> (Value, bool) {
         let result = self.request("tools/call", &json!({"name":tool,"arguments":arguments}));
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         (

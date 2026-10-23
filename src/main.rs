@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod context;
 mod continuation;
+mod diagnostic;
 mod done;
 mod error;
 mod facts;
@@ -66,6 +67,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.json || matches!(cli.command, Command::Unit(_));
     let hook = matches!(cli.command, Command::Hook(_));
+    let peer = matches!(cli.command, Command::Host(_));
     if hook && std::env::var_os("HERDR_ENV").is_none() {
         return ExitCode::SUCCESS;
     }
@@ -103,6 +105,12 @@ fn main() -> ExitCode {
                 let mut body = serde_json::json!({ "error": error.to_string(), "deadline": matches!(error.root(), Error::Deadline(_)) });
                 if let Error::Refused { code, .. } = error.root() {
                     body["code"] = code.code().into();
+                }
+                if let Some(diagnostic) = error.diagnostic() {
+                    body["diagnostic"] = serde_json::json!(diagnostic);
+                    if peer {
+                        body["error"] = diagnostic.to_string().into();
+                    }
                 }
                 println!("{body}");
             } else {

@@ -59,6 +59,13 @@ pub enum Error {
         pane: String,
         output: String,
     },
+    /// Safe diagnostics wrap the original classification, never replacing it.
+    #[error("{}{diagnostic}", diagnostic_prefix(source))]
+    Diagnostic {
+        #[source]
+        source: Box<Error>,
+        diagnostic: Box<crate::diagnostic::Diagnostic>,
+    },
     /// An agent launch failed after placement; admission retries it with backoff.
     #[error("launch failed: {0}")]
     Launch(String),
@@ -106,9 +113,48 @@ impl Error {
     /// Classify a failure without discarding its startup diagnostics.
     pub fn root(&self) -> &Self {
         match self {
-            Self::Startup { source, .. } => source.root(),
+            Self::Startup { source, .. } | Self::Diagnostic { source, .. } => source.root(),
             error => error,
         }
+    }
+
+    pub fn with_diagnostic(self, diagnostic: crate::diagnostic::Diagnostic) -> Self {
+        Self::Diagnostic {
+            source: Box::new(self),
+            diagnostic: Box::new(diagnostic),
+        }
+    }
+
+    pub fn correlate(mut self, request: Option<&str>) -> Self {
+        if let Self::Diagnostic { diagnostic, .. } = &mut self {
+            **diagnostic = (**diagnostic).clone().request(request);
+        }
+        self
+    }
+
+    pub fn on_host(mut self, host: &str) -> Self {
+        if let Self::Diagnostic { diagnostic, .. } = &mut self {
+            diagnostic.host = Some(host.into());
+        }
+        self
+    }
+
+    pub fn diagnostic(&self) -> Option<&crate::diagnostic::Diagnostic> {
+        match self {
+            Self::Diagnostic { diagnostic, .. } => Some(diagnostic),
+            Self::Startup { source, .. } => source.diagnostic(),
+            _ => None,
+        }
+    }
+
+    /// Structured tool errors retain text for older consumers.
+    pub fn tool_message(&self) -> String {
+        self.diagnostic().map_or_else(
+            || self.to_string(),
+            |diagnostic| {
+                serde_json::json!({"error":self.to_string(),"diagnostic":diagnostic}).to_string()
+            },
+        )
     }
 
     #[must_use]
@@ -117,6 +163,13 @@ impl Error {
             Self::Full => ExitCode::from(EXIT_FULL),
             _ => ExitCode::from(EXIT_ERROR),
         }
+    }
+}
+
+fn diagnostic_prefix(source: &Error) -> String {
+    match source.root() {
+        Error::Ssh { .. } | Error::Deadline(_) | Error::Parse { .. } => format!("{source}; "),
+        _ => String::new(),
     }
 }
 

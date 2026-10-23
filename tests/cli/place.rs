@@ -189,15 +189,21 @@ fn place_bases_new_branches_reuses_existing_ones_and_refuses_foreign_work() {
         ],
     );
     let (_, error) = place(&rig, &repo, "kept", None);
-    assert!(error["error"].as_str().unwrap().contains("locked (mine)"));
+    assert_eq!(error["diagnostic"]["cause"], "workspace_occupied");
+    assert_eq!(error["diagnostic"]["context"]["occupancy"], "locked");
+    assert_eq!(error["diagnostic"]["context"]["workspace"], json!(tree));
+    assert!(!error["error"].as_str().unwrap().contains("mine"));
     fs::write(rig.dir.join("already-open"), "").unwrap();
     let (code, error) = place(&rig, &repo, "from-main", None);
     assert_eq!(code, 2);
-    assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("Herdr workspace w8 already shows")
+    assert_eq!(error["diagnostic"]["cause"], "workspace_occupied");
+    assert_eq!(
+        error["diagnostic"]["context"]["occupancy"],
+        "open_workspace"
+    );
+    assert_eq!(
+        error["diagnostic"]["context"]["workspace"],
+        json!(repo.join(".worktrees/from-main"))
     );
     let (_, error) = place(&rig, &repo, "main", None);
     assert!(
@@ -223,7 +229,10 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert_eq!(code, 2, "{error}");
     let message = error["error"].as_str().unwrap();
     assert!(message.contains("setup command"), "{message}");
-    assert!(message.contains("setup failed: no network"), "{message}");
+    assert_eq!(error["diagnostic"]["cause"], "setup_failed");
+    assert_eq!(error["diagnostic"]["context"]["new_worktree_removed"], true);
+    assert!(!message.contains("setup failed: no network"), "{message}");
+    assert!(message.contains("untrusted detail withheld"), "{message}");
     assert!(
         message.contains("the new worktree was removed"),
         "{message}"

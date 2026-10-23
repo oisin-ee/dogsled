@@ -526,7 +526,15 @@ With `--branch`, `place`, `agent`, and `run` use the branch's worktree on the se
 Before repository work, dogsled verifies the selected host's checkout against the caller's `git remote get-url origin`.
 If the host has no checkout of the repository, dogsled clones it from the caller's origin into the same path relative to home first.
 An existing path with a different origin, or a non-repository path, is an error. Dogsled does not overwrite it.
-Clone errors identify the host and origin. Dogsled does not silently move the work elsewhere.
+Clone errors identify the selected host and a safe cause. Dogsled does not show credential-bearing origins or command output.
+Dogsled does not silently move the work elsewhere.
+
+Remote preparation errors include a versioned `diagnostic` object in CLI JSON and MCP error results.
+The object contains the operation, a stable cause code, validated context, and available status and request correlation.
+Known causes include an unavailable base, an existing branch with `--base`, an occupied workspace, a checkout identity mismatch, and clone or setup failure.
+Admission records, failed tickets, unit responses, and owner notifications retain the safe cause.
+Unknown or malformed peer diagnostics state why Dogsled withheld the detail. Host-health summaries remain categorical.
+A missing-base check never fetches commits or changes branches or worktrees.
 After a fresh clone, dogsled checks mise configuration. If mise reports missing trust, dogsled trusts only that new checkout's configuration.
 For peers, a checkout under the local home maps to the same relative path under the peer's home.
 The peer reads its own host policy.

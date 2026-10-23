@@ -88,6 +88,8 @@ pub struct Ticket {
     pub notified: bool,
     pub result: Option<Value>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<crate::diagnostic::Diagnostic>,
     /// Failed launch attempts, and when the next may run.
     #[serde(default)]
     pub retry: crate::backoff::Backoff,
@@ -134,6 +136,7 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             notified: false,
             result: None,
             error: None,
+            diagnostic: None,
             retry: crate::backoff::Backoff::default(),
         });
         ledger.write("queue.json", &tickets)?;
@@ -191,6 +194,7 @@ pub fn enqueue_retry(
     update_ticket(ledger, &id, |t| {
         t.retry.fail(now, &t.id);
         t.error = Some(format!("attempt 1: {error}"));
+        t.diagnostic = error.diagnostic().cloned();
     })?;
     Ok(id)
 }
@@ -539,6 +543,8 @@ pub(crate) struct Attempt {
     pub launch: Option<Launch>,
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<crate::diagnostic::Diagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<crate::unit_request::Prepared>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
@@ -567,7 +573,8 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         else {
             return Ok(None);
         };
-        let launch = prepare_launch(fleet, request, &host).map_err(prelaunch_error)?;
+        let launch = prepare_launch(fleet, request, &host)
+            .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
         if host.is_local() {
             crate::prepare::used(fleet.ledger, &launch.cwd, Some(&launch.id))?;
         } else {
@@ -643,9 +650,19 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
                 ) {
                     return Ok(None);
                 }
-                attempt.launch =
-                    Some(prepare_launch(fleet, request, &host).map_err(prelaunch_error)?);
+                let prepared = prepare_launch(fleet, request, &host);
+                let launch = match prepared {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        attempt.error = Some(error.to_string());
+                        attempt.diagnostic = error.diagnostic().cloned();
+                        attempts.write(&file, &attempt)?;
+                        return Err(prelaunch_error(error));
+                    }
+                };
+                attempt.launch = Some(launch);
                 attempt.error = None;
+                attempt.diagnostic = None;
                 attempts.write(&file, &attempt)?;
             }
             let launch = attempt
@@ -687,6 +704,7 @@ fn begin(
         host: Some(host.clone()),
         launch: None,
         error: None,
+        diagnostic: None,
         unit: attempts.read::<Attempt>(file)?.and_then(|a| a.unit),
         result: None,
     };
@@ -696,6 +714,7 @@ fn begin(
         Ok(launch) => launch,
         Err(error) => {
             attempt.error = Some(error.to_string());
+            attempt.diagnostic = error.diagnostic().cloned();
             attempts.write(file, &attempt)?;
             return Err(prelaunch_error(error));
         }
@@ -729,7 +748,10 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
     let checkout = request
         .repository
         .as_ref()
-        .map(|repo| crate::checkout::ensure(fleet, host, repo))
+        .map(|repo| {
+            crate::checkout::ensure(fleet, host, repo)
+                .map_err(|error| error.correlate(Some(&request.id)).on_host(&host.label))
+        })
         .transpose()?;
     let prepared = if let Some(branch) = &request.branch {
         let repo = request
@@ -743,7 +765,8 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
             branch,
             request.base.as_deref(),
             &request.id,
-        )?
+        )
+        .map_err(|error| error.correlate(Some(&request.id)).on_host(&host.label))?
     } else {
         crate::prepare::Prepared::default()
     };
@@ -902,7 +925,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 .child("admissions")
                 .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
             let recoverable = matches!(ticket.request.action, Action::Agent { .. })
-                && saved.is_some_and(|a| {
+                && saved.as_ref().is_some_and(|a| {
                     a.launch.is_some()
                         || (a.unit.is_some() && a.host.is_none())
                         || (ticket.retry.attempts > 0
@@ -911,7 +934,12 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 });
             ticket = update_ticket(fleet.ledger, &ticket.id, |t| {
                 t.state = if recoverable { "pending" } else { "failed" }.into();
-                t.error = Some("service stopped during admission; inspect the selected host before resubmitting".into());
+                t.diagnostic = saved.as_ref().and_then(|a| a.diagnostic.clone());
+                let message = "service stopped during admission; inspect the selected host before resubmitting";
+                t.error = Some(t.diagnostic.as_ref().map_or_else(
+                    || message.into(),
+                    |diagnostic| format!("{message}; {diagnostic}"),
+                ));
             })?;
         }
         if ticket.state != "pending" || !ticket.retry.ready(now) {
@@ -938,6 +966,7 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 t.result = Some(result);
                 t.wait_reason = None;
                 t.error = None;
+                t.diagnostic = None;
             }
             Ok(None) => t.state = "pending".into(),
             // A refused request fails at once; a failed launch, SSH, or Herdr call is retried.
@@ -945,9 +974,11 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 t.state = "pending".into();
                 t.retry.fail(now, &t.id);
                 t.error = Some(format!("attempt {}: {error}", t.retry.attempts));
+                t.diagnostic = error.diagnostic().cloned();
             }
             Err(error) => {
                 t.state = "failed".into();
+                t.diagnostic = error.diagnostic().cloned();
                 t.error = Some(if t.retry.attempts > 0 {
                     format!("{error} (after {} attempts)", t.retry.attempts + 1)
                 } else {
@@ -1001,9 +1032,17 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
                 continue;
             }
             let result = ticket.result.as_ref();
+            let selected = fleet
+                .ledger
+                .child("admissions")
+                .read::<Attempt>(&format!("{}.json", ticket.request.id))?
+                .and_then(|a| a.host);
             let host = result
                 .and_then(|r| r["host"].as_str().or_else(|| r["host"]["id"].as_str()))
-                .unwrap_or("unknown");
+                .or_else(|| selected.as_ref().map(|h| h.label.as_str()))
+                .or_else(|| ticket.diagnostic.as_ref().and_then(|d| d.host.as_deref()))
+                .or(ticket.request.host.as_deref())
+                .unwrap_or("unselected");
             let summary = ticket
                 .error
                 .clone()

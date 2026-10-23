@@ -1,5 +1,6 @@
 //! Prepare work in the repository checkout, never in the caller's worktree.
 
+use crate::diagnostic::{Cause, Context, Diagnostic, Occupancy, Operation};
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
 use crate::repository::Values;
@@ -219,9 +220,42 @@ fn local_once(
         .run(shell)?
         .ok();
     if has_branch && base.is_some() {
-        return Err(Error::Invalid(format!(
-            "branch {branch} exists; omit --base"
-        )));
+        return Err(
+            Error::Invalid(format!("branch {branch} exists; omit --base")).with_diagnostic(
+                Diagnostic::new(
+                    Operation::Prepare,
+                    Cause::BranchExists,
+                    Context::new(Some(branch), base, None),
+                )
+                .request(request_id),
+            ),
+        );
+    }
+    // Read-only preflight, after the existing-branch refusal and before any new hold,
+    // worktree, or branch. Never fetch or move refs to make an unavailable base resolve.
+    if !has_branch && let Some(base) = base {
+        let resolved = git(
+            &checkout,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{base}^{{commit}}"),
+            ],
+        )
+        .run(shell)?;
+        if !resolved.ok() {
+            return Err(
+                Error::Invalid("requested base unavailable on this host".into()).with_diagnostic(
+                    Diagnostic::new(
+                        Operation::Prepare,
+                        Cause::BaseUnavailable,
+                        Context::new(Some(branch), Some(base), None),
+                    )
+                    .request(request_id),
+                ),
+            );
+        }
     }
     // Publish the intended path before creating or reusing it. Cleanup must not race setup
     // or the transport gap before launch has recorded its receipt.
@@ -282,7 +316,24 @@ fn make(
             };
             args.extend(["-b", branch, path.as_str(), start.as_str()]);
         }
-        git(checkout, &args).setup_ok(shell)?;
+        if Path::new(&path).exists() {
+            return Err(
+                Error::Invalid("workspace path is occupied".into()).with_diagnostic(
+                    Diagnostic::new(
+                        Operation::Prepare,
+                        Cause::WorkspaceOccupied,
+                        Context::new(Some(branch), base, Some(&path)).occupied(Occupancy::Path),
+                    ),
+                ),
+            );
+        }
+        git(checkout, &args).setup_ok(shell).map_err(|error| {
+            error.with_diagnostic(Diagnostic::new(
+                Operation::Prepare,
+                Cause::SetupFailed,
+                Context::new(Some(branch), base, Some(&path)),
+            ))
+        })?;
         (path, true)
     };
     if created {
@@ -291,11 +342,21 @@ fn make(
             path: &path,
             branch,
         };
-        if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
-        {
-            discard(shell, checkout, &path, (!has_branch).then_some(branch))?;
-            return Err(Error::Invalid(format!(
-                "{error}; the new worktree was removed"
+        if crate::repository::run(shell, "setup", &settings.worktree.setup, values).is_err() {
+            discard(shell, checkout, &path, (!has_branch).then_some(branch)).map_err(|error| {
+                error.with_diagnostic(Diagnostic::new(
+                    Operation::Prepare,
+                    Cause::SetupFailed,
+                    Context::new(Some(branch), base, Some(&path)),
+                ))
+            })?;
+            return Err(Error::Invalid(
+                "setup command failed; the new worktree was removed".into(),
+            )
+            .with_diagnostic(Diagnostic::new(
+                Operation::Prepare,
+                Cause::SetupFailed,
+                Context::new(Some(branch), base, Some(&path)).removed(),
             )));
         }
     }
@@ -329,7 +390,8 @@ pub fn on_host(
     request_id: Option<&str>,
 ) -> Result<Prepared> {
     let repo = Path::new(node.home).join(repo).display().to_string();
-    let prepared = local(node.shell, node.ledger, &repo, &branch, base, request_id)?;
+    let prepared = local(node.shell, node.ledger, &repo, &branch, base, request_id)
+        .map_err(|error| error.correlate(request_id))?;
     if let Some(path) = &prepared.path {
         crate::cleanup::remember(
             node.ledger,
@@ -385,8 +447,14 @@ fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<
     if worktree::same(&found.path, &checkout.display().to_string()) {
         return Err(Error::Invalid(format!(
             "branch {} is checked out in the main checkout {}",
-            found.branch.unwrap_or_default(),
+            found.branch.as_deref().unwrap_or_default(),
             found.path
+        ))
+        .with_diagnostic(Diagnostic::new(
+            Operation::Prepare,
+            Cause::WorkspaceOccupied,
+            Context::new(found.branch.as_deref(), None, Some(&found.path))
+                .occupied(Occupancy::MainCheckout),
         )));
     }
     match found.lock.as_deref() {
@@ -400,6 +468,12 @@ fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<
             return Err(Error::Invalid(format!(
                 "{} is locked ({other}); it is not an agent worktree",
                 found.path
+            ))
+            .with_diagnostic(Diagnostic::new(
+                Operation::Prepare,
+                Cause::WorkspaceOccupied,
+                Context::new(found.branch.as_deref(), None, Some(&found.path))
+                    .occupied(Occupancy::Locked),
             )));
         }
     }
@@ -458,6 +532,11 @@ fn open(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Prepared> {
         return Err(Error::Invalid(format!(
             "Herdr workspace {} already shows {path}; a child may own it",
             workspace_id.as_deref().unwrap_or("?")
+        ))
+        .with_diagnostic(Diagnostic::new(
+            Operation::Prepare,
+            Cause::WorkspaceOccupied,
+            Context::new(None, None, Some(path)).occupied(Occupancy::OpenWorkspace),
         )));
     }
     let pane_id = opened

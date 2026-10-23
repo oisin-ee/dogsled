@@ -27,6 +27,8 @@ mod place;
 mod placement;
 #[path = "cli/profiles.rs"]
 mod profiles;
+#[path = "cli/remote_diagnostics.rs"]
+mod remote_diagnostics;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/review_fixes.rs"]

@@ -72,12 +72,17 @@ fn wait_ticket(fleet: &Fleet, id: &str) -> Result<Value> {
                     .ok_or_else(|| Error::Invalid("missing admission result".into()));
             }
             "failed" | "cancelled" => {
-                return Err(Error::Invalid(
+                let error = Error::Invalid(
                     ticket
                         .error
                         .clone()
                         .unwrap_or_else(|| format!("ticket {id} cancelled")),
-                ));
+                );
+                return Err(if let Some(diagnostic) = &ticket.diagnostic {
+                    error.with_diagnostic(diagnostic.clone())
+                } else {
+                    error
+                });
             }
             _ => (),
         }

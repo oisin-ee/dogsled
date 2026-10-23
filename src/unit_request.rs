@@ -117,6 +117,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
             host: None,
             launch: None,
             error: None,
+            diagnostic: None,
             result: None,
             unit: Some(Prepared {
                 origin: input.origin,
@@ -244,6 +245,12 @@ fn receipt(ledger: &Ledger, attempt: &Attempt) -> Result<Option<Value>> {
         .find(|t| t.request.id == unit.execution.request_id)
     {
         receipt["ticket"] = json!(ticket.id);
+        if let Some(error) = &ticket.error {
+            receipt["error"] = json!(error);
+        }
+        if let Some(diagnostic) = &ticket.diagnostic {
+            receipt["diagnostic"] = json!(diagnostic);
+        }
         receipt["disposition"] = json!(
             if matches!(ticket.state.as_str(), "pending" | "admitting") {
                 "queued"
@@ -296,9 +303,14 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
     } else {
         "unresolved"
     };
-    Ok(
-        json!({"execution":execution,"origin":unit.origin,"phase":phase,"receipt":receipt,"settlement":settlement(unit)?}),
-    )
+    let mut value = json!({"execution":execution,"origin":unit.origin,"phase":phase,"receipt":receipt,"settlement":settlement(unit)?});
+    if let Some(error) = &attempt.error {
+        value["error"] = json!(error);
+    }
+    if let Some(diagnostic) = &attempt.diagnostic {
+        value["diagnostic"] = json!(diagnostic);
+    }
+    Ok(value)
 }
 
 pub fn abandon(ledger: &Ledger, execution: &ExecutionRef) -> Result<NotStarted> {
@@ -499,8 +511,11 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
                 crate::launch::unit_receipt(fleet.ledger, fleet.shell, &pending.execution);
             // A failed, timed-out or unparsable pane snapshot proves nothing and belongs to
             // this request, as a remote host's `failed` entry does.
-            if let Err(error @ (Error::Command { .. } | Error::Deadline(_) | Error::Parse { .. })) =
-                &receipt
+            if let Err(error) = &receipt
+                && matches!(
+                    error.root(),
+                    Error::Command { .. } | Error::Deadline(_) | Error::Parse { .. }
+                )
             {
                 eprintln!(
                     "dogsled unit evidence {}: host could not read evidence: {error}",
@@ -516,19 +531,23 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
         }
     }
     for (host, units) in remote {
-        let executions: Vec<_> = units.iter().map(|unit| &unit.execution).collect();
         let entries: Vec<crate::launch::ReceiptEntry> = match fleet.remote(
             &host,
             &[
                 "unit-receipts".into(),
                 "--input".into(),
-                json!({ "executions": executions }).to_string(),
+                json!({ "executions": units.iter().map(|unit| &unit.execution).collect::<Vec<_>>() }).to_string(),
             ],
         ) {
             Ok(entries) => entries,
             // An unreachable host, or an old peer without `unit-receipts`, proves nothing.
             // Skip only this host; never fall back to a saved receipt or a per-unit read.
-            Err(error @ (Error::Ssh { .. } | Error::Parse { .. } | Error::Deadline(_))) => {
+            Err(error)
+                if matches!(
+                    error.root(),
+                    Error::Ssh { .. } | Error::Parse { .. } | Error::Deadline(_)
+                ) =>
+            {
                 let ids: Vec<_> = units
                     .iter()
                     .map(|unit| unit.execution.request_id.as_str())
@@ -912,11 +931,11 @@ pub fn run(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<std::proce
                 .into_iter()
                 .find(|code| message.starts_with(code))
                 .unwrap_or("LAUNCH_UNRESOLVED");
-            crate::print(
-                true,
-                &json!({"error":{"code":code,"message":message}}),
-                String::new,
-            )?;
+            let mut body = json!({"error":{"code":code,"message":message}});
+            if let Some(diagnostic) = error.diagnostic() {
+                body["error"]["diagnostic"] = json!(diagnostic);
+            }
+            crate::print(true, &body, String::new)?;
             Ok(error.exit_code())
         }
     }

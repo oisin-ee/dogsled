@@ -405,11 +405,14 @@ esac
     let (code, error) = rig.json(&args);
     assert_eq!(code, 2);
     let text = error["error"].as_str().unwrap();
-    assert!(
-        text.contains("peer")
-            && text.contains("https://expected.invalid/repo.git")
-            && text.contains("https://other.invalid/repo.git")
+    assert_eq!(error["diagnostic"]["cause"], "checkout_identity_mismatch");
+    assert_eq!(
+        error["diagnostic"]["context"]["workspace"],
+        json!(rig.dir.join("home/repo"))
     );
+    assert!(text.contains("checkout identity mismatch"));
+    assert!(!text.contains("https://expected.invalid/repo.git"));
+    assert!(!text.contains("https://other.invalid/repo.git"));
     assert_eq!(rig.log("git.log").matches("clone --").count(), 1);
     fs::write(rig.dir.join("origin"), "git@expected.invalid:repo.git\n").unwrap();
     assert_eq!(rig.json(&args).0, 0);
@@ -426,10 +429,13 @@ esac
         "peer",
     ]);
     assert_eq!(code, 2);
+    assert_eq!(error["diagnostic"]["cause"], "clone_failed");
+    assert_eq!(error["code"], "CLONE_FAILED");
+    assert!(error["error"].as_str().unwrap().contains("could not clone"));
+    assert!(!error.to_string().contains("credentials"));
     assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("peer: clone https://expected.invalid/repo.git")
+        !error
+            .to_string()
+            .contains("https://expected.invalid/repo.git")
     );
 }
