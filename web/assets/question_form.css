@@ -1,0 +1,26 @@
+.qf { margin-bottom: 1rem; }
+.qf-item { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; width: 100%;
+  text-align: left; background: none; border: 0; border-radius: 4px; color: inherit;
+  font: inherit; padding: 0.3rem 0.4rem; cursor: pointer; }
+.qf-item:hover, .qf-item.open { background: var(--surface0); }
+.qf-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qf-meta, .qf-muted { color: var(--overlay1); font-size: 0.8rem; }
+.qf-form { margin-top: 0.6rem; padding: 0.6rem; border: 1px solid var(--surface1); border-radius: 6px; }
+.qf-form h3 { margin: 0 0 0.3rem; font-size: 0.95rem; color: var(--accent); }
+.qf-field { margin: 0.6rem 0; padding: 0.5rem; border: 1px solid var(--surface0); border-radius: 4px; }
+.qf-field legend { padding: 0 0.3rem; }
+.qf-field.critical { border-color: var(--red); border-width: 2px; }
+.qf-field.critical legend { color: var(--red); font-weight: bold; }
+.qf-field.minor { padding: 0.2rem 0.5rem; font-size: 0.85rem; }
+.qf-option { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem;
+  padding: 0.2rem 0.3rem; border-radius: 4px; cursor: pointer; }
+.qf-option:hover, .qf-option.checked { background: var(--surface0); }
+.qf-badge { border-radius: 999px; padding: 0 0.5rem; font-size: 0.7rem;
+  color: var(--crust); background: var(--green); }
+.qf-content { flex-basis: 100%; margin: 0.2rem 0; padding: 0.4rem; overflow-x: auto;
+  white-space: pre-wrap; background: var(--crust); border-radius: 4px; font-size: 0.8rem; }
+.qf-form textarea { width: 100%; color: inherit; background: var(--crust);
+  border: 1px solid var(--surface1); border-radius: 4px; font: inherit; padding: 0.3rem; }
+.qf-submit { margin-top: 0.4rem; padding: 0.3rem 0.9rem; color: var(--crust);
+  background: var(--accent); border: 0; border-radius: 4px; font: inherit; cursor: pointer; }
+.qf-submit:disabled { opacity: 0.5; cursor: default; }
