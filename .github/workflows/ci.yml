@@ -28,27 +28,38 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Moon diffs against main, so it needs the full history.
+          fetch-depth: 0
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      # Install only moon at the .prototools version. A bare `proto install`
+      # would also install Rust natively from rust-toolchain.toml, and its shim
+      # would shadow the rustup toolchain below.
+      - run: proto install moon
       # rust-toolchain.toml pins the channel and components.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Format
-        run: cargo fmt --check
+        run: moon run :fmt-check
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: moon run :lint
       - name: Test
-        run: cargo test
+        run: moon run :test
 
   typescript:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
+          # Moon diffs against main, so it needs the full history.
+          fetch-depth: 0
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      - run: proto install moon
+      - run: proto install node
+      - name: Install dependencies
+        run: moon run :install
       - name: Typecheck
-        run: npm run --silent typecheck
+        run: moon run :typecheck
       - name: Shim tests
-        run: npm run --silent test
+        run: moon run :test-shim

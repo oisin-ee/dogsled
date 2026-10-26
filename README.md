@@ -637,6 +637,13 @@ cargo build --release
 npm ci
 ```
 
+Proto and moon own the development tooling. `proto install` installs the versions in `.prototools`, and `moon run` runs the checks:
+
+```sh
+proto install
+moon run :fmt-check :lint :test :typecheck :test-shim
+```
+
 The executable is `target/release/dogsled`.
 Release archives include the binary, `dogsled.service`, and `dev.dogsled.plist` from `plugin/services/`.
 Harness installers read their manifests and skill from Git, not the binary archive. The skill move does not change the archive contents.
@@ -646,6 +653,6 @@ For launchd, dotfiles creates `~/.local/state/dogsled` before loading the agent.
 If mise has a different installation path, dotfiles adjusts the executable path.
 Install the same release on every host before enabling its service. This PR does not install or start host services.
 
-The pre-commit hook runs `mise run check`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.
+The pre-commit hook runs `moon run :#precommit --affected --status staged`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.
 CLI behavior tests use private state and fake Herdr/SSH executables. Time-sensitive unit tests inject timestamps.
 See [the design](docs/design.md) for watchdog delivery guarantees and cleanup scope.

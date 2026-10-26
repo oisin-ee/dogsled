@@ -1,0 +1,8 @@
+$schema: https://moonrepo.dev/schemas/tasks.json
+# Every task depends on the toolchain configuration.
+implicitInputs:
+  - /.prototools
+  - /.moon/**/*.yml
+  - /.gitignore
+taskOptions:
+  outputStyle: buffer-only-failure

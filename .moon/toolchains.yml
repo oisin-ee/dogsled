@@ -1,0 +1,7 @@
+$schema: https://moonrepo.dev/schemas/toolchains.json
+# Proto owns the tool versions (`.prototools`). Rust stays pinned in
+# rust-toolchain.toml, so moon never installs a Rust toolchain.
+node:
+  versionFromPrototools: true
+proto:
+  version: "0.63.2"

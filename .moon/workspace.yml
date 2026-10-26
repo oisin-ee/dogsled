@@ -1,0 +1,17 @@
+$schema: https://moonrepo.dev/schemas/workspace.json
+versionConstraint: "=2.6.1"
+# The whole repository is one project: a Rust binary and a Pi extension.
+defaultProject: dogsled
+projects:
+  dogsled: "."
+vcs:
+  defaultBranch: main
+  # Moon writes the Git hook scripts and links them on every run.
+  sync: true
+  hooks:
+    pre-commit:
+      - env -u GIT_DIR moon run :#precommit --affected --status staged
+pipeline:
+  syncProjects: false
+  logRunningCommand: true
+telemetry: false
