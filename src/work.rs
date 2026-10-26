@@ -320,7 +320,9 @@ fn request_evidence(
 /// different command or options all refuse: a receipt never replays for another job.
 ///
 /// The job record is a second check, not a prerequisite. The prune removes a terminal job
-/// record and keeps its receipt, so the receipt's own evidence carries the replay.
+/// record and keeps its receipt, so the receipt's own evidence carries the replay. A
+/// receipt that carries the request evidence but no pane is not complete: it names no
+/// dispatch, so a replay without the job record refuses.
 pub(crate) fn correlate(
     ledger: &Ledger,
     launch: &Launch,
@@ -355,11 +357,24 @@ pub(crate) fn correlate(
     // The job record is a second check, not a prerequisite. The prune removes a terminal
     // job record and keeps its receipt, so the receipt carries the replay alone.
     let Some(job) = jobs::record(ledger, &launch.id)? else {
-        // Without the record, the receipt must carry the evidence on its own. A receipt
-        // that predates that evidence proves nothing about what it dispatched.
+        // Without the record, the receipt must be complete on its own: it names the
+        // request it dispatched and the pane it dispatched into. A receipt that predates
+        // the request evidence proves nothing about what it dispatched.
         if saved.get("request").is_none() {
             return Err(Error::Invalid(format!(
                 "job {} has a legacy launch receipt without request evidence; inspect that host before resubmitting",
+                launch.id
+            )));
+        }
+        // A complete receipt also names the pane it dispatched into. Without it the receipt
+        // proves no dispatch, so a replay refuses.
+        if saved
+            .get("pane")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(Error::Invalid(format!(
+                "job {} has a launch receipt without a pane; inspect that host before resubmitting",
                 launch.id
             )));
         }

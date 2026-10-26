@@ -1424,6 +1424,61 @@ fn a_legacy_receipt_without_request_evidence_fails_closed_after_the_prune() {
     assert!(!rig.dir.join("state/jobs/legacy.json").exists());
 }
 
+/// A receipt that carries the request evidence but no pane refuses after the prune removed
+/// the job record. A receipt that names no pane proves no dispatch, so the replay refuses
+/// instead of dispatching again.
+#[test]
+fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
+    for (name, pane) in [
+        ("missing", Value::Null),
+        ("empty", json!("")),
+        ("number", json!(7)),
+    ] {
+        let rig = Rig::new(&format!("receipt-without-pane-after-prune-{name}"));
+        let ended = now() - 2 * 86_400_000;
+        fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+        let job = json!({"id":"incomplete","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+            "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+            "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+        rig.put("state/jobs/incomplete.json", &job);
+        let mut saved = job_receipt(
+            "incomplete",
+            "local",
+            "w2:p1",
+            &["true"],
+            &rig.dir.join("home").display().to_string(),
+            "w1:p1",
+        );
+        match name {
+            "missing" => {
+                saved.as_object_mut().unwrap().remove("pane");
+            }
+            _ => saved["pane"] = pane,
+        }
+        rig.put("state/launches/incomplete.json", &saved);
+        let out = rig.run(&["prune", "--yes", "jobs"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{name}: {stdout}");
+        assert!(!rig.dir.join("state/jobs/incomplete.json").exists());
+        // The receipt names no pane, so the replay refuses.
+        let request = job_launch_request(&rig, "incomplete", &["true"]);
+        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        assert_eq!(code, 2, "{name}: {error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("launch receipt without a pane"),
+            "{name}: {error}"
+        );
+        let log = rig.log("herdr.log");
+        assert!(!log.contains("tab create"), "{name}: {log}");
+        assert!(!log.contains("pane run"), "{name}: {log}");
+        assert!(!rig.dir.join("state/jobs/incomplete.json").exists());
+    }
+}
+
 /// A receipt whose evidence names another command refuses after the prune removed the job
 /// record. The evidence is the check that a pruned record can no longer make.
 #[test]
@@ -1481,6 +1536,8 @@ enum DispatchOrder {
     During,
     /// The dispatch reports its failure before the wrapper ever starts.
     Before,
+    /// The wrapper runs, and its pane never closes. The close marker never arrives.
+    NoClose,
 }
 
 /// The fake Herdr for a dispatch-order test. It runs the real wrapper and reports a
@@ -1492,17 +1549,19 @@ fn dispatch_order_herdr(rig: &Rig, order: DispatchOrder) {
             r#"
     shift 3
     # The wrapper publishes its started and terminal records before this returns.
-    sh -c "$*" > "$RIG/job-output" 2>&1 &
-    # The wrapper's process id lets the test own and reap it.
+    sh -c "$*; s=\$?; printf '%s\n' \"\$s\" > \"\$RIG/wrapper-exit\"; exit \$s" > "$RIG/job-output" 2>&1 &
+    # The wrapper's process id lets the test own and reap it. The wrapper records its own
+    # exit status, so the test can prove the wrapper ended instead of inferring it from
+    # a marker the close helper wrote.
     echo $! > "$RIG/wrapper-pid"
-    wait
+    wait $!
     echo 'pane refused' >&2
     exit 1 ;;"#
         }
         DispatchOrder::During => {
             r#"
     shift 3
-    sh -c "$*" > "$RIG/job-output" 2>&1 &
+    sh -c "$*; s=\$?; printf '%s\n' \"\$s\" > \"\$RIG/wrapper-exit\"; exit \$s" > "$RIG/job-output" 2>&1 &
     # The wrapper's process id lets the test own and reap it. The wrapper publishes its
     # started record before its command runs. The command's own signal is the barrier: it
     # proves the record is already published.
@@ -1518,6 +1577,34 @@ fn dispatch_order_herdr(rig: &Rig, order: DispatchOrder) {
     # own, and must refuse the claim this failure made uncertain.
     echo 'pane refused' >&2
     exit 1 ;;"
+        }
+        DispatchOrder::NoClose => {
+            r#"
+    shift 3
+    sh -c "$*; s=\$?; printf '%s\n' \"\$s\" > \"\$RIG/wrapper-exit\"; exit \$s" > "$RIG/job-output" 2>&1 &
+    # The wrapper's process id lets the test own and reap it.
+    echo $! > "$RIG/wrapper-pid"
+    read -r ready < "$RIG/wrapper-ready"
+    echo 'pane refused' >&2
+    exit 1 ;;"#
+        }
+    };
+    // A wrapper that never closes its pane leaves the close marker unwritten, so the
+    // test's wait must end on its own bound.
+    let close = match order {
+        DispatchOrder::NoClose => {
+            r"
+    # The pane never closes, so the close marker never arrives.
+    printf '{{}}\n' ;;
+"
+        }
+        _ => {
+            r#"
+    # The wrapper's close is the last thing it does. The marker lets the test wait for the
+    # close itself. The wrapper's own exit status is the proof that the wrapper ended.
+    ( printf 'closed\n' > "$RIG/wrapper-closed" ) &
+    printf '{}\n' ;;
+"#
         }
     };
     rig.script(
@@ -1537,11 +1624,7 @@ case "$*" in
   'pane close '*)
     mkdir -p "$RIG/at-close"
     cp "$DOGSLED_STATE"/jobs/*.json "$RIG/at-close/"
-    # The wrapper's close is the last thing it does. The marker lets the test wait for its
-    # exit without a sleep.
-    ( printf 'closed\n' > "$RIG/wrapper-closed" ) &
-    printf '{{}}\n' ;;
-  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{{}}\n' ;;
+{close}  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{{}}\n' ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
@@ -1564,6 +1647,13 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
     let pid = read_pid(&rig.dir.join("wrapper-pid"), "the wrapper");
     let _wrapper = Owned::adopt(pid);
     assert_eq!(code, 2, "{error}");
+    // The wrapper ended on its own. Its own exit status is the proof, and the wait is
+    // bounded: a wrapper that never ends fails the test instead of hanging it.
+    assert_eq!(read_status(&rig.dir.join("wrapper-exit"), "the wrapper"), 7);
+    assert!(
+        wait_gone(pid, PROCESS_DEADLINE),
+        "the wrapper did not leave"
+    );
     // The wrapper's own terminal record survives the dispatch failure.
     let job = rig.read("state/jobs/dispatched.json");
     assert!(job["started_ms"].is_number(), "{job}");
@@ -1582,14 +1672,18 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
 #[test]
 fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
     let rig = Rig::new("dispatch-during-wrapper-run");
-    // The ready FIFO is the fake Herdr's own barrier, so the test never opens it.
-    let _ready = Fifo::new(&rig.dir, "wrapper-ready");
+    // The ready FIFO is the fake Herdr's own barrier. The test holds its ends open, so a
+    // reader on either side never waits for an open that may never come.
+    let ready = Fifo::new(&rig.dir, "wrapper-ready");
     let go = Fifo::new(&rig.dir, "wrapper-go");
     let closed = Fifo::new(&rig.dir, "wrapper-closed");
+    let _ready_hold = ready.hold();
+    let _go_hold = go.hold();
+    let _closed_hold = closed.hold();
     dispatch_order_herdr(&rig, DispatchOrder::During);
     let marker = rig.dir.join("marker");
     let command = format!(
-        "echo ready > \"$RIG/wrapper-ready\"; read -r go < \"$RIG/wrapper-go\"; touch {}",
+        "echo $$ > \"$RIG/command-pid\"; echo ready > \"$RIG/wrapper-ready\"; read -r go < \"$RIG/wrapper-go\"; touch {}",
         marker.display()
     );
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
@@ -1598,6 +1692,10 @@ fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
     // and every command it started, so no wrapper outlives this test.
     let pid = read_pid(&rig.dir.join("wrapper-pid"), "the wrapper");
     let _wrapper = Owned::adopt(pid);
+    // The command leads a group of its own, so the wrapper's group does not cover it.
+    // The test owns that group too, or the command outlives the test.
+    let command_pid = read_pid(&rig.dir.join("command-pid"), "the command");
+    let _command = Owned::adopt(command_pid);
     assert_eq!(code, 2, "{error}");
     // The wrapper is running: it published its started record, and the dispatch failure
     // did not overwrite it or invent an end.
@@ -1608,15 +1706,113 @@ fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
     // The blocked command has not run.
     assert!(!marker.exists());
     // The wrapper is released and finishes its own record. The rendezvous is bounded: a
-    // wrapper that never answers fails the test instead of hanging it.
+    // wrapper that never answers fails the test instead of hanging it. The writer stays
+    // open through the acknowledgement, so the reader never sees an early end.
     let mut go_writer = open_fifo(go.path());
     go_writer.write_all(b"go\n").unwrap();
-    drop(go_writer);
+    go_writer.flush().unwrap();
     assert_eq!(read_fifo(closed.path(), "the wrapper's close"), "closed\n");
+    // The close marker only proves the close helper ran. The wrapper's own exit proves
+    // the wrapper ended, and the wait is bounded.
+    assert_eq!(read_status(&rig.dir.join("wrapper-exit"), "the wrapper"), 0);
+    assert!(
+        wait_gone(pid, PROCESS_DEADLINE),
+        "the wrapper did not leave"
+    );
     let job = rig.read("state/jobs/dispatched.json");
     assert!(job["ended_ms"].is_number(), "{job}");
     assert_eq!(job["exit"], 0, "{job}");
     assert!(marker.exists());
+}
+
+/// The wrapper's guard covers the command group the wrapper started. A wrapper that never
+/// closes its pane leaves both the wrapper and its command running, and the guard kills
+/// both. The proof is bounded: the test ends on its own bound, and no process outlives it.
+#[test]
+fn the_wrapper_guard_covers_the_command_group_it_started() {
+    let rig = Rig::new("wrapper-guard-covers-command");
+    // The ready FIFO is the fake Herdr's own barrier. The test holds its ends open, so a
+    // reader on either side never waits for an open that may never come.
+    let ready = Fifo::new(&rig.dir, "wrapper-ready");
+    let go = Fifo::new(&rig.dir, "wrapper-go");
+    let closed = Fifo::new(&rig.dir, "wrapper-closed");
+    let _ready_hold = ready.hold();
+    let _go_hold = go.hold();
+    let _closed_hold = closed.hold();
+    dispatch_order_herdr(&rig, DispatchOrder::During);
+    let marker = rig.dir.join("marker");
+    // The command records its own process id, so the test can name the process the
+    // wrapper started.
+    let command = format!(
+        "echo $$ > \"$RIG/command-pid\"; echo ready > \"$RIG/wrapper-ready\"; read -r go < \"$RIG/wrapper-go\"; touch {}",
+        marker.display()
+    );
+    let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let pid = read_pid(&rig.dir.join("wrapper-pid"), "the wrapper");
+    let command_pid = read_pid(&rig.dir.join("command-pid"), "the command");
+    let wrapper = Owned::adopt(pid);
+    // The command leads a group of its own, so the wrapper's group does not cover it.
+    // The test owns that group too, or the command outlives the test.
+    let command = Owned::adopt(command_pid);
+    assert_eq!(code, 2, "{error}");
+    assert_ne!(process_group(command_pid), None, "the command has no group");
+    // The guard leaves nothing behind: the wrapper and the command it started are gone
+    // before the test ends.
+    drop(wrapper);
+    drop(command);
+    assert!(
+        wait_gone(pid, PROCESS_DEADLINE),
+        "the wrapper outlived its test"
+    );
+    assert!(
+        wait_gone(command_pid, PROCESS_DEADLINE),
+        "the command outlived its test"
+    );
+}
+
+/// A wrapper that never closes its pane fails the race test on the bound instead of
+/// hanging it. The close marker never arrives, so the wait ends on the bound, and the
+/// guard leaves no wrapper or command behind.
+#[test]
+fn a_wrapper_that_never_closes_its_pane_fails_the_race_on_the_bound() {
+    let rig = Rig::new("wrapper-never-closes");
+    let ready = Fifo::new(&rig.dir, "wrapper-ready");
+    let go = Fifo::new(&rig.dir, "wrapper-go");
+    let closed = Fifo::new(&rig.dir, "wrapper-closed");
+    let _ready_hold = ready.hold();
+    let _go_hold = go.hold();
+    let _closed_hold = closed.hold();
+    dispatch_order_herdr(&rig, DispatchOrder::NoClose);
+    // The wrapper's close never happens, so the close marker never arrives.
+    let marker = rig.dir.join("marker");
+    let command = format!(
+        "echo ready > \"$RIG/wrapper-ready\"; read -r go < \"$RIG/wrapper-go\"; touch {}",
+        marker.display()
+    );
+    let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let pid = read_pid(&rig.dir.join("wrapper-pid"), "the wrapper");
+    let wrapper = Owned::adopt(pid);
+    assert_eq!(code, 2, "{error}");
+    let mut go_writer = open_fifo(go.path());
+    go_writer.write_all(b"go\n").unwrap();
+    go_writer.flush().unwrap();
+    // The close never arrives, so the wait ends on its own bound instead of hanging.
+    let bound = Duration::from_millis(300);
+    let started = Instant::now();
+    let closed_text = read_fifo_within(closed.path(), "the wrapper's close", bound);
+    assert!(closed_text.is_none(), "the close arrived unexpectedly");
+    assert!(
+        started.elapsed() < PROCESS_DEADLINE,
+        "the wait outlived the test bound"
+    );
+    // The guard leaves no wrapper behind, and the test ends without waiting for one.
+    drop(wrapper);
+    assert!(
+        wait_gone(pid, PROCESS_DEADLINE),
+        "the wrapper outlived its test"
+    );
 }
 
 /// A dispatch that fails before the wrapper starts leaves the claim uncertain. A wrapper

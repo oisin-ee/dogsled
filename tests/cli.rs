@@ -84,6 +84,32 @@ impl Owned {
         }
     }
 
+    /// The child this guard owns, so a test can take its streams.
+    pub(crate) fn child_mut(&mut self) -> &mut std::process::Child {
+        let child = self.child.as_mut();
+        assert!(child.is_some(), "this process was not spawned by the test");
+        child.unwrap()
+    }
+
+    /// Wait for the child to exit, or fail the test on the bound. A child that never exits
+    /// fails its test instead of hanging it.
+    pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
+        let child = self.child_mut();
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) => {}
+                Err(error) => panic!("the child could not be waited for: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the child did not exit within {PROCESS_DEADLINE:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Adopt a process this test did not spawn. Its parent is gone, so the guard kills it
     /// and waits for it to leave. The group is only killed when it is not the test's own
     /// group, so the guard never kills the test.
@@ -121,7 +147,7 @@ impl Drop for Owned {
         }
         // The process is gone before the test ends, so no process outlives its test.
         let deadline = Instant::now() + PROCESS_DEADLINE;
-        while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok() {
+        while !process_gone(self.pid) {
             assert!(
                 Instant::now() < deadline,
                 "process {} did not leave within {PROCESS_DEADLINE:?}",
@@ -157,6 +183,13 @@ impl Fifo {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Open this FIFO for reading and writing, and keep it open. A writer on the other
+    /// side never waits for an open that may never come, and the FIFO stays open through
+    /// the acknowledgement.
+    pub(crate) fn hold(&self) -> fs::File {
+        open_fifo(&self.path)
+    }
 }
 
 impl Drop for Fifo {
@@ -177,12 +210,12 @@ pub(crate) fn open_fifo(path: &Path) -> fs::File {
         .unwrap()
 }
 
-/// Read a FIFO's content, or fail the test on the bound. A writer that never arrives must
-/// not hang the test. An empty read means no writer has opened the FIFO yet, so the read
-/// keeps waiting for the writer rather than ending the wait early.
-pub(crate) fn read_fifo(path: &Path, what: &str) -> String {
+/// Read a FIFO's content within `bound`, or `None` when the bound passes. A writer that
+/// never arrives must not hang the test. An empty read means no writer has opened the FIFO
+/// yet, so the read keeps waiting for the writer rather than ending the wait early.
+pub(crate) fn read_fifo_within(path: &Path, what: &str, bound: Duration) -> Option<String> {
     let mut file = open_fifo(path);
-    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let deadline = Instant::now() + bound;
     let mut text = String::new();
     loop {
         let mut buffer = [0_u8; 256];
@@ -198,13 +231,35 @@ pub(crate) fn read_fifo(path: &Path, what: &str) -> String {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => panic!("{what} could not be read: {error}"),
         }
-        assert!(
-            Instant::now() < deadline,
-            "{what} did not arrive within {PROCESS_DEADLINE:?}"
-        );
+        if Instant::now() >= deadline {
+            return None;
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
-    text
+    Some(text)
+}
+
+/// Read a FIFO's content, or fail the test on the bound. A writer that never arrives must
+/// not hang the test.
+pub(crate) fn read_fifo(path: &Path, what: &str) -> String {
+    read_fifo_within(path, what, PROCESS_DEADLINE)
+        .unwrap_or_else(|| panic!("{what} did not arrive within {PROCESS_DEADLINE:?}"))
+}
+
+/// Wait for `pid` to leave, up to `bound`. It reports whether the process left. A process
+/// that never leaves is reported on the bound, so a caller can fail on it instead of
+/// waiting for it.
+pub(crate) fn wait_gone(pid: u32, bound: Duration) -> bool {
+    let deadline = Instant::now() + bound;
+    loop {
+        if process_gone(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// The process id in `path`, or fail the test on the bound. A process that never writes it
@@ -223,6 +278,45 @@ pub(crate) fn read_pid(path: &Path, what: &str) -> u32 {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// The exit status in `path`, or fail the test on the bound. A process that never writes it
+/// fails the test instead of hanging it.
+pub(crate) fn read_status(path: &Path, what: &str) -> i32 {
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && let Ok(status) = text.trim().parse::<i32>()
+        {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not write its exit status within {PROCESS_DEADLINE:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Whether `pid` has left. A process that already ended, or that waits only to be
+/// reaped, has left for the test's purpose.
+pub(crate) fn process_gone(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+        return true;
+    }
+    // A process that ended but waits to be reaped still holds its process id. It has
+    // left, so the test does not wait for it.
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().starts_with('Z')
 }
 
 /// The process group of `pid`, or `None` when the process already left. A process that

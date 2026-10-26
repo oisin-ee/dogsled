@@ -486,6 +486,17 @@ fn a_job_launch_receipt_carries_its_own_request_evidence() {
         error.to_string().contains("another command or request"),
         "{error}"
     );
+    // A recordless receipt without a complete pane is refused.
+    for pane in [json!(null), json!(""), json!(7)] {
+        let mut incomplete = saved.clone();
+        incomplete["pane"] = pane;
+        let error = work::correlate(&ledger, &launch, &cmd, None, None, &incomplete).unwrap_err();
+        assert!(error.to_string().contains("without a pane"), "{error}");
+    }
+    let mut missing = saved.clone();
+    missing.as_object_mut().unwrap().remove("pane");
+    let error = work::correlate(&ledger, &launch, &cmd, None, None, &missing).unwrap_err();
+    assert!(error.to_string().contains("without a pane"), "{error}");
     // A receipt that predates the evidence is refused.
     let legacy = json!({"id":"replayed","host":"local","pane":"w2:p1"});
     let error = work::correlate(&ledger, &launch, &cmd, None, None, &legacy).unwrap_err();
