@@ -55,7 +55,8 @@ jobs:
           # Moon diffs against main, so it needs the full history.
           fetch-depth: 0
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-      - run: proto install moon node
+      - run: proto install moon
+      - run: proto install node
       - name: Install dependencies
         run: moon run :install
       - name: Typecheck
