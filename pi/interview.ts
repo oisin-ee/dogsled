@@ -12,7 +12,7 @@ import { PortalClient, sleep } from "./portal-client.ts";
 const POLL_MS = 500;
 
 /** The parameter schema of pi-interview 0.13.0, so the model calls it the same way. */
-export const interviewParameters = {
+const interviewParameters = {
 	type: "object",
 	required: ["questions"],
 	properties: {
@@ -35,7 +35,7 @@ export const interviewParameters = {
 } as const;
 
 /** The tool description of pi-interview 0.13.0, unchanged. */
-export const interviewDescription =
+const interviewDescription =
 	"Present an interactive form to gather user responses. " +
 	"Opens in a configured Orca browser tab, a native macOS window (Glimpse), or a standard browser. " +
 	"Use proactively when: choosing between multiple approaches, gathering requirements before implementation, " +
@@ -80,7 +80,7 @@ function isChoiceValue(value: unknown): value is { option: string; note?: string
 }
 
 /** The value of one answer, as the model reads it. */
-export function formatResponseValue(value: ResponseItem["value"]): string {
+function formatResponseValue(value: ResponseItem["value"]): string {
 	if (Array.isArray(value)) {
 		if (value.every(isChoiceValue)) return value.map(item => item.note ? `${item.option} (${item.note})` : item.option).join(", ");
 		return value.join(", ");
@@ -103,7 +103,7 @@ function hasAnswer(response: ResponseItem): boolean {
 }
 
 /** The answered questions, in the order the form asked them. */
-export function buildAnsweredResponses(responses: ResponseItem[], questions: Question[]): ResponseItem[] {
+function buildAnsweredResponses(responses: ResponseItem[], questions: Question[]): ResponseItem[] {
 	const byId = new Map(responses.filter(response => response && typeof response.id === "string").map(response => [response.id, response]));
 	return questions.flatMap(question => {
 		const response = byId.get(question.id);
@@ -113,7 +113,7 @@ export function buildAnsweredResponses(responses: ResponseItem[], questions: Que
 }
 
 /** The answered questions as the model reads them: a summary and the structured data. */
-export function formatAnsweredResponses(responses: ResponseItem[], questions: Question[]): string {
+function formatAnsweredResponses(responses: ResponseItem[], questions: Question[]): string {
 	const answered = buildAnsweredResponses(responses, questions);
 	if (answered.length === 0) return "(none)";
 	const questionById = new Map(questions.map(question => [question.id, question]));

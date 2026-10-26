@@ -59,7 +59,7 @@ function environment(port: number): NodeJS.ProcessEnv {
 }
 
 function context(cwd = "/repo"): ExtensionContext {
-	return { cwd, sessionManager: { getSessionId: () => "session-1" } } as unknown as ExtensionContext;
+	return { cwd, isIdle: () => true, sessionManager: { getSessionId: () => "session-1" } } as unknown as ExtensionContext;
 }
 
 /** A host that records what the plan mode sends and which tools it declares. */
@@ -179,6 +179,19 @@ test("a decision is delivered, acknowledged, and handed on as the plan-approved 
 	assert.deepEqual(h.sent, ["Looks good."]);
 	assert.ok(p.calls.some(call => call.method === "POST" && call.path === "/api/decisions/rev-1/ack"));
 	assert.deepEqual(approved, [{ cwd: "/repo", planFilePath: "/repo/plans/plan.md", planContent: "# Plan", feedback: "Looks good." }]);
+});
+
+test("a decision that arrives while the agent is busy is steered into the running turn", async t => {
+	const p = portal();
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const h = host();
+	const steered: unknown[] = [];
+	h.plan.sendUserMessage = (content: string, options?: { deliverAs?: string }) => { steered.push([content, options?.deliverAs]); };
+	const mode = new PlanMode(h.plan, new PortalClient(environment(port)));
+	const ctx = { ...context(), isIdle: () => false } as unknown as ExtensionContext;
+	await mode.decision(JSON.stringify(DECISION), ctx);
+	assert.deepEqual(steered, [["Looks good.", "steer"]]);
 });
 
 test("an acknowledged decision is not delivered twice", async t => {

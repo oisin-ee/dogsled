@@ -10,16 +10,16 @@ import { Key } from "@earendil-works/pi-tui";
 import { PortalClient, sleep } from "./portal-client.ts";
 
 /** The tool that sends a plan to the portal. */
-export const SUBMIT_PLAN = "submit_plan";
+const SUBMIT_PLAN = "submit_plan";
 
 /** The custom message the framing note joins the conversation as. */
-export const PLAN_MODE_MESSAGE = "dogsled:plan-mode";
+const PLAN_MODE_MESSAGE = "dogsled:plan-mode";
 
 /** The file types the gate lets the model write while planning. */
 const PLAN_EXTENSIONS = new Set([".md", ".mdx"]);
 
 /** The message the model reads when planning starts. */
-export const PLANNING_MESSAGE =
+const PLANNING_MESSAGE =
 	"Plan mode is on. Explore the repository read-only: read files, search, and run read-only commands. " +
 	"Write the plan as one markdown file in the working directory, then call submit_plan with that file. " +
 	"Do not change any other file until the plan is approved.";
@@ -98,7 +98,7 @@ function bashCommand(input: unknown): string {
 }
 
 /** The reason a tool call is blocked while planning, or undefined when it is allowed. */
-export function planningBlock(event: ToolCallEvent, cwd: string): string | undefined {
+function planningBlock(event: ToolCallEvent, cwd: string): string | undefined {
 	if (event.toolName === "write" || event.toolName === "edit") {
 		const path = targetPath(event.input);
 		if (!planPathAllowed(path, cwd)) return `Planning is on: ${event.toolName} may only change a markdown file (.md or .mdx) inside ${cwd}. The target was ${path || "(no path)"}.`;
@@ -228,7 +228,11 @@ export class PlanMode {
 		if (!this.delivered.has(review)) {
 			this.delivered.add(review);
 			const message = typeof decision.message === "string" ? decision.message : "";
-			if (message) this.pi.sendUserMessage(message);
+			if (message) {
+				// A running agent is steered, so the message joins the turn that is running.
+				if (ctx.isIdle()) this.pi.sendUserMessage(message);
+				else this.pi.sendUserMessage(message, { deliverAs: "steer" });
+			}
 			if (decision.decision === "approved") {
 				const approved: PlanApproved = {
 					cwd: ctx.cwd,

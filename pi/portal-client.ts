@@ -17,13 +17,13 @@ export class PortalDown extends Error {
 }
 
 /** The port `dogsled web` listens on: `DOGSLED_WEB_PORT`, else 7465. */
-export function portalPort(env: NodeJS.ProcessEnv): number {
+function portalPort(env: NodeJS.ProcessEnv): number {
 	const port = Number(env["DOGSLED_WEB_PORT"]);
 	return Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT;
 }
 
 /** The dogsled state directory: `DOGSLED_STATE`, else `$XDG_STATE_HOME/dogsled`, else `~/.local/state/dogsled`. */
-export function stateDirectory(env: NodeJS.ProcessEnv): string {
+function stateDirectory(env: NodeJS.ProcessEnv): string {
 	const state = env["DOGSLED_STATE"];
 	if (state) return state;
 	const xdg = env["XDG_STATE_HOME"];
@@ -32,10 +32,10 @@ export function stateDirectory(env: NodeJS.ProcessEnv): string {
 }
 
 /** One Server-Sent Event: its name and its data. */
-export interface ServerEvent { event: string; data: string }
+interface ServerEvent { event: string; data: string }
 
 /** Parse a Server-Sent Events stream into events. Comments and unnamed fields are skipped. */
-export async function* serverEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ServerEvent> {
+async function* serverEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ServerEvent> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
