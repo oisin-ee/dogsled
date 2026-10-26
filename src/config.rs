@@ -39,6 +39,21 @@ pub struct Policy {
     pub remote_command: Vec<String>,
     pub cleanup: Cleanup,
     pub quota: Quota,
+    pub web: Web,
+}
+
+/// The web portal's settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Web {
+    /// The port `dogsled web` listens on. The server binds the loopback address.
+    pub port: u16,
+}
+
+impl Default for Web {
+    fn default() -> Self {
+        Self { port: 7465 }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -70,6 +85,7 @@ impl Default for Policy {
                 .collect(),
             cleanup: Cleanup::default(),
             quota: Quota::default(),
+            web: Web::default(),
         }
     }
 }
@@ -156,5 +172,19 @@ mod tests {
     fn missing_file_is_defaults() {
         let p = load(Path::new("/nonexistent/dogsled/config.toml")).unwrap();
         assert_eq!(p, Policy::default());
+    }
+
+    #[test]
+    fn the_web_port_has_a_default_and_can_be_set() {
+        assert_eq!(Policy::default().web.port, 7465);
+        let p = parse("[web]\nport = 8080\n").unwrap();
+        assert_eq!(p.web.port, 8080);
+        // The rest of the policy keeps its defaults.
+        assert_eq!(p.disk_free_min_percent, 15.0);
+    }
+
+    #[test]
+    fn an_unknown_web_key_is_rejected() {
+        assert!(parse("[web]\nports = 8080\n").is_err());
     }
 }
