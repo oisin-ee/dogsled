@@ -350,6 +350,7 @@ mod tests {
             board: receiver,
             port: PORT,
             agents: socket.map(Arc::new),
+            token: crate::web::guard::Token::new(String::new()),
         }
     }
 

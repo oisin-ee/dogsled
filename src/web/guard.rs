@@ -8,9 +8,42 @@
 //!   A name that resolves elsewhere is a DNS rebinding attempt.
 //! - `Origin` must name the same origin for a request that changes state. A
 //!   missing `Origin` on such a request is a cross-site form post.
+//!
+//! A request that carries the portal's token as a `Bearer` credential passes
+//! the `Origin` rule. A browser cannot add that header to a cross-site
+//! request, so the token shows the request comes from a local client. The
+//! `Host` rule still applies: the token does not let a request name another
+//! host.
 
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use sha2::{Digest, Sha256};
+
+/// The portal's own token.
+///
+/// The token is a secret, so its `Debug` shows that a token is there and
+/// nothing more. A log line that prints the state cannot leak it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token(String);
+
+impl Token {
+    /// Wrap a token value.
+    pub fn new(token: String) -> Self {
+        Self(token)
+    }
+
+    /// The token's value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Token([redacted])")
+    }
+}
 
 /// The origins that may change state on the portal: the loopback address and
 /// its name, on the port the server listens on.
@@ -52,6 +85,39 @@ pub fn origin_allowed(method: &Method, origin: Option<&str>, port: u16) -> bool 
     origins(port).iter().any(|allowed| allowed == origin)
 }
 
+/// The token of an `Authorization: Bearer <token>` header, if the request has
+/// a non-empty one.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
+/// Whether the request carries the portal's token as a `Bearer` credential.
+///
+/// Both sides are hashed first, so the comparison takes the same time for any
+/// input. An empty portal token never matches.
+#[must_use]
+pub fn bearer_allowed(headers: &HeaderMap, token: &Token) -> bool {
+    if token.as_str().is_empty() {
+        return false;
+    }
+    let Some(given) = bearer(headers) else {
+        return false;
+    };
+    let given = Sha256::digest(given.as_bytes());
+    let expected = Sha256::digest(token.as_str().as_bytes());
+    given
+        .iter()
+        .zip(expected.iter())
+        .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
+}
+
 /// The `Host` header of a request, if it has one.
 fn host_header(headers: &HeaderMap) -> Option<&str> {
     headers.get(axum::http::header::HOST)?.to_str().ok()
@@ -63,12 +129,13 @@ fn origin_header(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Reject a request whose `Host` names another host, or whose `Origin` names
-/// another origin while changing state.
-pub fn check(method: &Method, headers: &HeaderMap, port: u16) -> Option<Response> {
+/// another origin while changing state. A request with the portal's token
+/// passes the `Origin` rule.
+pub fn check(method: &Method, headers: &HeaderMap, port: u16, token: &Token) -> Option<Response> {
     if !host_allowed(host_header(headers), port) {
         return Some(StatusCode::FORBIDDEN.into_response());
     }
-    if !origin_allowed(method, origin_header(headers), port) {
+    if !origin_allowed(method, origin_header(headers), port) && !bearer_allowed(headers, token) {
         return Some(StatusCode::FORBIDDEN.into_response());
     }
     None
@@ -120,6 +187,91 @@ mod tests {
             Some("http://localhost:7465"),
             7465
         ));
+    }
+
+    /// Headers with one `Authorization` value.
+    fn bearer_headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            value.parse().expect("a header value"),
+        );
+        headers
+    }
+
+    /// The portal's token, in the form the guard takes.
+    fn token(value: &str) -> Token {
+        Token::new(value.to_owned())
+    }
+
+    #[test]
+    fn the_token_passes_the_origin_rule() {
+        let headers = bearer_headers("Bearer secret");
+        assert!(bearer_allowed(&headers, &token("secret")));
+    }
+
+    #[test]
+    fn a_wrong_or_malformed_token_gets_no_bypass() {
+        for value in [
+            "Bearer other",
+            "Bearer ",
+            "Bearer",
+            "Basic secret",
+            "secret",
+        ] {
+            let headers = bearer_headers(value);
+            assert!(!bearer_allowed(&headers, &token("secret")), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_missing_token_gets_no_bypass() {
+        assert!(!bearer_allowed(&HeaderMap::new(), &token("secret")));
+    }
+
+    #[test]
+    fn an_empty_portal_token_never_matches() {
+        assert!(!bearer_allowed(
+            &bearer_headers("Bearer secret"),
+            &token("")
+        ));
+        assert!(!bearer_allowed(&HeaderMap::new(), &token("")));
+    }
+
+    #[test]
+    fn the_token_is_not_shown_in_its_debug_form() {
+        assert_eq!(format!("{:?}", token("secret")), "Token([redacted])");
+        assert!(!format!("{:?}", token("secret")).contains("secret"));
+    }
+
+    #[test]
+    fn a_write_with_the_token_and_no_origin_is_allowed() {
+        let mut headers = bearer_headers("Bearer secret");
+        headers.insert(
+            axum::http::header::HOST,
+            "127.0.0.1:7465".parse().expect("a host"),
+        );
+        assert!(check(&Method::POST, &headers, 7465, &token("secret")).is_none());
+    }
+
+    #[test]
+    fn a_write_with_a_wrong_token_is_refused() {
+        let mut headers = bearer_headers("Bearer wrong");
+        headers.insert(
+            axum::http::header::HOST,
+            "127.0.0.1:7465".parse().expect("a host"),
+        );
+        assert!(check(&Method::POST, &headers, 7465, &token("secret")).is_some());
+    }
+
+    #[test]
+    fn the_token_does_not_pass_the_host_rule() {
+        let mut headers = bearer_headers("Bearer secret");
+        headers.insert(
+            axum::http::header::HOST,
+            "evil.example".parse().expect("a host"),
+        );
+        assert!(check(&Method::POST, &headers, 7465, &token("secret")).is_some());
     }
 
     #[test]
