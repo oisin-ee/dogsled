@@ -31,9 +31,10 @@ jobs:
         with:
           # Moon diffs against main, so it needs the full history.
           fetch-depth: 0
-      # Proto installs moon and Node from .prototools.
+      # setup-toolchain installs proto and moon. Do not run `proto install` here:
+      # proto would also install Rust natively from rust-toolchain.toml and its
+      # shim would shadow the rustup toolchain below.
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-      - run: proto install
       # rust-toolchain.toml pins the channel and components.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -53,7 +54,7 @@ jobs:
           # Moon diffs against main, so it needs the full history.
           fetch-depth: 0
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-      - run: proto install
+      - run: proto install node
       - name: Install dependencies
         run: moon run :install
       - name: Typecheck
