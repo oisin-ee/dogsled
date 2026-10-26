@@ -109,6 +109,54 @@ fn done_hands_off_a_held_detached_checkout_without_inventing_a_branch() {
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
 }
 
+/// The teardown ran after the handoff's loss check and left a commit that no ref holds. The
+/// checkout, its lock, its panes, and its item stay: the removal checks the loss rule again.
+#[test]
+fn a_teardown_commit_in_the_handoff_keeps_the_checkout_its_lock_panes_and_item() {
+    let (rig, tree) = close_rig("done-teardown-commit");
+    worker(&rig, &tree, "working");
+    fs::write(
+        rig.dir.join("child.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({"type":"message","message":{"role":"user","content":"do it"}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}})
+        ),
+    )
+    .unwrap();
+    // A detached checkout has no branch to hold the teardown's commit.
+    git(&tree, &["checkout", "--detach"]);
+    let out = done(&rig);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The teardown leaves a commit that no ref holds, after the handoff checked the loss rule.
+    fs::write(rig.dir.join("hook-commit"), "").unwrap();
+    worker(&rig, &tree, "idle");
+    let journal = String::from_utf8_lossy(&rig.run(&["serve", "--once", "--interval", "1"]).stderr)
+        .into_owned();
+    assert!(
+        journal.contains("the teardown left unsaved work"),
+        "{journal}"
+    );
+    assert!(
+        !journal.contains("dogsled handoff: closed w2:p1"),
+        "{journal}"
+    );
+    assert!(tree.exists());
+    assert!(git(&rig.dir.join("home/repo"), &["branch", "--list", "feat/x"]).contains("feat/x"));
+    let herdr = rig.log("herdr.log");
+    assert!(
+        !herdr.contains("workspace close") && !herdr.contains("pane close"),
+        "{herdr}"
+    );
+    let repo = rig.dir.join("home/repo");
+    assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
 #[test]
 fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
     let (rig, tree) = close_rig("done-inbox");

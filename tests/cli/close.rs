@@ -6,6 +6,8 @@ const TEARDOWN: &str = r#"[worktree]
 teardown = [
   "printf '%s %s %s %s\\n' \"$(pwd -P)\" {main} {branch} {path} >> \"$RIG/hook.log\"",
   "if test -f \"$RIG/hook-fails\"; then printf 'teardown failed: stack busy\\n' >&2; exit 1; fi",
+  "if test -f \"$RIG/hook-commit\"; then printf 'teardown work\\n' > teardown-work.txt && git add teardown-work.txt && git -c user.name=t -c user.email=t@t commit -q -m 'teardown work'; fi",
+  "if test -f \"$RIG/hook-dirt\"; then printf 'teardown dirt\\n' > teardown-dirt.txt; fi",
 ]
 "#;
 
@@ -279,6 +281,62 @@ fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("teardown command"), "{stderr}");
     assert!(stderr.contains("teardown failed: stack busy"), "{stderr}");
+    assert!(tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    let herdr = rig.log("herdr.log");
+    assert!(
+        !herdr.contains("workspace close") && !herdr.contains("pane close"),
+        "{herdr}"
+    );
+    let repo = rig.dir.join("home/repo");
+    assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
+/// The teardown ran after the loss check and left a commit that no ref holds. The checkout,
+/// its lock, its panes, and its item stay: the removal checks the loss rule again.
+#[test]
+fn a_teardown_commit_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
+    let (rig, tree) = close_rig("close-teardown-commit");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    fs::write(rig.dir.join("hook-commit"), "").unwrap();
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the teardown left unsaved work"),
+        "{stderr}"
+    );
+    assert!(tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    let herdr = rig.log("herdr.log");
+    assert!(
+        !herdr.contains("workspace close") && !herdr.contains("pane close"),
+        "{herdr}"
+    );
+    let repo = rig.dir.join("home/repo");
+    assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
+/// The teardown ran after the loss check and left a file that no ref holds. The checkout,
+/// its lock, its panes, and its item stay: the removal checks the loss rule again.
+#[test]
+fn a_teardown_file_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
+    let (rig, tree) = close_rig("close-teardown-dirt");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    fs::write(rig.dir.join("hook-dirt"), "").unwrap();
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the teardown left unsaved work"),
+        "{stderr}"
+    );
     assert!(tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
     let herdr = rig.log("herdr.log");

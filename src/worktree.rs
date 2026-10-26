@@ -360,6 +360,10 @@ pub fn remove(
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
     if Path::new(&tree.path).is_dir() {
+        // The teardown ran after the callers' loss check and can leave a commit or content
+        // that no ref holds. Check the current HEAD and content again before anything closes
+        // or is removed.
+        recheck_loss(shell, tree, evidence)?;
         evidence.restore_deletions(shell, &tree.path)?;
     }
     let open = crate::cleanup::current_panes(shell)?;
@@ -424,6 +428,24 @@ pub fn remove(
         branch_deleted,
         anchor_closed,
     })
+}
+
+/// The loss rule, once more, after the repository's `teardown`. Teardown runs after the
+/// callers' check, so it can leave a commit or content that no ref holds. The checkout, its
+/// lock, its panes, and its item stay when it does.
+fn recheck_loss(shell: &dyn Shell, tree: &Linked, evidence: &crate::loss::Evidence) -> Result<()> {
+    // The commit the checkout holds now. The teardown can commit, and can detach HEAD, so the
+    // branch tip the callers assessed is not always the tip now.
+    let tip = head_sha(shell, &tree.path)?;
+    let loss = evidence.assess(shell, &tip, Some(&tree.path))?;
+    if !loss.loses_nothing() {
+        return Err(refuse(&format!(
+            "{}: the teardown left unsaved work ({}); the checkout, its lock, and its panes stay",
+            tree.path,
+            loss.detail()
+        )));
+    }
+    Ok(())
 }
 
 fn git_ok(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<()> {
