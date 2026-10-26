@@ -19,24 +19,36 @@ tasks:
     command: cargo clippy --all-targets -- -D warnings
     description: Run Clippy with warnings as errors, on every target.
     tags: [precommit]
+    # The server embeds the web bundle, so the bundle must exist before
+    # Clippy reads the sources that embed it.
+    deps:
+      - web-build
     inputs:
       - "src/**/*"
       - "tests/**/*"
+      - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "clippy.toml"
+      - "web/public/**/*"
   test:
     command: cargo test
     description: Run the Rust unit and integration tests.
     tags: [precommit]
+    # The asset tests read the embedded web bundle, so the bundle must exist
+    # before the tests run.
+    deps:
+      - web-build
     inputs:
       - "src/**/*"
       - "tests/**/*"
+      - "build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+      - "web/public/**/*"
   web-lint:
     command: cargo clippy -p web --target wasm32-unknown-unknown -- -D warnings
     description: Run Clippy on the web portal UI for the WASM target.

@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_asset_request_is_answered_with_404() {
+    async fn an_asset_request_is_answered_with_the_page() {
         let response = call(
             Request::builder()
                 .uri("/")
@@ -464,13 +464,13 @@ mod tests {
                 .expect("the request"),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        // The answer comes from the assets stub, not from the router's own
-        // not-found, so the stub is mounted.
+        assert_eq!(response.status(), StatusCode::OK);
+        // The answer comes from the embedded bundle, not from the router's
+        // own not-found, so the asset fallback is mounted.
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .expect("the body");
-        assert_eq!(String::from_utf8_lossy(&body), "no assets yet");
+        assert!(String::from_utf8_lossy(&body).contains("id=\"main\""));
     }
 
     #[tokio::test]

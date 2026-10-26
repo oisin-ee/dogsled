@@ -637,12 +637,23 @@ cargo build --release
 npm ci
 ```
 
+The server embeds the Dioxus portal UI, so the web bundle must exist before the binary builds.
+`moon run :web-build` runs `dx bundle --web --release` and writes the bundle to `web/public`.
+Run it before a plain `cargo build`:
+
+```sh
+moon run :web-build
+cargo build --release
+```
+
 Proto and moon own the development tooling. `proto install` installs the versions in `.prototools`, and `moon run` runs the checks:
 
 ```sh
 proto install
 moon run :fmt-check :lint :test :typecheck :test-shim
 ```
+
+The `lint` and `test` tasks build the web bundle first, so they work in a fresh checkout.
 
 The executable is `target/release/dogsled`.
 Release archives include the binary, `dogsled.service`, and `dev.dogsled.plist` from `plugin/services/`.
