@@ -25,7 +25,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
@@ -37,9 +37,20 @@ jobs:
       # not install it: its own rust install applies the toolchain file's
       # component list, which leaves the toolchain without cargo and rustc.
       - run: rustup toolchain install
-      # .prototools pins the other tools of this job: moon, node and dx. Its
-      # rust entry satisfies the cargo backend's rust requirement, and finds
-      # the toolchain rustup installed, so proto leaves it alone.
+      # dx bundles the web portal UI. Proto's cargo backend would build it
+      # from source, which takes over ten minutes on macOS. binstall fetches
+      # the published binary instead, in seconds.
+      - uses: cargo-bins/cargo-binstall@81df5c23b0dc775b009efdfc9895c5965b7a4e40 # v1.26.1
+      - name: Cache dx
+        id: dx-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/dx
+          key: dx-${{ runner.os }}-${{ runner.arch }}-0.7.10
+      - name: Install dx
+        if: steps.dx-cache.outputs.cache-hit != 'true'
+        run: cargo binstall --no-confirm --locked dioxus-cli@0.7.10
+      # .prototools pins the other tools of this job: moon and node.
       - run: proto install
       - uses: Swatinem/rust-cache@v2
       - name: Web lint
