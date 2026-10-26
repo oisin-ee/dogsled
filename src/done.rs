@@ -43,6 +43,10 @@ pub struct Mark {
     pub marked_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<Branch>,
+    /// The child's checkout is detached: it has no branch to land, and its commits must be
+    /// held by the default branch or a remote. Recorded so the handoff checks it once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<crate::items::Reply>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,7 +232,11 @@ pub fn mark(
         ))
     })?;
     let item = identity(ledger, pane)?;
-    let branch = preflight(shell, &agent)?;
+    let (branch, detached) = match preflight(shell, &agent)? {
+        Preflight::None => (None, false),
+        Preflight::Detached => (None, true),
+        Preflight::Branch(branch) => (Some(branch), false),
+    };
     let mark = Mark {
         pane: pane.into(),
         item,
@@ -238,6 +246,7 @@ pub fn mark(
         sealed: None,
         marked_ms: now,
         branch,
+        detached,
         reply: None,
         closed_ms: None,
     };
@@ -256,7 +265,19 @@ pub fn mark(
     Ok(mark)
 }
 
-fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Option<Branch>> {
+/// What the child's checkout is: no agent worktree, a detached one with no branch to land, or
+/// a branch to land.
+#[derive(Debug)]
+enum Preflight {
+    /// The pane works in no agent worktree.
+    None,
+    /// A detached checkout. It has no branch, and its commits are already held elsewhere.
+    Detached,
+    /// A branch to land.
+    Branch(Branch),
+}
+
+fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Preflight> {
     let panes = if agent.cwd.is_none() {
         crate::cleanup::current_panes(shell)?
     } else {
@@ -268,14 +289,16 @@ fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Option<Br
             .find(|p| p.pane_id == agent.pane)
             .and_then(|p| p.cwd.as_deref())
     });
-    let Some(cwd) = cwd else { return Ok(None) };
-    let Some(tree) = crate::worktree::linked(shell, cwd)? else {
-        return Ok(None);
+    let Some(cwd) = cwd else {
+        return Ok(Preflight::None);
+    };
+    let Some(tree) = crate::worktree::linked_or_detached(shell, cwd)? else {
+        return Ok(Preflight::None);
     };
     if crate::worktree::lock_reason(shell, &tree.checkout, &tree.path)?.as_deref()
         != Some(crate::worktree::AGENT_LOCK)
     {
-        return Ok(None);
+        return Ok(Preflight::None);
     }
     let dirty = crate::loss::dirty_paths(shell, &tree.path, false)?;
     if !dirty.is_empty() {
@@ -286,23 +309,28 @@ fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Option<Br
         )));
     }
     let repo = tree.checkout.display().to_string();
-    let evidence = crate::loss::Evidence::keeping_branch(&repo, &tree.branch);
-    let head = shell.run_ok(
-        "git",
-        &[
-            "-C".into(),
-            tree.path.clone(),
-            "rev-parse".into(),
-            "HEAD".into(),
-        ],
-    )?;
-    let loss = evidence.assess(shell, head.stdout.trim(), Some(&tree.path))?;
+    // A detached checkout has no branch. None is invented for it, so its commits must be
+    // held by the default branch or a refreshed remote ref, exactly as for a branch.
+    let detached = tree.branch.is_empty();
+    let evidence = if detached {
+        crate::loss::Evidence::fetch(shell, &repo)
+    } else {
+        crate::loss::Evidence::keeping_branch(&repo, &tree.branch)
+    };
+    if let Some(warning) = &evidence.warning {
+        eprintln!("{warning}");
+    }
+    let head = crate::worktree::head_sha(shell, &tree.path)?;
+    let loss = evidence.assess(shell, &head, Some(&tree.path))?;
     if !loss.loses_nothing() {
         return Err(Error::Invalid(format!(
             "{}: {}. Preserve the work before calling done",
             tree.path,
             loss.detail()
         )));
+    }
+    if detached {
+        return Ok(Preflight::Detached);
     }
     let mut branch = Branch {
         repo,
@@ -311,7 +339,7 @@ fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Option<Br
         landed: false,
     };
     refresh_branch(shell, &mut branch)?;
-    Ok(Some(branch))
+    Ok(Preflight::Branch(branch))
 }
 
 fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> Result<()> {
@@ -608,10 +636,17 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
         {
             crate::items::set_reply(ledger, id, reply.clone())?;
         }
-        if mark.branch.is_none() {
+        if mark.branch.is_none() && !mark.detached {
             match preflight(shell, agent) {
-                Ok(branch) => {
-                    mark.branch = branch;
+                Ok(Preflight::None) => {
+                    save(ledger, &mark)?;
+                }
+                Ok(Preflight::Detached) => {
+                    mark.detached = true;
+                    save(ledger, &mark)?;
+                }
+                Ok(Preflight::Branch(branch)) => {
+                    mark.branch = Some(branch);
                     save(ledger, &mark)?;
                 }
                 Err(error) => {

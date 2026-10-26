@@ -69,8 +69,40 @@ fn inside(cwd: &str, tree: &str) -> bool {
     resolved(Path::new(cwd)).starts_with(resolved(Path::new(tree)))
 }
 
-/// The worktree that contains `cwd`, when it is a linked worktree on a branch.
+/// The worktree that contains `cwd`, when it is a linked worktree on a branch. A detached
+/// worktree is not one: it has no branch, so it is refused here.
 pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
+    let tree = linked_or_detached(shell, cwd)?;
+    if let Some(tree) = &tree
+        && tree.branch.is_empty()
+    {
+        return Err(refuse(&format!(
+            "{} is a detached worktree; `dogsled prune` removes it once its commit is on a remote",
+            tree.path
+        )));
+    }
+    Ok(tree)
+}
+
+/// The commit a checkout's HEAD points at.
+pub fn head_sha(shell: &dyn Shell, path: &str) -> Result<String> {
+    let out = git(shell, Path::new(path), &["rev-parse", "HEAD"])?;
+    if !out.ok() {
+        return Err(Error::Invalid(format!(
+            "{path}: cannot read HEAD: {}",
+            out.stderr.trim()
+        )));
+    }
+    let head = out.stdout.trim().to_string();
+    if head.is_empty() {
+        return Err(Error::Invalid(format!("{path}: HEAD names no commit")));
+    }
+    Ok(head)
+}
+
+/// The linked worktree that contains `cwd`. A detached one has an empty `branch`; no branch is
+/// invented for it.
+pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     if !Path::new(cwd).is_dir() {
         return Ok(None);
     }
@@ -100,15 +132,14 @@ pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     if common == dir {
         return Ok(None);
     }
-    if branch == "HEAD" {
-        return Err(refuse(&format!(
-            "{top} is a detached worktree; `dogsled prune` removes it once its commit is on a remote"
-        )));
-    }
     Ok(Some(Linked {
         checkout: crate::prepare::main_checkout(shell, cwd)?,
         path: top.into(),
-        branch: branch.into(),
+        branch: if branch == "HEAD" {
+            String::new()
+        } else {
+            branch.into()
+        },
     }))
 }
 
@@ -329,6 +360,10 @@ pub fn remove(
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
     if Path::new(&tree.path).is_dir() {
+        // The teardown ran after the callers' loss check and can leave a commit or content
+        // that no ref holds. Check the current HEAD and content again before anything closes
+        // or is removed.
+        recheck_loss(shell, tree, evidence)?;
         evidence.restore_deletions(shell, &tree.path)?;
     }
     let open = crate::cleanup::current_panes(shell)?;
@@ -393,6 +428,24 @@ pub fn remove(
         branch_deleted,
         anchor_closed,
     })
+}
+
+/// The loss rule, once more, after the repository's `teardown`. Teardown runs after the
+/// callers' check, so it can leave a commit or content that no ref holds. The checkout, its
+/// lock, its panes, and its item stay when it does.
+fn recheck_loss(shell: &dyn Shell, tree: &Linked, evidence: &crate::loss::Evidence) -> Result<()> {
+    // The commit the checkout holds now. The teardown can commit, and can detach HEAD, so the
+    // branch tip the callers assessed is not always the tip now.
+    let tip = head_sha(shell, &tree.path)?;
+    let loss = evidence.assess(shell, &tip, Some(&tree.path))?;
+    if !loss.loses_nothing() {
+        return Err(refuse(&format!(
+            "{}: the teardown left unsaved work ({}); the checkout, its lock, and its panes stay",
+            tree.path,
+            loss.detail()
+        )));
+    }
+    Ok(())
 }
 
 fn git_ok(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<()> {
