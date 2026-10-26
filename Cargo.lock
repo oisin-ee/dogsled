@@ -4569,7 +4569,9 @@ dependencies = [
  "dioxus",
  "futures-util",
  "gloo-net",
+ "js-sys",
  "portal-types",
+ "serde",
  "serde_json",
 ]
 
