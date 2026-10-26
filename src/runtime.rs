@@ -609,6 +609,14 @@ pub fn exec(
     // unreadable one: no process, no log, and no pane exist for a job nobody claimed.
     let job = jobs::record(ledger, id)?
         .ok_or_else(|| Error::Invalid(format!("job {id} has no claim to run")))?;
+    // The requested id names the record. A record that embeds another id is not this job's
+    // claim, and it never reaches the execution lock.
+    if job.id != id {
+        return Err(Error::Invalid(format!(
+            "job {id} claim belongs to job {}",
+            job.id
+        )));
+    }
     if job.cmd != cmd {
         return Err(Error::Invalid(
             "exec command differs from the launch record".into(),
@@ -626,7 +634,7 @@ pub fn exec(
             ));
         }
     }
-    Ok(ExitCode::from(jobs::exec(ledger, shell, job)? as u8))
+    Ok(ExitCode::from(jobs::exec(ledger, shell, id, &job)? as u8))
 }
 
 fn machine(

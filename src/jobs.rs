@@ -329,6 +329,14 @@ pub fn ownership(ledger: &Ledger, id: &str) -> Result<Ownership> {
     let Some(job) = record(ledger, id)? else {
         return Ok(Ownership::Unclaimed);
     };
+    // The record's own identity must be the job that was asked for. A record stored under
+    // this name for another id proves nothing about this job.
+    if job.id != id {
+        return Err(Error::Invalid(format!(
+            "job {id} claim belongs to job {}",
+            job.id
+        )));
+    }
     Ok(if job.started_ms.is_some() {
         Ownership::Started(job)
     } else if job.ended_ms.is_some() {
@@ -371,7 +379,23 @@ pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
     validate_id(&job.id)?;
     store(ledger).with_lock(&job.id, || {
         match ownership(ledger, &job.id)? {
-            Ownership::Uncertain(existing) if existing.state == CLAIMING => {}
+            Ownership::Uncertain(existing) if existing.state == CLAIMING => {
+                // The intent must be this request's intent. Only the pane may change: the
+                // command, directory, host, owner, and options are the request's own.
+                if existing.id != job.id
+                    || existing.cmd != job.cmd
+                    || existing.cwd != job.cwd
+                    || existing.host != job.host
+                    || existing.owner != job.owner
+                    || existing.timeout_ms != job.timeout_ms
+                    || existing.idle_timeout_ms != job.idle_timeout_ms
+                {
+                    return Err(Error::Invalid(format!(
+                        "job {} claim changed after its intent was published",
+                        job.id
+                    )));
+                }
+            }
             _ => {
                 return Err(Error::Invalid(format!(
                     "job {} already has an owner",
@@ -415,20 +439,38 @@ pub fn uncertain(ledger: &Ledger, job: &Job, reason: String) -> Result<()> {
     })
 }
 
-/// The exact claim that authorizes this wrapper to run `job`. A record that is missing,
-/// unreadable, for another command, already started, ended, or uncertain is refused here,
-/// before any process, log, or pane exists.
-fn pending_claim(ledger: &Ledger, job: &Job) -> Result<Job> {
-    let Some(claimed) = record(ledger, &job.id)? else {
-        return Err(Error::Invalid(format!(
-            "job {} has no claim to run",
-            job.id
-        )));
+/// The exact claim that authorizes this wrapper to run `id`. A record that is missing,
+/// unreadable, for another job, incomplete, for another command, already started, ended, or
+/// uncertain is refused here, before any process, log, or pane exists.
+///
+/// `initial` is the record the caller read for the requested job. The reload must still be
+/// that same job: a record whose execution-affecting fields changed is refused, never
+/// silently adopted.
+fn pending_claim(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
+    let Some(claimed) = record(ledger, id)? else {
+        return Err(Error::Invalid(format!("job {id} has no claim to run")));
     };
-    if claimed.cmd != job.cmd {
-        return Err(Error::Invalid(
-            "exec command differs from the claimed command".into(),
-        ));
+    // The record's own identity must be the requested job. A record stored under this name
+    // for another id never runs here.
+    if claimed.id != id {
+        return Err(Error::Invalid(format!(
+            "job {id} claim belongs to job {}",
+            claimed.id
+        )));
+    }
+    // The claim is complete: a command, a directory, a host, an owner, and the pane it was
+    // allocated. An incomplete claim proves nothing.
+    if claimed.cmd.is_empty()
+        || claimed.cwd.is_empty()
+        || claimed.host.is_empty()
+        || claimed.owner.is_empty()
+    {
+        return Err(Error::Invalid(format!("job {id} claim is incomplete")));
+    }
+    if claimed.pane.is_empty() {
+        return Err(Error::Invalid(format!(
+            "job {id} claim has no allocated pane"
+        )));
     }
     if claimed.started_ms.is_some() {
         return Err(Error::Invalid("job already started".into()));
@@ -437,9 +479,29 @@ fn pending_claim(ledger: &Ledger, job: &Job) -> Result<Job> {
         return Err(Error::Invalid("job already ended".into()));
     }
     if claimed.state != PENDING {
+        return Err(Error::Invalid(format!("job {id} claim is not executable")));
+    }
+    if claimed.exit.is_some() || claimed.signal.is_some() || claimed.reason.is_some() {
         return Err(Error::Invalid(format!(
-            "job {} claim is not executable",
-            job.id
+            "job {id} claim already carries a result"
+        )));
+    }
+    if claimed.cmd != initial.cmd {
+        return Err(Error::Invalid(
+            "exec command differs from the claimed command".into(),
+        ));
+    }
+    // The execution-affecting inputs are the ones that were requested. A record that changed
+    // its directory, host, owner, pane, or options since it was read asks for another job.
+    if claimed.cwd != initial.cwd
+        || claimed.host != initial.host
+        || claimed.owner != initial.owner
+        || claimed.pane != initial.pane
+        || claimed.timeout_ms != initial.timeout_ms
+        || claimed.idle_timeout_ms != initial.idle_timeout_ms
+    {
+        return Err(Error::Invalid(format!(
+            "job {id} claim changed since it was requested"
         )));
     }
     Ok(claimed)
@@ -447,9 +509,9 @@ fn pending_claim(ledger: &Ledger, job: &Job) -> Result<Job> {
 
 /// Mark the claim as started and return the running record. The short per-job record lock
 /// holds this publication, and it is released before any capture.
-fn start(ledger: &Ledger, job: &Job) -> Result<Job> {
-    store(ledger).with_lock(&job.id, || {
-        let mut running = pending_claim(ledger, job)?;
+fn start(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
+    store(ledger).with_lock(id, || {
+        let mut running = pending_claim(ledger, id, initial)?;
         running.started_ms = Some(now_ms());
         running.state = WORKING.into();
         save(ledger, &running)?;
@@ -457,18 +519,25 @@ fn start(ledger: &Ledger, job: &Job) -> Result<Job> {
     })
 }
 
-pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
-    validate_id(&job.id)?;
-    if job.cmd.is_empty() {
+/// Run the job `id` from its own claim. The requested id names the lock, the lookup, and the
+/// record: a record that embeds another id never runs here, and it never owns this lock.
+pub fn exec(ledger: &Ledger, shell: &dyn Shell, id: &str, initial: &Job) -> Result<i32> {
+    validate_id(id)?;
+    if initial.cmd.is_empty() {
         return Err(Error::Invalid("empty command".into()));
     }
+    if initial.id != id {
+        return Err(Error::Invalid(format!(
+            "job {id} claim belongs to job {}",
+            initial.id
+        )));
+    }
     // Exactly one wrapper may own an id for its entire lifetime.
-    store(ledger).with_lock(&format!("{}-exec", job.id), || {
+    store(ledger).with_lock(&format!("{id}-exec"), || {
         // The claim is reloaded and validated under this lock, so a claim that a replay or
         // another wrapper changed cannot start a job. Nothing exists yet: no process, no log,
         // no pane.
-        pending_claim(ledger, &job)?;
-        job = start(ledger, &job)?;
+        let mut job = start(ledger, id, initial)?;
         if let Err(error) = report(shell, &job, WORKING, None) {
             eprintln!("dogsled pane report: {error}");
         }

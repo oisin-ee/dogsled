@@ -1,4 +1,5 @@
 use super::*;
+use std::io::{Read as _, Write as _};
 
 fn remote_agent(rig: &Rig, repo: Option<&Path>) -> (i32, Value) {
     let mut args = vec![
@@ -1126,7 +1127,8 @@ fn job_launch_request(rig: &Rig, id: &str, cmd: &[&str]) -> Value {
 }
 
 /// A host replay whose receipt is missing must not allocate a second pane and must not
-/// dispatch the command again when the job already holds a claim.
+/// dispatch the command again when the job already holds a claim. A claim is not a
+/// dispatch receipt: without one the replay fails closed.
 #[test]
 fn a_host_replay_without_a_receipt_does_not_dispatch_an_existing_claim_again() {
     let rig = Rig::new("replay-existing-claim");
@@ -1136,14 +1138,119 @@ fn a_host_replay_without_a_receipt_does_not_dispatch_an_existing_claim_again() {
         "timeout_ms":null,"idle_timeout_ms":null});
     rig.put("state/jobs/replayed.json", &job);
     let request = job_launch_request(&rig, "replayed", &["true"]);
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
-    assert_eq!(code, 0, "{result}");
-    assert_eq!(result["pane"], "w2:p1", "{result}");
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("no saved launch receipt"),
+        "{error}"
+    );
     let log = rig.log("herdr.log");
     // No pane was allocated, and the command was never dispatched again.
     assert!(!log.contains("tab create"), "{log}");
     assert!(!log.contains("pane run"), "{log}");
-    // The claim keeps its own pane and its own state.
+    // The claim keeps its own pane and its own state, and no receipt was invented.
+    assert_eq!(rig.read("state/jobs/replayed.json"), job);
+    assert!(!rig.dir.join("state/launches/replayed.json").exists());
+}
+
+/// A replay with a saved receipt that matches the request and the recorded job replays its
+/// result without allocating a pane or dispatching the command again.
+#[test]
+fn a_host_replay_with_a_matching_receipt_replays_without_side_effects() {
+    let rig = Rig::new("replay-matching-receipt");
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
+        "timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/replayed.json", &job);
+    rig.put(
+        "state/launches/replayed.json",
+        &json!({"id":"replayed","host":"local","pane":"w2:p1"}),
+    );
+    let request = job_launch_request(&rig, "replayed", &["true"]);
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["pane"], "w2:p1", "{result}");
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
+    assert_eq!(rig.read("state/jobs/replayed.json"), job);
+}
+
+/// A replay with a conflicting same-id request refuses. The saved receipt belongs to the
+/// request that made it, so a different command, host, directory, options, or pane never
+/// replays.
+#[test]
+fn a_host_replay_with_a_conflicting_receipt_refuses() {
+    // The conflict in the request, and the conflict in the saved receipt.
+    type Conflict = (&'static str, fn(&mut Value, &mut Value));
+    let conflicts: [Conflict; 5] = [
+        ("command", |request: &mut Value, _saved: &mut Value| {
+            request["action"]["cmd"] = json!(["false"]);
+        }),
+        ("host", |request: &mut Value, _saved: &mut Value| {
+            request["host"] = json!("other-host");
+        }),
+        ("cwd", |request: &mut Value, _saved: &mut Value| {
+            request["cwd"] = json!("/somewhere/else");
+        }),
+        ("options", |request: &mut Value, _saved: &mut Value| {
+            request["action"]["timeout_ms"] = json!(5000);
+        }),
+        ("pane", |_request: &mut Value, saved: &mut Value| {
+            saved["pane"] = json!("w9:p1");
+        }),
+    ];
+    for (name, conflict) in conflicts {
+        let rig = Rig::new(&format!("replay-conflict-{name}"));
+        fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+        let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+            "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
+            "timeout_ms":null,"idle_timeout_ms":null});
+        rig.put("state/jobs/replayed.json", &job);
+        let mut saved = json!({"id":"replayed","host":"local","pane":"w2:p1"});
+        let mut request = job_launch_request(&rig, "replayed", &["true"]);
+        conflict(&mut request, &mut saved);
+        rig.put("state/launches/replayed.json", &saved);
+        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        assert_eq!(code, 2, "{name}: {error}");
+        let log = rig.log("herdr.log");
+        assert!(!log.contains("tab create"), "{name}: {log}");
+        assert!(!log.contains("pane run"), "{name}: {log}");
+        assert_eq!(rig.read("state/jobs/replayed.json"), job, "{name}");
+        assert_eq!(rig.read("state/launches/replayed.json"), saved, "{name}");
+    }
+}
+
+/// A conflicting same-id request without a saved receipt refuses too: the claim alone
+/// authorizes nothing.
+#[test]
+fn a_host_replay_with_a_conflicting_request_and_no_receipt_refuses() {
+    let rig = Rig::new("replay-conflict-no-receipt");
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
+        "timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/replayed.json", &job);
+    let mut request = job_launch_request(&rig, "replayed", &["true"]);
+    request["action"]["cmd"] = json!(["false"]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("no saved launch receipt"),
+        "{error}"
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
     assert_eq!(rig.read("state/jobs/replayed.json"), job);
 }
 
@@ -1172,6 +1279,235 @@ fn a_host_replay_of_an_uncertain_claim_refuses_and_keeps_the_uncertainty() {
     assert!(!log.contains("pane run"), "{log}");
     // The uncertainty is kept: nothing invents an end or a retry.
     assert_eq!(rig.read("state/jobs/unproved.json"), job);
+}
+
+/// How the fake Herdr orders the real wrapper and the dispatch failure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DispatchOrder {
+    /// The wrapper runs to completion, and the dispatch reports its failure afterwards.
+    After,
+    /// The wrapper is still running when the dispatch reports its failure.
+    During,
+    /// The dispatch reports its failure before the wrapper ever starts.
+    Before,
+}
+
+/// The fake Herdr for a dispatch-order test. It runs the real wrapper and reports a
+/// dispatch failure, or it reports the failure first and leaves the wrapper to start later.
+/// The wrapper is the real `dogsled exec`, so its publication is its own.
+fn dispatch_order_herdr(rig: &Rig, order: DispatchOrder) {
+    let run = match order {
+        DispatchOrder::After => {
+            r#"
+    shift 3
+    # The wrapper publishes its started and terminal records before this returns.
+    sh -c "$*" > "$RIG/job-output" 2>&1
+    echo 'pane refused' >&2
+    exit 1 ;;"#
+        }
+        DispatchOrder::During => {
+            r#"
+    shift 3
+    sh -c "$*" > "$RIG/job-output" 2>&1 &
+    # The wrapper publishes its started record before its command runs. The command's own
+    # signal is the barrier: it proves the record is already published.
+    read -r ready < "$RIG/wrapper-ready"
+    echo 'pane refused' >&2
+    exit 1 ;;"#
+        }
+        DispatchOrder::Before => {
+            r"
+    shift 3
+    # The dispatch fails before the wrapper ever starts. The wrapper starts later, on its
+    # own, and must refuse the claim this failure made uncertain.
+    echo 'pane refused' >&2
+    exit 1 ;;"
+        }
+    };
+    rig.script(
+        "herdr",
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+  'machine list --json') cat "$RIG/machines.json" ;;
+  'agent list') cat "${{RIG_AGENTS:-$RIG/agents.json}}" ;;
+  'pane list') cat "$RIG/panes.json" ;;
+  'workspace list') printf '%s\n' '{{"result":{{"workspaces":[{{"workspace_id":"w1","label":"caller"}}]}}}}' ;;
+  'worktree list --cwd'*) printf '%s\n' '{{"result":{{"worktrees":[]}}}}' ;;
+  'tab create'*|'workspace create'*) printf '%s\n' '{{"result":{{"root_pane":{{"pane_id":"w2:p1","terminal_id":"term_child"}}}}}}' ;;
+  'pane run'*)
+{run}
+  'pane close '*)
+    mkdir -p "$RIG/at-close"
+    cp "$DOGSLED_STATE"/jobs/*.json "$RIG/at-close/"
+    # The wrapper's close is the last thing it does. The marker lets the test wait for its
+    # exit without a sleep.
+    ( printf 'closed\n' > "$RIG/wrapper-closed" ) &
+    printf '{{}}\n' ;;
+  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{{}}\n' ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#,
+        ),
+    );
+}
+
+/// A dispatch that fails after the real wrapper published its terminal record keeps that
+/// record. The wrapper runs to completion before the dispatch reports its failure, so the
+/// order is forced by the process, not by a sleep.
+#[test]
+fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
+    let rig = Rig::new("dispatch-after-wrapper-ended");
+    dispatch_order_herdr(&rig, DispatchOrder::After);
+    let command = "echo out; exit 7";
+    let request = job_launch_request(&rig, "dispatched", &["sh", "-c", command]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    // The wrapper's own terminal record survives the dispatch failure.
+    let job = rig.read("state/jobs/dispatched.json");
+    assert!(job["started_ms"].is_number(), "{job}");
+    assert!(job["ended_ms"].is_number(), "{job}");
+    assert_eq!(job["exit"], 7, "{job}");
+    assert_eq!(job["state"], "blocked", "{job}");
+    // The real wrapper's output is preserved.
+    let output = rig.log("job-output");
+    assert!(output.contains("out\n"), "{output}");
+    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
+}
+
+/// A dispatch that fails while the real wrapper is running keeps the wrapper's running
+/// record. The wrapper's command signals a FIFO, which proves its started record is
+/// published before the dispatch reports its failure.
+#[test]
+fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
+    let rig = Rig::new("dispatch-during-wrapper-run");
+    for name in ["wrapper-ready", "wrapper-go", "wrapper-closed"] {
+        assert!(
+            Command::new("mkfifo")
+                .arg(rig.dir.join(name))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    dispatch_order_herdr(&rig, DispatchOrder::During);
+    let marker = rig.dir.join("marker");
+    let command = format!(
+        "echo ready > \"$RIG/wrapper-ready\"; read -r go < \"$RIG/wrapper-go\"; touch {}",
+        marker.display()
+    );
+    let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    // The wrapper is running: it published its started record, and the dispatch failure
+    // did not overwrite it or invent an end.
+    let job = rig.read("state/jobs/dispatched.json");
+    assert!(job["started_ms"].is_number(), "{job}");
+    assert!(job["ended_ms"].is_null(), "{job}");
+    assert_eq!(job["state"], "working", "{job}");
+    // The blocked command has not run.
+    assert!(!marker.exists());
+    // The wrapper is released and finishes its own record.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(rig.dir.join("wrapper-go"))
+        .unwrap()
+        .write_all(b"go\n")
+        .unwrap();
+    let mut closed = String::new();
+    fs::File::open(rig.dir.join("wrapper-closed"))
+        .unwrap()
+        .read_to_string(&mut closed)
+        .unwrap();
+    assert_eq!(closed, "closed\n");
+    let job = rig.read("state/jobs/dispatched.json");
+    assert!(job["ended_ms"].is_number(), "{job}");
+    assert_eq!(job["exit"], 0, "{job}");
+    assert!(marker.exists());
+}
+
+/// A dispatch that fails before the wrapper starts leaves the claim uncertain. A wrapper
+/// that starts later refuses that claim, and its command never runs.
+#[test]
+fn a_dispatch_failure_before_a_real_wrapper_starts_makes_the_late_wrapper_refuse() {
+    let rig = Rig::new("dispatch-before-wrapper-starts");
+    dispatch_order_herdr(&rig, DispatchOrder::Before);
+    let marker = rig.dir.join("marker");
+    let command = format!("touch {}", marker.display());
+    let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    // The dispatch outcome was never proved, so the claim stays uncertain.
+    let job = rig.read("state/jobs/dispatched.json");
+    assert_eq!(job["state"], "uncertain", "{job}");
+    assert!(job["ended_ms"].is_null(), "{job}");
+    assert!(job["exit"].is_null(), "{job}");
+    // The wrapper starts now. It refuses the uncertain claim, and runs nothing.
+    let output = rig.run(&["exec", "dispatched", "--", "sh", "-c", &command]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not executable"), "{stderr}");
+    assert!(!marker.exists());
+    assert!(!rig.dir.join("state/jobs/dispatched.log").exists());
+    // The uncertainty is kept: nothing invents an end or a retry.
+    let job = rig.read("state/jobs/dispatched.json");
+    assert_eq!(job["state"], "uncertain", "{job}");
+    assert!(job["ended_ms"].is_null(), "{job}");
+    // The dispatch happened once. The late wrapper dispatched nothing.
+    assert_eq!(rig.log("herdr.log").matches("pane run").count(), 1);
+}
+
+/// A launch that stops after the claim is published but before the dispatch never runs the
+/// command. The retry fails closed: it keeps the claim, saves no receipt, and neither
+/// allocates nor dispatches.
+#[test]
+fn an_interrupted_launch_after_claim_publication_fails_closed_on_retry() {
+    let rig = Rig::new("interrupted-after-claim");
+    // The fake Herdr refuses the dispatch, so the claim is published and the launch stops
+    // before the wrapper runs.
+    rig.script(
+        "herdr",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+  'machine list --json') cat "$RIG/machines.json" ;;
+  'agent list') cat "${RIG_AGENTS:-$RIG/agents.json}" ;;
+  'pane list') cat "$RIG/panes.json" ;;
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
+  'worktree list --cwd'*) printf '%s\n' '{"result":{"worktrees":[]}}' ;;
+  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
+  'pane run'*) echo 'pane refused' >&2; exit 1 ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#,
+    );
+    let request = job_launch_request(&rig, "interrupted", &["true"]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    // The claim is published, and the dispatch that was never proved keeps it uncertain.
+    let job = rig.read("state/jobs/interrupted.json");
+    assert_eq!(job["state"], "uncertain", "{job}");
+    assert_eq!(job["pane"], "w2:p1", "{job}");
+    // No receipt was saved: nothing proves a dispatch.
+    assert!(!rig.dir.join("state/launches/interrupted.json").exists());
+    // The retry fails closed. It keeps the claim, allocates nothing, and dispatches nothing.
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("unresolved claim"),
+        "{error}"
+    );
+    let log = rig.log("herdr.log");
+    // The dispatch happened once. The retry neither allocated a pane nor dispatched again.
+    assert_eq!(log.matches("pane run").count(), 1, "{log}");
+    assert_eq!(log.matches("tab create").count(), 1, "{log}");
+    assert!(!rig.dir.join("state/launches/interrupted.json").exists());
+    // The claim is kept exactly as the failed dispatch left it.
+    assert_eq!(rig.read("state/jobs/interrupted.json"), job);
 }
 
 /// A failed `pane run` leaves the job uncertain, and a wrapper that already started or ended

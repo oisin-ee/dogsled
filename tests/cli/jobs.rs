@@ -86,6 +86,113 @@ fn exec_without_an_executable_claim_never_runs_the_command() {
     assert!(!rig.log("herdr.log").contains("pane close"));
 }
 
+/// A record that carries another job's identity never runs. The requested id, the record's
+/// own id, and the record the wrapper reads must all name the same job. A record that
+/// embeds another id is refused before any lock, process, log, or pane.
+#[test]
+fn exec_refuses_a_record_that_embeds_another_job() {
+    let rig = Rig::new("exec-embedded-id");
+    let marker = rig.dir.join("marker");
+    let command = format!("touch {}", marker.display());
+    let home = rig.dir.join("home").display().to_string();
+    // B's own directory exists, so B is a valid, executable claim of its own.
+    fs::create_dir_all(rig.dir.join("home/other")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    // A.json holds B's identity. Its command matches the request, so only the identity
+    // can refuse it.
+    let a = json!({"id":"B","cmd":["sh","-c",&command],"cwd":home,"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"pending","exit":Value::Null,"signal":Value::Null,"reason":Value::Null,
+        "started_ms":Value::Null,"ended_ms":Value::Null,"timeout_ms":Value::Null,"idle_timeout_ms":Value::Null});
+    rig.put("state/jobs/A.json", &a);
+    // B.json is a valid, executable claim of its own, with its own cwd, options, and pane.
+    let b = json!({"id":"B","cmd":["sh","-c",&command],"cwd":format!("{home}/other"),"host":"local",
+        "owner":"w1:p1","pane":"w3:p1","state":"pending","exit":Value::Null,"signal":Value::Null,
+        "reason":Value::Null,"started_ms":Value::Null,"ended_ms":Value::Null,"timeout_ms":json!(1000),
+        "idle_timeout_ms":Value::Null});
+    rig.put("state/jobs/B.json", &b);
+    let output = rig.run(&["exec", "A", "--", "sh", "-c", &command]);
+    assert_eq!(output.status.code(), Some(2));
+    // Both records are unchanged: A is not B, and B was never started.
+    assert_eq!(rig.read("state/jobs/A.json"), a);
+    assert_eq!(rig.read("state/jobs/B.json"), b);
+    // No process, log, or pane ran for either job.
+    assert!(!marker.exists());
+    assert!(!rig.dir.join("state/jobs/A.log").exists());
+    assert!(!rig.dir.join("state/jobs/B.log").exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("belongs to job B"), "{stderr}");
+    let herdr = rig.log("herdr.log");
+    assert!(!herdr.contains("pane run"), "{herdr}");
+    assert!(!herdr.contains("pane close"), "{herdr}");
+}
+
+/// A pending claim is executable only when it is complete. An empty pane, a result it
+/// already carries, a missing field, or a record that changed since it was read is refused
+/// without mutation.
+#[test]
+fn exec_refuses_an_incomplete_or_conflicting_pending_claim() {
+    let rig = Rig::new("exec-incomplete-claim");
+    let marker = rig.dir.join("marker");
+    let command = format!("touch {}", marker.display());
+
+    // A pending claim with no allocated pane proves nothing.
+    rig.claim_with(
+        "empty-pane",
+        &["sh", "-c", &command],
+        &json!(null),
+        &json!(null),
+        "",
+    );
+    // A pending claim that already carries a terminal result is not executable.
+    rig.claim("carried-exit", &["sh", "-c", &command]);
+    let mut carried = rig.read("state/jobs/carried-exit.json");
+    carried["exit"] = json!(0);
+    rig.put("state/jobs/carried-exit.json", &carried);
+    rig.claim("carried-signal", &["sh", "-c", &command]);
+    let mut carried = rig.read("state/jobs/carried-signal.json");
+    carried["signal"] = json!(15);
+    rig.put("state/jobs/carried-signal.json", &carried);
+    rig.claim("carried-reason", &["sh", "-c", &command]);
+    let mut carried = rig.read("state/jobs/carried-reason.json");
+    carried["reason"] = json!("timeout");
+    rig.put("state/jobs/carried-reason.json", &carried);
+    // A pending claim without a directory, a host, or an owner is incomplete.
+    for (id, field) in [
+        ("no-cwd", "cwd"),
+        ("no-host", "host"),
+        ("no-owner", "owner"),
+    ] {
+        rig.claim(id, &["sh", "-c", &command]);
+        let mut claim = rig.read(&format!("state/jobs/{id}.json"));
+        claim[field] = json!("");
+        rig.put(&format!("state/jobs/{id}.json"), &claim);
+    }
+
+    for id in [
+        "empty-pane",
+        "carried-exit",
+        "carried-signal",
+        "carried-reason",
+        "no-cwd",
+        "no-host",
+        "no-owner",
+    ] {
+        let before = rig.read(&format!("state/jobs/{id}.json"));
+        let output = rig.run(&["exec", id, "--", "sh", "-c", &command]);
+        assert_eq!(output.status.code(), Some(2), "{id}");
+        // The record is unchanged: nothing started, nothing ended, nothing ran.
+        assert_eq!(rig.read(&format!("state/jobs/{id}.json")), before, "{id}");
+        assert!(
+            !rig.dir.join(format!("state/jobs/{id}.log")).exists(),
+            "{id}"
+        );
+    }
+    assert!(!marker.exists());
+    let herdr = rig.log("herdr.log");
+    assert!(!herdr.contains("pane run"), "{herdr}");
+    assert!(!herdr.contains("pane close"), "{herdr}");
+}
+
 /// A request that names different options than its claim asks for a different job.
 #[test]
 fn exec_refuses_options_that_differ_from_the_claim() {
@@ -271,15 +378,37 @@ fn exec_closes_after_a_spawn_error_and_skips_close_without_a_pane() {
     assert!(job["reason"].is_string());
     assert!(rig.log("herdr.log").ends_with("pane close w1:p1\n"));
     fs::remove_file(rig.dir.join("herdr.log")).unwrap();
-    // A claim without a pane closes no pane.
+    // A claim without an allocated pane is not executable. It closes no pane, and it leaves
+    // its own record untouched.
     rig.claim_with("no-pane", &["true"], &json!(null), &json!(null), "");
     let output = rig
         .cmd(&["exec", "no-pane", "--", "true"])
         .env_remove("HERDR_PANE_ID")
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     assert!(!rig.log("herdr.log").contains("pane close"));
+    let job = rig.read("state/jobs/no-pane.json");
+    assert!(job["started_ms"].is_null(), "{job}");
+    assert!(job["ended_ms"].is_null(), "{job}");
+    assert!(!rig.dir.join("state/jobs/no-pane.log").exists());
+    // A valid claim runs without a current HERDR pane in its own environment. It closes
+    // the pane its claim names, and nothing else.
+    rig.claim_with(
+        "no-current-pane",
+        &["true"],
+        &json!(null),
+        &json!(null),
+        "w2:p1",
+    );
+    let output = rig
+        .cmd(&["exec", "no-current-pane", "--", "true"])
+        .env_remove("HERDR_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(rig.read("state/jobs/no-current-pane.json")["ended_ms"].is_number());
+    assert!(rig.log("herdr.log").contains("pane close w2:p1"));
 }
 
 #[test]

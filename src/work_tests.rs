@@ -383,3 +383,60 @@ fn a_job_record_says_who_may_run_the_job() {
     assert!(crate::jobs::publish_claim(&ledger, &job).is_err());
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
+
+/// A record stored under one name and holding another job's identity proves nothing. The
+/// lookup refuses it, and the intent-to-claim publication refuses a changed request.
+#[test]
+fn a_record_that_embeds_another_job_is_never_its_own_claim() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let job = crate::jobs::Job {
+        id: "claimed".into(),
+        cmd: vec!["true".into()],
+        cwd: "/".into(),
+        host: "local".into(),
+        owner: "owner".into(),
+        pane: "pane".into(),
+        state: crate::jobs::PENDING.into(),
+        exit: None,
+        signal: None,
+        reason: None,
+        started_ms: None,
+        ended_ms: None,
+        timeout_ms: None,
+        idle_timeout_ms: None,
+    };
+    // A.json holds B's identity.
+    let mut other = job.clone();
+    other.id = "other".into();
+    crate::jobs::save(&ledger, &other).unwrap();
+    std::fs::rename(
+        crate::jobs::store(&ledger).dir.join("other.json"),
+        crate::jobs::store(&ledger).dir.join("claimed.json"),
+    )
+    .unwrap();
+    // The lookup refuses the contradictory identity.
+    let error = crate::jobs::ownership(&ledger, "claimed").unwrap_err();
+    assert!(
+        error.to_string().contains("belongs to job other"),
+        "{error}"
+    );
+    // No publication takes that record over.
+    let error = crate::jobs::publish_intent(&ledger, &job).unwrap_err();
+    assert!(
+        error.to_string().contains("belongs to job other"),
+        "{error}"
+    );
+    // A real job's intent keeps its own request: only the pane may change.
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    crate::jobs::publish_intent(&ledger, &job).unwrap();
+    let mut changed = job.clone();
+    changed.cwd = "/elsewhere".into();
+    let error = crate::jobs::publish_claim(&ledger, &changed).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("changed after its intent was published"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}

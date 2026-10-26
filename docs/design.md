@@ -78,7 +78,7 @@ dogsled ps | logs <id> | stop <id> | wait <id>
   Without a branch, remote work runs in `--cwd`. Non-repository directories must already exist there.
 - Dogsled opens a pane where the work's repository is shown: its worktree's workspace, else the main checkout's, else a new workspace. Work outside a repository uses a tab in the caller's workspace locally, or a workspace with the same name on the remote.
 - The pane runs `dogsled exec <id> -- <cmd>`, a small wrapper that:
-  - runs only from the job's own durable claim: a missing, unreadable, mismatched, started, ended, or uncertain claim starts no process, log, or pane;
+  - runs only from the job's own durable claim: a missing, unreadable, mismatched, incomplete, started, ended, or uncertain claim starts no new process, log, or pane; a job that already started keeps the process and log it already has;
   - reports `working` with `--agent dogsled-job` and shows the command as the agent name;
   - writes stdout and stderr to `~/.local/state/dogsled/jobs/<id>.log` and to the pane;
   - kills the command at `--timeout`, or when it prints nothing for `--idle-timeout`;
