@@ -1,6 +1,8 @@
 //! Wire types for `dogsled web`. The server builds them from its board; the portal UI reads
 //! them. This crate holds data only, so it compiles to wasm32 as well.
 
+pub mod agents;
+
 use serde::{Deserialize, Serialize};
 
 /// Everything the board shows, grouped by repository.

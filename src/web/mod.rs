@@ -6,6 +6,7 @@
 //! probed, and it is rebuilt every two seconds. The API pushes a new payload
 //! only when the board changed.
 
+pub mod agents;
 pub mod board;
 pub mod guard;
 pub mod token;
@@ -46,6 +47,8 @@ pub struct AppState {
     board: watch::Receiver<String>,
     /// The port the server listens on.
     port: u16,
+    /// The client the agent routes read and write through.
+    agents: Option<Arc<crate::herdr_socket::Client>>,
 }
 
 impl AppState {
@@ -80,6 +83,9 @@ async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<
     let state = AppState {
         board: receiver,
         port,
+        // Herdr's socket is not always there. The board API still serves, and
+        // the agent routes report the failure.
+        agents: crate::herdr_socket::Client::from_env().ok().map(Arc::new),
     };
     // The reader runs on a blocking thread, like the sidebar's reader. It reads
     // the cached state and never probes.
@@ -132,6 +138,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/board", get(board))
         .route("/api/stream", get(stream))
+        .merge(agents::router())
         .layer(axum::middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
@@ -258,6 +265,7 @@ mod tests {
         AppState {
             board: receiver,
             port: PORT,
+            agents: None,
         }
     }
 
