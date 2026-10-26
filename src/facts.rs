@@ -220,6 +220,7 @@ pub fn observe(shell: &dyn Shell, probe: &mut Probe, previous: Option<&Probe>) {
         .into_iter()
         .map(|(cwd, _, tree)| (cwd.to_owned(), tree))
         .collect();
+    let repositories = repositories(shell, probe, previous);
     for agent in &mut probe.agent_panes {
         agent.worktree = agent
             .cwd
@@ -227,7 +228,64 @@ pub fn observe(shell: &dyn Shell, probe: &mut Probe, previous: Option<&Probe>) {
             .and_then(|cwd| trees.get(cwd))
             .cloned()
             .flatten();
+        agent.repository = agent
+            .cwd
+            .as_ref()
+            .and_then(|cwd| repositories.get(cwd))
+            .cloned()
+            .flatten();
     }
+}
+
+/// Canonical identity of each distinct agent checkout's `origin`. A checkout with no `origin`,
+/// or one that is a local path, has none. A checkout whose identity is already known is not
+/// looked up again; a checkout without one is, because it may gain an `origin` later.
+fn repositories(
+    shell: &dyn Shell,
+    probe: &Probe,
+    previous: Option<&Probe>,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    // A checkout whose identity is already known costs no `git` call this tick.
+    let mut known: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    if let Some(previous) = previous {
+        for agent in &previous.agent_panes {
+            if let (Some(cwd), Some(repository)) = (&agent.cwd, &agent.repository) {
+                known.insert(cwd.as_str(), repository.as_str());
+            }
+        }
+    }
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut lookups: Vec<(&str, Option<String>)> = Vec::new();
+    for agent in &probe.agent_panes {
+        let Some(cwd) = agent.cwd.as_deref() else {
+            continue;
+        };
+        if !seen.insert(cwd) {
+            continue;
+        }
+        lookups.push((cwd, known.get(cwd).map(|r| (*r).to_owned())));
+    }
+    // The lookups run in parallel, one group of checkouts per core.
+    let chunk = lookups
+        .len()
+        .div_ceil(crate::probe::cores() as usize)
+        .max(1);
+    std::thread::scope(|scope| {
+        for group in lookups.chunks_mut(chunk) {
+            scope.spawn(move || {
+                for (cwd, repository) in group {
+                    if repository.is_none() {
+                        *repository = git(shell, cwd, &["remote", "get-url", "origin"])
+                            .and_then(|url| crate::checkout::identity(&url));
+                    }
+                }
+            });
+        }
+    });
+    lookups
+        .into_iter()
+        .map(|(cwd, repository)| (cwd.to_owned(), repository))
+        .collect()
 }
 
 fn transcript(agent: &Agent, old: Option<&Agent>) -> Session {
@@ -343,15 +401,93 @@ mod tests {
             "agent_panes":[{"pane":"a","state":"idle","cwd":dir},{"pane":"b","state":"working","cwd":dir}],
             "panes":[],"reservations":[]})).unwrap();
         observe(&shell, &mut probe, None);
-        assert_eq!(shell.calls.lock().unwrap().len(), 1);
+        // One worktree probe and one origin lookup, though two agents share the cwd.
+        assert_eq!(shell.calls.lock().unwrap().len(), 2);
         let previous = probe.clone();
         observe(&shell, &mut probe, Some(&previous));
         assert_eq!(
             shell.calls.lock().unwrap().len(),
-            2,
+            4,
             "even a non-worktree is checked again next tick"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agents_report_the_canonical_repository_of_their_origin() {
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "git -C /w/a remote get-url origin",
+            "git@GitHub.com:oisin-ee/dogsled.git\n",
+        );
+        shell.on("git -C /w/b remote get-url origin", "/srv/git/local.git\n");
+        let mut probe: Probe = serde_json::from_value(json!({"host":"local","label":"local","load1":0,"cores":4,
+            "memory":{"used_bytes":0,"total_bytes":0},"disk_free_percent":50,"agents":{"total":3,"by_status":{}},
+            "agent_panes":[{"pane":"a","state":"idle","cwd":"/w/a"},{"pane":"b","state":"idle","cwd":"/w/b"},{"pane":"c","state":"idle"}],
+            "panes":[],"reservations":[]})).unwrap();
+        observe(&shell, &mut probe, None);
+        let repos: Vec<_> = probe
+            .agent_panes
+            .iter()
+            .map(|a| a.repository.as_deref())
+            .collect();
+        assert_eq!(repos, [Some("github.com/oisin-ee/dogsled"), None, None]);
+    }
+
+    #[test]
+    fn a_linked_worktree_names_the_repository_of_its_origin() {
+        let shell = crate::shell::Fake::new();
+        // A linked worktree has its own path but the repository's `origin`.
+        shell.on(
+            "git -C /r/.worktrees/feature remote get-url origin",
+            "https://github.com/oisin-ee/dogsled.git\n",
+        );
+        let mut probe: Probe = serde_json::from_value(json!({"host":"local","label":"local","load1":0,"cores":4,
+            "memory":{"used_bytes":0,"total_bytes":0},"disk_free_percent":50,"agents":{"total":1,"by_status":{}},
+            "agent_panes":[{"pane":"a","state":"working","cwd":"/r/.worktrees/feature"}],
+            "panes":[],"reservations":[]})).unwrap();
+        observe(&shell, &mut probe, None);
+        assert_eq!(
+            probe.agent_panes[0].repository.as_deref(),
+            Some("github.com/oisin-ee/dogsled")
+        );
+    }
+
+    #[test]
+    fn a_known_repository_is_not_looked_up_again() {
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "git -C /w/a remote get-url origin",
+            "https://github.com/oisin-ee/dogsled.git\n",
+        );
+        let mut probe: Probe = serde_json::from_value(json!({"host":"local","label":"local","load1":0,"cores":4,
+            "memory":{"used_bytes":0,"total_bytes":0},"disk_free_percent":50,"agents":{"total":1,"by_status":{}},
+            "agent_panes":[{"pane":"a","state":"idle","cwd":"/w/a"}],
+            "panes":[],"reservations":[]})).unwrap();
+        observe(&shell, &mut probe, None);
+        let lookups = shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.contains("get-url"))
+            .count();
+        assert_eq!(lookups, 1);
+        let previous = probe.clone();
+        // The worktree probe runs again each tick; the origin lookup does not.
+        observe(&shell, &mut probe, Some(&previous));
+        let lookups = shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.contains("get-url"))
+            .count();
+        assert_eq!(lookups, 1, "the cached identity costs no second lookup");
+        assert_eq!(
+            probe.agent_panes[0].repository.as_deref(),
+            Some("github.com/oisin-ee/dogsled")
+        );
     }
 
     #[test]
