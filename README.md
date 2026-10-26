@@ -97,6 +97,8 @@ Without a branch, a remote non-repository `--cwd` must exist there.
 Repository directories map to the same path relative to home. A linked-worktree caller needs `--branch` to preserve its branch remotely.
 
 The pane runs `dogsled exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
+A job runs only from its own durable claim in `jobs/ID.json`. `exec` refuses a job whose record is missing, unreadable, for another command, already started, ended, or uncertain: no process, log, or pane exists for such a job.
+The launch publishes a non-executable intent before it allocates a pane, and an executable claim once the pane is known. An allocation that stops, or a dispatch that was never proved, stays uncertain and never runs again.
 If the pane output closes, capture continues to the log and preserves the child exit code.
 The atomic `jobs/ID.json` contains the command, directory, host, owner, exit code, signal, reason, and millisecond timestamps.
 After the job ends, `exec` saves this final record, reports completion, then closes its own pane and tab.

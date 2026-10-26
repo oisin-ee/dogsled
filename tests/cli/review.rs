@@ -14,6 +14,14 @@ fn closed_wrapper_stdout_preserves_full_log_and_child_exit() {
             .unwrap()
             .success()
     );
+    rig.claim(
+        "closed-output",
+        &[
+            "sh",
+            "-c",
+            "echo first; read -r ready < \"$RIG/continue\"; echo second; echo third >&2; exit 7",
+        ],
+    );
     let mut child = rig
         .cmd(&[
             "exec",

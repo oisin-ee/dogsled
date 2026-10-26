@@ -174,7 +174,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             cmd,
             timeout,
             idle_timeout,
-        } => return runtime::exec(&ledger, &shell, id, cmd, timeout, idle_timeout),
+        } => return runtime::exec(&ledger, &shell, &id, &cmd, timeout, idle_timeout),
         Command::Status {
             watch,
             interval,

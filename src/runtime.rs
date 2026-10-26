@@ -599,38 +599,33 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
 pub fn exec(
     ledger: &crate::ledger::Ledger,
     shell: &dyn crate::shell::Shell,
-    id: String,
-    cmd: Vec<String>,
+    id: &str,
+    cmd: &[String],
     timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
 ) -> Result<ExitCode> {
-    jobs::validate_id(&id)?;
-    let job = match jobs::store(ledger).read::<Job>(&format!("{id}.json"))? {
-        Some(job) => {
-            if job.cmd != cmd {
-                return Err(Error::Invalid(
-                    "exec command differs from launch record".into(),
-                ));
-            }
-            job
+    jobs::validate_id(id)?;
+    // A job runs only from its claim. A missing record is refused here, and so is an
+    // unreadable one: no process, no log, and no pane exist for a job nobody claimed.
+    let job = jobs::record(ledger, id)?
+        .ok_or_else(|| Error::Invalid(format!("job {id} has no claim to run")))?;
+    if job.cmd != cmd {
+        return Err(Error::Invalid(
+            "exec command differs from the launch record".into(),
+        ));
+    }
+    // The claim carries the job's options. A request that names different ones asks for a
+    // different job, and is refused.
+    for (requested, claimed) in [
+        (timeout_ms, job.timeout_ms),
+        (idle_timeout_ms, job.idle_timeout_ms),
+    ] {
+        if requested.is_some() && requested != claimed {
+            return Err(Error::Invalid(
+                "exec options differ from the launch record".into(),
+            ));
         }
-        None => Job {
-            id,
-            cmd,
-            cwd: std::env::current_dir()?.display().to_string(),
-            host: "local".into(),
-            owner: std::env::var("HERDR_PANE_ID").unwrap_or_default(),
-            pane: std::env::var("HERDR_PANE_ID").unwrap_or_default(),
-            state: "pending".into(),
-            exit: None,
-            signal: None,
-            reason: None,
-            started_ms: None,
-            ended_ms: None,
-            timeout_ms,
-            idle_timeout_ms,
-        },
-    };
+    }
     Ok(ExitCode::from(jobs::exec(ledger, shell, job)? as u8))
 }
 

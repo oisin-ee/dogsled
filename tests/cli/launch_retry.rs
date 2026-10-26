@@ -1111,6 +1111,155 @@ fn interrupted_job_admission_preserves_running_record_without_relaunch() {
     assert!(!log.contains("pane run"), "{log}");
 }
 
+/// The host launch request for a job, as the peer receives it.
+fn job_launch_request(rig: &Rig, id: &str, cmd: &[&str]) -> Value {
+    json!({
+        "id": id,
+        "action": {"type":"job","cmd":cmd,"timeout_ms":null,"idle_timeout_ms":null},
+        "host": "local",
+        "cwd": rig.dir.join("home"),
+        "pane": Value::Null,
+        "workspace": "w1",
+        "workspace_name": "caller",
+        "owner": "w1:p1",
+    })
+}
+
+/// A host replay whose receipt is missing must not allocate a second pane and must not
+/// dispatch the command again when the job already holds a claim.
+#[test]
+fn a_host_replay_without_a_receipt_does_not_dispatch_an_existing_claim_again() {
+    let rig = Rig::new("replay-existing-claim");
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
+        "timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/replayed.json", &job);
+    let request = job_launch_request(&rig, "replayed", &["true"]);
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["pane"], "w2:p1", "{result}");
+    let log = rig.log("herdr.log");
+    // No pane was allocated, and the command was never dispatched again.
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
+    // The claim keeps its own pane and its own state.
+    assert_eq!(rig.read("state/jobs/replayed.json"), job);
+}
+
+/// A job whose dispatch outcome was never proved stays uncertain. No replay allocates a
+/// pane, dispatches the command, or invents an end.
+#[test]
+fn a_host_replay_of_an_uncertain_claim_refuses_and_keeps_the_uncertainty() {
+    let rig = Rig::new("replay-uncertain-claim");
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    let job = json!({"id":"unproved","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"uncertain","exit":null,"signal":null,"reason":"dispatch outcome unknown",
+        "started_ms":null,"ended_ms":null,"timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/unproved.json", &job);
+    let request = job_launch_request(&rig, "unproved", &["true"]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("unresolved claim"),
+        "{error}"
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
+    // The uncertainty is kept: nothing invents an end or a retry.
+    assert_eq!(rig.read("state/jobs/unproved.json"), job);
+}
+
+/// A failed `pane run` leaves the job uncertain, and a wrapper that already started or ended
+/// keeps its own record. Neither order overwrites the other.
+#[test]
+fn a_failed_dispatch_keeps_a_running_or_terminal_wrapper_record() {
+    for (name, state, started, ended) in [
+        ("running", "working", json!(123), Value::Null),
+        ("terminal", "idle", json!(123), json!(124)),
+    ] {
+        let rig = Rig::new(&format!("dispatch-{name}"));
+        // The wrapper publishes its own record while the dispatch fails. The order is forced
+        // by the fake Herdr, so the test needs no sleep.
+        let wrapper = json!({"id":"dispatched","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local",
+            "owner":"w1:p1","pane":"w2:p1","state":state,"exit":if ended.is_null() {Value::Null} else {json!(0)},
+            "signal":null,"reason":null,"started_ms":started,"ended_ms":ended,
+            "timeout_ms":null,"idle_timeout_ms":null});
+        rig.put("wrapper.json", &wrapper);
+        rig.script(
+            "herdr",
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
+  'worktree list --cwd'*) cat "$RIG/worktrees.json" ;;
+  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
+  'pane run'*)
+    mkdir -p "$DOGSLED_STATE/jobs"
+    cp "$RIG/wrapper.json" "$DOGSLED_STATE/jobs/dispatched.json"
+    echo 'pane refused' >&2; exit 1 ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#,
+        );
+        let request = job_launch_request(&rig, "dispatched", &["true"]);
+        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        assert_eq!(code, 2, "{error}");
+        // The wrapper's own record survives the transport failure.
+        let after = rig.read("state/jobs/dispatched.json");
+        assert_eq!(after["started_ms"], started, "{after}");
+        assert_eq!(after["ended_ms"], ended, "{after}");
+        assert_eq!(after["state"], state, "{after}");
+    }
+}
+
+/// A dispatch that failed with a pending claim and no wrapper record stays uncertain. It does
+/// not end, and it does not become executable again.
+#[test]
+fn a_failed_dispatch_without_a_wrapper_record_stays_uncertain() {
+    let rig = Rig::new("dispatch-uncertain");
+    rig.script(
+        "herdr",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+case "$*" in
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
+  'worktree list --cwd'*) cat "$RIG/worktrees.json" ;;
+  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
+  'pane run'*) echo 'pane refused' >&2; exit 1 ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#,
+    );
+    let request = job_launch_request(&rig, "unproved", &["true"]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    let job = rig.read("state/jobs/unproved.json");
+    assert_eq!(job["state"], "uncertain", "{job}");
+    // Nothing invents an end, and nothing is executable again.
+    assert!(job["ended_ms"].is_null(), "{job}");
+    assert!(job["exit"].is_null(), "{job}");
+    assert!(
+        job["reason"].as_str().unwrap().contains("pane refused"),
+        "{job}"
+    );
+    // A second launch refuses the uncertain claim.
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("unresolved claim"),
+        "{error}"
+    );
+    assert_eq!(rig.log("herdr.log").matches("pane run").count(), 1);
+}
+
 #[test]
 fn first_host_launch_refuses_a_terminal_replaced_after_preparation() {
     let rig = Rig::new("replaced-before-first-launch");

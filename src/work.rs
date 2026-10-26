@@ -302,7 +302,7 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
     })
 }
 
-pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {
+pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, _now: u64) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
     if launch.unit.is_some() && !matches!(launch.action, Action::Agent { .. }) {
         return Err(crate::unit_transport::conflict(
@@ -320,7 +320,6 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
         if let Some(value) = receipts.read::<Value>(&file)? {
             return Ok(value);
         }
-        let (pane, _) = pane(shell, launch)?;
         let result = match &launch.action {
             Action::Job {
                 cmd,
@@ -333,8 +332,8 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                     cwd: launch.cwd.clone(),
                     host: launch.host.clone(),
                     owner: launch.owner.clone(),
-                    pane: pane.clone(),
-                    state: "pending".into(),
+                    pane: String::new(),
+                    state: jobs::CLAIMING.into(),
                     exit: None,
                     signal: None,
                     reason: None,
@@ -343,28 +342,60 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
                     timeout_ms: *timeout_ms,
                     idle_timeout_ms: *idle_timeout_ms,
                 };
-                jobs::save(ledger, &job)?;
-                let executable = std::env::current_exe()?.display().to_string();
-                let command = format!(
-                    "DOGSLED_STATE={} {} exec {} -- {}",
-                    quote(&ledger.dir.display().to_string()),
-                    quote(&executable),
-                    quote(&launch.id),
-                    cmd.iter().map(|c| quote(c)).collect::<Vec<_>>().join(" ")
-                );
-                if let Err(error) = shell.run_ok(
-                    "herdr",
-                    &["pane".into(), "run".into(), pane.clone(), command],
-                ) {
-                    let mut failed = job;
-                    failed.exit = Some(2);
-                    failed.reason = Some(error.to_string());
-                    failed.state = "blocked".into();
-                    failed.ended_ms = Some(now);
-                    jobs::save(ledger, &failed)?;
-                    return Err(error);
+                // The job's ownership is read before any pane side effect. A job that already
+                // has an owner keeps it: this launch never takes it over, never allocates a
+                // second pane, and never dispatches the command again.
+                let existing = match jobs::ownership(ledger, &launch.id)? {
+                    jobs::Ownership::Unclaimed => None,
+                    jobs::Ownership::Uncertain(held) => {
+                        return Err(Error::Invalid(format!(
+                            "job {} has an unresolved claim; inspect that host before resubmitting: {}",
+                            launch.id,
+                            held.reason.unwrap_or_else(|| "outcome unknown".into())
+                        )));
+                    }
+                    jobs::Ownership::Pending(held)
+                    | jobs::Ownership::Started(held)
+                    | jobs::Ownership::Terminal(held) => Some(held),
+                };
+                if let Some(held) = existing {
+                    // The claim is the evidence of the pane. Its own wrapper may still start
+                    // it, so the claim stays executable: this launch replays the saved result
+                    // without a second pane and without a second dispatch.
+                    json!({"id":launch.id,"host":launch.host,"pane":held.pane})
+                } else {
+                    // The intent is published before the pane side effect. It is not
+                    // executable: an allocation that stops here stays uncertain, and no other
+                    // allocation may take the job over.
+                    jobs::publish_intent(ledger, &job)?;
+                    let (pane, _) = pane(shell, launch)?;
+                    // The pane is known, so the claim becomes executable. The wrapper reads it
+                    // before it runs anything.
+                    let mut claim = job.clone();
+                    claim.pane.clone_from(&pane);
+                    claim.state = jobs::PENDING.into();
+                    jobs::publish_claim(ledger, &claim)?;
+                    let executable = std::env::current_exe()?.display().to_string();
+                    let command = format!(
+                        "DOGSLED_STATE={} {} exec {} -- {}",
+                        quote(&ledger.dir.display().to_string()),
+                        quote(&executable),
+                        quote(&launch.id),
+                        cmd.iter().map(|c| quote(c)).collect::<Vec<_>>().join(" ")
+                    );
+                    if let Err(error) = shell.run_ok(
+                        "herdr",
+                        &["pane".into(), "run".into(), pane.clone(), command],
+                    ) {
+                        // The dispatch failed. The wrapper's own record is the evidence: a
+                        // wrapper that already started or ended keeps its state, and nothing
+                        // overwrites it with the pending copy. A startup that was never proved
+                        // stays uncertain, so no later execution and no safe retry is invented.
+                        jobs::uncertain(ledger, &claim, error.to_string())?;
+                        return Err(error);
+                    }
+                    json!({"id":launch.id,"host":launch.host,"pane":pane})
                 }
-                json!({"id":launch.id,"host":launch.host,"pane":pane})
             }
             Action::Agent { .. } => {
                 return Err(Error::Invalid(

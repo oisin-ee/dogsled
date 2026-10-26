@@ -291,6 +291,172 @@ fn capture(ledger: &Ledger, job: &Job) -> Result<(std::process::ExitStatus, Opti
     result
 }
 
+/// A job record that has not started: the intent published before its pane is known. It is
+/// not executable, and no wrapper may run a job from it.
+pub const CLAIMING: &str = "claiming";
+/// An executable claim: the pane is known, and the command may run.
+pub const PENDING: &str = "pending";
+/// The wrapper owns the job and runs it.
+pub const WORKING: &str = "working";
+/// A claim whose dispatch outcome could not be proved.
+pub const UNCERTAIN: &str = "uncertain";
+
+/// What a job's durable record says about who may run it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ownership {
+    /// No record: nobody claimed this job.
+    Unclaimed,
+    /// An executable claim. The wrapper may run it.
+    Pending(Job),
+    /// The wrapper owns it and runs it.
+    Started(Job),
+    /// It ended.
+    Terminal(Job),
+    /// It holds an ownership that no execution may take over: an allocation that stopped
+    /// before its pane was known, or a dispatch whose outcome was never proved.
+    Uncertain(Job),
+}
+
+/// The durable record of a job. A missing record is `None`; an unreadable one is an error,
+/// so a caller never mistakes a corrupt record for an absent one.
+pub fn record(ledger: &Ledger, id: &str) -> Result<Option<Job>> {
+    validate_id(id)?;
+    store(ledger).read(&format!("{id}.json"))
+}
+
+/// What the record says about who may run the job.
+pub fn ownership(ledger: &Ledger, id: &str) -> Result<Ownership> {
+    let Some(job) = record(ledger, id)? else {
+        return Ok(Ownership::Unclaimed);
+    };
+    Ok(if job.started_ms.is_some() {
+        Ownership::Started(job)
+    } else if job.ended_ms.is_some() {
+        Ownership::Terminal(job)
+    } else if job.state == PENDING {
+        Ownership::Pending(job)
+    } else {
+        // Not executable: an intent without a pane, or a dispatch that was never proved.
+        Ownership::Uncertain(job)
+    })
+}
+
+/// Publish the durable intent for a launch that is about to allocate a pane. The intent is
+/// not executable. It is written before the pane side effect, so an allocation that stops
+/// here stays uncertain and cannot authorize another allocation.
+pub fn publish_intent(ledger: &Ledger, job: &Job) -> Result<()> {
+    validate_id(&job.id)?;
+    store(ledger).with_lock(&job.id, || {
+        if !matches!(ownership(ledger, &job.id)?, Ownership::Unclaimed) {
+            return Err(Error::Invalid(format!(
+                "job {} already has an owner",
+                job.id
+            )));
+        }
+        let mut intent = job.clone();
+        intent.state = CLAIMING.into();
+        intent.pane = String::new();
+        intent.exit = None;
+        intent.signal = None;
+        intent.reason = None;
+        intent.started_ms = None;
+        intent.ended_ms = None;
+        save(ledger, &intent)
+    })
+}
+
+/// Publish the executable claim for `job`, once its pane is known. The intent must still be
+/// the record's own: another owner never takes a job over.
+pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
+    validate_id(&job.id)?;
+    store(ledger).with_lock(&job.id, || {
+        match ownership(ledger, &job.id)? {
+            Ownership::Uncertain(existing) if existing.state == CLAIMING => {}
+            _ => {
+                return Err(Error::Invalid(format!(
+                    "job {} already has an owner",
+                    job.id
+                )));
+            }
+        }
+        let mut claim = job.clone();
+        claim.state = PENDING.into();
+        claim.exit = None;
+        claim.signal = None;
+        claim.reason = None;
+        claim.started_ms = None;
+        claim.ended_ms = None;
+        save(ledger, &claim)
+    })
+}
+
+/// Keep the uncertainty of a dispatch that was not proved. A record the wrapper started or
+/// ended is its evidence, and is never overwritten. Nothing here invents an end or a safe
+/// retry: the job stays unproved until the host says otherwise.
+pub fn uncertain(ledger: &Ledger, job: &Job, reason: String) -> Result<()> {
+    validate_id(&job.id)?;
+    store(ledger).with_lock(&job.id, || {
+        let Some(current) = record(ledger, &job.id)? else {
+            return Ok(());
+        };
+        if current.started_ms.is_some() || current.ended_ms.is_some() {
+            return Ok(());
+        }
+        if current.state != PENDING {
+            return Ok(());
+        }
+        let mut held = current;
+        held.state = UNCERTAIN.into();
+        held.reason = Some(reason);
+        held.exit = None;
+        held.signal = None;
+        held.ended_ms = None;
+        save(ledger, &held)
+    })
+}
+
+/// The exact claim that authorizes this wrapper to run `job`. A record that is missing,
+/// unreadable, for another command, already started, ended, or uncertain is refused here,
+/// before any process, log, or pane exists.
+fn pending_claim(ledger: &Ledger, job: &Job) -> Result<Job> {
+    let Some(claimed) = record(ledger, &job.id)? else {
+        return Err(Error::Invalid(format!(
+            "job {} has no claim to run",
+            job.id
+        )));
+    };
+    if claimed.cmd != job.cmd {
+        return Err(Error::Invalid(
+            "exec command differs from the claimed command".into(),
+        ));
+    }
+    if claimed.started_ms.is_some() {
+        return Err(Error::Invalid("job already started".into()));
+    }
+    if claimed.ended_ms.is_some() {
+        return Err(Error::Invalid("job already ended".into()));
+    }
+    if claimed.state != PENDING {
+        return Err(Error::Invalid(format!(
+            "job {} claim is not executable",
+            job.id
+        )));
+    }
+    Ok(claimed)
+}
+
+/// Mark the claim as started and return the running record. The short per-job record lock
+/// holds this publication, and it is released before any capture.
+fn start(ledger: &Ledger, job: &Job) -> Result<Job> {
+    store(ledger).with_lock(&job.id, || {
+        let mut running = pending_claim(ledger, job)?;
+        running.started_ms = Some(now_ms());
+        running.state = WORKING.into();
+        save(ledger, &running)?;
+        Ok(running)
+    })
+}
+
 pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
     validate_id(&job.id)?;
     if job.cmd.is_empty() {
@@ -298,13 +464,12 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, mut job: Job) -> Result<i32> {
     }
     // Exactly one wrapper may own an id for its entire lifetime.
     store(ledger).with_lock(&format!("{}-exec", job.id), || {
-        if get(ledger, &job.id).is_ok_and(|j| j.started_ms.is_some()) {
-            return Err(Error::Invalid("job already started".into()));
-        }
-        job.started_ms = Some(now_ms());
-        job.state = "working".into();
-        save(ledger, &job)?;
-        if let Err(error) = report(shell, &job, "working", None) {
+        // The claim is reloaded and validated under this lock, so a claim that a replay or
+        // another wrapper changed cannot start a job. Nothing exists yet: no process, no log,
+        // no pane.
+        pending_claim(ledger, &job)?;
+        job = start(ledger, &job)?;
+        if let Err(error) = report(shell, &job, WORKING, None) {
             eprintln!("dogsled pane report: {error}");
         }
         let outcome = capture(ledger, &job);

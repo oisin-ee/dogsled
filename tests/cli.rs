@@ -260,6 +260,44 @@ esac
     fn read(&self, path: &str) -> Value {
         serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap()
     }
+    /// A job claim that a wrapper may run: the command, the options, and a pane.
+    /// A wrapper runs only from a claim like this one.
+    fn claim(&self, id: &str, cmd: &[&str]) {
+        self.claim_with(id, cmd, &json!(null), &json!(null), "w1:p1");
+    }
+    /// A claim with the job's own timeout options, so a request that names different ones
+    /// asks for a different job.
+    fn claim_with(
+        &self,
+        id: &str,
+        cmd: &[&str],
+        timeout_ms: &Value,
+        idle_timeout_ms: &Value,
+        pane: &str,
+    ) {
+        fs::create_dir_all(self.dir.join("state/jobs")).unwrap();
+        let job = json!({
+            "id": id,
+            "cmd": cmd,
+            "cwd": self.dir.join("home").display().to_string(),
+            "host": "local",
+            "owner": "w1:p1",
+            "pane": pane,
+            "state": "pending",
+            "exit": Value::Null,
+            "signal": Value::Null,
+            "reason": Value::Null,
+            "started_ms": Value::Null,
+            "ended_ms": Value::Null,
+            "timeout_ms": timeout_ms,
+            "idle_timeout_ms": idle_timeout_ms,
+        });
+        fs::write(
+            self.dir.join(format!("state/jobs/{id}.json")),
+            serde_json::to_vec_pretty(&job).unwrap(),
+        )
+        .unwrap();
+    }
     fn log(&self, path: &str) -> String {
         fs::read_to_string(self.dir.join(path)).unwrap_or_default()
     }

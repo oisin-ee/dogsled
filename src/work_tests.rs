@@ -332,3 +332,54 @@ fn submit_waits_behind_pending_tickets_even_with_room() {
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
+
+/// A job's durable record says who may run it. A missing record is nobody's, a pending record
+/// is the wrapper's to run, and a record that started, ended, or stopped uncertainly is nobody's
+/// to take over.
+#[test]
+fn a_job_record_says_who_may_run_the_job() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let job = crate::jobs::Job {
+        id: "claimed".into(),
+        cmd: vec!["true".into()],
+        cwd: "/".into(),
+        host: "local".into(),
+        owner: "owner".into(),
+        pane: "pane".into(),
+        state: crate::jobs::PENDING.into(),
+        exit: None,
+        signal: None,
+        reason: None,
+        started_ms: None,
+        ended_ms: None,
+        timeout_ms: None,
+        idle_timeout_ms: None,
+    };
+    assert!(matches!(
+        crate::jobs::ownership(&ledger, "claimed").unwrap(),
+        crate::jobs::Ownership::Unclaimed
+    ));
+    // The intent is published before the pane side effect, and it is not executable.
+    crate::jobs::publish_intent(&ledger, &job).unwrap();
+    let held = crate::jobs::ownership(&ledger, "claimed").unwrap();
+    assert!(matches!(
+        held,
+        crate::jobs::Ownership::Uncertain(ref held) if held.state == crate::jobs::CLAIMING
+    ));
+    // A second intent never takes the job over.
+    assert!(crate::jobs::publish_intent(&ledger, &job).is_err());
+    // The claim becomes executable once its pane is known.
+    crate::jobs::publish_claim(&ledger, &job).unwrap();
+    assert!(matches!(
+        crate::jobs::ownership(&ledger, "claimed").unwrap(),
+        crate::jobs::Ownership::Pending(_)
+    ));
+    // An uncertain claim authorizes nothing, and a claim is never overwritten.
+    crate::jobs::uncertain(&ledger, &job, "dispatch outcome unknown".into()).unwrap();
+    assert!(matches!(
+        crate::jobs::ownership(&ledger, "claimed").unwrap(),
+        crate::jobs::Ownership::Uncertain(ref held) if held.state == crate::jobs::UNCERTAIN
+    ));
+    assert!(crate::jobs::publish_claim(&ledger, &job).is_err());
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
