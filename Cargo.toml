@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "portal-types"]
+members = [".", "portal-types", "web"]
 
 [package]
 name = "dogsled"

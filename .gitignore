@@ -8,3 +8,4 @@
 .moon/cache/
 .moon/docker/
 .moon/hooks/
+/web/public

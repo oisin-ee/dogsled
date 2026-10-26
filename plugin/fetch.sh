@@ -29,6 +29,11 @@ build() {
     say "cargo is not on PATH. Install Rust (https://rustup.rs) and install the plugin again."
     exit 1
   fi
+  if ! command -v dx >/dev/null 2>&1; then
+    say "dx is not on PATH. Install it with 'cargo install dioxus-cli --version 0.7.10 --locked' and install the plugin again."
+    exit 1
+  fi
+  (cd "$root/web" && dx bundle --web --release)
   (cd "$root" && cargo build --release --locked --bin dogsled)
   install_file "$root/target/release/dogsled" "built from source"
   exit 0

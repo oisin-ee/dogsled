@@ -37,6 +37,27 @@ tasks:
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+  web-lint:
+    command: cargo clippy -p web --target wasm32-unknown-unknown -- -D warnings
+    description: Run Clippy on the web portal UI for the WASM target.
+    inputs:
+      - "web/**/*"
+      - "portal-types/**/*"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clippy.toml"
+  web-build:
+    script: cd web && dx bundle --web --release
+    description: Bundle the web portal UI into web/public with dx.
+    inputs:
+      - "web/**/*"
+      - "portal-types/**/*"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+    outputs:
+      - "web/public"
   typecheck:
     command: npm run --silent typecheck
     description: Typecheck the Pi extension.

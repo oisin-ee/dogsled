@@ -36,9 +36,15 @@ jobs:
       # would also install Rust natively from rust-toolchain.toml, and its shim
       # would shadow the rustup toolchain below.
       - run: proto install moon
-      # rust-toolchain.toml pins the channel and components.
+      # dx bundles the web portal UI.
+      - run: proto install cargo:dioxus-cli
+      # rust-toolchain.toml pins the channel, components and the wasm target.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - name: Web lint
+        run: moon run :web-lint
+      - name: Web build
+        run: moon run :web-build
       - name: Format
         run: moon run :fmt-check
       - name: Lint

@@ -1,0 +1,11 @@
+[application]
+# `dx bundle --web` writes index.html, assets/ and wasm/ here. A fixed folder
+# lets the server embed the bundle later.
+out_dir = "public"
+
+[web.app]
+title = "Dogsled"
+
+# `dx serve` forwards the API to a running `dogsled web`.
+[[web.proxy]]
+backend = "http://127.0.0.1:7465/api/"
