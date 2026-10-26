@@ -175,6 +175,12 @@ Before metadata deletion, J1 requires an existing matching pending job at wrappe
 
 Deletion and execution share the appropriate job locks. Validate timestamp ordering and prevent clock rollback from reopening expired requests. Retention must not delete lock files that another process can hold. Legacy records remain readable, but missing validity evidence never becomes permission to execute.
 
+**J2 decisions (2026-10-26; the form timed out with the recommended options selected, so they hold until the user changes them):**
+
+- **Receipt replay after expiry:** a correlated receipt replay stays read-only and allowed. It returns the saved result and never dispatches. Every path that can start new execution refuses an expired request.
+- **Clock bootstrap:** each host keeps a persistent high-water clock. If the file is missing, create it automatically. Start it at the later of the current clock and the newest timestamp in the host's own records. A corrupt or unwritable clock refuses execution.
+- **Future skew:** allow a creation time up to 5 minutes ahead of the host wall clock. Refuse anything further ahead. Never clamp or rewrite the creation time.
+
 For remote jobs, authoritative execution-host terminal evidence starts retention. No owner read acknowledgement is required. After expiry, owner reads report an expired result rather than reviving the job.
 
 Running jobs never expire. Age never ends ownership; it only removes records that are already finished.
