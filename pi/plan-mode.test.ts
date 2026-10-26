@@ -162,6 +162,7 @@ test("submit_plan posts the plan and answers at once", async t => {
 	const post = p.calls.find(call => call.method === "POST" && call.path === "/api/reviews");
 	assert.ok(post);
 	assert.equal(post.headers["authorization"], "Bearer secret-token");
+	assert.equal(post.headers["origin"], undefined);
 	assert.deepEqual(JSON.parse(post.body), { path: file, content: "# Plan\n\nStep one.", pane: process.env["HERDR_PANE_ID"] ?? "", session: "session-1", cwd: "/repo" });
 	mode.stopWatching();
 });

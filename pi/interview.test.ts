@@ -10,7 +10,7 @@ import { PortalClient } from "./portal-client.ts";
 
 interface Call { method: string; path: string; headers: Record<string, string | string[] | undefined>; body: string }
 
-const ANSWER = { responses: [{ id: "q1", value: "B" }], questions: [{ id: "q1", type: "single", question: "Which one?" }] };
+const ANSWER = { id: "q-1", responses: [{ id: "q1", value: "B" }] };
 
 /** A portal that answers the interview routes, so the tool can be tested over real HTTP. */
 function portal(answer: (poll: number) => { status: number; body?: unknown }) {
@@ -61,6 +61,7 @@ function environment(port: number): NodeJS.ProcessEnv {
 }
 
 const questions = JSON.stringify({ title: "Choice", questions: [{ id: "q1", type: "single", question: "Which one?", options: ["A", "B"] }] });
+const questionsFile = { title: "Choice", questions: [{ id: "q1", type: "single", question: "Which one?", options: ["A", "B"] }] };
 
 /** The pane the tool reports to the portal. */
 function withPane(t: { after: (fn: () => void) => void }): void {
@@ -98,11 +99,58 @@ test("the interview posts the questions with the bearer token", async t => {
 	assert.ok(post);
 	assert.equal(post.path, "/api/questions");
 	assert.equal(post.headers["authorization"], "Bearer secret-token");
-	assert.deepEqual(JSON.parse(post.body), { questions, pane: "w1:p1", session: "session-1", cwd: "/repo" });
+	assert.equal(post.headers["origin"], undefined);
+	assert.deepEqual(JSON.parse(post.body), { questions: questionsFile, pane: "w1:p1", session: "session-1", cwd: "/repo" });
 });
 
-test("the answers are named from the questions the model sent when the portal sends none", async t => {
+test("the questions are read from a file and posted as the parsed object", async t => {
+	const p = portal(() => ({ status: 200, body: ANSWER }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-questions-"));
+	const file = join(dir, "questions.json");
+	writeFileSync(file, questions);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	await tool.run({ questions: file }, context(), undefined);
+	const post = p.calls.find(call => call.method === "POST");
+	assert.ok(post);
+	assert.deepEqual(JSON.parse(post.body).questions, questionsFile);
+});
+
+test("a questions path is read relative to the working directory", async t => {
+	const p = portal(() => ({ status: 200, body: ANSWER }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-questions-"));
+	writeFileSync(join(dir, "questions.json"), questions);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const ctx = { ...context(), cwd: dir } as unknown as ExtensionToolContext;
+	await tool.run({ questions: "questions.json" }, ctx, undefined);
+	const post = p.calls.find(call => call.method === "POST");
+	assert.ok(post);
+	assert.deepEqual(JSON.parse(post.body).questions, questionsFile);
+});
+
+test("a broken questions file is an error before any call to the portal", async t => {
+	const p = portal(() => ({ status: 200, body: ANSWER }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	await assert.rejects(() => tool.run({ questions: "/repo/missing-questions.json" }, context(), undefined), /Questions file not found/);
+	await assert.rejects(() => tool.run({ questions: "{not json" }, context(), undefined), /Invalid questions JSON/);
+	assert.equal(p.calls.length, 0);
+});
+
+test("an answer in another shape is an error that names the shape it expected", async t => {
 	const p = portal(() => ({ status: 200, body: { answers: [{ id: "q1", value: "A" }] } }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	await assert.rejects(() => tool.run({ questions }, context(), undefined), /unexpected answer shape/);
+});
+
+test("the answers are named from the questions the model sent", async t => {
+	const p = portal(() => ({ status: 200, body: { id: "q-1", responses: [{ id: "q1", value: "A" }] } }));
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
 	const tool = new InterviewTool(new PortalClient(environment(port)));
@@ -160,7 +208,7 @@ test("an unreachable portal names the server that is missing", async () => {
 
 test("the questions come from inline JSON or from a file", () => {
 	const inline = loadQuestions(questions, "/repo");
-	assert.deepEqual(inline, [{ id: "q1", type: "single", question: "Which one?" }]);
+	assert.deepEqual(inline, questionsFile);
 	const dir = mkdtempSync(join(tmpdir(), "dogsled-questions-"));
 	const file = join(dir, "questions.json");
 	writeFileSync(file, questions);

@@ -16,7 +16,7 @@ const interviewParameters = {
 	type: "object",
 	required: ["questions"],
 	properties: {
-		questions: { type: "string", description: "Inline JSON string with questions, or path to a questions JSON / saved interview HTML file" },
+		questions: { type: "string", description: "Inline JSON string with questions, or path to a questions JSON file" },
 		timeout: { type: "number", description: "Seconds before auto-timeout", default: 600 },
 		verbose: { type: "boolean", description: "Enable debug logging", default: false },
 		async: { type: "boolean", description: "Return immediately instead of waiting for the user. The answer arrives later as a message tagged with the returned interview ID; keep working and do not poll.", default: false },
@@ -75,6 +75,9 @@ export interface Question {
 	question: string;
 }
 
+/** A questions file, parsed. The portal renders it as a form. */
+export type QuestionsFile = Record<string, unknown>;
+
 function isChoiceValue(value: unknown): value is { option: string; note?: string } {
 	return typeof value === "object" && value !== null && !Array.isArray(value) && typeof (value as { option?: unknown }).option === "string";
 }
@@ -127,20 +130,69 @@ function formatAnsweredResponses(responses: ResponseItem[], questions: Question[
 	return `${summary}\n\nStructured response data:\n\n\`\`\`json\n${JSON.stringify(answered, null, 2)}\n\`\`\``;
 }
 
-/** The questions of a form, read from the inline JSON or from a questions file. */
-export function loadQuestions(input: string, cwd: string): Question[] {
+/**
+ * The questions of a form, read from the inline JSON or from a questions file.
+ * The model may pass either form, as pi-interview does. The file is read
+ * relative to the working directory, and a broken file is an error before any
+ * call to the portal.
+ */
+export function loadQuestions(input: string, cwd: string): QuestionsFile {
 	const trimmed = input.trimStart();
 	const inline = trimmed.startsWith("{") || /^`{3,}(?:json|jsonc)?\s*\n?\s*\{/i.test(trimmed);
-	const text = inline ? trimmed : readFileSync(resolveQuestionPath(input, cwd), "utf8");
-	let data: unknown;
-	try { data = JSON.parse(text); }
+	const text = inline ? trimmed : readQuestionsFile(input, cwd);
+	const data = parseQuestionsJson(text);
+	validateQuestionsFile(data);
+	return data;
+}
+
+/** The questions of a form, in the order the form asks them. */
+function formQuestions(file: QuestionsFile): Question[] {
+	const list = file["questions"];
+	if (!Array.isArray(list)) return [];
+	return list.flatMap(entry => {
+		const question = (entry ?? {}) as Partial<Question>;
+		if (typeof question.id !== "string" || typeof question.question !== "string") return [];
+		return [{ id: question.id, type: questionType(question.type), question: question.question }];
+	});
+}
+
+/** The type of a question, when it is one the form knows. */
+function questionType(value: unknown): Question["type"] {
+	return value === "single" || value === "multi" || value === "text" || value === "image" || value === "info" ? value : "text";
+}
+
+/** Read the questions file, or say that it is not there. */
+function readQuestionsFile(input: string, cwd: string): string {
+	const path = resolveQuestionPath(input, cwd);
+	try { return readFileSync(path, "utf8"); }
+	catch (error) {
+		const code = (error as { code?: string }).code;
+		if (code === "ENOENT") throw new Error(`Questions file not found: ${path}`);
+		throw new Error(`Cannot read the questions file ${path}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/** The JSON text of a questions file, without the code fence a model may wrap it in. */
+function questionsJsonText(text: string): string {
+	const json = text.trim();
+	const fence = json.match(/^`{3,}(?:json|jsonc)?\s*\n([\s\S]*?)\n\s*`{3,}\s*$/i);
+	return (fence ? (fence[1] ?? "") : json).trim();
+}
+
+/** The parsed questions, or an error that names the problem. */
+function parseQuestionsJson(text: string): unknown {
+	try { return JSON.parse(questionsJsonText(text)); }
 	catch (error) { throw new Error(`Invalid questions JSON: ${error instanceof Error ? error.message : String(error)}`); }
-	const questions = (data as { questions?: unknown }).questions;
-	if (!Array.isArray(questions)) throw new Error("Invalid questions JSON: no questions array");
-	return questions.map((question, index) => {
-		const q = question as Partial<Question>;
-		if (typeof q?.id !== "string" || typeof q?.question !== "string") throw new Error(`Invalid questions JSON: question ${index} has no id or question`);
-		return { id: q.id, type: q.type ?? "text", question: q.question };
+}
+
+/** The parsed questions must be a file with a questions array. */
+function validateQuestionsFile(data: unknown): asserts data is QuestionsFile {
+	if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid questions JSON: no questions object");
+	const list = (data as { questions?: unknown }).questions;
+	if (!Array.isArray(list)) throw new Error("Invalid questions JSON: no questions array");
+	list.forEach((entry, index) => {
+		const question = (entry ?? {}) as Partial<Question>;
+		if (typeof question.id !== "string" || typeof question.question !== "string") throw new Error(`Invalid questions JSON: question ${index} has no id or question`);
 	});
 }
 
@@ -150,17 +202,25 @@ function resolveQuestionPath(input: string, cwd: string): string {
 }
 
 /**
- * The answers the portal returns, and the questions they belong to. The portal
- * may answer with a bare list, with `answers`, or with `responses`; the
- * questions are optional, because the tool can name the answers from the
- * questions the model sent.
+ * The answers the portal returns. The contract is one body: the id of the
+ * form, and the responses of the form. The questions are not part of it, so
+ * the tool names the answers from the questions the model sent. Any other
+ * body is an error that names the shape it expected.
  */
-function parseAnswers(value: unknown): { responses: ResponseItem[]; questions: Question[] } {
-	const payload = value as { answers?: unknown; responses?: unknown; questions?: unknown } | null;
-	const list = Array.isArray(value) ? value : Array.isArray(payload?.answers) ? payload.answers : payload?.responses;
-	const responses = Array.isArray(list) ? list as ResponseItem[] : [];
-	const questions = Array.isArray(payload?.questions) ? payload.questions as Question[] : [];
-	return { responses: responses.filter(response => response && typeof response.id === "string"), questions };
+function parseAnswers(value: unknown): ResponseItem[] {
+	const payload = value as { id?: unknown; responses?: unknown } | null;
+	if (!payload || typeof payload !== "object" || Array.isArray(payload) || typeof payload.id !== "string" || !Array.isArray(payload.responses)) {
+		throw new Error('dogsled web returned an unexpected answer shape: expected {"id": string, "responses": ResponseItem[]}');
+	}
+	return payload.responses.filter(isResponseItem);
+}
+
+/** One answer of the portal, in the shape the contract names. */
+function isResponseItem(value: unknown): value is ResponseItem {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const item = value as { id?: unknown; value?: unknown; attachments?: unknown };
+	if (typeof item.id !== "string" || item.value === undefined) return false;
+	return item.attachments === undefined || Array.isArray(item.attachments);
 }
 
 /** The `interview` tool: ask the user a form through the portal and wait for the answers. */
@@ -179,8 +239,11 @@ export class InterviewTool {
 		const cwd = ctx.cwd;
 		const session = ctx.sessionManager.getSessionId();
 		const pane = process.env["HERDR_PANE_ID"] ?? "";
+		// The questions are parsed before the call, so a broken file or bad JSON
+		// is a tool error and never reaches the portal.
+		const file = loadQuestions(params.questions, cwd);
 		const created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
-			questions: params.questions,
+			questions: file,
 			pane,
 			session,
 			cwd,
@@ -193,7 +256,7 @@ export class InterviewTool {
 			// answers arrive as a message, like pi-interview does.
 			const own = new AbortController();
 			this.pending.add(own);
-			void this.wait(id, params.questions, ctx, own.signal, params.timeout)
+			void this.wait(id, file, own.signal, params.timeout)
 				.then(answers => { this.deliver(`Interview ${id} finished.\n\n${answers.text}`); })
 				.catch(error => { this.deliver(`Interview ${id} did not finish: ${error instanceof Error ? error.message : String(error)}`); })
 				.finally(() => { this.pending.delete(own); });
@@ -204,7 +267,7 @@ export class InterviewTool {
 		}
 
 		try {
-			const answers = await this.wait(id, params.questions, ctx, signal, params.timeout);
+			const answers = await this.wait(id, file, signal, params.timeout);
 			return {
 				content: [{ type: "text", text: `User completed the interview form.\n\nAnswered responses:\n${answers.text}` }],
 				details: { status: "completed", responses: answers.responses, url: "" },
@@ -226,7 +289,7 @@ export class InterviewTool {
 	}
 
 	/** Poll the portal until it has the answers, the form is withdrawn, or the wait ends. */
-	private async wait(id: string, questions: string, ctx: ExtensionToolContext, signal: AbortSignal | undefined, timeout: number | undefined): Promise<{ text: string; responses: ResponseItem[] }> {
+	private async wait(id: string, file: QuestionsFile, signal: AbortSignal | undefined, timeout: number | undefined): Promise<{ text: string; responses: ResponseItem[] }> {
 		const seconds = timeout ?? 600;
 		const deadline = Date.now() + Math.max(1, seconds) * 1000;
 		for (;;) {
@@ -239,16 +302,9 @@ export class InterviewTool {
 			}
 			if (response.status === 410) throw new Error("The interview form was withdrawn before it was answered.");
 			if (!response.ok) throw new Error(`dogsled web GET /api/questions/${id}/answer failed: ${response.status} ${(await response.text()).trim()}`);
-			const { responses, questions: asked } = parseAnswers(await response.json());
-			const names = asked.length ? asked : this.askedQuestions(questions, ctx);
-			return { text: formatAnsweredResponses(responses, names), responses };
+			const responses = parseAnswers(await response.json());
+			return { text: formatAnsweredResponses(responses, formQuestions(file)), responses };
 		}
-	}
-
-	/** The questions the model sent, used to name the answers when the portal sends none. */
-	private askedQuestions(questions: string, ctx: ExtensionToolContext): Question[] {
-		try { return loadQuestions(questions, ctx.cwd); }
-		catch { return []; }
 	}
 }
 

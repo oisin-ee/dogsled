@@ -100,9 +100,9 @@ export class PortalClient {
 	/** Send a request. A server that cannot be reached is a `PortalDown` error; an aborted `signal` keeps its own error. */
 	async request(method: string, path: string, options: { body?: unknown; signal?: AbortSignal | undefined; accept?: string } = {}): Promise<Response> {
 		const headers: Record<string, string> = {
+			// The bearer token is what the portal checks: a valid token passes a
+			// state-changing request without an Origin header.
 			authorization: `Bearer ${this.token()}`,
-			// The portal only accepts a request that changes state from its own origin.
-			origin: `http://127.0.0.1:${this.port}`,
 		};
 		if (options.accept) headers["accept"] = options.accept;
 		const init: RequestInit = { method, headers };
