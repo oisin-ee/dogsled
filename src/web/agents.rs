@@ -346,12 +346,16 @@ mod tests {
     fn state(socket: Option<Client>) -> AppState {
         let (sender, receiver) = watch::channel(String::new());
         sender.send_replace(String::new());
-        AppState {
-            board: receiver,
-            port: PORT,
-            agents: socket.map(Arc::new),
-            token: crate::web::guard::Token::new(String::new()),
-        }
+        AppState::new(
+            receiver,
+            PORT,
+            socket.map(Arc::new),
+            crate::web::guard::Token::new(String::new()),
+            crate::ledger::Ledger::new(
+                std::env::temp_dir().join(format!("dogsled-agents-{}", crate::ledger::new_id())),
+            )
+            .child("web"),
+        )
     }
 
     /// The state of the API, talking to a fake Herdr.

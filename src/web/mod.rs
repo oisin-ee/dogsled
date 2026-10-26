@@ -56,9 +56,39 @@ pub struct AppState {
     /// The portal's own token. A request that carries it as a `Bearer`
     /// credential passes the guard's origin rule.
     token: guard::Token,
+    /// The portal's own directory. Every file the portal keeps lives under it,
+    /// so the routes never read a process-global state root.
+    web: Ledger,
+    /// The questions that wait for an answer, with the waiters of the long
+    /// polls.
+    questions: store::Store,
 }
 
 impl AppState {
+    /// The state of a portal that serves on the given port.
+    ///
+    /// The `web` ledger is the portal's own directory. The questions of the
+    /// portal live under it, so a new state over the same directory sees the
+    /// questions that wait.
+    #[must_use]
+    pub fn new(
+        board: watch::Receiver<String>,
+        port: u16,
+        agents: Option<Arc<crate::herdr_socket::Client>>,
+        token: guard::Token,
+        web: Ledger,
+    ) -> Self {
+        let questions = store::Store::new(web.child("questions"));
+        Self {
+            board,
+            port,
+            agents,
+            token,
+            web,
+            questions,
+        }
+    }
+
     /// The current payload.
     fn payload(&self) -> String {
         self.board.borrow().clone()
@@ -93,14 +123,16 @@ async fn run(
     // The first payload is empty: a read that fails must not keep the server
     // from starting. The reader replaces it within a tick.
     let (sender, receiver) = watch::channel(empty_payload());
-    let state = AppState {
-        board: receiver,
+    let state = AppState::new(
+        receiver,
         port,
         // Herdr's socket is not always there. The board API still serves, and
         // the agent routes report the failure.
-        agents: crate::herdr_socket::Client::from_env().ok().map(Arc::new),
+        crate::herdr_socket::Client::from_env().ok().map(Arc::new),
         token,
-    };
+        // The portal's own directory is under the ledger that holds the token.
+        ledger.child("web"),
+    );
     // The reader runs on a blocking thread, like the sidebar's reader. It reads
     // the cached state and never probes.
     let stop = Arc::new(AtomicBool::new(false));
@@ -282,12 +314,16 @@ mod tests {
     fn state(payload: &str) -> AppState {
         let (sender, receiver) = watch::channel(payload.to_owned());
         sender.send_replace(payload.to_owned());
-        AppState {
-            board: receiver,
-            port: PORT,
-            agents: None,
-            token: guard::Token::new(TOKEN.to_owned()),
-        }
+        AppState::new(
+            receiver,
+            PORT,
+            None,
+            guard::Token::new(TOKEN.to_owned()),
+            crate::ledger::Ledger::new(
+                std::env::temp_dir().join(format!("dogsled-web-{}", crate::ledger::new_id())),
+            )
+            .child("web"),
+        )
     }
 
     fn board_json() -> String {
