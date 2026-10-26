@@ -4,7 +4,9 @@
 A matching host-launch replay still succeeds after existing prune removes the terminal Job record. The real-wrapper race tests cannot hang or leave processes.
 
 ## Revision and scope
-Repository: `/Users/oisin/dev/dogsled`. Reuse `fix/lifecycle-job-claims` WITHOUT a base argument. Retained head `7feffe978b515ae4a9f62e85fed2ae0617bcfd2e`. Preserve all commits; no reset, rebase or recreate.
+Repository: `/Users/oisin/dev/dogsled`. Work on branch `fix/lifecycle-job-claims-r2`, created from `7feffe978b515ae4a9f62e85fed2ae0617bcfd2e` (the head of `fix/lifecycle-job-claims`). An earlier writer on the original branch stalled without edits; do not touch that branch. Preserve all commits; no reset or rebase.
+
+**Start immediately.** This brief names the exact lines. Your first edit is the prune-then-replay regression in `tests/cli/launch_retry.rs`; run it to prove it fails. Read only what that test and the `correlate` change need. Do not survey unrelated host-command or workspace code. If you have made 20 tool calls without an edit, stop and report what blocks you.
 Prerequisite: independent review `u-30fae40b-92bb-4491-a040-e16ce5bafc25-67` returned BLOCK at that exact SHA. It confirmed the four earlier findings are repaired and lock order is correct. The lead verified both new findings in source.
 Owned: `src/work.rs`, `src/work_tests.rs`, `tests/cli/launch_retry.rs`, `tests/cli/stop_sweep.rs` (one prune-then-replay regression only, if it fits there better), `tests/cli.rs` (shared rig helpers only).
 Read: `src/jobs.rs`, `src/cleanup.rs` (`prune_only` ~872, `remove_job` ~1892), `src/ledger.rs`, prior briefs `plans/briefs/lifecycle-job-claims{,-repair,-repair-review}.md`.
