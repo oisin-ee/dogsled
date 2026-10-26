@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.24.0 - 2026-10-26
+
+- The lead skill lets the lead make an edit itself in three cases. The first case is a specified change under about 100 lines. The second case is when no host can start a worker. The third case is a direct user order. Before, the skill said the lead never edits code, so a lead started one writer for each 10-line edit. When every spawn failed, the lead refused the user's direct orders to make the change. Now step 0 keeps that work in the lead's session. Step 1 puts the small edits of one request into one unit.
+- The lead skill sends exec agents that run under prewalk away from the lead procedure. Those agents run their assigned work in the same session and do not delegate.
+- Agent, job, and queued rows carry the canonical repository of their checkout, as `host/owner/name` from the origin URL. The ssh, scp-like, and https spellings of one remote give the same identity, and the Pi unit protocol reads the same fixture. A checkout whose identity is known costs no `git` call.
+- Repository tooling moved to proto and moon. This change does not affect installed hosts.
+
 ## 0.23.2 - 2026-10-22
 
 - The cleanup sweep no longer closes a pane whose root process is a running command, such as the `dogsled sidebar` pane. Before, a pane counted as an idle shell whenever no foreground process had a different pid from the pane's shell pid. Herdr runs a plugin pane's command as the pane's own root process, so the sidebar looked like an idle shell, and the sweep closed the sidebar and every workspace that held it. Now only a shell that waits at its prompt is idle: a root process with another name, a shell that runs a command such as `sh -c "..."`, and process information that does not name the root process all keep the pane.
