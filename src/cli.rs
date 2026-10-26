@@ -68,6 +68,12 @@ pub enum Command {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Serve the portal's board API on the loopback address.
+    Web {
+        /// The port to listen on. Defaults to the configured port.
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// List cleanup candidates without changing them.
     Doctor {
         #[arg(long)]
