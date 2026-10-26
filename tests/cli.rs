@@ -51,7 +51,197 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// The bound every real-process wait in these tests uses. A process that never ends fails
+/// its test on this bound instead of stalling the suite.
+pub(crate) const PROCESS_DEADLINE: Duration = Duration::from_secs(20);
+
+/// A process a test owns. The guard kills the process and its group and waits for it to
+/// leave, so a failed assertion never strands a wrapper or a command it started.
+#[derive(Debug)]
+pub(crate) struct Owned {
+    /// The process to kill.
+    pid: u32,
+    /// The process group to kill, when the process leads a group of its own.
+    group: Option<u32>,
+    /// The child to reap, when this test spawned it.
+    child: Option<std::process::Child>,
+}
+
+impl Owned {
+    /// Start `command` in its own process group, so the guard kills its descendants too.
+    /// The caller's own stdio settings are kept.
+    pub(crate) fn spawn(command: &mut Command) -> Self {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        Self {
+            pid,
+            group: Some(pid),
+            child: Some(child),
+        }
+    }
+
+    /// Adopt a process this test did not spawn. Its parent is gone, so the guard kills it
+    /// and waits for it to leave. The group is only killed when it is not the test's own
+    /// group, so the guard never kills the test.
+    pub(crate) fn adopt(pid: u32) -> Self {
+        let group = process_group(pid).filter(|group| *group != own_group());
+        Self {
+            pid,
+            group,
+            child: None,
+        }
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        // The process group holds the process and every command it started.
+        if let Some(group) = self.group
+            && let Ok(group) = i32::try_from(group)
+        {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(group),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let Ok(pid) = i32::try_from(self.pid) else {
+            return;
+        };
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        // The process is gone before the test ends, so no process outlives its test.
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "process {} did not leave within {PROCESS_DEADLINE:?}",
+                self.pid
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// A FIFO a test owns. The guard removes it, so a failed assertion leaves no rendezvous
+/// behind that a later test could block on.
+#[derive(Debug)]
+pub(crate) struct Fifo {
+    path: PathBuf,
+}
+
+impl Fifo {
+    /// A FIFO at `path` in the rig's directory.
+    pub(crate) fn new(dir: &Path, name: &str) -> Self {
+        let path = dir.join(name);
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        Self { path }
+    }
+
+    /// The path of this FIFO.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Fifo {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Open a FIFO without blocking. The FIFO is opened for reading and writing, so neither
+/// side waits for an open that may never come.
+pub(crate) fn open_fifo(path: &Path) -> fs::File {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)
+        .unwrap()
+}
+
+/// Read a FIFO's content, or fail the test on the bound. A writer that never arrives must
+/// not hang the test. An empty read means no writer has opened the FIFO yet, so the read
+/// keeps waiting for the writer rather than ending the wait early.
+pub(crate) fn read_fifo(path: &Path, what: &str) -> String {
+    let mut file = open_fifo(path);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let mut text = String::new();
+    loop {
+        let mut buffer = [0_u8; 256];
+        match std::io::Read::read(&mut file, &mut buffer) {
+            Ok(0) if !text.is_empty() => break,
+            Ok(0) => {}
+            Ok(n) => {
+                text.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                if text.contains('\n') {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("{what} could not be read: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not arrive within {PROCESS_DEADLINE:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    text
+}
+
+/// The process id in `path`, or fail the test on the bound. A process that never writes it
+/// fails the test instead of hanging it.
+pub(crate) fn read_pid(path: &Path, what: &str) -> u32 {
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not write its process id within {PROCESS_DEADLINE:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The process group of `pid`, or `None` when the process already left. A process that
+/// already ended has nothing left to kill, so the test does not wait for it.
+pub(crate) fn process_group(pid: u32) -> Option<u32> {
+    let out = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+/// The process group of this test. A guard never kills this group: it holds the test.
+pub(crate) fn own_group() -> u32 {
+    nix::unistd::getpgrp().as_raw() as u32
+}
 
 fn isolated(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);

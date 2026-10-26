@@ -1,5 +1,5 @@
 use super::*;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 
 fn remote_agent(rig: &Rig, repo: Option<&Path>) -> (i32, Value) {
     let mut args = vec![
@@ -1169,6 +1169,40 @@ fn a_host_replay_with_a_matching_receipt_replays_without_side_effects() {
     rig.put("state/jobs/replayed.json", &job);
     rig.put(
         "state/launches/replayed.json",
+        &job_receipt(
+            "replayed",
+            "local",
+            "w2:p1",
+            &["true"],
+            &rig.dir.join("home").display().to_string(),
+            "w1:p1",
+        ),
+    );
+    let request = job_launch_request(&rig, "replayed", &["true"]);
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["pane"], "w2:p1", "{result}");
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
+    assert_eq!(rig.read("state/jobs/replayed.json"), job);
+}
+
+/// A legacy receipt still replays while its job record survives. The record carries the
+/// same request facts the receipt now keeps, so the older receipt is not a second reader of
+/// a different truth: the record is the evidence, and the receipt is the proof of dispatch.
+#[test]
+fn a_legacy_receipt_replays_while_its_job_record_survives() {
+    let rig = Rig::new("legacy-receipt-with-record");
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
+        "timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/replayed.json", &job);
+    // The receipt as it was written before the request evidence existed.
+    rig.put(
+        "state/launches/replayed.json",
         &json!({"id":"replayed","host":"local","pane":"w2:p1"}),
     );
     let request = job_launch_request(&rig, "replayed", &["true"]);
@@ -1213,7 +1247,14 @@ fn a_host_replay_with_a_conflicting_receipt_refuses() {
             "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
             "timeout_ms":null,"idle_timeout_ms":null});
         rig.put("state/jobs/replayed.json", &job);
-        let mut saved = json!({"id":"replayed","host":"local","pane":"w2:p1"});
+        let mut saved = job_receipt(
+            "replayed",
+            "local",
+            "w2:p1",
+            &["true"],
+            &rig.dir.join("home").display().to_string(),
+            "w1:p1",
+        );
         let mut request = job_launch_request(&rig, "replayed", &["true"]);
         conflict(&mut request, &mut saved);
         rig.put("state/launches/replayed.json", &saved);
@@ -1281,6 +1322,156 @@ fn a_host_replay_of_an_uncertain_claim_refuses_and_keeps_the_uncertainty() {
     assert_eq!(rig.read("state/jobs/unproved.json"), job);
 }
 
+/// The job launch receipt, as a job launch writes it.
+fn job_receipt(id: &str, host: &str, pane: &str, cmd: &[&str], cwd: &str, owner: &str) -> Value {
+    json!({"id":id,"host":host,"pane":pane,
+        "request":{"cmd":cmd,"cwd":cwd,"owner":owner,
+            "timeout_ms":null,"idle_timeout_ms":null}})
+}
+
+/// A matching receipt replays after the prune removed the job record. The prune keeps the
+/// receipt, so the receipt's own evidence carries the replay: no second pane, no second
+/// dispatch, and no invented job record.
+#[test]
+fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
+    let rig = Rig::new("replay-after-prune");
+    // The job ends long enough ago that the prune removes its record.
+    let ended = now() - 2 * 86_400_000;
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    let job = json!({"id":"pruned","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/pruned.json", &job);
+    rig.put(
+        "state/launches/pruned.json",
+        &job_receipt(
+            "pruned",
+            "local",
+            "w2:p1",
+            &["true"],
+            &rig.dir.join("home").display().to_string(),
+            "w1:p1",
+        ),
+    );
+    // The prune removes the job record and its log, and keeps the receipt.
+    let out = rig.run(&["prune", "--yes", "jobs"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("removed job pruned"), "{stdout}");
+    assert!(!rig.dir.join("state/jobs/pruned.json").exists());
+    assert!(rig.dir.join("state/launches/pruned.json").exists());
+    // The replay returns the recorded result. It allocates nothing and dispatches nothing.
+    let request = job_launch_request(&rig, "pruned", &["true"]);
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["id"], "pruned", "{result}");
+    assert_eq!(result["pane"], "w2:p1", "{result}");
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
+    // The prune did not come back, and the receipt is unchanged.
+    assert!(!rig.dir.join("state/jobs/pruned.json").exists());
+    assert_eq!(
+        rig.read("state/launches/pruned.json"),
+        job_receipt(
+            "pruned",
+            "local",
+            "w2:p1",
+            &["true"],
+            &rig.dir.join("home").display().to_string(),
+            "w1:p1",
+        )
+    );
+}
+
+/// A receipt that predates the request evidence fails closed once the prune removed the job
+/// record. Without the record, the receipt has nothing to prove which command it dispatched,
+/// so the replay refuses instead of dispatching again.
+#[test]
+fn a_legacy_receipt_without_request_evidence_fails_closed_after_the_prune() {
+    let rig = Rig::new("legacy-receipt-after-prune");
+    let ended = now() - 2 * 86_400_000;
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    let job = json!({"id":"legacy","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/legacy.json", &job);
+    // The receipt as it was written before the request evidence existed.
+    rig.put(
+        "state/launches/legacy.json",
+        &json!({"id":"legacy","host":"local","pane":"w2:p1"}),
+    );
+    let out = rig.run(&["prune", "--yes", "jobs"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(!rig.dir.join("state/jobs/legacy.json").exists());
+    // The replay refuses: it dispatches nothing and invents nothing.
+    let request = job_launch_request(&rig, "legacy", &["true"]);
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("legacy launch receipt without request evidence"),
+        "{error}"
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!log.contains("pane run"), "{log}");
+    assert!(!rig.dir.join("state/jobs/legacy.json").exists());
+}
+
+/// A receipt whose evidence names another command refuses after the prune removed the job
+/// record. The evidence is the check that a pruned record can no longer make.
+#[test]
+fn a_conflicting_receipt_fails_closed_after_the_prune() {
+    for (name, conflict) in [("command", "cmd"), ("owner", "owner")] {
+        let rig = Rig::new(&format!("conflicting-receipt-after-prune-{name}"));
+        let ended = now() - 2 * 86_400_000;
+        fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+        let job = json!({"id":"conflicted","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+            "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+            "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+        rig.put("state/jobs/conflicted.json", &job);
+        let mut saved = job_receipt(
+            "conflicted",
+            "local",
+            "w2:p1",
+            &["true"],
+            &rig.dir.join("home").display().to_string(),
+            "w1:p1",
+        );
+        match conflict {
+            "cmd" => saved["request"]["cmd"] = json!(["false"]),
+            _ => saved["request"]["owner"] = json!("w9:p9"),
+        }
+        rig.put("state/launches/conflicted.json", &saved);
+        let out = rig.run(&["prune", "--yes", "jobs"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{name}: {stdout}");
+        assert!(!rig.dir.join("state/jobs/conflicted.json").exists());
+        // The receipt names another command or another owner, so the replay refuses.
+        let request = job_launch_request(&rig, "conflicted", &["true"]);
+        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        assert_eq!(code, 2, "{name}: {error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("another command or request"),
+            "{name}: {error}"
+        );
+        let log = rig.log("herdr.log");
+        assert!(!log.contains("tab create"), "{name}: {log}");
+        assert!(!log.contains("pane run"), "{name}: {log}");
+        assert!(!rig.dir.join("state/jobs/conflicted.json").exists());
+    }
+}
+
 /// How the fake Herdr orders the real wrapper and the dispatch failure.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DispatchOrder {
@@ -1301,7 +1492,10 @@ fn dispatch_order_herdr(rig: &Rig, order: DispatchOrder) {
             r#"
     shift 3
     # The wrapper publishes its started and terminal records before this returns.
-    sh -c "$*" > "$RIG/job-output" 2>&1
+    sh -c "$*" > "$RIG/job-output" 2>&1 &
+    # The wrapper's process id lets the test own and reap it.
+    echo $! > "$RIG/wrapper-pid"
+    wait
     echo 'pane refused' >&2
     exit 1 ;;"#
         }
@@ -1309,8 +1503,10 @@ fn dispatch_order_herdr(rig: &Rig, order: DispatchOrder) {
             r#"
     shift 3
     sh -c "$*" > "$RIG/job-output" 2>&1 &
-    # The wrapper publishes its started record before its command runs. The command's own
-    # signal is the barrier: it proves the record is already published.
+    # The wrapper's process id lets the test own and reap it. The wrapper publishes its
+    # started record before its command runs. The command's own signal is the barrier: it
+    # proves the record is already published.
+    echo $! > "$RIG/wrapper-pid"
     read -r ready < "$RIG/wrapper-ready"
     echo 'pane refused' >&2
     exit 1 ;;"#
@@ -1363,6 +1559,10 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
     let command = "echo out; exit 7";
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", command]);
     let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    // The test owns the wrapper before any assertion about it. A failed assertion kills it
+    // and every command it started, so no wrapper outlives this test.
+    let pid = read_pid(&rig.dir.join("wrapper-pid"), "the wrapper");
+    let _wrapper = Owned::adopt(pid);
     assert_eq!(code, 2, "{error}");
     // The wrapper's own terminal record survives the dispatch failure.
     let job = rig.read("state/jobs/dispatched.json");
@@ -1382,15 +1582,10 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
 #[test]
 fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
     let rig = Rig::new("dispatch-during-wrapper-run");
-    for name in ["wrapper-ready", "wrapper-go", "wrapper-closed"] {
-        assert!(
-            Command::new("mkfifo")
-                .arg(rig.dir.join(name))
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
+    // The ready FIFO is the fake Herdr's own barrier, so the test never opens it.
+    let _ready = Fifo::new(&rig.dir, "wrapper-ready");
+    let go = Fifo::new(&rig.dir, "wrapper-go");
+    let closed = Fifo::new(&rig.dir, "wrapper-closed");
     dispatch_order_herdr(&rig, DispatchOrder::During);
     let marker = rig.dir.join("marker");
     let command = format!(
@@ -1399,6 +1594,10 @@ fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
     );
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
     let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    // The test owns the wrapper before any assertion about it. A failed assertion kills it
+    // and every command it started, so no wrapper outlives this test.
+    let pid = read_pid(&rig.dir.join("wrapper-pid"), "the wrapper");
+    let _wrapper = Owned::adopt(pid);
     assert_eq!(code, 2, "{error}");
     // The wrapper is running: it published its started record, and the dispatch failure
     // did not overwrite it or invent an end.
@@ -1408,19 +1607,12 @@ fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
     assert_eq!(job["state"], "working", "{job}");
     // The blocked command has not run.
     assert!(!marker.exists());
-    // The wrapper is released and finishes its own record.
-    fs::OpenOptions::new()
-        .write(true)
-        .open(rig.dir.join("wrapper-go"))
-        .unwrap()
-        .write_all(b"go\n")
-        .unwrap();
-    let mut closed = String::new();
-    fs::File::open(rig.dir.join("wrapper-closed"))
-        .unwrap()
-        .read_to_string(&mut closed)
-        .unwrap();
-    assert_eq!(closed, "closed\n");
+    // The wrapper is released and finishes its own record. The rendezvous is bounded: a
+    // wrapper that never answers fails the test instead of hanging it.
+    let mut go_writer = open_fifo(go.path());
+    go_writer.write_all(b"go\n").unwrap();
+    drop(go_writer);
+    assert_eq!(read_fifo(closed.path(), "the wrapper's close"), "closed\n");
     let job = rig.read("state/jobs/dispatched.json");
     assert!(job["ended_ms"].is_number(), "{job}");
     assert_eq!(job["exit"], 0, "{job}");

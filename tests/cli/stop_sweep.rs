@@ -440,13 +440,9 @@ fn claude_and_codex_stop_deliver_cleanup_and_request_the_next_pass() {
     }
 }
 
-struct Service(std::process::Child);
-impl Drop for Service {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+/// The service the test owns. The guard kills the service and every process it started, and
+/// waits for it to leave, so no service outlives its test.
+struct Service(#[allow(dead_code)] Owned);
 
 fn until(check: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(6);
@@ -481,13 +477,9 @@ fn stop_wakes_the_service_without_waiting_for_the_publication_interval() {
         );
         String::from_utf8(out.stdout).unwrap()
     };
-    let _service = Service(
-        command(&["serve", "--interval", "60"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut service = command(&["serve", "--interval", "60"]);
+    service.stdout(Stdio::null()).stderr(Stdio::null());
+    let _service = Service(Owned::spawn(&mut service));
     until(|| rig.dir.join("state/host.json").exists());
     assert!(
         fs::metadata(rig.dir.join("state/sweep.sock"))
@@ -514,14 +506,12 @@ fn long_state_path_without_a_socket_still_consumes_stop_requests() {
     fs::create_dir_all(&state).unwrap();
     let journal_path = rig.dir.join("service.log");
     let journal = fs::File::create(&journal_path).unwrap();
-    let _service = Service(
-        rig.cmd(&["serve", "--interval", "1"])
-            .env("DOGSLED_STATE", &state)
-            .stdout(Stdio::null())
-            .stderr(journal)
-            .spawn()
-            .unwrap(),
-    );
+    let mut service = rig.cmd(&["serve", "--interval", "1"]);
+    service
+        .env("DOGSLED_STATE", &state)
+        .stdout(Stdio::null())
+        .stderr(journal);
+    let _service = Service(Owned::spawn(&mut service));
     until(|| state.join("host.json").exists());
     assert!(!state.join("sweep.sock").exists());
     assert!(!state.join("sweep.json").exists());

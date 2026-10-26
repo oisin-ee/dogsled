@@ -7,6 +7,7 @@ use crate::node::Snapshot;
 use crate::probe::{Agent, AgentCounts, Memory, Pane, Probe};
 use crate::shell::Fake;
 use crate::work::{self, Action, Request};
+use serde_json::json;
 
 mod reconcile;
 
@@ -436,6 +437,62 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
         error
             .to_string()
             .contains("changed after its intent was published"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A job launch receipt keeps the request it dispatched. The receipt alone carries a replay,
+/// so the prune of the job record does not break it, and a receipt for another command or a
+/// receipt without the evidence fails closed.
+#[test]
+fn a_job_launch_receipt_carries_its_own_request_evidence() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    let launch = crate::work::Launch {
+        id: "replayed".into(),
+        unit: None,
+        action: Action::Job {
+            cmd: vec!["true".into()],
+            timeout_ms: None,
+            idle_timeout_ms: None,
+        },
+        host: "local".into(),
+        cwd: "/work".into(),
+        pane: None,
+        terminal: None,
+        workspace: None,
+        workspace_name: None,
+        owner: "owner".into(),
+        owner_host: None,
+    };
+    let cmd = vec!["true".to_owned()];
+    let saved = json!({
+        "id":"replayed","host":"local","pane":"w2:p1",
+        "request":{"cmd":["true"],"cwd":"/work","owner":"owner",
+            "timeout_ms":null,"idle_timeout_ms":null}
+    });
+    // The receipt correlates to the request it made.
+    assert!(work::correlate(&ledger, &launch, &cmd, None, None, &saved).is_ok());
+    // The prune removed the job record. The receipt still carries the replay: the record is
+    // a second check, not a prerequisite.
+    assert!(crate::jobs::record(&ledger, "replayed").unwrap().is_none());
+    assert!(work::correlate(&ledger, &launch, &cmd, None, None, &saved).is_ok());
+    // A receipt that names another command is refused.
+    let mut other = saved.clone();
+    other["request"]["cmd"] = json!(["false"]);
+    let error = work::correlate(&ledger, &launch, &cmd, None, None, &other).unwrap_err();
+    assert!(
+        error.to_string().contains("another command or request"),
+        "{error}"
+    );
+    // A receipt that predates the evidence is refused.
+    let legacy = json!({"id":"replayed","host":"local","pane":"w2:p1"});
+    let error = work::correlate(&ledger, &launch, &cmd, None, None, &legacy).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("legacy launch receipt without request evidence"),
         "{error}"
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();

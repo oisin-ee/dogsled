@@ -302,10 +302,26 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
     })
 }
 
-/// The saved receipt of a job launch must name this request and the recorded job. A
-/// conflicting same-id request, a receipt for another pane, and a receipt that names a
+/// The request facts a job launch receipt keeps. The receipt names the command it
+/// dispatched, so the receipt alone proves which job it belongs to. The job record keeps
+/// the same facts, and the prune removes that record.
+fn request_evidence(
+    launch: &Launch,
+    cmd: &[String],
+    timeout_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
+) -> Value {
+    json!({"cmd":cmd,"cwd":launch.cwd,"owner":launch.owner,
+        "timeout_ms":timeout_ms,"idle_timeout_ms":idle_timeout_ms})
+}
+
+/// The saved receipt of a job launch must name this request and the command it dispatched.
+/// A conflicting same-id request, a receipt for another pane, and a receipt that names a
 /// different command or options all refuse: a receipt never replays for another job.
-fn correlate(
+///
+/// The job record is a second check, not a prerequisite. The prune removes a terminal job
+/// record and keeps its receipt, so the receipt's own evidence carries the replay.
+pub(crate) fn correlate(
     ledger: &Ledger,
     launch: &Launch,
     cmd: &[String],
@@ -325,13 +341,29 @@ fn correlate(
             launch.id
         )));
     }
-    // The recorded job is the claim's own evidence. A receipt that names another pane, or
-    // another command, or another set of options, dispatched another job.
-    let Some(job) = jobs::record(ledger, &launch.id)? else {
+    // The receipt's own evidence is the first check. A receipt that names another command
+    // or another request dispatched another job, whether or not its job record remains.
+    let evidence = request_evidence(launch, cmd, timeout_ms, idle_timeout_ms);
+    if let Some(request) = saved.get("request")
+        && *request != evidence
+    {
         return Err(Error::Invalid(format!(
-            "job {} has a saved launch receipt but no claim",
+            "job {} has a saved launch receipt for another command or request",
             launch.id
         )));
+    }
+    // The job record is a second check, not a prerequisite. The prune removes a terminal
+    // job record and keeps its receipt, so the receipt carries the replay alone.
+    let Some(job) = jobs::record(ledger, &launch.id)? else {
+        // Without the record, the receipt must carry the evidence on its own. A receipt
+        // that predates that evidence proves nothing about what it dispatched.
+        if saved.get("request").is_none() {
+            return Err(Error::Invalid(format!(
+                "job {} has a legacy launch receipt without request evidence; inspect that host before resubmitting",
+                launch.id
+            )));
+        }
+        return Ok(());
     };
     if job.id != launch.id {
         return Err(Error::Invalid(format!(
@@ -442,7 +474,8 @@ fn launch_job(
         jobs::uncertain(ledger, &claim, error.to_string())?;
         return Err(error);
     }
-    Ok(json!({"id":launch.id,"host":launch.host,"pane":pane}))
+    Ok(json!({"id":launch.id,"host":launch.host,"pane":pane,
+        "request":request_evidence(launch, cmd, timeout_ms, idle_timeout_ms)}))
 }
 
 pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, _now: u64) -> Result<Value> {
