@@ -69,8 +69,40 @@ fn inside(cwd: &str, tree: &str) -> bool {
     resolved(Path::new(cwd)).starts_with(resolved(Path::new(tree)))
 }
 
-/// The worktree that contains `cwd`, when it is a linked worktree on a branch.
+/// The worktree that contains `cwd`, when it is a linked worktree on a branch. A detached
+/// worktree is not one: it has no branch, so it is refused here.
 pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
+    let tree = linked_or_detached(shell, cwd)?;
+    if let Some(tree) = &tree
+        && tree.branch.is_empty()
+    {
+        return Err(refuse(&format!(
+            "{} is a detached worktree; `dogsled prune` removes it once its commit is on a remote",
+            tree.path
+        )));
+    }
+    Ok(tree)
+}
+
+/// The commit a checkout's HEAD points at.
+pub fn head_sha(shell: &dyn Shell, path: &str) -> Result<String> {
+    let out = git(shell, Path::new(path), &["rev-parse", "HEAD"])?;
+    if !out.ok() {
+        return Err(Error::Invalid(format!(
+            "{path}: cannot read HEAD: {}",
+            out.stderr.trim()
+        )));
+    }
+    let head = out.stdout.trim().to_string();
+    if head.is_empty() {
+        return Err(Error::Invalid(format!("{path}: HEAD names no commit")));
+    }
+    Ok(head)
+}
+
+/// The linked worktree that contains `cwd`. A detached one has an empty `branch`; no branch is
+/// invented for it.
+pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     if !Path::new(cwd).is_dir() {
         return Ok(None);
     }
@@ -100,15 +132,14 @@ pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     if common == dir {
         return Ok(None);
     }
-    if branch == "HEAD" {
-        return Err(refuse(&format!(
-            "{top} is a detached worktree; `dogsled prune` removes it once its commit is on a remote"
-        )));
-    }
     Ok(Some(Linked {
         checkout: crate::prepare::main_checkout(shell, cwd)?,
         path: top.into(),
-        branch: branch.into(),
+        branch: if branch == "HEAD" {
+            String::new()
+        } else {
+            branch.into()
+        },
     }))
 }
 

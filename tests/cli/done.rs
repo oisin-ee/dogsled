@@ -50,10 +50,63 @@ fn done_refuses_uncommitted_untracked_deleted_and_unheld_work_without_a_mark() {
     assert!(!rig.dir.join("state/done.json").exists());
     git(&tree, &["checkout", "HEAD", "--", "dogsled.toml"]);
     git(&tree, &["checkout", "--detach"]);
+    // A detached checkout has no branch to land, so a commit no ref holds is unheld work.
+    fs::write(tree.join("detached"), "work no ref holds\n").unwrap();
+    git(&tree, &["add", "detached"]);
+    git(&tree, &["commit", "-q", "-m", "detached work"]);
     let out = done(&rig);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("detached worktree"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not held"), "{stderr}");
+    assert!(stderr.contains("Preserve the work"), "{stderr}");
     assert!(!rig.dir.join("state/done.json").exists());
+}
+
+/// A child in a detached checkout whose commit the default branch holds. Its handoff removes
+/// the checkout, names no branch, and leaves the branch list alone.
+#[test]
+fn done_hands_off_a_held_detached_checkout_without_inventing_a_branch() {
+    let (rig, tree) = close_rig("done-detached");
+    worker(&rig, &tree, "working");
+    // A transcript, so the handoff can capture the child's final reply.
+    fs::write(
+        rig.dir.join("child.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({"type":"message","message":{"role":"user","content":"do it"}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}})
+        ),
+    )
+    .unwrap();
+    git(&tree, &["checkout", "--detach"]);
+    let out = done(&rig);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The mark records a detached checkout: no branch, and no branch to land.
+    let marks = rig.read("state/done.json");
+    let mark = marks.as_object().unwrap().values().next().unwrap();
+    assert_eq!(mark["detached"], true, "{mark}");
+    assert!(mark["branch"].is_null(), "{mark}");
+    // The handoff removes the checkout and deletes no branch.
+    let repo = rig.dir.join("home/repo");
+    let branches = git(&repo, &["branch", "--format=%(refname:short)"]);
+    worker(&rig, &tree, "idle");
+    let journal = String::from_utf8_lossy(&rig.run(&["serve", "--once", "--interval", "1"]).stderr)
+        .into_owned();
+    assert!(
+        journal.contains("dogsled handoff: closed w2:p1"),
+        "{journal}"
+    );
+    assert!(!tree.exists());
+    assert_eq!(
+        git(&repo, &["branch", "--format=%(refname:short)"]),
+        branches,
+        "the handoff must not invent or delete a branch for a detached checkout"
+    );
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
 }
 
 #[test]
