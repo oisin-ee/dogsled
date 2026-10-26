@@ -7,8 +7,12 @@
 //! only when the board changed.
 
 pub mod agents;
+pub mod assets;
 pub mod board;
 pub mod guard;
+pub mod questions;
+pub mod reviews;
+pub mod store;
 pub mod token;
 
 use std::convert::Infallible;
@@ -49,6 +53,9 @@ pub struct AppState {
     port: u16,
     /// The client the agent routes read and write through.
     agents: Option<Arc<crate::herdr_socket::Client>>,
+    /// The portal's own token. A request that carries it as a `Bearer`
+    /// credential passes the guard's origin rule.
+    token: guard::Token,
 }
 
 impl AppState {
@@ -64,15 +71,21 @@ impl AppState {
 /// to stop.
 pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<()> {
     // The token file exists from the first start, so later steps can use it.
-    token::token(ledger)?;
+    let token = guard::Token::new(token::token(ledger)?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run(ledger, policy, home, port))
+    runtime.block_on(run(ledger, policy, home, port, token))
 }
 
 /// The server's own work: read the board, publish it, and serve it.
-async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<()> {
+async fn run(
+    ledger: &Ledger,
+    policy: &Policy,
+    home: &str,
+    port: u16,
+    token: guard::Token,
+) -> Result<()> {
     // The server reads without a deadline: it runs until it is told to stop.
     let shell = System {
         budget: crate::budget::Budget::default(),
@@ -86,6 +99,7 @@ async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<
         // Herdr's socket is not always there. The board API still serves, and
         // the agent routes report the failure.
         agents: crate::herdr_socket::Client::from_env().ok().map(Arc::new),
+        token,
     };
     // The reader runs on a blocking thread, like the sidebar's reader. It reads
     // the cached state and never probes.
@@ -139,6 +153,9 @@ fn router(state: AppState) -> Router {
         .route("/api/board", get(board))
         .route("/api/stream", get(stream))
         .merge(agents::router())
+        .merge(questions::routes())
+        .merge(reviews::routes())
+        .fallback(assets::serve)
         .layer(axum::middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
@@ -166,7 +183,7 @@ async fn stream(
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let headers = request.headers().clone();
-    if let Some(response) = guard::check(&method, &headers, state.port) {
+    if let Some(response) = guard::check(&method, &headers, state.port, &state.token) {
         return response;
     }
     next.run(request).await
@@ -259,6 +276,9 @@ mod tests {
 
     const PORT: u16 = 7465;
 
+    /// The portal's token, in the state the tests share.
+    const TOKEN: &str = "secret";
+
     fn state(payload: &str) -> AppState {
         let (sender, receiver) = watch::channel(payload.to_owned());
         sender.send_replace(payload.to_owned());
@@ -266,6 +286,7 @@ mod tests {
             board: receiver,
             port: PORT,
             agents: None,
+            token: guard::Token::new(TOKEN.to_owned()),
         }
     }
 
@@ -291,6 +312,17 @@ mod tests {
             builder = builder.header(header::ORIGIN, origin);
         }
         builder.body(Body::empty()).expect("the request")
+    }
+
+    /// A request with the given method, host and bearer token.
+    fn request_with_token(method: Method, host: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri("/api/board")
+            .header(header::HOST, host)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("the request")
     }
 
     /// One request against a fresh app.
@@ -360,6 +392,64 @@ mod tests {
         // The route has no POST, so the guard let the request through and the
         // router refused the method.
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn a_write_with_the_token_and_no_origin_reaches_the_route() {
+        let response = call(request_with_token(
+            Method::POST,
+            &format!("127.0.0.1:{PORT}"),
+            TOKEN,
+        ))
+        .await;
+        // The route has no POST, so the guard let the request through and the
+        // router refused the method.
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn a_write_with_a_wrong_token_is_refused() {
+        let response = call(request_with_token(
+            Method::POST,
+            &format!("127.0.0.1:{PORT}"),
+            "wrong",
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_asset_request_is_answered_with_404() {
+        let response = call(
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, format!("127.0.0.1:{PORT}"))
+                .body(Body::empty())
+                .expect("the request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // The answer comes from the assets stub, not from the router's own
+        // not-found, so the stub is mounted.
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("the body");
+        assert_eq!(String::from_utf8_lossy(&body), "no assets yet");
+    }
+
+    #[tokio::test]
+    async fn an_asset_request_from_another_host_is_refused() {
+        let response = call(
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, "evil.example")
+                .body(Body::empty())
+                .expect("the request"),
+        )
+        .await;
+        // The guard covers the asset fallback too, so the answer is the
+        // guard's refusal and not the fallback's 404.
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
