@@ -1,0 +1,17 @@
+[
+  { "origin": "https://github.com/oisin-ee/dogsled.git", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "git@github.com:oisin-ee/dogsled.git", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "git@github.com:oisin-ee/dogsled", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "github.com:oisin-ee/dogsled.git", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "ssh://git@github.com/oisin-ee/dogsled.git", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "ssh://git@github.com:22/oisin-ee/dogsled.git/", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "https://user@GitHub.com/oisin-ee/dogsled", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "  https://github.com/oisin-ee/dogsled.git\n", "identity": "github.com/oisin-ee/dogsled" },
+  { "origin": "https://github.com/Oisin-Ee/DogSled", "identity": "github.com/Oisin-Ee/DogSled" },
+  { "origin": "https://gitlab.com/group/sub/project.git", "identity": "gitlab.com/group/sub/project" },
+  { "origin": "/srv/git/dogsled.git", "identity": null },
+  { "origin": "file:///github.com/oisin-ee/dogsled.git", "identity": null },
+  { "origin": "https://github.com/", "identity": null },
+  { "origin": "git@github.com:", "identity": null },
+  { "origin": "", "identity": null }
+]

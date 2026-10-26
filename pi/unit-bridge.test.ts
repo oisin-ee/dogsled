@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { rig } from "./unit-fixture.test.ts";
 import { repositoryIdentity } from "./unit-protocol.ts";
 
@@ -106,4 +107,13 @@ for (const fault of ["reject", "malformed"] as const) test(`lost prepare respons
 test("SSH and HTTPS origins map to the user-selected repository identity", () => {
 	for (const origin of ["git@github.com:owner/repo.git", "https://github.com/owner/repo.git", "ssh://git@github.com/owner/repo"]) assert.equal(repositoryIdentity(origin), "github.com/owner/repo");
 	assert.throws(() => repositoryIdentity("/tmp/repo"));
+});
+
+test("repository identity matches the shared fixture", () => {
+	const cases: { origin: string; identity: string | null }[] = JSON.parse(readFileSync(new URL("../tests/fixtures/repository-identity.json", import.meta.url), "utf8"));
+	assert.ok(cases.length > 0);
+	for (const { origin, identity } of cases) {
+		if (identity === null) assert.throws(() => repositoryIdentity(origin), /REQUEST_CONFLICT|Invalid URL/, JSON.stringify(origin));
+		else assert.equal(repositoryIdentity(origin), identity, JSON.stringify(origin));
+	}
 });

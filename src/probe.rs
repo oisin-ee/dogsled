@@ -270,6 +270,9 @@ pub struct Agent {
     /// The linked worktree the agent runs in, measured on this host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<crate::facts::Worktree>,
+    /// Canonical `host/owner/name` of the repository the agent's checkout names as `origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// The agent called `done`, and its turn that called it is its latest completion. Only a
     /// done agent is finished: idle alone means it waits for input.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -418,6 +421,7 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 cwd: raw.cwd,
                 session: crate::facts::Session::default(),
                 worktree: None,
+                repository: None,
                 done: false,
             }
         })

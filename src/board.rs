@@ -460,6 +460,9 @@ pub struct Row {
     pub ahead: Option<u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dirty: bool,
+    /// Canonical `host/owner/name` of the agent's repository, when it is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -542,6 +545,7 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
             quiet_ms: None,
             ahead: Some(branch.ahead),
             dirty: false,
+            repository: None,
         };
     }
     let found = agent(hosts, item);
@@ -612,6 +616,7 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         quiet_ms,
         ahead,
         dirty,
+        repository: agent.and_then(|a| a.repository.clone()),
     }
 }
 
@@ -652,6 +657,7 @@ fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         quiet_ms: None,
         ahead: None,
         dirty: false,
+        repository: None,
     }
 }
 
@@ -693,6 +699,7 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
         quiet_ms: None,
         ahead: None,
         dirty: false,
+        repository: None,
     }
 }
 
@@ -1416,6 +1423,7 @@ mod tests {
             cwd: None,
             session: Session::default(),
             worktree: None,
+            repository: None,
             done: false,
         }
     }
