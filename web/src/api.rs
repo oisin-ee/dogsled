@@ -4,7 +4,9 @@ use futures_util::StreamExt;
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
 use portal_types::BoardView;
-use portal_types::agents::{AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody};
+use portal_types::agents::{
+    AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen,
+};
 use serde::de::DeserializeOwned;
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
@@ -64,6 +66,28 @@ pub async fn fetch_conversation(pane: &str) -> Result<Conversation, String> {
     read_json(response).await
 }
 
+/// Read the terminal of the agent in `pane`.
+pub async fn fetch_screen(pane: &str) -> Result<Screen, String> {
+    let response = Request::get(&format!("{BASE}/api/agents/{}/screen", encode(pane)))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    read_json(response).await
+}
+
+/// Open the agent in Herdr.
+pub async fn focus_agent(pane: &str) -> Result<(), String> {
+    let response = Request::post(&format!("{BASE}/api/agents/{}/focus", encode(pane)))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(failure(response).await)
+    }
+}
+
 /// Send a prompt to the agent in `pane`.
 pub async fn send_prompt(pane: &str, text: &str) -> Result<(), String> {
     let body = PromptBody {
@@ -108,13 +132,13 @@ pub async fn watch_agent(pane: &str, mut on_event: impl FnMut(AgentEvent)) -> Re
         .map_err(|error| error.to_string())?;
     while let Some(item) = stream.next().await {
         let (_, message) = item.map_err(|error| error.to_string())?;
-        if let Some(text) = message.data().as_string()
-            && let Ok(event) = serde_json::from_str::<AgentEvent>(&text)
-        {
+        if let Some(text) = message.data().as_string() {
+            let event = serde_json::from_str::<AgentEvent>(&text)
+                .map_err(|error| format!("the agent stream sent an invalid event: {error}"))?;
             on_event(event);
         }
     }
-    Ok(())
+    Err("the agent stream ended".to_owned())
 }
 
 /// Hand each board the server pushes to `on_board`, until the stream fails.
