@@ -59,6 +59,8 @@ fn Row(row: wire::RowView, css: &'static str) -> Element {
     match pane {
         Some(pane) => rsx! {
             button {
+                r#type: "button",
+                aria_pressed: is_selected,
                 class: if is_selected { "row selected" } else { "row" },
                 onclick: move |_| selected.set(Some(pane.clone())),
                 {body}
