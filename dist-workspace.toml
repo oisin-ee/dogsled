@@ -13,6 +13,8 @@ installers = []
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
+# Build the web portal UI before the cargo-dist build.
+github-build-setup = "../build-setup.yml"
 # Publish the Pi extension to npm after the binaries are built.
 publish-jobs = ["./publish-npm"]
 # Checkout needs contents; npm trusted publishing needs the OIDC token.

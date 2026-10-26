@@ -13,6 +13,8 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 out="$root/bin/dogsled"
 base="${DOGSLED_RELEASES:-https://github.com/oisin-ee/dogsled/releases/download}"
 version=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' "$root/herdr-plugin.toml" | head -n 1)
+# The dx version that bundles the web portal UI. It matches web/Cargo.toml.
+dx_version=0.7.10
 say() { printf 'dogsled: %s\n' "$*" >&2; }
 
 install_file() {
@@ -23,12 +25,33 @@ install_file() {
   say "installed $out ($2)"
 }
 
+# dx bundles the web portal UI. Build it from source with cargo install, which
+# takes over ten minutes. cargo-binstall fetches the published binary instead,
+# in seconds.
+install_dx() {
+  if command -v dx >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v cargo >/dev/null 2>&1; then
+    say "cargo is not on PATH. Install Rust (https://rustup.rs) and install the plugin again."
+    exit 1
+  fi
+  if ! command -v cargo-binstall >/dev/null 2>&1; then
+    say "cargo-binstall is not on PATH. Install it with 'cargo install cargo-binstall --locked' and install the plugin again."
+    exit 1
+  fi
+  say "installing dx $dx_version"
+  cargo binstall --no-confirm --locked "dioxus-cli@$dx_version"
+}
+
 build() {
   say "$1; building v$version from source"
   if ! command -v cargo >/dev/null 2>&1; then
     say "cargo is not on PATH. Install Rust (https://rustup.rs) and install the plugin again."
     exit 1
   fi
+  install_dx
+  (cd "$root/web" && dx bundle --web --release)
   (cd "$root" && cargo build --release --locked --bin dogsled)
   install_file "$root/target/release/dogsled" "built from source"
   exit 0

@@ -1,0 +1,24 @@
+[package]
+name = "web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "The dogsled web portal UI, built to WASM by `dx bundle --web`"
+license = "MIT"
+publish = false
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["web", "router"] }
+futures-util = { version = "0.3", default-features = false }
+gloo-net = { version = "0.6", default-features = false, features = ["http", "eventsource", "json"] }
+portal-types = { path = "../portal-types" }
+serde_json = "1.0.151"
+
+[lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

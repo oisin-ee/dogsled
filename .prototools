@@ -1,4 +1,6 @@
 # Proto owns every dev tool of this repository (https://moonrepo.dev/docs/proto/config).
-# Rust is pinned only in rust-toolchain.toml.
+# Rust is pinned in rust-toolchain.toml, and rustup installs that toolchain.
+# dx is not here: proto's cargo backend builds it from source, which takes
+# over ten minutes. CI installs the published binary with cargo-binstall.
 moon = "2.6.1"
 node = "24"
