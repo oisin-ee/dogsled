@@ -28,27 +28,29 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      # Proto installs moon and Node from .prototools.
+      - uses: moonrepo/setup-toolchain@v0.6.4
+      - run: proto install
       # rust-toolchain.toml pins the channel and components.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Format
-        run: cargo fmt --check
+        run: moon run :fmt-check
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: moon run :lint
       - name: Test
-        run: cargo test
+        run: moon run :test
 
   typescript:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
+      - uses: moonrepo/setup-toolchain@v0.6.4
+      - run: proto install
+      - name: Install dependencies
+        run: moon run :install
       - name: Typecheck
-        run: npm run --silent typecheck
+        run: moon run :typecheck
       - name: Shim tests
-        run: npm run --silent test
+        run: moon run :test-shim
