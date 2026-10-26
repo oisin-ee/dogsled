@@ -33,6 +33,8 @@ const ALLOWED_KEYS: &[&str] = &[
     "space",
     "backspace",
     "delete",
+    // Ctrl+C interrupts a working agent.
+    "ctrl+c",
     "up",
     "down",
     "left",
@@ -177,12 +179,21 @@ async fn keys(
     if body.keys.is_empty() {
         return refuse("no key was given");
     }
+    let mut keys = Vec::with_capacity(body.keys.len());
     for key in &body.keys {
-        if !ALLOWED_KEYS.contains(&key.to_lowercase().as_str()) {
+        let lower = key.to_lowercase();
+        if !ALLOWED_KEYS.contains(&lower.as_str()) {
             return refuse(&format!("the key `{key}` is not allowed"));
         }
+        // A chord is case-insensitive in Herdr, so send the canonical form. A
+        // plain key keeps its case, so `Y` still types an upper-case letter.
+        keys.push(if lower.contains('+') {
+            lower
+        } else {
+            key.clone()
+        });
     }
-    match socket.agent_send_keys(&pane, &body.keys) {
+    match socket.agent_send_keys(&pane, &keys) {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
         Err(error) => error_response(&error),
     }
@@ -424,7 +435,11 @@ mod tests {
             }
             "agent.send_keys" => {
                 assert_eq!(params["target"], "w1:p1");
-                assert_eq!(params["keys"], json!(["enter"]));
+                let keys = params["keys"].as_array().expect("the keys");
+                assert!(
+                    keys.iter().all(|key| key == "enter" || key == "ctrl+c"),
+                    "the keys are {keys:?}"
+                );
                 json!({"result": {"type": "ok"}})
             }
             "agent.focus" => {
@@ -586,9 +601,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ctrl_c_reaches_the_agent() {
+        let server = agent_server();
+        let response = call(
+            with_socket(&server),
+            request(
+                Method::POST,
+                "/api/agents/w1:p1/keys",
+                Some(r#"{"keys":["Ctrl+C"]}"#),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(server.methods().contains(&"agent.send_keys".to_owned()));
+        let requests = server.requests.lock().unwrap();
+        let sent = requests
+            .iter()
+            .find(|request| request["method"] == "agent.send_keys")
+            .expect("the key request");
+        assert_eq!(sent["params"]["keys"], json!(["ctrl+c"]));
+    }
+
+    #[tokio::test]
     async fn a_key_outside_the_whitelist_is_refused() {
         let server = agent_server();
-        for key in ["rm -rf /", "ctrl+c", "shift+tab", "f13", "prefix+x", ""] {
+        for key in ["rm -rf /", "ctrl+d", "shift+tab", "f13", "prefix+x", ""] {
             let response = call(
                 with_socket(&server),
                 request(
