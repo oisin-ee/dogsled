@@ -1,0 +1,61 @@
+/* Plan review controls share the portal's Catppuccin palette. */
+.app { min-height: 0; isolation: isolate; color-scheme: dark; }
+.app > * { min-width: 0; min-height: 0; }
+.app.standalone { grid-template-columns: minmax(0, 1fr); }
+.app.standalone .right { border: 0; width: 100%; }
+.app.standalone .rv { max-width: 80rem; margin-inline: auto; }
+.rv { display: flex; flex-direction: column; gap: 1rem; overflow-wrap: anywhere; }
+.rv h2, .rv h3 { margin: 0; font-weight: 600; text-wrap: balance; }
+.rv h2 { font-size: 1rem; }
+.rv h3 { font-size: .95rem; }
+.rv p { margin: .4rem 0; text-wrap: pretty; }
+.rv-muted { color: var(--subtext0); }
+.rv button, .rv textarea, .rv input { font: inherit; }
+.rv button { min-height: 32px; border: 1px solid var(--surface1); border-radius: 4px; padding: .3rem .6rem; background: transparent; color: var(--text); cursor: pointer; }
+.rv button:hover:not(:disabled) { background: var(--surface0); }
+.rv button:disabled { opacity: .55; cursor: not-allowed; }
+.rv button.rv-primary { background: var(--accent); color: var(--crust); border-color: var(--accent); }
+.rv button.rv-primary:hover:not(:disabled) { background: var(--teal); border-color: var(--teal); }
+.rv :is(button, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rv :is(textarea, input):focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.rv ::selection { background: var(--accent); color: var(--crust); }
+.rv textarea { display: block; width: 100%; resize: vertical; min-height: 3rem; border: 1px solid var(--surface1); border-radius: 4px; background: var(--crust); color: var(--text); padding: .5rem; caret-color: var(--accent); }
+.rv input { max-width: 100%; }
+.rv :is(textarea, input)::placeholder { color: var(--subtext0); }
+.rv-needs, .rv-review, .rv-annotations { display: flex; flex-direction: column; gap: .75rem; }
+.rv-needs .rv-item { text-align: left; overflow-wrap: anywhere; }
+.rv-needs .active { background: var(--surface0); border-color: var(--accent); }
+.rv-header { border-bottom: 1px solid var(--surface0); padding-bottom: .6rem; }
+.rv-prose { font: 1rem/1.75 system-ui, sans-serif; }
+.rv-prose :is(h1, h2, h3, h4, h5, h6) { font-family: inherit; font-weight: 600; margin: 1.25em 0 .4em; color: var(--text); }
+.rv-prose h1 { font-size: 1.5rem; }
+.rv-prose h2 { font-size: 1.25rem; }
+.rv-prose :is(h3, h4, h5, h6) { font-size: 1.1rem; }
+.rv-prose :is(ul, ol) { padding-left: 1.5rem; }
+.rv-prose li + li { margin-top: .25rem; }
+.rv-prose a { color: var(--accent); text-underline-offset: .2em; }
+.rv-prose pre { overflow-x: auto; background: var(--crust); padding: .75rem; font: .9rem/1.6 ui-monospace, monospace; }
+.rv-prose code { font-family: ui-monospace, monospace; background: var(--crust); }
+.rv-prose img { max-width: 100%; height: auto; }
+.rv-prose hr { border: 0; border-top: 1px solid var(--surface1); }
+.rv blockquote { margin: .5rem 0; padding: .4rem .75rem; border-left: 1px solid var(--accent); color: var(--subtext0); white-space: pre-wrap; }
+.rv-prose .rv-annotated { background: color-mix(in srgb, var(--yellow) 13%, transparent); text-decoration-color: var(--yellow); }
+.rv-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.rv-annotation { border-bottom: 1px solid var(--surface0); padding-block: .5rem 1rem; }
+.rv-annotation > p { white-space: pre-wrap; }
+.rv-images { display: flex; flex-wrap: wrap; gap: .5rem; }
+.rv-images img { max-width: 7rem; max-height: 7rem; object-fit: contain; border-radius: 4px; }
+.rv-popover { position: fixed; z-index: 10; inset: auto 1rem 1rem auto; width: min(28rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow-y: auto; padding: 1rem; border: 1px solid var(--surface1); border-radius: 6px; background: var(--base); display: flex; flex-direction: column; gap: .6rem; }
+.rv-popover blockquote { max-height: 10rem; overflow-y: auto; }
+.rv-diff { overflow-x: auto; background: var(--crust); padding: .6rem; font-size: .85rem; font-variant-numeric: tabular-nums; }
+.rv-diff > div { white-space: pre; }
+.rv-diff .added { color: var(--green); }
+.rv-diff .removed { color: var(--red); }
+@media (pointer: coarse) {
+  .rv button { min-height: 48px; }
+}
+@media (max-width: 800px) {
+  .app:not(.standalone) { grid-template-columns: minmax(16rem, 26vw) minmax(20rem, 1fr) minmax(18rem, 32vw); overflow-x: auto; }
+  .rv textarea, .rv input { font-size: 16px; }
+  .rv { font-size: 16px; }
+}
