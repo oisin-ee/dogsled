@@ -1,5 +1,8 @@
 # Proto owns every dev tool of this repository (https://moonrepo.dev/docs/proto/config).
-# Rust is pinned only in rust-toolchain.toml.
+# Rust is pinned in rust-toolchain.toml. Proto's cargo backend needs the rust
+# tool before it can install dx, so the channel lives here too. Keep the two
+# in step.
 moon = "2.6.1"
 node = "24"
+rust = "1.99.0"
 "cargo:dioxus-cli" = "0.7.10"

@@ -127,6 +127,12 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Install the wasm target"
+        run: "rustup target add wasm32-unknown-unknown"
+      - name: "Install dx"
+        run: "cargo install dioxus-cli --version 0.7.10 --locked"
+      - name: "Bundle the web portal UI"
+        run: "dx bundle --web --release"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

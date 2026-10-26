@@ -32,12 +32,9 @@ jobs:
           # Moon diffs against main, so it needs the full history.
           fetch-depth: 0
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-      # Install only moon at the .prototools version. A bare `proto install`
-      # would also install Rust natively from rust-toolchain.toml, and its shim
-      # would shadow the rustup toolchain below.
-      - run: proto install moon
-      # dx bundles the web portal UI.
-      - run: proto install cargo:dioxus-cli
+      # .prototools pins every tool of this job: moon, node, rust and dx.
+      # The rust entry is what lets proto's cargo backend install dx.
+      - run: proto install
       # rust-toolchain.toml pins the channel, components and the wasm target.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
