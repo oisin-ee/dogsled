@@ -16,8 +16,6 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::RwLock;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use axum::body::Body;
@@ -85,57 +83,27 @@ struct Delivery {
     event: DecisionEvent,
 }
 
-/// The state root a test set, if any.
-#[cfg(test)]
-static TEST_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
-
-/// The state root a test set, if any.
-#[cfg(test)]
-fn test_root() -> Option<PathBuf> {
-    TEST_ROOT
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-}
-
-/// The state root a test set, if any.
-#[cfg(not(test))]
-fn test_root() -> Option<PathBuf> {
-    None
-}
-
-/// The state root the portal reads.
-fn state_root() -> PathBuf {
-    test_root().unwrap_or_else(crate::ledger::default_dir)
-}
-
-/// The ledger of the portal's own directory.
-fn web() -> Ledger {
-    Ledger::new(state_root()).child("web")
-}
-
 /// The ledger of the reviews.
-fn reviews() -> Ledger {
-    web().child("reviews")
+fn reviews(web: &Ledger) -> Ledger {
+    web.child("reviews")
 }
 
 /// The directory the images live in.
-fn attachments() -> PathBuf {
-    web().child("attachments").dir
+fn attachments(web: &Ledger) -> PathBuf {
+    web.child("attachments").dir
 }
 
 /// The decisions the server pushes to the sessions that listen.
 ///
-/// The channel belongs to the state root, so two portals with their own state
+/// The channel belongs to the portal's own directory, so two portals with their own state
 /// never see each other's decisions.
-fn decisions_channel() -> broadcast::Sender<Delivery> {
+fn decisions_channel(web: &Ledger) -> broadcast::Sender<Delivery> {
     static CHANNELS: OnceLock<Mutex<HashMap<PathBuf, broadcast::Sender<Delivery>>>> =
         OnceLock::new();
     let channels = CHANNELS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut channels = channels.lock().unwrap_or_else(PoisonError::into_inner);
-    let root = state_root();
     channels
-        .entry(root)
+        .entry(web.dir.clone())
         .or_insert_with(|| broadcast::channel(DECISION_CHANNEL).0)
         .clone()
 }
@@ -157,8 +125,9 @@ async fn blocking<T: Send + 'static, E: Into<Error> + Send + 'static>(
 }
 
 /// The reviews the portal holds, newest first.
-async fn list() -> Response {
-    let records = match blocking(load_all).await {
+async fn list(State(state): State<AppState>) -> Response {
+    let web = state.web.clone();
+    let records = match blocking(move || load_all(&web)).await {
         Ok(records) => records,
         Err(error) => return failed(&error),
     };
@@ -173,9 +142,10 @@ async fn list() -> Response {
 }
 
 /// One review, with its revisions and annotations.
-async fn show(RoutePath(id): RoutePath<String>) -> Response {
+async fn show(State(state): State<AppState>, RoutePath(id): RoutePath<String>) -> Response {
     let owned = id.clone();
-    let found = blocking(move || load(&owned)).await;
+    let web = state.web.clone();
+    let found = blocking(move || load(&web, &owned)).await;
     match found {
         Ok(Some(record)) => Json(record.review).into_response(),
         Ok(None) => not_found(&id),
@@ -184,9 +154,14 @@ async fn show(RoutePath(id): RoutePath<String>) -> Response {
 }
 
 /// The line diff between two revisions of a review.
-async fn diff(RoutePath(id): RoutePath<String>, RawQuery(query): RawQuery) -> Response {
+async fn diff(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
     let owned = id.clone();
-    let found = blocking(move || load(&owned)).await;
+    let web = state.web.clone();
+    let found = blocking(move || load(&web, &owned)).await;
     let record = match found {
         Ok(Some(record)) => record,
         Ok(None) => return not_found(&id),
@@ -223,7 +198,9 @@ async fn submit(
     if !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
-    let submitted = blocking(move || web().with_lock(REVIEW_LOCK, || submit_locked(&body))).await;
+    let web = state.web.clone();
+    let submitted =
+        blocking(move || web.with_lock(REVIEW_LOCK, || submit_locked(&web, &body))).await;
     match submitted {
         Ok(submitted) => Json(submitted).into_response(),
         Err(error) => failed(&error),
@@ -232,6 +209,7 @@ async fn submit(
 
 /// The draft annotations of a review. The body holds the whole list.
 async fn annotations(
+    State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
     Json(body): Json<AnnotationsBody>,
 ) -> Response {
@@ -241,9 +219,10 @@ async fn annotations(
         }
     }
     let owned = id.clone();
+    let web = state.web.clone();
     let changed = blocking(move || {
-        web().with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&owned)? else {
+        web.with_lock(REVIEW_LOCK, || {
+            let Some(mut record) = load(&web, &owned)? else {
                 return Ok(None);
             };
             let revision = record.review.revisions.last().map_or(1, |last| last.n);
@@ -259,7 +238,7 @@ async fn annotations(
                     annotation
                 })
                 .collect();
-            save(&record)?;
+            save(&web, &record)?;
             Ok(Some(record.review))
         })
     })
@@ -272,15 +251,20 @@ async fn annotations(
 }
 
 /// The comment on the plan as a whole.
-async fn general(RoutePath(id): RoutePath<String>, Json(body): Json<GeneralBody>) -> Response {
+async fn general(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+    Json(body): Json<GeneralBody>,
+) -> Response {
     let owned = id.clone();
+    let web = state.web.clone();
     let changed = blocking(move || {
-        web().with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&owned)? else {
+        web.with_lock(REVIEW_LOCK, || {
+            let Some(mut record) = load(&web, &owned)? else {
                 return Ok(None);
             };
             record.review.general.clone_from(&body.general);
-            save(&record)?;
+            save(&web, &record)?;
             Ok(Some(record.review))
         })
     })
@@ -293,26 +277,31 @@ async fn general(RoutePath(id): RoutePath<String>, Json(body): Json<GeneralBody>
 }
 
 /// The owner approves the plan. The decision goes to the session.
-async fn approve(RoutePath(id): RoutePath<String>, body: Option<Json<ApproveBody>>) -> Response {
+async fn approve(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+    body: Option<Json<ApproveBody>>,
+) -> Response {
     let notes = body.and_then(|Json(body)| body.notes);
     let owned = id.clone();
+    let web = state.web.clone();
     let decided = blocking(move || {
-        web().with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&owned)? else {
+        web.with_lock(REVIEW_LOCK, || {
+            let Some(mut record) = load(&web, &owned)? else {
                 return Ok(None);
             };
             record.review.decision = Some(Decision::Approved {
                 notes: notes.clone(),
             });
             record.delivered = false;
-            save(&record)?;
+            save(&web, &record)?;
             Ok(Some(record.review))
         })
     })
     .await;
     match decided {
         Ok(Some(review)) => {
-            let _ = decisions_channel().send(Delivery {
+            let _ = decisions_channel(&state.web).send(Delivery {
                 session: review.session.clone(),
                 event: decision_event(&review),
             });
@@ -324,11 +313,15 @@ async fn approve(RoutePath(id): RoutePath<String>, body: Option<Json<ApproveBody
 }
 
 /// The owner asks for changes. The decision goes to the session.
-async fn request_changes(RoutePath(id): RoutePath<String>) -> Response {
+async fn request_changes(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+) -> Response {
     let owned = id.clone();
+    let web = state.web.clone();
     let decided = blocking(move || {
-        web().with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&owned)? else {
+        web.with_lock(REVIEW_LOCK, || {
+            let Some(mut record) = load(&web, &owned)? else {
                 return Ok(None);
             };
             let message = change_request(&record.review);
@@ -336,14 +329,14 @@ async fn request_changes(RoutePath(id): RoutePath<String>) -> Response {
                 message: message.clone(),
             });
             record.delivered = false;
-            save(&record)?;
+            save(&web, &record)?;
             Ok(Some(record.review))
         })
     })
     .await;
     match decided {
         Ok(Some(review)) => {
-            let _ = decisions_channel().send(Delivery {
+            let _ = decisions_channel(&state.web).send(Delivery {
                 session: review.session.clone(),
                 event: decision_event(&review),
             });
@@ -355,7 +348,7 @@ async fn request_changes(RoutePath(id): RoutePath<String>) -> Response {
 }
 
 /// An image the owner added to an annotation. The body is the image itself.
-async fn attachment(body: Body) -> Response {
+async fn attachment(State(state): State<AppState>, body: Body) -> Response {
     let Ok(bytes) = axum::body::to_bytes(body, MAX_ATTACHMENT_BYTES + 1).await else {
         return too_large();
     };
@@ -367,11 +360,12 @@ async fn attachment(body: Body) -> Response {
     };
     let name = format!("{}.{extension}", random_id());
     let owned = name.clone();
-    let written = blocking(move || write_attachment(&owned, &bytes)).await;
+    let web = state.web.clone();
+    let written = blocking(move || write_attachment(&web, &owned, &bytes)).await;
     if let Err(error) = written {
         return failed(&error);
     }
-    let path = attachments().join(&name);
+    let path = attachments(&state.web).join(&name);
     Json(Attachment {
         path: path.display().to_string(),
     })
@@ -379,13 +373,17 @@ async fn attachment(body: Body) -> Response {
 }
 
 /// An image the owner added to an annotation.
-async fn attachment_file(RoutePath(name): RoutePath<String>) -> Response {
+async fn attachment_file(
+    State(state): State<AppState>,
+    RoutePath(name): RoutePath<String>,
+) -> Response {
     if !valid_attachment_name(&name) {
         return not_found(&name);
     }
     let owned = name.clone();
+    let web = state.web.clone();
     let bytes = blocking(move || {
-        let path = attachments().join(&owned);
+        let path = attachments(&web).join(&owned);
         fs::read(&path).map_err(Error::from)
     })
     .await;
@@ -410,10 +408,11 @@ async fn decisions(
     }
     // The receiver comes first, so a decision that arrives while the portal
     // reads the undelivered ones is not missed.
-    let receiver = decisions_channel().subscribe();
+    let receiver = decisions_channel(&state.web).subscribe();
     let owned = session.clone();
+    let web = state.web.clone();
     // A state the portal cannot read holds no decision to replay.
-    let replay = blocking(move || replay_events(&owned))
+    let replay = blocking(move || replay_events(&web, &owned))
         .await
         .unwrap_or_default();
     let replayed: Arc<Vec<DecisionEvent>> = Arc::new(replay.clone());
@@ -438,13 +437,14 @@ async fn ack(
         return refused("the request needs the portal token");
     }
     let owned = review_id.clone();
+    let web = state.web.clone();
     let delivered = blocking(move || {
-        web().with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&owned)? else {
+        web.with_lock(REVIEW_LOCK, || {
+            let Some(mut record) = load(&web, &owned)? else {
                 return Ok(None);
             };
             record.delivered = true;
-            save(&record)?;
+            save(&web, &record)?;
             Ok(Some(record.delivered))
         })
     })
@@ -457,8 +457,8 @@ async fn ack(
 }
 
 /// The plan of a session, with the revision it adds.
-fn submit_locked(body: &SubmitBody) -> Result<Submitted> {
-    let mut records = load_all()?;
+fn submit_locked(web: &Ledger, body: &SubmitBody) -> Result<Submitted> {
+    let mut records = load_all(web)?;
     let now = ledger::now_ms();
     // The open review of the same session and path takes the new revision.
     let open = records
@@ -487,7 +487,7 @@ fn submit_locked(body: &SubmitBody) -> Result<Submitted> {
             review,
             delivered: false,
         };
-        save(&record)?;
+        save(web, &record)?;
         return Ok(Submitted {
             id: record.review.id.clone(),
             revision: 1,
@@ -504,7 +504,7 @@ fn submit_locked(body: &SubmitBody) -> Result<Submitted> {
         submitted_ms: now,
     });
     record.review.annotations = annotations;
-    save(record)?;
+    save(web, record)?;
     Ok(Submitted {
         id: record.review.id.clone(),
         revision,
@@ -716,8 +716,8 @@ fn decision_event(review: &Review) -> DecisionEvent {
 }
 
 /// The decisions of a session that the session did not take yet.
-fn replay_events(session: &str) -> Result<Vec<DecisionEvent>> {
-    Ok(load_all()?
+fn replay_events(web: &Ledger, session: &str) -> Result<Vec<DecisionEvent>> {
+    Ok(load_all(web)?
         .iter()
         .filter(|record| {
             record.review.session == session
@@ -776,8 +776,8 @@ fn summary(record: &Record) -> ReviewSummary {
 }
 
 /// Read every review the portal holds.
-fn load_all() -> Result<Vec<Record>> {
-    let dir = reviews().dir;
+fn load_all(web: &Ledger) -> Result<Vec<Record>> {
+    let dir = reviews(web).dir;
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -800,21 +800,21 @@ fn load_all() -> Result<Vec<Record>> {
 }
 
 /// Read one review.
-fn load(id: &str) -> Result<Option<Record>> {
+fn load(web: &Ledger, id: &str) -> Result<Option<Record>> {
     if !valid_id(id) {
         return Ok(None);
     }
-    reviews().read(&format!("{id}.json"))
+    reviews(web).read(&format!("{id}.json"))
 }
 
 /// Write one review.
-fn save(record: &Record) -> Result<()> {
-    reviews().write(&format!("{}.json", record.review.id), record)
+fn save(web: &Ledger, record: &Record) -> Result<()> {
+    reviews(web).write(&format!("{}.json", record.review.id), record)
 }
 
 /// Write an image, readable by its owner only.
-fn write_attachment(name: &str, bytes: &[u8]) -> Result<()> {
-    let dir = attachments();
+fn write_attachment(web: &Ledger, name: &str, bytes: &[u8]) -> Result<()> {
+    let dir = attachments(web);
     fs::create_dir_all(&dir)?;
     let path = dir.join(name);
     let mut options = fs::OpenOptions::new();
@@ -1000,28 +1000,20 @@ mod tests {
     /// The portal's token, in the state the tests share.
     const TOKEN: &str = "secret";
 
-    /// The lock that keeps the tests apart. The tests share one state root.
-    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// The state the tests share.
-    fn state() -> AppState {
+    /// A state over a fresh directory. Every test has its own, so the tests
+    /// run side by side.
+    fn fresh_state() -> AppState {
         let (_sender, receiver) = tokio::sync::watch::channel(String::new());
-        AppState {
-            board: receiver,
-            port: PORT,
-            agents: None,
-            token: guard::Token::new(TOKEN.to_owned()),
-        }
-    }
-
-    /// Point the portal's state at a fresh directory and keep the test lock.
-    async fn fresh_state() -> tokio::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().await;
-        let root = std::env::temp_dir().join(format!("dogsled-reviews-{}", ledger::new_id()));
-        *TEST_ROOT
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(root);
-        guard
+        let web =
+            Ledger::new(std::env::temp_dir().join(format!("dogsled-reviews-{}", ledger::new_id())))
+                .child("web");
+        AppState::new(
+            receiver,
+            PORT,
+            None,
+            guard::Token::new(TOKEN.to_owned()),
+            web,
+        )
     }
 
     /// The same guard the server uses.
@@ -1035,11 +1027,14 @@ mod tests {
     }
 
     /// One request against the reviews API.
-    async fn call(request: Request<Body>) -> Response {
+    async fn call(state: &AppState, request: Request<Body>) -> Response {
         let app = Router::new()
             .merge(routes())
-            .layer(axum::middleware::from_fn_with_state(state(), test_guard))
-            .with_state(state());
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                test_guard,
+            ))
+            .with_state(state.clone());
         app.oneshot(request).await.expect("the router answers")
     }
 
@@ -1122,12 +1117,15 @@ mod tests {
     }
 
     /// Submit a plan and return the review id and the revision.
-    async fn submit_plan(path: &str, content: &str) -> (String, u32) {
-        let response = call(token_request(
-            Method::POST,
-            "/api/reviews",
-            Some(&submit_body(path, content)),
-        ))
+    async fn submit_plan(state: &AppState, path: &str, content: &str) -> (String, u32) {
+        let response = call(
+            state,
+            token_request(
+                Method::POST,
+                "/api/reviews",
+                Some(&submit_body(path, content)),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
@@ -1146,10 +1144,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_plan_opens_a_review_with_revision_one() {
-        let _guard = fresh_state().await;
-        let (id, revision) = submit_plan("plans/one.md", "first\n").await;
+        let state = fresh_state();
+        let (id, revision) = submit_plan(&state, "plans/one.md", "first\n").await;
         assert_eq!(revision, 1);
-        let response = call(request(Method::GET, &format!("/api/reviews/{id}"), None)).await;
+        let response = call(
+            &state,
+            request(Method::GET, &format!("/api/reviews/{id}"), None),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["path"], "plans/one.md");
@@ -1160,13 +1162,16 @@ mod tests {
 
     #[tokio::test]
     async fn the_same_plan_again_adds_a_revision() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "first\n").await;
-        let response = call(token_request(
-            Method::POST,
-            "/api/reviews",
-            Some(&submit_body("plans/one.md", "first\nsecond\n")),
-        ))
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "first\n").await;
+        let response = call(
+            &state,
+            token_request(
+                Method::POST,
+                "/api/reviews",
+                Some(&submit_body("plans/one.md", "first\nsecond\n")),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
@@ -1176,17 +1181,17 @@ mod tests {
 
     #[tokio::test]
     async fn another_path_opens_another_review() {
-        let _guard = fresh_state().await;
-        let (first, _) = submit_plan("plans/one.md", "first\n").await;
-        let (second, revision) = submit_plan("plans/two.md", "first\n").await;
+        let state = fresh_state();
+        let (first, _) = submit_plan(&state, "plans/one.md", "first\n").await;
+        let (second, revision) = submit_plan(&state, "plans/two.md", "first\n").await;
         assert_eq!(revision, 1);
         assert_ne!(first, second);
     }
 
     #[tokio::test]
     async fn an_annotation_on_an_unchanged_line_moves_with_the_revision() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\ntwo\nthree\n").await;
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\ntwo\nthree\n").await;
         let annotations = json!({
             "annotations": [{
                 "id": "a1",
@@ -1199,26 +1204,36 @@ mod tests {
             }]
         })
         .to_string();
-        let response = call(request(
-            Method::PUT,
-            &format!("/api/reviews/{id}/annotations"),
-            Some(&annotations),
-        ))
+        let response = call(
+            &state,
+            request(
+                Method::PUT,
+                &format!("/api/reviews/{id}/annotations"),
+                Some(&annotations),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
         // A line is added above the annotated one, so the annotation moves down.
-        let response = call(token_request(
-            Method::POST,
-            "/api/reviews",
-            Some(&submit_body("plans/one.md", "zero\none\ntwo\nthree\n")),
-        ))
+        let response = call(
+            &state,
+            token_request(
+                Method::POST,
+                "/api/reviews",
+                Some(&submit_body("plans/one.md", "zero\none\ntwo\nthree\n")),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["revision"], 2);
 
-        let response = call(request(Method::GET, &format!("/api/reviews/{id}"), None)).await;
+        let response = call(
+            &state,
+            request(Method::GET, &format!("/api/reviews/{id}"), None),
+        )
+        .await;
         let body = json_body(response).await;
         let kept = &body["annotations"][0];
         assert_eq!(kept["id"], "a1");
@@ -1230,8 +1245,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_annotation_on_a_changed_line_goes() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\ntwo\nthree\n").await;
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\ntwo\nthree\n").await;
         let annotations = json!({
             "annotations": [{
                 "id": "a1",
@@ -1244,32 +1259,42 @@ mod tests {
             }]
         })
         .to_string();
-        let response = call(request(
-            Method::PUT,
-            &format!("/api/reviews/{id}/annotations"),
-            Some(&annotations),
-        ))
+        let response = call(
+            &state,
+            request(
+                Method::PUT,
+                &format!("/api/reviews/{id}/annotations"),
+                Some(&annotations),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
         // The annotated line changes, so the comment no longer fits the plan.
-        let response = call(token_request(
-            Method::POST,
-            "/api/reviews",
-            Some(&submit_body("plans/one.md", "one\ntwo\nthree and more\n")),
-        ))
+        let response = call(
+            &state,
+            token_request(
+                Method::POST,
+                "/api/reviews",
+                Some(&submit_body("plans/one.md", "one\ntwo\nthree and more\n")),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = call(request(Method::GET, &format!("/api/reviews/{id}"), None)).await;
+        let response = call(
+            &state,
+            request(Method::GET, &format!("/api/reviews/{id}"), None),
+        )
+        .await;
         let body = json_body(response).await;
         assert_eq!(body["annotations"].as_array().map(Vec::len), Some(0));
     }
 
     #[tokio::test]
     async fn an_annotation_moves_when_the_quoted_text_stays() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\ntwo\nthree\n").await;
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\ntwo\nthree\n").await;
         let annotations = json!({
             "annotations": [{
                 "id": "a1",
@@ -1282,23 +1307,33 @@ mod tests {
             }]
         })
         .to_string();
-        let response = call(request(
-            Method::PUT,
-            &format!("/api/reviews/{id}/annotations"),
-            Some(&annotations),
-        ))
+        let response = call(
+            &state,
+            request(
+                Method::PUT,
+                &format!("/api/reviews/{id}/annotations"),
+                Some(&annotations),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
         // The quoted text stays and moves down by one line.
-        let response = call(token_request(
-            Method::POST,
-            "/api/reviews",
-            Some(&submit_body("plans/one.md", "zero\none\ntwo\nthree\n")),
-        ))
+        let response = call(
+            &state,
+            token_request(
+                Method::POST,
+                "/api/reviews",
+                Some(&submit_body("plans/one.md", "zero\none\ntwo\nthree\n")),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let response = call(request(Method::GET, &format!("/api/reviews/{id}"), None)).await;
+        let response = call(
+            &state,
+            request(Method::GET, &format!("/api/reviews/{id}"), None),
+        )
+        .await;
         let body = json_body(response).await;
         let kept = &body["annotations"][0];
         assert_eq!(kept["revision"], 2);
@@ -1308,20 +1343,26 @@ mod tests {
 
     #[tokio::test]
     async fn the_diff_between_two_revisions_shows_the_lines() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\ntwo\n").await;
-        let response = call(token_request(
-            Method::POST,
-            "/api/reviews",
-            Some(&submit_body("plans/one.md", "one\ntwo and more\n")),
-        ))
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\ntwo\n").await;
+        let response = call(
+            &state,
+            token_request(
+                Method::POST,
+                "/api/reviews",
+                Some(&submit_body("plans/one.md", "one\ntwo and more\n")),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let response = call(request(
-            Method::GET,
-            &format!("/api/reviews/{id}/diff?from=1&to=2"),
-            None,
-        ))
+        let response = call(
+            &state,
+            request(
+                Method::GET,
+                &format!("/api/reviews/{id}/diff?from=1&to=2"),
+                None,
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
@@ -1339,8 +1380,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_change_request_message_holds_the_quote_the_lines_the_comment_and_the_images() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\ntwo\n").await;
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\ntwo\n").await;
         let annotations = json!({
             "annotations": [{
                 "id": "a1",
@@ -1353,26 +1394,35 @@ mod tests {
             }]
         })
         .to_string();
-        let response = call(request(
-            Method::PUT,
-            &format!("/api/reviews/{id}/annotations"),
-            Some(&annotations),
-        ))
+        let response = call(
+            &state,
+            request(
+                Method::PUT,
+                &format!("/api/reviews/{id}/annotations"),
+                Some(&annotations),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let response = call(request(
-            Method::PUT,
-            &format!("/api/reviews/{id}/general"),
-            Some(&json!({ "general": "the plan needs a test" }).to_string()),
-        ))
+        let response = call(
+            &state,
+            request(
+                Method::PUT,
+                &format!("/api/reviews/{id}/general"),
+                Some(&json!({ "general": "the plan needs a test" }).to_string()),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = call(request(
-            Method::POST,
-            &format!("/api/reviews/{id}/request-changes"),
-            None,
-        ))
+        let response = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/reviews/{id}/request-changes"),
+                None,
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
@@ -1391,13 +1441,16 @@ mod tests {
 
     #[tokio::test]
     async fn an_approval_carries_its_notes() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\n").await;
-        let response = call(request(
-            Method::POST,
-            &format!("/api/reviews/{id}/approve"),
-            Some(&json!({ "notes": "looks good" }).to_string()),
-        ))
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\n").await;
+        let response = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/reviews/{id}/approve"),
+                Some(&json!({ "notes": "looks good" }).to_string()),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
@@ -1407,8 +1460,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_attachment_that_is_not_an_image_is_refused() {
-        let _guard = fresh_state().await;
+        let state = fresh_state();
         let response = call(
+            &state,
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/attachments")
@@ -1423,8 +1477,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_attachment_is_written_for_its_owner_only() {
-        let _guard = fresh_state().await;
+        let state = fresh_state();
         let response = call(
+            &state,
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/attachments")
@@ -1452,8 +1507,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_attachment_is_served_back() {
-        let _guard = fresh_state().await;
+        let state = fresh_state();
         let response = call(
+            &state,
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/attachments")
@@ -1466,11 +1522,10 @@ mod tests {
         let body = json_body(response).await;
         let path = body["path"].as_str().expect("the path");
         let name = path.rsplit('/').next().expect("the name");
-        let response = call(request(
-            Method::GET,
-            &format!("/api/attachments/{name}"),
-            None,
-        ))
+        let response = call(
+            &state,
+            request(Method::GET, &format!("/api/attachments/{name}"), None),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1484,29 +1539,35 @@ mod tests {
 
     #[tokio::test]
     async fn an_attachment_name_that_is_not_one_of_ours_is_refused() {
-        let _guard = fresh_state().await;
-        let response = call(request(Method::GET, "/api/attachments/..%2Ftoken", None)).await;
+        let state = fresh_state();
+        let response = call(
+            &state,
+            request(Method::GET, "/api/attachments/..%2Ftoken", None),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn a_decision_is_replayed_until_the_session_takes_it() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\n").await;
-        let response = call(request(
-            Method::POST,
-            &format!("/api/reviews/{id}/approve"),
-            Some(&json!({ "notes": "looks good" }).to_string()),
-        ))
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\n").await;
+        let response = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/reviews/{id}/approve"),
+                Some(&json!({ "notes": "looks good" }).to_string()),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
         // The session connects and gets the decision again.
-        let response = call(token_request(
-            Method::GET,
-            "/api/sessions/session-1/decisions",
-            None,
-        ))
+        let response = call(
+            &state,
+            token_request(Method::GET, "/api/sessions/session-1/decisions", None),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let text = stream_events(response).await;
@@ -1525,21 +1586,19 @@ mod tests {
         assert_eq!(event["path"], "plans/one.md");
 
         // The session takes the decision, so it is not replayed again.
-        let response = call(token_request(
-            Method::POST,
-            &format!("/api/decisions/{id}/ack"),
-            None,
-        ))
+        let response = call(
+            &state,
+            token_request(Method::POST, &format!("/api/decisions/{id}/ack"), None),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         assert_eq!(body["delivered"], true);
 
-        let response = call(token_request(
-            Method::GET,
-            "/api/sessions/session-1/decisions",
-            None,
-        ))
+        let response = call(
+            &state,
+            token_request(Method::GET, "/api/sessions/session-1/decisions", None),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let text = stream_events(response).await;
@@ -1548,20 +1607,22 @@ mod tests {
 
     #[tokio::test]
     async fn the_decisions_of_another_session_stay_out() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\n").await;
-        let response = call(request(
-            Method::POST,
-            &format!("/api/reviews/{id}/approve"),
-            Some(&json!({ "notes": "looks good" }).to_string()),
-        ))
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\n").await;
+        let response = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/reviews/{id}/approve"),
+                Some(&json!({ "notes": "looks good" }).to_string()),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let response = call(token_request(
-            Method::GET,
-            "/api/sessions/other-session/decisions",
-            None,
-        ))
+        let response = call(
+            &state,
+            token_request(Method::GET, "/api/sessions/other-session/decisions", None),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let text = stream_events(response).await;
@@ -1570,45 +1631,47 @@ mod tests {
 
     #[tokio::test]
     async fn a_submit_without_the_token_is_refused() {
-        let _guard = fresh_state().await;
-        let response = call(request(
-            Method::POST,
-            "/api/reviews",
-            Some(&submit_body("plans/one.md", "one\n")),
-        ))
+        let state = fresh_state();
+        let response = call(
+            &state,
+            request(
+                Method::POST,
+                "/api/reviews",
+                Some(&submit_body("plans/one.md", "one\n")),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn a_decision_stream_without_the_token_is_refused() {
-        let _guard = fresh_state().await;
-        let response = call(request(
-            Method::GET,
-            "/api/sessions/session-1/decisions",
-            None,
-        ))
+        let state = fresh_state();
+        let response = call(
+            &state,
+            request(Method::GET, "/api/sessions/session-1/decisions", None),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn an_ack_without_the_token_is_refused() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\n").await;
-        let response = call(request(
-            Method::POST,
-            &format!("/api/decisions/{id}/ack"),
-            None,
-        ))
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\n").await;
+        let response = call(
+            &state,
+            request(Method::POST, &format!("/api/decisions/{id}/ack"), None),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn a_write_from_another_origin_is_refused() {
-        let _guard = fresh_state().await;
+        let state = fresh_state();
         let response = call(
+            &state,
             Request::builder()
                 .method(Method::PUT)
                 .uri("/api/reviews/x/general")
@@ -1624,8 +1687,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_from_another_host_is_refused() {
-        let _guard = fresh_state().await;
+        let state = fresh_state();
         let response = call(
+            &state,
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/reviews")
@@ -1639,17 +1703,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_review_that_is_not_there_is_refused() {
-        let _guard = fresh_state().await;
-        let response = call(request(Method::GET, "/api/reviews/nope", None)).await;
+        let state = fresh_state();
+        let response = call(&state, request(Method::GET, "/api/reviews/nope", None)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn the_list_holds_the_reviews_newest_first() {
-        let _guard = fresh_state().await;
-        submit_plan("plans/one.md", "one\n").await;
-        submit_plan("plans/two.md", "two\n").await;
-        let response = call(request(Method::GET, "/api/reviews", None)).await;
+        let state = fresh_state();
+        submit_plan(&state, "plans/one.md", "one\n").await;
+        submit_plan(&state, "plans/two.md", "two\n").await;
+        let response = call(&state, request(Method::GET, "/api/reviews", None)).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_body(response).await;
         let reviews = body["reviews"].as_array().expect("the reviews");
@@ -1660,16 +1724,19 @@ mod tests {
 
     #[tokio::test]
     async fn a_decided_review_starts_a_new_one() {
-        let _guard = fresh_state().await;
-        let (id, _) = submit_plan("plans/one.md", "one\n").await;
-        let response = call(request(
-            Method::POST,
-            &format!("/api/reviews/{id}/approve"),
-            Some(&json!({ "notes": "looks good" }).to_string()),
-        ))
+        let state = fresh_state();
+        let (id, _) = submit_plan(&state, "plans/one.md", "one\n").await;
+        let response = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/reviews/{id}/approve"),
+                Some(&json!({ "notes": "looks good" }).to_string()),
+            ),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let (second, revision) = submit_plan("plans/one.md", "one\n").await;
+        let (second, revision) = submit_plan(&state, "plans/one.md", "one\n").await;
         assert_eq!(revision, 1);
         assert_ne!(second, id);
     }

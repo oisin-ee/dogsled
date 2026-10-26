@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
+# The question forms keep the fields the schema does not name, so they need a
+# JSON value type of their own.
+serde_json = "1.0.151"
 
 [lints.rust]
 unsafe_code = "forbid"
