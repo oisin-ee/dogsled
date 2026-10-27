@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod context;
 mod continuation;
+mod custody;
 mod diagnostic;
 mod done;
 mod error;

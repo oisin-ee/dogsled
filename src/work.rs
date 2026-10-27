@@ -1164,16 +1164,46 @@ fn finish(
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;
     // Queued and still-launching requests have no item: only a successful receipt
     // reaches this point. Preserve its host-clock confirmation, not admission's `now`.
-    items::record(
-        fleet.ledger,
-        item(request, host.id.clone(), pane, &result, now)?,
-    )?;
+    // Only a child can be orphaned, so only a child records an owner session.
+    let owner_session = match request.action {
+        Action::Agent { .. } => owner_session(fleet, request),
+        _ => None,
+    };
+    let item = item(request, host.id.clone(), pane, &result, now, owner_session)?;
+    items::record(fleet.ledger, item.clone())?;
+    // The custody starts at the origin: the owner holds the child until a lead claims it.
+    if item.kind == "agent" {
+        crate::custody::ensure(fleet.ledger, &item)?;
+    }
     Ok(result)
+}
+
+/// The owner's harness session identity, when this host can prove it.
+///
+/// The session-ended rule needs a recorded identity. A host that cannot prove the owner
+/// is on this host records none, so the rule never applies to that item.
+fn owner_session(fleet: &Fleet, request: &Request) -> Option<String> {
+    let hostname = crate::inbox::hostname();
+    if request.owner_host.as_deref() != Some(hostname.as_str()) {
+        return None;
+    }
+    crate::probe::agent_list(fleet.shell)
+        .ok()?
+        .into_iter()
+        .find(|agent| agent.pane == request.owner)
+        .and_then(|agent| agent.agent_session)
 }
 
 /// The owner's record of what `request` started. The profile's role wins; otherwise a child
 /// with a branch is a writer.
-fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -> Result<Item> {
+fn item(
+    request: &Request,
+    host: String,
+    pane: &str,
+    result: &Value,
+    now: u64,
+    owner_session: Option<String>,
+) -> Result<Item> {
     let text = |key: &str| result[key].as_str().map(str::to_owned);
     let (kind, name, harness) = match &request.action {
         // A job is named for its program, so the board shows it before any snapshot has it.
@@ -1202,6 +1232,7 @@ fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -
         host,
         pane: pane.into(),
         owner_pane: request.owner.clone(),
+        owner_session,
         name,
         created_ms: now,
         launch_confirmed_ms: result["launch_confirmed_ms"].as_u64(),
