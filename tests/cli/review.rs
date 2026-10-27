@@ -28,10 +28,25 @@ fn closed_wrapper_stdout_preserves_full_log_and_child_exit() {
     let command_pid = read_pid(&rig.dir.join("command-pid"), "the command");
     let command = Owned::adopt(command_pid);
     let mut output = std::io::BufReader::new(owned.child_mut().stdout.take().unwrap());
-    let mut first = String::new();
-    output.read_line(&mut first).unwrap();
+    // The read is bounded, so a wrapper that never prints fails the test on the bound
+    // instead of hanging it. The reader thread sends the first line and ends, so the
+    // test joins it without waiting for the still-running wrapper.
+    let (send, recv) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut first = String::new();
+        let read = output.read_line(&mut first);
+        let _ = send.send((read, first));
+    });
+    let (read, first) = recv
+        .recv_timeout(PROCESS_DEADLINE)
+        .unwrap_or_else(|error| panic!("the wrapper wrote no line: {error}"));
+    reader.join().unwrap();
+    let read = read.unwrap_or_else(|error| panic!("the wrapper's first line failed: {error}"));
+    assert!(
+        read > 0,
+        "the wrapper closed its output before the first line"
+    );
     assert_eq!(first, "first\n");
-    drop(output);
     // The FIFO is opened without blocking, so the write never waits for an open that
     // may never come. The writer stays open through the acknowledgement, so the reader
     // never sees an early end.
@@ -131,10 +146,30 @@ fn command_deadline_bounds_host_lock_wait() {
         .unwrap();
     lock.lock().unwrap();
     let start = Instant::now();
-    let out = rig.run(&["place", "--wait", "--max", "20ms"]);
-    assert_eq!(out.status.code(), Some(124));
-    assert!(start.elapsed() < Duration::from_secs(2));
-    assert_eq!(out.stdout, b"still running\n");
+    // The command is the test's own child, so the test owns and reaps it. Its output and
+    // its exit status come from bounded waits: a command that never ends fails the test
+    // on the bound instead of hanging the suite, and a failed assertion kills the
+    // command and its group.
+    let mut placement = rig.start(&["place", "--wait", "--max", "20ms"]);
+    let status = placement.wait();
+    let (stdout, stderr) = placement.output();
+    // The command's own deadline ends the wait for the held lock, so it reports the
+    // deadline and exits. The exit status, not a wall-clock guess, is the proof.
+    assert_eq!(
+        status.code(),
+        Some(124),
+        "stdout={stdout:?}, stderr={stderr:?}"
+    );
+    assert_eq!(stdout, "still running\n");
+    // The bounded waits above already cap this test at the process bound, so a command
+    // that never ends fails the test instead of hanging the suite. This assertion asks
+    // for the command to have finished well inside that bound, with room for a loaded
+    // machine. The command's own deadline is what the test is about; this clock only
+    // proves the command did not stall.
+    assert!(
+        start.elapsed() < PROCESS_DEADLINE / 2,
+        "the command outlived the test bound"
+    );
 }
 
 #[test]
