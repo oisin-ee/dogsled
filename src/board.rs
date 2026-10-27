@@ -898,7 +898,8 @@ fn enrich_rows(
         let Some((repo, tip)) = location else {
             continue;
         };
-        let default = defaults.entry(repo.to_owned()).or_insert_with(|| {
+        let repository = row.repository.clone().unwrap_or_else(|| repo.to_owned());
+        let default = defaults.entry(repository).or_insert_with(|| {
             let output = shell
                 .run(
                     "git",
@@ -1773,6 +1774,7 @@ mod tests {
     fn cleanup_reads_default_once_and_ancestry_once_per_row() {
         let mut first = agent("first", "pi", "idle");
         first.done = true;
+        first.repository = Some("github.com/owner/repo".into());
         first.worktree = Some(Worktree {
             path: "/repo".into(),
             branch: "feature".into(),
@@ -1781,6 +1783,7 @@ mod tests {
         });
         let mut second = first.clone();
         second.pane = "second".into();
+        second.worktree.as_mut().expect("worktree").path = "/repo/.worktrees/second".into();
         let status = status(
             vec![host("local", "local", vec![first, second])],
             vec![
@@ -1796,6 +1799,8 @@ mod tests {
         );
         let command = "git -C /repo merge-base --is-ancestor refs/heads/feature refs/heads/trunk";
         shell.on(command, "");
+        let second_command = "git -C /repo/.worktrees/second merge-base --is-ancestor refs/heads/feature refs/heads/trunk";
+        shell.on(second_command, "");
         enrich_rows(&mut board, &status, &[], &[], &shell);
         assert!(board.rows.iter().all(|row| {
             row.cleanup
@@ -1803,14 +1808,16 @@ mod tests {
                 .is_some_and(|cleanup| cleanup.cause == portal_types::CleanupCause::MergedNotPushed)
         }));
         assert_eq!(shell.calls.lock().expect("calls").len(), 3);
-        shell.on_output(
-            command,
-            crate::shell::Output {
-                status: 1,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
+        for command in [command, second_command] {
+            shell.on_output(
+                command,
+                crate::shell::Output {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
+        }
         enrich_rows(&mut board, &status, &[], &[], &shell);
         assert!(board.rows.iter().all(|row| {
             row.cleanup
