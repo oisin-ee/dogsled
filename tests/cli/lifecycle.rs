@@ -134,8 +134,15 @@ fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
     let request = json!({"id":"launch-one","action":{"type":"agent","kind":"claude","name":"worker","message":"hello"},
         "host":"remote","cwd":rig.dir.join("home"),"pane":null,"workspace":null,"workspace_name":"caller","owner":"parent"});
     assert_eq!(
-        rig.json(&["host", "launch", "--request", &request.to_string()])
-            .0,
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string()
+        ])
+        .0,
         0
     );
     assert!(rig.log("herdr.log").contains("tab create --workspace w1"));
@@ -143,8 +150,15 @@ fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
     next["id"] = json!("launch-two");
     next["workspace_name"] = json!("new-name");
     assert_eq!(
-        rig.json(&["host", "launch", "--request", &next.to_string()])
-            .0,
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &next.to_string()
+        ])
+        .0,
         0
     );
     assert!(
@@ -154,8 +168,15 @@ fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
     next["id"] = json!("launch-three");
     next["cwd"] = json!("/missing-dogsled-cwd");
     assert_eq!(
-        rig.json(&["host", "launch", "--request", &next.to_string()])
-            .0,
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &next.to_string()
+        ])
+        .0,
         2
     );
 }

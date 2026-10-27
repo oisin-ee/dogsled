@@ -626,7 +626,14 @@ fn failed_start_records_the_child_output_without_changing_unknown_outcome() {
     let rig = Rig::new("startup-output");
     npm_start_fails(&rig);
     let request = host_request(&rig);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     let message = error["error"].as_str().unwrap();
     assert!(message.contains(NPM_FAILURE), "{message}");
@@ -641,7 +648,14 @@ fn failed_start_records_the_child_output_without_changing_unknown_outcome() {
     assert_eq!(progress["confirmed"], false);
     assert!(!rig.dir.join("state/launches/recover-one.json").exists());
     for _ in 0..2 {
-        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        let (code, error) = rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string(),
+        ]);
         assert_eq!(code, 2, "{error}");
         let message = error["error"].as_str().unwrap();
         assert!(message.contains("startup outcome is unknown"), "{message}");
@@ -686,7 +700,14 @@ fn interrupted_start_can_recover_diagnostics_on_confirmation() {
     let request = host_request(&rig);
     failed_host_start(&rig, &request);
     npm_start_fails(&rig);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     let message = error["error"].as_str().unwrap();
     assert!(message.contains("startup outcome is unknown"), "{message}");
@@ -717,7 +738,14 @@ fn startup_diagnostics_do_not_turn_a_native_refusal_into_an_unknown_launch() {
             ),
     );
     let request = host_request(&rig);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     let message = error["error"].as_str().unwrap();
     assert!(message.contains("agent_name_taken"), "{message}");
@@ -731,8 +759,15 @@ fn startup_diagnostics_do_not_turn_a_native_refusal_into_an_unknown_launch() {
             .contains("startup detail")
     );
     assert_eq!(
-        rig.json(&["host", "launch", "--request", &request.to_string()])
-            .0,
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string()
+        ])
+        .0,
         2
     );
     assert_eq!(
@@ -752,7 +787,14 @@ fn empty_or_unavailable_pane_output_preserves_the_native_failure() {
             fs::remove_file(rig.dir.join("startup-output")).unwrap();
         }
         let request = host_request(&rig);
-        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        let (code, error) = rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string(),
+        ]);
         assert_eq!(code, 2, "{error}");
         let message = error["error"].as_str().unwrap();
         assert!(
@@ -778,7 +820,14 @@ fn failed_host_start(rig: &Rig, request: &Value) {
                 "  'agent start'*) echo 'startup response lost' >&2; exit 1 ;;\n  ",
             ),
     );
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -806,7 +855,14 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
     let rig = Rig::new("refused-start");
     let request = host_request(&rig);
     refusing_start(&rig);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     let message = error["error"].as_str().unwrap();
     assert!(message.contains("agent_name_taken"), "{message}");
@@ -814,7 +870,14 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
     let log = rig.log("herdr.log");
     assert!(log.contains("pane close w2:p1"), "{log}");
     // The refusal is the receipt: a resubmission neither allocates nor starts again.
-    let (code, again) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, again) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{again}");
     assert!(
         again["error"]
@@ -842,7 +905,14 @@ fn shell_initialization_is_owned_by_native_agent_start() {
         "[{\"pid\":10,\"name\":\"zsh\",\"argv\":[\"zsh\"]},{\"pid\":11,\"name\":\"bash\",\"cmdline\":\"brew shellenv\"}]",
     ));
     let request = host_request(&rig);
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{result}");
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
@@ -894,7 +964,14 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
         };
         rig.script("herdr", &script);
         let request = host_request(&rig);
-        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        let (code, error) = rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string(),
+        ]);
         assert_eq!(code, 2, "{case}: {error}");
         assert!(
             error["error"]
@@ -911,8 +988,15 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
                 .contains("agent_name_taken")
         );
         assert_eq!(
-            rig.json(&["host", "launch", "--request", &request.to_string()])
-                .0,
+            rig.json(&[
+                "host",
+                "launch",
+                "--job-validity",
+                "1",
+                "--request",
+                &request.to_string()
+            ])
+            .0,
             2
         );
         let log = rig.log("herdr.log");
@@ -932,7 +1016,14 @@ fn refused_start_closes_its_idle_prepared_pane_and_records_the_refusal() {
     let mut request = host_request(&rig);
     request["pane"] = json!("w2:p1");
     request["terminal"] = json!("term_child");
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         rig.read("state/launches/recover-one.json")["failed"]
@@ -969,7 +1060,14 @@ fn lost_start_response_reconciles_existing_agent_without_starting_twice() {
     let request = host_request(&rig);
     failed_host_start(&rig, &request);
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w2:p1","terminal_id":"term_child","name":"worker","agent":"pi","agent_status":"working"}]}}));
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["pane"], "w2:p1");
     assert_eq!(
@@ -980,8 +1078,15 @@ fn lost_start_response_reconciles_existing_agent_without_starting_twice() {
     // A receipt remains authoritative even if the agent subsequently exits.
     rig.put("agents.json", &json!({"result":{"agents":[]}}));
     assert_eq!(
-        rig.json(&["host", "launch", "--request", &request.to_string()])
-            .0,
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string()
+        ])
+        .0,
         0
     );
     assert_eq!(
@@ -991,8 +1096,15 @@ fn lost_start_response_reconciles_existing_agent_without_starting_twice() {
     let mut different = request;
     different["action"]["message"] = json!("another task");
     assert_eq!(
-        rig.json(&["host", "launch", "--request", &different.to_string()])
-            .0,
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &different.to_string()
+        ])
+        .0,
         2
     );
 }
@@ -1006,7 +1118,14 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":"w2:p1","terminal_id":"replacement"}]}}),
     );
-    let (_, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (_, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert!(
         error["error"]
             .as_str()
@@ -1018,7 +1137,14 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
         &json!({"result":{"panes":[{"pane_id":"w2:p1","terminal_id":"term_child"}]}}),
     );
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w2:p1","terminal_id":"term_child","name":"other","agent":"pi"}]}}));
-    let (_, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (_, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert!(error["error"].as_str().unwrap().contains("another agent"));
     rig.put("agents.json", &json!({"result":{"agents":[]}}));
     rig.script(
@@ -1030,7 +1156,14 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
                 "[{\"pid\":11,\"name\":\"pi\",\"argv\":[\"pi\"]}]",
             ),
     );
-    let (_, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (_, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert!(
         error["error"]
             .as_str()
@@ -1089,7 +1222,7 @@ fn remote_retry_keeps_selected_host_and_skips_checkout_and_prepare() {
 #[test]
 fn interrupted_job_admission_preserves_running_record_without_relaunch() {
     let rig = Rig::new("interrupted-job-admission");
-    let action = json!({"type":"job","cmd":["true"],"timeout_ms":null,"idle_timeout_ms":null});
+    let action = json!({"type":"job","cmd":["true"],"timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     let request = json!({"id":"interrupted-job","action":action,"host":null,"branch":null,"base":null,
         "cwd":rig.dir.join("home"),"repository":null,"workspace":"w1","workspace_name":"caller","owner":"w1:p1"});
     let launch = json!({"id":"interrupted-job","action":action,"host":"local","cwd":rig.dir.join("home"),
@@ -1099,7 +1232,7 @@ fn interrupted_job_admission_preserves_running_record_without_relaunch() {
     rig.put("state/admissions/interrupted-job.json", &json!({"request":request,"host":{"id":"local","label":"local"},"launch":launch,"error":null}));
     let job = json!({"id":"interrupted-job","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"running","exit":null,"signal":null,"reason":null,"started_ms":123,"ended_ms":null,
-        "timeout_ms":null,"idle_timeout_ms":null});
+        "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/interrupted-job.json", &job);
     rig.put("state/queue.json", &json!([{"id":"interrupted-ticket","request":request,"created_ms":100,"state":"admitting",
         "waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":100}}]));
@@ -1116,7 +1249,8 @@ fn interrupted_job_admission_preserves_running_record_without_relaunch() {
 fn job_launch_request(rig: &Rig, id: &str, cmd: &[&str]) -> Value {
     json!({
         "id": id,
-        "action": {"type":"job","cmd":cmd,"timeout_ms":null,"idle_timeout_ms":null},
+        "action": {"type":"job","cmd":cmd,"timeout_ms":null,"idle_timeout_ms":null,
+            "validity":rig.job_validity()},
         "host": "local",
         "cwd": rig.dir.join("home"),
         "pane": Value::Null,
@@ -1135,10 +1269,17 @@ fn a_host_replay_without_a_receipt_does_not_dispatch_an_existing_claim_again() {
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
-        "timeout_ms":null,"idle_timeout_ms":null});
+        "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/replayed.json", &job);
     let request = job_launch_request(&rig, "replayed", &["true"]);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -1165,11 +1306,12 @@ fn a_host_replay_with_a_matching_receipt_replays_without_side_effects() {
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
-        "timeout_ms":null,"idle_timeout_ms":null});
+        "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/replayed.json", &job);
     rig.put(
         "state/launches/replayed.json",
         &job_receipt(
+            &rig,
             "replayed",
             "local",
             "w2:p1",
@@ -1179,7 +1321,14 @@ fn a_host_replay_with_a_matching_receipt_replays_without_side_effects() {
         ),
     );
     let request = job_launch_request(&rig, "replayed", &["true"]);
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["pane"], "w2:p1", "{result}");
     let log = rig.log("herdr.log");
@@ -1198,7 +1347,7 @@ fn a_legacy_receipt_replays_while_its_job_record_survives() {
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
-        "timeout_ms":null,"idle_timeout_ms":null});
+        "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/replayed.json", &job);
     // The receipt as it was written before the request evidence existed.
     rig.put(
@@ -1206,7 +1355,14 @@ fn a_legacy_receipt_replays_while_its_job_record_survives() {
         &json!({"id":"replayed","host":"local","pane":"w2:p1"}),
     );
     let request = job_launch_request(&rig, "replayed", &["true"]);
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["pane"], "w2:p1", "{result}");
     let log = rig.log("herdr.log");
@@ -1245,9 +1401,10 @@ fn a_host_replay_with_a_conflicting_receipt_refuses() {
         fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
             "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
-            "timeout_ms":null,"idle_timeout_ms":null});
+            "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
         rig.put("state/jobs/replayed.json", &job);
         let mut saved = job_receipt(
+            &rig,
             "replayed",
             "local",
             "w2:p1",
@@ -1258,7 +1415,14 @@ fn a_host_replay_with_a_conflicting_receipt_refuses() {
         let mut request = job_launch_request(&rig, "replayed", &["true"]);
         conflict(&mut request, &mut saved);
         rig.put("state/launches/replayed.json", &saved);
-        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        let (code, error) = rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string(),
+        ]);
         assert_eq!(code, 2, "{name}: {error}");
         let log = rig.log("herdr.log");
         assert!(!log.contains("tab create"), "{name}: {log}");
@@ -1276,11 +1440,18 @@ fn a_host_replay_with_a_conflicting_request_and_no_receipt_refuses() {
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     let job = json!({"id":"replayed","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"pending","exit":null,"signal":null,"reason":null,"started_ms":null,"ended_ms":null,
-        "timeout_ms":null,"idle_timeout_ms":null});
+        "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/replayed.json", &job);
     let mut request = job_launch_request(&rig, "replayed", &["true"]);
     request["action"]["cmd"] = json!(["false"]);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -1303,10 +1474,17 @@ fn a_host_replay_of_an_uncertain_claim_refuses_and_keeps_the_uncertainty() {
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     let job = json!({"id":"unproved","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"uncertain","exit":null,"signal":null,"reason":"dispatch outcome unknown",
-        "started_ms":null,"ended_ms":null,"timeout_ms":null,"idle_timeout_ms":null});
+        "started_ms":null,"ended_ms":null,"timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/unproved.json", &job);
     let request = job_launch_request(&rig, "unproved", &["true"]);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -1323,10 +1501,19 @@ fn a_host_replay_of_an_uncertain_claim_refuses_and_keeps_the_uncertainty() {
 }
 
 /// The job launch receipt, as a job launch writes it.
-fn job_receipt(id: &str, host: &str, pane: &str, cmd: &[&str], cwd: &str, owner: &str) -> Value {
+fn job_receipt(
+    rig: &Rig,
+    id: &str,
+    host: &str,
+    pane: &str,
+    cmd: &[&str],
+    cwd: &str,
+    owner: &str,
+) -> Value {
     json!({"id":id,"host":host,"pane":pane,
         "request":{"cmd":cmd,"cwd":cwd,"owner":owner,
-            "timeout_ms":null,"idle_timeout_ms":null}})
+            "timeout_ms":null,"idle_timeout_ms":null,
+            "validity":rig.job_validity()}})
 }
 
 /// A matching receipt replays after the prune removed the job record. The prune keeps the
@@ -1341,11 +1528,12 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"pruned","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
-        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/pruned.json", &job);
     rig.put(
         "state/launches/pruned.json",
         &job_receipt(
+            &rig,
             "pruned",
             "local",
             "w2:p1",
@@ -1363,7 +1551,14 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
     assert!(rig.dir.join("state/launches/pruned.json").exists());
     // The replay returns the recorded result. It allocates nothing and dispatches nothing.
     let request = job_launch_request(&rig, "pruned", &["true"]);
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["id"], "pruned", "{result}");
     assert_eq!(result["pane"], "w2:p1", "{result}");
@@ -1375,6 +1570,7 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
     assert_eq!(
         rig.read("state/launches/pruned.json"),
         job_receipt(
+            &rig,
             "pruned",
             "local",
             "w2:p1",
@@ -1396,7 +1592,7 @@ fn a_legacy_receipt_without_request_evidence_fails_closed_after_the_prune() {
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"legacy","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
-        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/legacy.json", &job);
     // The receipt as it was written before the request evidence existed.
     rig.put(
@@ -1409,7 +1605,14 @@ fn a_legacy_receipt_without_request_evidence_fails_closed_after_the_prune() {
     assert!(!rig.dir.join("state/jobs/legacy.json").exists());
     // The replay refuses: it dispatches nothing and invents nothing.
     let request = job_launch_request(&rig, "legacy", &["true"]);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -1440,9 +1643,10 @@ fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
         fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let job = json!({"id":"incomplete","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
             "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
-            "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+            "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
         rig.put("state/jobs/incomplete.json", &job);
         let mut saved = job_receipt(
+            &rig,
             "incomplete",
             "local",
             "w2:p1",
@@ -1463,7 +1667,14 @@ fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
         assert!(!rig.dir.join("state/jobs/incomplete.json").exists());
         // The receipt names no pane, so the replay refuses.
         let request = job_launch_request(&rig, "incomplete", &["true"]);
-        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        let (code, error) = rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string(),
+        ]);
         assert_eq!(code, 2, "{name}: {error}");
         assert!(
             error["error"]
@@ -1490,9 +1701,10 @@ fn a_conflicting_receipt_fails_closed_after_the_prune() {
         fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let job = json!({"id":"conflicted","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
             "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
-            "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+            "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
         rig.put("state/jobs/conflicted.json", &job);
         let mut saved = job_receipt(
+            &rig,
             "conflicted",
             "local",
             "w2:p1",
@@ -1511,7 +1723,14 @@ fn a_conflicting_receipt_fails_closed_after_the_prune() {
         assert!(!rig.dir.join("state/jobs/conflicted.json").exists());
         // The receipt names another command or another owner, so the replay refuses.
         let request = job_launch_request(&rig, "conflicted", &["true"]);
-        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        let (code, error) = rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string(),
+        ]);
         assert_eq!(code, 2, "{name}: {error}");
         assert!(
             error["error"]
@@ -1648,7 +1867,14 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
     dispatch_order_herdr(&rig, DispatchOrder::After);
     let command = "echo out; exit 7";
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", command]);
-    let mut launch = rig.start(&["host", "launch", "--request", &request.to_string()]);
+    let mut launch = rig.start(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     // The test spawns the wrapper as its own child, so the test is the wrapper's parent
     // and can reap it. A failed assertion kills it and its group.
     let mut wrapper = rig.spawn_recorded(&rig.dir.join("wrapper-command"), "the wrapper");
@@ -1699,7 +1925,14 @@ fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
         marker.display()
     );
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
-    let mut launch = rig.start(&["host", "launch", "--request", &request.to_string()]);
+    let mut launch = rig.start(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     // The test spawns the wrapper as its own child, so the test is the wrapper's parent
     // and can reap it. A failed assertion kills it and its group.
     let mut wrapper = rig.spawn_recorded(&rig.dir.join("wrapper-command"), "the wrapper");
@@ -1769,7 +2002,14 @@ fn the_wrapper_guard_covers_the_command_group_it_started() {
         marker.display()
     );
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
-    let mut launch = rig.start(&["host", "launch", "--request", &request.to_string()]);
+    let mut launch = rig.start(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     // The fake Herdr waits for the test's release. The test owns that process, so a
     // failed assertion kills it and it never outlives the test.
     let herdr_pid = read_pid(&rig.dir.join("herdr-pid"), "the fake herdr");
@@ -1829,7 +2069,14 @@ fn a_wrapper_that_never_closes_its_pane_fails_the_race_on_the_bound() {
         marker.display()
     );
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
-    let mut launch = rig.start(&["host", "launch", "--request", &request.to_string()]);
+    let mut launch = rig.start(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     // The fake Herdr waits for the test's release. The test owns that process, so a
     // failed assertion kills it and it never outlives the test.
     let herdr_pid = read_pid(&rig.dir.join("herdr-pid"), "the fake herdr");
@@ -1881,7 +2128,14 @@ fn a_dispatch_failure_before_a_real_wrapper_starts_makes_the_late_wrapper_refuse
     let marker = rig.dir.join("marker");
     let command = format!("touch {}", marker.display());
     let request = job_launch_request(&rig, "dispatched", &["sh", "-c", &command]);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     // The dispatch outcome was never proved, so the claim stays uncertain.
     let job = rig.read("state/jobs/dispatched.json");
@@ -1928,7 +2182,14 @@ esac
 "#,
     );
     let request = job_launch_request(&rig, "interrupted", &["true"]);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     // The claim is published, and the dispatch that was never proved keeps it uncertain.
     let job = rig.read("state/jobs/interrupted.json");
@@ -1937,7 +2198,14 @@ esac
     // No receipt was saved: nothing proves a dispatch.
     assert!(!rig.dir.join("state/launches/interrupted.json").exists());
     // The retry fails closed. It keeps the claim, allocates nothing, and dispatches nothing.
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -1969,7 +2237,7 @@ fn a_failed_dispatch_keeps_a_running_or_terminal_wrapper_record() {
         let wrapper = json!({"id":"dispatched","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local",
             "owner":"w1:p1","pane":"w2:p1","state":state,"exit":if ended.is_null() {Value::Null} else {json!(0)},
             "signal":null,"reason":null,"started_ms":started,"ended_ms":ended,
-            "timeout_ms":null,"idle_timeout_ms":null});
+            "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
         rig.put("wrapper.json", &wrapper);
         rig.script(
             "herdr",
@@ -1988,7 +2256,14 @@ esac
 "#,
         );
         let request = job_launch_request(&rig, "dispatched", &["true"]);
-        let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+        let (code, error) = rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request.to_string(),
+        ]);
         assert_eq!(code, 2, "{error}");
         // The wrapper's own record survives the transport failure.
         let after = rig.read("state/jobs/dispatched.json");
@@ -2017,7 +2292,14 @@ esac
 "#,
     );
     let request = job_launch_request(&rig, "unproved", &["true"]);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     let job = rig.read("state/jobs/unproved.json");
     assert_eq!(job["state"], "uncertain", "{job}");
@@ -2029,7 +2311,14 @@ esac
         "{job}"
     );
     // A second launch refuses the uncertain claim.
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -2049,7 +2338,14 @@ fn first_host_launch_refuses_a_terminal_replaced_after_preparation() {
     request["terminal"] = json!("prepared_terminal");
     // No launch receipt: the first transport never reached the host. Its pane
     // now names a different terminal, even though the replacement shell is idle.
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -2061,7 +2357,14 @@ fn first_host_launch_refuses_a_terminal_replaced_after_preparation() {
     assert!(!rig.log("herdr.log").contains("tab create"));
     request["id"] = json!("missing-terminal");
     request.as_object_mut().unwrap().remove("terminal");
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -2092,7 +2395,14 @@ fn a_busy_start_is_repeated_on_the_same_pane_until_the_shell_is_ready() {
     let rig = Rig::new("busy-then-ready");
     busy_start(&rig, 2);
     let request = host_request(&rig);
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["pane"], "w2:p1");
     let log = rig.log("herdr.log");
@@ -2107,7 +2417,14 @@ fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried
     fs::write(rig.dir.join("busy-window-ms"), "600").unwrap();
     busy_start(&rig, -1);
     let request = host_request(&rig);
-    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_ne!(code, 0, "{error}");
     let message = error["error"].as_str().unwrap();
     assert!(message.contains("w2:p1"), "{message}");
@@ -2158,7 +2475,14 @@ fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried
         rig.read("state/launches/recover-one.progress.json")["attempted"],
         false
     );
-    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{result}");
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("tab create").count(), 1, "{log}");

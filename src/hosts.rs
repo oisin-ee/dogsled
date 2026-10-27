@@ -53,6 +53,9 @@ pub struct HostReport {
     /// When an unreachable peer is read again, after backoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_ms: Option<u64>,
+    /// The job validity protocol this host speaks. A host without it cannot run a job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_validity: Option<u32>,
 }
 
 /// Why a host could not be read, as a fixed category.
@@ -253,6 +256,9 @@ struct Cached {
     /// every cache expiry.
     #[serde(default)]
     retry: crate::backoff::Backoff,
+    /// The job validity protocol the peer speaks. A peer without it cannot run a job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    job_validity: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -451,29 +457,43 @@ impl<'a> Fleet<'a> {
         })
     }
 
-    pub fn reserve(&self, host: &Host, id: &str, now: u64) -> Result<ReserveOutcome> {
+    pub fn reserve(
+        &self,
+        host: &Host,
+        id: &str,
+        now: u64,
+        validity: Option<crate::jobs::Validity>,
+    ) -> Result<ReserveOutcome> {
         if host.is_local() {
-            return self.node().reserve(id, now);
+            return self.node().reserve(id, now, validity);
         }
         let t = self.thresholds();
-        self.remote(
-            host,
-            &[
-                "reserve".into(),
-                "--id".into(),
-                id.into(),
-                "--free-core-fraction-min".into(),
-                t.free_core_fraction_min.to_string(),
-                "--memory-reserve-bytes".into(),
-                t.memory_reserve_bytes.to_string(),
-                "--disk-free-min-percent".into(),
-                t.disk_free_min_percent.to_string(),
-                "--reservation-load".into(),
-                t.reservation_load.to_string(),
-                "--reservation-ttl-ms".into(),
-                t.reservation_ttl_ms.to_string(),
-            ],
-        )
+        let mut args = vec![
+            "reserve".into(),
+            "--id".into(),
+            id.into(),
+            "--free-core-fraction-min".into(),
+            t.free_core_fraction_min.to_string(),
+            "--memory-reserve-bytes".into(),
+            t.memory_reserve_bytes.to_string(),
+            "--disk-free-min-percent".into(),
+            t.disk_free_min_percent.to_string(),
+            "--reservation-load".into(),
+            t.reservation_load.to_string(),
+            "--reservation-ttl-ms".into(),
+            t.reservation_ttl_ms.to_string(),
+        ];
+        // The validity protocol rides with a job reservation. A peer that does not
+        // speak it refuses the flag, and the caller reports an unsupported protocol.
+        if let Some(validity) = validity {
+            args.extend([
+                "--job-validity".into(),
+                crate::jobs::VALIDITY_PROTOCOL_VERSION.to_string(),
+                "--job-created-ms".into(),
+                validity.created_ms.to_string(),
+            ]);
+        }
+        self.remote(host, &args)
     }
 
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
@@ -509,6 +529,7 @@ impl<'a> Fleet<'a> {
                 error: None,
                 failure: None,
                 retry: crate::backoff::Backoff::default(),
+                job_validity: report.job_validity,
             })
         } else {
             self.cached_peer(host, now)
@@ -524,6 +545,7 @@ impl<'a> Fleet<'a> {
             error: None,
             failure: Some(Failure::of(&e)),
             retry: crate::backoff::Backoff::default(),
+            job_validity: None,
         });
         // Only the category describes an unreachable host. This also covers a cache written
         // before categories existed, which may still hold raw ssh text.
@@ -582,6 +604,7 @@ impl<'a> Fleet<'a> {
             handoffs: cached.handoffs,
             retry_ms: (!cached.reachable && cached.retry.attempts > 0)
                 .then_some(cached.retry.next_ms),
+            job_validity: cached.job_validity,
         }
     }
 
@@ -639,46 +662,45 @@ impl<'a> Fleet<'a> {
                 return Ok(cached.clone());
             }
             let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
-            let (snapshot, reachable, available, running, handoffs, error, failure) = match self
-                .remote::<Option<
-                crate::node::SnapshotReport,
-            >>(
-                host,
-                &["snapshot".into()],
-            ) {
-                Ok(Some(report)) => {
-                    let available = report.snapshot.is_some();
-                    (
-                        report
-                            .snapshot
-                            .or_else(|| previous.and_then(|c| c.snapshot)),
+            let (snapshot, reachable, available, running, handoffs, error, failure, job_validity) =
+                match self.remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
+                {
+                    Ok(Some(report)) => {
+                        let available = report.snapshot.is_some();
+                        (
+                            report
+                                .snapshot
+                                .or_else(|| previous.and_then(|c| c.snapshot)),
+                            true,
+                            available,
+                            report.running,
+                            report.handoffs,
+                            None,
+                            None,
+                            report.job_validity,
+                        )
+                    }
+                    Ok(None) => (
+                        previous.and_then(|c| c.snapshot),
                         true,
-                        available,
-                        report.running,
-                        report.handoffs,
+                        false,
+                        None,
+                        Vec::new(),
+                        Some("host.json is missing; service: down".into()),
                         None,
                         None,
-                    )
-                }
-                Ok(None) => (
-                    previous.and_then(|c| c.snapshot),
-                    true,
-                    false,
-                    None,
-                    Vec::new(),
-                    Some("host.json is missing; service: down".into()),
-                    None,
-                ),
-                Err(e) => (
-                    previous.and_then(|c| c.snapshot),
-                    false,
-                    false,
-                    None,
-                    Vec::new(),
-                    None,
-                    Some(Failure::of(&e)),
-                ),
-            };
+                    ),
+                    Err(e) => (
+                        previous.and_then(|c| c.snapshot),
+                        false,
+                        false,
+                        None,
+                        Vec::new(),
+                        None,
+                        Some(Failure::of(&e)),
+                        None,
+                    ),
+                };
             if reachable {
                 retry.reset();
             } else {
@@ -695,6 +717,7 @@ impl<'a> Fleet<'a> {
                 error,
                 failure,
                 retry,
+                job_validity,
             };
             self.ledger.write(&file, &cached)?;
             Ok(cached)

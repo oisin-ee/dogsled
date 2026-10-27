@@ -155,7 +155,14 @@ fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
         };
         let before = crate::ledger::now_ms();
         // The caller's old admission timestamp must not become confirmation time.
-        let result = work::launch(&ledger, &shell, &progress.request, 1).unwrap();
+        let result = work::launch(
+            &ledger,
+            &shell,
+            &progress.request,
+            1,
+            Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
+        )
+        .unwrap();
         let confirmed = result["launch_confirmed_ms"].as_u64().unwrap();
         assert!(confirmed >= before && confirmed <= crate::ledger::now_ms());
         assert_eq!(

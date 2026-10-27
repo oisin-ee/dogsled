@@ -49,6 +49,9 @@ pub struct SnapshotReport {
     /// Host-owned results survive the child pane and checkout.
     #[serde(default)]
     pub handoffs: Vec<crate::done::Mark>,
+    /// The job validity protocol this host speaks. A peer without it cannot run a job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_validity: Option<u32>,
 }
 
 impl Snapshot {
@@ -89,6 +92,7 @@ impl Node<'_> {
             snapshot: self.ledger.read("host.json")?,
             running: Some(self.ledger.locked("service")?),
             handoffs: crate::done::list(self.ledger)?,
+            job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
         })
     }
 
@@ -147,9 +151,20 @@ impl Node<'_> {
         Ok(reservations)
     }
 
-    pub fn reserve(&self, id: &str, now: u64) -> Result<ReserveOutcome> {
+    pub fn reserve(
+        &self,
+        id: &str,
+        now: u64,
+        job_validity: Option<crate::jobs::Validity>,
+    ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
         self.ledger.with_lock("host", || {
+            // The host checks the request's age before it reads or rewrites any capacity
+            // record, and before it replays a hold. A request that may not start new
+            // execution never takes, keeps, or confirms a reservation.
+            if let Some(validity) = &job_validity {
+                crate::jobs::check_validity(self.ledger, Some(validity))?;
+            }
             let reservations = self.live_reservations(now)?;
             // The caller may have lost a successful SSH reply. Replaying a live hold is
             // not new admission: do not append it, refresh its TTL, or require a fresh probe.
@@ -242,7 +257,7 @@ mod tests {
             .unwrap();
         std::thread::scope(|scope| {
             let calls: Vec<_> = (0..4)
-                .map(|_| scope.spawn(|| node.reserve("same", 100)))
+                .map(|_| scope.spawn(|| node.reserve("same", 100, None)))
                 .collect();
             for call in calls {
                 assert!(call.join().unwrap().unwrap().reserved);
@@ -253,19 +268,23 @@ mod tests {
         assert_eq!(holds[0].id, "same");
         assert_eq!(holds[0].created_ms, 100);
         // An existing hold is not new admission and does not need a fresh probe.
-        assert!(node.reserve("same", 100 + STALE_MS + 1).unwrap().reserved);
+        assert!(
+            node.reserve("same", 100 + STALE_MS + 1, None)
+                .unwrap()
+                .reserved
+        );
         let holds: Vec<Reservation> = ledger.read("placements.json").unwrap().unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].created_ms, 100);
         assert!(
             !node
-                .reserve("another", 100 + STALE_MS + 1)
+                .reserve("another", 100 + STALE_MS + 1, None)
                 .unwrap()
                 .reserved
         );
         assert!(
             !node
-                .reserve("same", 100 + policy.reservation_ttl_ms)
+                .reserve("same", 100 + policy.reservation_ttl_ms, None)
                 .unwrap()
                 .reserved
         );

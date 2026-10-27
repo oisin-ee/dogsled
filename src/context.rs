@@ -93,6 +93,7 @@ mod tests {
                 jobs: Vec::new(),
                 handoffs: Vec::new(),
                 retry_ms: None,
+                job_validity: None,
             }],
             items: Vec::new(),
             queue: Vec::new(),
