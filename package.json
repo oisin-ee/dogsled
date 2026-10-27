@@ -1,6 +1,6 @@
 {
   "name": "@oisin-ee/pi-dogsled",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "description": "Pi extension for dogsled: the board, the /dogsled panel, the inbox reader, and the dogsled tools. Needs the dogsled binary of the same version.",
   "type": "module",
   "license": "MIT",
