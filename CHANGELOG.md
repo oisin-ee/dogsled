@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.25.1 - 2026-10-27
+
+- Release builds bundle the web portal from the `web` package. The 0.25.0 tag built no archives.
+
 ## 0.25.0 - 2026-10-27
 
 - `dogsled web` serves a local portal at `127.0.0.1:7465`. The `[web] port` configuration sets another port. The portal shows the board grouped by repository, todos, Herdr agents and their conversations, and a message box. A panel answers a blocked agent with the keys its prompt allows. The Rust/WASM Dioxus page is embedded in the binary. The server accepts only loopback Host values and the portal's own Origin. Pi tools authenticate with a per-user token in `<state>/web/token`.
