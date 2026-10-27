@@ -1,27 +1,46 @@
 use super::*;
 
+/// Read the first line of a child's output, or fail the test on the bound. The read runs
+/// on its own thread, so a child that never writes cannot hang the test. The reader comes
+/// back with the line, so the pipe stays open for the rest of the child's output.
+fn first_line(
+    stdout: std::process::ChildStdout,
+) -> (String, std::io::BufReader<std::process::ChildStdout>) {
+    use std::io::BufRead as _;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).map(|count| (count, line));
+        let _ = sender.send((read, reader));
+    });
+    match receiver.recv_timeout(PROCESS_DEADLINE) {
+        Ok((Ok((0, _line)), _reader)) => panic!("the child closed its output without a line"),
+        Ok((Ok((_count, line)), reader)) => (line, reader),
+        Ok((Err(error), _reader)) => panic!("the child's output could not be read: {error}"),
+        Err(error) => panic!("the child wrote no line within {PROCESS_DEADLINE:?}: {error}"),
+    }
+}
+
 #[test]
 fn wrapper_termination_kills_command_group_and_records_result() {
-    use std::io::BufRead as _;
     let rig = Rig::new("wrapper-signal");
     rig.claim("wrapper", &["sh", "-c", "echo ready; sleep 30"]);
-    let mut child = rig
-        .cmd(&["exec", "wrapper", "--", "sh", "-c", "echo ready; sleep 30"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    output.read_line(&mut line).unwrap();
+    let mut command = rig.cmd(&["exec", "wrapper", "--", "sh", "-c", "echo ready; sleep 30"]);
+    command.stdout(std::process::Stdio::piped());
+    // The test owns the wrapper as its own child, so the test reaps it and reads its
+    // exit status. A failed assertion kills the wrapper and its own group.
+    let mut child = Owned::spawn(&mut command);
+    let (line, _output) = first_line(child.child_mut().stdout.take().unwrap());
     assert_eq!(line, "ready\n");
     assert!(
         Command::new("kill")
-            .args(["-TERM", &child.id().to_string()])
+            .args(["-TERM", &child.child_mut().id().to_string()])
             .status()
             .unwrap()
             .success()
     );
-    assert_eq!(child.wait().unwrap().code(), Some(137));
+    assert_eq!(child.wait().code(), Some(137));
     assert_eq!(rig.read("state/jobs/wrapper.json")["reason"], "signal 15");
 }
 
@@ -38,49 +57,43 @@ fn remote_wait_deadline_bounds_a_silent_ssh_process() {
 
 #[test]
 fn stop_kills_running_process_after_child_output_without_test_sleep() {
-    use std::io::BufRead as _;
     let rig = Rig::new("stop-real");
     rig.claim("stoppable", &["sh", "-c", "echo ready; sleep 30"]);
-    let mut child = rig
-        .cmd(&[
-            "exec",
-            "stoppable",
-            "--",
-            "sh",
-            "-c",
-            "echo ready; sleep 30",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    output.read_line(&mut line).unwrap();
+    let mut command = rig.cmd(&[
+        "exec",
+        "stoppable",
+        "--",
+        "sh",
+        "-c",
+        "echo ready; sleep 30",
+    ]);
+    command.stdout(std::process::Stdio::piped());
+    // The test owns the wrapper as its own child, so the test reaps it and reads its
+    // exit status. A failed assertion kills the wrapper and its own group.
+    let mut child = Owned::spawn(&mut command);
+    let (line, _output) = first_line(child.child_mut().stdout.take().unwrap());
     assert_eq!(line, "ready\n");
     assert!(rig.run(&["stop", "stoppable"]).status.success());
-    assert_eq!(child.wait().unwrap().code(), Some(137));
+    assert_eq!(child.wait().code(), Some(137));
     assert_eq!(rig.read("state/jobs/stoppable.json")["reason"], "stopped");
 }
 
 #[test]
 fn waiting_queue_caller_observes_service_admission_without_sleep() {
-    use std::io::BufRead as _;
     let rig = Rig::new("queue-wait");
     rig.snapshot("state/host.json", now(), 99.0, 1);
-    let mut child = rig
-        .cmd(&["run", "--wait", "--max", "10s", "--", "sh", "-c", "exit 3"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    output.read_line(&mut line).unwrap();
+    let mut command = rig.cmd(&["run", "--wait", "--max", "10s", "--", "sh", "-c", "exit 3"]);
+    command.stdout(std::process::Stdio::piped());
+    // The test owns the command as its own child, so the test reaps it and reads its
+    // exit status. A failed assertion kills the command and its own group.
+    let mut child = Owned::spawn(&mut command);
+    let (line, _output) = first_line(child.child_mut().stdout.take().unwrap());
     let queued: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(queued["queued"], true);
     // The fixture supplies admission capacity, not the CI runner's current load.
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(child.wait().unwrap().code(), Some(3));
+    assert_eq!(child.wait().code(), Some(3));
     assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
     assert_eq!(rig.read("state/queue.json")[0]["waiting"], true);
     assert!(!rig.log("herdr.log").contains("dogsled: ticket"));

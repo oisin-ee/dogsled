@@ -3,25 +3,52 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+/// The time the server gets to end on its own after its stdin closes. A server that
+/// outlives this window is killed, so a test never hangs on it.
+const EXIT_GRACE: Duration = Duration::from_secs(5);
+
 /// A `dogsled mcp` client: one JSON-RPC line in, one response line out.
 pub(super) struct Client {
-    child: std::process::Child,
-    out: BufReader<std::process::ChildStdout>,
+    /// The server the test owns as its own child. The test reaps it and reads its exit
+    /// status. A failed assertion kills the server and its own group.
+    owned: Owned,
+    /// The server's output lines, in order. A reader thread drains the pipe, so a full
+    /// pipe never blocks the server.
+    lines: std::sync::mpsc::Receiver<String>,
+    /// The thread that reads the server's output. It ends when the server's output
+    /// closes.
+    reader: Option<std::thread::JoinHandle<()>>,
     next: u64,
 }
 
 impl Client {
     pub(super) fn start(rig: &Rig) -> Self {
-        let mut child = rig
-            .cmd(&["mcp"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let out = BufReader::new(child.stdout.take().unwrap());
+        let mut command = rig.cmd(&["mcp"]);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        let mut owned = Owned::spawn(&mut command);
+        let stdout = owned.child_mut().stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // The reader thread sends every line the server writes. A server that never
+        // writes leaves the channel empty, so the wait for a response ends on the bound
+        // instead of hanging the test.
+        let reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if sender.send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
         let mut client = Self {
-            child,
-            out,
+            owned,
+            lines: receiver,
+            reader: Some(reader),
             next: 0,
         };
         let init = client.request(
@@ -34,7 +61,7 @@ impl Client {
         client
     }
     fn write(&mut self, message: &Value) {
-        let stdin = self.child.stdin.as_mut().unwrap();
+        let stdin = self.owned.child_mut().stdin.as_mut().unwrap();
         writeln!(stdin, "{message}").unwrap();
         stdin.flush().unwrap();
     }
@@ -45,13 +72,29 @@ impl Client {
         self.next += 1;
         let id = self.next;
         self.write(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
+        // The whole request is bounded, not only each read. A server that keeps writing
+        // lines without the answer fails its test on the bound instead of looping for
+        // ever.
+        let deadline = Instant::now() + PROCESS_DEADLINE;
         loop {
-            let mut line = String::new();
-            assert!(self.out.read_line(&mut line).unwrap() > 0, "server closed");
+            let line = self.next_line(deadline);
             let message: Value = serde_json::from_str(&line).unwrap();
             if message["id"] == id {
                 return message["result"].clone();
             }
+        }
+    }
+    /// The server's next line, or fail the test on the bound. A server that never
+    /// answers fails its test instead of hanging it. A closed server is a closed
+    /// channel, which the reader thread signals by ending.
+    fn next_line(&mut self, deadline: Instant) -> String {
+        let bound = deadline.saturating_duration_since(Instant::now());
+        match self.lines.recv_timeout(bound) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("the server wrote no line within {PROCESS_DEADLINE:?}")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("server closed"),
         }
     }
     /// A tool's JSON result, and whether it is a tool error.
@@ -67,8 +110,25 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        drop(self.child.stdin.take());
-        let _ = self.child.wait();
+        // The server's stdin closes first, so a server that waits for its client ends on
+        // its own.
+        drop(self.owned.child_mut().stdin.take());
+        // The server gets a short grace window to end on its own. A server that does not
+        // end is killed below, so the test never hangs on it.
+        let deadline = Instant::now() + EXIT_GRACE;
+        while Instant::now() < deadline {
+            match self.owned.child_mut().try_wait() {
+                Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                Ok(Some(_)) | Err(_) => break,
+            }
+        }
+        // The kill comes before the reap, so the process group is never signalled after
+        // the host may have given its id to another group.
+        self.owned.terminate();
+        // The reader ends when the server's output closes, which the kill ensures.
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
