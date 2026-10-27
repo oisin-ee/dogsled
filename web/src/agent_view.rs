@@ -419,7 +419,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
             match tab {
                 Tab::Pending => match pending {
                     Some(RequestTab::Review(id)) => rsx! {
-                        div { class: "av-pending av-review", ReviewView { review_id: id } }
+                        div { class: "av-pending av-review", ReviewView { review_id: id, embedded: true } }
                     },
                     Some(RequestTab::Questions(id, _)) => rsx! {
                         div { class: "av-pending", QuestionForm { requested: id } }

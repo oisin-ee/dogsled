@@ -12,8 +12,8 @@ use crate::board::{RepoGroup, navigation_groups, repository_name};
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
-/// The selected pending item. Agent screens read this shared context until
-/// integration moves the review/question selection into AgentView props.
+/// The pending item the owner picked from the inbox. The shell passes it to
+/// `AgentView` as its `review` or `question` prop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxSelection {
     pub kind: InboxKind,
@@ -247,7 +247,13 @@ pub fn App() -> Element {
             }
             main { class: "centre",
                 match selected() {
-                    Some(pane) => rsx! { AgentView { pane } },
+                    Some(pane) => {
+                        let picked = selection().filter(|item| item.pane == pane);
+                        let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());
+                        let review = pick(InboxKind::Review);
+                        let question = pick(InboxKind::Question);
+                        rsx! { AgentView { key: "{pane}", pane, review, question } }
+                    }
                     None => rsx! {
                         section { class: "welcome",
                             if !items.is_empty() {
