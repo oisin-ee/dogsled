@@ -277,6 +277,28 @@ pub struct Agent {
     /// done agent is finished: idle alone means it waits for input.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub done: bool,
+    /// The agent called `done`, but its terminal handoff is not complete yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finishing: bool,
+    /// The native `done` handoff this host published: `none`, `accepted` or `recorded`.
+    /// A host that predates this field leaves it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<String>,
+    /// How far this host's launch for the pane reached: `allocating`, `allocated`,
+    /// `attempted` or `confirmed`. A host that predates this field leaves it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_progress: Option<String>,
+    /// The agent owns open items or pending or admitting child tickets. This is the same
+    /// scan the done guard uses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owns_open: bool,
+    /// The lifecycle state the host derived for this agent. Older hosts publish no state,
+    /// and older readers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    /// Why the lifecycle state is not positively established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_gap: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -423,6 +445,12 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 worktree: None,
                 repository: None,
                 done: false,
+                finishing: false,
+                handoff: None,
+                launch_progress: None,
+                owns_open: false,
+                lifecycle: None,
+                lifecycle_gap: None,
             }
         })
         .collect())

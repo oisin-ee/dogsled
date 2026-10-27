@@ -174,6 +174,63 @@ pub fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     }
 }
 
+/// How far this host's launch for `pane` has progressed. The lifecycle owner reads this to
+/// tell startup in progress from a launch that never reached its pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchProgress {
+    /// No launch record names this pane.
+    None,
+    /// The launch is recorded, and its pane is not allocated yet.
+    Allocating,
+    /// The pane is allocated, and no start has been attempted yet.
+    Allocated,
+    /// A start was attempted. The outcome may still be unknown.
+    Attempted,
+    /// The start is confirmed: the pane runs the launched agent.
+    Confirmed,
+    /// More than one launch record names this pane. The records contradict each other, so
+    /// nothing is proved: not a launch, and not the absence of one.
+    Ambiguous,
+}
+
+impl LaunchProgress {
+    /// The name the launch result and the owner's item publish.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Allocating => "allocating",
+            Self::Allocated => "allocated",
+            Self::Attempted => "attempted",
+            Self::Confirmed => "confirmed",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+/// The launch progress this host recorded for `pane`.
+pub fn progress(ledger: &Ledger, pane: &str) -> Result<LaunchProgress> {
+    let found = recovery::candidates(&ledger.child("launches"), Some(pane))?;
+    Ok(match found.as_slice() {
+        [(_, progress)] => {
+            if progress.confirmed {
+                LaunchProgress::Confirmed
+            } else if progress.attempted {
+                LaunchProgress::Attempted
+            } else if progress.pane.is_some() {
+                LaunchProgress::Allocated
+            } else {
+                LaunchProgress::Allocating
+            }
+        }
+        // No record names this pane: no launch is proved.
+        [] => LaunchProgress::None,
+        // Competing records contradict each other. That is not the absence of a launch, so
+        // it gets its own name and never reads as "nothing was launched".
+        [_, _, ..] => LaunchProgress::Ambiguous,
+    })
+}
+
 /// A seeded worker's end-of-turn hook must persist its immutable terminal evidence before
 /// its process closes. This is host-local and does not wait for the owner's acknowledgement.
 pub fn handoff_ready(ledger: &Ledger, pane: &str) -> Result<bool> {
@@ -1049,6 +1106,43 @@ mod receipt_tests {
             owner_id: "owner".into(),
             request_id: request_id.into(),
         }
+    }
+
+    /// Competing launch records contradict each other. They prove neither a launch nor its
+    /// absence, so they get their own name and never read as "nothing was launched".
+    #[test]
+    fn competing_launch_records_are_ambiguous_not_missing() {
+        let dir = std::env::temp_dir().join(crate::ledger::new_id());
+        let ledger = Ledger::new(dir.clone());
+        let receipts = ledger.child("launches");
+        for id in ["first", "second"] {
+            receipts
+                .write(
+                    &format!("{id}.progress.json"),
+                    &json!({
+                        "request":{"id":id,"action":{"type":"agent","kind":"pi","name":"worker",
+                            "message":"go"},"host":"local","cwd":"/checkout","pane":"w2:p2",
+                            "terminal":"term_shell","owner":"w1:p1"},
+                        "pane":"w2:p2","terminal":"term_shell","attempted":true,"confirmed":true,
+                        "result":{},"error":null
+                    }),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            progress(&ledger, "w2:p2").unwrap(),
+            LaunchProgress::Ambiguous
+        );
+        // One record names the pane: the launch is proved.
+        std::fs::remove_file(receipts.dir.join("second.progress.json")).unwrap();
+        assert_eq!(
+            progress(&ledger, "w2:p2").unwrap(),
+            LaunchProgress::Confirmed
+        );
+        // No record names the pane: no launch is proved.
+        std::fs::remove_file(receipts.dir.join("first.progress.json")).unwrap();
+        assert_eq!(progress(&ledger, "w2:p2").unwrap(), LaunchProgress::None);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -103,6 +103,10 @@ impl Node<'_> {
         // Reading the last snapshot without the lock is safe: writes replace it atomically.
         let last: Option<Snapshot> = self.ledger.read("host.json")?;
         crate::facts::observe(self.shell, &mut probe, last.as_ref().map(|s| &s.probe));
+        // The launch progress rides with each agent, so the owner can tell startup in
+        // progress from a launch that never reached its pane. It is published before the
+        // states, so the derivation sees it.
+        self.publish_launch_progress(&mut probe.agent_panes)?;
         crate::done::observe(self.ledger, &mut probe.agent_panes)?;
         self.ledger.with_lock("host", || {
             let previous: Option<Snapshot> = self.ledger.read("host.json")?;
@@ -122,6 +126,18 @@ impl Node<'_> {
                 },
             )
         })
+    }
+
+    /// The launch progress this host recorded for each observed agent.
+    fn publish_launch_progress(&self, agents: &mut [crate::probe::Agent]) -> Result<()> {
+        for agent in agents {
+            let progress = crate::launch::progress(self.ledger, &agent.pane)?;
+            agent.launch_progress = match progress {
+                crate::launch::LaunchProgress::None => None,
+                progress => Some(progress.as_str().to_owned()),
+            };
+        }
+        Ok(())
     }
 
     fn append_sample(&self, probe: &Probe, headroom: &Headroom, now: u64) -> Result<()> {

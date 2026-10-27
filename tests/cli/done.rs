@@ -274,3 +274,110 @@ fn handoff_closes_only_its_pane_when_a_busy_agent_shares_the_checkout() {
     assert!(!rig.log("herdr.log").contains("workspace close"));
     assert!(tree.exists());
 }
+
+/// The lifecycle state a host publishes for its agents. The host derives it from the
+/// evidence it holds; a reader must never have to derive it again.
+fn published_lifecycle(rig: &Rig, pane: &str) -> Value {
+    let host = rig.read("state/host.json");
+    host["probe"]["agent_panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["pane"] == pane)
+        .cloned()
+        .unwrap()
+}
+
+/// The host publishes `working` for an agent in a turn, and `idle` for a turn that ended
+/// with no signal. Herdr's own `done` never becomes the final handoff.
+#[test]
+fn the_host_publishes_a_lifecycle_state_beside_the_raw_terminal_state() {
+    let (rig, tree) = close_rig("done-lifecycle");
+    worker(&rig, &tree, "working");
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let published = published_lifecycle(&rig, "w2:p1");
+    assert_eq!(published["state"], "working", "{published}");
+    assert_eq!(published["lifecycle"], "working", "{published}");
+    assert!(published["lifecycle_gap"].is_null(), "{published}");
+
+    // A turn that ended with no signal is `stopped`. The board's own word stays `idle`.
+    worker(&rig, &tree, "idle");
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let published = published_lifecycle(&rig, "w2:p1");
+    assert_eq!(published["state"], "idle", "{published}");
+    assert_eq!(published["lifecycle"], "stopped", "{published}");
+
+    // Herdr's `done` means only that the turn ended. It is never the final handoff.
+    worker(&rig, &tree, "done");
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let published = published_lifecycle(&rig, "w2:p1");
+    assert_eq!(published["state"], "done", "{published}");
+    assert_eq!(published["lifecycle"], "stopped", "{published}");
+    assert_ne!(published["lifecycle"], "done", "{published}");
+}
+
+/// A child that called `done` and ended its turn, but whose final reply is not saved yet,
+/// has an accepted handoff, not a recorded one. The host publishes `finishing`, and the raw
+/// terminal state stays as it was.
+#[test]
+fn an_accepted_handoff_publishes_finishing_until_the_final_reply_is_saved() {
+    let (rig, tree) = close_rig("done-handoff");
+    worker(&rig, &tree, "idle");
+    rig.done("term_child", "w2:p1", 10);
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let published = published_lifecycle(&rig, "w2:p1");
+    assert_eq!(published["state"], "idle", "{published}");
+    assert_eq!(published["handoff"], "accepted", "{published}");
+    assert_eq!(published["lifecycle"], "finishing", "{published}");
+    assert_ne!(published["lifecycle"], "done", "{published}");
+}
+
+/// A child that called `done`, ended its turn and saved its final reply has a recorded
+/// final handoff. The host publishes `done`, and the raw terminal state stays as it was.
+#[test]
+fn a_recorded_final_handoff_publishes_done_and_keeps_the_raw_terminal_state() {
+    let (rig, tree) = close_rig("done-handoff-recorded");
+    worker(&rig, &tree, "idle");
+    rig.done("term_child", "w2:p1", 10);
+    // The mark keeps the final reply of the sealed turn.
+    rig.put(
+        "state/done.json",
+        &json!({"terminal": {
+            "pane":"w2:p1","after":9,"sealed":10,"marked_ms":1,
+            "reply":{"seq":10,"text":"the final reply","captured_ms":2,"done":true}
+        }}),
+    );
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let published = published_lifecycle(&rig, "w2:p1");
+    assert_eq!(published["state"], "idle", "{published}");
+    assert_eq!(published["lifecycle"], "done", "{published}");
+    assert_eq!(published["handoff"], "recorded", "{published}");
+}
