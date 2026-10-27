@@ -2,7 +2,7 @@
 
 id = "dogsled"
 name = "dogsled"
-version = "0.23.2"
+version = "0.25.2"
 min_herdr_version = "0.9.1"
 description = "Docks the dogsled sidebar beside Herdr's left sidebar."
 platforms = ["macos", "linux"]

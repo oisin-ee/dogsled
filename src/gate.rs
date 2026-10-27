@@ -248,6 +248,7 @@ mod tests {
             quiet_ms: None,
             ahead,
             dirty,
+            repository: None,
         }
     }
 

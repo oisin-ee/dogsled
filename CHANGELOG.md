@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.25.2 - 2026-10-27
+
+- The Linux release build compiles dx from source, because the prebuilt dx needs glibc 2.39 and the release builds on Ubuntu 22.04. The 0.25.1 tag built no Linux archive and published nothing.
+
+## 0.25.1 - 2026-10-27
+
+- Release builds bundle the web portal from the `web` package. The 0.25.0 tag built no archives.
+
+## 0.25.0 - 2026-10-27
+
+- `dogsled web` serves a local portal at `127.0.0.1:7465`. The `[web] port` configuration sets another port. The portal shows the board grouped by repository, todos, Herdr agents and their conversations, and a message box. A panel answers a blocked agent with the keys its prompt allows. The Rust/WASM Dioxus page is embedded in the binary. The server accepts only loopback Host values and the portal's own Origin. Pi tools authenticate with a per-user token in `<state>/web/token`.
+- The Pi extension adds an `interview` tool with pi-interview 0.13.0's parameters. The portal shows the questions and collects the answers. Plan mode starts with `/plan` or `Ctrl+Alt+P`, limits writes to markdown, and adds `submit_plan`.
+- The portal shows plans with a line map and annotations: text, images, and Quote in message. It compares revisions and accepts approval or requested changes. An approval emits `dogsled:plan-approved`, which pi-todo consumes.
+- When `dogsled web` is not running, the Pi tools fall back to `dogsled interview` and `dogsled review`. These commands serve the same form or review once on a random loopback port.
+- Release archives include `dev.dogsled.web.plist`. `dogsled web` exits promptly on SIGTERM and SIGINT, even with open streams.
+
+## 0.24.0 - 2026-10-26
+
+- The lead skill lets the lead make an edit itself in three cases. The first case is a specified change under about 100 lines. The second case is when no host can start a worker. The third case is a direct user order. Before, the skill said the lead never edits code, so a lead started one writer for each 10-line edit. When every spawn failed, the lead refused the user's direct orders to make the change. Now step 0 keeps that work in the lead's session. Step 1 puts the small edits of one request into one unit.
+- The lead skill sends exec agents that run under prewalk away from the lead procedure. Those agents run their assigned work in the same session and do not delegate.
+- Agent, job, and queued rows carry the canonical repository of their checkout, as `host/owner/name` from the origin URL. The ssh, scp-like, and https spellings of one remote give the same identity, and the Pi unit protocol reads the same fixture. A checkout whose identity is known costs no `git` call.
+- Repository tooling moved to proto and moon. This change does not affect installed hosts.
+
 ## 0.23.2 - 2026-10-22
 
 - The cleanup sweep no longer closes a pane whose root process is a running command, such as the `dogsled sidebar` pane. Before, a pane counted as an idle shell whenever no foreground process had a different pid from the pane's shell pid. Herdr runs a plugin pane's command as the pane's own root process, so the sidebar looked like an idle shell, and the sweep closed the sidebar and every workspace that held it. Now only a shell that waits at its prompt is idle: a root process with another name, a shell that runs a command such as `sh -c "..."`, and process information that does not name the root process all keep the pane.

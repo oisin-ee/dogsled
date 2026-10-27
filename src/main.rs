@@ -47,6 +47,7 @@ mod unit_reply;
 mod unit_request;
 mod unit_transport;
 mod watchdog;
+mod web;
 mod work;
 #[cfg(test)]
 mod work_tests;
@@ -204,6 +205,10 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             board::command(&shell, &ledger, &policy, home, command, cli.json)?;
         }
         Command::Sidebar { owner } => sidebar::command(shell, &ledger, &policy, &home, owner)?,
+        Command::Web { port } => web::serve(&ledger, &policy, &home, port)?,
+        command @ (Command::Interview { .. } | Command::Review { .. }) => {
+            return web::oneshot::command(&shell, &ledger, command);
+        }
         Command::Unit(command) => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             return unit_request::run(&fleet, command);

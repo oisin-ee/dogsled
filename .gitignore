@@ -4,3 +4,8 @@
 *.log
 .DS_Store
 /bin
+# Moon writes its cache and its generated Git hook scripts here.
+.moon/cache/
+.moon/docker/
+.moon/hooks/
+/web/public
