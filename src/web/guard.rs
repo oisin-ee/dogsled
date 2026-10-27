@@ -151,6 +151,24 @@ mod tests {
         assert!(host_allowed(Some("localhost:7465"), 7465));
     }
 
+    #[tokio::test]
+    async fn guards_accept_the_actual_random_port_only() -> std::io::Result<()> {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        let port = listener.local_addr()?.port();
+        let host = format!("127.0.0.1:{port}");
+        let origin = format!("http://127.0.0.1:{port}");
+        assert_ne!(port, 0);
+        assert!(host_allowed(Some(&host), port));
+        assert!(origin_allowed(&Method::POST, Some(&origin), port));
+        assert!(!host_allowed(Some("127.0.0.1:0"), port));
+        assert!(!origin_allowed(
+            &Method::POST,
+            Some("http://127.0.0.1:0"),
+            port
+        ));
+        Ok(())
+    }
+
     #[test]
     fn another_host_or_port_is_not_allowed() {
         assert!(!host_allowed(Some("evil.example"), 7465));

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -198,12 +198,76 @@ test("an async interview returns at once and delivers the answers as a message",
 	assert.match(delivered[0] ?? "", /Which one\?: B/);
 });
 
-test("an unreachable portal names the server that is missing", async () => {
-	const p = portal(() => ({ status: 204 }));
-	const port = await listen(p.server);
-	await p.server.close();
-	const tool = new InterviewTool(new PortalClient(environment(port)));
-	await assert.rejects(() => tool.run({ questions }, context(), undefined), /dogsled web is not running/);
+/** A real executable seam; no child-process mocks or global PATH changes. */
+function fallbackEnvironment(t: { after: (fn: () => void) => void }, script: string) {
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-fallback-"));
+	const calls = join(directory, "calls.json");
+	const terminated = join(directory, "terminated");
+	writeFileSync(join(directory, "dogsled"), `#!${process.execPath}\nconst fs = require("node:fs");\nconst args = process.argv.slice(2);\nconst path = args[args.indexOf("--file") + 1];\n${script}\nfs.writeFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, file: JSON.parse(fs.readFileSync(path, "utf8")) }));`, { mode: 0o755 });
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	return { env: { PATH: directory, DOGSLED_STATE: join(directory, "state") }, calls, terminated };
+}
+
+async function until(condition: () => boolean): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.ok(condition(), "the background command completed");
+}
+
+test("an unreachable portal runs dogsled interview with a private temporary questions file", async t => {
+	withPane(t);
+	const fake = fallbackEnvironment(t, `process.stdout.write(${JSON.stringify(JSON.stringify(ANSWER))});`);
+	const tool = new InterviewTool(new PortalClient(fake.env));
+	const result = await tool.run({ questions, timeout: 42 }, context(), undefined);
+	assert.equal(result.details.status, "completed");
+	assert.deepEqual(result.details.responses, ANSWER.responses);
+	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
+	assert.deepEqual(call.file, questionsFile);
+	const path = call.args[2];
+	assert.deepEqual(call.args, ["interview", "--file", path, "--pane", "w1:p1", "--session", "session-1", "--cwd", "/repo", "--timeout", "42"]);
+	assert.equal(existsSync(path), false, "the temporary file was removed");
+});
+
+test("the fallback parses the existing answer contract", async t => {
+	const fake = fallbackEnvironment(t, 'process.stdout.write(JSON.stringify({answers: []}));');
+	const tool = new InterviewTool(new PortalClient(fake.env));
+	await assert.rejects(() => tool.run({ questions }, context(), undefined), /unexpected answer shape/);
+	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
+	assert.equal(existsSync(call.args[2]), false);
+});
+
+test("aborting the fallback terminates the child and removes the temporary file", async t => {
+	const fake = fallbackEnvironment(t, 'process.on("SIGTERM", () => { fs.writeFileSync(process.env.DOGSLED_TEST_TERMINATED, "yes"); process.exit(0); }); setInterval(() => {}, 1000);');
+	const tool = new InterviewTool(new PortalClient({ ...fake.env, DOGSLED_TEST_TERMINATED: fake.terminated }));
+	const controller = new AbortController();
+	const result = tool.run({ questions }, context(), controller.signal);
+	t.after(() => controller.abort());
+	await until(() => existsSync(fake.calls));
+	controller.abort();
+	assert.equal((await result).details.status, "aborted");
+	assert.equal(existsSync(fake.terminated), true);
+	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
+	assert.equal(existsSync(call.args[2]), false);
+});
+
+test("an async fallback returns before the child answers and delivers once", async t => {
+	const fake = fallbackEnvironment(t, `setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(ANSWER))}), 200);`);
+	const delivered: string[] = [];
+	const tool = new InterviewTool(new PortalClient(fake.env), content => delivered.push(content));
+	t.after(() => tool.close());
+	const result = await tool.run({ questions, async: true }, context(), undefined);
+	assert.equal(result.details.status, "started");
+	assert.equal(delivered.length, 0);
+	await until(() => delivered.length === 1);
+	assert.match(delivered[0] ?? "", /Which one\?: B/);
+	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
+	await until(() => !existsSync(call.args[2]));
+});
+
+test("a failed one-shot interview is an error, not an empty answer", async t => {
+	const fake = fallbackEnvironment(t, 'process.exit(2);');
+	const tool = new InterviewTool(new PortalClient(fake.env));
+	await assert.rejects(() => tool.run({ questions }, context(), undefined), /interview exited with 2/);
 });
 
 test("the questions come from inline JSON or from a file", () => {

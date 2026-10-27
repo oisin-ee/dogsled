@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { PortalClient, sleep } from "./portal-client.ts";
+import { PortalClient, PortalDown, sleep, startOneShot } from "./portal-client.ts";
 
 /** The tool that sends a plan to the portal. */
 const SUBMIT_PLAN = "submit_plan";
@@ -120,6 +120,7 @@ export class PlanMode {
 	private planning = false;
 	private framed = false;
 	private watching: AbortController | undefined;
+	private readonly pending = new Set<AbortController>();
 	/** The reviews this session already delivered, so a reconnect never delivers one twice. */
 	private readonly delivered = new Set<string>();
 	/** The reviews the portal acknowledged. A review that was delivered but not acked is acked again, not delivered again. */
@@ -165,21 +166,45 @@ export class PlanMode {
 	}
 
 	/** Send a plan to the portal and start waiting for its decision. */
-	async submit(filePath: string, ctx: ExtensionContext): Promise<{ revision: number; id: string }> {
+	async submit(filePath: string, ctx: ExtensionContext): Promise<ReviewCreated | { fallback: true }> {
 		const path = isAbsolute(filePath) ? filePath : resolve(ctx.cwd, filePath);
 		const content = await readFile(path, "utf8");
-		const created = await this.client.json<ReviewCreated>("POST", "/api/reviews", {
-			path,
-			content,
-			pane: process.env["HERDR_PANE_ID"] ?? "",
-			session: ctx.sessionManager.getSessionId(),
-			cwd: ctx.cwd,
-		});
+		let created: ReviewCreated;
+		try {
+			created = await this.client.json<ReviewCreated>("POST", "/api/reviews", {
+				path, content, pane: process.env["HERDR_PANE_ID"] ?? "",
+				session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
+			});
+		} catch (error) {
+			if (!(error instanceof PortalDown)) throw error;
+			await this.fallback(path, ctx);
+			return { fallback: true };
+		}
 		const id = typeof created?.id === "string" ? created.id : "";
 		const revision = Number(created?.revision);
 		if (!id || !Number.isFinite(revision)) throw new Error("dogsled web did not return a review id and revision");
 		this.watch(ctx);
 		return { id, revision };
+	}
+
+	/** Start a temporary review server without holding the tool call open. */
+	private async fallback(path: string, ctx: ExtensionContext): Promise<void> {
+		const controller = new AbortController();
+		this.pending.add(controller);
+		const command = startOneShot([
+			"review", "--file", path, "--pane", process.env["HERDR_PANE_ID"] ?? "",
+			"--session", ctx.sessionManager.getSessionId(), "--cwd", ctx.cwd,
+		], this.client.env, controller.signal);
+		try { await command.started; }
+		catch (error) { this.pending.delete(controller); throw error; }
+		void command.result.then(stdout => this.decision(stdout, ctx, false))
+			.catch(error => {
+				if (!controller.signal.aborted) {
+					const message = `Plan review did not finish: ${error instanceof Error ? error.message : String(error)}`;
+					this.pi.sendUserMessage(message, ctx.isIdle() ? undefined : { deliverAs: "steer" });
+				}
+			})
+			.finally(() => { this.pending.delete(controller); });
 	}
 
 	/** Hold one decisions stream open until the session ends. */
@@ -195,6 +220,8 @@ export class PlanMode {
 	stopWatching(): void {
 		this.watching?.abort();
 		this.watching = undefined;
+		for (const controller of this.pending) controller.abort();
+		this.pending.clear();
 	}
 
 	private async stream(session: string, signal: AbortSignal, ctx: ExtensionContext): Promise<void> {
@@ -218,12 +245,20 @@ export class PlanMode {
 	}
 
 	/** Deliver one decision, acknowledge it, and hand the approved plan on. */
-	async decision(payload: string, ctx: ExtensionContext): Promise<void> {
-		let decision: Decision;
-		try { decision = JSON.parse(payload) as Decision; }
-		catch { return; }
-		const review = typeof decision?.review_id === "string" ? decision.review_id : "";
-		if (!review) return;
+	async decision(payload: string, ctx: ExtensionContext, acknowledge = true): Promise<void> {
+		let decision: Partial<Decision> | null;
+		try { decision = JSON.parse(payload) as Partial<Decision> | null; }
+		catch {
+			if (!acknowledge) throw new Error("dogsled review returned invalid decision JSON");
+			return;
+		}
+		if (!decision || typeof decision.review_id !== "string" || !decision.review_id
+			|| (decision.decision !== "approved" && decision.decision !== "changes_requested")
+			|| typeof decision.path !== "string" || typeof decision.message !== "string" || typeof decision.plan_content !== "string") {
+			if (!acknowledge) throw new Error("dogsled review returned an unexpected decision shape");
+			return;
+		}
+		const review = decision.review_id;
 		// A review the portal did not acknowledge is acked again, never delivered again.
 		if (!this.delivered.has(review)) {
 			this.delivered.add(review);
@@ -244,7 +279,8 @@ export class PlanMode {
 				this.stop();
 			}
 		}
-		if (this.acked.has(review)) return;
+		// The one-shot command acknowledges its own decision before exiting.
+		if (!acknowledge || this.acked.has(review)) return;
 		await this.client.json<unknown>("POST", `/api/decisions/${encodeURIComponent(review)}/ack`).catch(() => undefined);
 		this.acked.add(review);
 	}
@@ -290,7 +326,7 @@ export function registerPlanMode(pi: ExtensionAPI, client: PortalClient = new Po
 			if (typeof filePath !== "string" || !filePath) throw new Error("submit_plan needs the path of the plan file");
 			const review = await mode.submit(filePath, ctx);
 			return {
-				content: [{ type: "text", text: `Pushed as revision ${review.revision}; the decision arrives later as a message; end your turn.` }],
+				content: [{ type: "text", text: `${"fallback" in review ? "Started a review in a browser tab" : `Pushed as revision ${review.revision}`}; the decision arrives later as a message; end your turn.` }],
 				details: review,
 			};
 		},

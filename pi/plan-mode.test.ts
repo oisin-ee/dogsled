@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -230,6 +230,92 @@ test("a reconnected decisions stream does not deliver an acknowledged decision t
 	} finally {
 		mode.stopWatching();
 	}
+});
+
+/** A real dogsled executable that records argv and answers later. */
+function fallbackEnvironment(t: { after: (fn: () => void) => void }, script: string) {
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-review-fallback-"));
+	const calls = join(directory, "calls.json");
+	const plan = join(directory, "plan.md");
+	writeFileSync(plan, "# Plan");
+	writeFileSync(join(directory, "dogsled"), `#!${process.execPath}\nconst fs = require("node:fs");\n${script}\nfs.writeFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)));`, { mode: 0o755 });
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	return { env: { PATH: directory, DOGSLED_STATE: join(directory, "state") }, calls, directory, plan };
+}
+
+async function until(condition: () => boolean): Promise<void> {
+	const deadline = Date.now() + 5_000;
+	while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.ok(condition(), "the background review completed");
+}
+
+test("an unreachable portal starts a review in the background and delivers the approval", async t => {
+	const fake = fallbackEnvironment(t, `setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(DECISION))}), 200);`);
+	const h = host();
+	const approved: unknown[] = [];
+	h.events.on("dogsled:plan-approved", event => approved.push(event));
+	const mode = new PlanMode(h.plan, new PortalClient(fake.env));
+	t.after(() => mode.stopWatching());
+	mode.start();
+	const submitted = await mode.submit(fake.plan, context());
+	assert.deepEqual(submitted, { fallback: true });
+	assert.deepEqual(h.sent, [], "the tool returned before the decision");
+	await until(() => approved.length === 1);
+	assert.deepEqual(h.sent, ["Looks good."]);
+	assert.deepEqual(approved, [{ cwd: "/repo", planFilePath: "/repo/plans/plan.md", planContent: "# Plan", feedback: "Looks good." }]);
+	assert.equal(mode.active, false);
+	const args = JSON.parse(readFileSync(fake.calls, "utf8"));
+	assert.deepEqual(args, ["review", "--file", fake.plan, "--pane", process.env["HERDR_PANE_ID"] ?? "", "--session", "session-1", "--cwd", "/repo"]);
+});
+
+test("a fallback change request steers the running agent and leaves planning on", async t => {
+	const decision = { ...DECISION, decision: "changes_requested", message: "Revise the tests." };
+	const fake = fallbackEnvironment(t, `process.stdout.write(${JSON.stringify(JSON.stringify(decision))});`);
+	const h = host();
+	const steered: unknown[] = [];
+	h.plan.sendUserMessage = (message, options) => steered.push([message, options?.deliverAs]);
+	const mode = new PlanMode(h.plan, new PortalClient(fake.env));
+	t.after(() => mode.stopWatching());
+	mode.start();
+	await mode.submit(fake.plan, { ...context(), isIdle: () => false } as unknown as ExtensionContext);
+	await until(() => steered.length === 1);
+	assert.deepEqual(steered, [["Revise the tests.", "steer"]]);
+	assert.equal(mode.active, true);
+});
+
+test("closing plan mode terminates a pending review child", async t => {
+	const fake = fallbackEnvironment(t, 'process.on("SIGTERM", () => { fs.writeFileSync(process.env.DOGSLED_TEST_TERMINATED, "yes"); process.exit(0); }); setInterval(() => {}, 1000);');
+	const terminated = join(fake.directory, "terminated");
+	const h = host();
+	const mode = new PlanMode(h.plan, new PortalClient({ ...fake.env, DOGSLED_TEST_TERMINATED: terminated }));
+	t.after(() => mode.stopWatching());
+	await mode.submit(fake.plan, context());
+	await until(() => existsSync(fake.calls));
+	mode.stopWatching();
+	await until(() => existsSync(terminated));
+	assert.deepEqual(h.sent, []);
+});
+
+test("a failed review child reports its failure as a message", async t => {
+	const fake = fallbackEnvironment(t, "process.exit(2);");
+	const h = host();
+	const mode = new PlanMode(h.plan, new PortalClient(fake.env));
+	t.after(() => mode.stopWatching());
+	await mode.submit(fake.plan, context());
+	await until(() => h.sent.length > 0);
+	assert.match(h.sent[0] ?? "", /review exited with 2/);
+});
+
+test("a portal HTTP refusal does not launch a fallback", async t => {
+	const server = createServer((_request, response) => { response.writeHead(403); response.end("refused"); });
+	const port = await listen(server);
+	t.after(() => server.close());
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-plan-refused-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const file = join(dir, "plan.md");
+	writeFileSync(file, "# Plan");
+	const mode = new PlanMode(host().plan, new PortalClient(environment(port)));
+	await assert.rejects(() => mode.submit(file, context()), /403 refused/);
 });
 
 test("entering planning frames the task once and offers the submit tool", async () => {

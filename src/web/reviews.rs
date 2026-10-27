@@ -198,10 +198,7 @@ async fn submit(
     if !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
-    let web = state.web.clone();
-    let submitted =
-        blocking(move || web.with_lock(REVIEW_LOCK, || submit_locked(&web, &body))).await;
-    match submitted {
+    match submit_plan(&state.web, body).await {
         Ok(submitted) => Json(submitted).into_response(),
         Err(error) => failed(&error),
     }
@@ -406,22 +403,10 @@ async fn decisions(
     if !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
-    // The receiver comes first, so a decision that arrives while the portal
-    // reads the undelivered ones is not missed.
-    let receiver = decisions_channel(&state.web).subscribe();
-    let owned = session.clone();
-    let web = state.web.clone();
-    // A state the portal cannot read holds no decision to replay.
-    let replay = blocking(move || replay_events(&web, &owned))
-        .await
-        .unwrap_or_default();
-    let replayed: Arc<Vec<DecisionEvent>> = Arc::new(replay.clone());
-    let stream = tokio_stream::iter(
-        replay
-            .into_iter()
-            .map(|event| Ok::<Event, Infallible>(decision_frame(event))),
-    )
-    .chain(live_events(receiver, session, replayed));
+    let stream = match decision_stream(&state.web, session).await {
+        Ok(stream) => stream.map(|event| Ok::<Event, Infallible>(decision_frame(event))),
+        Err(error) => return failed(&error),
+    };
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
         .into_response()
@@ -436,9 +421,54 @@ async fn ack(
     if !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
-    let owned = review_id.clone();
-    let web = state.web.clone();
-    let delivered = blocking(move || {
+    match acknowledge(&state.web, review_id.clone()).await {
+        Ok(Some(delivered)) => Json(json!({ "delivered": delivered })).into_response(),
+        Ok(None) => not_found(&review_id),
+        Err(error) => failed(&error),
+    }
+}
+
+/// Submit through the same locked store as the HTTP endpoint.
+pub(crate) async fn submit_plan(web: &Ledger, body: SubmitBody) -> Result<Submitted> {
+    let web = web.clone();
+    blocking(move || web.with_lock(REVIEW_LOCK, || submit_locked(&web, &body))).await
+}
+
+/// Replay pending decisions, then follow live decisions without a subscribe/read race.
+async fn decision_stream(
+    web: &Ledger,
+    session: String,
+) -> Result<impl Stream<Item = DecisionEvent> + use<>> {
+    let receiver = decisions_channel(web).subscribe();
+    let owned = session.clone();
+    let web = web.clone();
+    let replay = blocking(move || replay_events(&web, &owned)).await?;
+    let replayed = Arc::new(replay.clone());
+    Ok(tokio_stream::iter(replay).chain(live_events(receiver, session, replayed)))
+}
+
+/// Wait for this review, not another pending decision of the same session.
+pub(crate) async fn wait_for_decision(
+    web: &Ledger,
+    session: String,
+    review_id: &str,
+) -> Result<DecisionEvent> {
+    let stream = decision_stream(web, session).await?;
+    tokio::pin!(stream);
+    while let Some(event) = stream.next().await {
+        if event.review_id == review_id {
+            return Ok(event);
+        }
+    }
+    Err(Error::Invalid(
+        "the review decisions stream ended".to_owned(),
+    ))
+}
+
+/// Mark a decision delivered through either transport.
+pub(crate) async fn acknowledge(web: &Ledger, owned: String) -> Result<Option<bool>> {
+    let web = web.clone();
+    blocking(move || {
         web.with_lock(REVIEW_LOCK, || {
             let Some(mut record) = load(&web, &owned)? else {
                 return Ok(None);
@@ -448,12 +478,7 @@ async fn ack(
             Ok(Some(record.delivered))
         })
     })
-    .await;
-    match delivered {
-        Ok(Some(delivered)) => Json(json!({ "delivered": delivered })).into_response(),
-        Ok(None) => not_found(&review_id),
-        Err(error) => failed(&error),
-    }
+    .await
 }
 
 /// The plan of a session, with the revision it adds.
@@ -733,7 +758,7 @@ fn live_events(
     receiver: broadcast::Receiver<Delivery>,
     session: String,
     replayed: Arc<Vec<DecisionEvent>>,
-) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+) -> impl Stream<Item = DecisionEvent> {
     BroadcastStream::new(receiver).filter_map(move |item| {
         let replayed = Arc::clone(&replayed);
         let session = session.clone();
@@ -749,7 +774,7 @@ fn live_events(
         if known {
             return None;
         }
-        Some(Ok(decision_frame(delivery.event)))
+        Some(delivery.event)
     })
 }
 

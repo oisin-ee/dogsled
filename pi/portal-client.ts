@@ -2,6 +2,7 @@
 // interactive parts of Pi: the interview form and the plan review. This module
 // only speaks HTTP to it. Every call carries the portal's bearer token, and the
 // server answers with the board, a form, a review, or a decision.
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -136,6 +137,43 @@ export class PortalClient {
 		if (!response.ok || !response.body) throw new Error(`dogsled web GET ${path} failed: ${response.status}`);
 		return serverEvents(response.body);
 	}
+}
+
+/** A one-shot command: startup is separate from its eventual answer. */
+export function startOneShot(args: string[], env: NodeJS.ProcessEnv, signal: AbortSignal): { started: Promise<void>; result: Promise<string> } {
+	const child = spawn("dogsled", args, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "inherit"] });
+	const started = new Promise<void>((resolve, reject) => {
+		child.once("spawn", resolve);
+		child.once("error", reject);
+	});
+	const result = new Promise<string>((resolve, reject) => {
+		const chunks: Buffer[] = [];
+		let size = 0;
+		let failure: Error | undefined;
+		const abort = () => { child.kill("SIGTERM"); };
+		child.stdout.on("data", (chunk: Buffer) => {
+			size += chunk.length;
+			if (size > 10 * 1024 * 1024) {
+				failure = new Error("dogsled returned more than 10 MiB of output");
+				child.kill("SIGTERM");
+			} else chunks.push(chunk);
+		});
+		child.once("error", error => { failure = error; });
+		child.once("close", (code, killed) => {
+			signal.removeEventListener("abort", abort);
+			if (signal.aborted) reject(new Error("dogsled command was aborted"));
+			else if (failure) reject(failure);
+			else if (code !== 0) reject(new Error(`dogsled ${args[0]} exited with ${code ?? killed}`));
+			else resolve(Buffer.concat(chunks).toString("utf8"));
+		});
+		signal.addEventListener("abort", abort, { once: true });
+		if (signal.aborted) abort();
+	});
+	// Startup can fail before the caller reaches either await. The caller still
+	// observes both rejections; neither is an unhandled background promise.
+	void started.catch(() => undefined);
+	void result.catch(() => undefined);
+	return { started, result };
 }
 
 /** Resolve after `ms`, or early when `signal` aborts. */
