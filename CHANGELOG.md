@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- The Pi `interview` tool and `submit_plan` open the portal on the new question or plan.
+
 ## 0.25.3 - 2026-10-27
 
 - `dogsled web` finds Herdr's socket through `herdr status server` when `HERDR_SOCKET_PATH` is unset, so the launchd service can list and message agents.
