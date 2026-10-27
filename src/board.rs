@@ -1490,6 +1490,7 @@ mod tests {
             jobs: Vec::new(),
             handoffs: Vec::new(),
             retry_ms: None,
+            job_validity: None,
         }
     }
 
@@ -1638,6 +1639,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -1679,6 +1681,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -1720,6 +1723,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -1787,6 +1791,7 @@ mod tests {
                     cmd: vec!["cargo".into(), "test".into()],
                     timeout_ms: None,
                     idle_timeout_ms: None,
+                    validity: None,
                 },
                 host: None,
                 branch: None,

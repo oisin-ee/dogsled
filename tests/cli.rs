@@ -29,6 +29,8 @@ mod placement;
 mod profiles;
 #[path = "cli/remote_diagnostics.rs"]
 mod remote_diagnostics;
+#[path = "cli/request_validity.rs"]
+mod request_validity;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/review_fixes.rs"]
@@ -539,6 +541,9 @@ const CONTRACT: &str = "Dogsled started you as a child agent. When your whole ta
 struct Rig {
     dir: PathBuf,
     service: std::sync::Mutex<Option<fs::File>>,
+    /// The time this rig's records were created at. It never moves, so a record and its
+    /// receipt always name the same request time.
+    origin_ms: u64,
 }
 impl Rig {
     fn new(name: &str) -> Self {
@@ -550,6 +555,7 @@ impl Rig {
         let rig = Self {
             dir,
             service: std::sync::Mutex::new(None),
+            origin_ms: now(),
         };
         rig.put("machines.json", &json!([]));
         rig.put("agents.json", &json!({"result":{"agents":[]}}));
@@ -777,6 +783,10 @@ esac
     fn claim(&self, id: &str, cmd: &[&str]) {
         self.claim_with(id, cmd, &json!(null), &json!(null), "w1:p1");
     }
+    /// A claim created at `created_ms`, so a request of a given age can be tested.
+    fn claim_at(&self, id: &str, cmd: &[&str], created_ms: u64) {
+        self.claim_validity(id, cmd, &json!(null), &json!(null), "w1:p1", created_ms);
+    }
     /// A claim with the job's own timeout options, so a request that names different ones
     /// asks for a different job.
     fn claim_with(
@@ -786,6 +796,18 @@ esac
         timeout_ms: &Value,
         idle_timeout_ms: &Value,
         pane: &str,
+    ) {
+        self.claim_validity(id, cmd, timeout_ms, idle_timeout_ms, pane, self.now_ms());
+    }
+    /// A claim with the job's own timeout options and the request's own creation time.
+    fn claim_validity(
+        &self,
+        id: &str,
+        cmd: &[&str],
+        timeout_ms: &Value,
+        idle_timeout_ms: &Value,
+        pane: &str,
+        created_ms: u64,
     ) {
         fs::create_dir_all(self.dir.join("state/jobs")).unwrap();
         let job = json!({
@@ -803,12 +825,25 @@ esac
             "ended_ms": Value::Null,
             "timeout_ms": timeout_ms,
             "idle_timeout_ms": idle_timeout_ms,
+            "validity": {"version": 1, "created_ms": created_ms},
         });
         fs::write(
             self.dir.join(format!("state/jobs/{id}.json")),
             serde_json::to_vec_pretty(&job).unwrap(),
         )
         .unwrap();
+    }
+    /// The validity evidence a record of this rig carries: the request's own creation
+    /// time, which never moves while the rig lives.
+    fn job_validity(&self) -> Value {
+        json!({"version": 1, "created_ms": self.origin_ms})
+    }
+    /// The host clock this rig runs at, or the real clock when the rig sets none.
+    fn now_ms(&self) -> u64 {
+        fs::read_to_string(self.dir.join("clock"))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or_else(now)
     }
     fn log(&self, path: &str) -> String {
         fs::read_to_string(self.dir.join(path)).unwrap_or_default()

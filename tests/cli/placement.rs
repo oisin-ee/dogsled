@@ -39,10 +39,18 @@ fn shown(rig: &Rig, repo: &Path, main: Option<&str>, tree: &Path, linked: Option
 /// Launch a job in `cwd` as a caller in workspace `w1`, named `caller`. A remote launch
 /// carries only the caller's workspace name.
 fn launch(rig: &Rig, cwd: &Path, remote: bool) -> String {
-    let request = json!({"id":"placed","action":{"type":"job","cmd":["true"],"timeout_ms":null,"idle_timeout_ms":null},
+    let request = json!({"id":"placed","action":{"type":"job","cmd":["true"],"timeout_ms":null,"idle_timeout_ms":null,
+        "validity":{"version":1,"created_ms":rig.now_ms()}},
         "host":"local","cwd":cwd,"pane":null,"workspace":(!remote).then_some("w1"),
         "workspace_name":"caller","owner":"w1:p1"});
-    let (code, value) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    let (code, value) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
     assert_eq!(code, 0, "{value}");
     rig.log("herdr.log")
         .lines()
