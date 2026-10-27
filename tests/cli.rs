@@ -991,26 +991,14 @@ esac
 cat "$RIG/remote.json"
 "#,
     );
-    let mut child = rig
-        .cmd(&["status", "--json"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let (send, recv) = std::sync::mpsc::channel();
-    let pid = child.id();
-    let waiter = std::thread::spawn(move || {
-        send.send(child.wait().unwrap()).unwrap();
-    });
-    match recv.recv_timeout(std::time::Duration::from_secs(10)) {
-        Ok(status) => assert!(status.success()),
-        Err(error) => {
-            let _ = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
-            panic!("peer rendezvous failed: {error}");
-        }
-    }
-    waiter.join().unwrap();
+    // The test owns the command as its own child, so the test reaps it and reads its
+    // exit status. The guard kills the command's group, so the peers it started never
+    // outlive the test.
+    let mut command = rig.cmd(&["status", "--json"]);
+    command.stdout(std::process::Stdio::piped());
+    let mut owned = Owned::spawn(&mut command);
+    let status = owned.wait();
+    assert!(status.success(), "the peer rendezvous failed");
 }
 
 #[test]
@@ -1214,12 +1202,12 @@ fn removed_commands_and_sidebar_are_not_accepted() {
 fn watch_prints_a_frame_without_waiting_for_the_interval() {
     let rig = Rig::new("watch");
     rig.snapshot("state/host.json", now(), 1.0, 2);
-    let mut child = rig
-        .cmd(&["status", "--watch", "--line", "--interval", "3600"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
+    // The test owns the command as its own child, so the test reaps it. The guard kills
+    // the command's group, so the watch never outlives the test.
+    let mut command = rig.cmd(&["status", "--watch", "--line", "--interval", "3600"]);
+    command.stdout(std::process::Stdio::piped());
+    let mut owned = Owned::spawn(&mut command);
+    let stdout = owned.child_mut().stdout.take().unwrap();
     let (send, recv) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         use std::io::BufRead as _;
@@ -1233,8 +1221,7 @@ fn watch_prints_a_frame_without_waiting_for_the_interval() {
         .unwrap();
     });
     let frame = recv.recv_timeout(std::time::Duration::from_secs(10));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    owned.child_mut().kill().unwrap();
     reader.join().unwrap();
     assert_eq!(frame.unwrap(), "local 1/2");
 }
