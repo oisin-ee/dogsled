@@ -29,7 +29,7 @@ const POLL_MS: u32 = 2000;
 type Values = Signal<BTreeMap<String, Value>>;
 
 #[component]
-pub fn QuestionForm() -> Element {
+pub fn QuestionForm(#[props(default)] requested: Option<String>) -> Element {
     let selected = use_context::<Signal<Option<String>>>();
     let mut pending = use_signal(Vec::<Pending>::new);
     let mut opened = use_signal(|| None::<String>);
@@ -58,7 +58,11 @@ pub fn QuestionForm() -> Element {
     });
 
     let list = pending();
-    let current = current_form(&list, opened().as_deref(), selected().as_deref()).cloned();
+    let current = match requested.as_deref() {
+        Some(id) => list.iter().find(|item| item.id == id),
+        None => current_form(&list, opened().as_deref(), selected().as_deref()),
+    }
+    .cloned();
     let count = list.len();
 
     rsx! {
@@ -71,7 +75,7 @@ pub fn QuestionForm() -> Element {
             if list.is_empty() {
                 p { class: "empty", "No question waits." }
             }
-            for item in list.iter() {
+            for item in list.iter().filter(|item| requested.as_ref().is_none_or(|id| &item.id == id)) {
                 {
                     let id = item.id.clone();
                     let open = current.as_ref().is_some_and(|form| form.id == item.id);
@@ -87,6 +91,9 @@ pub fn QuestionForm() -> Element {
                         }
                     }
                 }
+            }
+            if requested.is_some() && current.is_none() && error().is_none() {
+                p { class: "empty", "This question is loading, answered, or no longer available." }
             }
             if let Some(form) = current {
                 AskForm {
