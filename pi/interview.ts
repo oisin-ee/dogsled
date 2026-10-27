@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import type { AgentToolResult, ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { openInBrowser, PortalClient, PortalDown, portalUrl, sleep, startOneShot } from "./portal-client.ts";
 
 /** How long the tool waits between two polls for the answers. */
@@ -240,7 +240,7 @@ export class InterviewTool {
 	}
 
 	/** Run one interview. The tool's `signal` withdraws the form. */
-	async run(params: { questions: string; timeout?: number; verbose?: boolean; async?: boolean }, ctx: ExtensionToolContext, signal: AbortSignal | undefined): Promise<AgentToolResult<InterviewDetails>> {
+	async run(params: { questions: string; timeout?: number; verbose?: boolean; async?: boolean }, ctx: ExtensionToolContext, signal: AbortSignal | undefined, onUpdate?: AgentToolUpdateCallback<InterviewDetails>): Promise<AgentToolResult<InterviewDetails>> {
 		const cwd = ctx.cwd;
 		const session = ctx.sessionManager.getSessionId();
 		const pane = process.env["HERDR_PANE_ID"] ?? "";
@@ -260,6 +260,10 @@ export class InterviewTool {
 		if (!id) throw new Error("dogsled web did not return an interview id");
 		const url = portalUrl(`/?question=${encodeURIComponent(id)}&pane=${encodeURIComponent(pane)}`, this.client.env);
 		this.open(url);
+		onUpdate?.({
+			content: [{ type: "text", text: `Interview ${id} started: ${url}. Waiting for your answers.` }],
+			details: { status: "started", responses: [], url },
+		});
 
 		if (params.async) {
 			// The form runs on its own: the tool's own signal no longer owns it, and the
@@ -376,10 +380,10 @@ export function registerInterview(pi: ExtensionAPI, client: PortalClient = new P
 		description: interviewDescription,
 		promptSnippet: "Gather structured user input through an interactive form for requirements, tradeoffs, or multi-dimensional decisions.",
 		parameters: interviewParameters,
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const question = params as { questions?: unknown };
 			if (typeof question.questions !== "string" || !question.questions) throw new Error("interview needs the questions, as inline JSON or a path to a questions file");
-			return await tool.run(question as { questions: string }, ctx, signal);
+			return await tool.run(question as { questions: string }, ctx, signal, onUpdate);
 		},
 	});
 	return tool;

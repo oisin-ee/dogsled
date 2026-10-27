@@ -2,7 +2,7 @@
 // interactive parts of Pi: the interview form and the plan review. This module
 // speaks HTTP to it and opens its deep links. Every call carries the portal's bearer token, and the
 // server answers with the board, a form, a review, or a decision.
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -29,9 +29,13 @@ export function portalUrl(path: string, env: NodeJS.ProcessEnv = process.env): s
 }
 
 /** Open a portal link without holding the agent open or failing its tool call. */
-export function openInBrowser(url: string): void {
-	const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" });
-	child.once("error", () => undefined);
+export function openInBrowser(url: string, launch: (command: string, args: string[], options: SpawnOptions) => ChildProcess = spawn): void {
+	const child = launch(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" });
+	const report = (detail: string) => { console.error(`Could not open the Dogsled portal: ${detail}. Open ${url} in your browser.`); };
+	child.once("error", error => { report(error.message); });
+	child.once("exit", (code, signal) => {
+		if (code !== 0) report(signal ? `browser opener received ${signal}` : `browser opener exited with ${code}`);
+	});
 	child.unref();
 }
 

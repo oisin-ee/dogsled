@@ -81,8 +81,16 @@ test("the interview opens its deep link once and polls until the portal has an a
 	t.after(() => p.server.close());
 	const opened: string[] = [];
 	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, url => { opened.push(url); });
-	const result = await tool.run({ questions }, context(), undefined);
 	const url = `http://127.0.0.1:${port}/?question=q-1&pane=pane%20%26%20name`;
+	let updates = 0;
+	const result = await tool.run({ questions }, context(), undefined, update => {
+		assert.equal(p.polls(), 0, "the recovery URL is visible before waiting for an answer");
+		assert.equal(update.details.status, "started");
+		assert.equal(update.details.url, url);
+		assert.ok(update.content.some(item => item.type === "text" && item.text.includes(url)));
+		updates++;
+	});
+	assert.equal(updates, 1);
 	assert.deepEqual(opened, [url]);
 	assert.equal(result.details.url, url);
 	assert.equal(result.details.status, "completed");
