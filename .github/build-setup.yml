@@ -5,5 +5,4 @@
 - name: Install dx
   run: cargo binstall --no-confirm --locked dioxus-cli@0.7.10
 - name: Bundle the web portal UI
-  run: dx bundle --web --release
-  working-directory: web
+  run: dx bundle --web --release --package web

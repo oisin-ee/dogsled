@@ -60,7 +60,7 @@ tasks:
       - "rust-toolchain.toml"
       - "clippy.toml"
   web-build:
-    script: cd web && dx bundle --web --release
+    command: dx bundle --web --release --package web
     description: Bundle the web portal UI into web/public with dx.
     inputs:
       - "web/**/*"
