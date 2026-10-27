@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.25.2 - 2026-10-27
+
+- The Linux release build compiles dx from source, because the prebuilt dx needs glibc 2.39 and the release builds on Ubuntu 22.04. The 0.25.1 tag built no Linux archive and published nothing.
+
 ## 0.25.1 - 2026-10-27
 
 - Release builds bundle the web portal from the `web` package. The 0.25.0 tag built no archives.

@@ -3,6 +3,12 @@
 - name: Install cargo-binstall
   uses: cargo-bins/cargo-binstall@81df5c23b0dc775b009efdfc9895c5965b7a4e40 # v1.26.1
 - name: Install dx
-  run: cargo binstall --no-confirm --locked dioxus-cli@0.7.10
+  # The prebuilt Linux dx needs glibc 2.39; Ubuntu 22.04 has glibc 2.35.
+  run: |
+    if [ "$(uname -s)" = "Linux" ]; then
+      cargo install --locked dioxus-cli@0.7.10
+    else
+      cargo binstall --no-confirm --locked dioxus-cli@0.7.10
+    fi
 - name: Bundle the web portal UI
   run: dx bundle --web --release --package web
