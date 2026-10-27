@@ -7,6 +7,14 @@ use std::time::{Duration, Instant};
 /// outlives this window is killed, so a test never hangs on it.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
+/// The time a receive may wait for the deadline, or nothing when the deadline has
+/// passed. A receive with no time left can still return a queued line, so a server
+/// that keeps writing without the answer would outlive the bound.
+fn time_left(deadline: Instant) -> Option<Duration> {
+    let now = Instant::now();
+    (now < deadline).then(|| deadline - now)
+}
+
 /// A `dogsled mcp` client: one JSON-RPC line in, one response line out.
 pub(super) struct Client {
     /// The server the test owns as its own child. The test reaps it and reads its exit
@@ -77,7 +85,7 @@ impl Client {
         // ever.
         let deadline = Instant::now() + PROCESS_DEADLINE;
         loop {
-            let line = self.next_line(deadline);
+            let line = self.next_line(method, deadline);
             let message: Value = serde_json::from_str(&line).unwrap();
             if message["id"] == id {
                 return message["result"].clone();
@@ -87,12 +95,17 @@ impl Client {
     /// The server's next line, or fail the test on the bound. A server that never
     /// answers fails its test instead of hanging it. A closed server is a closed
     /// channel, which the reader thread signals by ending.
-    fn next_line(&mut self, deadline: Instant) -> String {
-        let bound = deadline.saturating_duration_since(Instant::now());
+    fn next_line(&mut self, method: &str, deadline: Instant) -> String {
+        // The deadline is checked before each receive. A receive with no time left can
+        // still return a queued line, so a server that keeps writing without the answer
+        // would outlive the bound.
+        let Some(bound) = time_left(deadline) else {
+            panic!("the server did not answer {method} within {PROCESS_DEADLINE:?}")
+        };
         match self.lines.recv_timeout(bound) {
             Ok(line) => line,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                panic!("the server wrote no line within {PROCESS_DEADLINE:?}")
+                panic!("the server wrote no line for {method} within {PROCESS_DEADLINE:?}")
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("server closed"),
         }
@@ -130,6 +143,19 @@ impl Drop for Client {
             let _ = reader.join();
         }
     }
+}
+
+#[test]
+fn mcp_request_deadline_is_checked_before_each_receive() {
+    // A receive with no time left can still return a queued line, so a server that keeps
+    // writing without the answer would outlive the bound. The deadline is checked
+    // before the receive, so a passed deadline gives no time at all.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    sender.send("queued line").unwrap();
+    assert!(time_left(Instant::now() + Duration::from_secs(1)).is_some());
+    assert!(time_left(Instant::now()).is_none());
+    // The line stays queued, because the check runs before the receive.
+    assert_eq!(receiver.try_recv().unwrap(), "queued line");
 }
 
 #[test]
