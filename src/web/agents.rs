@@ -108,6 +108,7 @@ pub(super) fn views(socket: &Client) -> crate::error::Result<Vec<AgentView>> {
         views.push(AgentView {
             pane,
             name: agent["name"].as_str().map(str::to_owned),
+            title: title_of(&agent),
             agent: agent["agent"].as_str().map(str::to_owned),
             state,
             cwd: agent["cwd"].as_str().map(str::to_owned),
@@ -313,6 +314,31 @@ fn agent_of(socket: &Client, pane: &str) -> Option<Value> {
 }
 
 /// The kind of a native session reference: a path or an id.
+/// The title of an agent, from the start of its transcript.
+///
+/// A transcript only grows, and its first message never changes, so a title
+/// read once for a path is kept. A path read before it had a first message
+/// is read again when its size changes.
+fn title_of(agent: &Value) -> Option<String> {
+    static TITLES: std::sync::Mutex<std::collections::BTreeMap<String, (u64, Option<String>)>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let harness = agent["agent"].as_str()?;
+    let transcript = agent["agent_session"]["value"].as_str()?;
+    let path = crate::transcript::resolve(Some(harness), kind_of(agent), transcript)?;
+    let size = std::fs::metadata(&path).ok()?.len();
+    let mut titles = TITLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((seen, title)) = titles.get(&path)
+        && (title.is_some() || *seen == size)
+    {
+        return title.clone();
+    }
+    let title = crate::activity::title(harness, &path);
+    titles.insert(path, (size, title.clone()));
+    title
+}
+
 fn kind_of(agent: &Value) -> &str {
     agent["agent_session"]["kind"].as_str().unwrap_or("path")
 }

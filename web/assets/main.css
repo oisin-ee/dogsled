@@ -43,7 +43,8 @@ code, pre, .mono { font-family: var(--font-mono); }
 .shell-button { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--surface1); border-radius: 4px; background: transparent; font: 500 13px/18px var(--font-sans); white-space: nowrap; cursor: pointer; }
 .shell-button:hover, .shell-button.on { background: var(--surface0); }
 .inbox-toggle { flex-shrink: 0; }
-.inbox-toggle b { background: var(--red); color: var(--crust); border-radius: 4px; padding: 0 6px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.inbox-toggle b { background: var(--surface1, #45475a); color: var(--subtext0, #a6adc8); border-radius: 4px; padding: 0 6px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.inbox-toggle b.waiting { background: var(--red); color: var(--crust); }
 .shell-notices { display: flex; flex-wrap: wrap; gap: 0 12px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--overlay1); }
 .hosts { margin-left: auto; display: flex; align-items: center; gap: 18px; color: var(--subtext0); font-size: 12px; font-variant-numeric: tabular-nums; overflow: auto; flex-shrink: 0; }
 .host-load { white-space: nowrap; }

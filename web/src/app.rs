@@ -252,6 +252,8 @@ pub fn App() -> Element {
     let view = board();
     let items = inbox();
     let state = inbox_state();
+    // Red only when something waits; an empty or unread inbox stays quiet.
+    let waiting = state.count().is_some_and(|count| count > 0);
     let count = state
         .count()
         .map_or_else(|| "—".to_owned(), |count| count.to_string());
@@ -269,7 +271,7 @@ pub fn App() -> Element {
                 button { r#type: "button", class: if inbox_open() { "shell-button inbox-toggle on" } else { "shell-button inbox-toggle" },
                     aria_expanded: inbox_open(), aria_controls: "portal-inbox",
                     onclick: move |_| inbox_open.toggle(),
-                    "Inbox" b { "{count}" }
+                    "Inbox" b { class: if waiting { "waiting" } else { "" }, "{count}" }
                 }
                 div { class: "shell-notices", role: "status",
                     if stream_paused() { span { "Live updates paused, retrying" } }

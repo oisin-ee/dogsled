@@ -47,11 +47,8 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
             .iter()
             .flat_map(|repo| &repo.todos)
             .find(|todo| todo.pane == agent.pane)
-            .map(|todo| todo.current.as_str())
-            .filter(|title| !title.trim().is_empty())
-            .or(agent.name.as_deref())
-            .map(task_title)
-            .unwrap_or_else(|| "Agent task".to_owned());
+            .map(|todo| todo.current.as_str());
+        let title = agent_title(title, agent);
         repository_group(&mut navigation.repos, agent.repository.clone())
             .rows
             .push(NavigationRow {
@@ -158,6 +155,24 @@ fn navigation_row(row: &RowView, todos: &[TodoView]) -> NavigationRow {
 
 pub fn repository_name(repository: &str) -> &str {
     repository.rsplit('/').next().unwrap_or(repository)
+}
+
+/// The title of an agent: its todo, then its first message, then its Herdr
+/// name, then its worktree folder.
+pub fn agent_title(todo: Option<&str>, agent: &AgentView) -> String {
+    let readable = |title: &&str| !title.trim().is_empty() && !title.starts_with("u-");
+    todo.filter(readable)
+        .or(agent.title.as_deref().filter(readable))
+        .or(agent.name.as_deref().filter(readable))
+        .or_else(|| worktree(agent.cwd.as_deref()?))
+        .unwrap_or("Agent task")
+        .to_owned()
+}
+
+/// The folder of a linked worktree, which names its branch.
+fn worktree(cwd: &str) -> Option<&str> {
+    let (_, folder) = cwd.trim_end_matches('/').rsplit_once("/.worktrees/")?;
+    (!folder.is_empty() && !folder.contains('/')).then_some(folder)
 }
 
 fn task_title(title: &str) -> String {
@@ -362,6 +377,30 @@ mod shell_tests {
             |repo| repo.rows.len() == 1 && repo.rows[0].pane.as_deref() == Some("worker-b")
         ));
         Ok(())
+    }
+
+    #[test]
+    fn a_lead_title_falls_back_from_todo_to_first_message_to_name_to_worktree() {
+        let mut agent = AgentView {
+            pane: "p".to_owned(),
+            name: Some("u-0cc2".to_owned()),
+            title: None,
+            agent: None,
+            state: "idle".to_owned(),
+            cwd: Some("/r/.worktrees/fix-portal-titles".to_owned()),
+            repository: None,
+            blocked: None,
+        };
+        assert_eq!(agent_title(None, &agent), "fix-portal-titles");
+        agent.name = Some("reviewer".to_owned());
+        assert_eq!(agent_title(None, &agent), "reviewer");
+        agent.title = Some("Ship the redesign".to_owned());
+        assert_eq!(agent_title(Some(" "), &agent), "Ship the redesign");
+        assert_eq!(agent_title(Some("Verify it"), &agent), "Verify it");
+        agent.title = None;
+        agent.name = None;
+        agent.cwd = Some("/r".to_owned());
+        assert_eq!(agent_title(None, &agent), "Agent task");
     }
 
     #[test]

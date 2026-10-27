@@ -295,16 +295,11 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
         .flat_map(|todo| &todo.sections)
         .map(|section| section.count)
         .sum();
-    let title = todos
-        .iter()
-        .find_map(|todo| nonempty(&todo.current))
-        .or_else(|| {
-            current
-                .as_ref()
-                .and_then(|agent| agent.name.as_deref())
-                .and_then(nonempty)
-        })
-        .unwrap_or(&pane);
+    let todo_title = todos.iter().find_map(|todo| nonempty(&todo.current));
+    let title = match current.as_ref() {
+        Some(agent) => crate::board::agent_title(todo_title, agent),
+        None => todo_title.unwrap_or(&pane).to_owned(),
+    };
     let branch = todos.iter().find_map(|todo| todo.branch.as_deref());
     let harness = row.and_then(|row| nonempty(&row.what)).or_else(|| {
         current
@@ -756,6 +751,7 @@ mod tests {
         let mut agent = wire::AgentView {
             pane: "test".to_owned(),
             name: None,
+            title: None,
             agent: None,
             state: "idle".to_owned(),
             cwd: None,

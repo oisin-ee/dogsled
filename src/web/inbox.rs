@@ -320,6 +320,7 @@ mod tests {
         let agent = AgentView {
             pane: "worker-pane".into(),
             name: Some("worker".into()),
+            title: None,
             agent: None,
             state: "blocked".into(),
             cwd: None,
