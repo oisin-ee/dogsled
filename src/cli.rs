@@ -74,6 +74,30 @@ pub enum Command {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Open one interview on a temporary loopback server and print its answers.
+    Interview {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, default_value = "")]
+        pane: String,
+        #[arg(long, default_value = "")]
+        session: String,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long, default_value_t = 1200)]
+        timeout: u64,
+    },
+    /// Open one plan review on a temporary loopback server and print its decision.
+    Review {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        cwd: String,
+    },
     /// List cleanup candidates without changing them.
     Doctor {
         #[arg(long)]

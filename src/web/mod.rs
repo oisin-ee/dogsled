@@ -10,6 +10,7 @@ pub mod agents;
 pub mod assets;
 pub mod board;
 pub mod guard;
+pub mod oneshot;
 pub mod questions;
 pub mod reviews;
 pub mod store;
@@ -99,23 +100,15 @@ impl AppState {
 ///
 /// The command deadline does not apply here: a server runs until it is told
 /// to stop.
-pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<()> {
-    // The token file exists from the first start, so later steps can use it.
-    let token = guard::Token::new(token::token(ledger)?);
+pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: Option<u16>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run(ledger, policy, home, port, token))
+    runtime.block_on(run(ledger, policy, home, port.unwrap_or(policy.web.port)))
 }
 
 /// The server's own work: read the board, publish it, and serve it.
-async fn run(
-    ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
-    port: u16,
-    token: guard::Token,
-) -> Result<()> {
+async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<()> {
     // The server reads without a deadline: it runs until it is told to stop.
     let shell = System {
         budget: crate::budget::Budget::default(),
@@ -123,16 +116,8 @@ async fn run(
     // The first payload is empty: a read that fails must not keep the server
     // from starting. The reader replaces it within a tick.
     let (sender, receiver) = watch::channel(empty_payload());
-    let state = AppState::new(
-        receiver,
-        port,
-        // Herdr's socket is not always there. The board API still serves, and
-        // the agent routes report the failure.
-        crate::herdr_socket::Client::from_env().ok().map(Arc::new),
-        token,
-        // The portal's own directory is under the ledger that holds the token.
-        ledger.child("web"),
-    );
+    let (listener, state) = listen(ledger, port, receiver).await?;
+    let port = state.port;
     // The reader runs on a blocking thread, like the sidebar's reader. It reads
     // the cached state and never probes.
     let stop = Arc::new(AtomicBool::new(false));
@@ -153,17 +138,34 @@ async fn run(
         })
     };
     let app = router(state);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!(
         "dogsled web on http://127.0.0.1:{port} (token in {})",
         token::path(ledger).display()
     );
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
-        .await?;
+        .await;
     stop.store(true, Ordering::Relaxed);
     let _ = reader.await;
-    Ok(())
+    Ok(result?)
+}
+
+/// Bind first, then build the state and guards from the actual port.
+async fn listen(
+    ledger: &Ledger,
+    port: u16,
+    board: watch::Receiver<String>,
+) -> Result<(tokio::net::TcpListener, AppState)> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let port = listener.local_addr()?.port();
+    let state = AppState::new(
+        board,
+        port,
+        crate::herdr_socket::Client::from_env().ok().map(Arc::new),
+        guard::Token::new(token::token(ledger)?),
+        ledger.child("web"),
+    );
+    Ok((listener, state))
 }
 
 /// The payload the server starts with: an empty board.

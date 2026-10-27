@@ -3,10 +3,13 @@
 // the name, the parameters, and the result shape of pi-interview 0.13.0, so
 // the model asks the way it always did. Only the transport differs: the form
 // lives on the loopback portal server, not in a local window.
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { PortalClient, sleep } from "./portal-client.ts";
+import { PortalClient, PortalDown, sleep, startOneShot } from "./portal-client.ts";
 
 /** How long the tool waits between two polls for the answers. */
 const POLL_MS = 500;
@@ -242,12 +245,15 @@ export class InterviewTool {
 		// The questions are parsed before the call, so a broken file or bad JSON
 		// is a tool error and never reaches the portal.
 		const file = loadQuestions(params.questions, cwd);
-		const created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
-			questions: file,
-			pane,
-			session,
-			cwd,
-		});
+		let created: { id?: unknown };
+		try {
+			created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
+				questions: file, pane, session, cwd,
+			}, signal);
+		} catch (error) {
+			if (!(error instanceof PortalDown)) throw error;
+			return this.fallback(file, params, ctx, signal);
+		}
 		const id = typeof created?.id === "string" ? created.id : "";
 		if (!id) throw new Error("dogsled web did not return an interview id");
 
@@ -279,6 +285,55 @@ export class InterviewTool {
 				return { content: [{ type: "text", text: "Interview was aborted." }], details: { status: "aborted", responses: [], url: "" } };
 			}
 			throw error;
+		}
+	}
+
+	/** Run the same form on a temporary server when the portal cannot be reached. */
+	private async fallback(file: QuestionsFile, params: { timeout?: number; async?: boolean }, ctx: ExtensionToolContext, signal: AbortSignal | undefined): Promise<AgentToolResult<InterviewDetails>> {
+		const directory = await mkdtemp(join(tmpdir(), "dogsled-interview-"));
+		const own = new AbortController();
+		const abort = params.async || !signal ? own.signal : AbortSignal.any([own.signal, signal]);
+		this.pending.add(own);
+		let background = false;
+		try {
+			const path = join(directory, "questions.json");
+			await writeFile(path, JSON.stringify(file), { mode: 0o600 });
+			const command = startOneShot([
+				"interview", "--file", path, "--pane", process.env["HERDR_PANE_ID"] ?? "",
+				"--session", ctx.sessionManager.getSessionId(), "--cwd", ctx.cwd,
+				"--timeout", String(Math.max(1, Math.ceil(params.timeout ?? 600))),
+			], this.client.env, abort);
+			await command.started;
+			const answer = command.result.then(stdout => parseAnswers(JSON.parse(stdout)));
+			if (params.async) {
+				const id = randomUUID();
+				background = true;
+				void answer.finally(async () => {
+					this.pending.delete(own);
+					await rm(directory, { recursive: true, force: true });
+				}).then(responses => {
+					this.deliver(`Interview ${id} finished.\n\n${formatAnsweredResponses(responses, formQuestions(file))}`);
+				}).catch(error => {
+					if (!own.signal.aborted) this.deliver(`Interview ${id} did not finish: ${error instanceof Error ? error.message : String(error)}`);
+				});
+				return {
+					content: [{ type: "text", text: `Interview ${id} started. The answer arrives later as a message; keep working and do not poll.` }],
+					details: { status: "started", responses: [], url: "" },
+				};
+			}
+			const responses = await answer;
+			return {
+				content: [{ type: "text", text: `User completed the interview form.\n\nAnswered responses:\n${formatAnsweredResponses(responses, formQuestions(file))}` }],
+				details: { status: "completed", responses, url: "" },
+			};
+		} catch (error) {
+			if (abort.aborted) return { content: [{ type: "text", text: "Interview was aborted." }], details: { status: "aborted", responses: [], url: "" } };
+			throw error;
+		} finally {
+			if (!background) {
+				this.pending.delete(own);
+				await rm(directory, { recursive: true, force: true });
+			}
 		}
 	}
 
