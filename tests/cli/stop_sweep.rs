@@ -440,8 +440,8 @@ fn claude_and_codex_stop_deliver_cleanup_and_request_the_next_pass() {
     }
 }
 
-/// The service the test owns. The guard kills the service and every process it started, and
-/// waits for it to leave, so no service outlives its test.
+/// The service the test owns. The guard kills the service and the process group it leads,
+/// and reaps the service, so no service outlives its test.
 struct Service(#[allow(dead_code)] Owned);
 
 fn until(check: impl Fn() -> bool) {
