@@ -302,7 +302,198 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
     })
 }
 
-pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> Result<Value> {
+/// The request facts a job launch receipt keeps. The receipt names the command it
+/// dispatched, so the receipt alone proves which job it belongs to. The job record keeps
+/// the same facts, and the prune removes that record.
+fn request_evidence(
+    launch: &Launch,
+    cmd: &[String],
+    timeout_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
+) -> Value {
+    json!({"cmd":cmd,"cwd":launch.cwd,"owner":launch.owner,
+        "timeout_ms":timeout_ms,"idle_timeout_ms":idle_timeout_ms})
+}
+
+/// The saved receipt of a job launch must name this request and the command it dispatched.
+/// A conflicting same-id request, a receipt for another pane, and a receipt that names a
+/// different command or options all refuse: a receipt never replays for another job.
+///
+/// The job record is a second check, not a prerequisite. The prune removes a terminal job
+/// record and keeps its receipt, so the receipt's own evidence carries the replay. A
+/// receipt that carries the request evidence but no pane is not complete: it names no
+/// dispatch, so a replay without the job record refuses.
+pub(crate) fn correlate(
+    ledger: &Ledger,
+    launch: &Launch,
+    cmd: &[String],
+    timeout_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
+    saved: &Value,
+) -> Result<()> {
+    if saved["id"] != json!(launch.id) {
+        return Err(Error::Invalid(format!(
+            "job {} has a saved launch receipt for another request",
+            launch.id
+        )));
+    }
+    if saved["host"] != json!(launch.host) {
+        return Err(Error::Invalid(format!(
+            "job {} has a saved launch receipt for another host",
+            launch.id
+        )));
+    }
+    // The receipt's own evidence is the first check. A receipt that names another command
+    // or another request dispatched another job, whether or not its job record remains.
+    let evidence = request_evidence(launch, cmd, timeout_ms, idle_timeout_ms);
+    if let Some(request) = saved.get("request")
+        && *request != evidence
+    {
+        return Err(Error::Invalid(format!(
+            "job {} has a saved launch receipt for another command or request",
+            launch.id
+        )));
+    }
+    // The job record is a second check, not a prerequisite. The prune removes a terminal
+    // job record and keeps its receipt, so the receipt carries the replay alone.
+    let Some(job) = jobs::record(ledger, &launch.id)? else {
+        // Without the record, the receipt must be complete on its own: it names the
+        // request it dispatched and the pane it dispatched into. A receipt that predates
+        // the request evidence proves nothing about what it dispatched.
+        if saved.get("request").is_none() {
+            return Err(Error::Invalid(format!(
+                "job {} has a legacy launch receipt without request evidence; inspect that host before resubmitting",
+                launch.id
+            )));
+        }
+        // A complete receipt also names the pane it dispatched into. Without it the receipt
+        // proves no dispatch, so a replay refuses.
+        if saved
+            .get("pane")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(Error::Invalid(format!(
+                "job {} has a launch receipt without a pane; inspect that host before resubmitting",
+                launch.id
+            )));
+        }
+        return Ok(());
+    };
+    if job.id != launch.id {
+        return Err(Error::Invalid(format!(
+            "job {} claim belongs to job {}",
+            launch.id, job.id
+        )));
+    }
+    if saved["pane"] != json!(job.pane) {
+        return Err(Error::Invalid(format!(
+            "job {} has a saved launch receipt for another pane",
+            launch.id
+        )));
+    }
+    if job.cmd != cmd
+        || job.cwd != launch.cwd
+        || job.host != launch.host
+        || job.owner != launch.owner
+        || job.timeout_ms != timeout_ms
+        || job.idle_timeout_ms != idle_timeout_ms
+    {
+        return Err(Error::Invalid(format!(
+            "job {} has a saved launch receipt for another command or request",
+            launch.id
+        )));
+    }
+    Ok(())
+}
+
+/// The launch of a job on this host. The claim is published before the pane side effect, and
+/// the wrapper that runs in that pane reads the claim before it runs anything.
+fn launch_job(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    launch: &Launch,
+    cmd: &[String],
+    timeout_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
+) -> Result<Value> {
+    let job = Job {
+        id: launch.id.clone(),
+        cmd: cmd.to_vec(),
+        cwd: launch.cwd.clone(),
+        host: launch.host.clone(),
+        owner: launch.owner.clone(),
+        pane: String::new(),
+        state: jobs::CLAIMING.into(),
+        exit: None,
+        signal: None,
+        reason: None,
+        started_ms: None,
+        ended_ms: None,
+        timeout_ms,
+        idle_timeout_ms,
+    };
+    // The job's ownership is read before any pane side effect. A job that already
+    // has an owner keeps it: this launch never takes it over, never allocates a
+    // second pane, and never dispatches the command again.
+    let existing = match jobs::ownership(ledger, &launch.id)? {
+        jobs::Ownership::Unclaimed => None,
+        jobs::Ownership::Uncertain(held) => {
+            return Err(Error::Invalid(format!(
+                "job {} has an unresolved claim; inspect that host before resubmitting: {}",
+                launch.id,
+                held.reason.unwrap_or_else(|| "outcome unknown".into())
+            )));
+        }
+        jobs::Ownership::Pending(_)
+        | jobs::Ownership::Started(_)
+        | jobs::Ownership::Terminal(_) => Some(()),
+    };
+    if existing.is_some() {
+        // A claim is not a dispatch receipt. Without a saved receipt that proves
+        // this request dispatched, the claim proves only that something was
+        // claimed: this launch refuses, allocates nothing, dispatches nothing,
+        // overwrites nothing, saves no receipt, and releases no preparation.
+        return Err(Error::Invalid(format!(
+            "job {} has a claim but no saved launch receipt; inspect that host before resubmitting",
+            launch.id
+        )));
+    }
+    // The intent is published before the pane side effect. It is not
+    // executable: an allocation that stops here stays uncertain, and no other
+    // allocation may take the job over.
+    jobs::publish_intent(ledger, &job)?;
+    let (pane, _) = pane(shell, launch)?;
+    // The pane is known, so the claim becomes executable. The wrapper reads it
+    // before it runs anything.
+    let mut claim = job.clone();
+    claim.pane.clone_from(&pane);
+    claim.state = jobs::PENDING.into();
+    jobs::publish_claim(ledger, &claim)?;
+    let executable = std::env::current_exe()?.display().to_string();
+    let command = format!(
+        "DOGSLED_STATE={} {} exec {} -- {}",
+        quote(&ledger.dir.display().to_string()),
+        quote(&executable),
+        quote(&launch.id),
+        cmd.iter().map(|c| quote(c)).collect::<Vec<_>>().join(" ")
+    );
+    if let Err(error) = shell.run_ok(
+        "herdr",
+        &["pane".into(), "run".into(), pane.clone(), command],
+    ) {
+        // The dispatch failed. The wrapper's own record is the evidence: a
+        // wrapper that already started or ended keeps its state, and nothing
+        // overwrites it with the pending copy. A startup that was never proved
+        // stays uncertain, so no later execution and no safe retry is invented.
+        jobs::uncertain(ledger, &claim, error.to_string())?;
+        return Err(error);
+    }
+    Ok(json!({"id":launch.id,"host":launch.host,"pane":pane,
+        "request":request_evidence(launch, cmd, timeout_ms, idle_timeout_ms)}))
+}
+
+pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, _now: u64) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
     if launch.unit.is_some() && !matches!(launch.action, Action::Agent { .. }) {
         return Err(crate::unit_transport::conflict(
@@ -318,54 +509,24 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, now: u64) -> 
     receipts.with_lock(&launch.id, || {
         let file = format!("{}.json", launch.id);
         if let Some(value) = receipts.read::<Value>(&file)? {
+            // A saved receipt is the only evidence that this request dispatched. It
+            // replays only when it correlates to this request and to the recorded job.
+            if let Action::Job {
+                cmd,
+                timeout_ms,
+                idle_timeout_ms,
+            } = &launch.action
+            {
+                correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
+            }
             return Ok(value);
         }
-        let (pane, _) = pane(shell, launch)?;
         let result = match &launch.action {
             Action::Job {
                 cmd,
                 timeout_ms,
                 idle_timeout_ms,
-            } => {
-                let job = Job {
-                    id: launch.id.clone(),
-                    cmd: cmd.clone(),
-                    cwd: launch.cwd.clone(),
-                    host: launch.host.clone(),
-                    owner: launch.owner.clone(),
-                    pane: pane.clone(),
-                    state: "pending".into(),
-                    exit: None,
-                    signal: None,
-                    reason: None,
-                    started_ms: None,
-                    ended_ms: None,
-                    timeout_ms: *timeout_ms,
-                    idle_timeout_ms: *idle_timeout_ms,
-                };
-                jobs::save(ledger, &job)?;
-                let executable = std::env::current_exe()?.display().to_string();
-                let command = format!(
-                    "DOGSLED_STATE={} {} exec {} -- {}",
-                    quote(&ledger.dir.display().to_string()),
-                    quote(&executable),
-                    quote(&launch.id),
-                    cmd.iter().map(|c| quote(c)).collect::<Vec<_>>().join(" ")
-                );
-                if let Err(error) = shell.run_ok(
-                    "herdr",
-                    &["pane".into(), "run".into(), pane.clone(), command],
-                ) {
-                    let mut failed = job;
-                    failed.exit = Some(2);
-                    failed.reason = Some(error.to_string());
-                    failed.state = "blocked".into();
-                    failed.ended_ms = Some(now);
-                    jobs::save(ledger, &failed)?;
-                    return Err(error);
-                }
-                json!({"id":launch.id,"host":launch.host,"pane":pane})
-            }
+            } => launch_job(ledger, shell, launch, cmd, *timeout_ms, *idle_timeout_ms)?,
             Action::Agent { .. } => {
                 return Err(Error::Invalid(
                     "agent launch must use its receipt owner".into(),

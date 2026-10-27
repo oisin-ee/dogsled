@@ -14,35 +14,43 @@ fn closed_wrapper_stdout_preserves_full_log_and_child_exit() {
             .unwrap()
             .success()
     );
-    let mut child = rig
-        .cmd(&[
-            "exec",
-            "closed-output",
-            "--",
-            "sh",
-            "-c",
-            "echo first; read -r ready < \"$RIG/continue\"; echo second; echo third >&2; exit 7",
-        ])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    // The command records its own process id, so the test can name the process the
+    // wrapper started. That command leads a process group of its own.
+    let script = "echo $$ > \"$RIG/command-pid\"; echo first; read -r ready < \"$RIG/continue\"; echo second; echo third >&2; exit 7";
+    rig.claim("closed-output", &["sh", "-c", script]);
+    let mut command = rig.cmd(&["exec", "closed-output", "--", "sh", "-c", script]);
+    command.stdout(Stdio::piped());
+    // The test owns the wrapper as its own child, so the test reaps it and reads its
+    // exit status. A failed assertion kills the wrapper and its own group.
+    let mut owned = Owned::spawn(&mut command);
+    // The command leads a group of its own, so the wrapper's group does not cover it.
+    // The test owns that group too, or the command outlives the test.
+    let command_pid = read_pid(&rig.dir.join("command-pid"), "the command");
+    let command = Owned::adopt(command_pid);
+    let mut output = std::io::BufReader::new(owned.child_mut().stdout.take().unwrap());
     let mut first = String::new();
     output.read_line(&mut first).unwrap();
     assert_eq!(first, "first\n");
     drop(output);
-    fs::OpenOptions::new()
-        .write(true)
-        .open(fifo)
-        .unwrap()
-        .write_all(b"go\n")
-        .unwrap();
-    assert_eq!(child.wait().unwrap().code(), Some(7));
+    // The FIFO is opened without blocking, so the write never waits for an open that
+    // may never come. The writer stays open through the acknowledgement, so the reader
+    // never sees an early end.
+    let mut writer = open_fifo(&fifo);
+    writer.write_all(b"go\n").unwrap();
+    writer.flush().unwrap();
+    // The wrapper's reaped exit status is the proof that it ended.
+    assert_eq!(owned.wait().code(), Some(7));
     let log = rig.log("state/jobs/closed-output.log");
     for line in ["first\n", "second\n", "third\n"] {
         assert!(log.contains(line), "{log}");
     }
     assert_eq!(rig.read("state/jobs/closed-output.json")["exit"], 7);
+    // The command's group is gone before the test ends, so no command outlives its test.
+    drop(command);
+    assert!(
+        wait_gone(command_pid, PROCESS_DEADLINE),
+        "the command outlived its test"
+    );
 }
 
 #[test]

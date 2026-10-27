@@ -7,6 +7,7 @@ use crate::node::Snapshot;
 use crate::probe::{Agent, AgentCounts, Memory, Pane, Probe};
 use crate::shell::Fake;
 use crate::work::{self, Action, Request};
+use serde_json::json;
 
 mod reconcile;
 
@@ -329,6 +330,181 @@ fn submit_waits_behind_pending_tickets_even_with_room() {
             .unwrap()
             .len(),
         1
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A job's durable record says who may run it. A missing record is nobody's, a pending record
+/// is the wrapper's to run, and a record that started, ended, or stopped uncertainly is nobody's
+/// to take over.
+#[test]
+fn a_job_record_says_who_may_run_the_job() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let job = crate::jobs::Job {
+        id: "claimed".into(),
+        cmd: vec!["true".into()],
+        cwd: "/".into(),
+        host: "local".into(),
+        owner: "owner".into(),
+        pane: "pane".into(),
+        state: crate::jobs::PENDING.into(),
+        exit: None,
+        signal: None,
+        reason: None,
+        started_ms: None,
+        ended_ms: None,
+        timeout_ms: None,
+        idle_timeout_ms: None,
+    };
+    assert!(matches!(
+        crate::jobs::ownership(&ledger, "claimed").unwrap(),
+        crate::jobs::Ownership::Unclaimed
+    ));
+    // The intent is published before the pane side effect, and it is not executable.
+    crate::jobs::publish_intent(&ledger, &job).unwrap();
+    let held = crate::jobs::ownership(&ledger, "claimed").unwrap();
+    assert!(matches!(
+        held,
+        crate::jobs::Ownership::Uncertain(ref held) if held.state == crate::jobs::CLAIMING
+    ));
+    // A second intent never takes the job over.
+    assert!(crate::jobs::publish_intent(&ledger, &job).is_err());
+    // The claim becomes executable once its pane is known.
+    crate::jobs::publish_claim(&ledger, &job).unwrap();
+    assert!(matches!(
+        crate::jobs::ownership(&ledger, "claimed").unwrap(),
+        crate::jobs::Ownership::Pending(_)
+    ));
+    // An uncertain claim authorizes nothing, and a claim is never overwritten.
+    crate::jobs::uncertain(&ledger, &job, "dispatch outcome unknown".into()).unwrap();
+    assert!(matches!(
+        crate::jobs::ownership(&ledger, "claimed").unwrap(),
+        crate::jobs::Ownership::Uncertain(ref held) if held.state == crate::jobs::UNCERTAIN
+    ));
+    assert!(crate::jobs::publish_claim(&ledger, &job).is_err());
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A record stored under one name and holding another job's identity proves nothing. The
+/// lookup refuses it, and the intent-to-claim publication refuses a changed request.
+#[test]
+fn a_record_that_embeds_another_job_is_never_its_own_claim() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let job = crate::jobs::Job {
+        id: "claimed".into(),
+        cmd: vec!["true".into()],
+        cwd: "/".into(),
+        host: "local".into(),
+        owner: "owner".into(),
+        pane: "pane".into(),
+        state: crate::jobs::PENDING.into(),
+        exit: None,
+        signal: None,
+        reason: None,
+        started_ms: None,
+        ended_ms: None,
+        timeout_ms: None,
+        idle_timeout_ms: None,
+    };
+    // A.json holds B's identity.
+    let mut other = job.clone();
+    other.id = "other".into();
+    crate::jobs::save(&ledger, &other).unwrap();
+    std::fs::rename(
+        crate::jobs::store(&ledger).dir.join("other.json"),
+        crate::jobs::store(&ledger).dir.join("claimed.json"),
+    )
+    .unwrap();
+    // The lookup refuses the contradictory identity.
+    let error = crate::jobs::ownership(&ledger, "claimed").unwrap_err();
+    assert!(
+        error.to_string().contains("belongs to job other"),
+        "{error}"
+    );
+    // No publication takes that record over.
+    let error = crate::jobs::publish_intent(&ledger, &job).unwrap_err();
+    assert!(
+        error.to_string().contains("belongs to job other"),
+        "{error}"
+    );
+    // A real job's intent keeps its own request: only the pane may change.
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    crate::jobs::publish_intent(&ledger, &job).unwrap();
+    let mut changed = job.clone();
+    changed.cwd = "/elsewhere".into();
+    let error = crate::jobs::publish_claim(&ledger, &changed).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("changed after its intent was published"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A job launch receipt keeps the request it dispatched. The receipt alone carries a replay,
+/// so the prune of the job record does not break it, and a receipt for another command or a
+/// receipt without the evidence fails closed.
+#[test]
+fn a_job_launch_receipt_carries_its_own_request_evidence() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    let launch = crate::work::Launch {
+        id: "replayed".into(),
+        unit: None,
+        action: Action::Job {
+            cmd: vec!["true".into()],
+            timeout_ms: None,
+            idle_timeout_ms: None,
+        },
+        host: "local".into(),
+        cwd: "/work".into(),
+        pane: None,
+        terminal: None,
+        workspace: None,
+        workspace_name: None,
+        owner: "owner".into(),
+        owner_host: None,
+    };
+    let cmd = vec!["true".to_owned()];
+    let saved = json!({
+        "id":"replayed","host":"local","pane":"w2:p1",
+        "request":{"cmd":["true"],"cwd":"/work","owner":"owner",
+            "timeout_ms":null,"idle_timeout_ms":null}
+    });
+    // The receipt correlates to the request it made.
+    assert!(work::correlate(&ledger, &launch, &cmd, None, None, &saved).is_ok());
+    // The prune removed the job record. The receipt still carries the replay: the record is
+    // a second check, not a prerequisite.
+    assert!(crate::jobs::record(&ledger, "replayed").unwrap().is_none());
+    assert!(work::correlate(&ledger, &launch, &cmd, None, None, &saved).is_ok());
+    // A receipt that names another command is refused.
+    let mut other = saved.clone();
+    other["request"]["cmd"] = json!(["false"]);
+    let error = work::correlate(&ledger, &launch, &cmd, None, None, &other).unwrap_err();
+    assert!(
+        error.to_string().contains("another command or request"),
+        "{error}"
+    );
+    // A recordless receipt without a complete pane is refused.
+    for pane in [json!(null), json!(""), json!(7)] {
+        let mut incomplete = saved.clone();
+        incomplete["pane"] = pane;
+        let error = work::correlate(&ledger, &launch, &cmd, None, None, &incomplete).unwrap_err();
+        assert!(error.to_string().contains("without a pane"), "{error}");
+    }
+    let mut missing = saved.clone();
+    missing.as_object_mut().unwrap().remove("pane");
+    let error = work::correlate(&ledger, &launch, &cmd, None, None, &missing).unwrap_err();
+    assert!(error.to_string().contains("without a pane"), "{error}");
+    // A receipt that predates the evidence is refused.
+    let legacy = json!({"id":"replayed","host":"local","pane":"w2:p1"});
+    let error = work::correlate(&ledger, &launch, &cmd, None, None, &legacy).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("legacy launch receipt without request evidence"),
+        "{error}"
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
