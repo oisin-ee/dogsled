@@ -205,6 +205,36 @@ function resolveQuestionPath(input: string, cwd: string): string {
 }
 
 /**
+ * Whether a source names a file on this host, rather than a URL the browser
+ * can load on its own.
+ *
+ * A form the model writes names its images by the path they have on the
+ * agent's machine. That machine is not the machine the browser runs on, so
+ * the path never loads. An `http:` or `data:` source already carries its
+ * bytes, so it is left alone.
+ */
+function isLocalSource(src: string): boolean {
+	return !/^(?:https?:|data:)/i.test(src);
+}
+
+/** The bytes of an image, or an error that names the file. */
+function readImage(path: string): Buffer {
+	try {
+		return readFileSync(path);
+	} catch (error) {
+		const code = (error as { code?: string }).code;
+		if (code === "ENOENT") throw new Error(`Image not found: ${path}`);
+		throw new Error(`Cannot read the image ${path}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/** The URL the portal serves an attachment from. */
+function attachmentUrl(path: string): string {
+	const name = path.split(/[\\/]/).pop() ?? "";
+	return `/api/attachments/${name}`;
+}
+
+/**
  * The answers the portal returns. The contract is one body: the id of the
  * form, and the responses of the form. The questions are not part of it, so
  * the tool names the answers from the questions the model sent. Any other
@@ -247,11 +277,16 @@ export class InterviewTool {
 		const file = loadQuestions(params.questions, cwd);
 		let created: { id?: unknown };
 		try {
+			// The images of the form are uploaded first, so the browser loads
+			// them from the portal instead of from the agent's own disk.
+			const questions = await this.uploadMedia(file, cwd, signal);
 			created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
-				questions: file, pane, session, cwd,
+				questions, pane, session, cwd,
 			}, signal);
 		} catch (error) {
 			if (!(error instanceof PortalDown)) throw error;
+			// The portal is down, so the form goes to the one-shot interview
+			// with the questions as the model wrote them.
 			return this.fallback(file, params, ctx, signal);
 		}
 		const id = typeof created?.id === "string" ? created.id : "";
@@ -341,6 +376,104 @@ export class InterviewTool {
 	close(): void {
 		for (const controller of this.pending) controller.abort();
 		this.pending.clear();
+	}
+
+	/**
+	 * The form with its local images uploaded to the portal.
+	 *
+	 * An image whose `src` names a file on this host is a path the browser
+	 * cannot reach, because the file lives on the agent's machine and the
+	 * browser runs on the owner's. The bytes go to the portal as an
+	 * attachment, and the `src` becomes the URL the portal serves.
+	 *
+	 * The portal is asked whether it is there before the first local file is
+	 * read, so a portal that is down falls back to the one-shot interview
+	 * with the questions as the model wrote them, and a missing file stays a
+	 * tool error only when there is a portal to upload it to.
+	 */
+	private async uploadMedia(file: QuestionsFile, cwd: string, signal: AbortSignal | undefined): Promise<QuestionsFile> {
+		const list = file["questions"];
+		if (!Array.isArray(list)) return file;
+		const local = this.localImages(list, cwd);
+		if (local.length === 0) return file;
+		// The portal that would hold the images has to be there.
+		await this.client.request("GET", "/api/questions", { signal });
+		const questions: Record<string, unknown>[] = [];
+		for (const entry of list) {
+			if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+				questions.push(entry as Record<string, unknown>);
+				continue;
+			}
+			const question: Record<string, unknown> = { ...(entry as Record<string, unknown>) };
+			const media = question["media"];
+			if (!media || typeof media !== "object" || Array.isArray(media)) {
+				questions.push(question);
+				continue;
+			}
+			const block = media as Record<string, unknown>;
+			const src = block["src"];
+			if (block["type"] !== "image" || typeof src !== "string" || !src || !isLocalSource(src)) {
+				questions.push(question);
+				continue;
+			}
+			const path = resolveQuestionPath(src, cwd);
+			const bytes = readImage(path);
+			const url = await this.uploadAttachment(bytes, path, signal);
+			question["media"] = { ...block, src: url };
+			questions.push(question);
+		}
+		return { ...file, questions };
+	}
+
+	/** The local images of a form, as the paths they name. */
+	private localImages(list: unknown[], cwd: string): string[] {
+		const paths: string[] = [];
+		for (const entry of list) {
+			if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+			const media = (entry as Record<string, unknown>)["media"];
+			if (!media || typeof media !== "object" || Array.isArray(media)) continue;
+			const block = media as Record<string, unknown>;
+			const src = block["src"];
+			if (block["type"] !== "image" || typeof src !== "string" || !src || !isLocalSource(src)) continue;
+			paths.push(resolveQuestionPath(src, cwd));
+		}
+		return paths;
+	}
+
+	/**
+	 * The bytes of an image, as an attachment of the portal.
+	 *
+	 * A portal that cannot be reached is a `PortalDown` error, so the form
+	 * falls back to the one-shot interview. A portal that refuses the image
+	 * is an error that names the file.
+	 */
+	private async uploadAttachment(bytes: Buffer, path: string, signal: AbortSignal | undefined): Promise<string> {
+		let response: Response;
+		const init: RequestInit = {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${this.client.token()}`,
+				"content-type": "application/octet-stream",
+			},
+			body: new Uint8Array(bytes),
+		};
+		if (signal) init.signal = signal;
+		try {
+			response = await fetch(`http://127.0.0.1:${this.client.port}/api/attachments`, init);
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			const cause = error instanceof Error ? error.cause : undefined;
+			const detail = cause instanceof Error ? cause.message : error instanceof Error ? error.message : String(error);
+			throw new PortalDown(detail);
+		}
+		if (!response.ok) {
+			throw new Error(`Cannot use the image ${path}: dogsled web POST /api/attachments failed: ${response.status} ${(await response.text()).trim()}`);
+		}
+		const payload = (await response.json()) as { path?: unknown };
+		if (typeof payload.path !== "string" || !payload.path) {
+			throw new Error(`Cannot use the image ${path}: dogsled web did not return an attachment path`);
+		}
+		return attachmentUrl(payload.path);
 	}
 
 	/** Poll the portal until it has the answers, the form is withdrawn, or the wait ends. */
