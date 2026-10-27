@@ -32,6 +32,41 @@ impl Client {
             .ok_or_else(|| Error::Invalid("HERDR_SOCKET_PATH is required to dock the board".into()))
     }
 
+    /// Use the pane's socket, or ask Herdr for its current session's socket.
+    pub fn discover() -> Result<Self> {
+        Self::discover_with(
+            &crate::shell::System::default(),
+            std::env::var_os("HERDR_SOCKET_PATH"),
+        )
+    }
+
+    fn discover_with(
+        shell: &dyn crate::shell::Shell,
+        path: Option<std::ffi::OsString>,
+    ) -> Result<Self> {
+        if let Some(path) = path.filter(|path| !path.is_empty()) {
+            return Ok(Self::at(path));
+        }
+        let fail = |detail| {
+            Error::Invalid(format!(
+                "HERDR_SOCKET_PATH is unset or empty; herdr status server --json: {detail}"
+            ))
+        };
+        let output = shell
+            .run_ok(
+                "herdr",
+                &["status".into(), "server".into(), "--json".into()],
+            )
+            .map_err(|error| fail(error.to_string()))?;
+        let status: Value =
+            serde_json::from_str(&output.stdout).map_err(|error| fail(error.to_string()))?;
+        let path = status["socket"]
+            .as_str()
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| fail("response has no non-empty socket string".into()))?;
+        Ok(Self::at(path))
+    }
+
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
@@ -434,6 +469,60 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn herdr_socket_discovery_prefers_the_environment() {
+        let shell = crate::shell::Fake::new();
+        let client = Client::discover_with(&shell, Some("/pane/herdr.sock".into())).unwrap();
+        assert_eq!(client, Client::at("/pane/herdr.sock"));
+        assert!(shell.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn herdr_socket_discovery_uses_the_server_status_even_before_startup() {
+        for status in ["running", "not_running"] {
+            for env in [None, Some("".into())] {
+                let shell = crate::shell::Fake::new();
+                shell.on(
+                    "herdr status server --json",
+                    &json!({"status": status, "socket": "/session/herdr.sock"}).to_string(),
+                );
+                let client = Client::discover_with(&shell, env).unwrap();
+                assert_eq!(client, Client::at("/session/herdr.sock"));
+                assert_eq!(*shell.calls.lock().unwrap(), ["herdr status server --json"]);
+            }
+        }
+    }
+
+    #[test]
+    fn herdr_socket_discovery_reports_both_sources_when_no_path_is_available() {
+        for response in [
+            "{}",
+            r#"{"socket":""}"#,
+            r#"{"socket":" "}"#,
+            r#"{"socket":7}"#,
+            "invalid",
+        ] {
+            let shell = crate::shell::Fake::new();
+            shell.on("herdr status server --json", response);
+            let error = Client::discover_with(&shell, None).unwrap_err().to_string();
+            assert!(error.contains("HERDR_SOCKET_PATH"));
+            assert!(error.contains("herdr status server --json"));
+        }
+        let shell = crate::shell::Fake::new();
+        shell.on_output(
+            "herdr status server --json",
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: "server status failed".into(),
+            },
+        );
+        let error = Client::discover_with(&shell, None).unwrap_err().to_string();
+        assert!(error.contains("HERDR_SOCKET_PATH"));
+        assert!(error.contains("herdr status server --json"));
+        assert!(error.contains("server status failed"));
+    }
 
     #[test]
     fn herdr_socket_sends_one_request_line_and_returns_its_result() {
