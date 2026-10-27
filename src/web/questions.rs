@@ -73,11 +73,14 @@ async fn answer_wait(
         Ok(limit) => limit,
         Err(detail) => return bad_request(&detail),
     };
-    match state.questions.wait(&id, limit).await {
-        Ok(Poll::Answered(responses)) => Json(responses).into_response(),
-        Ok(Poll::Timeout) => StatusCode::NO_CONTENT.into_response(),
-        Ok(Poll::Gone) => gone(),
-        Err(error) => failed(&error),
+    tokio::select! {
+        () = state.stop.cancelled() => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        result = state.questions.wait(&id, limit) => match result {
+            Ok(Poll::Answered(responses)) => Json(responses).into_response(),
+            Ok(Poll::Timeout) => StatusCode::NO_CONTENT.into_response(),
+            Ok(Poll::Gone) => gone(),
+            Err(error) => failed(&error),
+        },
     }
 }
 
@@ -331,6 +334,29 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["id"], serde_json::json!(id));
         assert_eq!(body["responses"][0]["value"], serde_json::json!("B"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_a_long_poll_but_keeps_the_pending_question() {
+        let state = fresh_state();
+        let id = ask(&state).await;
+        let request = token_request(Method::GET, &format!("/api/questions/{id}/answer"), None);
+        let waiting = call(&state, request);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        state.stop.cancel();
+        let response = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("the long poll stops");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let pending = state.questions.list().await.expect("pending questions");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+        std::fs::remove_dir_all(&state.web.dir).expect("remove portal state");
     }
 
     #[tokio::test]

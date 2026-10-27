@@ -407,7 +407,7 @@ async fn decisions(
         Ok(stream) => stream.map(|event| Ok::<Event, Infallible>(decision_frame(event))),
         Err(error) => return failed(&error),
     };
-    Sse::new(stream)
+    Sse::new(state.until_shutdown(stream))
         .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
         .into_response()
 }

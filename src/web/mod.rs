@@ -18,7 +18,6 @@ pub mod token;
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -32,6 +31,7 @@ use portal_types::BoardView;
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::WatchStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Policy;
 use crate::error::Result;
@@ -63,6 +63,8 @@ pub struct AppState {
     /// The questions that wait for an answer, with the waiters of the long
     /// polls.
     questions: store::Store,
+    /// Cancels the portal's requests, streams, and background readers together.
+    stop: CancellationToken,
 }
 
 impl AppState {
@@ -87,12 +89,21 @@ impl AppState {
             token,
             web,
             questions,
+            stop: CancellationToken::new(),
         }
     }
 
     /// The current payload.
     fn payload(&self) -> String {
         self.board.borrow().clone()
+    }
+
+    /// Finish a response stream as soon as the portal starts to stop.
+    fn until_shutdown<S: tokio_stream::Stream>(
+        &self,
+        stream: S,
+    ) -> impl tokio_stream::Stream<Item = S::Item> + use<S> {
+        futures_util::StreamExt::take_until(stream, self.stop.clone().cancelled_owned())
     }
 }
 
@@ -109,10 +120,18 @@ pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: Option<u16>) ->
 
 /// The server's own work: read the board, publish it, and serve it.
 async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<()> {
-    // The server reads without a deadline: it runs until it is told to stop.
-    let shell = System {
-        budget: crate::budget::Budget::default(),
-    };
+    run_until(ledger, policy, home, port, System::default(), shutdown()).await
+}
+
+/// Keep shell calls and the stop request injectable for lifecycle tests.
+async fn run_until(
+    ledger: &Ledger,
+    policy: &Policy,
+    home: &str,
+    port: u16,
+    shell: impl crate::shell::Shell + 'static,
+    stopping: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     // The first payload is empty: a read that fails must not keep the server
     // from starting. The reader replaces it within a tick.
     let (sender, receiver) = watch::channel(empty_payload());
@@ -120,34 +139,36 @@ async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<
     let port = state.port;
     // The reader runs on a blocking thread, like the sidebar's reader. It reads
     // the cached state and never probes.
-    let stop = Arc::new(AtomicBool::new(false));
-    let reader = {
-        let thread_stop = Arc::clone(&stop);
-        let ledger = ledger.clone();
-        let policy = policy.clone();
-        let home = home.to_owned();
-        tokio::task::spawn_blocking(move || {
-            reader(
-                &shell,
-                &ledger,
-                &policy,
-                &home,
-                &sender,
-                thread_stop.as_ref(),
-            );
-        })
-    };
-    let app = router(state);
+    let _reader = spawn_reader(
+        shell,
+        ledger.clone(),
+        policy.clone(),
+        home.to_owned(),
+        sender,
+        state.stop.clone(),
+    );
     println!(
         "dogsled web on http://127.0.0.1:{port} (token in {})",
         token::path(ledger).display()
     );
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await;
-    stop.store(true, Ordering::Relaxed);
-    let _ = reader.await;
-    Ok(result?)
+    Ok(serve_until(listener, state, stopping).await?)
+}
+
+/// Stop every response before waiting for the HTTP connections to drain.
+async fn serve_until(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    stopping: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let stop = state.stop.clone();
+    // An error or a dropped server must also release its background workers.
+    let _cancel = stop.clone().drop_guard();
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            stopping.await;
+            stop.cancel();
+        })
+        .await
 }
 
 /// Bind first, then build the state and guards from the actual port.
@@ -209,7 +230,7 @@ async fn stream(
 ) -> Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>> {
     let stream = WatchStream::new(state.board.clone())
         .map(|payload| Ok(Event::default().event("board").data(payload)));
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
+    Sse::new(state.until_shutdown(stream)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }
 
 /// Refuse a request from another host, or from another origin while it
@@ -223,25 +244,42 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
     next.run(request).await
 }
 
+/// The reader has nothing to flush. Do not join it at shutdown: an in-flight
+/// Herdr or SSH call can finish on its own 30-second budget after the server
+/// stops. A plain thread keeps runtime teardown from waiting for that call.
+fn spawn_reader(
+    shell: impl crate::shell::Shell + 'static,
+    ledger: Ledger,
+    policy: Policy,
+    home: String,
+    sender: watch::Sender<String>,
+    stop: CancellationToken,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || reader(&shell, &ledger, &policy, &home, &sender, &stop))
+}
+
 /// Rebuild the board every two seconds and publish it when it changed.
 ///
 /// The timestamp moves on every read, so it stays out of the comparison. Only
 /// the hosts and the rows decide whether the board changed.
 fn reader(
-    shell: &System,
+    shell: &dyn crate::shell::Shell,
     ledger: &Ledger,
     policy: &Policy,
     home: &str,
     sender: &watch::Sender<String>,
-    stop: &AtomicBool,
+    stop: &CancellationToken,
 ) {
     let mut last = String::new();
     // The fleet is discovered once and kept, like the sidebar's reader keeps
     // it. A failed discovery is tried again on the next tick.
     let mut fleet: Option<crate::hosts::Fleet<'_>> = None;
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_cancelled() {
         if fleet.is_none() {
             fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home.to_owned()).ok();
+        }
+        if stop.is_cancelled() {
+            break;
         }
         if let Some(fleet) = &fleet
             && let Ok(view) = read(fleet)
@@ -260,7 +298,7 @@ fn reader(
         }
         // Wait for the next tick in slices, so a stop is not delayed.
         let until = std::time::Instant::now() + REFRESH;
-        while std::time::Instant::now() < until && !stop.load(Ordering::Relaxed) {
+        while std::time::Instant::now() < until && !stop.is_cancelled() {
             std::thread::sleep(TICK);
         }
     }
@@ -511,6 +549,155 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/event-stream")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_finishes_with_an_open_board_stream() {
+        use std::io::{Read as _, Write as _};
+
+        let ledger = Ledger::new(
+            std::env::temp_dir().join(format!("dogsled-stop-{}", crate::ledger::new_id())),
+        );
+        let (_sender, receiver) = watch::channel(board_json());
+        let (listener, state) = listen(&ledger, 0, receiver).await.expect("bind the portal");
+        let port = state.port;
+        let (stop, stopping) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            serve_until(listener, state, async {
+                let _ = stopping.await;
+            })
+            .await
+        });
+        let (opened, ready) = tokio::sync::oneshot::channel();
+        let client = tokio::task::spawn_blocking(move || {
+            let mut client =
+                std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the portal");
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            write!(
+                client,
+                "GET /api/stream HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .expect("request the stream");
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let size = client.read(&mut buffer).expect("read the stream");
+                assert!(size > 0, "the stream stays open before shutdown");
+                bytes.extend_from_slice(&buffer[..size]);
+                if String::from_utf8_lossy(&bytes).contains("event: board") {
+                    break;
+                }
+            }
+            opened.send(()).expect("report the open stream");
+            let mut rest = Vec::new();
+            client.read_to_end(&mut rest)
+        });
+        ready.await.expect("the client opened SSE");
+        stop.send(()).expect("trigger shutdown");
+        let result = tokio::time::timeout(Duration::from_secs(2), server).await;
+        assert!(result.is_ok(), "shutdown must not wait for the SSE client");
+        result
+            .expect("server stopped")
+            .expect("server task")
+            .expect("serve result");
+        client.await.expect("client task").expect("SSE reaches EOF");
+        std::fs::remove_dir_all(&ledger.dir).expect("remove portal state");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_does_not_wait_for_a_blocked_shell_call() {
+        #[derive(Debug)]
+        struct BlockedShell {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            finished: std::sync::mpsc::Sender<()>,
+        }
+
+        impl crate::shell::Shell for BlockedShell {
+            fn run(&self, _: &str, _: &[String]) -> Result<crate::shell::Output> {
+                self.entered.send(()).expect("report the blocked read");
+                self.release
+                    .lock()
+                    .expect("release lock")
+                    .recv()
+                    .expect("release read");
+                Err(crate::error::Error::Invalid(
+                    "the test read failed".to_owned(),
+                ))
+            }
+        }
+
+        impl Drop for BlockedShell {
+            fn drop(&mut self) {
+                let _ = self.finished.send(());
+            }
+        }
+
+        let ledger = Ledger::new(
+            std::env::temp_dir().join(format!("dogsled-reader-stop-{}", crate::ledger::new_id())),
+        );
+        let owned = ledger.clone();
+        let (entered, reading) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let (finished, exited) = std::sync::mpsc::channel();
+        let shell = BlockedShell {
+            entered,
+            release: std::sync::Mutex::new(resume),
+            finished,
+        };
+        let (stop, stopping) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            run_until(&owned, &Policy::default(), "/tmp", 0, shell, async {
+                let _ = stopping.await;
+            })
+            .await
+        });
+        reading
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the shell read started");
+        stop.send(()).expect("trigger shutdown");
+        let result = tokio::time::timeout(Duration::from_secs(2), server).await;
+        // Release the fake even if the server failed, so the test leaks no thread.
+        assert!(
+            exited.try_recv().is_err(),
+            "the shell call is still blocked"
+        );
+        release.send(()).expect("release the fake shell");
+        exited
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reader exits after release");
+        result
+            .expect("shutdown does not join the reader")
+            .expect("server task")
+            .expect("serve result");
+        std::fs::remove_dir_all(&ledger.dir).expect("remove portal state");
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_the_decisions_stream_without_a_decision() {
+        let state = state(&board_json());
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/test-session/decisions")
+                    .header(header::HOST, format!("localhost:{PORT}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .expect("the request"),
+            )
+            .await
+            .expect("the decisions response");
+        assert_eq!(response.status(), StatusCode::OK);
+        state.stop.cancel();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(response.into_body(), 1024),
+        )
+        .await
+        .expect("the decisions stream stops")
+        .expect("the body");
     }
 
     #[tokio::test]

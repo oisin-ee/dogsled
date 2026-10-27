@@ -26,8 +26,10 @@ pub fn command(shell: &dyn Shell, ledger: &Ledger, command: Command) -> Result<E
 async fn run(shell: &dyn Shell, ledger: &Ledger, command: Command) -> Result<ExitCode> {
     let (_sender, receiver) = watch::channel(super::empty_payload());
     let (listener, state) = super::listen(ledger, 0, receiver).await?;
-    let app = super::router(state.clone());
-    let mut server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let server_state = state.clone();
+    let mut server = tokio::spawn(async move {
+        super::serve_until(listener, server_state, std::future::pending()).await
+    });
     let work = async {
         match command {
             Command::Interview {

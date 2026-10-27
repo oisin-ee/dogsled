@@ -20,4 +20,4 @@ publish-jobs = ["./publish-npm"]
 # Checkout needs contents; npm trusted publishing needs the OIDC token.
 github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token = "write" } }
 # Dotfiles installs these templates; dist only bundles them beside the binary.
-include = ["plugin/services/dogsled.service", "plugin/services/dev.dogsled.plist"]
+include = ["plugin/services/dogsled.service", "plugin/services/dev.dogsled.plist", "plugin/services/dev.dogsled.web.plist"]

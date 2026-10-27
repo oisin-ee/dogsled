@@ -169,6 +169,18 @@ pub enum Next {
 #[derive(Debug)]
 pub struct Subscription {
     lines: std::sync::mpsc::Receiver<std::result::Result<String, String>>,
+    /// Closing this handle wakes the reader even when Herdr sends no events.
+    socket: UnixStream,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
 }
 
 impl Subscription {
@@ -205,9 +217,10 @@ impl Subscription {
                 error["message"].as_str().unwrap_or_default()
             )));
         }
-        // The thread owns the socket from here on and reads the events.
+        // Keep a socket handle so dropping the subscription interrupts its reader.
+        let socket = reader.get_ref().try_clone()?;
         let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             for line in reader.lines() {
                 let message = match line {
                     Ok(line) => Ok(line),
@@ -218,7 +231,11 @@ impl Subscription {
                 }
             }
         });
-        Ok(Self { lines: receiver })
+        Ok(Self {
+            lines: receiver,
+            socket,
+            reader: Some(reader),
+        })
     }
 
     /// The next event, or that none arrived yet.
