@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { PortalClient, PortalDown, sleep, startOneShot } from "./portal-client.ts";
+import { openInBrowser, PortalClient, PortalDown, portalUrl, sleep, startOneShot } from "./portal-client.ts";
 
 /** The tool that sends a plan to the portal. */
 const SUBMIT_PLAN = "submit_plan";
@@ -117,6 +117,7 @@ interface ReviewCreated { id: string; revision: number }
 export class PlanMode {
 	private readonly pi: PlanHost;
 	private readonly client: PortalClient;
+	private readonly open: (url: string) => void;
 	private planning = false;
 	private framed = false;
 	private watching: AbortController | undefined;
@@ -126,9 +127,10 @@ export class PlanMode {
 	/** The reviews the portal acknowledged. A review that was delivered but not acked is acked again, not delivered again. */
 	private readonly acked = new Set<string>();
 
-	constructor(pi: PlanHost, client: PortalClient = new PortalClient()) {
+	constructor(pi: PlanHost, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser) {
 		this.pi = pi;
 		this.client = client;
+		this.open = open;
 	}
 
 	/** Whether the model is planning. */
@@ -166,7 +168,7 @@ export class PlanMode {
 	}
 
 	/** Send a plan to the portal and start waiting for its decision. */
-	async submit(filePath: string, ctx: ExtensionContext): Promise<ReviewCreated | { fallback: true }> {
+	async submit(filePath: string, ctx: ExtensionContext): Promise<(ReviewCreated & { url: string }) | { fallback: true }> {
 		const path = isAbsolute(filePath) ? filePath : resolve(ctx.cwd, filePath);
 		const content = await readFile(path, "utf8");
 		let created: ReviewCreated;
@@ -183,8 +185,10 @@ export class PlanMode {
 		const id = typeof created?.id === "string" ? created.id : "";
 		const revision = Number(created?.revision);
 		if (!id || !Number.isFinite(revision)) throw new Error("dogsled web did not return a review id and revision");
+		const url = portalUrl(`/?review=${encodeURIComponent(id)}`, this.client.env);
+		if (revision === 1) this.open(url);
 		this.watch(ctx);
-		return { id, revision };
+		return { id, revision, url };
 	}
 
 	/** Start a temporary review server without holding the tool call open. */
@@ -299,7 +303,7 @@ export class PlanMode {
 }
 
 /** Register the plan mode: the submit tool, the command, and the shortcut. */
-export function registerPlanMode(pi: ExtensionAPI, client: PortalClient = new PortalClient()): PlanMode {
+export function registerPlanMode(pi: ExtensionAPI, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser): PlanMode {
 	const host: PlanHost = {
 		events: pi.events,
 		sendUserMessage: (content, options) => { pi.sendUserMessage(content, options); },
@@ -307,7 +311,7 @@ export function registerPlanMode(pi: ExtensionAPI, client: PortalClient = new Po
 		getActiveTools: () => pi.getActiveTools(),
 		setActiveTools: names => { pi.setActiveTools(names); },
 	};
-	const mode = new PlanMode(host, client);
+	const mode = new PlanMode(host, client, open);
 	pi.registerTool({
 		name: SUBMIT_PLAN,
 		label: "Submit plan",
@@ -326,7 +330,7 @@ export function registerPlanMode(pi: ExtensionAPI, client: PortalClient = new Po
 			if (typeof filePath !== "string" || !filePath) throw new Error("submit_plan needs the path of the plan file");
 			const review = await mode.submit(filePath, ctx);
 			return {
-				content: [{ type: "text", text: `${"fallback" in review ? "Started a review in a browser tab" : `Pushed as revision ${review.revision}`}; the decision arrives later as a message; end your turn.` }],
+				content: [{ type: "text", text: `${"fallback" in review ? "Started a review in a browser tab" : `Pushed as revision ${review.revision}: ${review.url}`}; the decision arrives later as a message; end your turn.` }],
 				details: review,
 			};
 		},

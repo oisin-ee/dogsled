@@ -1,6 +1,6 @@
 // The client for the loopback portal server, `dogsled web`. The portal owns the
 // interactive parts of Pi: the interview form and the plan review. This module
-// only speaks HTTP to it. Every call carries the portal's bearer token, and the
+// speaks HTTP to it and opens its deep links. Every call carries the portal's bearer token, and the
 // server answers with the board, a form, a review, or a decision.
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -21,6 +21,18 @@ export class PortalDown extends Error {
 function portalPort(env: NodeJS.ProcessEnv): number {
 	const port = Number(env["DOGSLED_WEB_PORT"]);
 	return Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT;
+}
+
+/** A portal URL using the same port as the HTTP client. */
+export function portalUrl(path: string, env: NodeJS.ProcessEnv = process.env): string {
+	return `http://127.0.0.1:${portalPort(env)}${path}`;
+}
+
+/** Open a portal link without holding the agent open or failing its tool call. */
+export function openInBrowser(url: string): void {
+	const child = spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" });
+	child.once("error", () => undefined);
+	child.unref();
 }
 
 /** The dogsled state directory: `DOGSLED_STATE`, else `$XDG_STATE_HOME/dogsled`, else `~/.local/state/dogsled`. */
@@ -113,7 +125,7 @@ export class PortalClient {
 		}
 		if (options.signal) init.signal = options.signal;
 		try {
-			return await fetch(`http://127.0.0.1:${this.port}${path}`, init);
+			return await fetch(portalUrl(path, this.env), init);
 		} catch (error) {
 			if (options.signal?.aborted) throw error;
 			const cause = error instanceof Error ? error.cause : undefined;

@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
-import { bashBlocked, PlanMode, planPathAllowed, type PlanHost } from "./plan-mode.ts";
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import { bashBlocked, PlanMode, planPathAllowed, registerPlanMode, type PlanHost } from "./plan-mode.ts";
 import { PortalClient } from "./portal-client.ts";
 
 interface Call { method: string; path: string; headers: Record<string, string | string[] | undefined>; body: string }
@@ -13,8 +13,9 @@ interface Call { method: string; path: string; headers: Record<string, string | 
 const DECISION = { review_id: "rev-1", path: "/repo/plans/plan.md", decision: "approved", message: "Looks good.", plan_content: "# Plan" };
 
 /** A portal that answers the review, decision, and stream routes. */
-function portal(decisions: string[] = []) {
+function portal(decisions: string[] = [], reviews = [{ id: "rev-1", revision: 7 }]) {
 	const calls: Call[] = [];
+	let submitted = 0;
 	const server = createServer((request, response) => {
 		const chunks: Buffer[] = [];
 		request.on("data", chunk => chunks.push(chunk as Buffer));
@@ -22,7 +23,7 @@ function portal(decisions: string[] = []) {
 			calls.push({ method: request.method ?? "", path: request.url ?? "", headers: request.headers, body: Buffer.concat(chunks).toString("utf8") });
 			if (request.method === "POST" && request.url === "/api/reviews") {
 				response.writeHead(200, { "content-type": "application/json" });
-				response.end(JSON.stringify({ id: "rev-1", revision: 7 }));
+				response.end(JSON.stringify(reviews[Math.min(submitted++, reviews.length - 1)]));
 				return;
 			}
 			if (request.method === "POST" && request.url === "/api/decisions/rev-1/ack") {
@@ -95,7 +96,7 @@ test("planning lets a markdown file change and blocks every other write", async 
 	const p = portal();
 	const port = await listen(p.server);
 	p.server.close();
-	const mode = new PlanMode(host().plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(host().plan, new PortalClient(environment(port)), () => undefined);
 	const ctx = context();
 	assert.equal(await mode.gate(call("write", { path: "src/x.rs" }), ctx), undefined);
 	mode.start();
@@ -111,7 +112,7 @@ test("planning off lets every write through", async () => {
 	const p = portal();
 	const port = await listen(p.server);
 	p.server.close();
-	const mode = new PlanMode(host().plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(host().plan, new PortalClient(environment(port)), () => undefined);
 	const ctx = context();
 	assert.equal(await mode.gate(call("write", { path: "src/x.rs" }), ctx), undefined);
 	assert.equal(await mode.gate(call("write", { path: "plans/x.md" }), ctx), undefined);
@@ -130,7 +131,7 @@ test("planning blocks a bash command that changes files", async () => {
 	const p = portal();
 	const port = await listen(p.server);
 	p.server.close();
-	const mode = new PlanMode(host().plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(host().plan, new PortalClient(environment(port)), () => undefined);
 	const ctx = context();
 	mode.start();
 	const blocked = await mode.gate(call("bash", { command: "echo hi > out.txt" }), ctx);
@@ -147,18 +148,20 @@ test("planning blocks a bash command that changes files", async () => {
 	assert.equal(bashBlocked("echo 'rm -rf /'"), undefined);
 });
 
-test("submit_plan posts the plan and answers at once", async t => {
+test("submit_plan posts the plan and answers at once without reopening a later revision", async t => {
 	const p = portal();
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
 	const h = host();
-	const mode = new PlanMode(h.plan, new PortalClient(environment(port)));
+	const opened: string[] = [];
+	const mode = new PlanMode(h.plan, new PortalClient(environment(port)), url => { opened.push(url); });
 	const ctx = context();
 	const dir = mkdtempSync(join(tmpdir(), "dogsled-plan-"));
 	const file = join(dir, "plan.md");
 	writeFileSync(file, "# Plan\n\nStep one.");
 	const review = await mode.submit(file, ctx);
-	assert.deepEqual(review, { id: "rev-1", revision: 7 });
+	assert.deepEqual(review, { id: "rev-1", revision: 7, url: `http://127.0.0.1:${port}/?review=rev-1` });
+	assert.deepEqual(opened, []);
 	const post = p.calls.find(call => call.method === "POST" && call.path === "/api/reviews");
 	assert.ok(post);
 	assert.equal(post.headers["authorization"], "Bearer secret-token");
@@ -167,12 +170,59 @@ test("submit_plan posts the plan and answers at once", async t => {
 	mode.stopWatching();
 });
 
+test("plan reviews open only the first revision of each review id", async t => {
+	const p = portal([], [{ id: "rev-1", revision: 1 }, { id: "rev-1", revision: 2 }, { id: "rev &2", revision: 1 }]);
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-plan-open-"));
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const file = join(directory, "plan.md");
+	writeFileSync(file, "# Plan");
+	const opened: string[] = [];
+	const mode = new PlanMode(host().plan, new PortalClient(environment(port)), url => { opened.push(url); });
+	t.after(() => mode.stopWatching());
+	const firstUrl = `http://127.0.0.1:${port}/?review=rev-1`;
+	assert.deepEqual(await mode.submit(file, context()), { id: "rev-1", revision: 1, url: firstUrl });
+	assert.deepEqual(opened, [firstUrl]);
+	writeFileSync(file, "# Revised plan");
+	assert.deepEqual(await mode.submit(file, context()), { id: "rev-1", revision: 2, url: firstUrl });
+	assert.deepEqual(opened, [firstUrl]);
+	const nextUrl = `http://127.0.0.1:${port}/?review=rev%20%262`;
+	assert.deepEqual(await mode.submit(file, context()), { id: "rev &2", revision: 1, url: nextUrl });
+	assert.deepEqual(opened, [firstUrl, nextUrl]);
+});
+
+test("the submit_plan tool text includes the review URL", async t => {
+	const p = portal([], [{ id: "rev-1", revision: 1 }]);
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-plan-tool-"));
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const file = join(directory, "plan.md");
+	writeFileSync(file, "# Plan");
+	let tool: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
+	const pi = {
+		...host().plan,
+		registerTool(value: Parameters<ExtensionAPI["registerTool"]>[0]) { tool = value; },
+		registerCommand() {},
+		registerShortcut() {},
+	} as unknown as ExtensionAPI;
+	const opened: string[] = [];
+	const mode = registerPlanMode(pi, new PortalClient(environment(port)), url => { opened.push(url); });
+	t.after(() => mode.stopWatching());
+	assert.ok(tool);
+	const result = await tool.execute("submit", { filePath: file }, undefined, undefined, context() as ExtensionToolContext);
+	const url = `http://127.0.0.1:${port}/?review=rev-1`;
+	assert.deepEqual(opened, [url]);
+	assert.ok(result.content.some(item => item.type === "text" && item.text.includes(url)));
+});
+
 test("a decision is delivered, acknowledged, and handed on as the plan-approved event", async t => {
 	const p = portal();
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
 	const h = host();
-	const mode = new PlanMode(h.plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(h.plan, new PortalClient(environment(port)), () => undefined);
 	const ctx = context();
 	const approved: unknown[] = [];
 	h.events.on("dogsled:plan-approved", value => { approved.push(value); });
@@ -189,7 +239,7 @@ test("a decision that arrives while the agent is busy is steered into the runnin
 	const h = host();
 	const steered: unknown[] = [];
 	h.plan.sendUserMessage = (content: string, options?: { deliverAs?: string }) => { steered.push([content, options?.deliverAs]); };
-	const mode = new PlanMode(h.plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(h.plan, new PortalClient(environment(port)), () => undefined);
 	const ctx = { ...context(), isIdle: () => false } as unknown as ExtensionContext;
 	await mode.decision(JSON.stringify(DECISION), ctx);
 	assert.deepEqual(steered, [["Looks good.", "steer"]]);
@@ -200,7 +250,7 @@ test("an acknowledged decision is not delivered twice", async t => {
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
 	const h = host();
-	const mode = new PlanMode(h.plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(h.plan, new PortalClient(environment(port)), () => undefined);
 	const ctx = context();
 	await mode.decision(JSON.stringify(DECISION), ctx);
 	await mode.decision(JSON.stringify(DECISION), ctx);
@@ -212,7 +262,7 @@ test("a reconnected decisions stream does not deliver an acknowledged decision t
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
 	const h = host();
-	const mode = new PlanMode(h.plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(h.plan, new PortalClient(environment(port)), () => undefined);
 	const ctx = context();
 	const dir = mkdtempSync(join(tmpdir(), "dogsled-plan-"));
 	const file = join(dir, "plan.md");
@@ -254,7 +304,7 @@ test("an unreachable portal starts a review in the background and delivers the a
 	const h = host();
 	const approved: unknown[] = [];
 	h.events.on("dogsled:plan-approved", event => approved.push(event));
-	const mode = new PlanMode(h.plan, new PortalClient(fake.env));
+	const mode = new PlanMode(h.plan, new PortalClient(fake.env), () => undefined);
 	t.after(() => mode.stopWatching());
 	mode.start();
 	const submitted = await mode.submit(fake.plan, context());
@@ -274,7 +324,7 @@ test("a fallback change request steers the running agent and leaves planning on"
 	const h = host();
 	const steered: unknown[] = [];
 	h.plan.sendUserMessage = (message, options) => steered.push([message, options?.deliverAs]);
-	const mode = new PlanMode(h.plan, new PortalClient(fake.env));
+	const mode = new PlanMode(h.plan, new PortalClient(fake.env), () => undefined);
 	t.after(() => mode.stopWatching());
 	mode.start();
 	await mode.submit(fake.plan, { ...context(), isIdle: () => false } as unknown as ExtensionContext);
@@ -287,7 +337,7 @@ test("closing plan mode terminates a pending review child", async t => {
 	const fake = fallbackEnvironment(t, 'process.on("SIGTERM", () => { fs.writeFileSync(process.env.DOGSLED_TEST_TERMINATED, "yes"); process.exit(0); }); setInterval(() => {}, 1000);');
 	const terminated = join(fake.directory, "terminated");
 	const h = host();
-	const mode = new PlanMode(h.plan, new PortalClient({ ...fake.env, DOGSLED_TEST_TERMINATED: terminated }));
+	const mode = new PlanMode(h.plan, new PortalClient({ ...fake.env, DOGSLED_TEST_TERMINATED: terminated }), () => undefined);
 	t.after(() => mode.stopWatching());
 	await mode.submit(fake.plan, context());
 	await until(() => existsSync(fake.calls));
@@ -299,7 +349,7 @@ test("closing plan mode terminates a pending review child", async t => {
 test("a failed review child reports its failure as a message", async t => {
 	const fake = fallbackEnvironment(t, "process.exit(2);");
 	const h = host();
-	const mode = new PlanMode(h.plan, new PortalClient(fake.env));
+	const mode = new PlanMode(h.plan, new PortalClient(fake.env), () => undefined);
 	t.after(() => mode.stopWatching());
 	await mode.submit(fake.plan, context());
 	await until(() => h.sent.length > 0);
@@ -314,7 +364,7 @@ test("a portal HTTP refusal does not launch a fallback", async t => {
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
 	const file = join(dir, "plan.md");
 	writeFileSync(file, "# Plan");
-	const mode = new PlanMode(host().plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(host().plan, new PortalClient(environment(port)), () => undefined);
 	await assert.rejects(() => mode.submit(file, context()), /403 refused/);
 });
 
@@ -323,7 +373,7 @@ test("entering planning frames the task once and offers the submit tool", async 
 	const port = await listen(p.server);
 	p.server.close();
 	const h = host();
-	const mode = new PlanMode(h.plan, new PortalClient(environment(port)));
+	const mode = new PlanMode(h.plan, new PortalClient(environment(port)), () => undefined);
 	mode.start();
 	assert.equal(h.messages.length, 1);
 	assert.match(String((h.messages[0] as { content: string }).content), /markdown/);

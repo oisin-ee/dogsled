@@ -9,7 +9,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { PortalClient, PortalDown, sleep, startOneShot } from "./portal-client.ts";
+import { openInBrowser, PortalClient, PortalDown, portalUrl, sleep, startOneShot } from "./portal-client.ts";
 
 /** How long the tool waits between two polls for the answers. */
 const POLL_MS = 500;
@@ -37,10 +37,10 @@ const interviewParameters = {
 	},
 } as const;
 
-/** The tool description of pi-interview 0.13.0, unchanged. */
+/** The interview description with the portal's browser transport. */
 const interviewDescription =
 	"Present an interactive form to gather user responses. " +
-	"Opens in a configured Orca browser tab, a native macOS window (Glimpse), or a standard browser. " +
+	"Opens the Dogsled portal, or a fallback browser tab when the portal is not running. " +
 	"Use proactively when: choosing between multiple approaches, gathering requirements before implementation, " +
 	"exploring design tradeoffs, or when decisions have multiple dimensions worth discussing. " +
 	"Provides better UX than back-and-forth chat for structured input. " +
@@ -230,11 +230,13 @@ function isResponseItem(value: unknown): value is ResponseItem {
 export class InterviewTool {
 	private readonly client: PortalClient;
 	private readonly deliver: (content: string) => void;
+	private readonly open: (url: string) => void;
 	/** The background waits of the async interviews, so the session can close them. */
 	private readonly pending = new Set<AbortController>();
-	constructor(client: PortalClient = new PortalClient(), deliver: (content: string) => void = () => undefined) {
+	constructor(client: PortalClient = new PortalClient(), deliver: (content: string) => void = () => undefined, open: (url: string) => void = openInBrowser) {
 		this.client = client;
 		this.deliver = deliver;
+		this.open = open;
 	}
 
 	/** Run one interview. The tool's `signal` withdraws the form. */
@@ -256,6 +258,8 @@ export class InterviewTool {
 		}
 		const id = typeof created?.id === "string" ? created.id : "";
 		if (!id) throw new Error("dogsled web did not return an interview id");
+		const url = portalUrl(`/?question=${encodeURIComponent(id)}&pane=${encodeURIComponent(pane)}`, this.client.env);
+		this.open(url);
 
 		if (params.async) {
 			// The form runs on its own: the tool's own signal no longer owns it, and the
@@ -267,22 +271,22 @@ export class InterviewTool {
 				.catch(error => { this.deliver(`Interview ${id} did not finish: ${error instanceof Error ? error.message : String(error)}`); })
 				.finally(() => { this.pending.delete(own); });
 			return {
-				content: [{ type: "text", text: `Interview ${id} started. The answer arrives later as a message; keep working and do not poll.` }],
-				details: { status: "started", responses: [], url: "" },
+				content: [{ type: "text", text: `Interview ${id} started: ${url}. The answer arrives later as a message; keep working and do not poll.` }],
+				details: { status: "started", responses: [], url },
 			};
 		}
 
 		try {
 			const answers = await this.wait(id, file, signal, params.timeout);
 			return {
-				content: [{ type: "text", text: `User completed the interview form.\n\nAnswered responses:\n${answers.text}` }],
-				details: { status: "completed", responses: answers.responses, url: "" },
+				content: [{ type: "text", text: `User completed the interview form: ${url}\n\nAnswered responses:\n${answers.text}` }],
+				details: { status: "completed", responses: answers.responses, url },
 			};
 		} catch (error) {
 			// An aborted interview withdraws its form, so the portal does not wait for an answer.
 			if (signal?.aborted) {
 				await this.client.request("DELETE", `/api/questions/${encodeURIComponent(id)}`).catch(() => undefined);
-				return { content: [{ type: "text", text: "Interview was aborted." }], details: { status: "aborted", responses: [], url: "" } };
+				return { content: [{ type: "text", text: "Interview was aborted." }], details: { status: "aborted", responses: [], url } };
 			}
 			throw error;
 		}
