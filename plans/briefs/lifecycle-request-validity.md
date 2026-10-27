@@ -4,7 +4,7 @@
 A job request older than 30 days, created in the future beyond the skew limit, or without validity evidence can never start new execution. This holds after its Job record and receipt are deleted, and after a host clock moves back. Running jobs are never killed for age.
 
 ## Revisions
-Repository: `/Users/oisin/dev/dogsled`. Base: **the local `main` revision that integrates J1 repair 2** (`fix/lifecycle-job-claims-r2`). The lead fills in the exact SHA at dispatch. Do not start against an earlier base.
+Repository: `/Users/oisin/dev/dogsled`. Base: **the local `main` merge commit that integrates J1** (branch `fix/lifecycle-job-claims-r3`, which contains the full J1 chain through repair 6). The lead fills in the exact SHA at dispatch. Do not start against an earlier base.
 Design source: the AJ2 architect report, summarized here. Approved plan: `plans/lifecycle-cleanup.md` section 7, including "J2 decisions".
 
 ## Design (approved; do not reopen)
@@ -40,7 +40,7 @@ Write these before the fix and record that they fail at the base:
 4. Bootstrap: a missing clock starts at the newest local record timestamp when that is ahead of the wall clock.
 5. Peer boundary: new caller and old peer, old caller and new peer. Both give the clear refusal, with no fallback and no early reservation.
 6. A running job survives age expiry. An expired request with a matching receipt replays the saved result without dispatch.
-Keep the J1 receipt, claim, and race tests, and `interrupted_job_admission_preserves_running_record_without_relaunch`. Use `DOGSLED_TEST_NOW_MS` and the clock-file support in `Rig::cmd` (`tests/cli.rs:183–214`). Use the bounded process harness from J1 repair 2; do not use detached wrappers.
+Keep the J1 receipt, claim, and race tests, and `interrupted_job_admission_preserves_running_record_without_relaunch`. Use `DOGSLED_TEST_NOW_MS` and the clock-file support in `Rig::cmd` (`tests/cli.rs:183–214`). Use the bounded process harness in `tests/cli.rs` (`Owned`, `Background`); do not use detached wrappers.
 
 ## Acceptance
 ```sh
