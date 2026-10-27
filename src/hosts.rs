@@ -192,6 +192,17 @@ pub fn unreachable(failure: Failure) -> String {
 }
 
 impl HostReport {
+    /// The observed agent in `pane`, when this host's snapshot holds one. The lifecycle
+    /// owner reads the agent through here, so every consumer sees the same observation.
+    #[must_use]
+    pub fn agent(&self, pane: &str) -> Option<&crate::probe::Agent> {
+        self.probe
+            .as_ref()?
+            .agent_panes
+            .iter()
+            .find(|a| a.pane == pane)
+    }
+
     /// Why the host is in this state, for one status line: unreachable, or its service.
     #[must_use]
     pub fn condition(&self) -> String {

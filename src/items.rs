@@ -179,9 +179,15 @@ pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
         && hosts
             .iter()
             .filter(|h| h.host.id == item.host)
-            .filter_map(|h| h.probe.as_ref())
-            .flat_map(|p| &p.agent_panes)
-            .any(|a| a.pane == item.pane && a.done)
+            .filter_map(|h| h.agent(&item.pane))
+            .any(|a| a.done)
+}
+
+/// The lifecycle state of an item, from the same owner the board reads. The result and the
+/// resource closure stay separate facts: this returns only the agent's state.
+pub fn lifecycle(item: &Item, hosts: &[HostReport]) -> crate::lifecycle::Derived {
+    let (evidence, _) = crate::lifecycle::evidence(item, hosts);
+    crate::lifecycle::classify(&evidence)
 }
 
 /// The exact command that closes `item`, naming its host by label.

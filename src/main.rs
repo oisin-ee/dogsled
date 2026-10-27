@@ -25,6 +25,7 @@ mod items;
 mod jobs;
 mod launch;
 mod ledger;
+mod lifecycle;
 mod loss;
 #[cfg(test)]
 mod loss_tests;

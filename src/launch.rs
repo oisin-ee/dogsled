@@ -174,6 +174,56 @@ pub fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     }
 }
 
+/// How far this host's launch for `pane` has progressed. The lifecycle owner reads this to
+/// tell startup in progress from a launch that never reached its pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchProgress {
+    /// No launch record names this pane.
+    None,
+    /// The launch is recorded, and its pane is not allocated yet.
+    Allocating,
+    /// The pane is allocated, and no start has been attempted yet.
+    Allocated,
+    /// A start was attempted. The outcome may still be unknown.
+    Attempted,
+    /// The start is confirmed: the pane runs the launched agent.
+    Confirmed,
+}
+
+impl LaunchProgress {
+    /// The name the launch result and the owner's item publish.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Allocating => "allocating",
+            Self::Allocated => "allocated",
+            Self::Attempted => "attempted",
+            Self::Confirmed => "confirmed",
+        }
+    }
+}
+
+/// The launch progress this host recorded for `pane`.
+pub fn progress(ledger: &Ledger, pane: &str) -> Result<LaunchProgress> {
+    let found = recovery::candidates(&ledger.child("launches"), Some(pane))?;
+    Ok(match found.as_slice() {
+        [(_, progress)] => {
+            if progress.confirmed {
+                LaunchProgress::Confirmed
+            } else if progress.attempted {
+                LaunchProgress::Attempted
+            } else if progress.pane.is_some() {
+                LaunchProgress::Allocated
+            } else {
+                LaunchProgress::Allocating
+            }
+        }
+        // No record, or competing records: nothing is proved.
+        _ => LaunchProgress::None,
+    })
+}
+
 /// A seeded worker's end-of-turn hook must persist its immutable terminal evidence before
 /// its process closes. This is host-local and does not wait for the owner's acknowledgement.
 pub fn handoff_ready(ledger: &Ledger, pane: &str) -> Result<bool> {

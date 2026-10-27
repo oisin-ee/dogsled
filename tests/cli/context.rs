@@ -245,3 +245,48 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
     assert!(!out.contains("To land"), "{out}");
 }
+
+/// The board's own word stays the same, and the lifecycle state travels beside it. An
+/// unreadable terminal state is `unknown`: it never reads as `stopped` or `done`.
+#[test]
+fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
+    let rig = Rig::new("context-lifecycle");
+    rig.snapshot("state/host.json", now(), 1.0, 8);
+    let mut host = rig.read("state/host.json");
+    host["probe"]["agent_panes"] = json!([{
+        "pane":"w1:p1","agent":"pi","state":"unknown","name":null
+    }]);
+    rig.put("state/host.json", &host);
+    rig.put(
+        "state/items.json",
+        &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
+             "name":"worker","created_ms":1,"closed_ms":null}]),
+    );
+    let (code, board) = rig.json(&["board"]);
+    assert_eq!(code, 0);
+    let row = &board["rows"][0];
+    // The board's word for an unreadable terminal state stays `unknown`.
+    assert_eq!(row["state"], "unknown", "{board}");
+    // The row stays under ATTENTION: an unreadable agent needs the owner.
+    assert_eq!(row["group"], "attention", "{board}");
+}
+
+/// A child whose pane is not observed yet is `starting`, not `unknown` and not `stopped`.
+/// The board's own word says `starting`, and it does not claim the work has landed.
+#[test]
+fn an_unobserved_child_is_starting_and_never_claims_a_landed_result() {
+    let rig = Rig::new("context-starting");
+    rig.snapshot("state/host.json", now(), 1.0, 8);
+    rig.put(
+        "state/items.json",
+        &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p2","owner_pane":"w1:p1",
+             "name":"worker","created_ms":1,"closed_ms":null}]),
+    );
+    let (code, board) = rig.json(&["board"]);
+    assert_eq!(code, 0);
+    let row = &board["rows"][0];
+    assert_eq!(row["state"], "starting", "{board}");
+    assert_eq!(row["group"], "running", "{board}");
+    assert!(row["ahead"].is_null(), "{board}");
+    assert!(!row["dirty"].as_bool().unwrap_or(false), "{board}");
+}

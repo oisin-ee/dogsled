@@ -180,14 +180,34 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
         let owners = owners(ledger)?;
         for agent in agents {
             let mut done = false;
+            let mut called = false;
             for mark in marks.values_mut().filter(|m| matches(m, agent)) {
                 let evidence = evidence(ledger, mark, agent);
                 seal(mark, agent, &evidence);
                 done |= terminal(mark, &evidence)
                     && waiting(agent)
                     && !owners.contains_key(&agent.pane);
+                called = true;
             }
             agent.done = done;
+            // The native `done` was accepted, but the handoff is not complete.
+            agent.finishing = called && !done;
+            // The handoff is published from these fresh facts, so a second observation
+            // never reads back its own previous value.
+            agent.handoff = Some(
+                match (done, agent.finishing) {
+                    (true, _) => "recorded",
+                    (false, true) => "accepted",
+                    (false, false) => "none",
+                }
+                .to_owned(),
+            );
+            // The same scan the done guard uses: open items and pending or admitting
+            // child tickets. A turn that ended while the agent owns work waits for it.
+            agent.owns_open = owners.contains_key(&agent.pane);
+            // The lifecycle owner publishes the state with the agent, so every reader of
+            // the host snapshot sees the state this host observed.
+            crate::lifecycle::publish(agent, crate::lifecycle::Host::Up);
         }
         if before != marks {
             ledger.write(FILE, &marks)?;
