@@ -800,6 +800,15 @@ fn summary(record: &Record) -> ReviewSummary {
     }
 }
 
+/// Pending reviews for the portal inbox, from the same durable store.
+pub(super) fn pending(web: &Ledger) -> Result<Vec<Review>> {
+    Ok(load_all(web)?
+        .into_iter()
+        .filter(|record| record.review.decision.is_none())
+        .map(|record| record.review)
+        .collect())
+}
+
 /// Read every review the portal holds.
 fn load_all(web: &Ledger) -> Result<Vec<Record>> {
     let dir = reviews(web).dir;

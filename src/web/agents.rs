@@ -82,10 +82,17 @@ async fn list(State(state): State<AppState>) -> Response {
     let Some(socket) = socket(&state) else {
         return no_socket();
     };
-    let agents = match socket.agent_list() {
-        Ok(agents) => agents,
-        Err(error) => return error_response(&error),
-    };
+    let socket = socket.clone();
+    match tokio::task::spawn_blocking(move || views(&socket)).await {
+        Ok(Ok(agents)) => json_response(Json(AgentList { agents })),
+        Ok(Err(error)) => error_response(&error),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// Shared read for the agent list and inbox; callers run it on a blocking thread.
+pub(super) fn views(socket: &Client) -> crate::error::Result<Vec<AgentView>> {
+    let agents = socket.agent_list()?;
     let mut views = Vec::new();
     for agent in agents {
         let pane = agent["pane_id"].as_str().unwrap_or_default().to_owned();
@@ -104,10 +111,33 @@ async fn list(State(state): State<AppState>) -> Response {
             agent: agent["agent"].as_str().map(str::to_owned),
             state,
             cwd: agent["cwd"].as_str().map(str::to_owned),
+            repository: agent["cwd"]
+                .as_str()
+                .and_then(|cwd| repository(&crate::shell::System::default(), cwd)),
             blocked,
         });
     }
-    json_response(Json(AgentList { agents: views }))
+    Ok(views)
+}
+
+/// Use the same origin normalization as the board's observed agents.
+fn repository(shell: &dyn crate::shell::Shell, cwd: &str) -> Option<String> {
+    let output = shell
+        .run(
+            "git",
+            &[
+                "-C".into(),
+                cwd.into(),
+                "remote".into(),
+                "get-url".into(),
+                "origin".into(),
+            ],
+        )
+        .ok()?;
+    output
+        .ok()
+        .then(|| crate::checkout::identity(output.stdout.trim()))
+        .flatten()
 }
 
 /// One agent's turns, read from its transcript.
@@ -342,6 +372,21 @@ mod tests {
     use tower::ServiceExt;
 
     const PORT: u16 = 7465;
+
+    #[test]
+    fn repository_uses_the_board_origin_identity() {
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "git -C /checkout remote get-url origin",
+            "git@GitHub.com:owner/repo.git\n",
+        );
+        assert_eq!(
+            repository(&shell, "/checkout").as_deref(),
+            Some("github.com/owner/repo")
+        );
+        shell.on("git -C /checkout remote get-url origin", "/local/repo");
+        assert_eq!(repository(&shell, "/checkout"), None);
+    }
 
     /// The state of the API, with or without a Herdr socket.
     fn state(socket: Option<Client>) -> AppState {
