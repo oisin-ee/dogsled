@@ -1,0 +1,15 @@
+# lifecycle-state-contract
+
+Historical architect brief, retained as issued. The resulting review and follow-up decisions supersede its assumptions. Use `plans/lifecycle-cleanup.md` and the current todo contract for new dispatch.
+
+Outcome: Return a bounded, source-backed implementation contract for L1/L2's lifecycle derivation and signal transitions, with no source changes.
+Cause: src/board.rs:417-610 mixes presentation groups with Herdr terminal states; src/done.rs:30-203 owns real completion, including sealed unit evidence. The approved plan adds asking/blocked/stopped/waiting but leaves precedence and unknown evidence underspecified.
+Approved decisions: queued, starting, working, waiting-for-own-children, asking, blocked, done, stopped, lost. Only genuine native done plus sealed completion is done; Herdr done alone is turn-idle. Ask is explicit and goes to the owner; blocked is separate. Stopped receives one prompt. Neither idle nor host loss proves completion. Retained branch results are ready to merge, not agent state. Saved recovery is not a mergeable branch or task completion.
+Read: plans/lifecycle-cleanup.md, src/board.rs, src/probe.rs, src/done.rs, src/items.rs, src/inbox.rs, src/launch.rs, src/watchdog.rs, src/sweep.rs, src/node.rs, src/hosts.rs, src/sidebar/, src/context.rs, src/gate.rs, pi/board.ts and corresponding tests.
+Resolve: smallest single derivation owner; signal identity and current-turn clearing; ask+done conflict; observation unknown versus stopped; lost host versus confirmed done; parent children count including queued work; waiting must not be inferred merely because unrelated children are open if a stronger signal exists. Keep raw terminal evidence available for safety guards.
+Check Mark reuse: asking/blocked must never seal done, close resources, block inbox answers, or rewrite the immutable terminal unit reply. items::set_reply may be terminal-only; trace it rather than assuming it is safe for questions.
+Check board contract: current plan places saved recoveries under READY TO MERGE and calls them done results despite unresolved task bindings. Distinguish source contradictions from preferences; return consequential decisions for the lead, do not silently choose new semantics. Old shipped Pi code cannot be edited retroactively: identify a valid coordinated rollout rather than claiming compatibility without proof.
+Deliver: exact precedence/transition table, source citations, smallest owned-path split for L1 (Rust core/projections and Pi consumer) and L2, failing test seams and exact acceptance commands. Name any blocking product choice separately.
+Owned/generated paths: none. No source/config/docs edits, builds, tests, commits, remote mutation, deployment or dependency changes. Read-only report in final reply.
+Base: 4dbbe3de5950d29837f4bfd146c7eb56fc23a0b1. The plan is untracked in the lead checkout; read it at /Users/oisin/dev/dogsled/plans/lifecycle-cleanup.md if needed.
+Complete your seeded unit and native done protocol. Do not create another task list.

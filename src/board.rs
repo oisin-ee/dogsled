@@ -1811,6 +1811,7 @@ mod tests {
             notified: false,
             result: None,
             error: None,
+            diagnostic: None,
             retry: crate::backoff::Backoff::default(),
         };
         let mut status = status(vec![host("8103", "netcup", Vec::new())], Vec::new());

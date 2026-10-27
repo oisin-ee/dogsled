@@ -126,8 +126,8 @@ impl Failure {
 
     /// The category of an error from reading a host.
     #[must_use]
-    pub const fn of(error: &Error) -> Self {
-        match error {
+    pub fn of(error: &Error) -> Self {
+        match error.root() {
             Error::Ssh { failure, .. } => *failure,
             Error::Deadline(_) => Self::Deadline,
             Error::Parse { .. } => Self::UnexpectedOutput,
@@ -327,7 +327,7 @@ impl<'a> Fleet<'a> {
     }
 
     pub fn remote<T: for<'de> Deserialize<'de>>(&self, host: &Host, args: &[String]) -> Result<T> {
-        self.remote_bounded(host, args, self.shell.budget().remaining("ssh")?)
+        self.remote_bounded(host, args, crate::budget::CALL_LIMIT)
     }
 
     pub fn remote_setup<T: for<'de> Deserialize<'de>>(
@@ -344,14 +344,31 @@ impl<'a> Fleet<'a> {
         args: &[String],
         timeout: std::time::Duration,
     ) -> Result<T> {
-        let timeout = self.shell.budget().with_limit("ssh", timeout)?;
+        let report_deadline = |error: Error| {
+            if matches!(error.root(), Error::Deadline(_)) {
+                error.with_diagnostic(crate::diagnostic::Diagnostic::remote(
+                    None,
+                    args,
+                    None,
+                    &host.label,
+                ))
+            } else {
+                error
+            }
+        };
+        let timeout = self
+            .shell
+            .budget()
+            .with_limit("ssh", timeout)
+            .map_err(report_deadline)?;
         let mut bounded_args = args.to_vec();
         if self.shell.budget().deadline.is_some() {
             bounded_args.extend(["--budget-ms".into(), timeout.as_millis().to_string()]);
         }
         let out = self
             .shell
-            .run_bounded("ssh", &self.remote_argv(host, &bounded_args), timeout)?;
+            .run_bounded("ssh", &self.remote_argv(host, &bounded_args), timeout)
+            .map_err(report_deadline)?;
         Self::parse_remote(host, args, &out)
     }
 
@@ -360,6 +377,7 @@ impl<'a> Fleet<'a> {
         args: &[String],
         out: &crate::shell::Output,
     ) -> Result<T> {
+        let operation = crate::diagnostic::Operation::from_args(args);
         if out.status != 0 && out.status != 1 {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 && value["deadline"] == true
@@ -368,10 +386,16 @@ impl<'a> Fleet<'a> {
                     &host.label,
                     value["error"].as_str().unwrap_or("remote deadline"),
                 );
-                return Err(Error::Deadline(format!(
-                    "ssh {}: remote deadline",
-                    host.label
-                )));
+                let diagnostic = crate::diagnostic::Diagnostic::remote(
+                    value.get("diagnostic"),
+                    args,
+                    Some(out.status),
+                    &host.label,
+                );
+                return Err(
+                    Error::Deadline(format!("ssh {}: remote deadline", host.label))
+                        .with_diagnostic(diagnostic),
+                );
             }
             let refusal = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 .ok()
@@ -385,15 +409,45 @@ impl<'a> Fleet<'a> {
                 .and_then(|v| v["error"].as_str().map(str::to_owned))
                 .unwrap_or_else(|| out.stderr.trim().to_owned());
             record_ssh_detail(&host.label, &format!("exit {}: {detail}", out.status));
-            return Err(Error::Ssh {
+            let error = Error::Ssh {
                 target: host.label.clone(),
                 failure: Failure::of_ssh(out.status, &out.stderr),
                 refusal,
-            });
+            };
+            // Legacy refusals retain their fixed messages. Transport categories remain
+            // retryable without interpreting a peer envelope.
+            let value = serde_json::from_str::<serde_json::Value>(&out.stdout).ok();
+            if out.status == SSH_FAILED
+                || (refusal.is_some()
+                    && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none()))
+            {
+                return Err(error);
+            }
+            let diagnostic = crate::diagnostic::Diagnostic::remote(
+                value.as_ref().and_then(|v| v.get("diagnostic")),
+                args,
+                Some(out.status),
+                &host.label,
+            );
+            if operation == crate::diagnostic::Operation::Other
+                && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none())
+            {
+                return Err(error);
+            }
+            return Err(error.with_diagnostic(diagnostic));
         }
-        serde_json::from_str(&out.stdout).map_err(|e| Error::Parse {
-            origin: format!("{} host {}", host.label, args.join(" ")),
-            detail: e.to_string(),
+        serde_json::from_str(&out.stdout).map_err(|_| {
+            Error::Parse {
+                origin: format!("{} host {operation:?}", host.label),
+                detail: "response is not valid for this operation; untrusted detail withheld"
+                    .into(),
+            }
+            .with_diagnostic(crate::diagnostic::Diagnostic::remote(
+                None,
+                args,
+                Some(out.status),
+                &host.label,
+            ))
         })
     }
 
@@ -655,6 +709,50 @@ mod tests {
     use crate::ledger::new_id;
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
+
+    #[test]
+    fn transport_deadline_retains_operation_and_request_without_argv() {
+        #[derive(Debug)]
+        struct DeadlineShell;
+        impl Shell for DeadlineShell {
+            fn run(&self, _program: &str, _args: &[String]) -> Result<crate::shell::Output> {
+                Err(Error::Deadline("ssh".into()))
+            }
+        }
+        let shell = DeadlineShell;
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let policy = Policy::default();
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let fleet = Fleet {
+            shell: &shell,
+            ledger: &ledger,
+            policy: &policy,
+            home: "/home".into(),
+            hosts: vec![host.clone()],
+        };
+        let error = fleet
+            .remote_setup::<serde_json::Value>(
+                &host,
+                &[
+                    "launch".into(),
+                    "--request".into(),
+                    serde_json::json!({"id":"r-7","task":"TASK_SECRET"}).to_string(),
+                ],
+            )
+            .unwrap_err();
+        assert!(matches!(error.root(), Error::Deadline(_)));
+        assert_eq!(Failure::of(&error), Failure::Deadline);
+        let diagnostic = error.diagnostic().unwrap();
+        assert_eq!(diagnostic.operation, crate::diagnostic::Operation::Launch);
+        assert_eq!(diagnostic.request_id.as_deref(), Some("r-7"));
+        assert!(diagnostic.status.is_none());
+        assert!(!error.to_string().contains("TASK_SECRET"));
+        assert!(!format!("{error:?}").contains("TASK_SECRET"));
+    }
 
     fn debug_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(new_id());

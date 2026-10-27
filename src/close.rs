@@ -155,7 +155,7 @@ fn remove_target(
     let tree = target
         .cwd
         .as_deref()
-        .map(|cwd| worktree::linked(shell, cwd))
+        .map(|cwd| worktree::linked_or_detached(shell, cwd))
         .transpose()?
         .flatten();
     // Dogsled locks every worktree it makes. An unlocked one is someone's own checkout that
@@ -268,6 +268,9 @@ fn unsaved(
     guard: Guard,
 ) -> Result<crate::loss::Evidence> {
     let repo = tree.checkout.display().to_string();
+    // A detached checkout has no branch. No branch is invented for it, so its commits must
+    // be held by the default branch or a refreshed remote ref, exactly as for a branch.
+    let detached = tree.branch.is_empty();
     let evidence = if guard == Guard::Clean {
         crate::loss::Evidence::fetch(shell, &repo)
     } else {
@@ -279,12 +282,20 @@ fn unsaved(
                 dirty.join(", ")
             )));
         }
-        crate::loss::Evidence::keeping_branch(&repo, &tree.branch)
+        if detached {
+            crate::loss::Evidence::fetch(shell, &repo)
+        } else {
+            crate::loss::Evidence::keeping_branch(&repo, &tree.branch)
+        }
     };
     if let Some(warning) = &evidence.warning {
         eprintln!("{warning}");
     }
-    let tip = format!("refs/heads/{}", tree.branch);
+    let tip = if detached {
+        worktree::head_sha(shell, &tree.path)?
+    } else {
+        format!("refs/heads/{}", tree.branch)
+    };
     let loss = evidence.assess(shell, &tip, Some(&tree.path))?;
     if !loss.loses_nothing() {
         return Err(refuse(&format!("{}: {}", tree.path, loss.detail())));

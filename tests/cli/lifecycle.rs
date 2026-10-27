@@ -4,6 +4,7 @@ use super::*;
 fn wrapper_termination_kills_command_group_and_records_result() {
     use std::io::BufRead as _;
     let rig = Rig::new("wrapper-signal");
+    rig.claim("wrapper", &["sh", "-c", "echo ready; sleep 30"]);
     let mut child = rig
         .cmd(&["exec", "wrapper", "--", "sh", "-c", "echo ready; sleep 30"])
         .stdout(std::process::Stdio::piped())
@@ -39,6 +40,7 @@ fn remote_wait_deadline_bounds_a_silent_ssh_process() {
 fn stop_kills_running_process_after_child_output_without_test_sleep() {
     use std::io::BufRead as _;
     let rig = Rig::new("stop-real");
+    rig.claim("stoppable", &["sh", "-c", "echo ready; sleep 30"]);
     let mut child = rig
         .cmd(&[
             "exec",

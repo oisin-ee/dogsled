@@ -27,6 +27,8 @@ mod place;
 mod placement;
 #[path = "cli/profiles.rs"]
 mod profiles;
+#[path = "cli/remote_diagnostics.rs"]
+mod remote_diagnostics;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/review_fixes.rs"]
@@ -48,8 +50,471 @@ use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// The bound every real-process wait in these tests uses. A process that never ends fails
+/// its test on this bound instead of stalling the suite.
+pub(crate) const PROCESS_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The state the guard and its fallback share. A finished process has released its pid,
+/// and the host may then hand that pid to another process. A signal sent after that can
+/// kill a process that is not this test's. The guard and every fallback take this lock,
+/// so the signal and the reap keep one order: the signal comes first, and no signal
+/// follows the reap.
+#[derive(Debug, Default)]
+struct OwnedState {
+    /// Whether the guard is finished with the owned process: it has been killed and
+    /// reaped, or it was already gone. A finished process has left its group, so the
+    /// host may already have handed its group id to another group. The guard and every
+    /// fallback signal nothing once this is set.
+    finished: bool,
+}
+
+/// A process a test owns. The guard kills the process and its group and waits for it to
+/// end, so a failed assertion never strands a wrapper or a command it started. A process
+/// this test spawned is the test's own child, so the test reaps it and proves its exit.
+#[derive(Debug)]
+pub(crate) struct Owned {
+    /// The process to kill.
+    pid: u32,
+    /// The process group to kill, when the process leads a group of its own.
+    group: Option<u32>,
+    /// The child to reap, when this test spawned it.
+    child: Option<std::process::Child>,
+    /// Whether the guard already killed and reaped this process. A second call is a
+    /// no-op, so a later field drop signals nothing.
+    terminated: bool,
+    /// The state the guard and every fallback share.
+    state: Arc<Mutex<OwnedState>>,
+}
+
+/// A handle that kills an owned process group through the guard's own state. It signals
+/// only while the child is unreaped, so a group id the host may have reused is never
+/// signalled.
+#[derive(Debug, Clone)]
+pub(crate) struct GroupKiller {
+    group: Option<u32>,
+    state: Arc<Mutex<OwnedState>>,
+}
+
+impl GroupKiller {
+    /// Kill the group, unless the guard is already finished with the process.
+    pub(crate) fn kill(&self) {
+        // The lock is taken without waiting. A fallback that waits on the guard would
+        // hang the test it tries to release. The fallback signals the group only when
+        // it holds the lock and the guard is not finished, because a finished guard has
+        // already killed the group before it reaped the child, so skipping is right.
+        let Ok(state) = self.state.try_lock() else {
+            return;
+        };
+        if state.finished {
+            return;
+        }
+        if let Some(group) = self.group
+            && let Ok(group) = i32::try_from(group)
+        {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(group),
+                nix::sys::signal::SIGKILL,
+            );
+        }
+    }
+}
+
+impl Owned {
+    /// A handle that kills this guard's group while the child is unreaped.
+    pub(crate) fn group_killer(&self) -> GroupKiller {
+        GroupKiller {
+            group: self.group,
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    /// The shared state, so a signal and a reap keep one order.
+    ///
+    /// The state is cloned before it is locked, so the lock does not borrow this guard
+    /// and the guard can still reach its child while the lock is held.
+    fn shared_state(&self) -> Arc<Mutex<OwnedState>> {
+        Arc::clone(&self.state)
+    }
+
+    /// Start `command` in its own process group, so the guard kills its descendants too.
+    /// The caller's own stdio settings are kept. The child is this test's own, so the
+    /// test reaps it and reads its exit status.
+    pub(crate) fn spawn(command: &mut Command) -> Self {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        Self {
+            pid,
+            group: Some(pid),
+            child: Some(child),
+            terminated: false,
+            state: Arc::default(),
+        }
+    }
+
+    /// The child this guard owns, so a test can take its streams.
+    pub(crate) fn child_mut(&mut self) -> &mut std::process::Child {
+        let child = self.child.as_mut();
+        assert!(child.is_some(), "this process was not spawned by the test");
+        child.unwrap()
+    }
+
+    /// Wait for the child to exit, or fail the test on the bound. A child that never exits
+    /// fails its test instead of hanging it. The status comes from `try_wait`, so the
+    /// child is reaped: the exit is proved, not inferred.
+    pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        loop {
+            // The lock is held across the reap, so a fallback never signals a group the
+            // host has already given to another group.
+            let state = Arc::clone(&self.state);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let child = self.child_mut();
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // The child is reaped, so its group id may already belong to another
+                    // group. The guard and every fallback signal nothing from now on.
+                    guard.finished = true;
+                    return status;
+                }
+                Ok(None) => {}
+                Err(error) => panic!("the child could not be waited for: {error}"),
+            }
+            drop(guard);
+            assert!(
+                Instant::now() < deadline,
+                "the child did not exit within {PROCESS_DEADLINE:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Adopt a process this test did not spawn, such as a command a wrapper started. The
+    /// process is not the test's child, so the test cannot reap it and the host's init
+    /// does that. The guard kills the process and its group and waits for it to end. The
+    /// group is only killed when it is not the test's own group, so the guard never kills
+    /// the test.
+    pub(crate) fn adopt(pid: u32) -> Self {
+        let group = process_group(pid).filter(|group| *group != own_group());
+        Self {
+            pid,
+            group,
+            child: None,
+            terminated: false,
+            state: Arc::default(),
+        }
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+impl Owned {
+    /// Kill the process and its group and wait for it to end. The call is idempotent: a
+    /// second call does nothing, so a later field drop signals nothing.
+    fn terminate(&mut self) {
+        if self.terminated {
+            return;
+        }
+        self.terminated = true;
+        // Every signal and the reap happen under this lock, so a `GroupKiller` never
+        // signals after the reap.
+        let shared = self.shared_state();
+        let mut state = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.finished {
+            return;
+        }
+        // A child this guard spawned is the test's own child, so the test reaps it. A
+        // child that already ended has been reaped too, so its group id may already
+        // belong to another group, and the guard signals nothing then.
+        let child_gone = match self.child.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+            None => false,
+        };
+        if child_gone {
+            state.finished = true;
+            return;
+        }
+        // The group holds the processes that share the leader's group. A command that
+        // leads a group of its own is not in it, so the test adopts that command
+        // separately. The leader is not reaped yet, so the group id is still this
+        // test's own.
+        if let Some(group) = self.group
+            && let Ok(group) = i32::try_from(group)
+        {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(group),
+                nix::sys::signal::SIGKILL,
+            );
+        }
+        if let Some(child) = self.child.as_mut() {
+            // The child is reaped here, under the lock. Its exit status is the proof that
+            // it ended, so the guard never signals a process id the host has handed to
+            // someone else.
+            let _ = child.kill();
+            let _ = child.wait();
+            state.finished = true;
+            return;
+        }
+        // A process this guard did not spawn is not the test's child, so the test cannot
+        // reap it. The host's init reaps it, and may reuse the pid, so the guard
+        // signals the process once and never again.
+        let Ok(pid) = i32::try_from(self.pid) else {
+            state.finished = true;
+            return;
+        };
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL);
+        state.finished = true;
+        drop(state);
+        // The guard waits for the process to end, so no process outlives its test.
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        while !process_gone(self.pid) {
+            assert!(
+                Instant::now() < deadline,
+                "process {} did not leave within {PROCESS_DEADLINE:?}",
+                self.pid
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// A command a test started in the background. The test owns the command as its own
+/// child, so the test reaps it and reads its exit status. A command that never ends
+/// fails the test on the bound instead of hanging it. Dropping the guard kills the
+/// command and its group and reaps it, so the command does not outlive the test.
+pub(crate) struct Background {
+    /// The command the test owns. The guard kills the command and its group and reaps it
+    /// before the guard joins the reader.
+    owned: Owned,
+    /// The thread that drains the command's output, so a full pipe never blocks it.
+    reader: Option<std::thread::JoinHandle<()>>,
+    /// The command's output, sent when the command's streams close.
+    output: std::sync::mpsc::Receiver<(String, String)>,
+}
+
+impl Background {
+    /// The command's output, or fail the test on the bound. A command that never ends
+    /// fails the test instead of hanging it.
+    pub(crate) fn output(&self) -> (String, String) {
+        self.output
+            .recv_timeout(PROCESS_DEADLINE)
+            .unwrap_or_else(|error| panic!("the command wrote no output: {error}"))
+    }
+
+    /// Wait for the command to end, or fail the test on the bound. The status comes from
+    /// `try_wait`, so the child is reaped: the exit is proved, not inferred.
+    pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
+        self.owned.wait()
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        // The owned command group is killed and reaped first. The reader ends only when
+        // the command's streams close, so joining the reader before the kill waits on a
+        // command that never ends.
+        self.owned.terminate();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+/// A FIFO a test owns. The guard removes it, so a failed assertion leaves no rendezvous
+/// behind that a later test could block on.
+#[derive(Debug)]
+pub(crate) struct Fifo {
+    path: PathBuf,
+}
+
+impl Fifo {
+    /// A FIFO at `path` in the rig's directory.
+    pub(crate) fn new(dir: &Path, name: &str) -> Self {
+        let path = dir.join(name);
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        Self { path }
+    }
+
+    /// The path of this FIFO.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Open this FIFO for reading and writing, and keep it open. A writer on the other
+    /// side never waits for an open that may never come, and the FIFO stays open through
+    /// the acknowledgement.
+    pub(crate) fn hold(&self) -> fs::File {
+        open_fifo(&self.path)
+    }
+}
+
+impl Drop for Fifo {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Open a FIFO without blocking. The FIFO is opened for reading and writing, so neither
+/// side waits for an open that may never come.
+pub(crate) fn open_fifo(path: &Path) -> fs::File {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)
+        .unwrap()
+}
+
+/// Read a FIFO's content within `bound`, or `None` when the bound passes. A writer that
+/// never arrives must not hang the test. An empty read means no writer has opened the FIFO
+/// yet, so the read keeps waiting for the writer rather than ending the wait early.
+pub(crate) fn read_fifo_within(path: &Path, what: &str, bound: Duration) -> Option<String> {
+    let mut file = open_fifo(path);
+    let deadline = Instant::now() + bound;
+    let mut text = String::new();
+    loop {
+        let mut buffer = [0_u8; 256];
+        match std::io::Read::read(&mut file, &mut buffer) {
+            Ok(0) if !text.is_empty() => break,
+            Ok(0) => {}
+            Ok(n) => {
+                text.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                if text.contains('\n') {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("{what} could not be read: {error}"),
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Some(text)
+}
+
+/// Read a FIFO's content, or fail the test on the bound. A writer that never arrives must
+/// not hang the test.
+pub(crate) fn read_fifo(path: &Path, what: &str) -> String {
+    read_fifo_within(path, what, PROCESS_DEADLINE)
+        .unwrap_or_else(|| panic!("{what} did not arrive within {PROCESS_DEADLINE:?}"))
+}
+
+/// Wait for `pid` to end, up to `bound`. It reports whether the process ended. A process
+/// that never ends is reported on the bound, so a caller can fail on it instead of
+/// waiting for it. Only a process the test did not spawn is checked this way: a process
+/// the test spawned is reaped through its own child handle, and its exit status is the
+/// proof that it ended.
+pub(crate) fn wait_gone(pid: u32, bound: Duration) -> bool {
+    let deadline = Instant::now() + bound;
+    loop {
+        if process_gone(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The command in `path`, or fail the test on the bound. A file that is never written
+/// fails the test instead of hanging it.
+pub(crate) fn read_command(path: &Path, what: &str) -> String {
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && !text.trim().is_empty()
+        {
+            return text.trim().to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not write its command within {PROCESS_DEADLINE:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The process id in `path`, or fail the test on the bound. A process that never writes it
+/// fails the test instead of hanging it.
+pub(crate) fn read_pid(path: &Path, what: &str) -> u32 {
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not write its process id within {PROCESS_DEADLINE:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Whether `pid` has ended. A process that already ended, or that waits only to be
+/// reaped, has ended for the test's purpose. Only a process the test did not spawn is
+/// checked this way: a process the test spawned is reaped through its own child handle,
+/// and its exit status is the proof that it ended.
+pub(crate) fn process_gone(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+        return true;
+    }
+    // A process that ended but waits to be reaped still holds its process id. It has
+    // left, so the test does not wait for it.
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    if !out.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().starts_with('Z')
+}
+
+/// The process group of `pid`, or `None` when the process already left. A process that
+/// already ended has nothing left to kill, so the test does not wait for it.
+pub(crate) fn process_group(pid: u32) -> Option<u32> {
+    let out = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+/// The process group of this test. A guard never kills this group: it holds the test.
+pub(crate) fn own_group() -> u32 {
+    nix::unistd::getpgrp().as_raw() as u32
+}
 
 fn isolated(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
@@ -190,32 +655,81 @@ esac
             self.service.lock().unwrap().take();
         }
         let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
-        cmd.args(args)
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    self.dir.join("bin").display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .current_dir(self.dir.join("home"))
-            .env("HERDR_PANE_ID", "w1:p1")
-            .env("HERDR_WORKSPACE_ID", "w1")
-            .env("RIG", &self.dir)
-            .env("HOME", self.dir.join("home"))
-            .env("DOGSLED_CONFIG", self.dir.join("config.toml"))
-            .env("DOGSLED_STATE", self.dir.join("state"));
+        cmd.args(args);
+        self.rig_env(&mut cmd);
+        cmd
+    }
+    /// The environment every process in this rig runs with. A process the rig starts, and
+    /// a process the test spawns from what the rig recorded, run with the same
+    /// environment, so both see the same fake Herdr, the same state, and the same rig.
+    fn rig_env(&self, cmd: &mut Command) {
+        cmd.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                self.dir.join("bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .current_dir(self.dir.join("home"))
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env("HERDR_WORKSPACE_ID", "w1")
+        .env("RIG", &self.dir)
+        .env("HOME", self.dir.join("home"))
+        .env("DOGSLED_CONFIG", self.dir.join("config.toml"))
+        .env("DOGSLED_STATE", self.dir.join("state"));
         if let Ok(now) = fs::read_to_string(self.dir.join("clock")) {
             cmd.env("DOGSLED_TEST_NOW_MS", now.trim());
         }
         if let Ok(window) = fs::read_to_string(self.dir.join("busy-window-ms")) {
             cmd.env("DOGSLED_TEST_BUSY_WINDOW_MS", window.trim());
         }
-        cmd
     }
     fn run(&self, args: &[&str]) -> Output {
         self.cmd(args).output().unwrap()
+    }
+    /// Spawn the wrapper the fake Herdr recorded as `path`, as this test's own child.
+    /// The child leads a process group of its own, so the guard kills the wrapper and
+    /// every command that shares its group. The test reaps the child and reads its exit
+    /// status, so the wrapper's end is proved.
+    fn spawn_recorded(&self, path: &Path, what: &str) -> Owned {
+        let command = read_command(path, what);
+        let mut cmd = isolated("sh");
+        cmd.args(["-c", &command]);
+        self.rig_env(&mut cmd);
+        // The wrapper's output goes to a file, so a full pipe never blocks the wrapper.
+        cmd.stdout(fs::File::create(self.dir.join("wrapper-output")).unwrap());
+        cmd.stderr(fs::File::create(self.dir.join("wrapper-error")).unwrap());
+        Owned::spawn(&mut cmd)
+    }
+    /// Run `args` in the background, so the test can act while the command waits. The
+    /// command is the test's own child, so the test reaps it and reads its exit status.
+    /// The command leads a process group of its own, so the guard kills the commands it
+    /// started too.
+    fn start(&self, args: &[&str]) -> Background {
+        let mut command = self.cmd(args);
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut owned = Owned::spawn(&mut command);
+        let mut stdout = owned.child_mut().stdout.take().unwrap();
+        let mut stderr = owned.child_mut().stderr.take().unwrap();
+        let (send, output) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let _ = stdout.read_to_end(&mut out);
+            let _ = stderr.read_to_end(&mut err);
+            let _ = send.send((
+                String::from_utf8_lossy(&out).into_owned(),
+                String::from_utf8_lossy(&err).into_owned(),
+            ));
+        });
+        Background {
+            owned,
+            reader: Some(reader),
+            output,
+        }
     }
     fn json(&self, args: &[&str]) -> (i32, Value) {
         let out = self.cmd(args).arg("--json").output().unwrap();
@@ -257,6 +771,44 @@ esac
     }
     fn read(&self, path: &str) -> Value {
         serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap()
+    }
+    /// A job claim that a wrapper may run: the command, the options, and a pane.
+    /// A wrapper runs only from a claim like this one.
+    fn claim(&self, id: &str, cmd: &[&str]) {
+        self.claim_with(id, cmd, &json!(null), &json!(null), "w1:p1");
+    }
+    /// A claim with the job's own timeout options, so a request that names different ones
+    /// asks for a different job.
+    fn claim_with(
+        &self,
+        id: &str,
+        cmd: &[&str],
+        timeout_ms: &Value,
+        idle_timeout_ms: &Value,
+        pane: &str,
+    ) {
+        fs::create_dir_all(self.dir.join("state/jobs")).unwrap();
+        let job = json!({
+            "id": id,
+            "cmd": cmd,
+            "cwd": self.dir.join("home").display().to_string(),
+            "host": "local",
+            "owner": "w1:p1",
+            "pane": pane,
+            "state": "pending",
+            "exit": Value::Null,
+            "signal": Value::Null,
+            "reason": Value::Null,
+            "started_ms": Value::Null,
+            "ended_ms": Value::Null,
+            "timeout_ms": timeout_ms,
+            "idle_timeout_ms": idle_timeout_ms,
+        });
+        fs::write(
+            self.dir.join(format!("state/jobs/{id}.json")),
+            serde_json::to_vec_pretty(&job).unwrap(),
+        )
+        .unwrap();
     }
     fn log(&self, path: &str) -> String {
         fs::read_to_string(self.dir.join(path)).unwrap_or_default()
@@ -560,26 +1112,14 @@ esac
 cat "$RIG/remote.json"
 "#,
     );
-    let mut child = rig
-        .cmd(&["status", "--json"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let (send, recv) = std::sync::mpsc::channel();
-    let pid = child.id();
-    let waiter = std::thread::spawn(move || {
-        send.send(child.wait().unwrap()).unwrap();
-    });
-    match recv.recv_timeout(std::time::Duration::from_secs(10)) {
-        Ok(status) => assert!(status.success()),
-        Err(error) => {
-            let _ = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
-            panic!("peer rendezvous failed: {error}");
-        }
-    }
-    waiter.join().unwrap();
+    // The test owns the command as its own child, so the test reaps it and reads its
+    // exit status. The guard kills the command's group, so the peers it started never
+    // outlive the test.
+    let mut command = rig.cmd(&["status", "--json"]);
+    command.stdout(std::process::Stdio::piped());
+    let mut owned = Owned::spawn(&mut command);
+    let status = owned.wait();
+    assert!(status.success(), "the peer rendezvous failed");
 }
 
 #[test]
@@ -783,12 +1323,12 @@ fn removed_commands_and_sidebar_are_not_accepted() {
 fn watch_prints_a_frame_without_waiting_for_the_interval() {
     let rig = Rig::new("watch");
     rig.snapshot("state/host.json", now(), 1.0, 2);
-    let mut child = rig
-        .cmd(&["status", "--watch", "--line", "--interval", "3600"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
+    // The test owns the command as its own child, so the test reaps it. The guard kills
+    // the command's group, so the watch never outlives the test.
+    let mut command = rig.cmd(&["status", "--watch", "--line", "--interval", "3600"]);
+    command.stdout(std::process::Stdio::piped());
+    let mut owned = Owned::spawn(&mut command);
+    let stdout = owned.child_mut().stdout.take().unwrap();
     let (send, recv) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         use std::io::BufRead as _;
@@ -802,8 +1342,38 @@ fn watch_prints_a_frame_without_waiting_for_the_interval() {
         .unwrap();
     });
     let frame = recv.recv_timeout(std::time::Duration::from_secs(10));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    owned.child_mut().kill().unwrap();
     reader.join().unwrap();
     assert_eq!(frame.unwrap(), "local 1/2");
+}
+
+/// Dropping a background command kills the command and its group before the guard joins
+/// the reader. The reader ends only when the command's streams close, so a drop that
+/// joins the reader first waits on a command that never ends. The drop runs on its own
+/// thread, so a drop that waits fails the test on the bound instead of hanging it.
+#[test]
+fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
+    let rig = Rig::new("background-drop");
+    rig.snapshot("state/host.json", now(), 1.0, 2);
+    // The command never ends on its own: it watches until the test ends it.
+    let background = rig.start(&["status", "--watch", "--line", "--interval", "3600"]);
+    let pid = background.owned.pid;
+    let killer = background.owned.group_killer();
+    let (send, recv) = std::sync::mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        drop(background);
+        let _ = send.send(());
+    });
+    if recv.recv_timeout(Duration::from_secs(10)).is_err() {
+        // The drop is still waiting on the reader. The test kills the command's group,
+        // so no process outlives the test and the drop ends.
+        killer.kill();
+        let _ = dropper.join();
+        panic!("the drop joined the reader of a command that never ends");
+    }
+    dropper.join().unwrap();
+    assert!(
+        wait_gone(pid, PROCESS_DEADLINE),
+        "the command outlived its drop"
+    );
 }

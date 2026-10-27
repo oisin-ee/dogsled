@@ -1,5 +1,6 @@
 //! Prepare work in the repository checkout, never in the caller's worktree.
 
+use crate::diagnostic::{Cause, Context, Diagnostic, Occupancy, Operation};
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
 use crate::repository::Values;
@@ -142,11 +143,7 @@ pub fn local(
                     "preparation request changed",
                 ));
             }
-            return receipt.prepared.ok_or_else(|| {
-                Error::Invalid(format!(
-                    "request {id} stopped during preparation; inspect this host before resubmitting"
-                ))
-            });
+            return replay(id, &receipt);
         }
         // Persist intent before setup, worktree creation, or Herdr can change host state.
         // Without a completed receipt, a later call cannot prove those effects finished.
@@ -155,26 +152,93 @@ pub fn local(
             &PreparationReceipt {
                 request: request.clone(),
                 prepared: None,
+                failure: None,
             },
         )?;
-        let prepared = local_once(shell, ledger, repo, branch, base, Some(id))?;
-        receipts.write(
-            &file,
-            &PreparationReceipt {
-                request,
-                prepared: Some(prepared.clone()),
-            },
-        )?;
-        Ok(prepared)
+        match local_once(shell, ledger, repo, branch, base, Some(id)) {
+            Ok(prepared) => {
+                receipts.write(
+                    &file,
+                    &PreparationReceipt {
+                        request,
+                        prepared: Some(prepared.clone()),
+                        failure: None,
+                    },
+                )?;
+                Ok(prepared)
+            }
+            Err(error) => {
+                // A returned failure is a final outcome. Record it, so a later call replays
+                // the original cause instead of preparing the branch again.
+                let error = error.correlate(Some(id));
+                let failure = error.retained(Operation::Prepare, Some(id));
+                if receipts
+                    .write(
+                        &file,
+                        &PreparationReceipt {
+                            request,
+                            prepared: None,
+                            failure: Some(failure),
+                        },
+                    )
+                    .is_err()
+                {
+                    // The outcome is not retained. The intent stays uncertain, and the report
+                    // says so instead of claiming a durable cause.
+                    return Err(unretained(branch, base, id));
+                }
+                Err(error)
+            }
+        }
     })
 }
 
-/// A completed preparation is replayed only for the same request and inputs. A lost SSH
-/// reply must not create another workspace or reject the branch that this request created.
+/// A preparation receipt holds the outcome of one request. `prepared` and `failure` are
+/// outcomes: only one of them can be set. A receipt without either outcome is an uncertain
+/// interruption, and stays uncertain.
 #[derive(Debug, Serialize, Deserialize)]
 struct PreparationReceipt {
     request: (PathBuf, String, Option<String>),
     prepared: Option<Prepared>,
+    /// The safe record of a returned failure. Absent in receipts written before failures
+    /// were retained, and in receipts of an interrupted preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<crate::error::RetainedFailure>,
+}
+
+/// Replay a recorded outcome for the same request. A recorded failure returns its original
+/// safe cause without preparing again. An old receipt without an outcome proves nothing,
+/// so it stays uncertain.
+fn replay(id: &str, receipt: &PreparationReceipt) -> Result<Prepared> {
+    match (&receipt.prepared, &receipt.failure) {
+        (Some(_), Some(_)) => Err(Error::Invalid(format!(
+            "request {id} has a contradictory preparation receipt; inspect this host"
+        ))),
+        (Some(prepared), None) => Ok(prepared.clone()),
+        (None, Some(failure)) => Err(failure.restore()),
+        (None, None) => Err(Error::Invalid(format!(
+            "request {id} stopped during preparation; inspect this host before resubmitting"
+        ))),
+    }
+}
+
+/// The preparation failed and its outcome could not be recorded. The intent stays uncertain,
+/// so the report must not claim that the original cause is retained, and it must not carry
+/// the write error's text or the discarded preparation cause. It reports its own cause, so a
+/// caller on the other side of the peer boundary sees the persistence failure itself.
+fn unretained(branch: &str, base: Option<&str>, request_id: &str) -> Error {
+    let diagnostic = Diagnostic::new(
+        Operation::Prepare,
+        Cause::OutcomeUnrecorded,
+        Context::new(Some(branch), base, None),
+    )
+    .request(Some(request_id));
+    Error::Invalid(
+        "the preparation failed and its cause was not recorded; \
+         inspect this host before resubmitting"
+            .into(),
+    )
+    .with_diagnostic(diagnostic)
 }
 
 fn local_once(
@@ -219,9 +283,42 @@ fn local_once(
         .run(shell)?
         .ok();
     if has_branch && base.is_some() {
-        return Err(Error::Invalid(format!(
-            "branch {branch} exists; omit --base"
-        )));
+        return Err(
+            Error::Invalid(format!("branch {branch} exists; omit --base")).with_diagnostic(
+                Diagnostic::new(
+                    Operation::Prepare,
+                    Cause::BranchExists,
+                    Context::new(Some(branch), base, None),
+                )
+                .request(request_id),
+            ),
+        );
+    }
+    // Read-only preflight, after the existing-branch refusal and before any new hold,
+    // worktree, or branch. Never fetch or move refs to make an unavailable base resolve.
+    if !has_branch && let Some(base) = base {
+        let resolved = git(
+            &checkout,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{base}^{{commit}}"),
+            ],
+        )
+        .run(shell)?;
+        if !resolved.ok() {
+            return Err(
+                Error::Invalid("requested base unavailable on this host".into()).with_diagnostic(
+                    Diagnostic::new(
+                        Operation::Prepare,
+                        Cause::BaseUnavailable,
+                        Context::new(Some(branch), Some(base), None),
+                    )
+                    .request(request_id),
+                ),
+            );
+        }
     }
     // Publish the intended path before creating or reusing it. Cleanup must not race setup
     // or the transport gap before launch has recorded its receipt.
@@ -282,7 +379,24 @@ fn make(
             };
             args.extend(["-b", branch, path.as_str(), start.as_str()]);
         }
-        git(checkout, &args).setup_ok(shell)?;
+        if Path::new(&path).exists() {
+            return Err(
+                Error::Invalid("workspace path is occupied".into()).with_diagnostic(
+                    Diagnostic::new(
+                        Operation::Prepare,
+                        Cause::WorkspaceOccupied,
+                        Context::new(Some(branch), base, Some(&path)).occupied(Occupancy::Path),
+                    ),
+                ),
+            );
+        }
+        git(checkout, &args).setup_ok(shell).map_err(|error| {
+            error.with_diagnostic(Diagnostic::new(
+                Operation::Prepare,
+                Cause::SetupFailed,
+                Context::new(Some(branch), base, Some(&path)),
+            ))
+        })?;
         (path, true)
     };
     if created {
@@ -291,11 +405,21 @@ fn make(
             path: &path,
             branch,
         };
-        if let Err(error) = crate::repository::run(shell, "setup", &settings.worktree.setup, values)
-        {
-            discard(shell, checkout, &path, (!has_branch).then_some(branch))?;
-            return Err(Error::Invalid(format!(
-                "{error}; the new worktree was removed"
+        if crate::repository::run(shell, "setup", &settings.worktree.setup, values).is_err() {
+            discard(shell, checkout, &path, (!has_branch).then_some(branch)).map_err(|error| {
+                error.with_diagnostic(Diagnostic::new(
+                    Operation::Prepare,
+                    Cause::SetupFailed,
+                    Context::new(Some(branch), base, Some(&path)),
+                ))
+            })?;
+            return Err(Error::Invalid(
+                "setup command failed; the new worktree was removed".into(),
+            )
+            .with_diagnostic(Diagnostic::new(
+                Operation::Prepare,
+                Cause::SetupFailed,
+                Context::new(Some(branch), base, Some(&path)).removed(),
             )));
         }
     }
@@ -329,7 +453,8 @@ pub fn on_host(
     request_id: Option<&str>,
 ) -> Result<Prepared> {
     let repo = Path::new(node.home).join(repo).display().to_string();
-    let prepared = local(node.shell, node.ledger, &repo, &branch, base, request_id)?;
+    let prepared = local(node.shell, node.ledger, &repo, &branch, base, request_id)
+        .map_err(|error| error.correlate(request_id))?;
     if let Some(path) = &prepared.path {
         crate::cleanup::remember(
             node.ledger,
@@ -385,8 +510,14 @@ fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<
     if worktree::same(&found.path, &checkout.display().to_string()) {
         return Err(Error::Invalid(format!(
             "branch {} is checked out in the main checkout {}",
-            found.branch.unwrap_or_default(),
+            found.branch.as_deref().unwrap_or_default(),
             found.path
+        ))
+        .with_diagnostic(Diagnostic::new(
+            Operation::Prepare,
+            Cause::WorkspaceOccupied,
+            Context::new(found.branch.as_deref(), None, Some(&found.path))
+                .occupied(Occupancy::MainCheckout),
         )));
     }
     match found.lock.as_deref() {
@@ -400,6 +531,12 @@ fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<
             return Err(Error::Invalid(format!(
                 "{} is locked ({other}); it is not an agent worktree",
                 found.path
+            ))
+            .with_diagnostic(Diagnostic::new(
+                Operation::Prepare,
+                Cause::WorkspaceOccupied,
+                Context::new(found.branch.as_deref(), None, Some(&found.path))
+                    .occupied(Occupancy::Locked),
             )));
         }
     }
@@ -458,6 +595,11 @@ fn open(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Prepared> {
         return Err(Error::Invalid(format!(
             "Herdr workspace {} already shows {path}; a child may own it",
             workspace_id.as_deref().unwrap_or("?")
+        ))
+        .with_diagnostic(Diagnostic::new(
+            Operation::Prepare,
+            Cause::WorkspaceOccupied,
+            Context::new(None, None, Some(path)).occupied(Occupancy::OpenWorkspace),
         )));
     }
     let pane_id = opened
@@ -515,5 +657,122 @@ impl Git {
     /// Making or removing a checkout can take longer than an ordinary call.
     fn setup_ok(&self, shell: &dyn Shell) -> Result<()> {
         shell.run_setup_ok("git", &self.0).map(drop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::{Refusal, RetainedKind};
+    use crate::hosts::Failure;
+
+    /// A retained failure keeps its classification, so a replay is still a deadline, a
+    /// refusal, or a transport failure, and not an opaque error.
+    #[test]
+    fn a_retained_failure_keeps_its_classification() {
+        let deadline = Error::Deadline("ssh netcup: remote deadline".into()).with_diagnostic(
+            Diagnostic::new(Operation::Prepare, Cause::SetupFailed, Context::default()),
+        );
+        let retained = deadline.retained(Operation::Prepare, Some("request-1"));
+        assert_eq!(retained.kind, RetainedKind::Deadline);
+        assert_eq!(retained.request_id.as_deref(), Some("request-1"));
+        assert!(matches!(
+            retained.restore().root(),
+            Error::Deadline(_) | Error::Diagnostic { .. }
+        ));
+        let refusal = Error::Refused {
+            code: Refusal::CloneFailed,
+            detail: "the peer could not clone the repository".into(),
+        };
+        let retained = refusal.retained(Operation::Prepare, None);
+        assert_eq!(retained.kind, RetainedKind::Refused);
+        assert_eq!(retained.refusal, Some(Refusal::CloneFailed));
+        assert!(matches!(
+            retained.restore().root(),
+            Error::Refused { code, .. } if *code == Refusal::CloneFailed
+        ));
+        let transport = Error::Ssh {
+            target: "netcup".into(),
+            failure: Failure::Timeout,
+            refusal: None,
+        };
+        let retained = transport.retained(Operation::Prepare, None);
+        assert_eq!(retained.kind, RetainedKind::Transport);
+        assert_eq!(retained.transport, Some(Failure::Timeout));
+        assert!(matches!(
+            retained.restore().root(),
+            Error::Ssh { failure, .. } if *failure == Failure::Timeout
+        ));
+    }
+
+    /// The retained record never holds the original error text.
+    #[test]
+    fn a_retained_failure_never_holds_the_original_text() {
+        let error = Error::Invalid("command argv with SECRET_TOKEN failed".into());
+        let retained = error.retained(Operation::Prepare, Some("request-2"));
+        let text = serde_json::to_string(&retained).unwrap();
+        assert!(!text.contains("SECRET_TOKEN"), "{text}");
+        assert!(retained.detail_withheld, "{text}");
+        assert!(
+            retained.restore().to_string().contains("withheld"),
+            "{text}"
+        );
+    }
+
+    /// A receipt holds one outcome. A receipt with both is refused, and a receipt with
+    /// neither stays uncertain.
+    #[test]
+    fn a_receipt_holds_exactly_one_outcome() {
+        let request = (PathBuf::from("/repo"), "worker".to_owned(), None);
+        let prepared = Prepared {
+            pane_id: Some("w8:p1".into()),
+            terminal_id: Some("term_tree".into()),
+            workspace_id: None,
+            path: Some("/repo/.worktrees/worker".into()),
+        };
+        let success = PreparationReceipt {
+            request: request.clone(),
+            prepared: Some(prepared.clone()),
+            failure: None,
+        };
+        assert_eq!(replay("r", &success).unwrap(), prepared);
+        let failure = crate::error::RetainedFailure {
+            operation: Operation::Prepare,
+            diagnostic: None,
+            kind: RetainedKind::Other,
+            transport: None,
+            refusal: None,
+            request_id: Some("r".into()),
+            detail_withheld: true,
+        };
+        let recorded = PreparationReceipt {
+            request: request.clone(),
+            prepared: None,
+            failure: Some(failure.clone()),
+        };
+        let error = replay("r", &recorded).unwrap_err();
+        assert!(error.to_string().contains("withheld"), "{error}");
+        let contradictory = PreparationReceipt {
+            request,
+            prepared: Some(prepared),
+            failure: Some(failure),
+        };
+        assert!(
+            replay("r", &contradictory)
+                .unwrap_err()
+                .to_string()
+                .contains("contradictory preparation receipt")
+        );
+        let uncertain = PreparationReceipt {
+            request: (PathBuf::from("/repo"), "worker".to_owned(), None),
+            prepared: None,
+            failure: None,
+        };
+        assert!(
+            replay("r", &uncertain)
+                .unwrap_err()
+                .to_string()
+                .contains("stopped during preparation")
+        );
     }
 }

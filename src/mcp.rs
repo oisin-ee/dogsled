@@ -194,7 +194,7 @@ impl Server {
         .await
         .map_err(|e| e.to_string())?
         .map(|value| value.to_string())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.tool_message())
     }
 }
 

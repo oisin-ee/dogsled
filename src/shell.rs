@@ -134,7 +134,7 @@ impl System {
     ) -> Result<Output> {
         use std::io::Write as _;
         use std::os::unix::process::CommandExt as _;
-        let operation = format!("{program} {}", args.join(" "));
+        let operation = crate::diagnostic::shell_operation(program).to_owned();
         let timeout = self.budget.with_limit(&operation, timeout)?;
         if timeout.is_zero() {
             return Err(Error::Deadline(operation));
@@ -330,6 +330,26 @@ pub fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadline_never_formats_scripts_credentials_or_launch_json() {
+        let shell = System::default();
+        let error = shell
+            .run_bounded(
+                "sh",
+                &[
+                    "-c".into(),
+                    "sleep 1; echo TASK_SECRET https://user:TOKEN_SECRET@host".into(),
+                ],
+                std::time::Duration::from_millis(10),
+            )
+            .unwrap_err();
+        assert!(matches!(error.root(), Error::Deadline(_)));
+        for sink in [error.to_string(), format!("{error:?}")] {
+            assert!(!sink.contains("TASK_SECRET"), "{sink}");
+            assert!(!sink.contains("TOKEN_SECRET"), "{sink}");
+        }
+    }
 
     #[test]
     fn kill_group_accepts_success_and_absent_groups_without_probing() {

@@ -13,13 +13,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.25.2
+mise use github:oisin-ee/dogsled@v0.25.3
 ```
 
 Pi (extension, tools, and skill), from npm or as part of `@oisin-ee/oisinpi`:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.25.2
+pi install npm:@oisin-ee/pi-dogsled@0.25.3
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -27,14 +27,14 @@ At session start the extension compares its version with `dogsled --version` and
 Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/dogsled#v0.25.2
+claude plugin marketplace add oisin-ee/dogsled#v0.25.3
 claude plugin install dogsled@dogsled
 ```
 
 Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/dogsled --ref v0.25.2
+codex plugin marketplace add oisin-ee/dogsled --ref v0.25.3
 codex plugin add dogsled@dogsled
 ```
 
@@ -44,7 +44,7 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (left-docked work board):
 
 ```sh
-herdr plugin install oisin-ee/dogsled --ref v0.25.2 --yes
+herdr plugin install oisin-ee/dogsled --ref v0.25.3 --yes
 ```
 
 The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build step (`plugin/fetch.sh`) installs its own binary at `bin/dogsled`: the release archive for the manifest version, checked against its published SHA-256. When that release has no archive for the platform, it runs `cargo build --release --locked` instead, which needs Rust at the crate's `rust-version` or newer. A checksum mismatch stops the install. `DOGSLED_RELEASES` replaces the download base, such as a mirror. `herdr plugin link` skips build steps, so run `sh plugin/fetch.sh` in a linked checkout. No plugin starts host services.
@@ -113,6 +113,8 @@ Without a branch, a remote non-repository `--cwd` must exist there.
 Repository directories map to the same path relative to home. A linked-worktree caller needs `--branch` to preserve its branch remotely.
 
 The pane runs `dogsled exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
+A job runs only from its own durable claim in `jobs/ID.json`. `exec` refuses a job whose record is missing, unreadable, for another job, incomplete, for another command, already started, ended, or uncertain. A refusal starts no new process, log, or pane: a job that already started keeps the process and log it already has.
+The launch publishes a non-executable intent before it allocates a pane, and an executable claim once the pane is known. An allocation that stops, or a dispatch that was never proved, stays uncertain and never runs again. A launch replays a saved receipt only when the receipt matches the request and the recorded job; a claim alone is not a receipt.
 If the pane output closes, capture continues to the log and preserves the child exit code.
 The atomic `jobs/ID.json` contains the command, directory, host, owner, exit code, signal, reason, and millisecond timestamps.
 After the job ends, `exec` saves this final record, reports completion, then closes its own pane and tab.
@@ -542,7 +544,15 @@ With `--branch`, `place`, `agent`, and `run` use the branch's worktree on the se
 Before repository work, dogsled verifies the selected host's checkout against the caller's `git remote get-url origin`.
 If the host has no checkout of the repository, dogsled clones it from the caller's origin into the same path relative to home first.
 An existing path with a different origin, or a non-repository path, is an error. Dogsled does not overwrite it.
-Clone errors identify the host and origin. Dogsled does not silently move the work elsewhere.
+Clone errors identify the selected host and a safe cause. Dogsled does not show credential-bearing origins or command output.
+Dogsled does not silently move the work elsewhere.
+
+Remote preparation errors include a versioned `diagnostic` object in CLI JSON and MCP error results.
+The object contains the operation, a stable cause code, validated context, and available status and request correlation.
+Known causes include an unavailable base, an existing branch with `--base`, an occupied workspace, a checkout identity mismatch, and clone or setup failure.
+Admission records, failed tickets, unit responses, and owner notifications retain the safe cause.
+Unknown or malformed peer diagnostics state why Dogsled withheld the detail. Host-health summaries remain categorical.
+A missing-base check never fetches commits or changes branches or worktrees.
 After a fresh clone, dogsled checks mise configuration. If mise reports missing trust, dogsled trusts only that new checkout's configuration.
 For peers, a checkout under the local home maps to the same relative path under the peer's home.
 The peer reads its own host policy.

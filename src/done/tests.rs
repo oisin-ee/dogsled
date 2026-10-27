@@ -28,6 +28,7 @@ fn mark_at() -> Mark {
         sealed: None,
         marked_ms: 1,
         branch: None,
+        detached: false,
         reply: None,
         closed_ms: None,
     }
@@ -104,6 +105,45 @@ impl BranchRepo {
         self.run_ok("git", &words).unwrap();
     }
 
+    /// Run git in another directory of the same repository.
+    fn git_in(&self, dir: &std::path::Path, args: &[&str]) -> String {
+        use crate::shell::Shell as _;
+        let mut words = vec!["-C".into(), dir.display().to_string()];
+        words.extend(args.iter().map(ToString::to_string));
+        self.run_ok("git", &words).unwrap().stdout
+    }
+
+    /// A locked detached worktree with one commit, as an agent checkout whose branch is gone.
+    fn detached_worktree(&self) -> std::path::PathBuf {
+        self.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--lock",
+            "--reason",
+            "agent:worktree",
+            "--detach",
+            ".worktrees/detached",
+        ]);
+        let detached = self.path.join(".worktrees/detached");
+        std::fs::write(detached.join("work"), "detached work\n").unwrap();
+        self.git_in(&detached, &["add", "work"]);
+        self.git_in(
+            &detached,
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-q",
+                "-m",
+                "detached work",
+            ],
+        );
+        detached
+    }
+
     fn mark(&self, ledger: &Ledger) {
         let mut mark = mark_at();
         mark.closed_ms = Some(2);
@@ -121,6 +161,35 @@ impl Drop for BranchRepo {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+#[test]
+fn a_detached_checkout_is_preflighted_without_a_branch() {
+    let repo = BranchRepo::new();
+    let detached = repo.detached_worktree();
+    // The default branch holds the detached commit, so nothing is lost with the checkout.
+    let head = repo.git_in(&detached, &["rev-parse", "HEAD"]);
+    repo.git(&["merge", "-q", "--ff-only", head.trim()]);
+    let mut child = agent("working");
+    child.cwd = Some(detached.display().to_string());
+
+    match preflight(&repo, &child).unwrap() {
+        Preflight::Detached => {}
+        other => panic!("a detached checkout must have no branch: {other:?}"),
+    }
+}
+
+#[test]
+fn a_detached_checkout_with_unheld_commits_is_refused() {
+    let repo = BranchRepo::new();
+    let detached = repo.detached_worktree();
+    let mut child = agent("working");
+    child.cwd = Some(detached.display().to_string());
+
+    let error = preflight(&repo, &child).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("not held"), "{text}");
+    assert!(text.contains("Preserve the work"), "{text}");
 }
 
 #[test]

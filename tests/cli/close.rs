@@ -6,6 +6,8 @@ const TEARDOWN: &str = r#"[worktree]
 teardown = [
   "printf '%s %s %s %s\\n' \"$(pwd -P)\" {main} {branch} {path} >> \"$RIG/hook.log\"",
   "if test -f \"$RIG/hook-fails\"; then printf 'teardown failed: stack busy\\n' >&2; exit 1; fi",
+  "if test -f \"$RIG/hook-commit\"; then printf 'teardown work\\n' > teardown-work.txt && git add teardown-work.txt && git -c user.name=t -c user.email=t@t commit -q -m 'teardown work'; fi",
+  "if test -f \"$RIG/hook-dirt\"; then printf 'teardown dirt\\n' > teardown-dirt.txt; fi",
 ]
 "#;
 
@@ -279,6 +281,62 @@ fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("teardown command"), "{stderr}");
     assert!(stderr.contains("teardown failed: stack busy"), "{stderr}");
+    assert!(tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    let herdr = rig.log("herdr.log");
+    assert!(
+        !herdr.contains("workspace close") && !herdr.contains("pane close"),
+        "{herdr}"
+    );
+    let repo = rig.dir.join("home/repo");
+    assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
+/// The teardown ran after the loss check and left a commit that no ref holds. The checkout,
+/// its lock, its panes, and its item stay: the removal checks the loss rule again.
+#[test]
+fn a_teardown_commit_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
+    let (rig, tree) = close_rig("close-teardown-commit");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    fs::write(rig.dir.join("hook-commit"), "").unwrap();
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the teardown left unsaved work"),
+        "{stderr}"
+    );
+    assert!(tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    let herdr = rig.log("herdr.log");
+    assert!(
+        !herdr.contains("workspace close") && !herdr.contains("pane close"),
+        "{herdr}"
+    );
+    let repo = rig.dir.join("home/repo");
+    assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
+/// The teardown ran after the loss check and left a file that no ref holds. The checkout,
+/// its lock, its panes, and its item stay: the removal checks the loss rule again.
+#[test]
+fn a_teardown_file_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
+    let (rig, tree) = close_rig("close-teardown-dirt");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    fs::write(rig.dir.join("hook-dirt"), "").unwrap();
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the teardown left unsaved work"),
+        "{stderr}"
+    );
     assert!(tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
     let herdr = rig.log("herdr.log");
@@ -947,6 +1005,157 @@ fn doctor_finds_integrated_and_pushed_branches_without_a_worktree_and_prune_dele
     );
 }
 
+/// A locked detached worktree with one commit, as an agent checkout whose branch is gone. It
+/// has no branch to land, so its commits must be held by the default branch or a remote.
+fn detached_rig(name: &str) -> (Rig, PathBuf) {
+    let (rig, _) = close_rig(name);
+    let repo = rig.dir.join("home/repo");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--lock",
+            "--reason",
+            "agent:worktree",
+            "--detach",
+            ".worktrees/detached",
+        ],
+    );
+    let detached = repo.join(".worktrees/detached").canonicalize().unwrap();
+    fs::write(detached.join("work"), "detached work").unwrap();
+    git(&detached, &["add", "work"]);
+    git(&detached, &["commit", "-q", "-m", "detached work"]);
+    // Herdr shows the detached checkout in its own workspace, as any agent checkout.
+    let mut worktrees = rig.read("worktrees.json");
+    worktrees["result"]["worktrees"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"path":detached,"open_workspace_id":"w3","is_linked_worktree":true}));
+    rig.put("worktrees.json", &worktrees);
+    (rig, detached)
+}
+
+/// The detached checkout's own commit, which no ref holds until a test says so.
+fn detached_head(rig: &Rig) -> String {
+    git(
+        &rig.dir.join("home/repo/.worktrees/detached"),
+        &["rev-parse", "HEAD"],
+    )
+    .trim()
+    .to_string()
+}
+
+/// A pane that works in `tree`, as the child of a close.
+fn detached_panes(rig: &Rig, tree: &Path) {
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
+            {"pane_id":"w3:p1","workspace_id":"w3","agent":"pi","agent_status":"idle","cwd":tree}
+        ]}}),
+    );
+}
+
+#[test]
+fn close_removes_a_clean_detached_checkout_without_inventing_a_branch() {
+    let (rig, tree) = detached_rig("close-detached-native");
+    let repo = rig.dir.join("home/repo");
+    // The default branch holds the detached commit, so nothing is lost with the checkout.
+    git(
+        &repo,
+        &["merge", "-q", "--ff-only", detached_head(&rig).trim()],
+    );
+    detached_panes(&rig, &tree);
+    item(&rig, "local");
+    let before = git(&repo, &["branch", "--format=%(refname:short)"]);
+    let (code, closed) = rig.json(&["close", "w3:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    // The checkout is gone, and no branch was named for it or deleted.
+    assert!(!tree.exists());
+    assert_eq!(
+        closed["worktree"]["path"],
+        json!(tree.display().to_string())
+    );
+    assert_eq!(closed["worktree"]["branch"], "");
+    assert_eq!(closed["worktree"]["branch_deleted"], false);
+    assert_eq!(
+        git(&repo, &["branch", "--format=%(refname:short)"]),
+        before,
+        "close must not invent or delete a branch for a detached checkout"
+    );
+    // The teardown ran in the checkout, with an empty branch placeholder.
+    let main = repo.canonicalize().unwrap().display().to_string();
+    assert_eq!(
+        rig.log("hook.log"),
+        format!("{} {}  {}\n", tree.display(), main, tree.display())
+    );
+    assert!(rig.log("herdr.log").contains("workspace close w3"));
+}
+
+#[test]
+fn close_removes_a_detached_checkout_a_remote_holds_once_its_owner_is_gone() {
+    let (rig, tree) = detached_rig("close-detached-remote");
+    let repo = rig.dir.join("home/repo");
+    // A refreshed remote ref holds the commit, so nothing is lost with the checkout.
+    git(
+        &repo,
+        &[
+            "update-ref",
+            "refs/remotes/origin/detached",
+            detached_head(&rig).trim(),
+        ],
+    );
+    detached_panes(&rig, &tree);
+    // No item: no owner holds the checkout, so the close takes it.
+    let (code, closed) = rig.json(&["close", "w3:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    assert!(!tree.exists());
+    assert_eq!(closed["worktree"]["branch_deleted"], false);
+    assert_eq!(
+        git(&repo, &["branch", "--format=%(refname:short)"]),
+        "feat/x\nmain\n"
+    );
+}
+
+#[test]
+fn close_refuses_a_detached_checkout_whose_commits_no_ref_holds() {
+    let (rig, tree) = detached_rig("close-detached-unheld");
+    // A commit no ref holds: its work would be lost with the checkout.
+    fs::write(tree.join("more"), "more work").unwrap();
+    git(&tree, &["add", "more"]);
+    git(&tree, &["commit", "-q", "-m", "more work"]);
+    detached_panes(&rig, &tree);
+    item(&rig, "local");
+    let out = rig.run(&["close", "w3:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("commits are not held"), "{stderr}");
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("workspace close"));
+    assert!(!rig.log("herdr.log").contains("pane close"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    // The checkout is untouched: its commit is still there.
+    assert!(tree.join("more").exists());
+}
+
+#[test]
+fn close_refuses_a_dirty_detached_checkout_before_it_removes_anything() {
+    let (rig, tree) = detached_rig("close-detached-dirty");
+    detached_panes(&rig, &tree);
+    item(&rig, "local");
+    fs::write(tree.join("scratch"), "untracked").unwrap();
+    let out = rig.run(&["close", "w3:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("uncommitted"), "{stderr}");
+    assert!(tree.exists());
+    assert!(tree.join("scratch").exists());
+    assert!(!rig.log("herdr.log").contains("workspace close"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
 #[test]
 fn doctor_lists_a_detached_worktree_and_prune_removes_it_once_a_remote_holds_its_head() {
     let (rig, _) = close_rig("close-detached");
@@ -998,13 +1207,19 @@ fn doctor_lists_a_detached_worktree_and_prune_removes_it_once_a_remote_holds_its
     assert_eq!(found["removable"], false);
     fs::remove_file(probe.join("scratch")).unwrap();
     assert_eq!(entry(&rig)["removable"], true);
-    // `close` removes branch worktrees; it points at prune for a detached one.
+    // `close` removes an agent worktree. This probe is unlocked, so it is someone's own
+    // checkout: the pane closes and the checkout stays.
     rig.put(
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","agent":"pi","agent_status":"idle","cwd":probe}]}}),
     );
     let out = rig.run(&["close", "w3:p1"]);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("dogsled prune"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(probe.exists());
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     let stdout = String::from_utf8_lossy(&out.stdout);

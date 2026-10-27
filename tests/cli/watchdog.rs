@@ -31,6 +31,7 @@ esac
 printf '%s\n' "$*" >> "$RIG/git.log"
 case "$*" in
  *'rev-parse --path-format=absolute --git-common-dir') printf '%s\n' "$RIG/home/repo/.git" ;;
+ *'rev-parse HEAD') printf 'abc\n' ;;
  *'worktree list --porcelain -z')
  head=abc; tree=tree
  if test -f "$RIG/changed"; then head=def; fi
@@ -46,6 +47,7 @@ case "$*" in
  *'symbolic-ref --quiet refs/remotes/origin/HEAD') printf 'refs/remotes/origin/main\n' ;;
  *'merge-base --is-ancestor'*) if test -f "$RIG/unmerged"; then exit 1; fi ;;
  *'rev-parse refs/heads/feature refs/remotes/origin/main') printf 'abc\nmain\n' ;;
+ *'rev-parse abc refs/remotes/origin/main') printf 'abc\nmain\n' ;;
  *'merge-base main abc') printf 'fork\n' ;;
  *'diff --no-ext-diff --no-textconv --raw -z --no-renames --no-abbrev fork abc --')
  printf ':100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 M\0file\0' ;;

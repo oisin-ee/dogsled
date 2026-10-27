@@ -1,5 +1,6 @@
 //! Repository identity and home-relative checkout provisioning.
 
+use crate::diagnostic::{Cause, Context, Diagnostic, Operation};
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
 use crate::prepare;
@@ -191,79 +192,83 @@ pub fn local(
         let same_root = root.ok()
             && Path::new(root.stdout.trim()).canonicalize().ok() == path.canonicalize().ok();
         if !actual.ok() || !same_repository(actual.stdout.trim(), origin) || !same_root {
-            return Err(Error::Invalid(format!(
-                "{host}: checkout {display}: expected origin {origin}, found {}",
-                if actual.ok() {
-                    actual.stdout.trim()
-                } else {
-                    "<not a git checkout>"
-                }
-            )));
+            return Err(
+                Error::Invalid(format!("{host}: checkout identity mismatch")).with_diagnostic(
+                    Diagnostic::new(
+                        Operation::Checkout,
+                        Cause::CheckoutIdentityMismatch,
+                        Context::new(None, None, Some(&display)),
+                    ),
+                ),
+            );
         }
     } else {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let cloned = shell.run_setup(
-            "git",
-            &["clone".into(), "--".into(), origin.into(), display.clone()],
-        )?;
+        let cloned = shell
+            .run_setup(
+                "git",
+                &["clone".into(), "--".into(), origin.into(), display.clone()],
+            )
+            .map_err(|error| {
+                error.with_diagnostic(Diagnostic::new(
+                    Operation::Checkout,
+                    Cause::CloneFailed,
+                    Context::new(None, None, Some(&display)),
+                ))
+            })?;
         if !cloned.ok() {
             return Err(Error::Refused {
                 code: crate::error::Refusal::CloneFailed,
-                detail: format!(
-                    "{host}: clone {origin} into {display} failed: {}",
-                    cloned.stderr.trim()
-                ),
-            });
-        }
-        // Only the new checkout may acquire trust. Never trust ancestors or all configs.
-        let checked = shell.run_setup(
-            "mise",
-            &[
-                "-C".into(),
-                display.clone(),
-                "config".into(),
-                "ls".into(),
-                "--json".into(),
-            ],
-        )?;
-        if !checked.ok() {
-            let error = checked.stderr.to_lowercase();
-            if !error.contains("trust") {
-                return Err(Error::Invalid(format!(
-                    "{host}: mise config {display}: {}",
-                    checked.stderr.trim()
-                )));
+                detail: format!("{host}: the peer could not clone the repository"),
             }
-            let config = [
-                "mise.toml",
-                ".mise.toml",
-                ".config/mise.toml",
-                ".config/mise/config.toml",
-            ]
-            .into_iter()
-            .map(|p| path.join(p))
-            .find(|p| p.is_file())
-            .ok_or_else(|| {
-                Error::Invalid(format!(
-                    "{host}: untrusted config outside new checkout {display}"
-                ))
-            })?;
-            shell.run_setup_ok("mise", &["trust".into(), config.display().to_string()])?;
-            shell.run_setup_ok(
-                "mise",
-                &[
-                    "-C".into(),
-                    display.clone(),
-                    "config".into(),
-                    "ls".into(),
-                    "--json".into(),
-                ],
-            )?;
+            .with_diagnostic(Diagnostic::new(
+                Operation::Checkout,
+                Cause::CloneFailed,
+                Context::new(None, None, Some(&display)),
+            )));
         }
+        trust_new_checkout(shell, &path).map_err(|error| {
+            error.with_diagnostic(Diagnostic::new(
+                Operation::Checkout,
+                Cause::SetupFailed,
+                Context::new(None, None, Some(&display)),
+            ))
+        })?;
     }
     Ok(display)
+}
+
+/// Only the new checkout may acquire trust. Never trust ancestors or all configs.
+fn trust_new_checkout(shell: &dyn Shell, path: &Path) -> Result<()> {
+    let args = [
+        "-C".into(),
+        path.display().to_string(),
+        "config".into(),
+        "ls".into(),
+        "--json".into(),
+    ];
+    let checked = shell.run_setup("mise", &args)?;
+    if checked.ok() {
+        return Ok(());
+    }
+    if !checked.stderr.to_lowercase().contains("trust") {
+        return Err(Error::Invalid("new checkout setup failed".into()));
+    }
+    let config = [
+        "mise.toml",
+        ".mise.toml",
+        ".config/mise.toml",
+        ".config/mise/config.toml",
+    ]
+    .into_iter()
+    .map(|p| path.join(p))
+    .find(|p| p.is_file())
+    .ok_or_else(|| Error::Invalid("untrusted config outside new checkout".into()))?;
+    shell.run_setup_ok("mise", &["trust".into(), config.display().to_string()])?;
+    shell.run_setup_ok("mise", &args)?;
+    Ok(())
 }
 
 #[cfg(test)]
