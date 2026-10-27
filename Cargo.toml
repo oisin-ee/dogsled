@@ -3,7 +3,7 @@ members = [".", "portal-types", "web"]
 
 [package]
 name = "dogsled"
-version = "0.25.1"
+version = "0.25.2"
 edition = "2024"
 rust-version = "1.99"
 description = "Host status and placement for coding agents across Herdr hosts"
