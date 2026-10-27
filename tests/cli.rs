@@ -68,6 +68,9 @@ pub(crate) struct Owned {
     group: Option<u32>,
     /// The child to reap, when this test spawned it.
     child: Option<std::process::Child>,
+    /// Whether the guard already killed and reaped this process. A second call is a
+    /// no-op, so a later field drop signals nothing.
+    terminated: bool,
 }
 
 impl Owned {
@@ -83,6 +86,7 @@ impl Owned {
             pid,
             group: Some(pid),
             child: Some(child),
+            terminated: false,
         }
     }
 
@@ -124,12 +128,25 @@ impl Owned {
             pid,
             group,
             child: None,
+            terminated: false,
         }
     }
 }
 
 impl Drop for Owned {
     fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+impl Owned {
+    /// Kill the process and its group and wait for it to end. The call is idempotent: a
+    /// second call does nothing, so a later field drop signals nothing.
+    fn terminate(&mut self) {
+        if self.terminated {
+            return;
+        }
+        self.terminated = true;
         // A child this guard spawned is the test's own child, so the test reaps it. A
         // reaped child has ended, so the guard signals nothing for it afterwards.
         let reaped = match self.child.as_mut() {
@@ -177,9 +194,11 @@ impl Drop for Owned {
 
 /// A command a test started in the background. The test owns the command as its own
 /// child, so the test reaps it and reads its exit status. A command that never ends
-/// fails the test on the bound instead of hanging it.
+/// fails the test on the bound instead of hanging it. Dropping the guard kills the
+/// command and its group and reaps it, so the command does not outlive the test.
 pub(crate) struct Background {
-    /// The command the test owns. The guard kills the command and its group and reaps it.
+    /// The command the test owns. The guard kills the command and its group and reaps it
+    /// before the guard joins the reader.
     owned: Owned,
     /// The thread that drains the command's output, so a full pipe never blocks it.
     reader: Option<std::thread::JoinHandle<()>>,
@@ -205,7 +224,10 @@ impl Background {
 
 impl Drop for Background {
     fn drop(&mut self) {
-        // The owned command is killed and reaped by the guard.
+        // The owned command group is killed and reaped first. The reader ends only when
+        // the command's streams close, so joining the reader before the kill waits on a
+        // command that never ends.
+        self.owned.terminate();
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -1224,4 +1246,42 @@ fn watch_prints_a_frame_without_waiting_for_the_interval() {
     owned.child_mut().kill().unwrap();
     reader.join().unwrap();
     assert_eq!(frame.unwrap(), "local 1/2");
+}
+
+/// Dropping a background command kills the command and its group before the guard joins
+/// the reader. The reader ends only when the command's streams close, so a drop that
+/// joins the reader first waits on a command that never ends. The drop runs on its own
+/// thread, so a drop that waits fails the test on the bound instead of hanging it.
+#[test]
+fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
+    let rig = Rig::new("background-drop");
+    rig.snapshot("state/host.json", now(), 1.0, 2);
+    // The command never ends on its own: it watches until the test ends it.
+    let background = rig.start(&["status", "--watch", "--line", "--interval", "3600"]);
+    let pid = background.owned.pid;
+    let group = background.owned.group;
+    let (send, recv) = std::sync::mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        drop(background);
+        let _ = send.send(());
+    });
+    if recv.recv_timeout(Duration::from_secs(10)).is_err() {
+        // The drop is still waiting on the reader. The test kills the command's group,
+        // so no process outlives the test and the drop ends.
+        if let Some(group) = group
+            && let Ok(group) = i32::try_from(group)
+        {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(group),
+                nix::sys::signal::SIGKILL,
+            );
+        }
+        let _ = dropper.join();
+        panic!("the drop joined the reader of a command that never ends");
+    }
+    dropper.join().unwrap();
+    assert!(
+        wait_gone(pid, PROCESS_DEADLINE),
+        "the command outlived its drop"
+    );
 }
