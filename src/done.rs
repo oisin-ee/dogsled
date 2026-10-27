@@ -49,6 +49,11 @@ pub struct Mark {
     pub detached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<crate::items::Reply>,
+    /// The reply came from the native `done` handoff, so it proves the child finished. A
+    /// sealed terminal receipt is a result, not a native `done`, so it never proves a
+    /// handoff. Marks from before this field load with `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_ms: Option<u64>,
 }
@@ -282,6 +287,7 @@ pub fn mark(
         branch,
         detached,
         reply: None,
+        native_done: false,
         closed_ms: None,
     };
     ledger.with_lock("done", || {
@@ -658,6 +664,9 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
                 reported_ms: None,
                 done: true,
             });
+            // The native `done` handoff produced this reply. It is the only provenance
+            // that proves the child finished.
+            mark.native_done = true;
             save(ledger, &mark)?;
         }
         if let (Some(id), Some(reply)) = (&mark.item, &mark.reply)
@@ -668,7 +677,7 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
                         .is_some_and(|r| r.result_id.is_some() || (r.seq == reply.seq && r.done))
             })
         {
-            crate::items::set_reply(ledger, id, reply.clone())?;
+            crate::items::set_reply_with(ledger, id, reply.clone(), mark.native_done)?;
         }
         if mark.branch.is_none() && !mark.detached {
             match preflight(shell, agent) {

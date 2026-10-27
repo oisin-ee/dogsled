@@ -30,6 +30,7 @@ fn mark_at() -> Mark {
         branch: None,
         detached: false,
         reply: None,
+        native_done: false,
         closed_ms: None,
     }
 }
@@ -379,6 +380,35 @@ fn a_handoff_is_recorded_only_with_its_reply_and_terminal_evidence() {
     );
 }
 
+/// The mark the child host keeps carries the native `done` provenance once its handoff
+/// saves the final reply. Only that provenance proves a handoff later, when the pane is
+/// gone.
+#[test]
+fn the_mark_records_the_native_done_provenance_with_its_reply() {
+    let ledger = ledger();
+    let mut mark = mark_at();
+    mark.sealed = Some(0);
+    put(&ledger, mark);
+    // The native done path saves the reply on the mark. The mark is the durable record.
+    let mut mark = list(&ledger).unwrap().remove(0);
+    mark.reply = Some(crate::items::Reply {
+        seq: 0,
+        result_id: None,
+        text: "the final reply".into(),
+        captured_ms: 2,
+        reported_ms: None,
+        done: true,
+    });
+    mark.native_done = true;
+    put(&ledger, mark);
+    assert!(list(&ledger).unwrap()[0].native_done);
+    // A mark from before the provenance existed has none, and it never proves a handoff.
+    let mut legacy = list(&ledger).unwrap().remove(0);
+    legacy.native_done = false;
+    put(&ledger, legacy);
+    assert!(!list(&ledger).unwrap()[0].native_done);
+}
+
 #[test]
 fn restored_terminal_without_counters_seals_the_same_session() {
     let ledger = ledger();
@@ -499,6 +529,8 @@ fn legacy_migration_retains_missing_marks_and_rekeys_restored_panes_once() {
     assert_eq!(first.len(), 2);
     assert!(!first.contains_key("old_terminal"));
     assert!(first.contains_key("missing_terminal"));
+    // A mark from before the native `done` provenance existed has none.
+    assert!(first.values().all(|mark| !mark.native_done));
     finished(&ledger, &[restored]).unwrap();
     assert_eq!(first, ledger.read(FILE).unwrap().unwrap());
 }

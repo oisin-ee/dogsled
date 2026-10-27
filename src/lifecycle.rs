@@ -377,18 +377,20 @@ pub fn evidence<'a>(
     (evidence, agent)
 }
 
-/// The recorded final handoff of an item whose pane is no longer observed. The mark the
-/// child host kept, with its saved final reply, or the reply the owner imported into the
-/// item, proves that the native `done` was accepted and its handoff recorded. The handoff
-/// outlasts the pane, so an unavailable host does not erase it.
+/// The recorded final handoff of an item whose pane is no longer observed. Only the native
+/// `done` proves a handoff: a mark the child host kept with a saved final reply, or an item
+/// reply that carries the native `done` provenance. A terminal receipt is a sealed result,
+/// not a native `done`, so it never proves the handoff. The handoff outlasts the pane, so an
+/// unavailable host does not erase it.
 fn recorded_handoff(item: &crate::items::Item, report: Option<&crate::hosts::HostReport>) -> bool {
-    if item.reply.as_ref().is_some_and(|reply| reply.done) {
+    if item.native_done_reply().is_some() {
         return true;
     }
     report.is_some_and(|report| {
         report.handoffs.iter().any(|mark| {
             mark.pane == item.pane
                 && mark.item.as_deref().is_none_or(|id| id == item.id)
+                && mark.native_done
                 && mark.reply.is_some()
         })
     })
@@ -736,6 +738,7 @@ mod tests {
                 reported_ms: None,
                 done: true,
             }),
+            native_done: true,
             closed_ms: None,
         });
         let (found, observed) = evidence(&item, &hosts);
@@ -754,10 +757,10 @@ mod tests {
         assert_eq!(found.handoff, Handoff::None, "{found:?}");
     }
 
-    /// The owner imported the final reply into the item. That reply is the durable
-    /// handoff, so the item stays done after its pane is gone.
+    /// The owner imported the native `done` final reply into the item. That reply is the
+    /// durable handoff, so the item stays done after its pane is gone.
     #[test]
-    fn an_imported_final_reply_keeps_a_gone_item_done() {
+    fn a_native_done_final_reply_keeps_a_gone_item_done() {
         let (mut item, mut hosts) = host_with(agent("w2:p1", "idle"));
         hosts[0].probe.as_mut().unwrap().agent_panes.clear();
         item.reply = Some(crate::items::Reply {
@@ -768,9 +771,77 @@ mod tests {
             reported_ms: None,
             done: true,
         });
+        item.native_done = true;
         let (found, _) = evidence(&item, &hosts);
         assert_eq!(found.handoff, Handoff::Recorded, "{found:?}");
         assert_eq!(classify(&found).state, State::Done);
+    }
+
+    /// The owner imported the native `done` mark of a gone child. The mark's provenance
+    /// reaches the item, so the item stays done even though its host is down.
+    #[test]
+    fn a_merged_native_done_mark_keeps_a_gone_item_done_when_the_host_is_down() {
+        let (item, mut hosts) = host_with(agent("w2:p1", "idle"));
+        // The pane is gone and the host cannot be read any more.
+        hosts[0].probe.as_mut().unwrap().agent_panes.clear();
+        hosts[0].reachable = false;
+        hosts[0].service = "down".into();
+        // The child host kept the mark, with its reply and the native `done` provenance.
+        hosts[0].handoffs.push(crate::done::Mark {
+            pane: item.pane.clone(),
+            item: Some(item.id.clone()),
+            session: Some("session".into()),
+            name: Some("worker".into()),
+            after: Some(10),
+            sealed: Some(0),
+            marked_ms: 1,
+            branch: None,
+            detached: false,
+            reply: Some(crate::items::Reply {
+                seq: 0,
+                result_id: None,
+                text: "done".into(),
+                captured_ms: 2,
+                reported_ms: None,
+                done: true,
+            }),
+            native_done: true,
+            closed_ms: None,
+        });
+        // The owner imports the mark into the item.
+        let mut items = vec![item.clone()];
+        crate::items::merge_handoffs(&mut items, &hosts);
+        let item = items.remove(0);
+        assert!(item.native_done_reply().is_some());
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(found.handoff, Handoff::Recorded, "{found:?}");
+        assert_eq!(classify(&found).state, State::Done);
+    }
+
+    /// A sealed terminal receipt is not a native `done`. A unit worker that sealed without
+    /// calling `done` never proves a handoff, so a gone pane is not done.
+    #[test]
+    fn a_terminal_receipt_reply_never_proves_a_native_done_handoff() {
+        let (mut item, mut hosts) = host_with(agent("w2:p1", "idle"));
+        hosts[0].probe.as_mut().unwrap().agent_panes.clear();
+        // The reply the unit receipt import writes: a sealed result, not a native `done`.
+        item.reply = Some(crate::items::Reply {
+            seq: 0,
+            result_id: Some("r-1-entry".into()),
+            text: "the sealed result".into(),
+            captured_ms: 5,
+            reported_ms: None,
+            done: true,
+        });
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(found.handoff, Handoff::None, "{found:?}");
+        assert_ne!(classify(&found).state, State::Done);
+        // The host is unreachable as well: the missing native `done` still is missing.
+        hosts[0].reachable = false;
+        hosts[0].service = "down".into();
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(found.handoff, Handoff::None, "{found:?}");
+        assert_ne!(classify(&found).state, State::Done);
     }
 
     /// Competing launch records contradict each other. They prove neither a launch nor its
