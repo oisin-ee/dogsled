@@ -340,6 +340,45 @@ fn branch_refresh_keeps_real_git_failures_as_errors_without_settling() {
     }
 }
 
+/// A recorded handoff needs the saved final reply and the terminal launch evidence. Without
+/// them the native `done` was only accepted, so the lifecycle derives `finishing`.
+#[test]
+fn a_handoff_is_recorded_only_with_its_reply_and_terminal_evidence() {
+    let ledger = ledger();
+    let mut mark = mark_at();
+    mark.sealed = Some(0);
+    put(&ledger, mark);
+    // The turn ended and the mark is sealed, but no final reply was saved yet.
+    let mut agents = vec![agent("idle")];
+    observe(&ledger, &mut agents).unwrap();
+    assert!(agents[0].done, "the native done was accepted");
+    assert_eq!(agents[0].handoff.as_deref(), Some("accepted"));
+    assert!(agents[0].finishing);
+    assert_eq!(
+        crate::lifecycle::of_agent(&agents[0], crate::lifecycle::Host::Up).state,
+        crate::lifecycle::State::Finishing
+    );
+    // The final reply is saved, and no unit launch holds the handoff back.
+    let mut mark = list(&ledger).unwrap().remove(0);
+    mark.reply = Some(crate::items::Reply {
+        seq: 0,
+        result_id: None,
+        text: "the final reply".into(),
+        captured_ms: 2,
+        reported_ms: None,
+        done: true,
+    });
+    put(&ledger, mark);
+    let mut agents = vec![agent("idle")];
+    observe(&ledger, &mut agents).unwrap();
+    assert_eq!(agents[0].handoff.as_deref(), Some("recorded"));
+    assert!(!agents[0].finishing);
+    assert_eq!(
+        crate::lifecycle::of_agent(&agents[0], crate::lifecycle::Host::Up).state,
+        crate::lifecycle::State::Done
+    );
+}
+
 #[test]
 fn restored_terminal_without_counters_seals_the_same_session() {
     let ledger = ledger();

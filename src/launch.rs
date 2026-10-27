@@ -188,6 +188,9 @@ pub enum LaunchProgress {
     Attempted,
     /// The start is confirmed: the pane runs the launched agent.
     Confirmed,
+    /// More than one launch record names this pane. The records contradict each other, so
+    /// nothing is proved: not a launch, and not the absence of one.
+    Ambiguous,
 }
 
 impl LaunchProgress {
@@ -200,6 +203,7 @@ impl LaunchProgress {
             Self::Allocated => "allocated",
             Self::Attempted => "attempted",
             Self::Confirmed => "confirmed",
+            Self::Ambiguous => "ambiguous",
         }
     }
 }
@@ -219,8 +223,11 @@ pub fn progress(ledger: &Ledger, pane: &str) -> Result<LaunchProgress> {
                 LaunchProgress::Allocating
             }
         }
-        // No record, or competing records: nothing is proved.
-        _ => LaunchProgress::None,
+        // No record names this pane: no launch is proved.
+        [] => LaunchProgress::None,
+        // Competing records contradict each other. That is not the absence of a launch, so
+        // it gets its own name and never reads as "nothing was launched".
+        [_, _, ..] => LaunchProgress::Ambiguous,
     })
 }
 
@@ -1099,6 +1106,43 @@ mod receipt_tests {
             owner_id: "owner".into(),
             request_id: request_id.into(),
         }
+    }
+
+    /// Competing launch records contradict each other. They prove neither a launch nor its
+    /// absence, so they get their own name and never read as "nothing was launched".
+    #[test]
+    fn competing_launch_records_are_ambiguous_not_missing() {
+        let dir = std::env::temp_dir().join(crate::ledger::new_id());
+        let ledger = Ledger::new(dir.clone());
+        let receipts = ledger.child("launches");
+        for id in ["first", "second"] {
+            receipts
+                .write(
+                    &format!("{id}.progress.json"),
+                    &json!({
+                        "request":{"id":id,"action":{"type":"agent","kind":"pi","name":"worker",
+                            "message":"go"},"host":"local","cwd":"/checkout","pane":"w2:p2",
+                            "terminal":"term_shell","owner":"w1:p1"},
+                        "pane":"w2:p2","terminal":"term_shell","attempted":true,"confirmed":true,
+                        "result":{},"error":null
+                    }),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            progress(&ledger, "w2:p2").unwrap(),
+            LaunchProgress::Ambiguous
+        );
+        // One record names the pane: the launch is proved.
+        std::fs::remove_file(receipts.dir.join("second.progress.json")).unwrap();
+        assert_eq!(
+            progress(&ledger, "w2:p2").unwrap(),
+            LaunchProgress::Confirmed
+        );
+        // No record names the pane: no launch is proved.
+        std::fs::remove_file(receipts.dir.join("first.progress.json")).unwrap();
+        assert_eq!(progress(&ledger, "w2:p2").unwrap(), LaunchProgress::None);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -180,22 +180,36 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
         let owners = owners(ledger)?;
         for agent in agents {
             let mut done = false;
+            let mut recorded = false;
             let mut called = false;
+            // The terminal evidence the unit return needs. It is one read per pane.
+            let mut ready = false;
             for mark in marks.values_mut().filter(|m| matches(m, agent)) {
                 let evidence = evidence(ledger, mark, agent);
                 seal(mark, agent, &evidence);
-                done |= terminal(mark, &evidence)
+                let closable = terminal(mark, &evidence)
                     && waiting(agent)
                     && !owners.contains_key(&agent.pane);
+                done |= closable;
+                // The handoff is recorded only with its saved final reply and the
+                // launch evidence the unit return needs.
+                if closable && mark.reply.is_some() {
+                    if !ready {
+                        ready = crate::launch::handoff_ready(ledger, &agent.pane)?;
+                    }
+                    recorded |= ready;
+                }
                 called = true;
             }
+            // `done` stays the guard's turn-end fact: the handoff that records the reply
+            // looks for it. The published handoff below is the stricter claim.
             agent.done = done;
             // The native `done` was accepted, but the handoff is not complete.
-            agent.finishing = called && !done;
+            agent.finishing = called && !recorded;
             // The handoff is published from these fresh facts, so a second observation
             // never reads back its own previous value.
             agent.handoff = Some(
-                match (done, agent.finishing) {
+                match (recorded, agent.finishing) {
                     (true, _) => "recorded",
                     (false, true) => "accepted",
                     (false, false) => "none",

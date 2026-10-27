@@ -332,13 +332,43 @@ fn the_host_publishes_a_lifecycle_state_beside_the_raw_terminal_state() {
     assert_ne!(published["lifecycle"], "done", "{published}");
 }
 
-/// A child that called `done` and ended its turn has a recorded final handoff. The host
-/// publishes `done`, and the raw terminal state stays as it was.
+/// A child that called `done` and ended its turn, but whose final reply is not saved yet,
+/// has an accepted handoff, not a recorded one. The host publishes `finishing`, and the raw
+/// terminal state stays as it was.
 #[test]
-fn a_recorded_final_handoff_publishes_done_and_keeps_the_raw_terminal_state() {
+fn an_accepted_handoff_publishes_finishing_until_the_final_reply_is_saved() {
     let (rig, tree) = close_rig("done-handoff");
     worker(&rig, &tree, "idle");
     rig.done("term_child", "w2:p1", 10);
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let published = published_lifecycle(&rig, "w2:p1");
+    assert_eq!(published["state"], "idle", "{published}");
+    assert_eq!(published["handoff"], "accepted", "{published}");
+    assert_eq!(published["lifecycle"], "finishing", "{published}");
+    assert_ne!(published["lifecycle"], "done", "{published}");
+}
+
+/// A child that called `done`, ended its turn and saved its final reply has a recorded
+/// final handoff. The host publishes `done`, and the raw terminal state stays as it was.
+#[test]
+fn a_recorded_final_handoff_publishes_done_and_keeps_the_raw_terminal_state() {
+    let (rig, tree) = close_rig("done-handoff-recorded");
+    worker(&rig, &tree, "idle");
+    rig.done("term_child", "w2:p1", 10);
+    // The mark keeps the final reply of the sealed turn.
+    rig.put(
+        "state/done.json",
+        &json!({"terminal": {
+            "pane":"w2:p1","after":9,"sealed":10,"marked_ms":1,
+            "reply":{"seq":10,"text":"the final reply","captured_ms":2,"done":true}
+        }}),
+    );
     rig.snapshot("state/host.json", now(), 0.0, 8);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(

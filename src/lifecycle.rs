@@ -99,6 +99,9 @@ pub enum Launch {
     Progress,
     /// The launch is confirmed.
     Confirmed,
+    /// Competing launch records name the pane. They contradict each other, so they prove
+    /// neither a launch nor the absence of one.
+    Ambiguous,
 }
 
 /// What the evidence says about the pane's existence.
@@ -179,6 +182,11 @@ pub fn classify(e: &Evidence) -> Derived {
         if e.launch == Launch::Progress {
             return known(State::Starting);
         }
+        // Competing launch records contradict each other. They prove neither a launch nor
+        // its absence, so no state is claimed from them.
+        if e.launch == Launch::Ambiguous {
+            return gap(State::Unknown, "ambiguous launch evidence");
+        }
         return gap(State::Unknown, "no agent observed");
     };
     if e.host == Host::Unavailable {
@@ -204,6 +212,9 @@ pub fn classify(e: &Evidence) -> Derived {
         // A launch that has not been confirmed is still starting up. A live turn would
         // have proved it, so the terminal never outranks this.
         _ if e.launch == Launch::Progress => known(State::Starting),
+        // Competing launch records contradict each other. The turn ended, but the launch
+        // evidence about it is contradictory, so no state is claimed from it.
+        _ if e.launch == Launch::Ambiguous => gap(State::Unknown, "ambiguous launch evidence"),
         _ if ended(terminal) => match e.signal {
             Some(Signal::Blocked) => known(State::Blocked),
             Some(Signal::Ask) => known(State::Asking),
@@ -265,6 +276,9 @@ fn agent_launch(agent: &Agent) -> Launch {
         Some(name) if name == crate::launch::LaunchProgress::Confirmed.as_str() => {
             Launch::Confirmed
         }
+        Some(name) if name == crate::launch::LaunchProgress::Ambiguous.as_str() => {
+            Launch::Ambiguous
+        }
         Some(_) => Launch::Progress,
         None => Launch::None,
     }
@@ -319,13 +333,7 @@ pub fn evidence<'a>(
     // progress it recorded for each agent; without an observed agent, the host's own
     // sample dates the launch confirmation.
     let launch = match agent {
-        Some(agent) => match agent.launch_progress.as_deref() {
-            Some(name) if name == crate::launch::LaunchProgress::Confirmed.as_str() => {
-                Launch::Confirmed
-            }
-            Some(_) => Launch::Progress,
-            None => Launch::None,
-        },
+        Some(agent) => agent_launch(agent),
         None => {
             if confirmed.is_some_and(|confirmed| sampled.is_some_and(|sampled| sampled < confirmed))
             {
@@ -353,13 +361,37 @@ pub fn evidence<'a>(
     let evidence = Evidence {
         host,
         terminal: agent.map(|a| a.state.as_str()),
-        handoff: agent.map_or(Handoff::None, handoff),
+        handoff: match agent {
+            // The host published what it observed, and it is the current answer.
+            Some(agent) => handoff(agent),
+            // No agent is observed. A recorded handoff is durable, so it outlasts the
+            // pane and the host that published it.
+            None if recorded_handoff(item, report) => Handoff::Recorded,
+            None => Handoff::None,
+        },
         owns_open: agent.is_some_and(|a| a.owns_open),
         launch,
         pane,
         ..Evidence::default()
     };
     (evidence, agent)
+}
+
+/// The recorded final handoff of an item whose pane is no longer observed. The mark the
+/// child host kept, with its saved final reply, or the reply the owner imported into the
+/// item, proves that the native `done` was accepted and its handoff recorded. The handoff
+/// outlasts the pane, so an unavailable host does not erase it.
+fn recorded_handoff(item: &crate::items::Item, report: Option<&crate::hosts::HostReport>) -> bool {
+    if item.reply.as_ref().is_some_and(|reply| reply.done) {
+        return true;
+    }
+    report.is_some_and(|report| {
+        report.handoffs.iter().any(|mark| {
+            mark.pane == item.pane
+                && mark.item.as_deref().is_none_or(|id| id == item.id)
+                && mark.reply.is_some()
+        })
+    })
 }
 
 /// The evidence for a queued request: a pending ticket with no execution evidence, or a
@@ -676,6 +708,87 @@ mod tests {
         publish(&mut agent, Host::Up);
         assert_eq!(agent.lifecycle.as_deref(), Some("working"));
         assert!(agent.lifecycle_gap.is_none());
+    }
+
+    /// A recorded final handoff survives the pane it belongs to. The host report carries
+    /// the mark the child host kept, with its saved final reply.
+    #[test]
+    fn a_recorded_handoff_stays_done_when_the_pane_is_gone() {
+        let (mut item, mut hosts) = host_with(agent("w2:p1", "idle"));
+        // The pane is gone: the host no longer observes an agent for it.
+        hosts[0].probe.as_mut().unwrap().agent_panes.clear();
+        // The child host kept the mark, and the mark holds the final reply.
+        hosts[0].handoffs.push(crate::done::Mark {
+            pane: item.pane.clone(),
+            item: Some(item.id.clone()),
+            session: Some("session".into()),
+            name: Some("worker".into()),
+            after: Some(10),
+            sealed: Some(0),
+            marked_ms: 1,
+            branch: None,
+            detached: false,
+            reply: Some(crate::items::Reply {
+                seq: 0,
+                result_id: None,
+                text: "done".into(),
+                captured_ms: 2,
+                reported_ms: None,
+                done: true,
+            }),
+            closed_ms: None,
+        });
+        let (found, observed) = evidence(&item, &hosts);
+        assert!(observed.is_none(), "the pane is not observed any more");
+        assert_eq!(found.handoff, Handoff::Recorded, "{found:?}");
+        assert_eq!(classify(&found).state, State::Done);
+        // The host is unreachable as well: the recorded handoff still proves the handoff.
+        hosts[0].reachable = false;
+        hosts[0].service = "down".into();
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(found.handoff, Handoff::Recorded, "{found:?}");
+        assert_eq!(classify(&found).state, State::Done);
+        // A pane that is gone without a recorded handoff stays lost.
+        item.pane = "w3:p1".into();
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(found.handoff, Handoff::None, "{found:?}");
+    }
+
+    /// The owner imported the final reply into the item. That reply is the durable
+    /// handoff, so the item stays done after its pane is gone.
+    #[test]
+    fn an_imported_final_reply_keeps_a_gone_item_done() {
+        let (mut item, mut hosts) = host_with(agent("w2:p1", "idle"));
+        hosts[0].probe.as_mut().unwrap().agent_panes.clear();
+        item.reply = Some(crate::items::Reply {
+            seq: 3,
+            result_id: None,
+            text: "the final reply".into(),
+            captured_ms: 5,
+            reported_ms: None,
+            done: true,
+        });
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(found.handoff, Handoff::Recorded, "{found:?}");
+        assert_eq!(classify(&found).state, State::Done);
+    }
+
+    /// Competing launch records contradict each other. They prove neither a launch nor its
+    /// absence, so an idle agent never reads as stopped.
+    #[test]
+    fn competing_launch_records_are_unknown_not_stopped() {
+        let (item, mut hosts) = host_with(agent("w2:p1", "idle"));
+        hosts[0].probe.as_mut().unwrap().agent_panes[0].launch_progress =
+            Some(crate::launch::LaunchProgress::Ambiguous.as_str().to_owned());
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(found.launch, Launch::Ambiguous, "{found:?}");
+        let derived = classify(&found);
+        assert_eq!(derived.state, State::Unknown);
+        assert!(derived.gap.is_some());
+        // A live turn still outranks the contradiction: the turn itself is proved.
+        hosts[0].probe.as_mut().unwrap().agent_panes[0].state = "working".into();
+        let (found, _) = evidence(&item, &hosts);
+        assert_eq!(classify(&found).state, State::Working);
     }
 
     /// The board's evidence builder needs host reports. A local host with one agent.
