@@ -294,10 +294,26 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
     Ok((pane, terminal))
 }
 
+/// The pane's live terminal identity, or an error when the pane is not listed with one.
+/// A pane that is not listed has no proven identity, and a pane that is listed without a
+/// terminal id has none either.
+fn live_terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
+    crate::cleanup::pane_snapshot(shell)?
+        .1
+        .get(pane)
+        .cloned()
+        .ok_or_else(|| Error::Invalid(format!("{pane}: cannot establish launch terminal identity")))
+}
+
 /// Retire a pane this launch allocated. Only that pane is closed, and only after the same
 /// guards the launch cleanup uses: the caller's own pane, a focused pane, a pane an agent
 /// owns, a busy pane, and a pane whose terminal identity changed are never closed here.
-fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>) -> Result<()> {
+///
+/// The terminal identity must be proven before the pane closes. The launch recorded one,
+/// the pane is listed, and the listed terminal equals the recorded one. A missing recorded
+/// identity, an unlisted pane, or a different live terminal is not proof, so the pane
+/// stays open.
+pub(crate) fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>) -> Result<()> {
     if std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
         || crate::cleanup::current_panes(shell)?
             .iter()
@@ -305,13 +321,12 @@ fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>) -> Result<
     {
         return Err(Error::Invalid(format!("{pane}: caller or focused pane")));
     }
-    let expected = terminal.filter(|id| !id.is_empty());
-    if let Some(expected) = expected
-        && crate::cleanup::pane_snapshot(shell)?
-            .1
-            .get(pane)
-            .is_some_and(|current| current != expected)
-    {
+    let Some(expected) = terminal.filter(|id| !id.is_empty()) else {
+        return Err(Error::Invalid(format!(
+            "{pane}: the launch recorded no terminal identity"
+        )));
+    };
+    if live_terminal(shell, pane)? != expected {
         return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
     }
     if crate::probe::agent_list(shell)?
@@ -326,12 +341,7 @@ fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>) -> Result<
         return Err(Error::Invalid(format!("{pane}: the pane is busy")));
     }
     // Inspection must not authorize closing a replacement terminal.
-    if let Some(expected) = expected
-        && crate::cleanup::pane_snapshot(shell)?
-            .1
-            .get(pane)
-            .is_some_and(|current| current != expected)
-    {
+    if live_terminal(shell, pane)? != expected {
         return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
     }
     shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;

@@ -664,3 +664,50 @@ fn the_validity_clock_never_moves_back() {
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
+
+/// A launch retires its own pane only when the terminal identity is proven: the launch
+/// recorded one, the pane is listed, and the listed terminal equals it. Missing,
+/// unlisted, or different identity is never proof, so the pane stays open.
+#[test]
+fn retire_pane_closes_only_on_proven_terminal_identity() {
+    let script = |listed: &str| {
+        let shell = Fake::new();
+        shell.on("herdr pane list", listed);
+        shell.on("herdr agent list", r#"{"result":{"agents":[]}}"#);
+        shell.on(
+            "herdr pane process-info --pane pane_new",
+            r#"{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}"#,
+        );
+        shell.on("herdr pane close pane_new", "{}");
+        shell
+    };
+    let closed = |shell: &Fake| {
+        shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "herdr pane close pane_new")
+    };
+    let listed = r#"{"result":{"panes":[{"pane_id":"pane_new","terminal_id":"term_a"}]}}"#;
+    let unlisted = r#"{"result":{"panes":[{"pane_id":"other","terminal_id":"term_a"}]}}"#;
+
+    // Positive control: recorded and live identity are equal.
+    let shell = script(listed);
+    work::retire_pane(&shell, "pane_new", Some("term_a")).expect("proven identity retires");
+    assert!(closed(&shell), "a proven identity closes the pane");
+
+    for (what, listed, terminal) in [
+        ("no recorded identity", listed, None),
+        ("an empty recorded identity", listed, Some("")),
+        ("a different live identity", listed, Some("term_b")),
+        ("a pane that is not listed", unlisted, Some("term_a")),
+    ] {
+        let shell = script(listed);
+        assert!(
+            work::retire_pane(&shell, "pane_new", terminal).is_err(),
+            "{what} must refuse"
+        );
+        assert!(!closed(&shell), "{what} must not close the pane");
+    }
+}
