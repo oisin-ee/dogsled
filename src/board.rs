@@ -1681,6 +1681,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -1722,6 +1723,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -1789,6 +1791,7 @@ mod tests {
                     cmd: vec!["cargo".into(), "test".into()],
                     timeout_ms: None,
                     idle_timeout_ms: None,
+                    validity: None,
                 },
                 host: None,
                 branch: None,
