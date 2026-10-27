@@ -7,8 +7,7 @@ use portal_types::BoardView;
 use portal_types::agents::{
     AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen,
 };
-use portal_types::questions::{Pending, PendingList};
-use portal_types::reviews::{ReviewList, ReviewSummary};
+use portal_types::inbox::InboxView;
 use serde::de::DeserializeOwned;
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
@@ -59,36 +58,21 @@ pub async fn fetch_agents() -> Result<Vec<AgentView>, String> {
     Ok(list.agents)
 }
 
+/// The server-owned actionable inbox. A failed read is not an empty inbox.
+pub async fn fetch_inbox() -> Result<InboxView, String> {
+    let response = Request::get(&format!("{BASE}/api/inbox"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    read_json(response).await
+}
+
 /// The agent in `pane`, with the prompt it waits on while it is blocked.
 pub async fn fetch_agent(pane: &str) -> Result<Option<AgentView>, String> {
     Ok(fetch_agents()
         .await?
         .into_iter()
         .find(|agent| agent.pane == pane))
-}
-
-/// The interviews still waiting for an answer.
-pub async fn fetch_questions() -> Result<Vec<Pending>, String> {
-    let response = Request::get(&format!("{BASE}/api/questions"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    let list: PendingList = read_json(response).await?;
-    Ok(list.pending)
-}
-
-/// Plans that have not received a decision.
-pub async fn fetch_reviews() -> Result<Vec<ReviewSummary>, String> {
-    let response = Request::get(&format!("{BASE}/api/reviews"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    let list: ReviewList = read_json(response).await?;
-    Ok(list
-        .reviews
-        .into_iter()
-        .filter(|review| review.decision.is_none())
-        .collect())
 }
 
 /// The turns of the agent in `pane`.
@@ -175,32 +159,46 @@ pub async fn watch_agent(pane: &str, mut on_event: impl FnMut(AgentEvent)) -> Re
     Err("the agent stream ended".to_owned())
 }
 
-/// Hand each board the server pushes to `on_board`, until the stream fails.
+/// Hand board and inbox snapshots to their owners, retaining subscriptions
+/// across transport failures while native EventSource reconnects.
 pub async fn watch(
     mut on_board: impl FnMut(BoardView),
+    mut on_inbox: impl FnMut(Result<InboxView, String>),
     mut on_paused: impl FnMut(bool),
 ) -> Result<(), String> {
     let mut source =
         EventSource::new(&format!("{BASE}/api/stream")).map_err(|error| error.to_string())?;
-    let mut stream = source
-        .subscribe("board")
-        .map_err(|error| error.to_string())?;
-    while let Some(item) = stream.next().await {
-        // Native EventSource owns reconnection. Keep the subscription alive
-        // across transport errors so the last board stays on screen.
+    let subscriptions = ["board", "inbox", "inbox_error"]
+        .into_iter()
+        .map(|name| {
+            source
+                .subscribe(name)
+                .map(|stream| stream.map(move |item| (name, item)).boxed_local())
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut stream = futures_util::stream::select_all(subscriptions);
+    while let Some((name, item)) = stream.next().await {
         let Ok((_, message)) = item else {
             on_paused(true);
             continue;
         };
         if let Some(text) = message.data().as_string() {
-            match serde_json::from_str::<BoardView>(&text) {
-                Ok(view) => {
+            match name {
+                "board" => {
+                    let view = serde_json::from_str::<BoardView>(&text)
+                        .map_err(|error| format!("the board stream sent invalid data: {error}"))?;
                     on_board(view);
-                    on_paused(false);
                 }
-                Err(error) => return Err(format!("the board stream sent invalid data: {error}")),
+                "inbox" => on_inbox(
+                    serde_json::from_str::<InboxView>(&text)
+                        .map_err(|error| format!("the inbox stream sent invalid data: {error}")),
+                ),
+                "inbox_error" => on_inbox(Err(text)),
+                _ => {}
             }
+            on_paused(false);
         }
     }
-    Err("the board stream ended".to_owned())
+    Err("the portal stream ended".to_owned())
 }

@@ -3,8 +3,7 @@
 use dioxus::prelude::*;
 use portal_types::BoardView;
 use portal_types::agents::AgentView as Agent;
-use portal_types::questions::Pending;
-use portal_types::reviews::ReviewSummary;
+use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 
 use crate::agent_view::{AgentView, Draft};
 use crate::api;
@@ -26,6 +25,7 @@ pub enum InboxKind {
     Prompt,
     Question,
     Review,
+    UnseenWorker,
 }
 
 impl InboxKind {
@@ -34,6 +34,7 @@ impl InboxKind {
             Self::Prompt => "prompt",
             Self::Question => "question",
             Self::Review => "plan",
+            Self::UnseenWorker => "idle",
         }
     }
     pub fn tag(self) -> &'static str {
@@ -41,6 +42,7 @@ impl InboxKind {
             Self::Prompt => "Prompt",
             Self::Question => "Question",
             Self::Review => "Plan",
+            Self::UnseenWorker => "Idle",
         }
     }
     fn label(self) -> &'static str {
@@ -48,15 +50,81 @@ impl InboxKind {
             Self::Prompt => "Prompt",
             Self::Question => "Questions",
             Self::Review => "Plan review",
+            Self::UnseenWorker => "Idle",
         }
     }
 }
 
-#[derive(Clone, PartialEq)]
+impl From<ServerInboxKind> for InboxKind {
+    fn from(kind: ServerInboxKind) -> Self {
+        match kind {
+            ServerInboxKind::Prompt => Self::Prompt,
+            ServerInboxKind::Question => Self::Question,
+            ServerInboxKind::Review => Self::Review,
+            ServerInboxKind::UnseenWorker => Self::UnseenWorker,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct InboxItem {
     pub selection: InboxSelection,
     pub title: String,
-    pub created_ms: Option<u64>,
+    pub agent_title: Option<String>,
+    pub repository: Option<String>,
+    pub age_ms: u64,
+}
+
+#[derive(Clone, Default)]
+struct InboxState {
+    snapshot: Option<InboxView>,
+    error: Option<String>,
+    received_ms: u64,
+}
+
+impl InboxState {
+    fn update(&mut self, result: Result<InboxView, String>, now: u64) {
+        match result {
+            Ok(view) => {
+                self.snapshot = Some(view);
+                self.received_ms = now;
+                self.error = None;
+            }
+            Err(message) => self.error = Some(message),
+        }
+    }
+
+    fn count(&self) -> Option<usize> {
+        self.snapshot
+            .as_ref()
+            .filter(|_| self.error.is_none())
+            .map(|view| view.count)
+    }
+
+    fn items(&self) -> Vec<InboxItem> {
+        let mut items: Vec<_> = self
+            .snapshot
+            .as_ref()
+            .map(|view| {
+                view.items
+                    .iter()
+                    .map(|item| InboxItem {
+                        selection: InboxSelection {
+                            kind: item.kind.into(),
+                            id: item.id.clone(),
+                            pane: item.pane.clone(),
+                        },
+                        title: item.title.clone(),
+                        agent_title: item.agent_title.clone(),
+                        repository: item.repository.clone(),
+                        age_ms: item.age_ms,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        items.sort_by_key(|item| item.age_ms);
+        items
+    }
 }
 
 #[derive(Clone, Default)]
@@ -104,11 +172,8 @@ pub fn App() -> Element {
     let mut stream_paused = use_signal(|| false);
     let mut inbox_open = use_signal(|| false);
     let mut agents = use_signal(Vec::<Agent>::new);
-    let mut questions = use_signal(Vec::<Pending>::new);
-    let mut reviews = use_signal(Vec::<ReviewSummary>::new);
     let mut agent_error = use_signal(|| None::<String>);
-    let mut inbox_errors = use_signal(Vec::<String>::new);
-    let mut inbox_loaded = use_signal(|| false);
+    let mut inbox_state = use_signal(InboxState::default);
     let mut now = use_signal(|| 0_u64);
     let link = use_hook(DeepLink::read);
     let mut selected = use_context_provider(|| Signal::new(link.pane.clone()));
@@ -116,16 +181,20 @@ pub fn App() -> Element {
     use_context_provider(|| Draft(Signal::new(String::new())));
 
     use_future(move || async move {
-        match api::fetch_board().await {
+        let (board_result, inbox_result) =
+            futures_util::future::join(api::fetch_board(), api::fetch_inbox()).await;
+        match board_result {
             Ok(view) => board.set(Some(view)),
             Err(message) => board_error.set(Some(message)),
         }
+        inbox_state.write().update(inbox_result, clock_ms());
         loop {
             let result = api::watch(
                 |view| {
                     board.set(Some(view));
                     board_error.set(None);
                 },
+                |result| inbox_state.write().update(result, clock_ms()),
                 |paused| stream_paused.set(paused),
             )
             .await;
@@ -139,45 +208,34 @@ pub fn App() -> Element {
         }
     });
 
-    // Pending-item APIs are independent: a Herdr outage must not hide ledger
-    // rows, plan reviews, or interviews. Retain each last successful snapshot.
+    // Herdr supplies live leads only. Pending items come exclusively from inbox.
     use_future(move || async move {
         loop {
-            let (agent_result, question_result, review_result) = futures_util::future::join3(
-                api::fetch_agents(),
-                api::fetch_questions(),
-                api::fetch_reviews(),
-            )
-            .await;
-            let mut errors = Vec::new();
-            match agent_result {
+            match api::fetch_agents().await {
                 Ok(value) => {
                     agents.set(value);
                     agent_error.set(None);
                 }
                 Err(message) => agent_error.set(Some(message)),
             }
-            match question_result {
-                Ok(value) => questions.set(value),
-                Err(message) => errors.push(format!("Questions unavailable: {message}")),
-            }
-            match review_result {
-                Ok(value) => reviews.set(value),
-                Err(message) => errors.push(format!("Reviews unavailable: {message}")),
-            }
-            inbox_errors.set(errors);
-            inbox_loaded.set(true);
-            now.set(js_sys::Date::now().max(0.0) as u64);
             if let Err(message) = pause().await {
-                inbox_errors.write().push(format!(
-                    "Inbox refresh stopped: {message}. Reload the page."
-                ));
+                agent_error.set(Some(format!(
+                    "Agent refresh stopped: {message}. Reload the page."
+                )));
+                break;
+            }
+        }
+    });
+    use_future(move || async move {
+        loop {
+            now.set(clock_ms());
+            if pause().await.is_err() {
                 break;
             }
         }
     });
 
-    let inbox = use_memo(move || inbox_items(&agents(), &questions(), &reviews()));
+    let inbox = use_memo(move || inbox_state.read().items());
     use_effect(move || {
         if let Some(mut current) = selection()
             && current.pane.is_empty()
@@ -193,7 +251,11 @@ pub fn App() -> Element {
 
     let view = board();
     let items = inbox();
-    let count = items.len();
+    let state = inbox_state();
+    let count = state
+        .count()
+        .map_or_else(|| "—".to_owned(), |count| count.to_string());
+    let elapsed_ms = now().saturating_sub(state.received_ms);
     let groups = view.as_ref().map(|view| navigation_groups(view, &agents()));
 
     rsx! {
@@ -211,6 +273,9 @@ pub fn App() -> Element {
                 }
                 div { class: "shell-notices", role: "status",
                     if stream_paused() { span { "Live updates paused, retrying" } }
+                    if let Some(message) = &state.error {
+                        span { class: "inbox-error", title: "{message}", "Inbox unavailable: {message}. Reload to retry." }
+                    }
                     if let Some(message) = agent_error() {
                         span { title: "{message}", "Herdr is not reachable. The board still works." }
                     }
@@ -238,8 +303,11 @@ pub fn App() -> Element {
                 if let Some(message) = board_error() { p { class: "error", "Board updates unavailable: {message}" } }
                 match groups {
                     Some(groups) => rsx! {
-                        for (index, group) in groups.into_iter().enumerate() {
+                        for (index, group) in groups.repos.into_iter().enumerate() {
                             RepoGroup { key: "{index}:{group.repository:?}", group, inbox: items.clone() }
+                        }
+                        if groups.finished_without_repository > 0 {
+                            p { class: "finished-branches", "{groups.finished_without_repository} finished branches have no repository — see Land and clean up" }
                         }
                     },
                     None => rsx! { p { class: "empty", "Loading agents…" } },
@@ -258,8 +326,10 @@ pub fn App() -> Element {
                         section { class: "welcome",
                             if !items.is_empty() {
                                 h2 { "Waiting on you" }
-                                InboxList { items: items.clone(), board: view.clone(), agents: agents(), now: now(), inbox_open }
-                            } else if !inbox_loaded() || view.is_none() {
+                                InboxList { items: items.clone(), elapsed_ms, inbox_open }
+                            } else if state.error.is_some() {
+                                p { class: "error", "Inbox unavailable. Reload to retry." }
+                            } else if state.snapshot.is_none() || view.is_none() {
                                 p { class: "empty", "Loading agents…" }
                             } else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
                                 h2 { "No agents are running" }
@@ -268,7 +338,6 @@ pub fn App() -> Element {
                                 h2 { "Select an agent" }
                                 p { class: "empty", "Choose an agent in the navigation to open its work." }
                             }
-                            for message in inbox_errors() { p { class: "error", "{message}" } }
                         }
                     },
                 }
@@ -276,14 +345,13 @@ pub fn App() -> Element {
             if inbox_open() {
                 section { class: "inbox-panel", id: "portal-inbox", aria_label: "Inbox",
                     h2 { "Inbox" span { "Everything waiting on you" } }
-                    for message in inbox_errors() { p { class: "error", "{message}" } }
-                    if let Some(message) = agent_error() { p { class: "empty", "Prompts unavailable: {message}" } }
-                    if !inbox_loaded() {
+                    if let Some(message) = &state.error { p { class: "error", "Inbox unavailable: {message}. Reload to retry." } }
+                    if state.snapshot.is_none() && state.error.is_none() {
                         p { class: "empty", "Loading inbox…" }
-                    } else if items.is_empty() {
+                    } else if state.count() == Some(0) && state.error.is_none() {
                         p { class: "inbox-empty", "Nothing is waiting on you." }
                     } else {
-                        InboxList { items, board: view, agents: agents(), now: now(), inbox_open }
+                        InboxList { items, elapsed_ms, inbox_open }
                     }
                     p { class: "inbox-foot", "Selecting an item opens that agent with the item in front." }
                 }
@@ -293,13 +361,7 @@ pub fn App() -> Element {
 }
 
 #[component]
-fn InboxList(
-    items: Vec<InboxItem>,
-    board: Option<BoardView>,
-    agents: Vec<Agent>,
-    now: u64,
-    mut inbox_open: Signal<bool>,
-) -> Element {
+fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool>) -> Element {
     let mut selected = use_context::<Signal<Option<String>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     rsx! {
@@ -307,8 +369,10 @@ fn InboxList(
             for item in items {
                 {
                     let kind = item.selection.kind;
-                    let (title, repository) = agent_identity(&item.selection.pane, board.as_ref(), &agents);
-                    let age = item.created_ms.map(|created| age(now.saturating_sub(created)));
+                    let title = item.agent_title.as_deref().filter(|title| !title.starts_with("u-"))
+                        .unwrap_or("Agent task");
+                    let repository = item.repository.as_deref().map(repository_name);
+                    let age = age(item.age_ms.saturating_add(elapsed_ms));
                     rsx! {
                         button { key: "{kind:?}:{item.selection.id}", class: "inbox-item", r#type: "button",
                             onclick: move |_| {
@@ -321,7 +385,7 @@ fn InboxList(
                                 div { class: "inbox-title", "{item.title}" }
                                 div { class: "inbox-agent", "{title}" if let Some(repository) = repository { " · {repository}" } }
                             }
-                            if let Some(age) = age { span { class: "inbox-age", "{age}" } }
+                            span { class: "inbox-age", "{age}" }
                         }
                     }
                 }
@@ -330,91 +394,8 @@ fn InboxList(
     }
 }
 
-fn inbox_items(
-    agents: &[Agent],
-    questions: &[Pending],
-    reviews: &[ReviewSummary],
-) -> Vec<InboxItem> {
-    let mut items = Vec::new();
-    for agent in agents {
-        if let Some(prompt) = &agent.blocked {
-            items.push(InboxItem {
-                selection: InboxSelection {
-                    kind: InboxKind::Prompt,
-                    id: agent.pane.clone(),
-                    pane: agent.pane.clone(),
-                },
-                title: prompt.question.clone(),
-                created_ms: None,
-            });
-        }
-    }
-    for question in questions {
-        items.push(InboxItem {
-            selection: InboxSelection {
-                kind: InboxKind::Question,
-                id: question.id.clone(),
-                pane: question.pane.clone(),
-            },
-            title: question
-                .questions
-                .title
-                .clone()
-                .unwrap_or_else(|| "Questions".to_owned()),
-            created_ms: Some(question.created_ms),
-        });
-    }
-    for review in reviews.iter().filter(|review| review.decision.is_none()) {
-        items.push(InboxItem {
-            selection: InboxSelection {
-                kind: InboxKind::Review,
-                id: review.id.clone(),
-                pane: review.pane.clone(),
-            },
-            title: format!("{} · revision {}", review.path, review.revisions),
-            created_ms: None,
-        });
-    }
-    // Stable ordering preserves payload order when timestamps are unavailable.
-    items.sort_by(|left, right| {
-        left.selection
-            .kind
-            .cmp(&right.selection.kind)
-            .then_with(|| right.created_ms.cmp(&left.created_ms))
-    });
-    items
-}
-
-fn agent_identity(
-    pane: &str,
-    board: Option<&BoardView>,
-    agents: &[Agent],
-) -> (String, Option<String>) {
-    if let Some(board) = board {
-        for group in navigation_groups(board, agents) {
-            if let Some(row) = group
-                .rows
-                .iter()
-                .find(|row| row.pane.as_deref() == Some(pane))
-            {
-                return (
-                    row.title.clone(),
-                    group
-                        .repository
-                        .map(|repository| repository_name(&repository).to_owned()),
-                );
-            }
-        }
-    }
-    let name = agents
-        .iter()
-        .find(|agent| agent.pane == pane)
-        .and_then(|agent| agent.name.clone());
-    (
-        name.filter(|name| !name.starts_with("u-"))
-            .unwrap_or_else(|| "Agent task".to_owned()),
-        None,
-    )
+fn clock_ms() -> u64 {
+    js_sys::Date::now().max(0.0) as u64
 }
 
 fn age(ms: u64) -> String {
@@ -443,32 +424,75 @@ mod shell_tests {
     use serde_json::json;
 
     #[test]
-    fn inbox_prioritizes_prompts_then_newest_questions_then_reviews()
+    fn inbox_uses_server_count_metadata_ages_and_worker_selection() -> Result<(), serde_json::Error>
+    {
+        let view: InboxView = serde_json::from_value(json!({
+            "count": 7, "items": [{
+                "kind": "unseen_worker", "id": "unit", "pane": "worker-pane",
+                "title": "Implement inbox", "agent_title": "Worker task",
+                "repository": "github.com/owner/repo", "age_ms": 120000
+            }]
+        }))?;
+        let mut state = InboxState::default();
+        assert_eq!(state.count(), None);
+        state.update(Ok(view.clone()), 100);
+        assert_eq!(state.count(), Some(7));
+        let items = state.items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].selection.kind, InboxKind::UnseenWorker);
+        assert_eq!(items[0].selection.pane, "worker-pane");
+        assert_eq!(items[0].selection.kind.tag(), "Idle");
+        assert_eq!(items[0].agent_title.as_deref(), Some("Worker task"));
+        assert_eq!(age(items[0].age_ms), "2 m");
+        state.update(Err("reviews read failed".to_owned()), 200);
+        assert_eq!(state.snapshot, Some(view));
+        assert_eq!(state.items(), items);
+        assert_eq!(state.count(), None);
+        assert_eq!(state.received_ms, 100);
+        assert_eq!(state.error.as_deref(), Some("reviews read failed"));
+        state.update(Ok(InboxView::default()), 300);
+        assert_eq!(state.count(), Some(0));
+        assert!(state.items().is_empty());
+        assert!(state.error.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn inbox_sorts_newest_first_and_does_not_report_zero_on_initial_failure()
     -> Result<(), serde_json::Error> {
-        let agents: Vec<Agent> = serde_json::from_value(json!([
-            { "pane": "first", "state": "blocked", "blocked": { "question": "First prompt", "options": [] } },
-            { "pane": "second", "state": "blocked", "blocked": { "question": "Second prompt", "options": [] } }
-        ]))?;
-        let questions: Vec<Pending> = serde_json::from_value(json!([
-            { "id": "old", "pane": "first", "session": "s", "cwd": "/repo", "created_ms": 10, "questions": { "title": "Old", "questions": [] } },
-            { "id": "new", "pane": "second", "session": "s", "cwd": "/repo", "created_ms": 20, "questions": { "title": "New", "questions": [] } }
-        ]))?;
-        let reviews: Vec<ReviewSummary> = serde_json::from_value(json!([
-            { "id": "plan", "pane": "first", "session": "s", "path": "plan.md", "revisions": 2, "annotations": 0 }
-        ]))?;
-        let items = inbox_items(&agents, &questions, &reviews);
+        let mut state = InboxState::default();
+        state.update(Err("questions read failed".to_owned()), 0);
+        assert_eq!(state.count(), None);
+        assert!(state.snapshot.is_none());
+        let view: InboxView = serde_json::from_value(json!({
+            "count": 2, "items": [
+                { "kind": "review", "id": "old", "pane": "lead", "title": "Old plan", "age_ms": 120000 },
+                { "kind": "question", "id": "new", "pane": "lead", "title": "New question", "age_ms": 1000 }
+            ]
+        }))?;
+        state.update(Ok(view), 10);
         assert_eq!(
-            items
+            state
+                .items()
                 .iter()
                 .map(|item| item.selection.id.as_str())
                 .collect::<Vec<_>>(),
-            ["first", "second", "new", "old", "plan"]
+            ["new", "old"]
         );
-        assert_eq!(items[0].created_ms, None);
-        assert_eq!(items[4].created_ms, None);
-        assert_eq!(items[4].title, "plan.md · revision 2");
-        assert!(inbox_items(&[], &[], &[]).is_empty());
+        assert_eq!(state.count(), Some(2));
         Ok(())
+    }
+
+    #[test]
+    fn server_kinds_map_without_client_inference() {
+        for (server, shell) in [
+            (ServerInboxKind::Review, InboxKind::Review),
+            (ServerInboxKind::Question, InboxKind::Question),
+            (ServerInboxKind::Prompt, InboxKind::Prompt),
+            (ServerInboxKind::UnseenWorker, InboxKind::UnseenWorker),
+        ] {
+            assert_eq!(InboxKind::from(server), shell);
+        }
     }
 
     #[test]
