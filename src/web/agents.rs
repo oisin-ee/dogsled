@@ -224,8 +224,9 @@ async fn events(State(state): State<AppState>, Path(pane): Path<String>) -> Resp
     };
     // The subscription blocks, so a task reads it and hands the events over.
     let (sender, receiver) = tokio::sync::mpsc::channel::<String>(16);
+    let stop = state.stop.clone();
     tokio::task::spawn_blocking(move || {
-        loop {
+        while !stop.is_cancelled() && !sender.is_closed() {
             match subscription.next() {
                 Ok(Next::Event(event)) => {
                     let payload = agent_event(&pane, &event);
@@ -249,7 +250,7 @@ async fn events(State(state): State<AppState>, Path(pane): Path<String>) -> Resp
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(receiver)
         .map(|payload| Ok::<_, std::convert::Infallible>(sse_event("agent", payload)));
-    axum::response::sse::Sse::new(stream)
+    axum::response::sse::Sse::new(state.until_shutdown(stream))
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
         .into_response()
 }
@@ -396,6 +397,56 @@ mod tests {
             .await
             .expect("the body");
         serde_json::from_slice(&body).expect("the payload")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_closes_an_idle_agent_subscription() {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        let path = std::env::temp_dir().join(format!("hs-stop-{}.sock", crate::ledger::new_id()));
+        let listener = UnixListener::bind(&path).expect("fake Herdr socket");
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("subscription connects");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("read timeout");
+            let mut line = String::new();
+            std::io::BufReader::new(&socket)
+                .read_line(&mut line)
+                .expect("subscription request");
+            let request: serde_json::Value = serde_json::from_str(&line).expect("request JSON");
+            assert_eq!(request["method"], "events.subscribe");
+            writeln!(
+                socket,
+                "{}",
+                json!({"id": request["id"], "result": {"type": "subscription_started"}})
+            )
+            .expect("subscription acknowledgement");
+            // No events arrive. Only dropping the subscription can wake its reader.
+            let mut buffer = [0; 1];
+            socket
+                .read(&mut buffer)
+                .expect("read until the subscription closes")
+        });
+        let state = state(Some(Client::at(&path)));
+        let response = call(
+            state.clone(),
+            request(Method::GET, "/api/agents/w1:p1/events", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        state.stop.cancel();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(response.into_body(), 1024),
+        )
+        .await
+        .expect("agent SSE stops")
+        .expect("the body");
+        assert_eq!(peer.join().expect("fake Herdr finishes"), 0);
+        std::fs::remove_file(path).expect("remove socket");
     }
 
     /// A fake Herdr that answers the agent calls.
