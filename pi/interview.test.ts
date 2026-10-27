@@ -13,7 +13,7 @@ interface Call { method: string; path: string; headers: Record<string, string | 
 const ANSWER = { id: "q-1", responses: [{ id: "q1", value: "B" }] };
 
 /** A portal that answers the interview routes, so the tool can be tested over real HTTP. */
-function portal(answer: (poll: number) => { status: number; body?: unknown }) {
+function portal(answer: (poll: number) => { status: number; body?: unknown }, attachment: { name?: string; status?: number } = {}) {
 	const calls: Call[] = [];
 	let polls = 0;
 	const server = createServer((request, response) => {
@@ -24,6 +24,12 @@ function portal(answer: (poll: number) => { status: number; body?: unknown }) {
 			if (request.method === "POST" && request.url === "/api/questions") {
 				response.writeHead(200, { "content-type": "application/json" });
 				response.end(JSON.stringify({ id: "q-1" }));
+				return;
+			}
+			if (request.method === "POST" && request.url === "/api/attachments") {
+				const status = attachment.status ?? 200;
+				response.writeHead(status, { "content-type": "application/json" });
+				response.end(JSON.stringify(status === 200 ? { path: `/state/web/attachments/${attachment.name ?? "image.png"}` } : { error: "not an image" }));
 				return;
 			}
 			if (request.method === "DELETE") {
@@ -278,4 +284,77 @@ test("the questions come from inline JSON or from a file", () => {
 	writeFileSync(file, questions);
 	assert.deepEqual(loadQuestions(file, "/repo"), inline);
 	assert.deepEqual(loadQuestions(join(dir, "questions.json"), "/repo"), inline);
+});
+
+/** A form with one image whose source names a file on the agent's host. */
+function mediaQuestions(src: string): string {
+	return JSON.stringify({
+		title: "Media",
+		questions: [{ id: "q1", type: "info", question: "Look", media: { type: "image", src, alt: "A" } }],
+	});
+}
+
+test("a local image is uploaded to the portal and its source becomes the portal URL", async t => {
+	const p = portal(() => ({ status: 200, body: ANSWER }), { name: "shot.png" });
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-media-"));
+	const file = join(dir, "shot.png");
+	writeFileSync(file, "PNG-BYTES");
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	await tool.run({ questions: mediaQuestions(file) }, context(), undefined);
+	const upload = p.calls.find(call => call.method === "POST" && call.path === "/api/attachments");
+	assert.ok(upload, "the image was uploaded");
+	assert.equal(upload.body, "PNG-BYTES");
+	assert.equal(upload.headers["authorization"], "Bearer secret-token");
+	const post = p.calls.find(call => call.method === "POST" && call.path === "/api/questions");
+	assert.ok(post);
+	const body = JSON.parse(post.body);
+	assert.equal(body.questions.questions[0].media.src, "/api/attachments/shot.png");
+	assert.equal(body.questions.questions[0].media.alt, "A");
+});
+
+test("an image the browser can already load is left alone", async t => {
+	const p = portal(() => ({ status: 200, body: ANSWER }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	await tool.run({ questions: mediaQuestions("https://example.test/shot.png") }, context(), undefined);
+	assert.equal(p.calls.some(call => call.path === "/api/attachments"), false, "nothing was uploaded");
+	const post = p.calls.find(call => call.method === "POST" && call.path === "/api/questions");
+	assert.ok(post);
+	assert.equal(JSON.parse(post.body).questions.questions[0].media.src, "https://example.test/shot.png");
+});
+
+test("a missing image is an error that names the path", async t => {
+	const p = portal(() => ({ status: 200, body: ANSWER }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const missing = join(mkdtempSync(join(tmpdir(), "dogsled-media-")), "gone.png");
+	await assert.rejects(() => tool.run({ questions: mediaQuestions(missing) }, context(), undefined), new RegExp(`Image not found: ${missing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+	assert.equal(p.calls.some(call => call.method === "POST" && call.path === "/api/questions"), false, "the form was never posted");
+});
+
+test("a portal that refuses the image is an error that names the file", async t => {
+	const p = portal(() => ({ status: 200, body: ANSWER }), { status: 415 });
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-media-"));
+	const file = join(dir, "shot.png");
+	writeFileSync(file, "NOT-AN-IMAGE");
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	await assert.rejects(() => tool.run({ questions: mediaQuestions(file) }, context(), undefined), /Cannot use the image/);
+});
+
+test("a portal that is down falls back to the one-shot interview even with a local image", async t => {
+	const fake = fallbackEnvironment(t, `process.stdout.write(${JSON.stringify(JSON.stringify(ANSWER))});`);
+	const tool = new InterviewTool(new PortalClient(fake.env));
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-media-"));
+	const file = join(dir, "shot.png");
+	writeFileSync(file, "PNG-BYTES");
+	const result = await tool.run({ questions: mediaQuestions(file) }, context(), undefined);
+	assert.equal(result.details.status, "completed");
+	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
+	assert.equal(call.file.questions[0].media.src, file, "the fallback keeps the path the model wrote");
 });

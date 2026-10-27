@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use portal_types::questions::{
-    AnswerBody, Pending, PendingList, Question, QuestionKind, ResponseItem,
+    AnswerBody, Media, MediaPosition, Pending, PendingList, Question, QuestionKind, ResponseItem,
 };
 use serde_json::Value;
 
@@ -207,6 +207,12 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
     let questions = pending.questions.questions.clone();
     let heading = pending.questions.title.clone();
     let description = pending.questions.description.clone();
+    let total = pending
+        .questions
+        .questions
+        .iter()
+        .filter(|q| takes_an_answer(&q.kind))
+        .count();
 
     rsx! {
         form {
@@ -229,21 +235,51 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                     }
                 }
             },
-            if let Some(heading) = heading {
-                h3 { "{heading}" }
+            div { class: "qf-intro",
+                if let Some(heading) = heading {
+                    h2 { "{heading}" }
+                }
+                if let Some(description) = description {
+                    p { "{description}" }
+                }
             }
-            if let Some(description) = description {
-                p { class: "qf-muted", "{description}" }
-            }
-            for question in pending.questions.questions.iter().cloned() {
-                QuestionField { key: "{question.id}", form: pending.id.clone(), question, values }
+            for (index, question) in pending.questions.questions.iter().cloned().enumerate() {
+                QuestionField {
+                    key: "{question.id}",
+                    form: pending.id.clone(),
+                    number: index + 1,
+                    question,
+                    values,
+                }
             }
             if let Some(message) = error() {
                 p { class: "error", "{message}" }
             }
-            button { class: "qf-submit", r#type: "submit", disabled: busy(), "Send answers" }
+            div { class: "qf-foot",
+                span { class: "qf-muted", "Answered {answered_count(&questions, &values.read())} of {total}" }
+                button { class: "qf-submit", r#type: "submit", disabled: busy(), "Send answers" }
+            }
         }
     }
+}
+
+/// The questions of a form that hold an answer, so the footer can count them.
+fn answered_count(questions: &[Question], values: &BTreeMap<String, Value>) -> usize {
+    questions
+        .iter()
+        .filter(|question| {
+            takes_an_answer(&question.kind) && !chosen(values, &question.id).is_empty()
+        })
+        .count()
+}
+
+/// Whether a question takes an answer. An info question is a panel of
+/// content, and an image question is not answered in the portal.
+fn takes_an_answer(kind: &QuestionKind) -> bool {
+    matches!(
+        kind,
+        QuestionKind::Single | QuestionKind::Multi | QuestionKind::Text
+    )
 }
 
 /// The recommended labels of a question: a string or a list of strings.
@@ -368,7 +404,7 @@ fn choose(mut values: Values, id: &str, label: &str, multi: bool) {
 }
 
 #[component]
-fn QuestionField(form: String, question: Question, values: Values) -> Element {
+fn QuestionField(form: String, number: usize, question: Question, values: Values) -> Element {
     let weight = match question.weight.as_ref().and_then(Value::as_str) {
         Some("critical") => "critical",
         Some("minor") => "minor",
@@ -386,21 +422,22 @@ fn QuestionField(form: String, question: Question, values: Values) -> Element {
         .to_owned();
     let multi = question.kind == QuestionKind::Multi;
     let group = format!("{form}-{id}");
+    // The id of the heading, which names the group for the screen reader.
+    let label = format!("{group}-label");
+    // An info question is a panel of content, not a field with an answer.
+    let panel = question.kind == QuestionKind::Info;
+    let media = question.media.clone();
+    // The media sits above, below or beside the answer.
+    let position = media
+        .as_ref()
+        .map_or(MediaPosition::Above, |media| media.position());
+    // A multi question with many options reads better in two columns.
+    let multi_class = if multi { "qf-multi" } else { "" };
 
-    rsx! {
-        fieldset { class: "qf-field {weight}",
-            legend { "{question.question}" }
-            if let Some(context) = question.context.clone() {
-                p { class: "qf-muted", "{context}" }
-            }
-            if let Some(content) = content {
-                pre { class: "qf-content", "{content}" }
-            }
-            if question.media.is_some() {
-                p { class: "qf-muted", "Media: not supported in the portal yet" }
-            }
-            match question.kind {
-                QuestionKind::Single | QuestionKind::Multi => rsx! {
+    let answers = rsx! {
+        match question.kind {
+            QuestionKind::Single | QuestionKind::Multi => rsx! {
+                div { class: "qf-options",
                     for option in options {
                         ChoiceOption {
                             key: "{option_label(&option)}",
@@ -412,26 +449,170 @@ fn QuestionField(form: String, question: Question, values: Values) -> Element {
                             values,
                         }
                     }
-                },
-                QuestionKind::Text => rsx! {
-                    textarea {
-                        name: "{group}",
-                        rows: "3",
-                        value: "{text}",
-                        oninput: move |event: FormEvent| {
-                            values.write().insert(id.clone(), Value::String(event.value()));
-                        },
+                }
+            },
+            QuestionKind::Text => rsx! {
+                textarea {
+                    name: "{group}",
+                    rows: "3",
+                    value: "{text}",
+                    oninput: move |event: FormEvent| {
+                        values.write().insert(id.clone(), Value::String(event.value()));
+                    },
+                }
+            },
+            QuestionKind::Image => rsx! {
+                p { class: "qf-muted", "Image answers: not supported in the portal yet" }
+            },
+            QuestionKind::Info => rsx! {},
+            QuestionKind::Other(kind) => rsx! {
+                p { class: "qf-muted", "Question type {kind}: not supported in the portal yet" }
+            },
+        }
+    };
+
+    rsx! {
+        if panel {
+            section { class: "qf-card {weight}",
+                h3 { class: "qf-heading",
+                    span { class: "qf-number", "{number}" }
+                    span { "{question.question}" }
+                }
+                if let Some(context) = question.context.clone() {
+                    p { class: "qf-context", "{context}" }
+                }
+                if let Some(content) = content {
+                    pre { class: "qf-content", "{content}" }
+                }
+                if let Some(media) = media.clone() {
+                    MediaView { media }
+                }
+            }
+        } else {
+            section { class: "qf-field {weight} {multi_class}",
+                role: "group",
+                "aria-labelledby": "{label}",
+                h2 { class: "qf-legend", id: "{label}",
+                    span { class: "qf-number", "{number}" }
+                    span { "{question.question}" }
+                }
+                if let Some(context) = question.context.clone() {
+                    p { class: "qf-context", "{context}" }
+                }
+                if let Some(content) = content {
+                    pre { class: "qf-content", "{content}" }
+                }
+                div { class: "qf-body {position}",
+                    if position == MediaPosition::Above {
+                        if let Some(media) = media.clone() {
+                            MediaView { media }
+                        }
                     }
-                },
-                QuestionKind::Image => rsx! {
-                    p { class: "qf-muted", "Image answers: not supported in the portal yet" }
-                },
-                QuestionKind::Info => rsx! {},
-                QuestionKind::Other(kind) => rsx! {
-                    p { class: "qf-muted", "Question type {kind}: not supported in the portal yet" }
-                },
+                    div { class: "qf-answers", {answers} }
+                    if position == MediaPosition::Below {
+                        if let Some(media) = media.clone() {
+                            MediaView { media }
+                        }
+                    }
+                    if position == MediaPosition::Side {
+                        if let Some(media) = media.clone() {
+                            MediaView { media }
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+/// The media of a question: the image, table, chart, diagram or HTML the
+/// question shows.
+#[component]
+fn MediaView(media: Media) -> Element {
+    let position = media.position();
+    let body = rsx! {
+        match &media {
+            Media::Image { src, alt, caption, .. } => rsx! {
+                figure { class: "qf-media qf-image",
+                    img { src: "{src}", alt: alt.clone().unwrap_or_default() }
+                    if let Some(caption) = caption {
+                        figcaption { "{caption}" }
+                    }
+                }
+            },
+            Media::Table { table, caption, .. } => rsx! {
+                figure { class: "qf-media qf-table",
+                    table {
+                        if !table.headers.is_empty() {
+                            thead {
+                                tr {
+                                    for header in table.headers.iter() {
+                                        th { scope: "col", "{header}" }
+                                    }
+                                }
+                            }
+                        }
+                        tbody {
+                            for (index, row) in table.rows.iter().enumerate() {
+                                tr { class: if table.highlights.contains(&index) { "qf-hl" } else { "" },
+                                    for cell in row.iter() {
+                                        td { "{cell}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(caption) = caption {
+                        figcaption { "{caption}" }
+                    }
+                }
+            },
+            Media::Chart { chart, caption, .. } => rsx! {
+                figure { class: "qf-media qf-chart",
+                    p { class: "qf-media-label", "Chart" }
+                    pre { class: "qf-content", "{chart_source(chart)}" }
+                    if let Some(caption) = caption {
+                        figcaption { "{caption}" }
+                    }
+                }
+            },
+            Media::Mermaid { source, caption, .. } => rsx! {
+                figure { class: "qf-media qf-mermaid",
+                    p { class: "qf-media-label", "Diagram" }
+                    pre { class: "qf-content", "{source}" }
+                    if let Some(caption) = caption {
+                        figcaption { "{caption}" }
+                    }
+                }
+            },
+            Media::Html { html, caption, .. } => rsx! {
+                figure { class: "qf-media qf-html",
+                    iframe { srcdoc: "{html}", "sandbox": "", title: "HTML content" }
+                    if let Some(caption) = caption {
+                        figcaption { "{caption}" }
+                    }
+                }
+            },
+            Media::Unknown(_) => rsx! {
+                p { class: "qf-muted", "Media type {media.kind_name()}: not supported in the portal yet" }
+            },
+        }
+    };
+    rsx! {
+        div { class: "qf-media-wrap {position}", {body} }
+    }
+}
+
+/// The source of a chart, as the text the portal shows.
+fn chart_source(chart: &portal_types::questions::ChartMedia) -> String {
+    let data = serde_json::to_string_pretty(&chart.data).unwrap_or_else(|_| chart.data.to_string());
+    match &chart.options {
+        Some(options) => {
+            let options =
+                serde_json::to_string_pretty(options).unwrap_or_else(|_| options.to_string());
+            format!("{data}\n{options}")
+        }
+        None => data,
     }
 }
 
@@ -458,12 +639,12 @@ fn ChoiceOption(
                 checked,
                 onchange: move |_| choose(values, &id, &pick, multi),
             }
-            span { "{label}" }
+            span { class: "qf-option-label", "{label}" }
             if recommended {
                 span { class: "qf-badge", "Recommended" }
             }
             if let Some(content) = content {
-                pre { class: "qf-content", "{content}" }
+                p { class: "qf-option-desc", "{content}" }
             }
         }
     }
