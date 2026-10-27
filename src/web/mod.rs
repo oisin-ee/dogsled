@@ -179,10 +179,21 @@ async fn listen(
 ) -> Result<(tokio::net::TcpListener, AppState)> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let port = listener.local_addr()?.port();
+    let agents = match tokio::task::spawn_blocking(crate::herdr_socket::Client::discover)
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()))
+    {
+        Ok(client) => Some(Arc::new(client)),
+        Err(error) => {
+            eprintln!("dogsled web: herdr socket discovery failed: {error}");
+            None
+        }
+    };
     let state = AppState::new(
         board,
         port,
-        crate::herdr_socket::Client::from_env().ok().map(Arc::new),
+        agents,
         guard::Token::new(token::token(ledger)?),
         ledger.child("web"),
     );
