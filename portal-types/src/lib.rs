@@ -2,6 +2,7 @@
 //! them. This crate holds data only, so it compiles to wasm32 as well.
 
 pub mod agents;
+pub mod inbox;
 pub mod questions;
 pub mod reviews;
 
@@ -43,6 +44,15 @@ pub struct RowView {
     pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<Cleanup>,
+    /// A worker in idle/done/closed state whose newest message to its owner is unread.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unseen: bool,
     pub state: String,
     pub activity: String,
     pub age_ms: u64,
@@ -55,6 +65,29 @@ pub struct RowView {
     /// The canonical `host/owner/name` of the agent's repository, when it is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+}
+
+/// The known reason a finished row needs cleanup, and the next action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cleanup {
+    pub cause: CleanupCause,
+    pub action: CleanupAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupCause {
+    NeverMerged,
+    Dirty,
+    MergedNotPushed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupAction {
+    Land,
+    Commit,
+    PushMain,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

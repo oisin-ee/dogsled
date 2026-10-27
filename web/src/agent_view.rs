@@ -403,6 +403,7 @@ mod tests {
             agent: None,
             state: "idle".to_owned(),
             cwd: None,
+            repository: None,
             blocked: None,
         };
         assert!(!is_blocked(&agent));

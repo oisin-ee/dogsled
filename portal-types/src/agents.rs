@@ -28,6 +28,9 @@ pub struct AgentView {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Canonical repository identity derived from the checkout origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// Set only while the agent is blocked and its screen shows a prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<BlockedPrompt>,
