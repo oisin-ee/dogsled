@@ -294,6 +294,50 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
     Ok((pane, terminal))
 }
 
+/// Retire a pane this launch allocated. Only that pane is closed, and only after the same
+/// guards the launch cleanup uses: the caller's own pane, a focused pane, a pane an agent
+/// owns, a busy pane, and a pane whose terminal identity changed are never closed here.
+fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>) -> Result<()> {
+    if std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
+        || crate::cleanup::current_panes(shell)?
+            .iter()
+            .any(|p| p.pane_id == pane && p.focused)
+    {
+        return Err(Error::Invalid(format!("{pane}: caller or focused pane")));
+    }
+    let expected = terminal.filter(|id| !id.is_empty());
+    if let Some(expected) = expected
+        && crate::cleanup::pane_snapshot(shell)?
+            .1
+            .get(pane)
+            .is_some_and(|current| current != expected)
+    {
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+    }
+    if crate::probe::agent_list(shell)?
+        .iter()
+        .any(|agent| agent.pane == pane)
+    {
+        return Err(Error::Invalid(format!(
+            "{pane}: an agent now owns the pane"
+        )));
+    }
+    if crate::probe::foreground(shell, pane)?.is_some() {
+        return Err(Error::Invalid(format!("{pane}: the pane is busy")));
+    }
+    // Inspection must not authorize closing a replacement terminal.
+    if let Some(expected) = expected
+        && crate::cleanup::pane_snapshot(shell)?
+            .1
+            .get(pane)
+            .is_some_and(|current| current != expected)
+    {
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+    }
+    shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+    Ok(())
+}
+
 fn tab(workspace: String) -> Vec<String> {
     vec![
         "tab".into(),
@@ -504,7 +548,19 @@ fn launch_job(
     // executable: an allocation that stops here stays uncertain, and no other
     // allocation may take the job over.
     jobs::publish_intent(ledger, &job)?;
-    let (pane, _) = pane(shell, launch)?;
+    let (pane, terminal) = pane(shell, launch)?;
+    // Allocation blocks, so the request can expire during it. The recheck runs before the
+    // executable claim is published and before the command is dispatched. A refusal writes
+    // no receipt, releases no preparation, and retires only the pane this attempt
+    // allocated.
+    if let Err(refusal) = jobs::check_validity(ledger, job.validity.as_ref()) {
+        if launch.pane.is_none()
+            && let Err(error) = retire_pane(shell, &pane, terminal.as_deref())
+        {
+            eprintln!("dogsled pane close: {error}");
+        }
+        return Err(refusal);
+    }
     // The pane is known, so the claim becomes executable. The wrapper reads it
     // before it runs anything.
     let mut claim = job.clone();

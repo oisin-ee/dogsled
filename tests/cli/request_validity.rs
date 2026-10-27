@@ -607,3 +607,173 @@ fn the_mcp_path_stamps_one_creation_time() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// A wrapper that expires while the pane report runs starts no process. The claim stays
+/// where it was: it never ended, and it holds no terminal outcome.
+#[test]
+fn a_wrapper_that_expires_during_the_pane_report_starts_no_process() {
+    let rig = Rig::new("validity-wrapper-report-expiry");
+    let now = clock(&rig);
+    set_clock(&rig, now);
+    let marker = rig.dir.join("marker");
+    let command = format!("touch {}", marker.display());
+    // The claim is valid now, and the pane report that follows expires it.
+    rig.claim_at("crossing", &["sh", "-c", &command], now);
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
+            "  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\\n' ;;",
+            "  'pane report-agent'*) cp \"$RIG/later\" \"$DOGSLED_STATE/job-validity-clock.json\"; printf '{}\\n' ;;\n  'agent start'*|'agent prompt'*|'pane report-metadata'*) printf '{}\\n' ;;",
+        ),
+    );
+    // The host's effective time moves past the validity window while the report runs.
+    rig.put(
+        "later",
+        &json!({"version":1,"high_water_ms":now + WINDOW_MS + 1}),
+    );
+    let out = rig.run(&[
+        "exec",
+        "--job-validity",
+        "1",
+        "crossing",
+        "--",
+        "sh",
+        "-c",
+        &command,
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    // No process started: the command never ran.
+    assert!(!marker.exists());
+    assert!(!rig.dir.join("state/jobs/crossing.log").exists());
+    // The claim is not terminal: it never ended, and it carries no result.
+    let job = rig.read("state/jobs/crossing.json");
+    assert!(job["ended_ms"].is_null(), "{job}");
+    assert!(job["exit"].is_null(), "{job}");
+    assert!(job["reason"].is_null(), "{job}");
+    // The claim still holds the job: it was not released.
+    assert_eq!(job["state"], "working", "{job}");
+}
+
+/// A host launch that expires while the pane is allocated dispatches nothing. It writes
+/// no receipt, releases no preparation, and retires the pane it allocated.
+#[test]
+fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
+    let rig = Rig::new("validity-launch-allocation-expiry");
+    let now = clock(&rig);
+    set_clock(&rig, now);
+    rig.snapshot("state/host.json", now, 0.0, 8);
+    // The worktree this launch would run in, and the preparation it would release.
+    let tree = rig.dir.join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    rig.put(
+        "state/preparations.json",
+        &json!([{
+            "repo": rig.dir.join("home").display().to_string(),
+            "path": tree.display().to_string(),
+            "branch": "work",
+            "head": "",
+            "request_id": "job-1",
+        }]),
+    );
+    rig.script(
+        "herdr",
+        &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
+            "  'tab create'*|'workspace create'*) printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\"}}}' ;;",
+            "  'tab create'*|'workspace create'*) cp \"$RIG/later\" \"$DOGSLED_STATE/job-validity-clock.json\"; printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\"}}}' ;;",
+        ),
+    );
+    // The host's effective time moves past the validity window while the pane is
+    // allocated.
+    rig.put(
+        "later",
+        &json!({"version":1,"high_water_ms":now + WINDOW_MS + 1}),
+    );
+    let mut request = request_at(&rig, now);
+    request["cwd"] = json!(tree);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(refusal_code(&error), "JOB_EXPIRED", "{error}");
+    // Nothing was dispatched, and no receipt was written.
+    let herdr = rig.log("herdr.log");
+    assert!(!herdr.contains("pane run"), "{herdr}");
+    assert!(!rig.dir.join("state/launches/job-1.json").exists());
+    // The preparation was not released.
+    let preparations = rig.read("state/preparations.json");
+    assert_eq!(preparations.as_array().unwrap().len(), 1, "{preparations}");
+    // The pane this attempt allocated was retired.
+    assert!(herdr.contains("pane close w2:p1"), "{herdr}");
+}
+
+/// A reservation for an expired request changes nothing. The capacity record stays
+/// byte-identical, with or without an existing hold.
+#[test]
+fn a_reservation_for_an_expired_request_changes_nothing() {
+    for held in [false, true] {
+        let rig = Rig::new(&format!("validity-reservation-{held}"));
+        let now = clock(&rig);
+        set_clock(&rig, now);
+        rig.snapshot("state/host.json", now, 0.0, 8);
+        if held {
+            // A live hold for the same id.
+            rig.put(
+                "state/placements.json",
+                &json!([{"id":"job-1","created_ms":now}]),
+            );
+        }
+        let before = fs::read(rig.dir.join("state/placements.json")).unwrap_or_default();
+        // The request expired before it asked for capacity.
+        let expired = now - WINDOW_MS - 1;
+        let (code, error) = rig.json(&[
+            "host",
+            "reserve",
+            "--id",
+            "job-1",
+            "--job-validity",
+            "1",
+            "--job-created-ms",
+            &expired.to_string(),
+        ]);
+        assert_eq!(code, 2, "{held}: {error}");
+        assert_eq!(refusal_code(&error), "JOB_EXPIRED", "{held}: {error}");
+        // The capacity record is byte-identical: the refusal changed nothing.
+        let after = fs::read(rig.dir.join("state/placements.json")).unwrap_or_default();
+        assert_eq!(after, before, "{held}");
+    }
+}
+
+/// A missing clock with a corrupt local record refuses execution. The bootstrap cannot
+/// account for a record it cannot read, so it must not start the clock behind it.
+#[test]
+fn a_missing_clock_with_a_corrupt_record_refuses_execution() {
+    let rig = Rig::new("validity-bootstrap-corrupt-record");
+    let now = clock(&rig);
+    set_clock(&rig, now);
+    rig.snapshot("state/host.json", now, 0.0, 8);
+    // A local record that cannot be parsed.
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    fs::write(rig.dir.join("state/jobs/broken.json"), "not json").unwrap();
+    // The clock file is missing, so the bootstrap has to read every record.
+    assert!(!rig.dir.join("state/job-validity-clock.json").exists());
+    let request = request_at(&rig, now);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(refusal_code(&error), "JOB_CLOCK_UNAVAILABLE", "{error}");
+    // No clock was written, no claim exists, and nothing was dispatched.
+    assert!(!rig.dir.join("state/job-validity-clock.json").exists());
+    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
+    assert!(!rig.log("herdr.log").contains("pane run"));
+}

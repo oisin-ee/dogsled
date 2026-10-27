@@ -69,8 +69,8 @@ fn refuse(code: crate::error::Refusal) -> Error {
 }
 
 /// The newest timestamp in this host's own records: job records, launch receipts,
-/// admissions, and queue tickets. A record that cannot be read is skipped: it proves no
-/// time, and the clock must still start from the records that do.
+/// admissions, and queue tickets. A record directory or file that exists but cannot be read
+/// or parsed refuses: the clock cannot start without accounting for every local record.
 fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
     let mut newest = 0_u64;
     let mut note = |value: &Value, path: &str| {
@@ -78,19 +78,22 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
             newest = newest.max(ms);
         }
     };
-    for value in json_files(&store(ledger).dir) {
+    for value in json_files(&store(ledger).dir)? {
         note(&value, "/validity/created_ms");
         note(&value, "/started_ms");
         note(&value, "/ended_ms");
     }
-    for value in json_files(&ledger.child("launches").dir) {
+    for value in json_files(&ledger.child("launches").dir)? {
         note(&value, "/request/validity/created_ms");
     }
-    for value in json_files(&ledger.child("admissions").dir) {
+    for value in json_files(&ledger.child("admissions").dir)? {
         note(&value, "/request/action/validity/created_ms");
         note(&value, "/launch/action/validity/created_ms");
     }
-    if let Some(tickets) = ledger.read::<Vec<Value>>("queue.json")? {
+    if let Some(tickets) = ledger
+        .read::<Vec<Value>>("queue.json")
+        .map_err(|_| refuse(crate::error::Refusal::JobClockUnavailable))?
+    {
         for ticket in &tickets {
             note(ticket, "/created_ms");
             note(ticket, "/request/action/validity/created_ms");
@@ -99,17 +102,31 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
     Ok(newest)
 }
 
-/// Every readable JSON file in `dir`. A file that cannot be read is skipped.
-fn json_files(dir: &std::path::Path) -> Vec<Value> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+/// Every JSON file in `dir`. A missing directory is empty. A directory that cannot be
+/// read, and a file that cannot be read or parsed, refuse: the bootstrap never skips a
+/// record.
+fn json_files(dir: &std::path::Path) -> Result<Vec<Value>> {
+    let unavailable = || refuse(crate::error::Refusal::JobClockUnavailable);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(unavailable()),
     };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
-        .filter_map(|entry| std::fs::read(entry.path()).ok())
-        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .collect()
+    let mut values = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| unavailable())?;
+        // A directory holds no record of its own.
+        if entry.file_type().map_err(|_| unavailable())?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|_| unavailable())?;
+        values.push(serde_json::from_slice::<Value>(&bytes).map_err(|_| unavailable())?);
+    }
+    Ok(values)
 }
 
 /// The host's validity clock, under its own lock. A missing clock is created from the wall
@@ -707,8 +724,9 @@ fn pending_claim(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
 fn start(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
     store(ledger).with_lock(id, || {
         let mut running = pending_claim(ledger, id, initial)?;
-        // The wrapper checks the request's age before it publishes the startup, so an
-        // expired or unprovable request never starts a process.
+        // The wrapper checks the request's age before it publishes the startup. `exec`
+        // checks again right before the process starts, because the pane report blocks.
+        // An expired or unprovable request never starts a process.
         check_validity(ledger, running.validity.as_ref())?;
         running.started_ms = Some(now_ms());
         running.state = WORKING.into();
@@ -739,6 +757,9 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, id: &str, initial: &Job) -> Resu
         if let Err(error) = report(shell, &job, WORKING, None) {
             eprintln!("dogsled pane report: {error}");
         }
+        // The pane report blocks, so the request can expire after the startup check. A
+        // refusal here starts no process, keeps the claim, and writes no terminal outcome.
+        check_validity(ledger, job.validity.as_ref())?;
         let outcome = capture(ledger, &job);
         match &outcome {
             Ok((status, reason)) => {

@@ -159,6 +159,12 @@ impl Node<'_> {
     ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
         self.ledger.with_lock("host", || {
+            // The host checks the request's age before it reads or rewrites any capacity
+            // record, and before it replays a hold. A request that may not start new
+            // execution never takes, keeps, or confirms a reservation.
+            if let Some(validity) = &job_validity {
+                crate::jobs::check_validity(self.ledger, Some(validity))?;
+            }
             let reservations = self.live_reservations(now)?;
             // The caller may have lost a successful SSH reply. Replaying a live hold is
             // not new admission: do not append it, refresh its TTL, or require a fresh probe.
@@ -167,11 +173,6 @@ impl Node<'_> {
                     reserved: true,
                     headroom: None,
                 });
-            }
-            // The host checks the request's age before it holds capacity. A request that may
-            // not start new execution never takes a reservation.
-            if let Some(validity) = job_validity {
-                crate::jobs::check_validity(self.ledger, Some(&validity))?;
             }
             let Some(mut snapshot) = self
                 .ledger
