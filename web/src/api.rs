@@ -7,6 +7,8 @@ use portal_types::BoardView;
 use portal_types::agents::{
     AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen,
 };
+use portal_types::questions::{Pending, PendingList};
+use portal_types::reviews::{ReviewList, ReviewSummary};
 use serde::de::DeserializeOwned;
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
@@ -47,14 +49,46 @@ async fn failure(response: gloo_net::http::Response) -> String {
     }
 }
 
-/// The agent in `pane`, with the prompt it waits on while it is blocked.
-pub async fn fetch_agent(pane: &str) -> Result<Option<AgentView>, String> {
+/// The agents Herdr sees, including their blocked prompts.
+pub async fn fetch_agents() -> Result<Vec<AgentView>, String> {
     let response = Request::get(&format!("{BASE}/api/agents"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
     let list: AgentList = read_json(response).await?;
-    Ok(list.agents.into_iter().find(|agent| agent.pane == pane))
+    Ok(list.agents)
+}
+
+/// The agent in `pane`, with the prompt it waits on while it is blocked.
+pub async fn fetch_agent(pane: &str) -> Result<Option<AgentView>, String> {
+    Ok(fetch_agents()
+        .await?
+        .into_iter()
+        .find(|agent| agent.pane == pane))
+}
+
+/// The interviews still waiting for an answer.
+pub async fn fetch_questions() -> Result<Vec<Pending>, String> {
+    let response = Request::get(&format!("{BASE}/api/questions"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let list: PendingList = read_json(response).await?;
+    Ok(list.pending)
+}
+
+/// Plans that have not received a decision.
+pub async fn fetch_reviews() -> Result<Vec<ReviewSummary>, String> {
+    let response = Request::get(&format!("{BASE}/api/reviews"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let list: ReviewList = read_json(response).await?;
+    Ok(list
+        .reviews
+        .into_iter()
+        .filter(|review| review.decision.is_none())
+        .collect())
 }
 
 /// The turns of the agent in `pane`.
@@ -142,19 +176,31 @@ pub async fn watch_agent(pane: &str, mut on_event: impl FnMut(AgentEvent)) -> Re
 }
 
 /// Hand each board the server pushes to `on_board`, until the stream fails.
-pub async fn watch(mut on_board: impl FnMut(BoardView)) -> Result<(), String> {
+pub async fn watch(
+    mut on_board: impl FnMut(BoardView),
+    mut on_paused: impl FnMut(bool),
+) -> Result<(), String> {
     let mut source =
         EventSource::new(&format!("{BASE}/api/stream")).map_err(|error| error.to_string())?;
     let mut stream = source
         .subscribe("board")
         .map_err(|error| error.to_string())?;
     while let Some(item) = stream.next().await {
-        let (_, message) = item.map_err(|error| error.to_string())?;
-        if let Some(text) = message.data().as_string()
-            && let Ok(view) = serde_json::from_str::<BoardView>(&text)
-        {
-            on_board(view);
+        // Native EventSource owns reconnection. Keep the subscription alive
+        // across transport errors so the last board stays on screen.
+        let Ok((_, message)) = item else {
+            on_paused(true);
+            continue;
+        };
+        if let Some(text) = message.data().as_string() {
+            match serde_json::from_str::<BoardView>(&text) {
+                Ok(view) => {
+                    on_board(view);
+                    on_paused(false);
+                }
+                Err(error) => return Err(format!("the board stream sent invalid data: {error}")),
+            }
         }
     }
-    Ok(())
+    Err("the board stream ended".to_owned())
 }
