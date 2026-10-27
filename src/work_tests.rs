@@ -355,6 +355,7 @@ fn a_job_record_says_who_may_run_the_job() {
         ended_ms: None,
         timeout_ms: None,
         idle_timeout_ms: None,
+        validity: None,
     };
     assert!(matches!(
         crate::jobs::ownership(&ledger, "claimed").unwrap(),
@@ -405,6 +406,7 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
         ended_ms: None,
         timeout_ms: None,
         idle_timeout_ms: None,
+        validity: None,
     };
     // A.json holds B's identity.
     let mut other = job.clone();
@@ -456,6 +458,7 @@ fn a_job_launch_receipt_carries_its_own_request_evidence() {
             cmd: vec!["true".into()],
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         },
         host: "local".into(),
         cwd: "/work".into(),
@@ -504,6 +507,55 @@ fn a_job_launch_receipt_carries_its_own_request_evidence() {
         error
             .to_string()
             .contains("legacy launch receipt without request evidence"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// The host's validity clock never moves back. A host clock that moves back cannot reopen
+/// an expired request, and the refusal is recorded at the time it was refused.
+#[test]
+fn the_validity_clock_never_moves_back() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    let created = 1_000_000_u64;
+    let validity = crate::jobs::Validity::new(created);
+    // The clock starts at the wall clock, which the test cannot move. The clock file is
+    // read and written directly here, so the test controls the host time.
+    let clock_file = ledger.dir.join("job-validity-clock.json");
+    let write = |high_water_ms: u64| {
+        std::fs::write(
+            &clock_file,
+            serde_json::to_vec(&crate::jobs::Clock {
+                version: crate::jobs::Clock::VERSION,
+                high_water_ms,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    // A request 30 days old is still valid, and one millisecond more is not.
+    let at = created + crate::jobs::VALIDITY_WINDOW_MS;
+    write(at);
+    assert!(crate::jobs::check_validity_at(&ledger, Some(&validity), at).is_ok());
+    write(at + 1);
+    let error = crate::jobs::check_validity_at(&ledger, Some(&validity), at + 1).unwrap_err();
+    assert!(error.to_string().contains("older than 30 days"), "{error}");
+    // The refusal advanced the clock, and the clock file holds the later time.
+    let saved: crate::jobs::Clock =
+        serde_json::from_slice(&std::fs::read(&clock_file).unwrap()).unwrap();
+    assert!(saved.high_water_ms > created + crate::jobs::VALIDITY_WINDOW_MS);
+    // A request without evidence never starts new execution.
+    let error = crate::jobs::check_validity_at(&ledger, None, at + 1).unwrap_err();
+    assert!(
+        error.to_string().contains("validity is unprovable"),
+        "{error}"
+    );
+    // A request from the future is refused.
+    let ahead = crate::jobs::Validity::new(u64::MAX / 2);
+    let error = crate::jobs::check_validity_at(&ledger, Some(&ahead), at + 1).unwrap_err();
+    assert!(
+        error.to_string().contains("ahead of this host clock"),
         "{error}"
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();

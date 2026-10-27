@@ -4,12 +4,201 @@ use crate::error::{Error, Result};
 use crate::ledger::{Ledger, now_ms};
 use crate::shell::{Shell, kill_group};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+/// The recorded creation time of a job request. It is stamped once, at the origin that
+/// asked for the work, and every later copy is byte-identical. A request without this
+/// evidence never starts new execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Validity {
+    pub version: u32,
+    pub created_ms: u64,
+}
+
+impl Validity {
+    /// The version this binary records and accepts.
+    pub const VERSION: u32 = 1;
+    /// The evidence for a request created at `created_ms`.
+    #[must_use]
+    pub const fn new(created_ms: u64) -> Self {
+        Self {
+            version: Self::VERSION,
+            created_ms,
+        }
+    }
+}
+
+/// The job validity protocol version this binary speaks. A peer that reports another
+/// version, or none, does not understand recorded request validity.
+pub const VALIDITY_PROTOCOL_VERSION: u32 = 1;
+
+/// How long a recorded request may start new execution: 30 days.
+pub const VALIDITY_WINDOW_MS: u64 = 2_592_000_000;
+/// How far ahead of this host clock a recorded request may claim to be: 5 minutes.
+pub const VALIDITY_SKEW_MS: u64 = 300_000;
+
+/// The host's job validity clock. Its high-water time never moves back, so a host clock
+/// that moves back cannot reopen an expired request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Clock {
+    pub version: u32,
+    pub high_water_ms: u64,
+}
+
+impl Clock {
+    /// The version this host records and accepts.
+    pub const VERSION: u32 = 1;
+}
+
+/// The clock's own file and lock, under the host's ledger.
+const CLOCK_FILE: &str = "job-validity-clock.json";
+const CLOCK_LOCK: &str = "job-validity-clock";
+
+/// A refusal with the fixed message its code carries.
+fn refuse(code: crate::error::Refusal) -> Error {
+    Error::Refused {
+        code,
+        detail: code.message().to_owned(),
+    }
+}
+
+/// The newest timestamp in this host's own records: job records, launch receipts,
+/// admissions, and queue tickets. A record that cannot be read is skipped: it proves no
+/// time, and the clock must still start from the records that do.
+fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
+    let mut newest = 0_u64;
+    let mut note = |value: &Value, path: &str| {
+        if let Some(ms) = value.pointer(path).and_then(Value::as_u64) {
+            newest = newest.max(ms);
+        }
+    };
+    for value in json_files(&store(ledger).dir) {
+        note(&value, "/validity/created_ms");
+        note(&value, "/started_ms");
+        note(&value, "/ended_ms");
+    }
+    for value in json_files(&ledger.child("launches").dir) {
+        note(&value, "/request/validity/created_ms");
+    }
+    for value in json_files(&ledger.child("admissions").dir) {
+        note(&value, "/request/action/validity/created_ms");
+        note(&value, "/launch/action/validity/created_ms");
+    }
+    if let Some(tickets) = ledger.read::<Vec<Value>>("queue.json")? {
+        for ticket in &tickets {
+            note(ticket, "/created_ms");
+            note(ticket, "/request/action/validity/created_ms");
+        }
+    }
+    Ok(newest)
+}
+
+/// Every readable JSON file in `dir`. A file that cannot be read is skipped.
+fn json_files(dir: &std::path::Path) -> Vec<Value> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+        .filter_map(|entry| std::fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .collect()
+}
+
+/// The host's validity clock, under its own lock. A missing clock is created from the wall
+/// clock and the newest local record. A corrupt or unsupported clock refuses execution.
+pub fn clock(ledger: &Ledger) -> Result<Clock> {
+    let now = crate::ledger::now_ms();
+    ledger.with_lock(CLOCK_LOCK, || load_clock(ledger, now))
+}
+
+/// Read the clock, and create it when it is missing.
+fn load_clock(ledger: &Ledger, now: u64) -> Result<Clock> {
+    match ledger.read::<Clock>(CLOCK_FILE) {
+        Ok(Some(clock)) if clock.version == Clock::VERSION => Ok(clock),
+        Ok(Some(_)) | Err(_) => Err(refuse(crate::error::Refusal::JobClockUnavailable)),
+        Ok(None) => {
+            let clock = Clock {
+                version: Clock::VERSION,
+                high_water_ms: now.max(newest_record_ms(ledger)?),
+            };
+            ledger
+                .write(CLOCK_FILE, &clock)
+                .map_err(|_| refuse(crate::error::Refusal::JobClockUnavailable))?;
+            Ok(clock)
+        }
+    }
+}
+
+/// The host's effective time: the later of its high-water time and its wall clock. The
+/// high-water time is persisted first, so a host clock that moves back cannot reopen an
+/// expired request.
+pub fn advance_clock(ledger: &Ledger, now: u64) -> Result<u64> {
+    ledger.with_lock(CLOCK_LOCK, || {
+        let clock = load_clock(ledger, now)?;
+        let effective = clock.high_water_ms.max(now);
+        if effective != clock.high_water_ms {
+            ledger
+                .write(
+                    CLOCK_FILE,
+                    &Clock {
+                        version: Clock::VERSION,
+                        high_water_ms: effective,
+                    },
+                )
+                .map_err(|_| refuse(crate::error::Refusal::JobClockUnavailable))?;
+        }
+        Ok(effective)
+    })
+}
+
+/// Check a recorded request against this host's clock. The clock advances first, so a
+/// refusal records the time it was refused at. A request without evidence, an old
+/// request, and a request from the future each refuse with their own code.
+pub fn check_validity(ledger: &Ledger, validity: Option<&Validity>) -> Result<()> {
+    check_validity_at(ledger, validity, crate::ledger::now_ms())
+}
+
+/// Check a recorded request against this host's clock at `now`.
+pub fn check_validity_at(ledger: &Ledger, validity: Option<&Validity>, now: u64) -> Result<()> {
+    // The clock advances first, so a refusal is recorded at the time it was refused.
+    let effective = advance_clock(ledger, now)?;
+    let Some(validity) = validity else {
+        return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+    };
+    if validity.version != Validity::VERSION {
+        return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+    }
+    // A request from the future is refused against the wall clock, so a host clock that
+    // moved back does not refuse a request that was made while it was correct.
+    if validity.created_ms > now.saturating_add(VALIDITY_SKEW_MS) {
+        return Err(refuse(crate::error::Refusal::JobFromFuture));
+    }
+    // The age is measured against the effective time, so a host clock that moved back
+    // cannot reopen an expired request.
+    if effective.saturating_sub(validity.created_ms) > VALIDITY_WINDOW_MS {
+        return Err(refuse(crate::error::Refusal::JobExpired));
+    }
+    Ok(())
+}
+
+/// The validity evidence a new request carries. The origin stamps it once, and refuses
+/// issuance when this host's clock is behind its own high-water time.
+pub fn origin_validity(ledger: &Ledger) -> Result<Validity> {
+    let now = crate::ledger::now_ms();
+    let clock = clock(ledger)?;
+    if clock.high_water_ms > now.saturating_add(VALIDITY_SKEW_MS) {
+        return Err(refuse(crate::error::Refusal::JobClockUnavailable));
+    }
+    Ok(Validity::new(now))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
@@ -27,6 +216,10 @@ pub struct Job {
     pub ended_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
     pub idle_timeout_ms: Option<u64>,
+    /// The request's own creation time, copied from the request. A record without it
+    /// proves no age.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<Validity>,
 }
 
 pub fn duration(text: &str) -> std::result::Result<u64, String> {
@@ -389,6 +582,7 @@ pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
                     || existing.owner != job.owner
                     || existing.timeout_ms != job.timeout_ms
                     || existing.idle_timeout_ms != job.idle_timeout_ms
+                    || existing.validity != job.validity
                 {
                     return Err(Error::Invalid(format!(
                         "job {} claim changed after its intent was published",
@@ -499,6 +693,7 @@ fn pending_claim(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
         || claimed.pane != initial.pane
         || claimed.timeout_ms != initial.timeout_ms
         || claimed.idle_timeout_ms != initial.idle_timeout_ms
+        || claimed.validity != initial.validity
     {
         return Err(Error::Invalid(format!(
             "job {id} claim changed since it was requested"
@@ -512,6 +707,9 @@ fn pending_claim(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
 fn start(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
     store(ledger).with_lock(id, || {
         let mut running = pending_claim(ledger, id, initial)?;
+        // The wrapper checks the request's age before it publishes the startup, so an
+        // expired or unprovable request never starts a process.
+        check_validity(ledger, running.validity.as_ref())?;
         running.started_ms = Some(now_ms());
         running.state = WORKING.into();
         save(ledger, &running)?;

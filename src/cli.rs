@@ -112,6 +112,9 @@ pub enum Command {
     /// Execute a job inside its pane.
     Exec {
         id: String,
+        /// The job validity protocol the launch used.
+        #[arg(long)]
+        job_validity: Option<u32>,
         #[arg(long, value_parser = crate::jobs::duration)]
         timeout: Option<u64>,
         #[arg(long, value_parser = crate::jobs::duration)]
@@ -440,6 +443,9 @@ pub enum HostCommand {
     Launch {
         #[arg(long)]
         request: String,
+        /// The job validity protocol the caller speaks. A job launch carries it.
+        #[arg(long)]
+        job_validity: Option<u32>,
     },
     Job {
         id: String,
@@ -464,6 +470,12 @@ pub enum HostCommand {
     Reserve {
         #[arg(long)]
         id: String,
+        /// The job validity protocol the caller speaks. A job reservation carries it.
+        #[arg(long)]
+        job_validity: Option<u32>,
+        /// The recorded creation time of the request this reservation is for.
+        #[arg(long)]
+        job_created_ms: Option<u64>,
         #[command(flatten)]
         thresholds: ThresholdArgs,
     },

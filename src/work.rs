@@ -19,6 +19,9 @@ pub enum Action {
         cmd: Vec<String>,
         timeout_ms: Option<u64>,
         idle_timeout_ms: Option<u64>,
+        /// The request's own creation time, stamped once at its origin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        validity: Option<crate::jobs::Validity>,
     },
     Agent {
         kind: String,
@@ -108,8 +111,37 @@ pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
     Ok(tickets)
 }
 
+/// A job request's own validity evidence. A request that is not a job has no age to
+/// check: agents and prepared units are unchanged by this rule.
+fn request_validity(request: &Request) -> Option<&crate::jobs::Validity> {
+    match &request.action {
+        Action::Job { validity, .. } => validity.as_ref(),
+        _ => None,
+    }
+}
+
+/// The validity evidence a launch carries in its own action.
+fn launch_validity(launch: &Launch) -> Option<crate::jobs::Validity> {
+    match &launch.action {
+        Action::Job { validity, .. } => *validity,
+        _ => None,
+    }
+}
+
+/// Check a request against this host's clock. A request that may not start new execution
+/// is refused here, before any placement, preparation, dispatch, or ownership change.
+fn check_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
+    if !matches!(request.action, Action::Job { .. }) {
+        return Ok(());
+    }
+    crate::jobs::check_validity(ledger, request_validity(request))
+}
+
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
     ledger.with_lock("queue", || {
+        // A request that may not start new execution never enters the queue. The refusal
+        // is recorded on the clock, and the queue stays as it was.
+        check_request_validity(ledger, &request)?;
         let mut tickets = queue(ledger)?;
         if let Some(ticket) = tickets.iter_mut().find(|t| t.request.id == request.id) {
             if serde_json::to_value(&ticket.request)? != serde_json::to_value(&request)? {
@@ -311,8 +343,15 @@ fn request_evidence(
     timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
 ) -> Value {
-    json!({"cmd":cmd,"cwd":launch.cwd,"owner":launch.owner,
-        "timeout_ms":timeout_ms,"idle_timeout_ms":idle_timeout_ms})
+    let mut evidence = json!({"cmd":cmd,"cwd":launch.cwd,"owner":launch.owner,
+        "timeout_ms":timeout_ms,"idle_timeout_ms":idle_timeout_ms});
+    // The validity evidence joins the receipt only when the request carries it. A legacy
+    // receipt keeps its own shape, and a new request never correlates to a receipt that
+    // names no request time.
+    if let Some(validity) = launch_validity(launch) {
+        evidence["validity"] = json!(validity);
+    }
+    evidence
 }
 
 /// The saved receipt of a job launch must name this request and the command it dispatched.
@@ -398,6 +437,7 @@ pub(crate) fn correlate(
         || job.owner != launch.owner
         || job.timeout_ms != timeout_ms
         || job.idle_timeout_ms != idle_timeout_ms
+        || job.validity != launch_validity(launch)
     {
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another command or request",
@@ -432,6 +472,7 @@ fn launch_job(
         ended_ms: None,
         timeout_ms,
         idle_timeout_ms,
+        validity: launch_validity(launch),
     };
     // The job's ownership is read before any pane side effect. A job that already
     // has an owner keeps it: this launch never takes it over, never allocates a
@@ -471,10 +512,13 @@ fn launch_job(
     claim.state = jobs::PENDING.into();
     jobs::publish_claim(ledger, &claim)?;
     let executable = std::env::current_exe()?.display().to_string();
+    // The wrapper carries the protocol it speaks and the request's own creation time, so
+    // the wrapper checks the same age the launch checked.
     let command = format!(
-        "DOGSLED_STATE={} {} exec {} -- {}",
+        "DOGSLED_STATE={} {} exec --job-validity {} {} -- {}",
         quote(&ledger.dir.display().to_string()),
         quote(&executable),
+        crate::jobs::VALIDITY_PROTOCOL_VERSION,
         quote(&launch.id),
         cmd.iter().map(|c| quote(c)).collect::<Vec<_>>().join(" ")
     );
@@ -493,12 +537,30 @@ fn launch_job(
         "request":request_evidence(launch, cmd, timeout_ms, idle_timeout_ms)}))
 }
 
-pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, _now: u64) -> Result<Value> {
+pub fn launch(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    launch: &Launch,
+    _now: u64,
+    peer_validity: Option<u32>,
+) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
     if launch.unit.is_some() && !matches!(launch.action, Action::Agent { .. }) {
         return Err(crate::unit_transport::conflict(
             "seed requires an agent launch",
         ));
+    }
+    // A job launch needs the validity protocol. A peer that speaks another version, or
+    // none, never creates a claim or a pane.
+    if matches!(launch.action, Action::Job { .. })
+        && peer_validity != Some(jobs::VALIDITY_PROTOCOL_VERSION)
+    {
+        return Err(Error::Refused {
+            code: crate::error::Refusal::JobValidityUnsupported,
+            detail: crate::error::Refusal::JobValidityUnsupported
+                .message()
+                .to_owned(),
+        });
     }
     if matches!(launch.action, Action::Agent { .. }) {
         let result = crate::launch::agent(ledger, shell, launch)?;
@@ -515,17 +577,26 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, _now: u64) ->
                 cmd,
                 timeout_ms,
                 idle_timeout_ms,
+                ..
             } = &launch.action
             {
+                // A correlated receipt replays after expiry. It is read-only: it returns
+                // the saved result and dispatches nothing.
                 correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
             }
             return Ok(value);
+        }
+        // New execution checks the request's age before it claims anything, allocates a
+        // pane, or dispatches the command.
+        if let Action::Job { validity, .. } = &launch.action {
+            jobs::check_validity(ledger, validity.as_ref())?;
         }
         let result = match &launch.action {
             Action::Job {
                 cmd,
                 timeout_ms,
                 idle_timeout_ms,
+                ..
             } => launch_job(ledger, shell, launch, cmd, *timeout_ms, *idle_timeout_ms)?,
             Action::Agent { .. } => {
                 return Err(Error::Invalid(
@@ -761,6 +832,9 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
 /// The caller owns the request's admission lock. Commit uses this path so the lock is
 /// never reacquired while `runtime::start` enters admission.
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    // Admission checks the request's age before it places, prepares, or dispatches
+    // anything. A request that may not start new execution is refused here.
+    check_request_validity(fleet.ledger, request)?;
     let attempts = fleet.ledger.child("admissions");
     let file = format!("{}.json", request.id);
     if let Some(mut attempt) = attempts.read::<Attempt>(&file)? {
@@ -888,7 +962,9 @@ fn begin(
 }
 
 fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
-    let placed = commands::place(fleet, host, &request.id, now).map_err(prelaunch_error)?;
+    let validity = request_validity(request).copied();
+    let placed =
+        commands::place_with(fleet, host, &request.id, now, validity).map_err(prelaunch_error)?;
     if let Placement::Full { hosts, .. } = &placed {
         defer(fleet, request, hosts, now)?;
     }
@@ -987,16 +1063,28 @@ fn finish(
     now: u64,
 ) -> Result<Value> {
     let launched = if host.is_local() {
-        launch(fleet.ledger, fleet.shell, launch_request, now)
-    } else {
-        fleet.remote_setup(
-            host,
-            &[
-                "launch".into(),
-                "--request".into(),
-                serde_json::to_string(launch_request)?,
-            ],
+        launch(
+            fleet.ledger,
+            fleet.shell,
+            launch_request,
+            now,
+            Some(jobs::VALIDITY_PROTOCOL_VERSION),
         )
+    } else {
+        let mut args = vec![
+            "launch".into(),
+            "--request".into(),
+            serde_json::to_string(launch_request)?,
+        ];
+        // The validity protocol rides with a job launch. A peer that does not speak it
+        // rejects the flag, and the caller reports an unsupported protocol.
+        if matches!(request.action, Action::Job { .. }) {
+            args.extend([
+                "--job-validity".into(),
+                crate::jobs::VALIDITY_PROTOCOL_VERSION.to_string(),
+            ]);
+        }
+        fleet.remote_setup(host, &args)
     };
     let result = launched.map_err(|e| {
         if retryable(&e) && matches!(request.action, Action::Agent { .. }) {

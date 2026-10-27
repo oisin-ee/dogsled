@@ -17,6 +17,22 @@ fn caller() -> Result<String> {
 }
 
 pub fn request(fleet: &Fleet, args: &WorkArgs, action: Action) -> Result<Request> {
+    // A job request is stamped once, here, at its origin. The stamp never changes, and a
+    // retry keeps it byte-identical.
+    let action = match action {
+        Action::Job {
+            cmd,
+            timeout_ms,
+            idle_timeout_ms,
+            ..
+        } => Action::Job {
+            cmd,
+            timeout_ms,
+            idle_timeout_ms,
+            validity: Some(jobs::origin_validity(fleet.ledger)?),
+        },
+        action => action,
+    };
     let cwd = args.cwd.clone().map_or_else(
         || std::env::current_dir().map(|p| p.display().to_string()),
         Ok,
@@ -335,6 +351,7 @@ pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<Ex
                 cmd,
                 timeout_ms: timeout,
                 idle_timeout_ms: idle_timeout,
+                validity: None,
             },
             json_output,
         ),
@@ -603,8 +620,21 @@ pub fn exec(
     cmd: &[String],
     timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
+    job_validity: Option<u32>,
 ) -> Result<ExitCode> {
     jobs::validate_id(id)?;
+    // The wrapper names the protocol it speaks. A wrapper that speaks another version
+    // never starts new execution.
+    if let Some(version) = job_validity
+        && version != jobs::VALIDITY_PROTOCOL_VERSION
+    {
+        return Err(Error::Refused {
+            code: crate::error::Refusal::JobValidityUnsupported,
+            detail: crate::error::Refusal::JobValidityUnsupported
+                .message()
+                .to_owned(),
+        });
+    }
     // A job runs only from its claim. A missing record is refused here, and so is an
     // unreadable one: no process, no log, and no pane exist for a job nobody claimed.
     let job = jobs::record(ledger, id)?
