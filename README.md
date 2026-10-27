@@ -13,13 +13,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.23.2
+mise use github:oisin-ee/dogsled@v0.25.3
 ```
 
 Pi (extension, tools, and skill), from npm or as part of `@oisin-ee/oisinpi`:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.23.2
+pi install npm:@oisin-ee/pi-dogsled@0.25.3
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -27,14 +27,14 @@ At session start the extension compares its version with `dogsled --version` and
 Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/dogsled#v0.23.2
+claude plugin marketplace add oisin-ee/dogsled#v0.25.3
 claude plugin install dogsled@dogsled
 ```
 
 Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/dogsled --ref v0.23.2
+codex plugin marketplace add oisin-ee/dogsled --ref v0.25.3
 codex plugin add dogsled@dogsled
 ```
 
@@ -44,10 +44,26 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (left-docked work board):
 
 ```sh
-herdr plugin install oisin-ee/dogsled --ref v0.23.2 --yes
+herdr plugin install oisin-ee/dogsled --ref v0.25.3 --yes
 ```
 
 The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build step (`plugin/fetch.sh`) installs its own binary at `bin/dogsled`: the release archive for the manifest version, checked against its published SHA-256. When that release has no archive for the platform, it runs `cargo build --release --locked` instead, which needs Rust at the crate's `rust-version` or newer. A checksum mismatch stops the install. `DOGSLED_RELEASES` replaces the download base, such as a mirror. `herdr plugin link` skips build steps, so run `sh plugin/fetch.sh` in a linked checkout. No plugin starts host services.
+
+## Web portal
+
+Run the portal with `dogsled web`, then open `http://127.0.0.1:7465`.
+The server listens only on the loopback address.
+The port defaults to 7465. Set `[web] port` in `dogsled.toml`, or pass `dogsled web --port PORT`.
+If the portal uses another port, set `DOGSLED_WEB_PORT` for the Pi tools so they can find it.
+
+The portal creates its token at `~/.local/state/dogsled/web/token`, or `$DOGSLED_STATE/web/token` with a custom state directory.
+Only the owner can read the token file. Agent API requests use it as a Bearer credential.
+Release archives include `dev.dogsled.web.plist` for the macOS login service.
+Dotfiles renders and loads the template. It runs `dogsled web` and restarts it after a failure.
+
+Without a persistent portal, `dogsled interview --file questions.json` opens a temporary server and prints the answers as JSON.
+`dogsled review --file plan.md --pane PANE --session SESSION --cwd DIR` opens a temporary server and prints the decision as JSON.
+Both commands close their server after the interaction ends.
 
 ## Commands
 
@@ -647,15 +663,34 @@ cargo build --release
 npm ci
 ```
 
+The server embeds the Dioxus portal UI, so the web bundle must exist before the binary builds.
+`moon run :web-build` runs `dx bundle --web --release` and writes the bundle to `web/public`.
+Run it before a plain `cargo build`:
+
+```sh
+moon run :web-build
+cargo build --release
+```
+
+Proto and moon own the development tooling. `proto install` installs the versions in `.prototools`, and `moon run` runs the checks:
+
+```sh
+proto install
+moon run :fmt-check :lint :test :typecheck :test-shim
+```
+
+The `lint` and `test` tasks build the web bundle first, so they work in a fresh checkout.
+
 The executable is `target/release/dogsled`.
-Release archives include the binary, `dogsled.service`, and `dev.dogsled.plist` from `plugin/services/`.
-Harness installers read their manifests and skill from Git, not the binary archive. The skill move does not change the archive contents.
-Both run `dogsled serve` through `~/.local/bin/mise`, restart on failure, and log to the dogsled state directory.
+Release archives include the binary and three service templates from `plugin/services/`: `dogsled.service`, `dev.dogsled.plist`, and `dev.dogsled.web.plist`.
+Harness installers read their manifests and skill from Git, not the binary archive.
+The first two templates run `dogsled serve`. The web template runs `dogsled web`.
+All three run through `~/.local/bin/mise`, restart on failure, and log to the dogsled state directory.
 Dotfiles installs the systemd user unit or renders the launchd template with an absolute, XML-escaped `@HOME@` path.
 For launchd, dotfiles creates `~/.local/state/dogsled` before loading the agent. Systemd creates it through `StateDirectory`.
 If mise has a different installation path, dotfiles adjusts the executable path.
 Install the same release on every host before enabling its service. This PR does not install or start host services.
 
-The pre-commit hook runs `mise run check`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.
+The pre-commit hook runs `moon run :#precommit --affected --status staged`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.
 CLI behavior tests use private state and fake Herdr/SSH executables. Time-sensitive unit tests inject timestamps.
 See [the design](docs/design.md) for watchdog delivery guarantees and cleanup scope.

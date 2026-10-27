@@ -1,6 +1,6 @@
 {
   "name": "dogsled",
-  "version": "0.23.2",
+  "version": "0.25.3",
   "description": "Host status, placement, jobs, and queue admission for Herdr agents.",
   "author": {
     "name": "oisin-ee",

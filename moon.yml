@@ -1,0 +1,107 @@
+$schema: https://moonrepo.dev/schemas/project.json
+tasks:
+  fmt:
+    command: cargo fmt
+    description: Format the Rust sources.
+  fmt-check:
+    command: cargo fmt --check
+    description: Check the Rust formatting.
+    tags: [precommit]
+    inputs:
+      - "src/**/*"
+      - "tests/**/*"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "clippy.toml"
+  lint:
+    command: cargo clippy --all-targets -- -D warnings
+    description: Run Clippy with warnings as errors, on every target.
+    tags: [precommit]
+    # The server embeds the web bundle, so the bundle must exist before
+    # Clippy reads the sources that embed it.
+    deps:
+      - web-build
+    inputs:
+      - "src/**/*"
+      - "tests/**/*"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "clippy.toml"
+      - "web/public/**/*"
+  test:
+    command: cargo test
+    description: Run the Rust unit and integration tests.
+    tags: [precommit]
+    # The asset tests read the embedded web bundle, so the bundle must exist
+    # before the tests run.
+    deps:
+      - web-build
+    inputs:
+      - "src/**/*"
+      - "tests/**/*"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "web/public/**/*"
+  web-lint:
+    command: cargo clippy -p web --target wasm32-unknown-unknown -- -D warnings
+    description: Run Clippy on the web portal UI for the WASM target.
+    inputs:
+      - "web/**/*"
+      - "portal-types/**/*"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "clippy.toml"
+  web-build:
+    command: dx bundle --web --release --package web
+    description: Bundle the web portal UI into web/public with dx.
+    inputs:
+      - "web/**/*"
+      - "portal-types/**/*"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+    outputs:
+      - "web/public"
+  typecheck:
+    command: npm run --silent typecheck
+    description: Typecheck the Pi extension.
+    toolchain: node
+    tags: [precommit]
+    inputs:
+      - "pi/**/*"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+  test-shim:
+    command: npm run --silent test
+    description: Run the Pi extension tests.
+    toolchain: node
+    tags: [precommit]
+    inputs:
+      - "pi/**/*"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+  install:
+    command: npm ci --no-audit --no-fund
+    description: Install the Pi extension dependencies.
+    toolchain: node
+    inputs:
+      - "package.json"
+      - "package-lock.json"
+  check:
+    description: Run every check that CI runs.
+    deps:
+      - fmt-check
+      - lint
+      - test
+      - typecheck
+      - test-shim

@@ -1,0 +1,27 @@
+[package]
+name = "portal-types"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Wire types shared by the dogsled web server and the portal UI"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+# The question forms keep the fields the schema does not name, so they need a
+# JSON value type of their own.
+serde_json = "1.0.151"
+
+[lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+struct_field_names = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

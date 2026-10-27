@@ -644,6 +644,7 @@ pub mod tests {
             quiet_ms: None,
             ahead: None,
             dirty: false,
+            repository: None,
         }
     }
 

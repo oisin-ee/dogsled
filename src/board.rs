@@ -460,6 +460,9 @@ pub struct Row {
     pub ahead: Option<u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dirty: bool,
+    /// Canonical `host/owner/name` of the agent's repository, when it is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -542,6 +545,7 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
             quiet_ms: None,
             ahead: Some(branch.ahead),
             dirty: false,
+            repository: None,
         };
     }
     let found = agent(hosts, item);
@@ -612,7 +616,36 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         quiet_ms,
         ahead,
         dirty,
+        repository: agent.and_then(|a| a.repository.clone()),
     }
+}
+
+/// The repository of the checkout a job runs in, when an observed agent on that host names
+/// the same checkout. The board reads no Git state of its own, so a job in an unobserved
+/// checkout has no repository.
+fn job_repository(
+    hosts: &[HostReport],
+    item: &Item,
+    job: Option<&crate::jobs::Job>,
+) -> Option<String> {
+    let job = job?;
+    let host = hosts.iter().find(|h| h.host.id == item.host)?;
+    host.probe
+        .as_ref()?
+        .agent_panes
+        .iter()
+        .filter(|a| {
+            a.cwd
+                .as_deref()
+                .is_some_and(|cwd| same_checkout(cwd, &job.cwd))
+        })
+        .find_map(|a| a.repository.clone())
+}
+
+/// Two paths name the same checkout when one is the other, or sits inside it.
+fn same_checkout(a: &str, b: &str) -> bool {
+    let (a, b) = (std::path::Path::new(a), std::path::Path::new(b));
+    a == b || a.starts_with(b) || b.starts_with(a)
 }
 
 fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
@@ -652,6 +685,7 @@ fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         quiet_ms: None,
         ahead: None,
         dirty: false,
+        repository: job_repository(hosts, item, job),
     }
 }
 
@@ -693,6 +727,11 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
         quiet_ms: None,
         ahead: None,
         dirty: false,
+        repository: ticket
+            .request
+            .repository
+            .as_ref()
+            .and_then(|repo| crate::checkout::identity(&repo.origin)),
     }
 }
 
@@ -1416,6 +1455,7 @@ mod tests {
             cwd: None,
             session: Session::default(),
             worktree: None,
+            repository: None,
             done: false,
         }
     }
@@ -1618,5 +1658,175 @@ mod tests {
             ("job", "cargo", "cargo test")
         );
         assert_eq!(row.group, Group::Running);
+    }
+
+    #[test]
+    fn a_job_row_carries_the_repository_of_its_checkout() {
+        let mut worker = agent("w2:p1", "pi", "working");
+        worker.cwd = Some("/r".into());
+        worker.repository = Some("github.com/oisin-ee/dogsled".into());
+        let mut local = host("local", "local", vec![worker]);
+        local.jobs.push(crate::jobs::Job {
+            id: "j1".into(),
+            cmd: vec!["cargo".into(), "test".into()],
+            cwd: "/r".into(),
+            host: "local".into(),
+            owner: "w1:p1".into(),
+            pane: "w3:p1".into(),
+            state: "running".into(),
+            exit: None,
+            signal: None,
+            reason: None,
+            started_ms: Some(NOW),
+            ended_ms: None,
+            timeout_ms: None,
+            idle_timeout_ms: None,
+        });
+        let board = build(
+            &status(
+                vec![local],
+                vec![Item {
+                    kind: "job".into(),
+                    ..item("j1", "local", "w3:p1")
+                }],
+            ),
+            None,
+            NOW,
+        );
+        let row = board
+            .rows
+            .iter()
+            .find(|r| r.kind == "job")
+            .expect("the job has a row");
+        assert_eq!(
+            row.repository.as_deref(),
+            Some("github.com/oisin-ee/dogsled")
+        );
+    }
+
+    #[test]
+    fn a_job_row_without_an_observed_checkout_has_no_repository() {
+        let mut local = host("local", "local", Vec::new());
+        local.jobs.push(crate::jobs::Job {
+            id: "j1".into(),
+            cmd: vec!["cargo".into(), "test".into()],
+            cwd: "/r".into(),
+            host: "local".into(),
+            owner: "w1:p1".into(),
+            pane: "w3:p1".into(),
+            state: "running".into(),
+            exit: None,
+            signal: None,
+            reason: None,
+            started_ms: Some(NOW),
+            ended_ms: None,
+            timeout_ms: None,
+            idle_timeout_ms: None,
+        });
+        let board = build(
+            &status(
+                vec![local],
+                vec![Item {
+                    kind: "job".into(),
+                    ..item("j1", "local", "w3:p1")
+                }],
+            ),
+            None,
+            NOW,
+        );
+        let row = board
+            .rows
+            .iter()
+            .find(|r| r.kind == "job")
+            .expect("the job has a row");
+        assert_eq!(row.repository, None);
+    }
+
+    #[test]
+    fn a_row_serialises_its_repository_when_it_is_known() {
+        let mut worker = agent("w2:p1", "pi", "working");
+        worker.repository = Some("github.com/oisin-ee/dogsled".into());
+        let board = build(
+            &status(
+                vec![host("8103", "netcup", vec![worker])],
+                vec![item("child", "8103", "w2:p1")],
+            ),
+            None,
+            NOW,
+        );
+        let text = serde_json::to_string(&board.rows[0]).unwrap();
+        assert!(
+            text.contains(r#""repository":"github.com/oisin-ee/dogsled""#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_row_without_a_repository_does_not_serialise_one() {
+        let board = build(
+            &status(
+                vec![host(
+                    "8103",
+                    "netcup",
+                    vec![agent("w2:p1", "pi", "working")],
+                )],
+                vec![item("child", "8103", "w2:p1")],
+            ),
+            None,
+            NOW,
+        );
+        let text = serde_json::to_string(&board.rows[0]).unwrap();
+        assert!(!text.contains("repository"), "{text}");
+    }
+
+    #[test]
+    fn a_queued_row_carries_the_repository_of_its_request() {
+        let ticket = crate::work::Ticket {
+            id: "t1".into(),
+            request: crate::work::Request {
+                id: "t1".into(),
+                action: crate::work::Action::Job {
+                    cmd: vec!["cargo".into(), "test".into()],
+                    timeout_ms: None,
+                    idle_timeout_ms: None,
+                },
+                host: None,
+                branch: None,
+                base: None,
+                cwd: "/r".into(),
+                repository: Some(crate::checkout::Repository {
+                    path: "/r".into(),
+                    origin: "git@github.com:oisin-ee/dogsled.git".into(),
+                    relative: "r".into(),
+                    working_root: "/r".into(),
+                }),
+                workspace: None,
+                workspace_name: None,
+                owner: "w1:p1".into(),
+                owner_host: None,
+            },
+            created_ms: NOW - 1_000,
+            state: "pending".into(),
+            waiting: false,
+            waiting_until_ms: None,
+            wait_reason: None,
+            notified: false,
+            result: None,
+            error: None,
+            diagnostic: None,
+            retry: crate::backoff::Backoff::default(),
+        };
+        let mut status = status(vec![host("8103", "netcup", Vec::new())], Vec::new());
+        status.queue.push(ticket);
+        let board = build(&status, None, NOW);
+        let row = board
+            .rows
+            .iter()
+            .find(|r| r.group == Group::Waiting)
+            .expect("the queued job has a row");
+        assert_eq!(
+            row.repository.as_deref(),
+            Some("github.com/oisin-ee/dogsled")
+        );
     }
 }

@@ -113,7 +113,7 @@ pub fn ensure(fleet: &Fleet, host: &Host, repo: &Repository) -> Result<String> {
 
 /// Host and repository path that a git remote URL names. The ssh, scp-like, and
 /// https spellings of one repository give the same identity. A local path has none.
-fn identity(url: &str) -> Option<(String, String)> {
+fn parts(url: &str) -> Option<(String, String)> {
     let url = url.trim();
     let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
         if !matches!(
@@ -144,10 +144,17 @@ fn identity(url: &str) -> Option<(String, String)> {
     Some((host.to_ascii_lowercase(), path.to_owned()))
 }
 
+/// Canonical `host/path` identity of a remote URL: host lowercased, path case kept, no `.git`.
+/// Matches `repositoryIdentity` in `pi/unit-protocol.ts`; both read
+/// `tests/fixtures/repository-identity.json`.
+pub fn identity(url: &str) -> Option<String> {
+    parts(url).map(|(host, path)| format!("{host}/{path}"))
+}
+
 /// Whether two origin URLs name the same repository. URLs without a host and
 /// repository path must match exactly.
 fn same_repository(a: &str, b: &str) -> bool {
-    match (identity(a), identity(b)) {
+    match (parts(a), parts(b)) {
         (Some(a), Some(b)) => a == b,
         _ => a.trim() == b.trim(),
     }
@@ -266,7 +273,23 @@ fn trust_new_checkout(shell: &dyn Shell, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::same_repository;
+    use super::{identity, same_repository};
+
+    #[test]
+    fn identity_matches_the_shared_fixture() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../tests/fixtures/repository-identity.json"))
+                .unwrap();
+        assert_eq!(cases.len(), 15);
+        for case in cases {
+            let origin = case["origin"].as_str().unwrap();
+            assert_eq!(
+                identity(origin).as_deref(),
+                case["identity"].as_str(),
+                "{origin:?}"
+            );
+        }
+    }
 
     #[test]
     fn ssh_and_https_spellings_name_one_repository() {

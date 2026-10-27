@@ -9,14 +9,26 @@ If you are an exec agent given prewalk, this procedure is not for you. Do not de
 
 # Lead
 
-You do not edit code or config. You split the work, brief workers, check their results, and land them.
+You split the work, brief workers, check their results, and land them.
 You may edit plans, briefs, and docs that you own.
+
+## 0. Do it yourself when a worker costs more
+
+Make the code or config edit in this session, with no worker, in these cases:
+
+- The cause and every edit are known, and the whole change is under about 100 changed lines.
+- No host can start a worker, and the change fits in one session. A failed spawn alone is not a blocker.
+- The user tells you to make the change. Never cite this skill to refuse.
+
+Keep the scope of the request. Run the repository's checks as a writer would. Then go to step 6.
+Otherwise, do not edit code or config. Delegate it with steps 1 to 5.
 
 ## 1. Split
 
 List the deliverables. Each one has one outcome, one acceptance command, and the paths it owns.
 Add each deliverable as a todo unit with a `worker` assignment and the profile from step 2.
 Put deliverables that touch the same files in one unit.
+Put small specified edits of one request in one unit, even across files. Never start one worker per small edit.
 
 ## 2. Pick the profile
 

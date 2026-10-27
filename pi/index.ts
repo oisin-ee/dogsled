@@ -9,6 +9,9 @@ import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
 import { loadJobHistory, type JobHistory } from "./work-history.ts";
 import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor, type WorkData, type WorkTab } from "./work-panel.ts";
+import { registerInterview } from "./interview.ts";
+import { registerPlanMode } from "./plan-mode.ts";
+import { PortalClient } from "./portal-client.ts";
 
 const REFRESH_MS = 10_000;
 
@@ -48,7 +51,16 @@ export default function dogsled(pi: ExtensionAPI) {
 
 	const inbox = new InboxReader(pi, exec);
 	const units = new UnitBridge(pi, binary);
-	pi.on("tool_call", (event, ctx) => units.call(event, ctx));
+	// The portal owns the interactive parts of Pi: the interview form and the plan review.
+	const portal = new PortalClient();
+	const planMode = registerPlanMode(pi, portal);
+	const interviews = registerInterview(pi, portal);
+	// One handler owns the tool call: the unit bridge first, then the plan-mode gate.
+	pi.on("tool_call", async (event, ctx) => {
+		const result = await units.call(event, ctx);
+		if (result) return result;
+		return planMode.gate(event, ctx);
+	});
 	pi.on("tool_execution_end", (event, ctx) => units.ended(event.toolCallId, ctx));
 
 	pi.registerMessageRenderer<Details>(MESSAGE_TYPE, (message, { expanded, outputPad }, theme) => {
@@ -272,6 +284,9 @@ export default function dogsled(pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
 		units.stop();
+		planMode.stop();
+		planMode.stopWatching();
+		interviews.close();
 		workPanel?.dispose();
 		generation++;
 		workAbort?.abort();

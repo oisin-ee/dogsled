@@ -20,7 +20,10 @@ function rig() {
 	const commands = new Map<string, any>();
 	const shortcuts = new Map<string, any>();
 	const renderers = new Map<string, any>();
+	const tools = new Map<string, any>();
 	const sent: any[] = [];
+	const userMessages: string[] = [];
+	let active: string[] = ["read", "write", "edit", "bash"];
 	let code = 0;
 	let context = "local 3/8\n";
 	let gate = "";
@@ -38,6 +41,10 @@ function rig() {
 		registerCommand(name: string, options: unknown) { commands.set(name, options); },
 		registerShortcut(key: string, options: unknown) { shortcuts.set(key, options); },
 		registerMessageRenderer(type: string, fn: unknown) { renderers.set(type, fn); },
+		registerTool(tool: unknown) { tools.set((tool as { name: string }).name, tool); },
+		getActiveTools() { return [...active]; },
+		setActiveTools(names: string[]) { active = [...names]; },
+		sendUserMessage(content: string) { userMessages.push(content); },
 		sendMessage(message: unknown, options: unknown) { sent.push([message, options]); },
 		async exec(binary: string, args: string[], options?: { timeout: number }) {
 			calls.push([binary, ...args]);
@@ -59,7 +66,7 @@ function rig() {
 	dogsled(api as unknown as ExtensionAPI);
 	let drawn: () => void = () => {};
 	let component: any;
-	const ctx = { mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session", getLeafId: () => null }, isIdle: () => true, ui: { theme: plain,
+	const ctx = { mode: "tui", hasUI: true, cwd: process.cwd(), sessionManager: { getSessionId: () => "session", getLeafId: () => null }, isIdle: () => true, ui: { theme: plain,
 		setWidget: (...args: any[]) => {
 			component?.dispose?.();
 			widgets.push(args);
@@ -69,7 +76,7 @@ function rig() {
 		}, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
-	return { calls, widgets, notices, servers, commands, shortcuts, renderers, sent, ctx, next,
+	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, userMessages, active: () => [...active], ctx, next,
 		widget() { return component; },
 		gate: (text: string) => { gate = text; },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
@@ -325,7 +332,9 @@ test("work navigation uses modified keys and resets on session replacement", asy
 	const panel = r.widget();
 	await r.shortcuts.get("alt+]").handler(r.ctx);
 	assert.match(panel.render(100).join("\n"), /\[TODOS\]/);
-	assert.ok([...r.shortcuts.keys()].every(key => key.startsWith("alt+")));
+	// The work panel's own keys are all alt-modified; the plan mode keeps its own shortcut.
+	const work = [...r.shortcuts.keys()].filter(key => key !== "ctrl+alt+p");
+	assert.ok(work.length > 0 && work.every(key => key.startsWith("alt+")), work.join(" "));
 	await r.invoke("session_start");
 	assert.equal(r.widgets.at(-1)[1], undefined);
 	await r.invoke("session_shutdown");
@@ -387,4 +396,41 @@ test("the extension's version is the package's, and a different dogsled binary i
 	await old.invoke("session_start");
 	assert.deepEqual(old.notices.map(n => (n as unknown[])[1]), ["warning"]);
 	await old.invoke("session_shutdown");
+});
+
+test("the extension registers the interview and submit_plan tools, the plan command, and its shortcut", () => {
+	const r = rig();
+	assert.ok(r.tools.has("interview"));
+	assert.ok(r.tools.has("submit_plan"));
+	assert.ok(r.commands.has("plan"));
+	assert.ok(r.shortcuts.has("ctrl+alt+p"));
+	// The submit tool belongs to planning, so it is not declared to the model at first.
+	assert.equal((r.tools.get("submit_plan") as { defaultActive: boolean }).defaultActive, false);
+	assert.equal((r.tools.get("submit_plan") as { executionMode: string }).executionMode, "sequential");
+});
+
+test("plan mode blocks a write until the plan command turns it on", async () => {
+	const r = rig();
+	const write = { type: "tool_call", toolName: "write", toolCallId: "c1", input: { path: "src/x.rs" } };
+	assert.equal(await r.invoke("tool_call", write), undefined);
+	await r.commands.get("plan").handler("", r.ctx);
+	const blocked = await r.invoke("tool_call", write);
+	assert.equal(blocked?.block, true);
+	assert.match(String(blocked?.reason), /markdown file/);
+	const allowed = await r.invoke("tool_call", { type: "tool_call", toolName: "write", toolCallId: "c2", input: { path: "plans/x.md" } });
+	assert.equal(allowed, undefined);
+	assert.ok(r.active().includes("submit_plan"));
+	await r.commands.get("plan").handler("", r.ctx);
+	assert.equal(await r.invoke("tool_call", write), undefined);
+	assert.ok(!r.active().includes("submit_plan"));
+});
+
+test("plan mode frames the task as a conversation message, not a system prompt change", async () => {
+	const r = rig();
+	await r.commands.get("plan").handler("", r.ctx);
+	assert.equal(r.sent.length, 1);
+	const [message] = r.sent[0] as [{ customType: string; content: string; display: boolean }];
+	assert.equal(message.customType, "dogsled:plan-mode");
+	assert.match(message.content, /submit_plan/);
+	assert.equal(message.display, true);
 });
