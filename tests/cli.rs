@@ -51,11 +51,26 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The bound every real-process wait in these tests uses. A process that never ends fails
 /// its test on this bound instead of stalling the suite.
 pub(crate) const PROCESS_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The state the guard and its fallback share. A finished process has released its pid,
+/// and the host may then hand that pid to another process. A signal sent after that can
+/// kill a process that is not this test's. The guard and every fallback take this lock,
+/// so the signal and the reap keep one order: the signal comes first, and no signal
+/// follows the reap.
+#[derive(Debug, Default)]
+struct OwnedState {
+    /// Whether the guard is finished with the owned process: it has been killed and
+    /// reaped, or it was already gone. A finished process has left its group, so the
+    /// host may already have handed its group id to another group. The guard and every
+    /// fallback signal nothing once this is set.
+    finished: bool,
+}
 
 /// A process a test owns. The guard kills the process and its group and waits for it to
 /// end, so a failed assertion never strands a wrapper or a command it started. A process
@@ -71,9 +86,60 @@ pub(crate) struct Owned {
     /// Whether the guard already killed and reaped this process. A second call is a
     /// no-op, so a later field drop signals nothing.
     terminated: bool,
+    /// The state the guard and every fallback share.
+    state: Arc<Mutex<OwnedState>>,
+}
+
+/// A handle that kills an owned process group through the guard's own state. It signals
+/// only while the child is unreaped, so a group id the host may have reused is never
+/// signalled.
+#[derive(Debug, Clone)]
+pub(crate) struct GroupKiller {
+    group: Option<u32>,
+    state: Arc<Mutex<OwnedState>>,
+}
+
+impl GroupKiller {
+    /// Kill the group, unless the guard is already finished with the process.
+    pub(crate) fn kill(&self) {
+        // The lock is taken without waiting. A fallback that waits on the guard would
+        // hang the test it tries to release. The fallback signals the group only when
+        // it holds the lock and the guard is not finished, because a finished guard has
+        // already killed the group before it reaped the child, so skipping is right.
+        let Ok(state) = self.state.try_lock() else {
+            return;
+        };
+        if state.finished {
+            return;
+        }
+        if let Some(group) = self.group
+            && let Ok(group) = i32::try_from(group)
+        {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(group),
+                nix::sys::signal::SIGKILL,
+            );
+        }
+    }
 }
 
 impl Owned {
+    /// A handle that kills this guard's group while the child is unreaped.
+    pub(crate) fn group_killer(&self) -> GroupKiller {
+        GroupKiller {
+            group: self.group,
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    /// The shared state, so a signal and a reap keep one order.
+    ///
+    /// The state is cloned before it is locked, so the lock does not borrow this guard
+    /// and the guard can still reach its child while the lock is held.
+    fn shared_state(&self) -> Arc<Mutex<OwnedState>> {
+        Arc::clone(&self.state)
+    }
+
     /// Start `command` in its own process group, so the guard kills its descendants too.
     /// The caller's own stdio settings are kept. The child is this test's own, so the
     /// test reaps it and reads its exit status.
@@ -87,6 +153,7 @@ impl Owned {
             group: Some(pid),
             child: Some(child),
             terminated: false,
+            state: Arc::default(),
         }
     }
 
@@ -101,14 +168,26 @@ impl Owned {
     /// fails its test instead of hanging it. The status comes from `try_wait`, so the
     /// child is reaped: the exit is proved, not inferred.
     pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
-        let child = self.child_mut();
         let deadline = Instant::now() + PROCESS_DEADLINE;
         loop {
+            // The lock is held across the reap, so a fallback never signals a group the
+            // host has already given to another group.
+            let state = Arc::clone(&self.state);
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let child = self.child_mut();
             match child.try_wait() {
-                Ok(Some(status)) => return status,
+                Ok(Some(status)) => {
+                    // The child is reaped, so its group id may already belong to another
+                    // group. The guard and every fallback signal nothing from now on.
+                    guard.finished = true;
+                    return status;
+                }
                 Ok(None) => {}
                 Err(error) => panic!("the child could not be waited for: {error}"),
             }
+            drop(guard);
             assert!(
                 Instant::now() < deadline,
                 "the child did not exit within {PROCESS_DEADLINE:?}"
@@ -129,6 +208,7 @@ impl Owned {
             group,
             child: None,
             terminated: false,
+            state: Arc::default(),
         }
     }
 }
@@ -147,18 +227,31 @@ impl Owned {
             return;
         }
         self.terminated = true;
+        // Every signal and the reap happen under this lock, so a `GroupKiller` never
+        // signals after the reap.
+        let shared = self.shared_state();
+        let mut state = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.finished {
+            return;
+        }
         // A child this guard spawned is the test's own child, so the test reaps it. A
-        // reaped child has ended, so the guard signals nothing for it afterwards.
-        let reaped = match self.child.as_mut() {
+        // child that already ended has been reaped too, so its group id may already
+        // belong to another group, and the guard signals nothing then.
+        let child_gone = match self.child.as_mut() {
             Some(child) => matches!(child.try_wait(), Ok(Some(_))),
             None => false,
         };
+        if child_gone {
+            state.finished = true;
+            return;
+        }
         // The group holds the processes that share the leader's group. A command that
         // leads a group of its own is not in it, so the test adopts that command
-        // separately. A reaped child leaves its group empty, so the guard signals
-        // nothing then.
-        if !reaped
-            && let Some(group) = self.group
+        // separately. The leader is not reaped yet, so the group id is still this
+        // test's own.
+        if let Some(group) = self.group
             && let Ok(group) = i32::try_from(group)
         {
             let _ = nix::sys::signal::killpg(
@@ -167,19 +260,25 @@ impl Owned {
             );
         }
         if let Some(child) = self.child.as_mut() {
-            // The child is reaped here. Its exit status is the proof that it ended, so the
-            // guard never signals a process id the host has handed to someone else.
+            // The child is reaped here, under the lock. Its exit status is the proof that
+            // it ended, so the guard never signals a process id the host has handed to
+            // someone else.
             let _ = child.kill();
             let _ = child.wait();
+            state.finished = true;
             return;
         }
         // A process this guard did not spawn is not the test's child, so the test cannot
-        // reap it. The host's init reaps it. The guard waits for the process to end, so
-        // no process outlives its test.
+        // reap it. The host's init reaps it, and may reuse the pid, so the guard
+        // signals the process once and never again.
         let Ok(pid) = i32::try_from(self.pid) else {
+            state.finished = true;
             return;
         };
         let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL);
+        state.finished = true;
+        drop(state);
+        // The guard waits for the process to end, so no process outlives its test.
         let deadline = Instant::now() + PROCESS_DEADLINE;
         while !process_gone(self.pid) {
             assert!(
@@ -1259,7 +1358,7 @@ fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
     // The command never ends on its own: it watches until the test ends it.
     let background = rig.start(&["status", "--watch", "--line", "--interval", "3600"]);
     let pid = background.owned.pid;
-    let group = background.owned.group;
+    let killer = background.owned.group_killer();
     let (send, recv) = std::sync::mpsc::channel();
     let dropper = std::thread::spawn(move || {
         drop(background);
@@ -1268,14 +1367,7 @@ fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
     if recv.recv_timeout(Duration::from_secs(10)).is_err() {
         // The drop is still waiting on the reader. The test kills the command's group,
         // so no process outlives the test and the drop ends.
-        if let Some(group) = group
-            && let Ok(group) = i32::try_from(group)
-        {
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(group),
-                nix::sys::signal::SIGKILL,
-            );
-        }
+        killer.kill();
         let _ = dropper.join();
         panic!("the drop joined the reader of a command that never ends");
     }
