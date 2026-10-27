@@ -128,7 +128,19 @@ impl BranchRepo {
         let detached = self.path.join(".worktrees/detached");
         std::fs::write(detached.join("work"), "detached work\n").unwrap();
         self.git_in(&detached, &["add", "work"]);
-        self.git_in(&detached, &["commit", "-q", "-m", "detached work"]);
+        self.git_in(
+            &detached,
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-q",
+                "-m",
+                "detached work",
+            ],
+        );
         detached
     }
 
