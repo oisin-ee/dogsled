@@ -223,6 +223,11 @@ fn safe_url(url: &str) -> bool {
         || normalized.starts_with("mailto:")
 }
 
+/// Markdown as safe HTML: raw HTML stays text and unsafe links are dropped.
+pub(crate) fn render_markdown(source: &str) -> String {
+    render_plan(source, &[])
+}
+
 fn render_plan(source: &str, annotations: &[Annotation]) -> String {
     let events = Parser::new(source)
         .into_offset_iter()

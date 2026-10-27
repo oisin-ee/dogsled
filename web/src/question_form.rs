@@ -68,14 +68,17 @@ pub fn QuestionForm(#[props(default)] requested: Option<String>) -> Element {
     rsx! {
         document::Stylesheet { href: QUESTION_CSS }
         section { class: "qf",
-            h2 { class: "group-title", "Needs you: {count}" }
+            if requested.is_none() {
+                h2 { class: "group-title", "Needs you: {count}" }
+            }
             if let Some(message) = error() {
                 p { class: "error", "{message}" }
             }
             if list.is_empty() {
                 p { class: "empty", "No question waits." }
             }
-            for item in list.iter().filter(|item| requested.as_ref().is_none_or(|id| &item.id == id)) {
+            // An agent screen opens one form by id; only the standalone page lists them.
+            for item in list.iter().filter(|_| requested.is_none()) {
                 {
                     let id = item.id.clone();
                     let open = current.as_ref().is_some_and(|form| form.id == item.id);

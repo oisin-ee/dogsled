@@ -555,7 +555,7 @@ fn Conversation(turns: Vec<Turn>, loading: bool, working: bool) -> Element {
                 for (index, turn) in turns.iter().enumerate() {
                     article { key: "{index}", class: match turn.role { Role::User => "av-turn av-user", Role::Assistant => "av-turn av-assistant" },
                         h3 { match turn.role { Role::User => "You", Role::Assistant => "Agent" } }
-                        pre { "{turn.text}" }
+                        div { class: "av-text", dangerous_inner_html: crate::review_view::render_markdown(&turn.text) }
                     }
                 }
                 if working { p { class: "av-live", role: "status", "Working…" } }
