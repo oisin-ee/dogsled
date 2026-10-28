@@ -1,8 +1,8 @@
 use super::*;
 
-const ID: &str = "r-1793174082524-94752-0";
+pub(super) const ID: &str = "r-1793174082524-94752-0";
 
-fn rig(name: &str, owner: &str) -> Rig {
+pub(super) fn rig(name: &str, owner: &str) -> Rig {
     let rig = Rig::new(name);
     rig.put(
         "state/items.json",
@@ -21,7 +21,7 @@ fn rig(name: &str, owner: &str) -> Rig {
     rig
 }
 
-fn returned(rig: &Rig) -> Value {
+pub(super) fn returned(rig: &Rig) -> Value {
     let export = super::unit_requests::exported(0);
     let execution = json!({"executor":"dogsled","ownerId":"w9:p9","requestId":ID});
     let binding = json!({"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]});

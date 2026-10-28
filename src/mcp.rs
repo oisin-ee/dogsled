@@ -146,6 +146,25 @@ pub struct CloseArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimArgs {
+    /// The orphaned item recorded on this host.
+    pub item: String,
+    #[serde(default)]
+    pub revision: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptArgs {
+    pub item: String,
+    /// The exact saved result identity.
+    pub result: String,
+    /// Evidence of the result review, not original task completion.
+    pub evidence: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct DropArgs {
     /// The closed agent item id.
     pub id: String,
@@ -356,6 +375,35 @@ impl Server {
                 fleet,
                 &args.id,
                 args.host.as_deref(),
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Claim custody of an orphaned child recorded on this host. Uses the live caller identity. Repeat claims by its custodian are harmless. Does not complete the original task."
+    )]
+    async fn claim(&self, Parameters(args): Parameters<ClaimArgs>) -> Result<String, String> {
+        self.call(move |fleet| {
+            Ok(serde_json::to_value(crate::claim::claim(
+                fleet,
+                &args.item,
+                args.revision,
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Accept the exact returned result of a claimed child, with review evidence. Records an audit receipt only and leaves the original task open."
+    )]
+    async fn accept(&self, Parameters(args): Parameters<AcceptArgs>) -> Result<String, String> {
+        self.call(move |fleet| {
+            Ok(serde_json::to_value(crate::claim::accept(
+                fleet,
+                &args.item,
+                &args.result,
+                &args.evidence,
             )?)?)
         })
         .await

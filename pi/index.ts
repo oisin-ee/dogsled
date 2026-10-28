@@ -63,6 +63,28 @@ export default function dogsled(pi: ExtensionAPI) {
 	});
 	pi.on("tool_execution_end", (event, ctx) => units.ended(event.toolCallId, ctx));
 
+	// Custody receipts are audit facts only. They never call todo or its provider.
+	pi.on("tool_result", event => {
+		const kind = event.toolName === "mcp__dogsled__claim" ? "claim"
+			: event.toolName === "mcp__dogsled__accept" ? "accept" : undefined;
+		if (!kind || event.isError) return;
+		for (const block of event.content) {
+			if (block.type !== "text") continue;
+			let receipt: unknown;
+			try { receipt = JSON.parse(block.text); } catch { continue; }
+			if (!receipt || typeof receipt !== "object"
+				|| !("kind" in receipt) || receipt.kind !== kind
+				|| !("item" in receipt) || typeof receipt.item !== "string"
+				|| !("revision" in receipt) || typeof receipt.revision !== "number") continue;
+			if (kind === "claim") {
+				if (!("outcome" in receipt) || !["claimed", "held"].includes(String(receipt.outcome))
+					|| !("custodianPane" in receipt) || typeof receipt.custodianPane !== "string") continue;
+			} else if (!("resultId" in receipt) || typeof receipt.resultId !== "string"
+				|| !("reviewId" in receipt) || typeof receipt.reviewId !== "string") continue;
+			pi.appendEntry("dogsled.custody.v1", receipt);
+		}
+	});
+
 	pi.registerMessageRenderer<Details>(MESSAGE_TYPE, (message, { expanded, outputPad }, theme) => {
 		const records = message.details?.records ?? [];
 		const box = new Box(outputPad, 1, text => theme.bg("customMessageBg", text));
