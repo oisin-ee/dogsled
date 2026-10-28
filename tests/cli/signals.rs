@@ -281,6 +281,149 @@ fn remote_snapshot_imports_and_clears_the_signal() {
     assert_eq!(notes(&rig, "ask").len(), 1);
 }
 
+fn remote_signal(name: &str) -> (Rig, Value) {
+    let rig = setup(name);
+    assert_eq!(signal(&rig, "ask", "Remote outage question").0, 0);
+    let marks = rig.read("state/done.json");
+    let mut mark = marks.as_object().unwrap().values().next().unwrap().clone();
+    mark["pane"] = json!("w9:p1");
+    rig.put("state/done.json", &json!({}));
+    let mut listed = rig.read("agents.json");
+    listed["result"]["agents"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|a| a["pane_id"] != "w2:p1");
+    rig.put("agents.json", &listed);
+    let mut items = rig.read("state/items.json");
+    items[0]["host"] = json!("8103");
+    items[0]["pane"] = json!("w9:p1");
+    rig.put("state/items.json", &items);
+    rig.peer();
+    let mut remote = rig.read("remote.json");
+    remote["probe"]["agent_panes"] = json!([{
+        "pane":"w9:p1","agent":"pi","state":"idle","name":"worker",
+        "agent_session":"child-session","signal":"ask","terminal_id":"term_remote"
+    }]);
+    remote["probe"]["panes"] = json!([{"pane_id":"w9:p1","terminal_id":"term_remote"}]);
+    remote["running"] = json!(true);
+    remote["handoffs"] = json!([mark]);
+    rig.put("remote.json", &remote);
+    serve(&rig);
+    let saved = rig.read("state/items.json")[0]["signal"].clone();
+    assert!(saved["reported_ms"].is_u64(), "{saved}");
+    assert_eq!(notes(&rig, "ask").len(), 1);
+    (rig, saved)
+}
+
+fn refresh_remote(rig: &Rig) {
+    let out = rig.run(&["retry", "netcup"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serve(rig);
+}
+
+fn remote_outage(rig: &Rig, saved: &Value) {
+    fs::write(rig.dir.join("unreachable"), "offline").unwrap();
+    refresh_remote(rig);
+    let cache = rig.read("state/peer-38313033.json");
+    assert_eq!(cache["reachable"], false, "{cache}");
+    assert_eq!(cache["handoffs"], json!([]), "{cache}");
+    assert_eq!(
+        cache["snapshot"]["probe"]["agent_panes"][0]["agent_session"],
+        "child-session"
+    );
+    assert_eq!(rig.read("state/items.json")[0]["signal"], *saved);
+}
+
+#[test]
+fn failed_remote_read_keeps_cached_signal_and_delivery_stamp_after_recovery() {
+    let (rig, saved) = remote_signal("signal-remote-outage");
+    remote_outage(&rig, &saved);
+    // A cached failure is no more evidence than the original failed read.
+    serve(&rig);
+    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    fs::remove_file(rig.dir.join("unreachable")).unwrap();
+    refresh_remote(&rig);
+    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    assert_eq!(notes(&rig, "ask").len(), 1);
+}
+
+#[test]
+fn successful_remote_clear_after_outage_clears_the_retained_signal() {
+    let (rig, saved) = remote_signal("signal-remote-outage-clear");
+    remote_outage(&rig, &saved);
+    fs::remove_file(rig.dir.join("unreachable")).unwrap();
+    let mut report = rig.read("remote.json");
+    report["handoffs"][0]["signal"]["cleared_ms"] = json!(now());
+    rig.put("remote.json", &report);
+    refresh_remote(&rig);
+    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert_eq!(notes(&rig, "ask").len(), 1);
+}
+
+#[test]
+fn replacement_remote_session_clears_a_signal_without_a_matching_mark() {
+    let (rig, saved) = remote_signal("signal-remote-replacement");
+    let mut report = rig.read("remote.json");
+    report["handoffs"] = json!([]);
+    rig.put("remote.json", &report);
+    refresh_remote(&rig);
+    // A successful but mark-less read of the same session also proves no clearance.
+    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    report["probe"]["agent_panes"][0]["agent_session"] = json!("replacement");
+    rig.put("remote.json", &report);
+    refresh_remote(&rig);
+    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert_eq!(notes(&rig, "ask").len(), 1);
+}
+
+#[test]
+fn outage_during_custody_move_does_not_deliver_the_same_event_twice() {
+    let (rig, saved) = remote_signal("signal-remote-outage-custody");
+    remote_outage(&rig, &saved);
+    let mut listed = rig.read("agents.json");
+    listed["result"]["agents"][1]["agent_status"] = json!("idle");
+    listed["result"]["agents"][1]["agent_session"] =
+        json!({"kind":"path","value":"custodian-session"});
+    rig.put("agents.json", &listed);
+    let out = rig
+        .cmd(&["inbox", "claim", "--harness", "pi"])
+        .env("HERDR_PANE_ID", "w3:p1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut custody = rig.read("state/custody.json");
+    custody[0]["custodian_pane"] = json!("w3:p1");
+    custody[0]["custodian_session"] = json!("custodian-session");
+    custody[0]["revision"] = json!(1);
+    rig.put("state/custody.json", &custody);
+    serve(&rig);
+    fs::remove_file(rig.dir.join("unreachable")).unwrap();
+    refresh_remote(&rig);
+    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    assert_eq!(notes(&rig, "ask").len(), 1);
+    if rig.dir.join("state/inbox/term_grandchild.json").exists() {
+        let records = rig.read("state/inbox/term_grandchild.json");
+        assert_eq!(
+            records
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["kind"] == "ask")
+                .count(),
+            0,
+            "{records}"
+        );
+    }
+}
+
 #[test]
 fn open_children_without_a_signal_show_waiting() {
     let rig = setup("signal-waiting");
