@@ -76,6 +76,28 @@ fn local_drop_deletes_local_and_origin_branches_and_settles_mark_and_board() {
 }
 
 #[test]
+fn drop_counts_against_a_freshly_fetched_default_branch() {
+    let (rig, repo) = rig("drop-fresh-count");
+    // The branch landed on origin, but this clone's origin/main is still the old base.
+    let base = git(&repo, &["rev-parse", "main"]);
+    git(&repo, &["push", "-q", "origin", "feat/x:main"]);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", base.trim()],
+    );
+    let out = rig.run(&["drop", "i1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "dropped feat/x (0 unmerged commits discarded)\n"
+    );
+}
+
+#[test]
 fn drop_accepts_already_absent_branches() {
     let (rig, repo) = rig("drop-absent");
     git(&repo, &["branch", "-D", "feat/x"]);

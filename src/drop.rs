@@ -138,6 +138,11 @@ pub fn local(shell: &dyn Shell, ledger: &Ledger, item: &Item) -> Result<Dropped>
             branch.name
         )));
     }
+    // Count against the origin as it is now, as close and done do: a stale default branch
+    // would report landed commits as discarded.
+    if let Some(warning) = crate::loss::Evidence::fetch(shell, &branch.repo).warning {
+        eprintln!("{warning}");
+    }
     crate::done::refresh_branch(shell, &mut branch)?;
     let discarded = branch.ahead;
     let exists = git(
