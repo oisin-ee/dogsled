@@ -1,6 +1,6 @@
 # Consolidate oisinpi into Dogsled
 
-Status: approved direction, not started. Source revisions: Dogsled `3820e93`, oisinpi `1fd7000`.
+Status: approved direction, not started. Facts checked at `origin/main` of each repository: Dogsled `cafbb25` (0.27.0), oisinpi `1c9169d` (0.12.1).
 
 ## Goal
 
@@ -28,7 +28,9 @@ Each step gets its own plan update before work starts.
 
 ## Step 1: Copy oisinpi in
 
-Copy the tracked files of oisinpi at `1fd7000` in one commit. Do not import Git history.
+Fetch oisinpi, then copy the tracked files of its newest `origin/main` in one commit. Do not import Git history.
+Base the branch on the newest Dogsled `origin/main`. Put the oisinpi revision in the commit message.
+If either head moved after `cafbb25` or `1c9169d`, repeat the path-collision check and the tool-version table first.
 After the copy, apply only the changes that two repositories in one tree need. Do not change runtime behavior.
 
 ### Layout
@@ -105,7 +107,7 @@ Extend `.github/workflows/ci.yml`. Do not copy the oisinpi `ci.yml`.
 ### Release
 
 The tag release (`release.yml` through cargo-dist) publishes every package.
-All packages take the Dogsled version. The oisinpi packages go from `0.12.0` to the next Dogsled version. The number only increases, so npm accepts it.
+All packages take the Dogsled version. The oisinpi packages go from `0.12.1` to the next Dogsled version after `0.27.0`. The number only increases, so npm accepts it.
 
 - Extend `publish-npm.yml` to build the WASM bindings and the guardrails `dist/`. Then publish each package.
 - Check that each `package.json` version matches the tag, and skip a version that is already on npm, for each package.
@@ -135,7 +137,7 @@ Then archive the oisinpi GitHub repository. Its README must point to this reposi
 
 - Existing Pi sessions store todo state as custom entries. The merged extension must read the entries of today's pi-todo, with the same `customType` names and payloads. Otherwise open sessions lose their todos.
 - Pi rejects a tool or flag that two extensions register. If the merged `pi-dogsled` includes the todo tool, the `oisinpi` collection must drop `pi-todo` in the same release. A host with the old collection and the new extension must not load both.
-- `pi/plan-mode.ts` emits `dogsled:plan-approved`, and pi-todo consumes it. This event becomes a direct call in step 3.
+- `pi/plan-mode.ts` emits `dogsled:plan-approved`, and `packages/pi-todo/src/plan-approved.ts` consumes it. This event becomes a direct call in step 3.
 - The seed handoff to a worker (`--todo-unit-file`) crosses a process boundary. It stays a file contract.
 
 ## Open items for the owner
