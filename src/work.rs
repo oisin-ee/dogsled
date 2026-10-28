@@ -599,7 +599,10 @@ fn launch_job(
         jobs::uncertain(ledger, &claim, error.to_string())?;
         return Err(error);
     }
+    // Stamped on the pane's host after the pane exists and the command is dispatched. A
+    // snapshot sampled before it may predate the pane, so it cannot prove the pane gone.
     Ok(json!({"id":launch.id,"host":launch.host,"pane":pane,
+        "launch_confirmed_ms":crate::ledger::now_ms(),
         "request":request_evidence(launch, cmd, timeout_ms, idle_timeout_ms)}))
 }
 

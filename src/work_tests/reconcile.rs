@@ -166,3 +166,59 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
     assert_eq!(items::list(&ledger).unwrap()[0].closed_ms, Some(200));
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
+
+#[test]
+fn a_running_job_stays_open_until_a_sample_after_its_launch_lacks_its_pane() {
+    // Admission at 100, pane and dispatch confirmed at 300. A sample from 200 predates the
+    // pane, so its missing pane is no evidence; that rule once closed live jobs at start.
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
+    let shell = Fake::new();
+    let policy = Policy::default();
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local()],
+    };
+    let mut current = snapshot(200);
+    current.probe.panes.clear();
+    current.jobs.push(
+        serde_json::from_value(json!({
+            "id":"job","cmd":["true"],"cwd":"/","host":"local","owner":"owner",
+            "pane":"child","state":"working","exit":null,"signal":null,"reason":null,
+            "started_ms":250,"ended_ms":null,"timeout_ms":null,"idle_timeout_ms":null
+        }))
+        .unwrap(),
+    );
+    ledger.write("host.json", &current).unwrap();
+    items::record(
+        &ledger,
+        Item {
+            id: "job".into(),
+            kind: "job".into(),
+            host: "local".into(),
+            pane: "child".into(),
+            created_ms: 100,
+            launch_confirmed_ms: Some(300),
+            ..Item::default()
+        },
+    )
+    .unwrap();
+    for sampled in [200, 300] {
+        let mut reports = fleet.status(sampled).unwrap();
+        reports[0].sampled_ms = Some(sampled);
+        items::reconcile(&ledger, &reports, sampled).unwrap();
+        assert_eq!(
+            items::list(&ledger).unwrap()[0].closed_ms,
+            None,
+            "sample {sampled}"
+        );
+    }
+    let mut reports = fleet.status(301).unwrap();
+    reports[0].sampled_ms = Some(301);
+    items::reconcile(&ledger, &reports, 301).unwrap();
+    assert_eq!(items::list(&ledger).unwrap()[0].closed_ms, Some(301));
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
