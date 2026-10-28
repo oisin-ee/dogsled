@@ -296,7 +296,7 @@ fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
         .child("launches")
         .write("receipted.json", &saved)
         .unwrap();
-    let result = work::receive_launch(&ledger, &shell, &launch, now, Some(1));
+    let result = work::receive_launch(&ledger, &shell, &launch, now, Some(2));
     assert!(
         crate::jobs::request_validity(&ledger, "receipted")
             .unwrap()
@@ -660,6 +660,7 @@ fn a_job_record_says_who_may_run_the_job() {
         timeout_ms: None,
         idle_timeout_ms: None,
         validity: None,
+        startup: None,
         output_expired: false,
     };
     assert!(matches!(
@@ -712,6 +713,7 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
         timeout_ms: None,
         idle_timeout_ms: None,
         validity: None,
+        startup: None,
         output_expired: false,
     };
     // A.json holds B's identity.

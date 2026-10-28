@@ -1,4 +1,410 @@
 use super::*;
+use std::io::Write as _;
+
+fn startup_herdr(rig: &Rig) {
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script("herdr", &script.replace("case \"$*\" in", r#"case "$*" in
+  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_job"}}}' ;;
+  'pane run'*) shift 3; printf '%s\n' "$*" > "$RIG/startup-wrapper"; printf '{}\n' ;;
+  'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
+"#));
+}
+
+fn startup_request(rig: &Rig, cwd: &Path) -> Value {
+    json!({"id":"startup","action":{"type":"job","cmd":["sh","-c","touch \"$RIG/command-marker\""],
+        "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()},
+        "host":"local","cwd":cwd,"pane":null,"workspace":"w1","workspace_name":"caller","owner":"w1:p1"})
+}
+
+fn pending_startup(rig: &Rig, tree: &Path) -> Value {
+    startup_herdr(rig);
+    let request = startup_request(rig, tree);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 0, "{result}");
+    register_startup_tree(rig, &result["checkout"]);
+    let job = rig.read("state/jobs/startup.json");
+    assert_eq!(job["startup"]["checkout"], result["checkout"]);
+    job
+}
+
+fn register_startup_tree(rig: &Rig, checkout: &Value) {
+    rig.put("state/worktrees.json", &json!([checkout]));
+    close::git(
+        &PathBuf::from(checkout["repo"].as_str().unwrap()),
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+}
+
+fn close_job_hold(rig: &Rig, tree: &Path) -> (i32, Value) {
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"w2:p1","workspace_id":"w2","cwd":tree}]}}),
+    );
+    rig.json(&["host", "close", "w2:p1"])
+}
+
+fn job_repository_lock(repo: &Path) -> fs::File {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(repo.join(".git/dogsled-lifecycle.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+fn job_git_barrier(rig: &Rig) -> Fifo {
+    let ready = Fifo::new(&rig.dir, "startup-git-ready");
+    let actual = isolated("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(actual.status.success());
+    let actual = String::from_utf8(actual.stdout).unwrap();
+    rig.script("git", &format!(r#"#!/bin/sh
+case "$*" in
+  *'rev-parse --path-format=absolute --git-common-dir') printf 'ready\n' > "$RIG/startup-git-ready" ;;
+esac
+exec '{}' "$@"
+"#, actual.trim()));
+    ready
+}
+
+#[test]
+fn dispatch_before_removal_keeps_pending_job_checkout() {
+    let (rig, tree) = close::close_rig("startup-dispatch-hold");
+    startup_herdr(&rig);
+    let request = startup_request(&rig, &tree);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 0, "{result}");
+    register_startup_tree(&rig, &result["checkout"]);
+    let job = rig.read("state/jobs/startup.json");
+    assert_eq!(job["startup"]["checkout"], result["checkout"], "{job}");
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
+    // Apply a pre-dispatch plan, not merely a survey that already sees the Job hold.
+    let checkout = &result["checkout"];
+    let plan = json!({"entries":[{"class":"worktrees","id":tree,"detail":"captured before dispatch","removable":true,"tree":checkout}]});
+    let (code, applied) = rig.json(&["host", "prune", "--plan", &plan.to_string()]);
+    assert_eq!(code, 0, "{applied}");
+    let text = applied.to_string();
+    assert!(tree.exists(), "{text}");
+    assert!(text.contains("job startup"), "{text}");
+    assert!(!rig.dir.join("hook.log").exists());
+    let (code, refusal) = close_job_hold(&rig, &tree);
+    assert_eq!(code, 2, "{refusal}");
+    assert!(refusal.to_string().contains("job startup"), "{refusal}");
+    let mut wrapper = rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "pending wrapper");
+    assert!(wrapper.wait().success(), "{}", rig.log("wrapper-error"));
+    assert!(rig.dir.join("command-marker").exists());
+}
+
+#[test]
+fn removal_before_dispatch_refuses_stale_job_startup() {
+    let (rig, tree) = close::close_rig("startup-removed");
+    startup_herdr(&rig);
+    let request = startup_request(&rig, &tree);
+    let repo = rig.dir.join("home/repo");
+    close::git(
+        &repo,
+        &["worktree", "remove", "-f", "-f", tree.to_str().unwrap()],
+    );
+    assert!(!tree.exists());
+    let (code, refusal) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{refusal}");
+    assert!(!rig.dir.join("state/jobs/startup.json").exists());
+    assert!(!rig.dir.join("state/launches/startup.json").exists());
+    assert!(!rig.dir.join("startup-wrapper").exists());
+    assert!(!rig.log("herdr.log").contains("tab create"));
+}
+
+#[test]
+fn exec_refuses_replacement_checkout_at_same_path() {
+    for post_report in [false, true] {
+        let (rig, tree) = close::close_rig(&format!("startup-replaced-{post_report}"));
+        pending_startup(&rig, &tree);
+        let repo = rig.dir.join("home/repo");
+        let admin = PathBuf::from(close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim());
+        let mut blocked = None;
+        let release = Fifo::new(&rig.dir, "report-release");
+        let ready = Fifo::new(&rig.dir, "report-ready");
+        let _ready_hold = ready.hold();
+        let _release_hold = release.hold();
+        if post_report {
+            let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+            rig.script("herdr", &script.replace("'pane report-agent'*|'pane report-metadata'*) printf '{}\\n' ;;", "'pane report-agent'*|'pane report-metadata'*) if ! test -f \"$RIG/report-entered\"; then touch \"$RIG/report-entered\"; echo ready > \"$RIG/report-ready\"; read -r go < \"$RIG/report-release\"; fi; printf '{}\\n' ;;"));
+            blocked = Some(rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "report wrapper"));
+            read_fifo(ready.path(), "pane report");
+        }
+        close::git(
+            &repo,
+            &["worktree", "remove", "-f", "-f", tree.to_str().unwrap()],
+        );
+        close::git(
+            &repo,
+            &["worktree", "add", "-q", tree.to_str().unwrap(), "feat/x"],
+        );
+        let replacement_admin =
+            PathBuf::from(close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim());
+        assert_eq!(admin, replacement_admin);
+        let marker = admin.join("dogsled-checkout-id");
+        assert!(!marker.exists());
+        let mut wrapper = if let Some(wrapper) = blocked {
+            writeln!(release.hold(), "go").unwrap();
+            wrapper
+        } else {
+            rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "replacement wrapper")
+        };
+        assert_eq!(
+            wrapper.wait().code(),
+            Some(2),
+            "{}",
+            rig.log("wrapper-error")
+        );
+        assert!(!rig.dir.join("command-marker").exists());
+        assert!(!rig.dir.join("state/jobs/startup.log").exists());
+        assert!(rig.read("state/jobs/startup.json")["ended_ms"].is_null());
+        assert!(
+            !marker.exists(),
+            "refusal manufactured replacement identity"
+        );
+        assert_eq!(close::git(&tree, &["status", "--porcelain"]), "");
+    }
+}
+
+#[test]
+fn exec_waits_for_repository_gate_before_starting() {
+    let (rig, tree) = close::close_rig("startup-repository-gate");
+    let pending = pending_startup(&rig, &tree);
+    let ready = job_git_barrier(&rig);
+    let _ready_hold = ready.hold();
+    let lock = job_repository_lock(&rig.dir.join("home/repo"));
+    let mut wrapper = rig.start(&[
+        "--budget-ms",
+        "1000",
+        "exec",
+        "startup",
+        "--",
+        "sh",
+        "-c",
+        "touch \"$RIG/command-marker\"",
+    ]);
+    read_fifo(ready.path(), "wrapper repository lookup");
+    assert_eq!(wrapper.wait().code(), Some(2));
+    let (out, err) = wrapper.output();
+    assert!(
+        format!("{out}{err}").contains("dogsled-lifecycle.lock"),
+        "{out}{err}"
+    );
+    assert_eq!(rig.read("state/jobs/startup.json"), pending);
+    assert!(!rig.dir.join("state/jobs/startup.log").exists());
+    assert!(!rig.dir.join("command-marker").exists());
+    lock.unlock().unwrap();
+    let mut wrapper = rig.start(&[
+        "exec",
+        "startup",
+        "--",
+        "sh",
+        "-c",
+        "touch \"$RIG/command-marker\"",
+    ]);
+    read_fifo(ready.path(), "released wrapper repository lookup");
+    assert!(wrapper.wait().success());
+    // A running command owns exec, not the preparation/repository gates.
+    let running = Fifo::new(&rig.dir, "runtime-ready");
+    let go = Fifo::new(&rig.dir, "runtime-go");
+    let _running_hold = running.hold();
+    let _go_hold = go.hold();
+    let command = "echo $$ > \"$RIG/runtime-pid\"; echo ready > \"$RIG/runtime-ready\"; read -r go < \"$RIG/runtime-go\"";
+    let mut request = startup_request(&rig, &tree);
+    request["id"] = json!("runtime");
+    request["action"]["cmd"] = json!(["sh", "-c", command]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 0, "{result}");
+    let mut wrapper = rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "running wrapper");
+    read_fifo(running.path(), "running command");
+    let _command = Owned::adopt(read_pid(&rig.dir.join("runtime-pid"), "running command"));
+    lock.try_lock().unwrap();
+    lock.unlock().unwrap();
+    let preparation = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(rig.dir.join("state/preparation-receipts/runtime.lock"))
+        .unwrap();
+    preparation.try_lock().unwrap();
+    preparation.unlock().unwrap();
+    let job = rig.read("state/jobs/runtime.json");
+    let mut duplicate = rig.start(&[
+        "--budget-ms",
+        "5000",
+        "exec",
+        "runtime",
+        "--",
+        "sh",
+        "-c",
+        command,
+    ]);
+    read_fifo(ready.path(), "duplicate repository lookup");
+    assert_eq!(duplicate.wait().code(), Some(2));
+    let (out, err) = duplicate.output();
+    assert!(
+        format!("{out}{err}").contains("execution wrapper"),
+        "{out}{err}"
+    );
+    assert_eq!(rig.read("state/jobs/runtime.json"), job);
+    writeln!(go.hold(), "go").unwrap();
+    assert!(wrapper.wait().success());
+}
+
+#[test]
+fn nonterminal_job_holds_survive_failed_ticket_and_missing_pane() {
+    for state in [
+        "claiming",
+        "pending",
+        "working",
+        "uncertain",
+        "future",
+        "legacy",
+        "contradictory",
+        "unsupported",
+        "reversed-time",
+        "idle",
+    ] {
+        let (rig, tree) = close::close_rig(&format!("startup-hold-{state}"));
+        let mut job = pending_startup(&rig, &tree);
+        job["state"] = json!(if state == "legacy" {
+            "pending"
+        } else if state == "contradictory" {
+            "idle"
+        } else {
+            state
+        });
+        if state == "claiming" {
+            job["pane"] = json!("");
+        }
+        if state == "working" || state == "idle" || state == "contradictory" {
+            job["started_ms"] = json!(100);
+        }
+        if state == "idle" {
+            job["ended_ms"] = json!(101);
+            job["exit"] = json!(0);
+        }
+        if state == "unsupported" {
+            job["startup"]["version"] = json!(2);
+        }
+        if state == "reversed-time" {
+            job["state"] = json!("idle");
+            job["started_ms"] = json!(102);
+            job["ended_ms"] = json!(101);
+        }
+        if state == "legacy" {
+            job.as_object_mut().unwrap().remove("startup");
+            job["cwd"] = json!(tree.join("subdir"));
+        }
+        rig.put("state/jobs/startup.json", &job);
+        rig.put("panes.json", &json!({"result":{"panes":[]}}));
+        let request = startup_request(&rig, &tree);
+        rig.put("state/queue.json", &json!([{"request":request,"id":"startup","state":"failed","created_ms":rig.now_ms(),"waiting":false,"waiting_until_ms":null,"notified":true,"result":null,"error":"dispatch failed"}]));
+        let out = rig.run(&["prune", "--yes", "worktrees"]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(tree.exists(), state != "idle", "{state}: {text}");
+        if state != "idle" {
+            assert!(text.contains("job startup"), "{state}: {text}");
+            assert!(!rig.dir.join("hook.log").exists());
+            let (code, refusal) = close_job_hold(&rig, &tree);
+            assert_eq!(code, 2, "{state}: {refusal}");
+            assert!(
+                refusal.to_string().contains("job startup"),
+                "{state}: {refusal}"
+            );
+        }
+    }
+}
+
+#[test]
+fn historical_claim_without_startup_identity_is_readable_but_cannot_run() {
+    let rig = Rig::new("startup-legacy-claim");
+    rig.claim("legacy", &["sh", "-c", "touch \"$RIG/command-marker\""]);
+    let mut job = rig.read("state/jobs/legacy.json");
+    job.as_object_mut().unwrap().remove("startup");
+    rig.put("state/jobs/legacy.json", &job);
+    let out = rig.run(&[
+        "exec",
+        "legacy",
+        "--",
+        "sh",
+        "-c",
+        "touch \"$RIG/command-marker\"",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!rig.dir.join("command-marker").exists());
+    assert!(!rig.dir.join("state/jobs/legacy.log").exists());
+    assert_eq!(rig.read("state/jobs/legacy.json"), job);
+}
+
+#[test]
+fn v1_only_host_refuses_jobs_before_dispatch() {
+    let rig = Rig::new("startup-v1-only-peer");
+    rig.peer();
+    rig.snapshot("remote.json", rig.now_ms(), 0.0, 8);
+    let mut peer = rig.read("remote.json");
+    peer["job_validity"] = json!(1);
+    rig.put("remote.json", &peer);
+    let out = rig.run(&["run", "--host", "netcup", "--", "true"]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("host too old for job startup ownership; upgrade it"),
+        "{error}"
+    );
+    let log = rig.log("ssh.log");
+    assert!(!log.contains("host reserve"), "{log}");
+    assert!(!log.contains("host launch"), "{log}");
+    assert!(!rig.dir.join("state/jobs").exists());
+    // The reverse direction also refuses v1 ingress before claim publication.
+    let request = startup_request(&rig, &rig.dir.join("home"));
+    let (code, refused) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{refused}");
+    assert_eq!(refused["code"], "JOB_VALIDITY_UNSUPPORTED", "{refused}");
+    assert!(!rig.dir.join("state/jobs/startup.json").exists());
+    assert!(!rig.log("herdr.log").contains("pane run"));
+}
 
 fn complete(id: &str) -> Value {
     json!({"id":id,"cmd":["echo","hi"],"cwd":"/tmp","host":"local","owner":"w1:p1","pane":"w2:p1",
@@ -29,6 +435,54 @@ fn put_job(rig: &Rig, id: &str, job: &Value, output: &str) {
         format!("{output}\n"),
     )
     .unwrap();
+}
+
+fn prune_old_job(state: &str, reversed: bool, kept: bool) {
+    let rig = watchdog::watchdog_rig(&format!("prune-old-job-{state}-{reversed}"));
+    let tree = rig.dir.join("home/repo/tree");
+    let mut job = terminal("old", 2);
+    job["state"] = json!(state);
+    job["cwd"] = json!(tree);
+    if reversed {
+        job["started_ms"] = json!(3);
+    }
+    put_job(&rig, "old", &job, "old output");
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    assert_eq!(
+        plan["entries"].as_array().unwrap().iter().any(|entry| {
+            entry["class"] == "jobs" && entry["id"] == "old" && entry["removable"] == true
+        }),
+        !kept,
+        "{plan}"
+    );
+    let out = rig.run(&["prune", "--yes", "jobs"]);
+    assert!(out.status.success(), "{out:?}");
+    let record = rig.dir.join("state/jobs/old.json");
+    assert_eq!(record.exists(), kept, "{out:?}");
+    assert_eq!(rig.dir.join("state/jobs/old.log").exists(), kept);
+    if kept {
+        assert_eq!(rig.read("state/jobs/old.json"), job);
+    }
+    let out = rig.run(&["prune", "--yes", "worktrees"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree.exists(), kept, "{out:?}");
+    assert_eq!(rig.dir.join("removed").exists(), !kept);
+}
+
+#[test]
+fn prune_old_job_with_unknown_state_keeps_record_and_checkout() {
+    prune_old_job("future-state", false, true);
+}
+
+#[test]
+fn prune_old_job_with_reversed_time_keeps_record_and_checkout() {
+    prune_old_job("idle", true, true);
+}
+
+#[test]
+fn prune_old_job_with_terminal_evidence_removes_record() {
+    prune_old_job("idle", false, false);
 }
 
 /// Set the rig's host clock.
@@ -277,6 +731,17 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     );
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     let id = result["id"].as_str().unwrap();
+    // wait returns the terminal record; the asynchronous wrapper still reports/closes.
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let at_close = loop {
+        if let Ok(bytes) = fs::read(rig.dir.join(format!("at-close/{id}.json")))
+            && let Ok(record) = serde_json::from_slice::<Value>(&bytes)
+        {
+            break record;
+        }
+        assert!(Instant::now() < deadline, "wrapper did not close its pane");
+        std::thread::yield_now();
+    };
     let job = rig.read(&format!("state/jobs/{id}.json"));
     assert_eq!(job["exit"], 3);
     assert_eq!(job["state"], "blocked");
@@ -288,7 +753,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     assert!(herdr.contains("tab create --workspace w1"));
     assert!(herdr.contains("--source custom:dogsled --agent dogsled-job --state working"));
     assert!(herdr.contains("--token dogsled=exit 3"));
-    assert_eq!(rig.read(&format!("at-close/{id}.json")), job);
+    assert_eq!(at_close, job);
     assert!(job["ended_ms"].is_number());
     assert!(herdr.ends_with("pane close w2:p1\n"));
     assert_eq!(

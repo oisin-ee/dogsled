@@ -23,6 +23,16 @@ pub struct Ledger {
     pub budget: crate::budget::Budget,
 }
 
+/// An owned kernel lock. Explicit unlock also releases copies inherited at fork.
+#[derive(Debug)]
+pub struct Lock(File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 pub fn now_ms() -> u64 {
     // Debug binaries only: deterministic CLI integration tests. Release clocks
     // cannot be replaced by an environment variable.
@@ -73,14 +83,28 @@ impl Ledger {
         }
     }
 
-    pub fn with_lock<T>(&self, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    fn lock_file(&self, name: &str) -> Result<File> {
         fs::create_dir_all(&self.dir)?;
-        let lock = OpenOptions::new()
+        Ok(OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.dir.join(format!("{name}.lock")))?;
+            .open(self.dir.join(format!("{name}.lock")))?)
+    }
+
+    /// Acquire a lifetime lock without waiting for another owner.
+    pub fn try_lock(&self, name: &str) -> Result<Option<Lock>> {
+        let lock = self.lock_file(name)?;
+        match lock.try_lock() {
+            Ok(()) => Ok(Some(Lock(lock))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
+    pub fn with_lock<T>(&self, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let lock = self.lock_file(name)?;
         let operation = format!("lock {}", self.dir.join(format!("{name}.lock")).display());
         let end = std::time::Instant::now() + self.budget.remaining(&operation)?;
         loop {
@@ -96,11 +120,10 @@ impl Ledger {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        // Forked children share the open file description until exec. Explicit unlock
-        // releases their copies too; close alone can leave the lock held until they exec.
-        // Dropping the file remains the fallback on panic.
+        let lock = Lock(lock);
         let result = f();
-        lock.unlock()?;
+        // Preserve unlock errors on ordinary completion; Drop also unlocks on unwind.
+        lock.0.unlock()?;
         result
     }
 

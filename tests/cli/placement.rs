@@ -47,7 +47,7 @@ fn launch(rig: &Rig, cwd: &Path, remote: bool) -> String {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);

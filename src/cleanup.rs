@@ -933,7 +933,8 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
 /// The classes the sweep never applies: expired jobs, disk, and processes.
 fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result<()> {
     for job in crate::jobs::list(node.ledger)? {
-        if job.ended_ms.is_some_and(|t| now.saturating_sub(t) > DAY) {
+        if crate::jobs::terminal(&job) && job.ended_ms.is_some_and(|t| now.saturating_sub(t) > DAY)
+        {
             plan.entries.push(entry(
                 "jobs",
                 job.id.clone(),
@@ -1539,6 +1540,14 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = pane_holds(usage, seen, decider);
+    // Reload under the final repository-protected check too, not just the survey.
+    // Corrupt Job evidence propagates an error and cannot authorize removal.
+    held.extend(
+        crate::jobs::list(node.ledger)?
+            .iter()
+            .filter(|job| crate::jobs::holds(job, tree))
+            .map(|job| format!("job {} owns this checkout ({})", job.id, job.state)),
+    );
     if matches!(decider, Decider::Cleanup) {
         held.extend(young_shells(node, usage)?);
     }
@@ -1993,7 +2002,8 @@ fn remove_job(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
     let store = crate::jobs::store(node.ledger);
     store.with_lock(id, || {
         let job = crate::jobs::get(node.ledger, id)?;
-        if job.ended_ms.is_none_or(|t| now.saturating_sub(t) <= DAY) {
+        if !crate::jobs::terminal(&job) || job.ended_ms.is_none_or(|t| now.saturating_sub(t) <= DAY)
+        {
             return Err(Error::Invalid(format!("refuse {id}: job is not expired")));
         }
         for extension in ["log", "stop", "json"] {

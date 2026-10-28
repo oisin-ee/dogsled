@@ -686,6 +686,7 @@ fn launch_job(
     cmd: &[String],
     timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
+    checkout: Option<&crate::cleanup::Tree>,
 ) -> Result<Value> {
     let job = Job {
         id: launch.id.clone(),
@@ -703,6 +704,7 @@ fn launch_job(
         timeout_ms,
         idle_timeout_ms,
         validity: launch_validity(ledger, launch)?,
+        startup: Some(jobs::Startup::captured(&launch.cwd, checkout)),
         output_expired: false,
     };
     // The job's ownership is read before any pane side effect. A job that already
@@ -829,10 +831,33 @@ pub fn launch(
     if matches!(launch.action, Action::Job { .. }) {
         require_unclaimed(ledger, &launch.id)?;
     }
+    if matches!(launch.action, Action::Job { .. }) {
+        ledger
+            .child("preparation-receipts")
+            .with_lock(&launch.id, || launch_owned(ledger, shell, launch))
+    } else {
+        launch_owned(ledger, shell, launch)
+    }
+}
+
+fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<Value> {
+    let job = matches!(launch.action, Action::Job { .. });
+    if job && !std::path::Path::new(&launch.cwd).is_dir() {
+        return Err(crate::worktree::refuse("execution directory disappeared"));
+    }
     let (_, saved) = launch_checkout(ledger, launch)?;
+    let before = if job {
+        crate::worktree::snapshot(shell, &launch.cwd)?
+    } else {
+        None
+    };
+    let pin = before
+        .as_ref()
+        .map(crate::worktree::Linked::pin)
+        .transpose()?;
     let repo = saved.as_ref().map(|t| std::path::PathBuf::from(&t.repo));
     let common = crate::worktree::common_dir(shell, std::path::Path::new(&launch.cwd));
-    if repo.is_none() && common.is_err() {
+    if repo.is_none() && before.is_none() && common.is_err() {
         return launch_guarded(ledger, shell, launch, None);
     }
     let root = repo
@@ -866,6 +891,33 @@ pub fn launch(
                 ));
             }
             Some(live)
+        } else if let Some(before) = &before {
+            let pin = pin
+                .as_ref()
+                .ok_or_else(|| crate::worktree::refuse("checkout is unpinned"))?;
+            pin.validate(before)?;
+            let observed = crate::worktree::snapshot(shell, &launch.cwd)?
+                .ok_or_else(|| crate::worktree::refuse("checkout disappeared"))?;
+            if before.identity.is_some()
+                && before.tree().drift(&observed.tree()) != crate::cleanup::Drift::Same
+            {
+                return Err(crate::worktree::refuse(
+                    "checkout identity changed before launch",
+                ));
+            }
+            if before.gitdir != observed.gitdir
+                || before.head != observed.head
+                || before.branch != observed.branch
+            {
+                return Err(crate::worktree::refuse("checkout changed before launch"));
+            }
+            // Both directory inodes are pinned across the wait. Fresh discovery may create
+            // the first generation, but must never replace a known pre-lock identity.
+            let live = guard.discover(shell, &launch.cwd)?;
+            pin.validate(before)?;
+            live
+        } else if job {
+            return Err(crate::worktree::refuse("repository checkout is unreadable"));
         } else {
             guard.discover(shell, &launch.cwd)?
         };
@@ -955,7 +1007,15 @@ fn launch_guarded(
                 timeout_ms,
                 idle_timeout_ms,
                 ..
-            } => launch_job(ledger, shell, launch, cmd, *timeout_ms, *idle_timeout_ms)?,
+            } => launch_job(
+                ledger,
+                shell,
+                launch,
+                cmd,
+                *timeout_ms,
+                *idle_timeout_ms,
+                checkout,
+            )?,
             Action::Agent { .. } => {
                 return Err(Error::Invalid(
                     "agent launch must use its receipt owner".into(),

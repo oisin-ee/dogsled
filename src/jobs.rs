@@ -34,9 +34,9 @@ impl Validity {
     }
 }
 
-/// The job validity protocol version this binary speaks. A peer that reports another
-/// version, or none, does not understand recorded request validity.
-pub const VALIDITY_PROTOCOL_VERSION: u32 = 1;
+/// Version 2 requires recorded request validity and checkout ownership through spawn.
+/// Peers advertising an older version cannot safely execute a new job.
+pub const VALIDITY_PROTOCOL_VERSION: u32 = 2;
 
 /// How long a recorded request may start new execution: 30 days.
 pub const VALIDITY_WINDOW_MS: u64 = 2_592_000_000;
@@ -250,6 +250,42 @@ pub fn origin_validity(ledger: &Ledger) -> Result<Validity> {
     Ok(Validity::new(now))
 }
 
+/// Startup authority captured before pane allocation. Unknown versions/scopes stay
+/// readable for inspection and cleanup, but cannot authorize execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Startup {
+    pub version: u32,
+    #[serde(flatten)]
+    pub scope: ExecutionScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum ExecutionScope {
+    Git {
+        checkout: crate::cleanup::Tree,
+    },
+    NonRepository {
+        cwd: String,
+    },
+    #[serde(other)]
+    Unsupported,
+}
+
+impl Startup {
+    pub fn captured(cwd: &str, checkout: Option<&crate::cleanup::Tree>) -> Self {
+        Self {
+            version: 1,
+            scope: checkout.map_or_else(
+                || ExecutionScope::NonRepository { cwd: cwd.into() },
+                |checkout| ExecutionScope::Git {
+                    checkout: checkout.clone(),
+                },
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
@@ -270,6 +306,8 @@ pub struct Job {
     /// proves no age.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validity: Option<Validity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<Startup>,
     /// The job's output was deleted after its retention window. A reader sees this
     /// instead of a missing log.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -373,14 +411,39 @@ pub(crate) enum Expiry {
 /// What the record says about a job's age. Only a conclusively terminal job expires: a
 /// running, pending, claiming, or uncertain job keeps everything, and so does a job whose
 /// state this build does not know.
+pub(crate) fn terminal(job: &Job) -> bool {
+    TERMINAL_STATES.contains(&job.state.as_str())
+        && job
+            .ended_ms
+            .is_some_and(|ended| job.started_ms.is_none_or(|started| started <= ended))
+}
+
+/// Every record without conclusive terminal evidence independently owns its checkout.
+/// Historical or unsupported evidence holds cwd descendants instead of inventing identity.
+pub(crate) fn holds(job: &Job, tree: &crate::cleanup::Tree) -> bool {
+    if terminal(job) {
+        return false;
+    }
+    if let Some(Startup {
+        version: 1,
+        scope: ExecutionScope::Git { checkout },
+    }) = &job.startup
+        && let Some(identity) = &checkout.identity
+    {
+        return tree
+            .identity
+            .as_ref()
+            .is_some_and(|current| current == identity);
+    }
+    crate::worktree::resolved(std::path::Path::new(&job.cwd))
+        .starts_with(crate::worktree::resolved(std::path::Path::new(&tree.path)))
+}
+
 pub(crate) fn expiry(job: &Job, now: u64) -> Expiry {
-    let Some(ended) = job.ended_ms else {
-        return Expiry::Keep;
-    };
-    if !TERMINAL_STATES.contains(&job.state.as_str()) {
+    if !terminal(job) {
         return Expiry::Keep;
     }
-    let age = now.saturating_sub(ended);
+    let age = now.saturating_sub(job.ended_ms.unwrap_or(now));
     if age > RECORD_KEEP_MS {
         Expiry::Record
     } else if age > LOG_KEEP_MS {
@@ -616,17 +679,23 @@ fn pane_write(bytes: &[u8]) -> bool {
         .is_ok()
 }
 
-fn capture(ledger: &Ledger, job: &Job) -> Result<(std::process::ExitStatus, Option<String>)> {
-    let mut signals = signal_hook::iterator::Signals::new([
+struct Capture {
+    signals: signal_hook::iterator::Signals,
+    log: std::fs::File,
+    child: std::process::Child,
+}
+
+fn spawn(ledger: &Ledger, job: &Job) -> Result<Capture> {
+    let signals = signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGINT,
         signal_hook::consts::SIGTERM,
         signal_hook::consts::SIGHUP,
     ])?;
-    let mut log = OpenOptions::new()
+    let log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(store(ledger).dir.join(format!("{}.log", job.id)))?;
-    let mut child = Command::new(&job.cmd[0])
+    let child = Command::new(&job.cmd[0])
         .args(&job.cmd[1..])
         .current_dir(&job.cwd)
         .stdin(Stdio::null())
@@ -634,6 +703,23 @@ fn capture(ledger: &Ledger, job: &Job) -> Result<(std::process::ExitStatus, Opti
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()?;
+    Ok(Capture {
+        signals,
+        log,
+        child,
+    })
+}
+
+fn capture(
+    ledger: &Ledger,
+    job: &Job,
+    capture: Capture,
+) -> Result<(std::process::ExitStatus, Option<String>)> {
+    let Capture {
+        mut signals,
+        mut log,
+        mut child,
+    } = capture;
     let result = (|| {
         let (send, recv) = mpsc::channel();
         reader(
@@ -818,6 +904,7 @@ pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
                     || existing.timeout_ms != job.timeout_ms
                     || existing.idle_timeout_ms != job.idle_timeout_ms
                     || existing.validity != job.validity
+                    || existing.startup != job.startup
                 {
                     return Err(Error::Invalid(format!(
                         "job {} claim changed after its intent was published",
@@ -929,6 +1016,7 @@ fn pending_claim(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
         || claimed.timeout_ms != initial.timeout_ms
         || claimed.idle_timeout_ms != initial.idle_timeout_ms
         || claimed.validity != initial.validity
+        || claimed.startup != initial.startup
     {
         return Err(Error::Invalid(format!(
             "job {id} claim changed since it was requested"
@@ -953,8 +1041,86 @@ fn start(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
     })
 }
 
-/// Run the job `id` from its own claim. The requested id names the lock, the lookup, and the
-/// record: a record that embeds another id never runs here, and it never owns this lock.
+fn validate_startup(
+    shell: &dyn Shell,
+    job: &Job,
+    guard: Option<&crate::worktree::Guard>,
+) -> Result<()> {
+    let Some(Startup { version: 1, scope }) = &job.startup else {
+        return Err(Error::Invalid(format!(
+            "job {} has no supported startup ownership",
+            job.id
+        )));
+    };
+    if !std::path::Path::new(&job.cwd).is_dir() {
+        return Err(crate::worktree::refuse("execution directory disappeared"));
+    }
+    match scope {
+        ExecutionScope::Git { checkout } => {
+            let identity = checkout
+                .identity
+                .as_ref()
+                .ok_or_else(|| crate::worktree::refuse("job checkout has no identity"))?;
+            let guard =
+                guard.ok_or_else(|| crate::worktree::refuse("job repository is unguarded"))?;
+            let live = guard
+                .observe(shell, &job.cwd)?
+                .ok_or_else(|| crate::worktree::refuse("job checkout disappeared"))?;
+            if live.identity.as_ref() != Some(identity)
+                || !crate::worktree::same(&live.path, &checkout.path)
+                || !crate::worktree::same(&live.checkout.display().to_string(), &checkout.repo)
+                || live.branch != checkout.branch
+            {
+                return Err(crate::worktree::refuse("job checkout identity changed"));
+            }
+        }
+        ExecutionScope::NonRepository { cwd } => {
+            if cwd != &job.cwd || crate::worktree::snapshot(shell, cwd)?.is_some() {
+                return Err(crate::worktree::refuse(
+                    "non-repository execution scope changed",
+                ));
+            }
+        }
+        ExecutionScope::Unsupported => {
+            return Err(crate::worktree::refuse("unsupported job execution scope"));
+        }
+    }
+    Ok(())
+}
+
+/// The lifetime lock crosses this boundary, but preparation/repository gates never do.
+fn startup(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    id: &str,
+    initial: &Job,
+    guard: Option<&crate::worktree::Guard>,
+) -> Result<(crate::ledger::Lock, Job, Result<Capture>)> {
+    let execution = store(ledger)
+        .try_lock(&format!("{id}-exec"))?
+        .ok_or_else(|| Error::Invalid(format!("job {id} already has an execution wrapper")))?;
+    validate_startup(shell, initial, guard)?;
+    let job = start(ledger, id, initial)?;
+    if let Err(error) = report(shell, &job, WORKING, None) {
+        eprintln!("dogsled pane report: {error}");
+    }
+    // Reporting may block. Recheck authority and checkout immediately before output/spawn.
+    // Validation failure leaves the started evidence uncertain, without a terminal result.
+    let captured = store(ledger).with_lock(id, || {
+        if get(ledger, id)? != job {
+            return Err(Error::Invalid(format!(
+                "job {id} claim changed during startup"
+            )));
+        }
+        check_validity(ledger, job.validity.as_ref())?;
+        validate_startup(shell, &job, guard)?;
+        Ok(spawn(ledger, &job))
+    })?;
+    Ok((execution, job, captured))
+}
+
+/// Run the job from its captured scope. Startup takes preparation, repository, nonblocking
+/// lifetime exec, short record, and validity locks in that order. Monitoring retains only exec.
 pub fn exec(ledger: &Ledger, shell: &dyn Shell, id: &str, initial: &Job) -> Result<i32> {
     validate_id(id)?;
     if initial.cmd.is_empty() {
@@ -966,70 +1132,78 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, id: &str, initial: &Job) -> Resu
             initial.id
         )));
     }
-    // Exactly one wrapper may own an id for its entire lifetime.
-    store(ledger).with_lock(&format!("{id}-exec"), || {
-        // The claim is reloaded and validated under this lock, so a claim that a replay or
-        // another wrapper changed cannot start a job. Nothing exists yet: no process, no log,
-        // no pane.
-        let mut job = start(ledger, id, initial)?;
-        if let Err(error) = report(shell, &job, WORKING, None) {
-            eprintln!("dogsled pane report: {error}");
+    let (_execution, mut job, captured) =
+        ledger
+            .child("preparation-receipts")
+            .with_lock(id, || match &initial.startup {
+                Some(Startup {
+                    version: 1,
+                    scope: ExecutionScope::Git { checkout },
+                }) => {
+                    if checkout.identity.is_none() {
+                        return Err(crate::worktree::refuse("job checkout has no identity"));
+                    }
+                    crate::worktree::with_lifecycle(
+                        shell,
+                        ledger,
+                        std::path::Path::new(&checkout.repo),
+                        |guard| startup(ledger, shell, id, initial, Some(guard)),
+                    )
+                }
+                _ => startup(ledger, shell, id, initial, None),
+            })?;
+    // No outer gate is ever reacquired while exec remains held.
+    let outcome = captured.and_then(|captured| capture(ledger, &job, captured));
+    match &outcome {
+        Ok((status, reason)) => {
+            job.signal = status.signal();
+            job.exit = Some(
+                if reason.as_deref().is_some_and(|r| r.ends_with("timeout")) {
+                    124
+                } else {
+                    status.code().unwrap_or(128 + status.signal().unwrap_or(0))
+                },
+            );
+            job.reason.clone_from(reason);
         }
-        // The pane report blocks, so the request can expire after the startup check. A
-        // refusal here starts no process, keeps the claim, and writes no terminal outcome.
-        check_validity(ledger, job.validity.as_ref())?;
-        let outcome = capture(ledger, &job);
-        match &outcome {
-            Ok((status, reason)) => {
-                job.signal = status.signal();
-                job.exit = Some(
-                    if reason.as_deref().is_some_and(|r| r.ends_with("timeout")) {
-                        124
-                    } else {
-                        status.code().unwrap_or(128 + status.signal().unwrap_or(0))
-                    },
-                );
-                job.reason.clone_from(reason);
-            }
-            Err(e) => {
-                job.exit = Some(2);
-                job.reason = Some(e.to_string());
-            }
+        Err(e) => {
+            job.exit = Some(2);
+            job.reason = Some(e.to_string());
         }
-        let code = job.exit.unwrap_or(2);
-        job.state = if code == 0 { "idle" } else { "blocked" }.into();
-        job.ended_ms = Some(now_ms());
-        save(ledger, &job)?;
-        let elapsed = job
-            .ended_ms
-            .unwrap_or(0)
-            .saturating_sub(job.started_ms.unwrap_or(0));
-        let age = if elapsed >= 3_600_000 {
-            format!("{}h", elapsed / 3_600_000)
-        } else if elapsed >= 60_000 {
-            format!("{}m", elapsed / 60_000)
-        } else {
-            format!("{}s", elapsed / 1_000)
-        };
-        let token = format!(
-            "{} · {}",
-            job.reason
-                .as_ref()
-                .map_or_else(|| format!("exit {code}"), Clone::clone),
-            age
-        );
-        if let Err(error) = report(shell, &job, &job.state, Some(&token)) {
-            eprintln!("dogsled pane report: {error}");
-        }
-        // Closing our own foreground pane can terminate this wrapper. Keep all
-        // durable writes and completion reports above this final best-effort call.
-        if !job.pane.is_empty()
-            && let Err(error) =
-                shell.run_ok("herdr", &["pane".into(), "close".into(), job.pane.clone()])
-        {
-            eprintln!("dogsled pane close: {error}");
-        }
-        outcome?;
-        Ok(code)
-    })
+    }
+    let code = job.exit.unwrap_or(2);
+    job.state = if code == 0 { "idle" } else { "blocked" }.into();
+    job.ended_ms = Some(now_ms());
+    save(ledger, &job)?;
+    let elapsed = job
+        .ended_ms
+        .unwrap_or(0)
+        .saturating_sub(job.started_ms.unwrap_or(0));
+    let age = if elapsed >= 3_600_000 {
+        format!("{}h", elapsed / 3_600_000)
+    } else if elapsed >= 60_000 {
+        format!("{}m", elapsed / 60_000)
+    } else {
+        format!("{}s", elapsed / 1_000)
+    };
+    let token = format!(
+        "{} · {}",
+        job.reason
+            .as_ref()
+            .map_or_else(|| format!("exit {code}"), Clone::clone),
+        age
+    );
+    if let Err(error) = report(shell, &job, &job.state, Some(&token)) {
+        eprintln!("dogsled pane report: {error}");
+    }
+    // Closing our own foreground pane can terminate this wrapper. Keep all
+    // durable writes and completion reports above this final best-effort call.
+    if !job.pane.is_empty()
+        && let Err(error) =
+            shell.run_ok("herdr", &["pane".into(), "close".into(), job.pane.clone()])
+    {
+        eprintln!("dogsled pane close: {error}");
+    }
+    outcome?;
+    Ok(code)
 }

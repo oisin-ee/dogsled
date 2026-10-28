@@ -158,7 +158,7 @@ impl Refusal {
             }
             Self::JobClockUnavailable => "job validity clock is unavailable; new execution refused",
             Self::JobValidityUnsupported => {
-                "this host does not support job request validity (unsupported validity protocol); new execution refused"
+                "this host does not support job request validity: host too old for job startup ownership; upgrade it; new execution refused"
             }
             Self::QueueVersionUnsupported => {
                 "queue format version is newer than this binary supports; write refused"

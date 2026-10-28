@@ -415,10 +415,7 @@ fn reservation_validity(
             if version != crate::jobs::VALIDITY_PROTOCOL_VERSION {
                 return refuse(crate::error::Refusal::JobValidityUnsupported);
             }
-            Ok(Some(crate::jobs::Validity {
-                version,
-                created_ms,
-            }))
+            Ok(Some(crate::jobs::Validity::new(created_ms)))
         }
         (Some(_), None) | (None, Some(_)) => refuse(crate::error::Refusal::JobValidityUnprovable),
         (None, None) => Ok(None),
