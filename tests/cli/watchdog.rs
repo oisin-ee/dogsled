@@ -137,10 +137,32 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
         "terminal_id":"term_owner"}]);
     rig.put("state/host.json", &snapshot);
     // The owner's own item is open, and the sweep keeps an orphan on this host.
+    // The orphan has an open item whose owner pane is gone, so the sweep keeps it, and
+    // the check-in used to name it on every turn.
     rig.put(
         "state/items.json",
         &json!([{"id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
-            "name":"worker","created_ms":1,"closed_ms":null}]),
+            "name":"worker","created_ms":1,"closed_ms":null},
+            {"id":"orphan","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"gone",
+            "name":"lost-child","created_ms":1,"closed_ms":null}]),
+    );
+    // The orphan's pane works, so the sweep keeps the child instead of closing it.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","terminal_id":"term_owner"},
+            {"pane_id":"w2:p1","terminal_id":"term_child"},
+            {"pane_id":"w3:p1","terminal_id":"term_lost"}
+        ]}}),
+    );
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[
+            {"pane_id":"w1:p1","agent":"pi","agent_status":"idle","terminal_id":"term_owner",
+                "completion_seq":1,"state_change_seq":1},
+            {"pane_id":"w3:p1","agent":"pi","agent_status":"working","terminal_id":"term_lost",
+                "completion_seq":1,"state_change_seq":1}
+        ]}}),
     );
     rig.put(
         "state/orphans.json",
@@ -169,6 +191,18 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
         .join("\n");
     assert!(!text.contains("Orphaned children"), "{text}");
     assert!(!text.contains("lost-child"), "{text}");
+    // The orphan is still there: the sweep kept it, so the check-in had one to repeat.
+    let orphans = rig.read("state/orphans.json");
+    assert_eq!(orphans[0]["item"], json!("orphan"), "{orphans}");
+    assert_eq!(orphans[0]["name"], json!("lost-child"), "{orphans}");
+    let items = rig.read("state/items.json");
+    let orphan = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == json!("orphan"))
+        .unwrap();
+    assert!(orphan["closed_ms"].is_null(), "{items}");
 }
 
 #[test]

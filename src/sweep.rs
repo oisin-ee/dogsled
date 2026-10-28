@@ -317,6 +317,24 @@ fn classify<'a>(fleet: &Fleet, items: &[&'a Item]) -> Classified<'a> {
                     "dogsled sweep: cannot read the custody of {}: {error}",
                     item.id
                 );
+                // An unreadable record proves nothing. The child keeps the custody it
+                // started with, so it stays listed as unknown instead of dropping out of
+                // every class. It is never settled and never closed.
+                let origin = Custody {
+                    item: item.id.clone(),
+                    host: crate::inbox::hostname(),
+                    owner_pane: item.owner_pane.clone(),
+                    owner_session: item.owner_session.clone(),
+                    custodian_pane: item.owner_pane.clone(),
+                    custodian_session: item.owner_session.clone(),
+                    revision: 0,
+                    claims: Vec::new(),
+                };
+                classified.unknown.push((
+                    item,
+                    origin,
+                    format!("cannot read its custody: {error}"),
+                ));
                 continue;
             }
         };

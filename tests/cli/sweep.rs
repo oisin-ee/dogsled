@@ -906,6 +906,105 @@ fn a_child_with_a_legacy_owner_session_is_never_called_session_ended() {
     );
 }
 
+/// A custody record that cannot be read proves nothing. The child stays listed as unknown
+/// instead of dropping out of the sweep, and the other children are still classified.
+#[test]
+fn a_child_with_an_unreadable_custody_record_stays_listed_as_unknown() {
+    let (rig, tree) = close_rig("sweep-custody-unreadable");
+    rig.put(
+        "state/items.json",
+        &json!([
+            {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
+                "name":"first","created_ms":1,"closed_ms":null},
+            {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+                "name":"second","created_ms":1,"closed_ms":null}
+        ]),
+    );
+    // The custody file is corrupt, so no child's record can be read.
+    fs::write(rig.dir.join("state/custody.json"), "{ this is not json").unwrap();
+    // The sweep already kept the second child, so its age does not start again.
+    rig.put(
+        "state/orphans.json",
+        &json!([{"item":"i2","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+            "name":"second","reason":"owner w9:p2 is gone; the child is working",
+            "since_ms":42}]),
+    );
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 2, "{status}");
+    for orphan in orphans {
+        assert_eq!(orphan["status"], json!("unknown"), "{status}");
+        assert!(
+            orphan["reason"]
+                .as_str()
+                .unwrap()
+                .contains("cannot read its custody"),
+            "{status}"
+        );
+    }
+    // The age of a child the sweep kept is not restarted.
+    let kept = orphans.iter().find(|o| o["item"] == json!("i2")).unwrap();
+    assert_eq!(kept["since_ms"], json!(42), "{status}");
+    // The evidence proves nothing, so no child is closed.
+    for item in rig.read("state/items.json").as_array().unwrap() {
+        assert!(item["closed_ms"].is_null(), "{item}");
+    }
+}
+
+/// A custody record that cannot be written proves nothing either. The child stays listed as
+/// unknown, and the other child of the same sweep is still classified as an orphan.
+#[test]
+fn a_child_whose_custody_cannot_be_written_stays_unknown_and_the_other_is_still_orphaned() {
+    let (rig, tree) = close_rig("sweep-custody-unwritable");
+    rig.put(
+        "state/items.json",
+        &json!([
+            {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
+                "name":"first","created_ms":1,"closed_ms":null},
+            {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+                "name":"second","created_ms":1,"closed_ms":null}
+        ]),
+    );
+    // The first child has a custody record, so it is classified: its owner is gone.
+    rig.put(
+        "state/custody.json",
+        &json!([{"item":"i1","host":"local","owner_pane":"w9:p1","custodian_pane":"w9:p1",
+            "claims":[]}]),
+    );
+    // The custody lock cannot be opened, so the record of the second child cannot be
+    // written. The record that is there still reads.
+    fs::create_dir_all(rig.dir.join("state/custody.lock")).unwrap();
+    rig.put(
+        "state/orphans.json",
+        &json!([{"item":"i2","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+            "name":"second","reason":"owner w9:p2 is gone; the child is working",
+            "since_ms":42}]),
+    );
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 2, "{status}");
+    // The other child of the same sweep is still classified.
+    let first = orphans.iter().find(|o| o["item"] == json!("i1")).unwrap();
+    assert_eq!(first["status"], json!("orphaned"), "{status}");
+    // The child whose custody cannot be written stays listed as unknown.
+    let second = orphans.iter().find(|o| o["item"] == json!("i2")).unwrap();
+    assert_eq!(second["status"], json!("unknown"), "{status}");
+    assert!(
+        second["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot read its custody"),
+        "{status}"
+    );
+    assert_eq!(second["since_ms"], json!(42), "{status}");
+    // The evidence proves nothing, so the child is not closed.
+    assert!(rig.read("state/items.json")[1]["closed_ms"].is_null());
+}
+
 #[test]
 fn the_status_lists_an_unclaimed_orphan_once() {
     let (rig, tree) = close_rig("sweep-status-once");
