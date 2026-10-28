@@ -21,11 +21,13 @@ pub struct Tree {
     pub branch: String,
     #[serde(default)]
     pub head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::worktree::Identity>,
 }
 
 /// How a tree found after the plan relates to the planned tree.
 #[derive(Debug, PartialEq, Eq)]
-enum Drift {
+pub(crate) enum Drift {
     Same,
     /// The same repository, path, and branch at a new commit: live work, so a skip that the next
     /// survey re-plans.
@@ -37,8 +39,12 @@ enum Drift {
 impl Tree {
     /// Compare `now`, a fresh listing, with this planned tree. Every recheck uses this, so a new
     /// commit is a skip and an identity change is a failure on each path.
-    fn drift(&self, now: &Tree) -> Drift {
-        if self.repo != now.repo || self.path != now.path || self.branch != now.branch {
+    pub(crate) fn drift(&self, now: &Tree) -> Drift {
+        if !crate::worktree::same(&self.repo, &now.repo)
+            || !crate::worktree::same(&self.path, &now.path)
+            || self.branch != now.branch
+            || self.identity != now.identity
+        {
             Drift::Identity
         } else if self.head != now.head {
             Drift::HeadMoved
@@ -256,7 +262,7 @@ pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
     })?;
     ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
-        trees.retain(|t| t.path != tree.path);
+        trees.retain(|t| !crate::worktree::same(&t.path, &tree.path));
         trees.push(tree);
         ledger.write("worktrees.json", &trees)
     })
@@ -432,12 +438,16 @@ fn repositories(
     });
     for tree in &recorded {
         if missing(&tree.path) && !missing(&tree.repo) {
-            plan.entries.push(entry(
+            let mut stale = entry(
                 "worktrees",
                 tree.path.clone(),
                 "missing registered worktree; drops the stale registration".into(),
                 true,
-            ));
+            );
+            if tree.identity.is_some() {
+                stale.tree = Some(tree.clone());
+            }
+            plan.entries.push(stale);
         }
     }
     for configured in &node.cleanup.repositories {
@@ -542,6 +552,7 @@ fn porcelain(shell: &dyn Shell, repo: &str) -> Result<Vec<(Tree, bool)>> {
         path: String::new(),
         branch: String::new(),
         head: String::new(),
+        identity: None,
     };
     for field in output.stdout.split('\0') {
         if let Some(value) = field.strip_prefix("worktree ") {
@@ -750,10 +761,53 @@ fn readable(
         .flatten()
         .unwrap_or_default();
     for repo in repos {
-        match porcelain(node.shell, &repo) {
-            Ok(found) => {
+        let discovered =
+            crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&repo), |guard| {
+                let mut found = porcelain(node.shell, &repo)?;
+                let mut refused = BTreeSet::new();
+                for (tree, prunable) in found.iter_mut().skip(1) {
+                    if *prunable || unlinked_reason(tree, Some(false)).is_some() {
+                        continue;
+                    }
+                    let saved = recorded.iter().find(|saved| {
+                        crate::worktree::same(&saved.path, &tree.path) && saved.identity.is_some()
+                    });
+                    let captured = (|| {
+                        if let Some(saved) = saved {
+                            let linked = guard.observe(node.shell, &tree.path)?;
+                            if linked
+                                .as_ref()
+                                .is_some_and(|now| saved.identity != now.identity)
+                            {
+                                return Err(crate::worktree::refuse("worktree identity changed"));
+                            }
+                            Ok(linked)
+                        } else {
+                            guard.discover(node.shell, &tree.path)
+                        }
+                    })();
+                    match captured {
+                        Ok(Some(linked)) => *tree = linked.tree(),
+                        Ok(None) => (),
+                        Err(error) => {
+                            let mut warning = entry(
+                                "worktrees",
+                                tree.path.clone(),
+                                format!("unreadable: {error}"),
+                                false,
+                            );
+                            warning.tree = Some(tree.clone());
+                            plan.entries.push(warning);
+                            refused.insert(tree.path.clone());
+                        }
+                    }
+                }
+                Ok((found, refused))
+            });
+        match discovered {
+            Ok((found, refused)) => {
                 for (tree, prunable) in found.iter().skip(1) {
-                    if !Path::new(&tree.path).exists() {
+                    if refused.contains(&tree.path) || !Path::new(&tree.path).exists() {
                         continue;
                     }
                     match unlinked_reason(tree, Some(*prunable)) {
@@ -812,7 +866,15 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     for (tree, found) in trees.iter().zip(found) {
         let found = match found {
             Ok(found) => found,
-            Err(_) if gone(node.shell, tree) => {
+            Err(_)
+                if crate::worktree::with_lifecycle(
+                    node.shell,
+                    node.ledger,
+                    Path::new(&tree.repo),
+                    |guard| Ok(gone(guard, node.shell, tree)),
+                )
+                .unwrap_or(false) =>
+            {
                 plan.entries.extend(vanished(node, tree));
                 continue;
             }
@@ -1128,6 +1190,7 @@ fn branches(
             path: String::new(),
             branch: branch.into(),
             head: head.into(),
+            identity: None,
         });
         plan.entries.push(e);
     }
@@ -1565,7 +1628,8 @@ pub fn close_holds(
         repo: linked.checkout.display().to_string(),
         path: linked.path.clone(),
         branch: linked.branch.clone(),
-        head: String::new(),
+        head: linked.head.clone(),
+        identity: linked.identity.clone(),
     };
     let seen = Seen::load(&node, process_cwds(shell), BTreeMap::new())?;
     let usage = usage(&node, &tree, &seen)?;
@@ -1655,18 +1719,21 @@ enum Outcome {
 /// Another actor removed `tree` after this pass listed it: a fresh listing no longer has it and
 /// its path is absent. The removal goal holds. A path that Git no longer lists but that still
 /// exists is not gone, because it may hold content. A failed listing proves nothing.
-fn gone(shell: &dyn Shell, tree: &Tree) -> bool {
-    repository_trees(shell, &tree.repo)
-        .is_ok_and(|trees| !trees.iter().any(|t| t.path == tree.path))
-        && missing(&tree.path)
+fn gone(guard: &crate::worktree::Guard, shell: &dyn Shell, tree: &Tree) -> bool {
+    crate::worktree::verified_absent(guard, shell, tree)
 }
 
 /// A Git error inside a listed worktree that has since gone is the race, not a failure:
 /// `None` then. Any other error stays an error.
-fn unless_gone<T>(shell: &dyn Shell, tree: &Tree, result: Result<T>) -> Result<Option<T>> {
+fn unless_gone<T>(
+    guard: &crate::worktree::Guard,
+    shell: &dyn Shell,
+    tree: &Tree,
+    result: Result<T>,
+) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(_) if gone(shell, tree) => Ok(None),
+        Err(_) if gone(guard, shell, tree) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -1684,13 +1751,15 @@ fn vanished(node: &Node<'_>, tree: &Tree) -> Option<Entry> {
     recorded
         .into_iter()
         .find(|t| crate::worktree::same(&t.path, &tree.path))
-        .map(|t| {
-            entry(
+        .map(|_| {
+            let mut vanished = entry(
                 "worktrees",
-                t.path,
+                tree.path.clone(),
                 "removed during the survey; drops the stale registration".into(),
                 true,
-            )
+            );
+            vanished.tree = Some(tree.clone());
+            vanished
         })
 }
 
@@ -1705,15 +1774,24 @@ enum Recheck {
     Gone,
 }
 
-fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
-    let current = repository_trees(node.shell, &planned.repo)?
+fn validate_tree(
+    guard: &crate::worktree::Guard,
+    node: &Node<'_>,
+    planned: &Tree,
+) -> Result<Recheck> {
+    let mut current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
-        .find(|t| t.path == planned.path);
-    if current.is_none() && missing(&planned.path) {
+        .find(|t| crate::worktree::same(&t.path, &planned.path));
+    if gone(guard, node.shell, planned) {
         return Ok(Recheck::Gone);
     }
     // Git lost it after the survey: the next survey holds it; this pass touches nothing.
     let reason = unlinked_reason(planned, current.as_ref().map(|_| false));
+    if let Some(current) = current.as_mut() {
+        current.identity = guard
+            .observe(node.shell, &current.path)?
+            .and_then(|linked| linked.identity);
+    }
     let (Some(current), None) = (current, reason) else {
         return Err(Error::Invalid(format!(
             "refuse {}: {}; directory remains",
@@ -1722,6 +1800,7 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
         )));
     };
     let Some(repo) = unless_gone(
+        guard,
         node.shell,
         planned,
         crate::prepare::main_checkout(node.shell, &current.path),
@@ -1730,12 +1809,13 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
         return Ok(Recheck::Gone);
     };
     let drift = planned.drift(&current);
-    if drift == Drift::Identity
+    if planned.identity.is_none()
+        || drift == Drift::Identity
         || crate::worktree::resolved(&repo) != crate::worktree::resolved(Path::new(&planned.repo))
         || current.head.is_empty()
     {
         return Err(Error::Invalid(format!(
-            "refuse {}: worktree identity changed",
+            "refuse {}: planned worktree identity changed",
             planned.path
         )));
     }
@@ -1756,12 +1836,18 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
         BTreeMap::from([(current.repo.clone(), evidence)]),
     )?;
     // Another actor can remove it between this listing and the checks inside it.
-    let Some(found) = unless_gone(node.shell, planned, disposition(node, &current, &seen))? else {
+    let Some(found) = unless_gone(
+        guard,
+        node.shell,
+        planned,
+        disposition(node, &current, &seen),
+    )?
+    else {
         return Ok(Recheck::Gone);
     };
     if !found.removable {
         return Ok(Recheck::Refused(format!(
-            "refuse {}: {}",
+            "refuse {}: no longer safe to remove: {}",
             current.path, found.detail
         )));
     }
@@ -1773,22 +1859,27 @@ fn validate_tree(node: &Node<'_>, planned: &Tree) -> Result<Recheck> {
     Ok(Recheck::Removable(found.usage, evidence))
 }
 
-/// Drop a removed worktree's registration. Its repository stays registered.
-pub fn forget(ledger: &Ledger, path: &str) -> Result<()> {
+/// Reconcile only the registration of the checkout that this operation captured.
+pub fn forget_matching(ledger: &Ledger, tree: &Tree) -> Result<()> {
     ledger.with_lock("worktrees", || {
-        let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
-        trees.retain(|t| !crate::worktree::same(&t.path, path));
-        ledger.write("worktrees.json", &trees)
+        let mut recorded: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
+        recorded.retain(|record| {
+            !crate::worktree::same(&record.path, &tree.path)
+                || record.identity != tree.identity
+                || !crate::worktree::same(&record.repo, &tree.repo)
+                || record.branch != tree.branch
+        });
+        ledger.write("worktrees.json", &recorded)
     })
 }
 
-fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
-    let (held, evidence) = match validate_tree(node, tree)? {
+fn remove_tree(guard: &crate::worktree::Guard, node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
+    let (held, evidence) = match validate_tree(guard, node, tree)? {
         Recheck::Removable(held, evidence) => (held, evidence),
         Recheck::Refused(reason) => return Ok(Outcome::Skipped(reason)),
         Recheck::Gone => {
             // Another actor removed it after the survey. The goal holds; reconcile the record.
-            drop_registration(node, &tree.path)?;
+            forget_matching(node.ledger, tree)?;
             return Ok(Outcome::Done(format!(
                 "{} was already removed; dropped its registration",
                 tree.path
@@ -1799,19 +1890,19 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
         checkout: tree.repo.clone().into(),
         path: tree.path.clone(),
         branch: tree.branch.clone(),
+        head: tree.head.clone(),
+        gitdir: tree
+            .identity
+            .as_ref()
+            .map(|identity| identity.gitdir.clone())
+            .ok_or_else(|| Error::Invalid("missing administrative identity".into()))?,
+        identity: tree.identity.clone(),
     };
     let mut holders = Vec::new();
     for pane in &held.holders {
         let launch = crate::launch::final_pane(node.ledger, node.shell, &pane.pane_id)?;
         match launch {
-            crate::launch::PaneLaunch::Final if pane.agent.is_none() => {
-                if !crate::launch::close_final(node.ledger, node.shell, &pane.pane_id)? {
-                    return Err(Error::Invalid(format!(
-                        "{}: launch changed before removal",
-                        pane.pane_id
-                    )));
-                }
-            }
+            crate::launch::PaneLaunch::Final if pane.agent.is_none() => holders.push(pane),
             crate::launch::PaneLaunch::Final | crate::launch::PaneLaunch::Unresolved => {
                 return Err(Error::Invalid(format!(
                     "{}: unresolved launch ownership",
@@ -1825,10 +1916,13 @@ fn remove_tree(node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
         node.shell,
         node.ledger,
         &linked,
-        held.workspace.as_deref(),
-        &holders,
-        std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
-        &evidence,
+        crate::worktree::Removal {
+            guard,
+            workspace: held.workspace.as_deref(),
+            holders: &holders,
+            caller_workspace: std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
+            evidence: &evidence,
+        },
     )?;
     let closed = holders
         .iter()
@@ -1867,7 +1961,7 @@ fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
             let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
             repos.remove(repo);
             // An existing worktree may still hold content even when its main checkout is gone.
-            trees.retain(|tree| tree.repo != repo || !missing(&tree.path));
+            trees.retain(|tree| !crate::worktree::same(&tree.repo, repo) || !missing(&tree.path));
             node.ledger.write("worktrees.json", &trees)?;
             node.ledger.write("repositories.json", &repos)
         })
@@ -2001,10 +2095,26 @@ impl Applied {
 
 pub fn apply(node: &Node<'_>, plan: &Plan, now: u64) -> Result<Applied> {
     let mut applied = Applied::default();
-    // A remote plan is input, not authority: rebuild the candidate set on this host.
-    let actual = doctor(node, now)?;
+    // Checkout requests carry stale identity. Validate them read-only under the repository
+    // mutex before any fresh discovery can bind a generation to a replacement.
+    let mut actual = None;
     for requested in &plan.entries {
-        applied.record(requested, apply_one(node, &actual, requested, now));
+        let outcome = if requested.class == "worktrees" && requested.tree.is_some() {
+            apply_one(node, &Plan::default(), requested, now)
+        } else {
+            if actual.is_none() {
+                actual = Some(doctor(node, now)?);
+            }
+            apply_one(
+                node,
+                actual
+                    .as_ref()
+                    .ok_or_else(|| Error::Invalid("missing cleanup survey".into()))?,
+                requested,
+                now,
+            )
+        };
+        applied.record(requested, outcome);
     }
     Ok(applied)
 }
@@ -2070,6 +2180,17 @@ pub(crate) fn apply_survey(node: &Node<'_>, plan: &Plan, now: u64) -> Applied {
 }
 
 fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<Outcome> {
+    if requested.removable
+        && requested.class == "worktrees"
+        && let Some(tree) = &requested.tree
+    {
+        return crate::worktree::with_lifecycle(
+            node.shell,
+            node.ledger,
+            Path::new(&tree.repo),
+            |guard| remove_tree(guard, node, tree),
+        );
+    }
     if matches!(requested.class.as_str(), "disk" | "processes") {
         return Ok(Outcome::Done(format!(
             "{} {}: report only",
@@ -2133,11 +2254,18 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
     let candidate = current;
     match candidate.class.as_str() {
         "worktrees" => match &requested.tree {
-            Some(tree) => remove_tree(node, tree),
+            Some(_) => Err(Error::Invalid(
+                "checkout removal requires repository protection".into(),
+            )),
             None => drop_registration(node, &candidate.id).map(Outcome::Done),
         },
         "branches" => match &requested.tree {
-            Some(tree) => delete_branch(node.shell, tree),
+            Some(tree) => crate::worktree::with_lifecycle(
+                node.shell,
+                node.ledger,
+                Path::new(&tree.repo),
+                |_| delete_branch(node.shell, tree),
+            ),
             None => Err(Error::Invalid("a branch entry has no branch".into())),
         },
         "workspaces" => close_workspace(node, &candidate.id, now),
@@ -2275,7 +2403,43 @@ mod tests {
             path: String::new(),
             branch: "feature".into(),
             head: "abc".into(),
+            identity: None,
         }
+    }
+
+    #[test]
+    fn main_checkout_cache_entry_needs_no_linked_administrative_identity() {
+        let rig = Rig::new(json!([]));
+        let repo = rig.ledger.dir.join("repo");
+        let target = repo.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        let mut candidate = entry(
+            "targets",
+            target.display().to_string(),
+            "unused cache".into(),
+            true,
+        );
+        candidate.tree = Some(Tree {
+            repo: repo.display().to_string(),
+            path: repo.display().to_string(),
+            branch: "main".into(),
+            head: "abc".into(),
+            identity: None,
+        });
+        let plan = Plan {
+            entries: vec![candidate.clone()],
+        };
+        assert!(matches!(
+            apply_one(&rig.node(), &plan, &candidate, 100).unwrap(),
+            Outcome::Done(_)
+        ));
+        assert!(!target.exists());
+        assert!(repo.exists());
     }
 
     #[test]
@@ -2404,6 +2568,7 @@ mod tests {
                 path: format!("{missing}/tree"),
                 branch: "feature".into(),
                 head: String::new(),
+                identity: None,
             },
         )
         .unwrap();
@@ -2466,6 +2631,7 @@ mod tests {
             path: format!("{repo}/tree"),
             branch: "feature".into(),
             head: String::new(),
+            identity: None,
         };
         remember(&rig.ledger, tree).unwrap();
         rig.cleanup.repositories.push(repo.clone());
@@ -2540,6 +2706,7 @@ mod tests {
             path: surviving.clone(),
             branch: "main".into(),
             head: String::new(),
+            identity: None,
         };
         remember(&rig.ledger, live_tree.clone()).unwrap();
         remember(
@@ -2549,6 +2716,7 @@ mod tests {
                 path: format!("{repo}/tree"),
                 branch: "feature".into(),
                 head: String::new(),
+                identity: None,
             },
         )
         .unwrap();
@@ -2593,6 +2761,7 @@ mod tests {
             path: path.display().to_string(),
             branch: "feature".into(),
             head: String::new(),
+            identity: None,
         };
         remember(&rig.ledger, tree.clone()).unwrap();
         drop_repository(&rig.node(), &tree.repo).unwrap();
@@ -2657,6 +2826,7 @@ mod tests {
             path: parent.join("tree").display().to_string(),
             branch: "feature".into(),
             head: String::new(),
+            identity: None,
         };
         remember(&rig.ledger, tree.clone()).unwrap();
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -2690,6 +2860,7 @@ mod tests {
             path: repo.join("tree").display().to_string(),
             branch: "feature".into(),
             head: String::new(),
+            identity: None,
         };
         remember(&rig.ledger, tree.clone()).unwrap();
         let mut plan = Plan::default();
@@ -2722,15 +2893,29 @@ mod tests {
         let rig = Rig::new(json!([]));
         let repo = rig.ledger.dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let repo = repo.display().to_string();
+        let repo = std::fs::canonicalize(repo).unwrap().display().to_string();
         let tree = Tree {
             repo: repo.clone(),
             path: format!("{repo}/.worktrees/tiers-case"),
             branch: "tiers-case".into(),
             head: "abc".into(),
+            identity: Some(crate::worktree::Identity {
+                common: Path::new(&repo).join(".git"),
+                gitdir: Path::new(&repo).join(".git/worktrees/tiers-case"),
+                generation: "0123456789abcdef0123456789abcdef".into(),
+            }),
         };
         remember(&rig.ledger, tree.clone()).unwrap();
         // The survey planned the removal; then the worktree left Git's list before apply.
+        std::fs::create_dir(Path::new(&repo).join(".git")).unwrap();
+        rig.shell.on(
+            &format!("git -C {repo} rev-parse --path-format=absolute --git-common-dir"),
+            &format!("{repo}/.git\n"),
+        );
+        rig.shell.on(
+            &format!("git -C {repo} worktree list --porcelain"),
+            &format!("worktree {repo}\n\n"),
+        );
         rig.shell.on(
             &format!("git -C {repo} worktree list --porcelain -z"),
             &format!("worktree {repo}\0HEAD abc\0branch refs/heads/main\0\0"),

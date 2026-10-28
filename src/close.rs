@@ -95,9 +95,235 @@ pub fn local(
     caller: &Caller,
     guard: Guard,
 ) -> Result<Closed> {
-    let panes = crate::cleanup::current_panes(shell)?;
-    let target = validate_target(shell, &panes, pane, caller)?;
-    remove_target(shell, ledger, target, &panes, caller, guard)
+    with_local(shell, ledger, pane, caller, guard, Ok)
+}
+
+/// Keep repository protection through the caller's matching-record reconciliation.
+pub fn with_local<T>(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &Caller,
+    mode: Guard,
+    reconcile: impl FnOnce(Closed) -> Result<T>,
+) -> Result<T> {
+    if caller.pane.as_deref() == Some(pane) {
+        return Err(refuse("cannot close the caller pane"));
+    }
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    let owners = local_owners(ledger, pane)?;
+    let target = panes.iter().find(|p| p.pane_id == pane);
+    let cwd = target.and_then(|p| p.cwd.as_deref());
+    let capture = cwd
+        .map(|cwd| worktree::capture_close(shell, cwd))
+        .transpose()?
+        .flatten();
+    let saved = crate::launch::checkout_for_pane(ledger, pane)?;
+    let observation = capture
+        .map(|capture| capture.bind_saved(saved.as_ref()))
+        .transpose()?;
+    let (live, directory) = match &observation {
+        Some(worktree::CloseObservation::Live { tree, pin }) => (Some(tree), pin.as_ref()),
+        Some(worktree::CloseObservation::Missing) | None => (None, None),
+    };
+    let planned = close_expectation(saved.as_ref(), live);
+    let Some(planned) = planned else {
+        let target = validate_target(shell, &panes, pane, caller)?;
+        return reconcile(remove_target(
+            shell, ledger, target, &panes, caller, mode, None,
+        )?);
+    };
+    let repo = planned.repo.clone();
+    worktree::with_lifecycle(shell, ledger, Path::new(&repo), |lifecycle| {
+        if let (Some(saved), Some(live)) = (&saved, live)
+            && !live.matches_checkout(saved)
+        {
+            return Err(refuse("pane moved to another checkout"));
+        }
+        let absent = worktree::verified_absent(lifecycle, shell, &planned)
+            || (saved.is_none()
+                && live.is_some_and(|tree| {
+                    worktree::verified_absent_unmarked(lifecycle, shell, tree)
+                }));
+        if !absent && matches!(observation, Some(worktree::CloseObservation::Missing)) {
+            return Err(refuse("checkout reappeared"));
+        }
+        let planned = if absent {
+            planned
+        } else {
+            establish_close_identity(lifecycle, shell, planned, live, directory, saved.is_none())?
+        };
+        if absent || worktree::verified_absent(lifecycle, shell, &planned) {
+            validate_absent_target(
+                shell,
+                ledger,
+                pane,
+                caller,
+                &planned,
+                terminals.get(pane).map(String::as_str),
+                &owners,
+            )?;
+            if saved.is_some() {
+                crate::launch::validate_checkout_owner(
+                    ledger,
+                    pane,
+                    None,
+                    terminals.get(pane).map(String::as_str),
+                )?;
+            }
+            crate::cleanup::forget_matching(ledger, &planned)?;
+            return reconcile(Closed {
+                pane: pane.into(),
+                worktree: Some(Worktree {
+                    path: planned.path,
+                    branch: planned.branch,
+                    workspace: None,
+                    branch_deleted: false,
+                    anchor_closed: None,
+                }),
+                pane_closed: false,
+            });
+        }
+        // Every removal needs an observation and its original directory handles.
+        let live = live.ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        let directory = directory.ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        directory.validate(live)?;
+        let panes = crate::cleanup::current_panes(shell)?;
+        let target = validate_target(shell, &panes, pane, caller)?;
+        directory.validate(live)?;
+        reconcile(remove_target(
+            shell,
+            ledger,
+            target,
+            &panes,
+            caller,
+            mode,
+            Some((lifecycle, &planned)),
+        )?)
+    })
+}
+
+/// Add only an unmarked checkout's generation; never replace the request's HEAD.
+fn establish_close_identity(
+    lifecycle: &worktree::Guard,
+    shell: &dyn crate::shell::Shell,
+    planned: crate::cleanup::Tree,
+    live: Option<&worktree::Linked>,
+    pin: Option<&worktree::Pin>,
+    unsaved: bool,
+) -> Result<crate::cleanup::Tree> {
+    if unsaved && planned.identity.is_none() {
+        return Ok(lifecycle
+            .discover_unmarked(
+                shell,
+                live.ok_or_else(|| refuse("checkout identity is unreadable"))?,
+                pin.ok_or_else(|| refuse("checkout identity is unreadable"))?,
+            )?
+            .tree());
+    }
+    // Saved identity stays launch-bound; HEAD is the close request's observation.
+    if let Some(now) = lifecycle.observe(shell, &planned.path)? {
+        match planned.drift(&now.tree()) {
+            crate::cleanup::Drift::Identity => return Err(refuse("worktree identity changed")),
+            crate::cleanup::Drift::HeadMoved => return Err(refuse("HEAD moved before close")),
+            crate::cleanup::Drift::Same => (),
+        }
+    }
+    Ok(planned)
+}
+
+/// Retain launch identity, but capture HEAD at the start of this close request.
+fn close_expectation(
+    saved: Option<&crate::cleanup::Tree>,
+    live: Option<&worktree::Linked>,
+) -> Option<crate::cleanup::Tree> {
+    let mut planned = saved
+        .cloned()
+        .or_else(|| live.map(worktree::Linked::tree))?;
+    if let Some(live) = live {
+        planned.head.clone_from(&live.head);
+    }
+    Some(planned)
+}
+
+fn local_owners(ledger: &Ledger, pane: &str) -> Result<Vec<crate::items::Item>> {
+    Ok(crate::items::list(ledger)?
+        .into_iter()
+        .filter(|item| {
+            item.host == crate::hosts::LOCAL && item.pane == pane && item.closed_ms.is_none()
+        })
+        .collect())
+}
+
+/// Absence never authorizes reconciliation of a replacement pane or another item.
+fn validate_absent_target(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &Caller,
+    tree: &crate::cleanup::Tree,
+    terminal: Option<&str>,
+    owners: &[crate::items::Item],
+) -> Result<()> {
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    let items = crate::items::list(ledger)?;
+    let new_owner = items.iter().any(|item| {
+        item.host == crate::hosts::LOCAL
+            && item.pane == pane
+            && item.closed_ms.is_none()
+            && !owners.iter().any(|owner| owner.id == item.id)
+    });
+    let lost_owner = owners.iter().any(|owner| {
+        items
+            .iter()
+            .find(|item| item.id == owner.id)
+            .is_none_or(|item| {
+                item.host != owner.host
+                    || item.pane != owner.pane
+                    || item.owner_pane != owner.owner_pane
+                    || item.owner_session != owner.owner_session
+                    || item.created_ms != owner.created_ms
+            })
+    });
+    // Only the same captured item becoming closed may leave the open owner set.
+    if new_owner || lost_owner {
+        return Err(refuse("checkout item ownership changed"));
+    }
+    if panes.iter().any(|target| target.pane_id == pane) {
+        let target = validate_target(shell, &panes, pane, caller)?;
+        if terminal.is_none()
+            || terminal != terminals.get(pane).map(String::as_str)
+            || target.cwd.as_deref().is_none_or(|cwd| {
+                !worktree::resolved(Path::new(cwd))
+                    .starts_with(worktree::resolved(Path::new(&tree.path)))
+            })
+        {
+            return Err(refuse("removed checkout no longer owns the pane"));
+        }
+    }
+    Ok(())
+}
+
+/// Repeat the captured-resource check before entering any close effect.
+fn validate_checkout(
+    shell: &dyn crate::shell::Shell,
+    target: &crate::probe::Pane,
+    expected: &crate::cleanup::Tree,
+) -> Result<worktree::Linked> {
+    let now = worktree::linked_or_detached(shell, &expected.path)?
+        .ok_or_else(|| refuse("checkout identity is unreadable"))?;
+    if expected.identity.is_none()
+        || now.identity != expected.identity
+        || now.branch != expected.branch
+        || !worktree::same(&now.path, &expected.path)
+    {
+        return Err(refuse("worktree identity changed"));
+    }
+    if now.head != expected.head {
+        return Err(refuse("HEAD moved before close"));
+    }
+    worktree::validate_pane_checkout(shell, target, &now)?;
+    Ok(now)
 }
 
 /// Validate pane safety before selecting checkout removal or pane-only closure.
@@ -125,6 +351,15 @@ fn validate_target<'a>(
     Ok(target)
 }
 
+fn pane_only(shell: &dyn crate::shell::Shell, pane: &str) -> Result<Closed> {
+    shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+    Ok(Closed {
+        pane: pane.into(),
+        worktree: None,
+        pane_closed: true,
+    })
+}
+
 fn remove_target(
     shell: &dyn crate::shell::Shell,
     ledger: &Ledger,
@@ -132,8 +367,12 @@ fn remove_target(
     panes: &[crate::probe::Pane],
     caller: &Caller,
     guard: Guard,
+    lifecycle: Option<(&worktree::Guard, &crate::cleanup::Tree)>,
 ) -> Result<Closed> {
     let pane = target.pane_id.as_str();
+    let validated = lifecycle
+        .map(|(_, expected)| validate_checkout(shell, target, expected))
+        .transpose()?;
     // An explicit recovery may end a stranded shell without removing its checkout or
     // assigning an outcome to the interrupted launch. Automatic cleanup cannot do this.
     if guard == Guard::Clean && crate::launch::close_unfinished(ledger, shell, pane)? {
@@ -152,12 +391,15 @@ fn remove_target(
             "{pane} has not called done; it waits for input"
         )));
     }
-    let tree = target
-        .cwd
-        .as_deref()
-        .map(|cwd| worktree::linked_or_detached(shell, cwd))
-        .transpose()?
-        .flatten();
+    let tree = match validated {
+        Some(tree) => Some(tree),
+        None => target
+            .cwd
+            .as_deref()
+            .map(|cwd| worktree::linked_or_detached(shell, cwd))
+            .transpose()?
+            .flatten(),
+    };
     // Dogsled locks every worktree it makes. An unlocked one is someone's own checkout that
     // the child only ran in, such as its owner's: closing the child closes its pane alone.
     let lock = match &tree {
@@ -168,24 +410,17 @@ fn remove_target(
     let Some(tree) =
         tree.filter(|_| lock.is_some() && (!automatic || lock.as_deref() == Some(AGENT_LOCK)))
     else {
-        shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
-        return Ok(Closed {
-            pane: pane.into(),
-            worktree: None,
-            pane_closed: true,
-        });
+        return pane_only(shell, pane);
     };
+    if lock.as_deref() == Some(AGENT_LOCK) {
+        crate::cleanup::remember(ledger, tree.tree())?;
+    }
     let workspace = worktree::workspace(shell, &tree.checkout, &tree.path)?;
     let holders = worktree::holders(panes, &tree.path, workspace.as_deref());
     // Another agent, open item, or busy pane still uses the checkout. Even an explicit close
     // releases only its own pane: closing the others would close agents nobody asked to close.
     if shared(shell, ledger, pane, &holders)? {
-        shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
-        return Ok(Closed {
-            pane: pane.into(),
-            worktree: None,
-            pane_closed: true,
-        });
+        return pane_only(shell, pane);
     }
     outside(&tree, caller)?;
     let evidence = unsaved(shell, ledger, &tree, caller, guard)?;
@@ -220,10 +455,15 @@ fn remove_target(
         shell,
         ledger,
         &tree,
-        workspace.as_deref(),
-        &holders,
-        caller.workspace.as_deref(),
-        &evidence,
+        worktree::Removal {
+            guard: lifecycle
+                .ok_or_else(|| refuse("repository protection missing"))?
+                .0,
+            workspace: workspace.as_deref(),
+            holders: &holders,
+            caller_workspace: caller.workspace.as_deref(),
+            evidence: &evidence,
+        },
     )?;
     Ok(Closed {
         pane: pane.into(),

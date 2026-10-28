@@ -16,6 +16,177 @@ pub const AGENT_LOCK: &str = "agent:worktree";
 /// `place` opened it. The last child's removal closes that workspace.
 pub const ANCHOR_FILE: &str = "agent-worktree-anchor";
 
+/// Proof that this operation holds the repository-wide lifecycle mutex.
+/// The mutex address depends only on the canonical Git common directory.
+#[derive(Debug)]
+pub struct Guard {
+    common: PathBuf,
+}
+
+/// A Git administrative directory and its write-once checkout generation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Identity {
+    pub common: PathBuf,
+    pub gitdir: PathBuf,
+    pub generation: String,
+}
+
+impl PartialEq for Identity {
+    fn eq(&self, other: &Self) -> bool {
+        resolved(&self.common) == resolved(&other.common)
+            && resolved(&self.gitdir) == resolved(&other.gitdir)
+            && self.generation == other.generation
+    }
+}
+
+impl Eq for Identity {}
+
+const CHECKOUT_ID: &str = "dogsled-checkout-id";
+
+fn generation(gitdir: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(gitdir.join(CHECKOUT_ID)) {
+        Ok(text) => {
+            let id = text.trim();
+            if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(refuse("malformed checkout generation"));
+            }
+            Ok(Some(id.into()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+impl Guard {
+    /// Read an existing checkout without creating its generation marker.
+    pub fn observe(&self, shell: &dyn Shell, path: &str) -> Result<Option<Linked>> {
+        let Some(tree) = snapshot(shell, path)? else {
+            return Ok(None);
+        };
+        self.check_repository(shell, &tree.checkout)?;
+        validate_identity(shell, &tree)?;
+        if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
+            return Err(refuse("HEAD moved during checkout observation"));
+        }
+        Ok(Some(tree))
+    }
+
+    /// Fresh discovery only. Stale validation must never create a generation marker.
+    pub fn discover(&self, shell: &dyn Shell, path: &str) -> Result<Option<Linked>> {
+        let Some(mut tree) = snapshot(shell, path)? else {
+            return Ok(None);
+        };
+        self.check_repository(shell, &tree.checkout)?;
+        if tree.identity.is_none() {
+            tree.identity = Some(self.discover_identity(&tree.gitdir)?);
+        }
+        validate_identity(shell, &tree)?;
+        if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
+            return Err(refuse("HEAD moved during checkout discovery"));
+        }
+        Ok(Some(tree))
+    }
+
+    /// Discovery returns only the generation; it never supplies a new HEAD expectation.
+    fn discover_identity(&self, gitdir: &Path) -> Result<Identity> {
+        let id = if let Some(id) = generation(gitdir)? {
+            id
+        } else {
+            use std::io::Write as _;
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes)
+                .map_err(|error| Error::Invalid(format!("checkout generation: {error}")))?;
+            let id = bytes
+                .iter()
+                .fold(String::with_capacity(32), |mut id, byte| {
+                    const HEX: &[u8; 16] = b"0123456789abcdef";
+                    id.push(char::from(HEX[usize::from(byte >> 4)]));
+                    id.push(char::from(HEX[usize::from(byte & 15)]));
+                    id
+                });
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(gitdir.join(CHECKOUT_ID))
+            {
+                Ok(mut marker) => {
+                    writeln!(marker, "{id}")?;
+                    marker.sync_all()?;
+                    id
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    generation(gitdir)?.ok_or_else(|| refuse("checkout generation disappeared"))?
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        Ok(Identity {
+            common: self.common.clone(),
+            gitdir: gitdir.into(),
+            generation: id,
+        })
+    }
+
+    /// Establish an unmarked checkout only if the pinned directory and the pre-wait
+    /// observation still agree. Discovery must not replace the request's HEAD.
+    pub fn discover_unmarked(
+        &self,
+        shell: &dyn Shell,
+        before: &Linked,
+        pin: &Pin,
+    ) -> Result<Linked> {
+        pin.validate(before)?;
+        let now = linked_or_detached(shell, &before.path)?
+            .ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        let mut expected = before.tree();
+        expected.identity.clone_from(&now.identity);
+        if before.identity.is_some()
+            || expected.drift(&now.tree()) == crate::cleanup::Drift::Identity
+            || resolved(&before.gitdir) != resolved(&now.gitdir)
+        {
+            return Err(refuse("worktree identity changed"));
+        }
+        if before.head != now.head {
+            return Err(refuse("HEAD moved before close"));
+        }
+        self.check_repository(shell, &before.checkout)?;
+        pin.validate(before)?;
+        let mut tree = before.clone();
+        tree.identity = Some(match now.identity {
+            Some(identity) => identity,
+            None => self.discover_identity(&before.gitdir)?,
+        });
+        pin.validate(before)?;
+        validate_identity(shell, &tree)?;
+        if snapshot(shell, &before.path)?.is_none_or(|now| now.head != before.head) {
+            return Err(refuse("HEAD moved during checkout discovery"));
+        }
+        pin.validate(before)?;
+        Ok(tree)
+    }
+
+    pub fn check_repository(&self, shell: &dyn Shell, checkout: &Path) -> Result<()> {
+        if common_dir(shell, checkout)?.canonicalize()? != self.common {
+            return Err(refuse("repository identity changed"));
+        }
+        Ok(())
+    }
+}
+
+pub fn with_lifecycle<T>(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    checkout: &Path,
+    operation: impl FnOnce(&Guard) -> Result<T>,
+) -> Result<T> {
+    let common = common_dir(shell, checkout)?.canonicalize()?;
+    let lock = Ledger {
+        dir: common.clone(),
+        budget: ledger.budget,
+    };
+    lock.with_lock("dogsled-lifecycle", || operation(&Guard { common }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Linked {
     /// The main checkout.
@@ -23,6 +194,60 @@ pub struct Linked {
     pub path: String,
     /// Empty for a detached worktree.
     pub branch: String,
+    pub head: String,
+    pub gitdir: PathBuf,
+    pub identity: Option<Identity>,
+}
+
+/// Open handles keep both checkout-root and administrative inodes alive during a wait.
+pub struct Pin {
+    root: std::fs::File,
+    admin: std::fs::File,
+}
+
+impl Pin {
+    pub(crate) fn validate(&self, tree: &Linked) -> Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        for (file, path) in [
+            (&self.root, Path::new(&tree.path)),
+            (&self.admin, &tree.gitdir),
+        ] {
+            let original = file.metadata()?;
+            let current = std::fs::metadata(path)?;
+            if original.dev() != current.dev() || original.ino() != current.ino() {
+                return Err(refuse("worktree identity changed"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Linked {
+    pub(crate) fn pin(&self) -> Result<Pin> {
+        Ok(Pin {
+            root: std::fs::File::open(&self.path)?,
+            admin: std::fs::File::open(&self.gitdir)?,
+        })
+    }
+
+    /// Compare checkout location and administrative identity without recapturing HEAD.
+    pub(crate) fn matches_checkout(&self, expected: &crate::cleanup::Tree) -> bool {
+        same(&self.path, &expected.path)
+            && expected.identity.as_ref().is_none_or(|identity| {
+                resolved(&identity.gitdir) == resolved(&self.gitdir)
+                    && self.identity.as_ref().is_none_or(|now| now == identity)
+            })
+    }
+
+    pub fn tree(&self) -> crate::cleanup::Tree {
+        crate::cleanup::Tree {
+            repo: self.checkout.display().to_string(),
+            path: self.path.clone(),
+            branch: self.branch.clone(),
+            head: self.head.clone(),
+            identity: self.identity.clone(),
+        }
+    }
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -103,6 +328,182 @@ pub fn head_sha(shell: &dyn Shell, path: &str) -> Result<String> {
 /// The linked worktree that contains `cwd`. A detached one has an empty `branch`; no branch is
 /// invented for it.
 pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
+    capture(shell, cwd, true)
+}
+
+/// Read-only capture for launch validation, including the main checkout.
+pub fn snapshot(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
+    capture(shell, cwd, false)
+}
+
+/// The request observation and handles opened against the same directory tuple.
+/// Missing locations or handles are absence candidates, never permission to close.
+pub(crate) enum CloseCapture {
+    Observed {
+        tree: Linked,
+        pin: Option<Pin>,
+    },
+    Missing {
+        common: PathBuf,
+        gitdir: PathBuf,
+        path: String,
+    },
+}
+
+impl CloseCapture {
+    /// Bind missing-location evidence to saved identity before exposing the observation.
+    pub(crate) fn bind_saved(
+        self,
+        saved: Option<&crate::cleanup::Tree>,
+    ) -> Result<CloseObservation> {
+        match self {
+            Self::Observed { tree, pin } => Ok(CloseObservation::Live { tree, pin }),
+            Self::Missing {
+                common,
+                gitdir,
+                path,
+            } => {
+                if !saved.is_some_and(|saved| {
+                    same(&saved.path, &path)
+                        && saved.identity.as_ref().is_some_and(|identity| {
+                            resolved(&identity.common) == resolved(&common)
+                                && resolved(&identity.gitdir) == resolved(&gitdir)
+                        })
+                }) {
+                    return Err(refuse("checkout identity is unreadable"));
+                }
+                Ok(CloseObservation::Missing)
+            }
+        }
+    }
+}
+
+/// A missing observation can only reconcile verified absence under the lifecycle lock.
+pub(crate) enum CloseObservation {
+    Live { tree: Linked, pin: Option<Pin> },
+    Missing,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static BEFORE_CLOSE_STAT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static BEFORE_CLOSE_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn directory_key(metadata: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    (metadata.dev(), metadata.ino())
+}
+
+fn missing(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// Locate directories without observing HEAD. The observation is bracketed by root/admin
+/// stats, and subsequently opened handles must still name that captured tuple.
+pub(crate) fn capture_close(shell: &dyn Shell, cwd: &str) -> Result<Option<CloseCapture>> {
+    for attempt in 0..2 {
+        let out = git(
+            shell,
+            Path::new(cwd),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                "--git-dir",
+                "--show-toplevel",
+            ],
+        )?;
+        if !out.ok() {
+            return Ok(None);
+        }
+        let lines: Vec<_> = out.stdout.lines().map(str::trim).collect();
+        let [common, admin, root] = lines[..] else {
+            return Err(refuse("cannot locate checkout directories"));
+        };
+        if same(common, admin) {
+            return Ok(None);
+        }
+        let keys = || -> std::io::Result<_> {
+            Ok((
+                directory_key(&std::fs::metadata(root)?),
+                directory_key(&std::fs::metadata(admin)?),
+            ))
+        };
+        #[cfg(test)]
+        BEFORE_CLOSE_STAT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let before = match keys() {
+            Ok(keys) => keys,
+            Err(error) if missing(&error) => {
+                return Ok(Some(CloseCapture::Missing {
+                    common: resolved(Path::new(common)),
+                    gitdir: resolved(Path::new(admin)),
+                    path: resolved(Path::new(root)).display().to_string(),
+                }));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(tree) = linked_or_detached(shell, cwd)? else {
+            if attempt == 0 {
+                continue;
+            }
+            return Err(refuse("worktree identity changed during observation"));
+        };
+        match keys() {
+            Ok(after)
+                if before == after
+                    && same(root, &tree.path)
+                    && same(admin, &tree.gitdir.display().to_string()) => {}
+            Err(error) if missing(&error) => {
+                return Ok(Some(CloseCapture::Observed { tree, pin: None }));
+            }
+            Err(error) => return Err(error.into()),
+            _ if attempt == 0 => continue,
+            _ => return Err(refuse("worktree identity changed during observation")),
+        }
+        #[cfg(test)]
+        BEFORE_CLOSE_PIN.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let pin = match tree.pin() {
+            Ok(pin) => pin,
+            Err(Error::Io(error)) if missing(&error) => {
+                return Ok(Some(CloseCapture::Observed { tree, pin: None }));
+            }
+            Err(error) => return Err(error),
+        };
+        if (
+            directory_key(&pin.root.metadata()?),
+            directory_key(&pin.admin.metadata()?),
+        ) != before
+        {
+            return Err(refuse("worktree identity changed before pinning"));
+        }
+        match pin.validate(&tree) {
+            Ok(()) => (),
+            Err(Error::Io(error)) if missing(&error) => {
+                return Ok(Some(CloseCapture::Observed { tree, pin: None }));
+            }
+            Err(error) => return Err(error),
+        }
+        return Ok(Some(CloseCapture::Observed {
+            tree,
+            pin: Some(pin),
+        }));
+    }
+    Err(refuse("worktree identity changed during observation"))
+}
+
+fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Linked>> {
     if !Path::new(cwd).is_dir() {
         return Ok(None);
     }
@@ -115,25 +516,82 @@ pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>
             "--git-common-dir",
             "--git-dir",
             "--show-toplevel",
+            "HEAD",
             "--abbrev-ref",
             "HEAD",
         ],
     )?;
-    // Not a repository: there is no worktree to remove.
-    if out.status != 0 {
-        return Ok(None);
-    }
-    let lines: Vec<&str> = out.stdout.lines().map(str::trim).collect();
-    let [common, dir, top, branch] = lines[..] else {
+    // Administrative identity exists independently of HEAD in an unborn main checkout.
+    let unborn;
+    let output = if out.ok() {
+        &out.stdout
+    } else {
+        if linked_only {
+            return Ok(None);
+        }
+        let location = git(
+            shell,
+            Path::new(cwd),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                "--git-dir",
+                "--show-toplevel",
+            ],
+        )?;
+        if !location.ok() {
+            return Ok(None);
+        }
+        let branch = git(shell, Path::new(cwd), &["symbolic-ref", "--short", "HEAD"])?;
+        if !branch.ok() {
+            return Err(refuse("cannot read checkout HEAD"));
+        }
+        let tip = git(
+            shell,
+            Path::new(cwd),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+        )?;
+        let head = tip.ok().then(|| tip.stdout.trim());
+        unborn = format!(
+            "{}\n{}\n{}\n",
+            location.stdout.trim_end(),
+            head.unwrap_or_default(),
+            branch.stdout.trim()
+        );
+        &unborn
+    };
+    let lines: Vec<&str> = output.lines().map(str::trim).collect();
+    let [common, dir, top, head, branch] = lines[..] else {
         return Err(Error::Invalid(format!(
             "git rev-parse in {cwd} returned unexpected output"
         )));
     };
-    if common == dir {
+    if linked_only && same(common, dir) {
         return Ok(None);
     }
+    let common = Path::new(common).canonicalize()?;
+    let checkout = if common.file_name().is_some_and(|name| name == ".git") {
+        common
+            .parent()
+            .ok_or_else(|| refuse("Git common directory has no parent"))?
+            .to_path_buf()
+    } else {
+        common.clone()
+    };
+    let gitdir = Path::new(dir).canonicalize()?;
+    let identity = generation(&gitdir)?.map(|generation| Identity {
+        common,
+        gitdir: gitdir.clone(),
+        generation,
+    });
     Ok(Some(Linked {
-        checkout: crate::prepare::main_checkout(shell, cwd)?,
+        head: head.into(),
+        gitdir,
+        identity,
+        checkout,
+        // Keep Git's checkout spelling for listings and removal commands. Identity
+        // comparisons resolve aliases; administrative paths remain canonical.
         path: top.into(),
         branch: if branch == "HEAD" {
             String::new()
@@ -181,8 +639,105 @@ pub fn lock_reason(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Opt
         .and_then(|w| w.lock))
 }
 
-fn listed(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<bool> {
-    Ok(list(shell, checkout)?.iter().any(|w| same(&w.path, path)))
+/// Read-only incarnation validation, including after a setup or teardown hook.
+pub fn validate_identity(shell: &dyn Shell, tree: &Linked) -> Result<()> {
+    let now = snapshot(shell, &tree.path)?;
+    if tree.identity.is_none()
+        || now.as_ref().is_none_or(|now| {
+            now.identity != tree.identity
+                || !same(&now.path, &tree.path)
+                || now.branch != tree.branch
+                || resolved(&now.checkout) != resolved(&tree.checkout)
+        })
+    {
+        return Err(refuse(&format!("{}: worktree identity changed", tree.path)));
+    }
+    Ok(())
+}
+
+/// A pane can move independently of the repository mutex. Its cwd is comparison-only:
+/// it must never select a different checkout for removal.
+pub(crate) fn validate_pane_checkout(shell: &dyn Shell, pane: &Pane, tree: &Linked) -> Result<()> {
+    let current = pane
+        .cwd
+        .as_deref()
+        .map(|cwd| snapshot(shell, cwd))
+        .transpose()?
+        .flatten();
+    if current.as_ref().is_none_or(|now| {
+        resolved(&now.gitdir) != resolved(&tree.gitdir) || !now.matches_checkout(&tree.tree())
+    }) {
+        return Err(refuse("pane moved to another checkout"));
+    }
+    Ok(())
+}
+
+/// Check only cwd-based holders; workspace siblings can legitimately work elsewhere.
+fn validate_holder_checkouts(shell: &dyn Shell, tree: &Linked, holders: &[&Pane]) -> Result<()> {
+    let panes = crate::cleanup::current_panes(shell)?;
+    for original in holders.iter().filter(|pane| {
+        pane.cwd
+            .as_deref()
+            .is_some_and(|cwd| inside(cwd, &tree.path))
+    }) {
+        if let Some(current) = panes.iter().find(|pane| pane.pane_id == original.pane_id) {
+            validate_pane_checkout(shell, current, tree)?;
+        }
+    }
+    Ok(())
+}
+
+/// Absence needs a readable original repository, an unfiltered Git listing, and ENOENT
+/// for both the checkout and its recorded administrative directory. Symlinks are not absent.
+pub fn verified_absent(guard: &Guard, shell: &dyn Shell, tree: &crate::cleanup::Tree) -> bool {
+    let Some(identity) = &tree.identity else {
+        return false;
+    };
+    let missing = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    };
+    resolved(&identity.common) == resolved(&guard.common)
+        && guard.check_repository(shell, Path::new(&tree.repo)).is_ok()
+        && raw_paths(shell, Path::new(&tree.repo)).is_ok_and(|listed| {
+            !listed.iter().any(|path| {
+                same(path, &tree.path)
+                    || linked_or_detached(shell, path)
+                        .ok()
+                        .flatten()
+                        .and_then(|live| live.identity)
+                        .is_some_and(|live| live == *identity)
+            })
+        })
+        && missing(Path::new(&tree.path))
+        && missing(&identity.gitdir)
+}
+
+/// An unmarked request can prove disappearance from its captured root/admin locations.
+/// This is read-only and cannot bless a replacement with a new generation.
+pub(crate) fn verified_absent_unmarked(guard: &Guard, shell: &dyn Shell, tree: &Linked) -> bool {
+    tree.identity.is_none()
+        && guard.check_repository(shell, &tree.checkout).is_ok()
+        && raw_paths(shell, &tree.checkout)
+            .is_ok_and(|listed| !listed.iter().any(|path| same(path, &tree.path)))
+        && [Path::new(&tree.path), &tree.gitdir]
+            .into_iter()
+            .all(|path| {
+                std::fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            })
+}
+
+fn raw_paths(shell: &dyn Shell, checkout: &Path) -> Result<Vec<String>> {
+    let out = git(shell, checkout, &["worktree", "list", "--porcelain", "-z"])?;
+    if !out.ok() {
+        return Err(refuse("cannot list worktrees for absence verification"));
+    }
+    Ok(out
+        .stdout
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree ").map(str::to_owned))
+        .collect())
 }
 
 /// Why `git worktree remove` cannot remove `path` although its directory remains: Git no
@@ -341,15 +896,28 @@ pub struct Removed {
 /// Then delete its branch when `integration::check` finds it integrated, and close the anchor
 /// workspace when no linked worktree shows in Herdr any more. The caller has already refused a
 /// dirty, foreign-locked, or busy worktree.
+#[derive(Clone, Copy)]
+pub struct Removal<'a> {
+    pub guard: &'a Guard,
+    pub workspace: Option<&'a str>,
+    pub holders: &'a [&'a Pane],
+    pub caller_workspace: Option<&'a str>,
+    pub evidence: &'a crate::loss::Evidence,
+}
+
 pub fn remove(
     shell: &dyn Shell,
     ledger: &Ledger,
     tree: &Linked,
-    workspace: Option<&str>,
-    holders: &[&Pane],
-    caller_workspace: Option<&str>,
-    evidence: &crate::loss::Evidence,
+    removal: Removal<'_>,
 ) -> Result<Removed> {
+    let Removal {
+        guard,
+        workspace,
+        holders,
+        caller_workspace,
+        evidence,
+    } = removal;
     // Git cannot remove it, and its content is unknown: close nothing, unlock nothing.
     if let Some(reason) = unlinked(shell, &tree.checkout, &tree.path)? {
         return Err(refuse(&format!(
@@ -357,8 +925,16 @@ pub fn remove(
             tree.path
         )));
     }
+    guard.check_repository(shell, &tree.checkout)?;
+    validate_identity(shell, tree)?;
+    validate_holder_checkouts(shell, tree, holders)?;
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
+    if verified_absent(guard, shell, &tree.tree()) {
+        crate::cleanup::forget_matching(ledger, &tree.tree())?;
+        return Ok(Removed::default());
+    }
+    validate_identity(shell, tree)?;
     if Path::new(&tree.path).is_dir() {
         // The teardown ran after the callers' loss check and can leave a commit or content
         // that no ref holds. Check the current HEAD and content again before anything closes
@@ -366,22 +942,8 @@ pub fn remove(
         recheck_loss(shell, tree, evidence)?;
         evidence.restore_deletions(shell, &tree.path)?;
     }
-    let open = crate::cleanup::current_panes(shell)?;
-    for pane in holders {
-        let outside = workspace.is_none() || pane.workspace_id.as_deref() != workspace;
-        if outside && open.iter().any(|p| p.pane_id == pane.pane_id) {
-            shell.run_ok(
-                "herdr",
-                &["pane".into(), "close".into(), pane.pane_id.clone()],
-            )?;
-        }
-    }
-    if let Some(workspace) = workspace {
-        shell.run_ok(
-            "herdr",
-            &["workspace".into(), "close".into(), workspace.into()],
-        )?;
-    }
+    validate_holder_checkouts(shell, tree, holders)?;
+    close_holders(shell, ledger, workspace, holders)?;
     let lock = lock_reason(shell, &tree.checkout, &tree.path)?;
     match lock.as_deref() {
         None => (),
@@ -401,6 +963,11 @@ pub fn remove(
         &git_words(&tree.checkout, &["worktree", "remove", &tree.path]),
     )?;
     if !out.ok() {
+        if verified_absent(guard, shell, &tree.tree()) {
+            crate::cleanup::forget_matching(ledger, &tree.tree())?;
+            return Ok(Removed::default());
+        }
+        validate_identity(shell, tree)?;
         if lock.is_some() && Path::new(&tree.path).exists() {
             git_ok(
                 shell,
@@ -414,13 +981,13 @@ pub fn remove(
             out.stderr.trim()
         )));
     }
-    if listed(shell, &tree.checkout, &tree.path)? {
+    if !verified_absent(guard, shell, &tree.tree()) {
         return Err(Error::Invalid(format!(
             "git worktree remove exited 0 but {} is still a worktree",
             tree.path
         )));
     }
-    crate::cleanup::forget(ledger, &tree.path)?;
+    crate::cleanup::forget_matching(ledger, &tree.tree())?;
     let branch_deleted =
         !evidence.keeps_branch() && !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
     let anchor_closed = close_anchor(shell, &tree.checkout, caller_workspace)?;
@@ -428,6 +995,44 @@ pub fn remove(
         branch_deleted,
         anchor_closed,
     })
+}
+
+/// Pane and launch recovery effects begin only after teardown and incarnation validation.
+fn close_holders(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    workspace: Option<&str>,
+    holders: &[&Pane],
+) -> Result<()> {
+    let open = crate::cleanup::current_panes(shell)?;
+    for pane in holders {
+        // Recovery can close a final shell only after teardown and incarnation validation.
+        if pane.agent.is_none()
+            && matches!(
+                crate::launch::final_pane(ledger, shell, &pane.pane_id)?,
+                crate::launch::PaneLaunch::Final
+            )
+        {
+            if !crate::launch::close_final(ledger, shell, &pane.pane_id)? {
+                return Err(refuse("launch changed before removal"));
+            }
+            continue;
+        }
+        let outside = workspace.is_none() || pane.workspace_id.as_deref() != workspace;
+        if outside && open.iter().any(|p| p.pane_id == pane.pane_id) {
+            shell.run_ok(
+                "herdr",
+                &["pane".into(), "close".into(), pane.pane_id.clone()],
+            )?;
+        }
+    }
+    if let Some(workspace) = workspace {
+        shell.run_ok(
+            "herdr",
+            &["workspace".into(), "close".into(), workspace.into()],
+        )?;
+    }
+    Ok(())
 }
 
 /// The loss rule, once more, after the repository's `teardown`. Teardown runs after the
@@ -544,42 +1149,103 @@ fn close_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{Fake, Output};
+    use crate::shell::Output;
+
+    #[derive(Debug, Default)]
+    struct RemovalProbe {
+        limit: std::sync::Mutex<Option<std::time::Duration>>,
+    }
+
+    impl Shell for RemovalProbe {
+        fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+            if program == "herdr" {
+                return Ok(Output {
+                    status: 0,
+                    stdout: r#"{"result":{"panes":[],"worktrees":[]}}"#.into(),
+                    stderr: String::new(),
+                });
+            }
+            let mut command = std::process::Command::new(program);
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("GIT_") {
+                    command.env_remove(key);
+                }
+            }
+            let out = command.args(args).output()?;
+            Ok(Output {
+                status: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        }
+
+        fn run_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            limit: std::time::Duration,
+        ) -> Result<Output> {
+            if args.get(2).is_some_and(|a| a == "worktree")
+                && args.get(3).is_some_and(|a| a == "remove")
+            {
+                *self.limit.lock().unwrap() = Some(limit);
+                return Ok(Output {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: "stop here".into(),
+                });
+            }
+            self.run(program, args)
+        }
+    }
 
     #[test]
     fn removal_gets_the_setup_limit_not_the_routine_limit() {
-        let shell = Fake::new();
+        let shell = RemovalProbe::default();
         let checkout = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&checkout).unwrap();
         let repo = checkout.display().to_string();
         let path = format!("{repo}/.worktrees/x");
-        shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
-        shell.on(
-            &format!("git -C {repo} worktree list --porcelain"),
-            &format!("worktree {repo}\n\nworktree {path}\nbranch refs/heads/x\n"),
-        );
-        let removal = format!("git -C {repo} worktree remove {path}");
-        shell.on_output(
-            &removal,
-            Output {
-                status: 1,
-                stdout: String::new(),
-                stderr: "stop here".into(),
-            },
-        );
-        let tree = Linked {
-            checkout,
-            path,
-            branch: "x".into(),
-        };
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            vec!["worktree", "add", "-q", "-b", "x", &path],
+        ] {
+            git_ok(&shell, &checkout, &args).unwrap();
+        }
+        let ledger = Ledger::new(checkout.join("state"));
         let evidence = crate::loss::Evidence::default_only(&repo);
-        let error = remove(&shell, &ledger, &tree, None, &[], None, &evidence).unwrap_err();
+        let error = with_lifecycle(&shell, &ledger, &checkout, |guard| {
+            let tree = guard.discover(&shell, &path)?.unwrap();
+            remove(
+                &shell,
+                &ledger,
+                &tree,
+                Removal {
+                    guard,
+                    workspace: None,
+                    holders: &[],
+                    caller_workspace: None,
+                    evidence: &evidence,
+                },
+            )
+        })
+        .unwrap_err();
         assert!(error.to_string().contains("stop here"), "{error}");
-        let limits = shell.limits.lock().unwrap();
-        let limit = limits
-            .iter()
-            .find(|(call, _)| *call == removal)
-            .map(|(_, l)| *l);
-        assert_eq!(limit, Some(crate::budget::SETUP_LIMIT));
+        assert_eq!(
+            *shell.limit.lock().unwrap(),
+            Some(crate::budget::SETUP_LIMIT)
+        );
+        std::fs::remove_dir_all(checkout).unwrap();
     }
 }

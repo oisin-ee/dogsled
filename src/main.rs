@@ -686,7 +686,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             request_id,
         } => {
             let prepared =
-                prepare::on_host(node, &repo, branch, base.as_deref(), request_id.as_deref())?;
+                prepare::on_host(node, &repo, &branch, base.as_deref(), request_id.as_deref())?;
             print(true, &prepared, String::new)?;
         }
     }

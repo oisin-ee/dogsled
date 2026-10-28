@@ -104,6 +104,23 @@ struct ConfirmingShell {
 
 impl Shell for ConfirmingShell {
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        if program == "git" {
+            assert_eq!(
+                args,
+                &[
+                    "-C",
+                    "/",
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir"
+                ]
+            );
+            return Ok(Output {
+                status: 128,
+                stdout: String::new(),
+                stderr: "not a git repository".into(),
+            });
+        }
         assert_eq!(program, "herdr");
         let value = match args
             .iter()
