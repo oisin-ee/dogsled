@@ -206,6 +206,41 @@ fn a_base_pushed_after_the_clone_is_fetched_and_resolves() {
     assert!(fetched.status.success());
 }
 
+/// The same fetch happens on a remote peer: a base the peer's clone has not fetched
+/// resolves there too.
+#[test]
+fn a_remote_peer_fetches_a_base_its_clone_has_not_fetched() {
+    let (rig, repo) = place::place_rig("diagnostic-remote-fetch-base");
+    origin_with_branch(&rig, &repo, "feature");
+    rig.peer();
+    real_peer_prepare(&rig);
+    let (code, prepared) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/feature",
+        "--name",
+        "worker",
+        "--message",
+        "go",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    let tree = repo.join(".worktrees/worker");
+    assert!(tree.is_dir(), "{tree:?}");
+    let fetched = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(fetched.status.success());
+}
+
 /// A base the origin does not hold still fails, and the failure names the base.
 #[test]
 fn a_base_missing_on_origin_still_fails_with_its_name() {
