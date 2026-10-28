@@ -448,6 +448,16 @@ pub struct Row {
     pub host: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<portal_types::Cleanup>,
+    /// A worker in idle/done/closed state whose newest inbox message to its owner
+    /// is pending or claimed, not delivered (read) or failed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unseen: bool,
     /// `idle`, `working`, `blocked`, `stalled`, `done`, `running`, `exit 1`, `queued`, …
     pub state: String,
     /// The latest step, the job command, or why the row waits.
@@ -527,26 +537,40 @@ fn what(item: &Item, agent: Option<&Agent>) -> String {
     model.map_or_else(|| harness.clone(), |model| format!("{harness} · {model}"))
 }
 
+/// A closed agent whose branch is not landed yet: its pane is gone, its branch stays.
+fn closed_branch_row(
+    item: &Item,
+    branch: &crate::done::Branch,
+    hosts: &[HostReport],
+    now: u64,
+) -> Row {
+    Row {
+        group: Group::ToLand,
+        kind: "agent".into(),
+        id: item.id.clone(),
+        name: item.name.clone().unwrap_or_else(|| item.pane.clone()),
+        what: what(item, None),
+        host: label(hosts, &item.host),
+        pane: None,
+        owner_pane: Some(item.owner_pane.clone()),
+        title: None,
+        cleanup: None,
+        unseen: false,
+        state: "closed".into(),
+        activity: format!("branch {} +{} to land", branch.name, branch.ahead),
+        age_ms: now.saturating_sub(item.created_ms),
+        quiet_ms: None,
+        ahead: Some(branch.ahead),
+        dirty: false,
+        repository: None,
+    }
+}
+
 fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     if item.closed_ms.is_some()
         && let Some(branch) = &item.branch
     {
-        return Row {
-            group: Group::ToLand,
-            kind: "agent".into(),
-            id: item.id.clone(),
-            name: item.name.clone().unwrap_or_else(|| item.pane.clone()),
-            what: what(item, None),
-            host: label(hosts, &item.host),
-            pane: None,
-            state: "closed".into(),
-            activity: format!("branch {} +{} to land", branch.name, branch.ahead),
-            age_ms: now.saturating_sub(item.created_ms),
-            quiet_ms: None,
-            ahead: Some(branch.ahead),
-            dirty: false,
-            repository: None,
-        };
+        return closed_branch_row(item, branch, hosts, now);
     }
     let found = agent(hosts, item);
     let host_up = hosts
@@ -625,6 +649,10 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         what: what(item, agent),
         host: label(hosts, &item.host),
         pane: Some(item.pane.clone()),
+        owner_pane: Some(item.owner_pane.clone()),
+        title: None,
+        cleanup: None,
+        unseen: false,
         state,
         activity,
         age_ms: now.saturating_sub(item.created_ms),
@@ -694,6 +722,10 @@ fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         what: "job".into(),
         host: label(hosts, &item.host),
         pane: Some(item.pane.clone()),
+        owner_pane: Some(item.owner_pane.clone()),
+        title: None,
+        cleanup: None,
+        unseen: false,
         state,
         activity: job.map_or_else(String::new, |j| crate::activity::plain(&j.cmd.join(" "))),
         age_ms: now.saturating_sub(item.created_ms),
@@ -736,6 +768,10 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
         what,
         host: target.clone().unwrap_or_else(|| "any".into()),
         pane: None,
+        owner_pane: Some(request.owner.clone()),
+        title: None,
+        cleanup: None,
+        unseen: false,
         state: crate::lifecycle::display(
             crate::lifecycle::classify(&crate::lifecycle::ticket_evidence(&ticket.state)).state,
         )
@@ -804,6 +840,183 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
             .collect(),
         rows,
     }
+}
+
+/// Add portal metadata on the blocking board reader, never on an HTTP request.
+pub fn enrich(
+    board: &mut Board,
+    status: &Status,
+    todos: &[TodoSections],
+    ledger: &Ledger,
+    shell: &dyn Shell,
+) -> Result<()> {
+    let messages = inbox_messages(ledger)?;
+    enrich_rows(board, status, todos, &messages, shell);
+    Ok(())
+}
+
+fn inbox_messages(ledger: &Ledger) -> Result<Vec<crate::inbox::Record>> {
+    let mut messages = Vec::new();
+    let directory = ledger.child("inbox").dir;
+    match std::fs::read_dir(directory) {
+        Ok(entries) => {
+            for entry in entries {
+                let path = entry?.path();
+                if let Some(terminal) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_suffix(".json"))
+                    .filter(|n| !n.ends_with(".reader"))
+                {
+                    messages.extend(crate::inbox::received(ledger, terminal)?);
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(messages)
+}
+
+fn enrich_rows(
+    board: &mut Board,
+    status: &Status,
+    todos: &[TodoSections],
+    messages: &[crate::inbox::Record],
+    shell: &dyn Shell,
+) {
+    let mut defaults = std::collections::BTreeMap::new();
+    for row in &mut board.rows {
+        let item = status.items.iter().find(|item| item.id == row.id);
+        if row.state == "closed" {
+            row.pane = item.map(|item| item.pane.clone());
+        }
+        row.title = todos
+            .iter()
+            .find(|todo| row.pane.as_deref() == Some(todo.pane.as_str()))
+            .map(|todo| todo.current.clone());
+        let pane = row
+            .pane
+            .as_deref()
+            .or_else(|| item.map(|item| item.pane.as_str()));
+        row.unseen = unseen(row, pane, messages);
+        if row.group != Group::ToLand {
+            continue;
+        }
+        if row.dirty {
+            row.cleanup = Some(cleanup(portal_types::CleanupCause::Dirty));
+            continue;
+        }
+        let Some(item) = item else { continue };
+        let local = status
+            .hosts
+            .iter()
+            .any(|host| host.host.id == item.host && host.host.is_local());
+        if !local {
+            continue;
+        }
+        let tree = agent(&status.hosts, item).and_then(|(_, agent)| agent.worktree.as_ref());
+        let location = tree
+            .map(|tree| (tree.path.as_str(), format!("refs/heads/{}", tree.branch)))
+            .or_else(|| {
+                item.branch
+                    .as_ref()
+                    .map(|branch| (branch.repo.as_str(), format!("refs/heads/{}", branch.name)))
+            });
+        let Some((repo, tip)) = location else {
+            continue;
+        };
+        let repository = row.repository.clone().unwrap_or_else(|| repo.to_owned());
+        let default = defaults.entry(repository).or_insert_with(|| {
+            let output = shell
+                .run(
+                    "git",
+                    &[
+                        "-C".into(),
+                        repo.into(),
+                        "symbolic-ref".into(),
+                        "--quiet".into(),
+                        "refs/remotes/origin/HEAD".into(),
+                    ],
+                )
+                .ok()?;
+            output
+                .ok()
+                .then(|| {
+                    output
+                        .stdout
+                        .trim()
+                        .strip_prefix("refs/remotes/origin/")
+                        .map(|name| format!("refs/heads/{name}"))
+                })
+                .flatten()
+        });
+        let Some(default) = default else { continue };
+        let output = shell.run(
+            "git",
+            &[
+                "-C".into(),
+                repo.into(),
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                tip,
+                default.clone(),
+            ],
+        );
+        row.cleanup = output
+            .ok()
+            .and_then(|output| classify_cleanup(row, output.status));
+    }
+}
+
+fn cleanup(cause: portal_types::CleanupCause) -> portal_types::Cleanup {
+    use portal_types::{CleanupAction, CleanupCause};
+    portal_types::Cleanup {
+        cause,
+        action: match cause {
+            CleanupCause::NeverMerged => CleanupAction::Land,
+            CleanupCause::Dirty => CleanupAction::Commit,
+            CleanupCause::MergedNotPushed => CleanupAction::PushMain,
+        },
+    }
+}
+
+fn classify_cleanup(row: &Row, local_ancestry_status: i32) -> Option<portal_types::Cleanup> {
+    if row.group != Group::ToLand {
+        return None;
+    }
+    let cause = if row.dirty {
+        portal_types::CleanupCause::Dirty
+    } else if row.ahead.is_some_and(|ahead| ahead > 0) {
+        match local_ancestry_status {
+            0 => portal_types::CleanupCause::MergedNotPushed,
+            1 => portal_types::CleanupCause::NeverMerged,
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    Some(cleanup(cause))
+}
+
+/// Only the newest worker-to-owner inbox message matters. Pending and claimed
+/// messages are unread; delivered (acknowledged) and failed messages are not.
+fn unseen(row: &Row, pane: Option<&str>, messages: &[crate::inbox::Record]) -> bool {
+    if row.kind != "agent" || !matches!(row.state.as_str(), "idle" | "done" | "closed") {
+        return false;
+    }
+    let (Some(owner), Some(pane)) = (row.owner_pane.as_deref(), pane) else {
+        return false;
+    };
+    messages
+        .iter()
+        .filter(|message| message.from.pane.as_deref() == Some(pane) && message.pane == owner)
+        .max_by(|left, right| {
+            left.created_ms
+                .cmp(&right.created_ms)
+                .then(left.id.cmp(&right.id))
+        })
+        .is_some_and(|message| message.state.open())
 }
 
 impl Board {
@@ -1546,6 +1759,147 @@ mod tests {
             orphans: Vec::new(),
             sweep: None,
         }
+    }
+
+    #[test]
+    fn portal_metadata_maps_owner_title_and_latest_inbox_state() -> Result<()> {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let status = status(
+            vec![host("local", "local", vec![agent("worker", "pi", "idle")])],
+            vec![item("child", "local", "worker")],
+        );
+        let mut board = build(&status, None, NOW);
+        let mut todo = todo_fixture("worker");
+        todo.current = "Implement inbox".into();
+        let record = |id: &str, created_ms, state| crate::inbox::Record {
+            id: id.into(),
+            terminal: "term_owner".into(),
+            pane: "w1:p1".into(),
+            from: crate::inbox::Sender {
+                pane: Some("worker".into()),
+                ..Default::default()
+            },
+            kind: "message".into(),
+            text: "Ready".into(),
+            created_ms,
+            state,
+            lease: crate::backoff::Backoff::default(),
+            reason: None,
+            done_ms: None,
+        };
+        let unread = record("one", 1, crate::inbox::State::Pending);
+        ledger
+            .child("inbox")
+            .write("term_owner.json", &vec![unread.clone()])?;
+        let shell = crate::shell::Fake::new();
+        enrich(&mut board, &status, &[todo], &ledger, &shell)?;
+        assert_eq!(board.rows[0].owner_pane.as_deref(), Some("w1:p1"));
+        assert_eq!(board.rows[0].title.as_deref(), Some("Implement inbox"));
+        assert!(board.rows[0].unseen);
+        let read = record("two", 2, crate::inbox::State::Delivered);
+        let messages = [unread, read];
+        assert!(!unseen(&board.rows[0], Some("worker"), &messages));
+        for state in ["idle", "done", "closed"] {
+            board.rows[0].state = state.into();
+            assert!(unseen(&board.rows[0], Some("worker"), &messages[..1]));
+        }
+        board.rows[0].state = "working".into();
+        assert!(!unseen(&board.rows[0], Some("worker"), &messages[..1]));
+        board.rows[0].state = "idle".into();
+        board.rows[0].owner_pane = None;
+        assert!(!unseen(&board.rows[0], Some("worker"), &messages[..1]));
+        std::fs::remove_dir_all(ledger.dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_reads_default_once_and_ancestry_once_per_row() {
+        let mut first = agent("first", "pi", "idle");
+        first.done = true;
+        first.repository = Some("github.com/owner/repo".into());
+        first.worktree = Some(Worktree {
+            path: "/repo".into(),
+            branch: "feature".into(),
+            ahead: 2,
+            ..Worktree::default()
+        });
+        let mut second = first.clone();
+        second.pane = "second".into();
+        second.worktree.as_mut().expect("worktree").path = "/repo/.worktrees/second".into();
+        let status = status(
+            vec![host("local", "local", vec![first, second])],
+            vec![
+                item("one", "local", "first"),
+                item("two", "local", "second"),
+            ],
+        );
+        let mut board = build(&status, None, NOW);
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "git -C /repo symbolic-ref --quiet refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk\n",
+        );
+        let command = "git -C /repo merge-base --is-ancestor refs/heads/feature refs/heads/trunk";
+        shell.on(command, "");
+        let second_command = "git -C /repo/.worktrees/second merge-base --is-ancestor refs/heads/feature refs/heads/trunk";
+        shell.on(second_command, "");
+        enrich_rows(&mut board, &status, &[], &[], &shell);
+        assert!(board.rows.iter().all(|row| {
+            row.cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.cause == portal_types::CleanupCause::MergedNotPushed)
+        }));
+        assert_eq!(shell.calls.lock().expect("calls").len(), 3);
+        for command in [command, second_command] {
+            shell.on_output(
+                command,
+                crate::shell::Output {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
+        }
+        enrich_rows(&mut board, &status, &[], &[], &shell);
+        assert!(board.rows.iter().all(|row| {
+            row.cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.cause == portal_types::CleanupCause::NeverMerged)
+        }));
+    }
+
+    #[test]
+    fn cleanup_causes_follow_ancestry_and_unknown_is_not_a_guess() {
+        use portal_types::{CleanupAction, CleanupCause};
+        let status = status(vec![], vec![item("child", "local", "worker")]);
+        let mut row = build(&status, None, NOW).rows.remove(0);
+        row.group = Group::ToLand;
+        row.ahead = Some(2);
+        assert_eq!(
+            classify_cleanup(&row, 1),
+            Some(portal_types::Cleanup {
+                cause: CleanupCause::NeverMerged,
+                action: CleanupAction::Land,
+            })
+        );
+        assert_eq!(
+            classify_cleanup(&row, 0),
+            Some(portal_types::Cleanup {
+                cause: CleanupCause::MergedNotPushed,
+                action: CleanupAction::PushMain,
+            })
+        );
+        assert_eq!(classify_cleanup(&row, 128), None);
+        row.dirty = true;
+        assert_eq!(
+            classify_cleanup(&row, 128),
+            Some(portal_types::Cleanup {
+                cause: CleanupCause::Dirty,
+                action: CleanupAction::Commit,
+            })
+        );
+        row.group = Group::Running;
+        assert_eq!(classify_cleanup(&row, 0), None);
     }
 
     #[test]

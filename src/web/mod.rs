@@ -10,6 +10,7 @@ pub mod agents;
 pub mod assets;
 pub mod board;
 pub mod guard;
+pub mod inbox;
 pub mod oneshot;
 pub mod questions;
 pub mod reviews;
@@ -219,6 +220,7 @@ fn router(state: AppState) -> Router {
         .route("/api/board", get(board))
         .route("/api/stream", get(stream))
         .merge(agents::router())
+        .merge(inbox::routes())
         .merge(questions::routes())
         .merge(reviews::routes())
         .fallback(assets::serve)
@@ -241,6 +243,7 @@ async fn stream(
 ) -> Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>> {
     let stream = WatchStream::new(state.board.clone())
         .map(|payload| Ok(Event::default().event("board").data(payload)));
+    let stream = tokio_stream::StreamExt::merge(stream, inbox::events(state.clone()));
     Sse::new(state.until_shutdown(stream)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }
 
@@ -320,10 +323,11 @@ fn reader(
 fn read(fleet: &crate::hosts::Fleet<'_>) -> Result<BoardView> {
     let status = crate::commands::status(fleet)?;
     let now = crate::ledger::now_ms();
-    let board = crate::board::build(&status, None, now);
+    let mut board = crate::board::build(&status, None, now);
     // A todo cache that cannot be read leaves the todos empty, not the whole
     // API broken.
     let todos = crate::board::cached_todos(fleet.ledger).unwrap_or_default();
+    crate::board::enrich(&mut board, &status, &todos, fleet.ledger, fleet.shell)?;
     Ok(board::view(&board, &todos, now))
 }
 

@@ -75,8 +75,12 @@ async fn pause() -> Result<(), String> {
 }
 
 #[component]
-pub fn ReviewView(#[props(default)] review_id: Option<String>) -> Element {
-    let mut selected = use_context::<Signal<Option<String>>>();
+pub fn ReviewView(
+    #[props(default)] review_id: Option<String>,
+    #[props(default)] embedded: bool,
+) -> Element {
+    let local_selected = use_signal(|| None::<String>);
+    let mut selected = try_use_context::<Signal<Option<String>>>().unwrap_or(local_selected);
     let mut list = use_signal(Vec::<ReviewSummary>::new);
     let mut opened = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
@@ -123,8 +127,8 @@ pub fn ReviewView(#[props(default)] review_id: Option<String>) -> Element {
     });
     rsx! {
         document::Stylesheet { href: REVIEW_CSS }
-        section { class: "rv", aria_label: "Plan reviews",
-            if review_id.is_none() {
+        section { class: if embedded { "rv rv-embedded" } else { "rv" }, aria_label: "Plan reviews",
+            if !embedded && review_id.is_none() {
                 h2 { "Plans · Needs you: {reviews.len()}" }
                 nav { class: "rv-needs", aria_label: "Plans needing review",
                     for item in reviews {
@@ -140,7 +144,7 @@ pub fn ReviewView(#[props(default)] review_id: Option<String>) -> Element {
             if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
             if let Some(id) = current {
                 ReviewLoader {
-                    key: "{id}", id, tick: tick(), standalone: review_id.is_some(),
+                    key: "{id}", id, tick: tick(), embedded,
                     on_done: move |id: String| list.write().retain(|item| item.id != id),
                 }
             } else if loading() {
@@ -153,7 +157,7 @@ pub fn ReviewView(#[props(default)] review_id: Option<String>) -> Element {
 }
 
 #[component]
-fn ReviewLoader(id: String, tick: u64, standalone: bool, on_done: EventHandler<String>) -> Element {
+fn ReviewLoader(id: String, tick: u64, embedded: bool, on_done: EventHandler<String>) -> Element {
     let mut review = use_signal(|| None::<Review>);
     let mut error = use_signal(|| None::<String>);
     use_resource(use_reactive((&id, &tick), move |(id, _)| async move {
@@ -171,7 +175,7 @@ fn ReviewLoader(id: String, tick: u64, standalone: bool, on_done: EventHandler<S
             if value.decision.is_some() {
                 p { role: "status", "This review is closed." }
             } else {
-                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, standalone, on_done }
+                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, on_done }
             }
         } else { p { role: "status", "Loading plan…" } }
     }
@@ -217,6 +221,11 @@ fn safe_url(url: &str) -> bool {
         || normalized.starts_with("https:")
         || normalized.starts_with("http:")
         || normalized.starts_with("mailto:")
+}
+
+/// Markdown as safe HTML: raw HTML stays text and unsafe links are dropped.
+pub(crate) fn render_markdown(source: &str) -> String {
+    render_plan(source, &[])
 }
 
 fn render_plan(source: &str, annotations: &[Annotation]) -> String {
@@ -294,6 +303,47 @@ fn render_plan(source: &str, annotations: &[Annotation]) -> String {
     output
 }
 
+/// Match quotes across inline Markdown nodes without changing source line mapping.
+fn highlight_notes(annotations: &[Annotation]) {
+    let notes = serde_json::json!(annotations).to_string();
+    document::eval(&format!("const notes = {notes}; {HIGHLIGHTS}"));
+}
+
+const HIGHLIGHTS: &str = r#"
+requestAnimationFrame(() => {
+  const root = document.getElementById('review-plan');
+  if (!root || !window.CSS?.highlights) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  const ranges = [];
+  for (const note of notes) {
+    let text = '';
+    const positions = [];
+    for (const node of nodes) {
+      const block = node.parentElement.closest('[data-start-line]');
+      if (!block || Number(block.dataset.endLine) < note.start_line || Number(block.dataset.startLine) > note.end_line) continue;
+      for (let offset = 0; offset < node.length; offset++) {
+        const ch = /\s/.test(node.data[offset]) ? ' ' : node.data[offset];
+        if (ch === ' ' && text.endsWith(' ')) continue;
+        text += ch;
+        positions.push({node, offset});
+      }
+    }
+    const quote = note.quote.replace(/\s+/g, ' ').trim();
+    const index = quote ? text.indexOf(quote) : -1;
+    if (index < 0) continue;
+    const start = positions[index], end = positions[index + quote.length - 1];
+    const range = new Range();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset + 1);
+    ranges.push(range);
+  }
+  CSS.highlights.set('review-notes', new Highlight(...ranges));
+  root.classList.add('rv-exact-highlights');
+});
+"#;
+
 fn quote_message(quote: &str, start: usize, end: usize) -> String {
     let quoted = quote
         .lines()
@@ -308,6 +358,8 @@ struct Selection {
     quote: String,
     start: usize,
     end: usize,
+    left: f64,
+    top: f64,
 }
 
 const SELECTION: &str = r#"
@@ -319,11 +371,39 @@ if (selection && selection.rangeCount && !selection.isCollapsed) {
   const element = node => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('[data-start-line]');
   const first = element(range.startContainer), last = element(range.endContainer);
   if (first && last && root?.contains(first) && root.contains(last)) {
-    result = {quote: selection.toString(), start: Number(first.dataset.startLine), end: Number(last.dataset.endLine)};
+    const rect = range.getBoundingClientRect();
+    window.__reviewSelection = range.cloneRange();
+    if (window.CSS?.highlights) CSS.highlights.set('review-selection', new Highlight(range));
+    result = {quote: selection.toString(), start: Number(first.dataset.startLine), end: Number(last.dataset.endLine), left: rect.left, top: rect.bottom};
   }
 }
 dioxus.send(result);
 "#;
+
+/// Both decision bars use the editor's serialized write queue.
+#[derive(Clone, Copy, PartialEq)]
+struct ReviewControls {
+    busy: Signal<bool>,
+    editing: Signal<Option<Annotation>>,
+    can_request: Memo<bool>,
+    decide: EventHandler<bool>,
+}
+
+#[component]
+fn ReviewDecisionActions(controls: ReviewControls) -> Element {
+    rsx! {
+        div { class: "rv-actions rv-decisions",
+            button {
+                r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some() || !(controls.can_request)(),
+                onclick: move |_| controls.decide.call(false), "Request changes"
+            }
+            button {
+                r#type: "button", class: "rv-primary", disabled: (controls.busy)() || (controls.editing)().is_some(),
+                onclick: move |_| controls.decide.call(true), "Approve plan"
+            }
+        }
+    }
+}
 
 enum ReviewAction {
     SaveAnnotation(Annotation),
@@ -337,13 +417,14 @@ enum ReviewAction {
 }
 
 #[component]
-fn ReviewEditor(initial: Review, standalone: bool, on_done: EventHandler<String>) -> Element {
+fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) -> Element {
     let mut review = use_signal(|| initial);
     let mut general = use_signal(|| review.peek().general.clone());
     let mut notes = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut editing = use_signal(|| None::<Annotation>);
+    let mut anchor = use_signal(|| None::<(f64, f64)>);
     let mut show_diff = use_signal(|| false);
     let mut diff = use_signal(|| None::<DiffView>);
     // One queue owns all writes. A blur save must finish before a decision,
@@ -445,6 +526,7 @@ fn ReviewEditor(initial: Review, standalone: bool, on_done: EventHandler<String>
         .as_ref()
         .map_or("", |revision| revision.content.as_str());
     let rendered = render_plan(content, &value.annotations);
+    use_effect(move || highlight_notes(&review().annotations));
     let select = move || async move {
         if busy() || editing().is_some() {
             return;
@@ -460,7 +542,8 @@ fn ReviewEditor(initial: Review, standalone: bool, on_done: EventHandler<String>
                     quote: selection.quote,
                     comment: String::new(),
                     images: vec![],
-                }))
+                }));
+                anchor.set(Some((selection.left, selection.top)));
             }
             Ok(_) => {}
             Err(message) => error.set(Some(format!("Could not read the selection: {message}"))),
@@ -477,36 +560,56 @@ fn ReviewEditor(initial: Review, standalone: bool, on_done: EventHandler<String>
             notes: notes(),
         });
     };
-    let mut approve = decide;
-    let mut request = decide;
+    let can_request =
+        use_memo(move || !review().annotations.is_empty() || !general().trim().is_empty());
+    let decide = use_hook(|| EventHandler::new(decide));
+    let controls = ReviewControls {
+        busy,
+        editing,
+        can_request,
+        decide,
+    };
+    use_drop(move || {
+        document::eval(
+            "window.CSS?.highlights?.delete('review-selection'); window.CSS?.highlights?.delete('review-notes'); window.__reviewSelection = null;",
+        );
+    });
+    use_effect(move || {
+        if editing().is_none() {
+            document::eval(
+                "window.CSS?.highlights?.delete('review-selection'); window.__reviewSelection = null;",
+            );
+        }
+    });
     rsx! {
         article { class: "rv-review",
-            header { class: "rv-header",
-                h3 { "{value.path}" }
-                p { class: "rv-muted", "{value.pane} · Revision {n}" }
-            }
-            if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
+            if let Some(message) = error() { p { class: "error rv-error", role: "alert", "{message}" } }
             if value.decision.is_some() {
                 p { role: "status", "Review sent to the agent." }
             } else {
-                p { class: "rv-muted", "Select plan text to annotate it or quote it in a message." }
-                div { id: "review-plan", class: "rv-prose", tabindex: "0", aria_label: "Plan text",
-                    onmouseup: move |_| select(), onkeyup: move |_| select(), dangerous_inner_html: rendered,
-                }
-                button { r#type: "button", onclick: move |_| select(), "Annotate selection" }
-                if let Some(annotation) = editing() {
-                    AnnotationEditor {
-                        key: "{annotation.id}-{annotation.start_line}-{annotation.end_line}", annotation, standalone,
-                        busy: busy(),
-                        on_close: move |_| editing.set(None),
-                        on_save: move |annotation: Annotation| {
-                            if busy() { return; }
-                            busy.set(true);
-                            actions.send(ReviewAction::SaveAnnotation(annotation));
-                        },
+                if embedded {
+                    header { class: "rv-decision-bar",
+                        div { class: "rv-bar-identity",
+                            span { class: "rv-filename", "{value.path}" }
+                            span { class: "rv-muted", "Revision {n}" }
+                        }
+                        ReviewDecisionActions { controls }
                     }
                 }
-                if value.revisions.len() > 1 {
+                div { class: "rv-layout",
+                    div { class: "rv-document", id: "review-document",
+                        div { class: "rv-paper",
+                            if !embedded {
+                                div { class: "rv-path",
+                                    span { class: "rv-filename", "{value.path}" }
+                                    span { "Revision {n}" }
+                                }
+                            }
+                            div { id: "review-plan", class: "rv-prose", tabindex: "0", aria_label: "Plan text",
+                                onmounted: move |_| highlight_notes(&review.peek().annotations),
+                                onmouseup: move |_| select(), onkeyup: move |_| select(), dangerous_inner_html: rendered,
+                            }
+                            if value.revisions.len() > 1 {
                     button {
                         r#type: "button", aria_expanded: show_diff(), disabled: busy(),
                         onclick: move |_| async move {
@@ -535,17 +638,23 @@ fn ReviewEditor(initial: Review, standalone: bool, on_done: EventHandler<String>
                         }
                     }
                 }
-                section { class: "rv-annotations", aria_label: "Annotations",
-                    h3 { "Annotations ({value.annotations.len()})" }
+                        }
+                    }
+                    aside { class: "rv-annotations", aria_label: "Your notes",
+                        h3 { span { "Your notes" } span { class: "rv-count", "{value.annotations.len()}" } }
+                        p { class: "rv-draft-hint", "Drafts. The lead gets them when you request changes." }
                     for annotation in value.annotations.iter().cloned() {
                         div { class: "rv-annotation", key: "{annotation.id}",
-                            p { class: "rv-muted", "Lines {annotation.start_line}–{annotation.end_line}" }
+                            p { class: "rv-line", "Line {annotation.start_line}" }
+                            if annotation.end_line != annotation.start_line {
+                                p { class: "rv-line", "Through line {annotation.end_line}" }
+                            }
                             blockquote { "{annotation.quote}" }
                             p { "{annotation.comment}" }
                             Images { paths: annotation.images.clone() }
                             div { class: "rv-actions",
                                 button { r#type: "button", disabled: busy() || editing().is_some(), onclick: {
-                                    let annotation = annotation.clone(); move |_| editing.set(Some(annotation.clone()))
+                                    let annotation = annotation.clone(); move |_| { anchor.set(None); editing.set(Some(annotation.clone())); }
                                 }, "Edit" }
                                 button { r#type: "button", disabled: busy() || editing().is_some(), onclick: move |_| {
                                     if busy() { return; }
@@ -555,8 +664,7 @@ fn ReviewEditor(initial: Review, standalone: bool, on_done: EventHandler<String>
                             }
                         }
                     }
-                }
-                label { r#for: "review-general", "General comment" }
+                label { class: "rv-general-label", r#for: "review-general", "Note for the whole plan" }
                 textarea { id: "review-general", name: "general", rows: "3", value: "{general}", disabled: busy(),
                     oninput: move |event: FormEvent| general.set(event.value()),
                     onblur: move |_| {
@@ -565,15 +673,32 @@ fn ReviewEditor(initial: Review, standalone: bool, on_done: EventHandler<String>
                         }
                     },
                 }
-                label { r#for: "review-notes", "Approval notes (optional)" }
-                textarea { id: "review-notes", name: "notes", rows: "2", value: "{notes}", disabled: busy(),
-                    oninput: move |event: FormEvent| notes.set(event.value()),
+                    }
                 }
-                div { class: "rv-actions",
-                    button { r#type: "button", class: "rv-primary", disabled: busy() || editing().is_some(), onclick: move |_| approve(true), "Approve" }
-                    button { r#type: "button", disabled: busy() || editing().is_some() || (value.annotations.is_empty() && general().trim().is_empty()), onclick: move |_| request(false), "Request changes" }
+                if let Some(annotation) = editing() {
+                    AnnotationEditor {
+                        key: "{annotation.id}-{annotation.start_line}-{annotation.end_line}", annotation, anchor: anchor(),
+                        busy: busy(),
+                        on_close: move |_| editing.set(None),
+                        on_save: move |annotation: Annotation| {
+                            if busy() { return; }
+                            busy.set(true);
+                            actions.send(ReviewAction::SaveAnnotation(annotation));
+                        },
+                    }
                 }
-                if busy() { p { role: "status", "Saving…" } }
+                if !embedded {
+                    footer { class: "rv-footer",
+                        details {
+                            summary { "Approval notes (optional)" }
+                            textarea { id: "review-notes", aria_label: "Approval notes", name: "notes", rows: "2", value: "{notes}", disabled: busy(),
+                                oninput: move |event: FormEvent| notes.set(event.value()),
+                            }
+                        }
+                        ReviewDecisionActions { controls }
+                    }
+                }
+                if busy() { p { class: "rv-saving", role: "status", "Saving…" } }
             }
         }
     }
@@ -600,12 +725,12 @@ fn Images(paths: Vec<String>) -> Element {
 #[component]
 fn AnnotationEditor(
     annotation: Annotation,
-    standalone: bool,
+    anchor: Option<(f64, f64)>,
     busy: bool,
     on_save: EventHandler<Annotation>,
     on_close: EventHandler<()>,
 ) -> Element {
-    let mut draft = use_context::<Draft>().0;
+    let draft = try_use_context::<Draft>().map(|draft| draft.0);
     let mut comment = use_signal(|| annotation.comment.clone());
     let mut images = use_signal(|| annotation.images.clone());
     let mut uploading = use_signal(|| false);
@@ -639,17 +764,41 @@ fn AnnotationEditor(
     let save = annotation.clone();
     rsx! {
         section { id: "review-annotation", class: "rv-popover", role: "dialog", aria_label: "Annotate plan selection",
-            onmounted: move |_| { mounted.set(true); },
+            onmounted: move |_| {
+                mounted.set(true);
+                let position = serde_json::to_string(&anchor).unwrap_or_default();
+                document::eval(&format!(r#"
+                    const root = document.getElementById('review-annotation');
+                    const anchor = {position};
+                    const place = () => {{
+                        const rect = window.__reviewSelection?.getBoundingClientRect();
+                        const x = rect?.left ?? anchor?.[0] ?? (innerWidth - root.offsetWidth) / 2;
+                        const y = rect?.bottom ?? anchor?.[1] ?? 160;
+                        root.style.setProperty('--popover-left', `${{Math.max(12, Math.min(x, innerWidth - root.offsetWidth - 12))}}px`);
+                        root.style.setProperty('--popover-top', `${{Math.max(12, Math.min(y + 8, innerHeight - root.offsetHeight - 12))}}px`);
+                    }};
+                    place();
+                    const controller = new AbortController();
+                    window.addEventListener('resize', place, {{signal: controller.signal}});
+                    document.getElementById('review-document')?.addEventListener('scroll', place, {{signal: controller.signal}});
+                    const size = new ResizeObserver(place); size.observe(root);
+                    const removed = new MutationObserver(() => {{
+                        if (!root.isConnected) {{ controller.abort(); size.disconnect(); removed.disconnect(); }}
+                    }});
+                    removed.observe(document.body, {{childList: true, subtree: true}});
+                "#));
+            },
             onkeydown: move |event: KeyboardEvent| { if event.key() == Key::Escape && !busy && !uploading() { on_close.call(()); } },
-            h3 { "Lines {annotation.start_line}–{annotation.end_line}" }
+            div { class: "rv-popover-heading",
+                span { "Line {annotation.start_line}" }
+                button { r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "×" }
+            }
             blockquote { "{annotation.quote}" }
-            label { r#for: "annotation-comment", "Comment" }
-            textarea { id: "annotation-comment", name: "comment", rows: "3", autofocus: true, value: "{comment}", disabled: busy,
+            textarea { id: "annotation-comment", name: "comment", aria_label: "Note for the lead", placeholder: "Add a note for the lead", rows: "3", autofocus: true, value: "{comment}", disabled: busy,
                 oninput: move |event: FormEvent| comment.set(event.value()),
             }
-            label { r#for: "annotation-images", "Images (PNG, JPEG, WebP; up to 10 MiB each)" }
-            input { id: "annotation-images", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading() }
-            p { class: "rv-muted", "You can also paste or drop images here." }
+            input { id: "annotation-images", class: "rv-file", aria_label: "Add images (PNG, JPEG, WebP; up to 10 MiB each)", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading() }
+            p { class: "rv-image-hint", "Paste, drop or add images." }
             Images { paths: images() }
             for (index, path) in images().iter().enumerate() {
                 button { key: "{path}-{index}", r#type: "button", disabled: busy || uploading(), onclick: move |_| { images.write().remove(index); }, "Remove image {index + 1}" }
@@ -657,16 +806,19 @@ fn AnnotationEditor(
             if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
             if uploading() { p { role: "status", "Uploading images…" } }
             div { class: "rv-actions",
-                button { r#type: "button", class: "rv-primary", disabled: busy || uploading(), onclick: move |_| {
-                    let mut value = save.clone(); value.comment = comment(); value.images = images(); on_save.call(value);
-                }, "Save" }
-                button { r#type: "button", disabled: standalone || busy || uploading(), title: if standalone { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
+                button { r#type: "button", disabled: draft.is_none() || busy || uploading(), title: if draft.is_none() { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
+                    let Some(mut draft) = draft else { return; };
                     let message = quote_message(&quote, annotation.start_line, annotation.end_line);
                     let mut text = draft();
                     if !text.is_empty() { text.push_str("\n\n"); }
                     text.push_str(&message); draft.set(text); on_close.call(());
                 }, "Quote in message" }
-                button { r#type: "button", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "Close" }
+                button { r#type: "button", disabled: busy || uploading(), onclick: move |_| {
+                    document::eval("document.getElementById('annotation-images')?.click();");
+                }, "Add image" }
+                button { r#type: "button", class: "rv-primary", disabled: busy || uploading(), onclick: move |_| {
+                    let mut value = save.clone(); value.comment = comment(); value.images = images(); on_save.call(value);
+                }, "Save note" }
             }
         }
     }

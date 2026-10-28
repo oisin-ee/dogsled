@@ -23,11 +23,17 @@ pub struct AgentView {
     pub pane: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The task the agent was given: the first line of its first own message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Canonical repository identity derived from the checkout origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// Set only while the agent is blocked and its screen shows a prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<BlockedPrompt>,

@@ -1,0 +1,69 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Dogsled — blocked prompt</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><style>:root{--base:#1e1e2e;--mantle:#181825;--crust:#11111b;--s0:#313244;--s1:#45475a;--o1:#7f849c;--sub:#a6adc8;--text:#cdd6f4;--blue:#89b4fa;--red:#f38ba8;--yellow:#f9e2af;--green:#a6e3a1;--teal:#94e2d5;--mauve:#cba6f7}
+*{box-sizing:border-box;margin:0}
+body{width:1440px;height:900px;overflow:hidden;background:var(--base);color:var(--text);font:14px/20px Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;display:grid;grid-template-columns:288px 1fr;grid-template-rows:48px 1fr}
+.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px}.muted{color:var(--sub)}.dim{color:var(--o1)}
+.btn{font:500 13px/18px Inter;padding:6px 12px;border-radius:4px;border:1px solid var(--s1);white-space:nowrap;display:inline-flex;gap:8px;align-items:center}
+.primary{background:var(--blue);color:var(--crust);border-color:var(--blue)}
+.st{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--o1);flex:none}.st.w{background:var(--blue)}.st.b{background:var(--yellow)}.st.d{background:var(--green)}
+header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;background:var(--crust);border-bottom:1px solid #ffffff10}
+header h1{font-size:15px;font-weight:600}
+.inbox{position:relative}.inbox b{background:var(--red);color:var(--crust);border-radius:4px;padding:0 6px;font-size:12px;font-variant-numeric:tabular-nums}
+.inbox.on{background:var(--s0)}
+.hosts{margin-left:auto;display:flex;gap:18px;font-size:12px;color:var(--sub)}.hosts i{display:inline-block;width:44px;height:4px;background:var(--s0);border-radius:2px;margin:0 6px 2px;vertical-align:middle;position:relative}.hosts i b{position:absolute;inset:0 auto 0 0;background:var(--blue);border-radius:2px}
+nav{background:var(--mantle);border-right:1px solid #ffffff10;padding:10px 8px;overflow:hidden;display:flex;flex-direction:column;gap:10px}
+.repo h2{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:600;padding:4px 8px;color:var(--text)}
+.repo h2 span{font-size:12px;font-weight:400;color:var(--o1)}
+.ag{display:grid;grid-template-columns:8px 1fr auto;gap:0 10px;align-items:center;padding:5px 8px;border-radius:4px;font-size:13px}
+.ag .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ag .m{font-size:12px;color:var(--o1);grid-column:2}
+.ag.sel{background:var(--s0)}
+.tag{font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;grid-row:1;grid-column:3}
+.tag.plan{background:#89b4fa26;color:var(--blue)}.tag.q{background:#cba6f726;color:var(--mauve)}.tag.k{background:#f9e2af26;color:var(--yellow)}
+.land{display:flex;justify-content:space-between;padding:6px 8px;font-size:12px;color:var(--green)}
+main{display:grid;grid-template-rows:auto 1fr;min-height:0;min-width:0;position:relative}
+.ah{display:flex;align-items:center;gap:14px;padding:12px 28px 0;border-bottom:1px solid #ffffff10;flex-wrap:wrap}
+.ah .id{flex:1;min-width:0}.ah h2{font-size:17px;font-weight:600}.ah .meta{font-size:12px;color:var(--sub);display:flex;gap:8px;align-items:center}
+.ah .acts{display:flex;gap:8px}
+.tabs{flex-basis:100%;display:flex;gap:22px;margin-top:6px}.tabs span{padding:9px 0;font-size:13px;color:var(--sub);display:flex;gap:6px;align-items:center}.tabs .on{color:var(--text);box-shadow:inset 0 -2px var(--blue)}
+.dotp{width:6px;height:6px;border-radius:50%;background:var(--yellow)}
+.wait{font-size:12px;font-weight:600;color:var(--yellow)}
+.bv{display:flex;justify-content:center;padding:28px 0;overflow:hidden}
+.bx{width:760px;display:flex;flex-direction:column;gap:16px}
+.bx h1{font-size:24px;line-height:32px;font-weight:600}
+.scr{font:13px/20px "JetBrains Mono",monospace;background:var(--crust);border-radius:6px;padding:14px 16px;white-space:pre;color:var(--sub)}
+.scr b{color:var(--text);font-weight:400}
+.keys{display:flex;gap:8px;flex-wrap:wrap}.keys .btn{min-width:44px;justify-content:center}
+.inp{display:flex;gap:8px}.inp span:first-child{flex:1;background:var(--crust);border:1px solid var(--s1);border-radius:4px;padding:7px 10px;color:var(--o1);font-size:13px}.sub{padding-left:26px}.sub .t{color:var(--o1)}.sub .st{background:var(--s1)!important}.sub .m{color:#7f849c99}
+.stuck{grid-column:3;grid-row:1;font-size:11px;font-weight:600;color:var(--yellow)}
+.subs{font-size:12px;color:var(--o1);padding:2px 8px 4px 26px}.ag.sub{grid-template-columns:6px 1fr auto;gap:0 8px;padding:1px 8px 1px 28px;font-size:12px;line-height:18px}
+.ag.sub .st{width:6px;height:6px;background:var(--s1)!important}.ag.sub .t{color:var(--o1)}.ag.sub .m,.ag.sub .s{grid-column:3;grid-row:1;font-size:11px;color:#7f849cb3}
+.ag.sub .stuck{color:var(--yellow)}.ag.sub.sel{background:var(--s0)}.ag.sub.sel .t{color:var(--text)}</style></head><body><header><h1>Dogsled</h1><span class="btn inbox ">Inbox <b>3</b></span><div class="hosts"><span>local<i><b style="width:66%"></b></i>8/12</span><span>netcup<i><b style="width:22%"></b></i>3/16</span><span>momokaya-2<i><b style="width:13%"></b></i>1/7</span></div></header><nav>
+<div class="repo"><h2>dogsled <span>5 agents</span></h2>
+ <div class="ag "><i class="st b"></i><span class="t">Deliver the approved Dogsled lifecycle</span><span class="tag plan">Plan</span><span class="m">lead · local</span></div>
+ <div class="ag sub sel"><i class="st"></i><span class="t">Open the portal from Pi</span><span class="stuck">prompt</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Serialize the regression fallback (r3)</span><span class="s">working</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Keep receipt replay across prune</span><span class="stuck" title="Idle, and the lead has not picked it up">idle 18 h · unseen</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Kill before joining in Background drop</span><span class="s">done</span></div>
+ <div class="land"><span>To land</span><span>1 branch</span></div></div>
+<div class="repo"><h2>momokaya-template <span>4 agents</span></h2>
+ <div class="ag "><i class="st b"></i><span class="t">Use filesystem identity for snapshot containment</span><span class="tag q">Question</span><span class="m">writer · local</span></div>
+ <div class="ag "><i class="st w"></i><span class="t">Reconcile read-region fixtures and ADR W7</span><span class="m">writer · local · working</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Remove private-history dependency</span><span class="s">working</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">zsh job</span><span class="s">job</span></div></div>
+<div class="repo"><h2>dotfiles <span>1 agent</span></h2>
+ <div class="ag"><i class="st d"></i><span class="t">Align dogsled plugin refs and lock to v0.25.2</span><span class="m">writer · local · done</span></div>
+ <div class="land"><span>To land</span><span>1 branch</span></div></div>
+</nav><main><div class="ah"><div class="id"><h2>Open the portal from Pi</h2><div class="meta"><span class="wait">Blocked on a prompt</span>·<span>writer · pi · GPT</span>·<span>netcup</span>·<span class="mono">feat/pi-open-portal</span></div></div>
+<div class="acts"><span class="btn">Open in Herdr</span></div>
+<div class="tabs"><span class="on"><i class="dotp"></i>Prompt</span><span>Conversation</span><span>Todos 1</span><span>Branch</span></div></div>
+<div class="bv"><div class="bx"><h1>Allow git push to origin?</h1>
+<div class="scr"><b>Bash command</b>
+  git push origin feat/pi-open-portal
+
+<b>Do you want to proceed?</b>
+❯ 1. Yes
+  2. Yes, and don't ask again for git push
+  3. No, and tell the agent what to do differently (esc)</div>
+<div class="keys"><span class="btn primary">1 · Yes</span><span class="btn">2 · Yes, don't ask again</span><span class="btn">3 · No</span><span class="btn">Esc</span><span class="btn">Enter</span><span class="btn">↑</span><span class="btn">↓</span></div>
+<div class="inp"><span>Type a reply and press Enter</span><span class="btn">Send</span></div>
+<div class="muted" style="font-size:12px">Buttons are read from the agent's screen. Open in Herdr when none fits.</div>
+</div></div></main></body></html>

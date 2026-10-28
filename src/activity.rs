@@ -220,13 +220,24 @@ fn joined(parts: &[String]) -> Option<String> {
 /// A turn is one message of the owner or of the agent. Tool calls, tool
 /// results and thinking are not turns. Claude writes one line per content
 /// block, and the blocks of one message share its id: they are one turn.
+///
+/// The transcript is read backwards until it gives the newest
+/// [`CONVERSATION_TURNS`] text turns, or [`CONVERSATION_BYTES`] are read. Tool
+/// output can be megabytes after the last text turn, so a fixed tail window
+/// is not enough.
 pub fn conversation(agent: &str, path: &str) -> Vec<Turn> {
-    let Some(values) = tail(path) else {
-        return Vec::new();
-    };
-    // `tail` reads newest first, and a conversation reads oldest first.
+    let mut newest: Vec<(Option<String>, Turn)> = Vec::new();
+    lines_backwards(path, CONVERSATION_BYTES, CHUNK_BYTES, |line| {
+        if let Ok(value) = serde_json::from_str::<Value>(line)
+            && let Some(found) = turn(agent, &value)
+        {
+            newest.push(found);
+        }
+        newest.len() < CONVERSATION_TURNS
+    });
+    // The read runs newest first, and a conversation reads oldest first.
     let mut turns: Vec<(Option<String>, Turn)> = Vec::new();
-    for (id, turn) in values.iter().rev().filter_map(|value| turn(agent, value)) {
+    for (id, turn) in newest.into_iter().rev() {
         if let Some(last) = turns.last_mut()
             && let Some(id) = &id
             && last.0.as_ref() == Some(id)
@@ -238,6 +249,143 @@ pub fn conversation(agent: &str, path: &str) -> Vec<Turn> {
         turns.push((id, turn));
     }
     turns.into_iter().map(|(_, turn)| turn).collect()
+}
+
+/// The most text turns a conversation returns.
+const CONVERSATION_TURNS: usize = 200;
+
+/// The most transcript bytes a conversation reads.
+const CONVERSATION_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The size of one backward read.
+const CHUNK_BYTES: u64 = 1024 * 1024;
+
+/// Give the complete lines of `path` to `visit`, newest first, until `visit`
+/// returns `false` or `limit` bytes are read, `step` bytes at a time. A line
+/// cut by the limit is not given.
+fn lines_backwards(path: &str, limit: u64, step: u64, mut visit: impl FnMut(&str) -> bool) {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return;
+    };
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return;
+    };
+    let floor = len.saturating_sub(limit);
+    let mut end = len;
+    // The bytes after this chunk that belong to a line starting in it.
+    let mut carry: Vec<u8> = Vec::new();
+    while end > floor {
+        let start = end.saturating_sub(step).max(floor);
+        let Ok(size) = usize::try_from(end - start) else {
+            return;
+        };
+        let mut bytes = vec![0; size];
+        if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut bytes).is_err() {
+            return;
+        }
+        bytes.extend_from_slice(&carry);
+        let chunk = bytes;
+        // The first line is complete at the start of the file, or at the read
+        // limit when a newline comes just before it. Elsewhere the bytes before
+        // the first newline end a line that starts earlier.
+        let whole = start == 0 || (start == floor && newline_before(&mut file, start));
+        let (head, lines) = if whole {
+            (&[][..], &chunk[..])
+        } else {
+            match chunk.iter().position(|byte| *byte == b'\n') {
+                Some(index) => (&chunk[..index], &chunk[index + 1..]),
+                None => (&chunk[..], &[][..]),
+            }
+        };
+        for line in lines.rsplit(|byte| *byte == b'\n') {
+            if !line.is_empty() && !visit(&String::from_utf8_lossy(line)) {
+                return;
+            }
+        }
+        carry = head.to_vec();
+        end = start;
+    }
+}
+
+/// Whether the byte before `at` is a newline.
+fn newline_before(file: &mut std::fs::File, at: u64) -> bool {
+    let mut byte = [0];
+    file.seek(SeekFrom::Start(at - 1)).is_ok()
+        && file.read_exact(&mut byte).is_ok()
+        && byte[0] == b'\n'
+}
+
+/// The task an agent was given: the first line of its first own message.
+///
+/// Headings and tags are skipped, so a brief that opens with `## Outcome`
+/// gives the sentence under it. Only the first [`TITLE_BYTES`] are read.
+pub fn title(agent: &str, path: &str) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file.take(TITLE_BYTES));
+    for line in reader.split(b'\n').map_while(Result::ok) {
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        let Some((_, found)) = turn(agent, &value) else {
+            continue;
+        };
+        if found.role != Role::User {
+            continue;
+        }
+        if let Some(line) = title_line(&found.text) {
+            return Some(short(&line, TITLE_CHARS));
+        }
+    }
+    None
+}
+
+/// The line of a message that names its task.
+///
+/// A loaded skill (`<skill>` to `</skill>`) is not the task, and neither are
+/// headings, tag lines, or the paths of attached files before the words. A
+/// `Title:` label is dropped.
+fn title_line(text: &str) -> Option<String> {
+    let mut in_skill = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("<skill") {
+            in_skill = !line.contains("</skill>");
+            continue;
+        }
+        if in_skill {
+            in_skill = !line.contains("</skill>");
+            continue;
+        }
+        if line.starts_with('#') || line.starts_with('<') {
+            continue;
+        }
+        let words: Vec<&str> = line
+            .split_whitespace()
+            .skip_while(|word| word.starts_with('/') || word.starts_with("~/"))
+            .collect();
+        let line = words.join(" ");
+        let line = line.strip_prefix("Title:").unwrap_or(&line).trim();
+        if !line.is_empty() {
+            return Some(line.to_owned());
+        }
+    }
+    None
+}
+
+/// The most transcript bytes a title read takes.
+const TITLE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The longest title.
+const TITLE_CHARS: usize = 80;
+
+/// `text` cut to `max` characters, with an ellipsis when it was cut.
+fn short(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// One turn of a conversation, with the id that groups Claude's blocks.
@@ -616,6 +764,87 @@ mod tests {
         assert_eq!(turns[0].role, Role::User);
         assert_eq!(turns[1].role, Role::Assistant);
         assert_eq!(turns[1].text, "done");
+    }
+
+    #[test]
+    fn the_conversation_reaches_turns_before_megabytes_of_tool_output() {
+        let big = "x".repeat(64 * 1024);
+        let mut lines = vec![
+            json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"check the portal"}]}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"looking"}]}}),
+        ];
+        for _ in 0..40 {
+            lines.push(json!({"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":big}]}}));
+        }
+        let path = transcript(&lines);
+        assert!(std::fs::metadata(&path).expect("size").len() > 2 * 1024 * 1024);
+        let turns = conversation("pi", &path);
+        let texts: Vec<_> = turns.iter().map(|turn| turn.text.as_str()).collect();
+        assert_eq!(texts, ["check the portal", "looking"]);
+    }
+
+    #[test]
+    fn backward_lines_join_lines_that_cross_a_chunk_boundary() {
+        let path = std::env::temp_dir().join(format!("lines-{}.txt", crate::ledger::new_id()));
+        std::fs::write(&path, "first line\nsecond much longer line\nthird\n").expect("file");
+        let path = path.to_string_lossy().into_owned();
+        for step in [1, 3, 7, 64] {
+            let mut seen = Vec::new();
+            lines_backwards(&path, u64::MAX, step, |line| {
+                seen.push(line.to_owned());
+                true
+            });
+            assert_eq!(
+                seen,
+                ["third", "second much longer line", "first line"],
+                "step {step}"
+            );
+        }
+        let mut seen = Vec::new();
+        lines_backwards(&path, 30, 7, |line| {
+            seen.push(line.to_owned());
+            true
+        });
+        assert_eq!(
+            seen,
+            ["third", "second much longer line"],
+            "a line that starts at the limit is whole"
+        );
+        let mut seen = Vec::new();
+        lines_backwards(&path, 20, 7, |line| {
+            seen.push(line.to_owned());
+            true
+        });
+        assert_eq!(seen, ["third"], "a line cut by the limit is not given");
+    }
+
+    #[test]
+    fn the_title_is_the_first_line_of_the_first_owner_message() {
+        let path = transcript(&[
+            json!({"type":"session","id":"s"}),
+            json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"## Outcome\nShip the portal redesign\nmore"}]}}),
+            json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"later"}]}}),
+        ]);
+        assert_eq!(
+            title("pi", &path).as_deref(),
+            Some("Ship the portal redesign")
+        );
+        let long = transcript(&[
+            json!({"type":"message","message":{"role":"user","content":"y".repeat(200)}}),
+        ]);
+        assert_eq!(
+            title("pi", &long).map(|t| t.chars().count()),
+            Some(TITLE_CHARS)
+        );
+        assert_eq!(title("pi", "/nonexistent"), None);
+        let skill = transcript(&[
+            json!({"type":"message","message":{"role":"user","content":"<skill name=\"x\">\nReferences are relative to /s.\n</skill>\n\n/tmp/shot.png redesign the portal"}}),
+        ]);
+        assert_eq!(title("pi", &skill).as_deref(), Some("redesign the portal"));
+        let brief = transcript(&[
+            json!({"type":"message","message":{"role":"user","content":"<file name=\"/t.md\">\nTitle: Compare layouts\nDeliverable: x"}}),
+        ]);
+        assert_eq!(title("pi", &brief).as_deref(), Some("Compare layouts"));
     }
 
     #[test]

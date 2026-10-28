@@ -1,0 +1,82 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Dogsled — questions</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet"><style>:root{--base:#1e1e2e;--mantle:#181825;--crust:#11111b;--s0:#313244;--s1:#45475a;--o1:#7f849c;--sub:#a6adc8;--text:#cdd6f4;--blue:#89b4fa;--red:#f38ba8;--yellow:#f9e2af;--green:#a6e3a1;--teal:#94e2d5;--mauve:#cba6f7}
+*{box-sizing:border-box;margin:0}
+body{width:1440px;height:900px;overflow:hidden;background:var(--base);color:var(--text);font:14px/20px Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased;display:grid;grid-template-columns:288px 1fr;grid-template-rows:48px 1fr}
+.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px}.muted{color:var(--sub)}.dim{color:var(--o1)}
+.btn{font:500 13px/18px Inter;padding:6px 12px;border-radius:4px;border:1px solid var(--s1);white-space:nowrap;display:inline-flex;gap:8px;align-items:center}
+.primary{background:var(--blue);color:var(--crust);border-color:var(--blue)}
+.st{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--o1);flex:none}.st.w{background:var(--blue)}.st.b{background:var(--yellow)}.st.d{background:var(--green)}
+header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;background:var(--crust);border-bottom:1px solid #ffffff10}
+header h1{font-size:15px;font-weight:600}
+.inbox{position:relative}.inbox b{background:var(--red);color:var(--crust);border-radius:4px;padding:0 6px;font-size:12px;font-variant-numeric:tabular-nums}
+.inbox.on{background:var(--s0)}
+.hosts{margin-left:auto;display:flex;gap:18px;font-size:12px;color:var(--sub)}.hosts i{display:inline-block;width:44px;height:4px;background:var(--s0);border-radius:2px;margin:0 6px 2px;vertical-align:middle;position:relative}.hosts i b{position:absolute;inset:0 auto 0 0;background:var(--blue);border-radius:2px}
+nav{background:var(--mantle);border-right:1px solid #ffffff10;padding:10px 8px;overflow:hidden;display:flex;flex-direction:column;gap:10px}
+.repo h2{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:600;padding:4px 8px;color:var(--text)}
+.repo h2 span{font-size:12px;font-weight:400;color:var(--o1)}
+.ag{display:grid;grid-template-columns:8px 1fr auto;gap:0 10px;align-items:center;padding:5px 8px;border-radius:4px;font-size:13px}
+.ag .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ag .m{font-size:12px;color:var(--o1);grid-column:2}
+.ag.sel{background:var(--s0)}
+.tag{font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;grid-row:1;grid-column:3}
+.tag.plan{background:#89b4fa26;color:var(--blue)}.tag.q{background:#cba6f726;color:var(--mauve)}.tag.k{background:#f9e2af26;color:var(--yellow)}
+.land{display:flex;justify-content:space-between;padding:6px 8px;font-size:12px;color:var(--green)}
+main{display:grid;grid-template-rows:auto 1fr;min-height:0;min-width:0;position:relative}
+.ah{display:flex;align-items:center;gap:14px;padding:12px 28px 0;border-bottom:1px solid #ffffff10;flex-wrap:wrap}
+.ah .id{flex:1;min-width:0}.ah h2{font-size:17px;font-weight:600}.ah .meta{font-size:12px;color:var(--sub);display:flex;gap:8px;align-items:center}
+.ah .acts{display:flex;gap:8px}
+.tabs{flex-basis:100%;display:flex;gap:22px;margin-top:6px}.tabs span{padding:9px 0;font-size:13px;color:var(--sub);display:flex;gap:6px;align-items:center}.tabs .on{color:var(--text);box-shadow:inset 0 -2px var(--blue)}
+.dotp{width:6px;height:6px;border-radius:50%;background:var(--yellow)}
+.wait{font-size:12px;font-weight:600;color:var(--yellow)}
+.qv{overflow:hidden;display:flex;justify-content:center;padding:28px 0}
+.form{width:760px;display:flex;flex-direction:column;gap:18px}
+.form .intro h1{font-size:24px;line-height:32px;font-weight:600;letter-spacing:-.01em}.form .intro p{color:var(--sub);margin-top:4px}
+.qc{border:1px solid var(--s1);border-radius:6px;padding:18px 20px;display:flex;flex-direction:column;gap:12px}
+.qc.crit{border-color:#89b4fa80}
+.qc h2{font-size:16px;font-weight:600;display:flex;gap:10px}.qc h2 .n{color:var(--o1);font-weight:500}
+.qc .ctx{font-size:13px;color:var(--sub)}
+.opt{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border:1px solid var(--s1);border-radius:6px}
+.opt.on{border-color:var(--blue);background:#89b4fa12}
+.opt .r{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--o1);margin-top:2px;flex:none}.opt.on .r{border:5px solid var(--blue)}
+.opt .cb{width:16px;height:16px;border-radius:3px;border:1.5px solid var(--o1);margin-top:2px;flex:none}.opt.on .cb{background:var(--blue);border-color:var(--blue)}
+.opt b{font-weight:500}.opt .d{font-size:13px;color:var(--sub)}
+.rec{font-size:11px;font-weight:600;color:var(--green);background:#a6e3a11f;padding:1px 6px;border-radius:4px;margin-left:8px}
+pre{font:12px/18px "JetBrains Mono",monospace;background:var(--crust);border-radius:4px;padding:10px 12px;color:var(--sub)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.foot{display:flex;align-items:center;gap:10px;padding-top:4px}.foot .muted{margin-right:auto;font-size:12px}.sub{padding-left:26px}.sub .t{color:var(--o1)}.sub .st{background:var(--s1)!important}.sub .m{color:#7f849c99}
+.stuck{grid-column:3;grid-row:1;font-size:11px;font-weight:600;color:var(--yellow)}
+.subs{font-size:12px;color:var(--o1);padding:2px 8px 4px 26px}.ag.sub{grid-template-columns:6px 1fr auto;gap:0 8px;padding:1px 8px 1px 28px;font-size:12px;line-height:18px}
+.ag.sub .st{width:6px;height:6px;background:var(--s1)!important}.ag.sub .t{color:var(--o1)}.ag.sub .m,.ag.sub .s{grid-column:3;grid-row:1;font-size:11px;color:#7f849cb3}
+.ag.sub .stuck{color:var(--yellow)}.ag.sub.sel{background:var(--s0)}.ag.sub.sel .t{color:var(--text)}</style></head><body><header><h1>Dogsled</h1><span class="btn inbox ">Inbox <b>3</b></span><div class="hosts"><span>local<i><b style="width:66%"></b></i>8/12</span><span>netcup<i><b style="width:22%"></b></i>3/16</span><span>momokaya-2<i><b style="width:13%"></b></i>1/7</span></div></header><nav>
+<div class="repo"><h2>dogsled <span>5 agents</span></h2>
+ <div class="ag "><i class="st b"></i><span class="t">Deliver the approved Dogsled lifecycle</span><span class="tag plan">Plan</span><span class="m">lead · local</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Open the portal from Pi</span><span class="stuck">prompt</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Serialize the regression fallback (r3)</span><span class="s">working</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Keep receipt replay across prune</span><span class="stuck" title="Idle, and the lead has not picked it up">idle 18 h · unseen</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Kill before joining in Background drop</span><span class="s">done</span></div>
+ <div class="land"><span>To land</span><span>1 branch</span></div></div>
+<div class="repo"><h2>momokaya-template <span>4 agents</span></h2>
+ <div class="ag sel"><i class="st b"></i><span class="t">Use filesystem identity for snapshot containment</span><span class="tag q">Question</span><span class="m">writer · local</span></div>
+ <div class="ag "><i class="st w"></i><span class="t">Reconcile read-region fixtures and ADR W7</span><span class="m">writer · local · working</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">Remove private-history dependency</span><span class="s">working</span></div>
+ <div class="ag sub"><i class="st"></i><span class="t">zsh job</span><span class="s">job</span></div></div>
+<div class="repo"><h2>dotfiles <span>1 agent</span></h2>
+ <div class="ag"><i class="st d"></i><span class="t">Align dogsled plugin refs and lock to v0.25.2</span><span class="m">writer · local · done</span></div>
+ <div class="land"><span>To land</span><span>1 branch</span></div></div>
+</nav><main><div class="ah"><div class="id"><h2>Use filesystem identity for snapshot containment</h2><div class="meta"><span class="wait">Waiting for your answers</span>·<span>writer · pi · MiniMax</span>·<span>local</span>·<span class="mono">fix/snapshot-containment</span></div></div>
+<div class="acts"><span class="btn">Open in Herdr</span></div>
+<div class="tabs"><span class="on"><i class="dotp"></i>Questions 2</span><span>Conversation</span><span>Todos 3</span><span>Branch</span></div></div>
+<div class="qv"><div class="form">
+ <div class="intro"><h1>Before the iOS gate</h1><p>The writer stopped and waits for these answers. It continues as soon as you send them.</p></div>
+ <section class="qc crit"><h2><span class="n">1</span>Which host should run the iOS gate?</h2>
+  <div class="ctx">The gate needs Xcode and holds the simulator for about 20 minutes.</div>
+  <div class="opt on"><span class="r"></span><div><b>momokaya-2</b><span class="rec">Recommended</span><div class="d">1 of 7 cores busy. Keeps local free for the lifecycle writers.</div></div></div>
+  <div class="opt"><span class="r"></span><div><b>local</b><div class="d">8 of 12 cores busy.</div></div></div></section>
+ <section class="qc"><h2><span class="n">2</span>Which containment checks should block the commit?</h2>
+  <pre>fn contained(root: &amp;Metadata, path: &amp;Metadata) -&gt; bool {
+    root.dev() == path.dev() &amp;&amp; is_ancestor(root.ino(), path)
+}</pre>
+  <div class="grid2"><div class="opt on"><span class="cb"></span><div><b>Device and inode match</b><span class="rec">Recommended</span></div></div>
+  <div class="opt on"><span class="cb"></span><div><b>Symlink escape test</b></div></div>
+  <div class="opt"><span class="cb"></span><div><b>Bind-mount fixture</b><div class="d">Linux only</div></div></div>
+  <div class="opt"><span class="cb"></span><div><b>Case-folding path test</b></div></div></div></section>
+ <div class="foot"><span class="muted">Answered 2 of 2</span><span class="btn">Answer in conversation instead</span><span class="btn primary">Send answers</span></div>
+</div></div></main></body></html>

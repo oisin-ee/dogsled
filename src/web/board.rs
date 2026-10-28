@@ -60,7 +60,12 @@ pub fn group(board: &board::Board, todos: &[board::TodoSections]) -> Vec<RepoGro
                 None => continue,
             },
         };
-        groups[index].rows.push(RowView::from(row));
+        let mut view = RowView::from(row);
+        view.title = todos
+            .iter()
+            .find(|todo| row.pane.as_deref() == Some(todo.pane.as_str()))
+            .map(|todo| todo.current.clone());
+        groups[index].rows.push(view);
     }
     for todo in todos {
         let index = match repository_of(board, todo) {
@@ -113,6 +118,10 @@ impl From<&board::Row> for RowView {
             what: row.what.clone(),
             host: row.host.clone(),
             pane: row.pane.clone(),
+            owner_pane: row.owner_pane.clone(),
+            title: row.title.clone(),
+            cleanup: row.cleanup.clone(),
+            unseen: row.unseen,
             state: row.state.clone(),
             activity: row.activity.clone(),
             age_ms: row.age_ms,
@@ -210,6 +219,10 @@ mod tests {
             what: "pi".into(),
             host: "local".into(),
             pane: pane.map(str::to_owned),
+            owner_pane: None,
+            title: None,
+            cleanup: None,
+            unseen: false,
             state: "working".into(),
             activity: "step".into(),
             age_ms: 10,
