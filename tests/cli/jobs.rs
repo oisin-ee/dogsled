@@ -848,6 +848,41 @@ fn an_expired_output_is_reported_not_missing() {
     assert_eq!(tail, json!(EXPIRED), "{tail}");
 }
 
+/// Expired output advances its cursor and ends both plain and following log reads.
+#[test]
+fn expired_logs_end_after_one_marker() {
+    let rig = Rig::new("retention-log-cursor");
+    let mut job = terminal("aged", now());
+    job["output_expired"] = json!(true);
+    put_job(&rig, "aged", &job, EXPIRED);
+    let marker = format!("{EXPIRED}\n");
+    let (code, first) = rig.json(&["host", "logs", "aged"]);
+    assert_eq!(code, 0, "{first}");
+    assert_eq!(first["bytes"], json!(marker.as_bytes()), "{first}");
+    assert_eq!(first["next"], marker.len() as u64, "{first}");
+    for offset in [marker.len() as u64, u64::MAX] {
+        let (code, end) = rig.json(&["host", "logs", "aged", "--offset", &offset.to_string()]);
+        assert_eq!(code, 0, "{end}");
+        assert_eq!(end["bytes"], json!([]), "{end}");
+        assert_eq!(end["next"], offset, "{end}");
+        assert_eq!(end["done"], true, "{end}");
+        assert_eq!(end["expired"], true, "{end}");
+    }
+    let (code, partial) = rig.json(&["host", "logs", "aged", "--offset", "3"]);
+    assert_eq!(code, 0, "{partial}");
+    assert_eq!(
+        partial["bytes"],
+        json!(&marker.as_bytes()[3..]),
+        "{partial}"
+    );
+    for args in [vec!["logs", "aged"], vec!["logs", "aged", "--follow"]] {
+        let mut command = rig.start(&args);
+        assert!(command.wait().success());
+        let (stdout, stderr) = command.output();
+        assert_eq!(stdout, marker, "{stderr}");
+    }
+}
+
 /// The expiry pass repeats safely. A second pass changes nothing.
 #[test]
 fn a_second_expiry_pass_changes_nothing() {
