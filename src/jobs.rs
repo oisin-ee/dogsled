@@ -468,17 +468,44 @@ pub struct LogChunk {
     pub expired: bool,
 }
 
+/// The marker once: a read past it is empty, so a following reader ends.
+fn expired_chunk(offset: u64) -> LogChunk {
+    let marker = format!("{OUTPUT_EXPIRED}\n").into_bytes();
+    let length = marker.len() as u64;
+    let bytes = if offset < length {
+        marker[offset as usize..].to_vec()
+    } else {
+        Vec::new()
+    };
+    LogChunk {
+        next: offset.max(length),
+        bytes,
+        done: true,
+        expired: true,
+    }
+}
+
+/// Whether the job's record expired: it is gone, and its job item still names it.
+pub fn record_expired(ledger: &Ledger, id: &str) -> Result<bool> {
+    validate_id(id)?;
+    if record(ledger, id)?.is_some() {
+        return Ok(false);
+    }
+    Ok(crate::items::list(ledger)?
+        .iter()
+        .any(|item| item.kind == "job" && item.id == id))
+}
+
 pub fn logs(ledger: &Ledger, id: &str, offset: u64) -> Result<LogChunk> {
     use std::io::{Seek, SeekFrom};
-    let job = get(ledger, id)?;
+    let job = match record(ledger, id)? {
+        Some(job) => job,
+        None if record_expired(ledger, id)? => return Ok(expired_chunk(offset)),
+        None => get(ledger, id)?,
+    };
     if job.output_expired {
         // The output expired: the read reports it and never fails.
-        return Ok(LogChunk {
-            bytes: format!("{OUTPUT_EXPIRED}\n").into_bytes(),
-            next: offset,
-            done: true,
-            expired: true,
-        });
+        return Ok(expired_chunk(offset));
     }
     let mut bytes = Vec::new();
     match fs::File::open(store(ledger).dir.join(format!("{id}.log"))) {
