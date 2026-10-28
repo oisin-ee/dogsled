@@ -1,15 +1,9 @@
-// The `interview` tool: the model asks the user a structured form, and the
-// portal's form server carries the questions and the answers. The tool keeps
-// the name, the parameters, and the result shape of pi-interview 0.13.0, so
-// the model asks the way it always did. Only the transport differs: the form
-// lives on the loopback portal server, not in a local window.
-import { randomUUID } from "node:crypto";
+// Interviews live in the portal inbox. The owner opens the portal; asking a
+// question never opens a browser or starts a temporary form server.
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { openInBrowser, PortalClient, PortalDown, portalUrl, sleep, startOneShot } from "./portal-client.ts";
+import { PortalClient, PortalDown, portalUrl, sleep } from "./portal-client.ts";
 
 /** How long the tool waits between two polls for the answers. */
 const POLL_MS = 500;
@@ -20,7 +14,7 @@ const interviewParameters = {
 	required: ["questions"],
 	properties: {
 		questions: { type: "string", description: "Inline JSON string with questions, or path to a questions JSON file" },
-		timeout: { type: "number", description: "Seconds before auto-timeout", default: 600 },
+		timeout: { type: "number", description: "Optional timeout in seconds. Without it, wait until the user answers or rejects the interview.", minimum: 1 },
 		verbose: { type: "boolean", description: "Enable debug logging", default: false },
 		async: { type: "boolean", description: "Return immediately instead of waiting for the user. The answer arrives later as a message tagged with the returned interview ID; keep working and do not poll.", default: false },
 		theme: {
@@ -40,7 +34,8 @@ const interviewParameters = {
 /** The interview description with the portal's browser transport. */
 const interviewDescription =
 	"Present an interactive form to gather user responses. " +
-	"Opens the Dogsled portal, or a fallback browser tab when the portal is not running. " +
+	"Adds the form to the Dogsled portal inbox without opening a browser tab. Assume the user can open the portal. " +
+	"The user can answer or reject the interview with a reason. No timeout applies unless you explicitly set one. " +
 	"Use proactively when: choosing between multiple approaches, gathering requirements before implementation, " +
 	"exploring design tradeoffs, or when decisions have multiple dimensions worth discussing. " +
 	"Provides better UX than back-and-forth chat for structured input. " +
@@ -48,6 +43,7 @@ const interviewDescription =
 	"Pass questions as inline JSON string directly (preferred) or as a path to a JSON file. " +
 	'Questions JSON format: { "title": "...", "description": "...", "questions": [{ "id": "q1", "type": "single|multi|text|image|info", "question": "...", "options": ["A", "B"], "content": { "source": "...", "lang": "ts" }, "media": { "type": "image|chart|mermaid|table|html", ... } }] }. ' +
 	"Options can be strings or objects: { label: string, content?: { source, lang?, file?, lines?, highlights?, title?, showSource? } }. " +
+	"Every single and multi question automatically offers Other with a free-text answer; selected options also accept extra context. " +
 	"Always set recommended with context explaining your reasoning. Recommended options show a 'Recommended' badge and are pre-selected for the user. " +
 	'Use conviction: "slight" when unsure (does NOT pre-select), conviction: "strong" when very confident (shows Recommended badge). ' +
 	"Omit conviction for normal recommendations (pre-selects). " +
@@ -60,14 +56,15 @@ const interviewDescription =
 /** One answer to one question, as the portal returns it. */
 export interface ResponseItem {
 	id: string;
-	value: string | string[] | { option: string; note?: string } | { option: string; note?: string }[];
+	value: string | { option: string; note?: string } | (string | { option: string; note?: string })[];
 	attachments?: string[];
 }
 
 /** The result shape of pi-interview 0.13.0. */
 export interface InterviewDetails {
-	status: "completed" | "cancelled" | "timeout" | "aborted" | "queued" | "started";
+	status: "completed" | "rejected" | "cancelled" | "timeout" | "aborted" | "queued" | "started";
 	responses: ResponseItem[];
+	reason?: string;
 	url: string;
 }
 
@@ -87,19 +84,13 @@ function isChoiceValue(value: unknown): value is { option: string; note?: string
 
 /** The value of one answer, as the model reads it. */
 function formatResponseValue(value: ResponseItem["value"]): string {
-	if (Array.isArray(value)) {
-		if (value.every(isChoiceValue)) return value.map(item => item.note ? `${item.option} (${item.note})` : item.option).join(", ");
-		return value.join(", ");
-	}
+	if (Array.isArray(value)) return value.map(formatResponseValue).join(", ");
 	if (isChoiceValue(value)) return value.note ? `${value.option} (${value.note})` : value.option;
 	return value;
 }
 
 function hasAnswerValue(value: ResponseItem["value"]): boolean {
-	if (Array.isArray(value)) {
-		if (value.every(isChoiceValue)) return value.some(item => item.option.trim() !== "");
-		return value.some(item => typeof item === "string" && item.trim() !== "");
-	}
+	if (Array.isArray(value)) return value.some(hasAnswerValue);
 	if (isChoiceValue(value)) return value.option.trim() !== "";
 	return typeof value === "string" && value.trim() !== "";
 }
@@ -240,12 +231,20 @@ function attachmentUrl(path: string): string {
  * the tool names the answers from the questions the model sent. Any other
  * body is an error that names the shape it expected.
  */
-function parseAnswers(value: unknown): ResponseItem[] {
-	const payload = value as { id?: unknown; responses?: unknown } | null;
+function parseAnswers(value: unknown): { responses: ResponseItem[]; rejection?: { reason: string } } {
+	const payload = value as { id?: unknown; responses?: unknown; rejection?: unknown } | null;
 	if (!payload || typeof payload !== "object" || Array.isArray(payload) || typeof payload.id !== "string" || !Array.isArray(payload.responses)) {
 		throw new Error('dogsled web returned an unexpected answer shape: expected {"id": string, "responses": ResponseItem[]}');
 	}
-	return payload.responses.filter(isResponseItem);
+	if (!payload.responses.every(isResponseItem)) throw new Error("dogsled web returned an invalid response item");
+	if (payload.rejection !== undefined) {
+		const rejection = payload.rejection as { reason?: unknown } | null;
+		if (!rejection || typeof rejection !== "object" || typeof rejection.reason !== "string" || payload.responses.length !== 0) {
+			throw new Error("dogsled web returned an invalid rejection");
+		}
+		return { responses: [], rejection: { reason: rejection.reason } };
+	}
+	return { responses: payload.responses };
 }
 
 /** One answer of the portal, in the shape the contract names. */
@@ -256,17 +255,22 @@ function isResponseItem(value: unknown): value is ResponseItem {
 	return item.attachments === undefined || Array.isArray(item.attachments);
 }
 
+interface Outcome {
+	status: "completed" | "rejected" | "cancelled" | "timeout" | "aborted";
+	text: string;
+	responses: ResponseItem[];
+	reason?: string;
+}
+
 /** The `interview` tool: ask the user a form through the portal and wait for the answers. */
 export class InterviewTool {
 	private readonly client: PortalClient;
 	private readonly deliver: (content: string) => void;
-	private readonly open: (url: string) => void;
 	/** The background waits of the async interviews, so the session can close them. */
-	private readonly pending = new Set<AbortController>();
-	constructor(client: PortalClient = new PortalClient(), deliver: (content: string) => void = () => undefined, open: (url: string) => void = openInBrowser) {
+	private readonly pending = new Map<AbortController, Promise<Outcome>>();
+	constructor(client: PortalClient = new PortalClient(), deliver: (content: string) => void = () => undefined) {
 		this.client = client;
 		this.deliver = deliver;
-		this.open = open;
 	}
 
 	/** Run one interview. The tool's `signal` withdraws the form. */
@@ -277,113 +281,50 @@ export class InterviewTool {
 		// The questions are parsed before the call, so a broken file or bad JSON
 		// is a tool error and never reaches the portal.
 		const file = loadQuestions(params.questions, cwd);
-		let created: { id?: unknown };
-		try {
-			// The images of the form are uploaded first, so the browser loads
-			// them from the portal instead of from the agent's own disk.
-			const questions = await this.uploadMedia(file, cwd, signal);
-			created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
-				questions, pane, session, cwd,
-			}, signal);
-		} catch (error) {
-			if (!(error instanceof PortalDown)) throw error;
-			// The portal is down, so the form goes to the one-shot interview
-			// with the questions as the model wrote them.
-			return this.fallback(file, params, ctx, signal);
+		if (params.timeout !== undefined && (!Number.isFinite(params.timeout) || params.timeout < 1 || params.timeout > 2_147_483)) {
+			throw new Error("Interview timeout must be between 1 and 2147483 seconds.");
 		}
+		const uploaded = await this.uploadMedia(file, cwd, signal);
+		const created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
+			questions: uploaded, pane, session, cwd,
+		}, signal);
 		const id = typeof created?.id === "string" ? created.id : "";
 		if (!id) throw new Error("dogsled web did not return an interview id");
 		const url = portalUrl(`/?question=${encodeURIComponent(id)}&pane=${encodeURIComponent(pane)}`, this.client.env);
-		this.open(url);
 		onUpdate?.({
-			content: [{ type: "text", text: `Interview ${id} started: ${url}. Waiting for your answers.` }],
+			content: [{ type: "text", text: `Interview ${id} is in the Dogsled inbox: ${url}. Waiting for answers or rejection.` }],
 			details: { status: "started", responses: [], url },
 		});
 
+		const own = new AbortController();
+		const operation = params.async || !signal ? own.signal : AbortSignal.any([own.signal, signal]);
+		if (signal?.aborted) own.abort();
+		const answer = this.wait(id, file, operation, params.timeout)
+			.finally(() => { this.pending.delete(own); });
+		this.pending.set(own, answer);
 		if (params.async) {
-			// The form runs on its own: the tool's own signal no longer owns it, and the
-			// answers arrive as a message, like pi-interview does.
-			const own = new AbortController();
-			this.pending.add(own);
-			void this.wait(id, file, own.signal, params.timeout)
-				.then(answers => { this.deliver(`Interview ${id} finished.\n\n${answers.text}`); })
-				.catch(error => { this.deliver(`Interview ${id} did not finish: ${error instanceof Error ? error.message : String(error)}`); })
-				.finally(() => { this.pending.delete(own); });
+			void answer.then(outcome => {
+				if (!own.signal.aborted) this.deliver(`Interview ${id} ${outcome.status}.\n\n${outcome.text}`);
+			}).catch(error => {
+				if (!own.signal.aborted) this.deliver(`Interview ${id} did not finish: ${error instanceof Error ? error.message : String(error)}`);
+			});
 			return {
-				content: [{ type: "text", text: `Interview ${id} started: ${url}. The answer arrives later as a message; keep working and do not poll.` }],
+				content: [{ type: "text", text: `Interview ${id} is in the Dogsled inbox: ${url}. The outcome arrives later as a message; keep working and do not poll.` }],
 				details: { status: "started", responses: [], url },
 			};
 		}
-
-		try {
-			const answers = await this.wait(id, file, signal, params.timeout);
-			return {
-				content: [{ type: "text", text: `User completed the interview form: ${url}\n\nAnswered responses:\n${answers.text}` }],
-				details: { status: "completed", responses: answers.responses, url },
-			};
-		} catch (error) {
-			// An aborted interview withdraws its form, so the portal does not wait for an answer.
-			if (signal?.aborted) {
-				await this.client.request("DELETE", `/api/questions/${encodeURIComponent(id)}`).catch(() => undefined);
-				return { content: [{ type: "text", text: "Interview was aborted." }], details: { status: "aborted", responses: [], url } };
-			}
-			throw error;
-		}
+		const { text, ...details } = await answer;
+		return { content: [{ type: "text", text: `${text}\n\n${url}` }], details: { ...details, url } };
 	}
 
-	/** Run the same form on a temporary server when the portal cannot be reached. */
-	private async fallback(file: QuestionsFile, params: { timeout?: number; async?: boolean }, ctx: ExtensionToolContext, signal: AbortSignal | undefined): Promise<AgentToolResult<InterviewDetails>> {
-		const directory = await mkdtemp(join(tmpdir(), "dogsled-interview-"));
-		const own = new AbortController();
-		const abort = params.async || !signal ? own.signal : AbortSignal.any([own.signal, signal]);
-		this.pending.add(own);
-		let background = false;
-		try {
-			const path = join(directory, "questions.json");
-			await writeFile(path, JSON.stringify(file), { mode: 0o600 });
-			const command = startOneShot([
-				"interview", "--file", path, "--pane", process.env["HERDR_PANE_ID"] ?? "",
-				"--session", ctx.sessionManager.getSessionId(), "--cwd", ctx.cwd,
-				"--timeout", String(Math.max(1, Math.ceil(params.timeout ?? 600))),
-			], this.client.env, abort);
-			await command.started;
-			const answer = command.result.then(stdout => parseAnswers(JSON.parse(stdout)));
-			if (params.async) {
-				const id = randomUUID();
-				background = true;
-				void answer.finally(async () => {
-					this.pending.delete(own);
-					await rm(directory, { recursive: true, force: true });
-				}).then(responses => {
-					this.deliver(`Interview ${id} finished.\n\n${formatAnsweredResponses(responses, formQuestions(file))}`);
-				}).catch(error => {
-					if (!own.signal.aborted) this.deliver(`Interview ${id} did not finish: ${error instanceof Error ? error.message : String(error)}`);
-				});
-				return {
-					content: [{ type: "text", text: `Interview ${id} started. The answer arrives later as a message; keep working and do not poll.` }],
-					details: { status: "started", responses: [], url: "" },
-				};
-			}
-			const responses = await answer;
-			return {
-				content: [{ type: "text", text: `User completed the interview form.\n\nAnswered responses:\n${formatAnsweredResponses(responses, formQuestions(file))}` }],
-				details: { status: "completed", responses, url: "" },
-			};
-		} catch (error) {
-			if (abort.aborted) return { content: [{ type: "text", text: "Interview was aborted." }], details: { status: "aborted", responses: [], url: "" } };
-			throw error;
-		} finally {
-			if (!background) {
-				this.pending.delete(own);
-				await rm(directory, { recursive: true, force: true });
-			}
-		}
-	}
-
-	/** Close the background waits of the async interviews. */
-	close(): void {
-		for (const controller of this.pending) controller.abort();
+	/** Finish withdrawal before the extension runtime exits or is replaced. */
+	async close(): Promise<void> {
+		for (const controller of this.pending.keys()) controller.abort();
+		const results = await Promise.allSettled(this.pending.values());
 		this.pending.clear();
+		for (const result of results) {
+			if (result.status === "rejected") throw result.reason;
+		}
 	}
 
 	/**
@@ -395,9 +336,7 @@ export class InterviewTool {
 	 * attachment, and the `src` becomes the URL the portal serves.
 	 *
 	 * The portal is asked whether it is there before the first local file is
-	 * read, so a portal that is down falls back to the one-shot interview
-	 * with the questions as the model wrote them, and a missing file stays a
-	 * tool error only when there is a portal to upload it to.
+	 * read. If it is down, report that directly without starting another server.
 	 */
 	private async uploadMedia(file: QuestionsFile, cwd: string, signal: AbortSignal | undefined): Promise<QuestionsFile> {
 		const list = file["questions"];
@@ -451,9 +390,8 @@ export class InterviewTool {
 	/**
 	 * The bytes of an image, as an attachment of the portal.
 	 *
-	 * A portal that cannot be reached is a `PortalDown` error, so the form
-	 * falls back to the one-shot interview. A portal that refuses the image
-	 * is an error that names the file.
+	 * A portal that cannot be reached is a `PortalDown` error.
+	 * A portal that refuses the image is an error that names the file.
 	 */
 	private async uploadAttachment(bytes: Buffer, path: string, signal: AbortSignal | undefined): Promise<string> {
 		let response: Response;
@@ -484,29 +422,62 @@ export class InterviewTool {
 		return attachmentUrl(payload.path);
 	}
 
-	/** Poll the portal until it has the answers, the form is withdrawn, or the wait ends. */
-	private async wait(id: string, file: QuestionsFile, signal: AbortSignal | undefined, timeout: number | undefined): Promise<{ text: string; responses: ResponseItem[] }> {
-		const seconds = timeout ?? 600;
-		const deadline = Date.now() + Math.max(1, seconds) * 1000;
-		for (;;) {
-			if (signal?.aborted) throw new Error("Interview was aborted.");
-			const response = await this.client.request("GET", `/api/questions/${encodeURIComponent(id)}/answer`, { signal });
-			if (response.status === 204) {
-				if (Date.now() >= deadline) throw new Error(`Interview form timed out after ${seconds} seconds.`);
-				await sleep(POLL_MS, signal);
-				continue;
+	/** Resolve saved outcomes consistently in sync, async, and cancellation races. */
+	private outcome(payload: unknown, file: QuestionsFile): Outcome {
+		const { responses, rejection } = parseAnswers(payload);
+		if (rejection) return {
+			status: "rejected", responses: [], reason: rejection.reason,
+			text: `User rejected the interview. Do not treat this as approval.\n\nReason: ${rejection.reason || "No reason given."}`,
+		};
+		return { status: "completed", responses, text: `User completed the interview form.\n\nAnswered responses:\n${formatAnsweredResponses(responses, formQuestions(file))}` };
+	}
+
+	/** Cancel abandoned forms, but recover a terminal outcome that won the race. */
+	private async withdraw(id: string, file: QuestionsFile): Promise<Outcome | undefined> {
+		const signal = AbortSignal.timeout(5_000);
+		const path = `/api/questions/${encodeURIComponent(id)}`;
+		const response = await this.client.request("DELETE", path, { signal });
+		if (response.status === 409) {
+			const saved = await this.client.json<unknown>("GET", `${path}/answer?wait=0`, undefined, signal);
+			return this.outcome(saved, file);
+		}
+		if (!response.ok && response.status !== 410) throw new Error(`Could not withdraw interview ${id}: HTTP ${response.status}`);
+		return undefined;
+	}
+
+	/** No implicit deadline: the owner can leave the form in the inbox until ready. */
+	private async wait(id: string, file: QuestionsFile, signal: AbortSignal, timeout: number | undefined): Promise<Outcome> {
+		const deadline = new AbortController();
+		const timer = timeout === undefined ? undefined : setTimeout(() => deadline.abort(), timeout * 1000);
+		timer?.unref();
+		const operation = AbortSignal.any([signal, deadline.signal]);
+		try {
+			for (;;) {
+				operation.throwIfAborted();
+				const response = await this.client.request("GET", `/api/questions/${encodeURIComponent(id)}/answer`, { signal: operation });
+				if (response.status === 204) {
+					await sleep(POLL_MS, operation);
+					continue;
+				}
+				if (response.status === 410) return { status: "cancelled", responses: [], text: "The interview was withdrawn." };
+				if (!response.ok) throw new Error(`dogsled web GET /api/questions/${id}/answer failed: ${response.status} ${(await response.text()).trim()}`);
+				return this.outcome(await response.json(), file);
 			}
-			if (response.status === 410) throw new Error("The interview form was withdrawn before it was answered.");
-			if (!response.ok) throw new Error(`dogsled web GET /api/questions/${id}/answer failed: ${response.status} ${(await response.text()).trim()}`);
-			const responses = parseAnswers(await response.json());
-			return { text: formatAnsweredResponses(responses, formQuestions(file)), responses };
+		} catch (error) {
+			const saved = await this.withdraw(id, file);
+			if (saved) return saved;
+			if (signal.aborted) return { status: "aborted", responses: [], text: "Interview was aborted." };
+			if (deadline.signal.aborted) return { status: "timeout", responses: [], text: `Interview timed out after ${timeout} seconds and was removed from the inbox.` };
+			throw error;
+		} finally {
+			if (timer) clearTimeout(timer);
 		}
 	}
 }
 
 /** Register the `interview` tool. */
 export function registerInterview(pi: ExtensionAPI, client: PortalClient = new PortalClient()): InterviewTool {
-	const tool = new InterviewTool(client, content => { pi.sendUserMessage(content); });
+	const tool = new InterviewTool(client, content => { pi.sendUserMessage(content, { deliverAs: "steer" }); });
 	pi.registerTool({
 		name: "interview",
 		label: "Interview",

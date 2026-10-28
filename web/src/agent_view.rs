@@ -90,6 +90,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     let mut board = use_signal(|| None::<BoardView>);
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
     let mut questions = use_signal(|| None::<Vec<Pending>>);
+    let mut selection = use_context::<Signal<Option<crate::app::InboxSelection>>>();
     let mut turns = use_signal(Vec::<Turn>::new);
     let mut screen = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
@@ -417,7 +418,21 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                         div { class: "av-pending av-review", ReviewView { review_id: id, embedded: true } }
                     },
                     Some(RequestTab::Questions(id, _)) => rsx! {
-                        div { class: "av-pending", QuestionForm { requested: id } }
+                        div { class: "av-pending",
+                            QuestionForm {
+                                requested: id,
+                                on_done: move |id: String| {
+                                    if let Some(pending) = questions.write().as_mut() {
+                                        pending.retain(|item| item.id != id);
+                                    }
+                                    let selected_question = selection.peek().as_ref().is_some_and(|item| {
+                                        item.kind == crate::app::InboxKind::Question && item.id == id
+                                    });
+                                    if selected_question { selection.set(None); }
+                                    refresh += 1;
+                                },
+                            }
+                        }
                     },
                     Some(RequestTab::Prompt) => rsx! {
                         BlockedPanel {

@@ -6,10 +6,14 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+mod tests;
+
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use portal_types::questions::{
-    AnswerBody, Media, MediaPosition, Pending, PendingList, Question, QuestionKind, ResponseItem,
+    AnswerBody, Media, MediaPosition, Pending, PendingList, Question, QuestionKind, Rejection,
+    ResponseItem,
 };
 use serde_json::Value;
 
@@ -29,7 +33,10 @@ const POLL_MS: u32 = 2000;
 type Values = Signal<BTreeMap<String, Value>>;
 
 #[component]
-pub fn QuestionForm(#[props(default)] requested: Option<String>) -> Element {
+pub fn QuestionForm(
+    #[props(default)] requested: Option<String>,
+    on_done: EventHandler<String>,
+) -> Element {
     let selected = use_context::<Signal<Option<String>>>();
     let mut pending = use_signal(Vec::<Pending>::new);
     let mut opened = use_signal(|| None::<String>);
@@ -102,7 +109,10 @@ pub fn QuestionForm(#[props(default)] requested: Option<String>) -> Element {
                 AskForm {
                     key: "{form.id}",
                     pending: form,
-                    on_done: move |id: String| pending.write().retain(|item| item.id != id),
+                    on_done: move |id: String| {
+                        pending.write().retain(|item| item.id != id);
+                        on_done.call(id);
+                    },
                 }
             }
         }
@@ -163,6 +173,23 @@ async fn send_answer(id: &str, responses: Vec<ResponseItem>) -> Result<Sent, Str
     }
 }
 
+/// Reject the form separately from its draft answers.
+async fn send_rejection(id: &str, reason: String) -> Result<Sent, String> {
+    let response = Request::post(&format!("{BASE}/api/questions/{id}/reject"))
+        .json(&Rejection { reason })
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    match response.status() {
+        200..=299 => Ok(Sent::Saved),
+        409 | 410 => Ok(Sent::Closed),
+        status => Err(format!(
+            "Could not reject the interview (HTTP {status}). Try again."
+        )),
+    }
+}
+
 /// The form to show: the one clicked, else the first of the selected pane,
 /// else the first.
 fn current_form<'a>(
@@ -206,6 +233,8 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
     let values: Values = use_signal(|| initial_values(&pending.questions.questions));
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
+    let mut rejection_reason = use_signal(String::new);
+    let reject_id = pending.id.clone();
     let id = pending.id.clone();
     let questions = pending.questions.questions.clone();
     let heading = pending.questions.title.clone();
@@ -224,11 +253,12 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                 // The page answers the form itself, so the browser must not
                 // send it.
                 event.prevent_default();
+                if busy() { return; }
+                busy.set(true);
+                error.set(None);
                 let id = id.clone();
                 let responses = collect_responses(&questions, &values.read());
-                async move {
-                    busy.set(true);
-                    error.set(None);
+                spawn(async move {
                     match send_answer(&id, responses).await {
                         Ok(Sent::Saved | Sent::Closed) => on_done.call(id),
                         Err(message) => {
@@ -236,7 +266,7 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                             busy.set(false);
                         }
                     }
-                }
+                });
             },
             div { class: "qf-intro",
                 if let Some(heading) = heading {
@@ -261,6 +291,33 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
             div { class: "qf-foot",
                 span { class: "qf-muted", "Answered {answered_count(&questions, &values.read())} of {total}" }
                 button { class: "qf-submit", r#type: "submit", disabled: busy(), "Send answers" }
+            }
+            section { class: "qf-reject", aria_label: "Reject interview",
+                label { class: "qf-note",
+                    span { "Reason for rejecting (optional)" }
+                    textarea {
+                        name: "rejection-reason", rows: "2", value: "{rejection_reason}", disabled: busy(),
+                        placeholder: "Tell the agent why these questions do not help, or what you need instead",
+                        oninput: move |event: FormEvent| rejection_reason.set(event.value()),
+                    }
+                }
+                button {
+                    class: "qf-reject-button", r#type: "button", disabled: busy(),
+                    onclick: move |_| {
+                        if busy() { return; }
+                        busy.set(true);
+                        error.set(None);
+                        let id = reject_id.clone();
+                        let reason = rejection_reason();
+                        spawn(async move {
+                            match send_rejection(&id, reason).await {
+                                Ok(Sent::Saved | Sent::Closed) => on_done.call(id),
+                                Err(message) => { error.set(Some(message)); busy.set(false); }
+                            }
+                        });
+                    },
+                    "Reject questions"
+                }
             }
         }
     }
@@ -373,36 +430,79 @@ fn content_text(content: &Value) -> String {
     }
 }
 
-/// The chosen labels of a question.
-fn chosen(values: &BTreeMap<String, Value>, id: &str) -> Vec<String> {
+/// Every choice question offers a writable alternative, even when its author did not.
+fn choice_options(question: &Question) -> Vec<Value> {
+    let mut options = question.options.clone().unwrap_or_default();
+    if !options.iter().any(|option| option_label(option) == "Other") {
+        options.push(Value::String("Other".to_owned()));
+    }
+    options
+}
+
+/// An answer can be a label alone or a choice with the owner's note.
+fn answer_label(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("option").and_then(Value::as_str))
+}
+
+fn selected_values(values: &BTreeMap<String, Value>, id: &str) -> Vec<Value> {
     match values.get(id) {
-        Some(Value::String(label)) => vec![label.clone()],
-        Some(Value::Array(labels)) => labels
-            .iter()
-            .filter_map(|label| label.as_str().map(str::to_owned))
-            .collect(),
-        _ => Vec::new(),
+        Some(Value::Array(answers)) => answers.clone(),
+        Some(answer) => vec![answer.clone()],
+        None => Vec::new(),
+    }
+}
+
+/// The chosen labels of a question, independent of any attached notes.
+fn chosen(values: &BTreeMap<String, Value>, id: &str) -> Vec<String> {
+    selected_values(values, id)
+        .iter()
+        .filter_map(|value| {
+            answer_label(value)
+                .filter(|label| !label.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn set_note(values: &mut BTreeMap<String, Value>, id: &str, label: &str, note: String) {
+    let Some(value) = values.get_mut(id) else {
+        return;
+    };
+    let answers = match value {
+        Value::Array(answers) => answers.as_mut_slice(),
+        answer => std::slice::from_mut(answer),
+    };
+    if let Some(answer) = answers
+        .iter_mut()
+        .find(|answer| answer_label(answer) == Some(label))
+    {
+        *answer = if note.trim().is_empty() {
+            Value::String(label.to_owned())
+        } else {
+            serde_json::json!({ "option": label, "note": note })
+        };
     }
 }
 
 /// Choose an option: replace the choice of a single question, flip it in a
 /// multi one.
-fn choose(mut values: Values, id: &str, label: &str, multi: bool) {
-    let mut map = values.write();
+fn choose(values: &mut BTreeMap<String, Value>, id: &str, label: &str, multi: bool) {
     if multi {
-        let mut labels = chosen(&map, id);
-        match labels.iter().position(|item| item == label) {
+        let mut answers = selected_values(values, id);
+        match answers
+            .iter()
+            .position(|answer| answer_label(answer) == Some(label))
+        {
             Some(position) => {
-                labels.remove(position);
+                answers.remove(position);
             }
-            None => labels.push(label.to_owned()),
+            None => answers.push(Value::String(label.to_owned())),
         }
-        map.insert(
-            id.to_owned(),
-            Value::Array(labels.into_iter().map(Value::String).collect()),
-        );
-    } else {
-        map.insert(id.to_owned(), Value::String(label.to_owned()));
+        values.insert(id.to_owned(), Value::Array(answers));
+    } else if !chosen(values, id).iter().any(|selected| selected == label) {
+        values.insert(id.to_owned(), Value::String(label.to_owned()));
     }
 }
 
@@ -414,7 +514,7 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
         _ => "normal",
     };
     let recommended = recommended_labels(&question);
-    let options = question.options.clone().unwrap_or_default();
+    let options = choice_options(&question);
     let content = question.content.as_ref().map(content_text);
     let id = question.id.clone();
     let text = values
@@ -626,28 +726,53 @@ fn ChoiceOption(
     option: Value,
     recommended: bool,
     multi: bool,
-    values: Values,
+    mut values: Values,
 ) -> Element {
     let label = option_label(&option);
     let content = option.get("content").map(content_text);
     let checked = chosen(&values.read(), &id).contains(&label);
     let pick = label.clone();
+    let choice_id = id.clone();
+    let note_label = label.clone();
+    let note = selected_values(&values.read(), &id)
+        .iter()
+        .find(|answer| answer_label(answer) == Some(label.as_str()))
+        .and_then(|answer| answer.get("note"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let other = label == "Other";
 
     rsx! {
-        label { class: if checked { "qf-option checked" } else { "qf-option" },
-            input {
-                r#type: if multi { "checkbox" } else { "radio" },
-                name: "{group}",
-                value: "{label}",
-                checked,
-                onchange: move |_| choose(values, &id, &pick, multi),
+        div { class: "qf-choice",
+            label { class: if checked { "qf-option checked" } else { "qf-option" },
+                input {
+                    r#type: if multi { "checkbox" } else { "radio" },
+                    name: "{group}",
+                    value: "{label}",
+                    checked,
+                    onchange: move |_| choose(&mut values.write(), &choice_id, &pick, multi),
+                }
+                span { class: "qf-option-label", "{label}" }
+                if recommended {
+                    span { class: "qf-badge", "Recommended" }
+                }
+                if let Some(content) = content {
+                    p { class: "qf-option-desc", "{content}" }
+                }
             }
-            span { class: "qf-option-label", "{label}" }
-            if recommended {
-                span { class: "qf-badge", "Recommended" }
-            }
-            if let Some(content) = content {
-                p { class: "qf-option-desc", "{content}" }
+            if checked {
+                label { class: "qf-note",
+                    span { if other { "Your answer" } else { "More context (optional)" } }
+                    textarea {
+                        name: "{group}-{label}-note",
+                        rows: "2",
+                        required: other,
+                        value: "{note}",
+                        placeholder: if other { "Write your own answer" } else { "Explain your choice or add another idea" },
+                        oninput: move |event: FormEvent| set_note(&mut values.write(), &id, &note_label, event.value()),
+                    }
+                }
             }
         }
     }
