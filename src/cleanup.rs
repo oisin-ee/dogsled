@@ -27,7 +27,7 @@ pub struct Tree {
 
 /// How a tree found after the plan relates to the planned tree.
 #[derive(Debug, PartialEq, Eq)]
-enum Drift {
+pub(crate) enum Drift {
     Same,
     /// The same repository, path, and branch at a new commit: live work, so a skip that the next
     /// survey re-plans.
@@ -39,7 +39,7 @@ enum Drift {
 impl Tree {
     /// Compare `now`, a fresh listing, with this planned tree. Every recheck uses this, so a new
     /// commit is a skip and an identity change is a failure on each path.
-    fn drift(&self, now: &Tree) -> Drift {
+    pub(crate) fn drift(&self, now: &Tree) -> Drift {
         if !crate::worktree::same(&self.repo, &now.repo)
             || !crate::worktree::same(&self.path, &now.path)
             || self.branch != now.branch

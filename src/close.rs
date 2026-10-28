@@ -138,7 +138,21 @@ pub fn with_local<T>(
                 lifecycle.discover(shell, &planned.path)?
             };
             if let Some(now) = observed {
-                planned = now.tree();
+                // Discovery may supply an identity, never a new plan or HEAD expectation.
+                if planned.identity.is_none() {
+                    planned.identity.clone_from(&now.identity);
+                }
+                let drift = planned.drift(&now.tree());
+                if drift == crate::cleanup::Drift::Identity
+                    || live
+                        .as_ref()
+                        .is_some_and(|before| before.gitdir != now.gitdir)
+                {
+                    return Err(refuse("worktree identity changed"));
+                }
+                if drift == crate::cleanup::Drift::HeadMoved {
+                    return Err(refuse("HEAD moved before close"));
+                }
             }
         }
         if worktree::verified_absent(lifecycle, shell, &planned) {

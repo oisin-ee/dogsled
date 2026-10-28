@@ -1518,6 +1518,91 @@ fn external_remove(repo: &Repo) {
     );
 }
 
+fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let fixture = lifecycle_fixture(false);
+    let captured = recorded(&fixture.ledger)[0].clone();
+    if saved_identity {
+        fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+            "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
+            "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
+            "result":{"checkout":captured},"error":null
+        })).unwrap();
+        fixture
+            .ledger
+            .child("launches")
+            .write("c1-old.json", &serde_json::json!({"checkout": captured}))
+            .unwrap();
+    } else {
+        std::fs::remove_file(
+            captured
+                .identity
+                .as_ref()
+                .unwrap()
+                .gitdir
+                .join("dogsled-checkout-id"),
+        )
+        .unwrap();
+        fixture
+            .ledger
+            .write("worktrees.json", &Vec::<crate::cleanup::Tree>::new())
+            .unwrap();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    shell.lock_attempt = Some(tx);
+    std::thread::scope(|scope| {
+        let close =
+            crate::worktree::with_lifecycle(&shell, &fixture.ledger, &fixture.repo.repo, |_| {
+                let close = std::thread::Builder::new()
+                    .name("lifecycle-contender".into())
+                    .spawn_scoped(scope, || {
+                        crate::close::local(
+                            &shell,
+                            &fixture.ledger,
+                            "placed-shell",
+                            &crate::close::Caller::default(),
+                            crate::close::Guard::Clean,
+                        )
+                    })
+                    .unwrap();
+                // The contender has captured its plan and reached repository mutex lookup.
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                git(
+                    &fixture.repo.tree,
+                    &["commit", "-q", "--allow-empty", "-m", "concurrent work"],
+                );
+                // Keep the new HEAD removable by the loss rule: only plan drift must protect it.
+                git(&fixture.repo.tree, &["push", "-q", "origin", "feature"]);
+                Ok(close)
+            })
+            .unwrap();
+        let result = close.join().unwrap();
+        assert!(result.is_err(), "{result:?}");
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("HEAD moved"), "{error}");
+    });
+    assert!(fixture.repo.tree.is_dir());
+    let head = git(&fixture.repo.tree, &["rev-parse", "HEAD"]);
+    assert_ne!(head.trim(), captured.head);
+    assert_eq!(
+        git(&fixture.repo.tree, &["log", "-1", "--format=%s"]).trim(),
+        "concurrent work"
+    );
+    assert!(shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 0);
+}
+
+#[test]
+fn saved_close_preserves_head_moved_while_waiting() {
+    close_preserves_head_moved_while_waiting(true);
+}
+
+#[test]
+fn discovered_close_preserves_head_moved_while_waiting() {
+    close_preserves_head_moved_while_waiting(false);
+}
+
 #[test]
 fn concurrent_close_and_prune_run_one_teardown() {
     use std::sync::{Arc, Barrier, atomic::Ordering::SeqCst};
