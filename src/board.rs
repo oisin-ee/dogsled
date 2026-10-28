@@ -428,10 +428,10 @@ pub enum Group {
 impl Group {
     pub fn title(self) -> &'static str {
         match self {
-            Self::ToLand => "TO LAND",
-            Self::Attention => "ATTENTION",
-            Self::Running => "RUNNING",
-            Self::Waiting => "WAITING",
+            Self::ToLand => "READY TO MERGE",
+            Self::Attention => "NEEDS YOU",
+            Self::Running => "WORKING",
+            Self::Waiting => "QUEUED",
         }
     }
 }
@@ -506,6 +506,22 @@ fn label(hosts: &[HostReport], id: &str) -> String {
         .iter()
         .find(|h| h.host.id == id || h.host.label == id)
         .map_or_else(|| id.to_owned(), |h| h.host.label.clone())
+}
+
+/// The group a lifecycle state belongs to. NEEDS YOU holds the states the owner must act
+/// on; the rest keep working. A retained branch is a result, not a state, so it has its
+/// own group.
+fn group_for(state: crate::lifecycle::State) -> Group {
+    use crate::lifecycle::State as Life;
+    match state {
+        Life::Asking | Life::Blocked | Life::Stopped | Life::Lost | Life::Unknown => {
+            Group::Attention
+        }
+        Life::Starting | Life::Working | Life::Waiting | Life::Finishing | Life::Done => {
+            Group::Running
+        }
+        Life::Queued => Group::Waiting,
+    }
 }
 
 fn agent<'a>(hosts: &'a [HostReport], item: &Item) -> Option<(&'a HostReport, &'a Agent)> {
@@ -590,31 +606,21 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     // state of its own.
     let lifecycle = crate::items::lifecycle(item, hosts);
     let stalled = agent.is_some_and(|a| a.stalled_since_ms.is_some());
-    let state = match agent {
-        Some(_) if stalled => "stalled".to_owned(),
-        Some(a) => a.state.clone(),
-        None if host_up => "starting".to_owned(),
-        None => "unavailable".to_owned(),
+    let state = if stalled {
+        "stalled".to_owned()
+    } else {
+        crate::lifecycle::display(lifecycle.state).to_owned()
     };
-    // A turn that ended waits for input; only a recorded final handoff has finished.
-    let waiting = matches!(state.as_str(), "idle" | "done");
+    let waiting = crate::watchdog::turn_ended(lifecycle.state);
+    let quiet_eligible = lifecycle.state == crate::lifecycle::State::Working;
     let finished = lifecycle.state == crate::lifecycle::State::Done;
-    // An observed agent whose state the owner cannot read, or that is blocked, needs the
-    // owner. An agent that is not observed yet keeps today's group: the board's own
-    // wording for it says `starting`, and the group change belongs to a later unit.
-    let needs_attention = !host_up
-        || stalled
-        || (agent.is_some()
-            && matches!(
-                lifecycle.state,
-                crate::lifecycle::State::Blocked | crate::lifecycle::State::Unknown
-            ));
+    let needs_attention = stalled || group_for(lifecycle.state) == Group::Attention;
     let group = if needs_attention {
         Group::Attention
     } else if finished && waiting && (dirty || (ahead.is_some() && !landed)) {
         Group::ToLand
     } else {
-        Group::Running
+        group_for(lifecycle.state)
     };
     let activity = match (group, agent) {
         (Group::ToLand, _) => [
@@ -626,21 +632,22 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         .collect::<Vec<_>>()
         .join(" · "),
         (_, None) if !host_up => format!("{} is unavailable", label(hosts, &item.host)),
-        (_, None) => "starting".to_owned(),
+        (_, None) => crate::lifecycle::display(lifecycle.state).to_owned(),
         (_, Some(a)) => {
             let last = a.session.activity.clone().unwrap_or_default();
-            match quiet_ms.filter(|q| *q >= QUIET_MS && !waiting) {
+            match quiet_ms.filter(|q| *q >= QUIET_MS && quiet_eligible) {
                 Some(quiet) if last.is_empty() => format!("quiet {}", age(quiet)),
                 Some(quiet) => format!("quiet {} · last: {last}", age(quiet)),
                 None => last,
             }
         }
     };
-    let group = if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && !waiting {
-        Group::Attention
-    } else {
-        group
-    };
+    let group =
+        if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && quiet_eligible {
+            Group::Attention
+        } else {
+            group
+        };
     Row {
         group,
         kind: "agent".into(),
@@ -900,7 +907,11 @@ fn enrich_rows(
             .pane
             .as_deref()
             .or_else(|| item.map(|item| item.pane.as_str()));
-        row.unseen = unseen(row, pane, messages);
+        let ended = item.is_some_and(|item| {
+            item.closed_ms.is_some()
+                || crate::watchdog::turn_ended(crate::items::lifecycle(item, &status.hosts).state)
+        });
+        row.unseen = unseen(row, pane, messages, ended);
         if row.group != Group::ToLand {
             continue;
         }
@@ -1002,8 +1013,8 @@ fn classify_cleanup(row: &Row, local_ancestry_status: i32) -> Option<portal_type
 
 /// Only the newest worker-to-owner inbox message matters. Pending and claimed
 /// messages are unread; delivered (acknowledged) and failed messages are not.
-fn unseen(row: &Row, pane: Option<&str>, messages: &[crate::inbox::Record]) -> bool {
-    if row.kind != "agent" || !matches!(row.state.as_str(), "idle" | "done" | "closed") {
+fn unseen(row: &Row, pane: Option<&str>, messages: &[crate::inbox::Record], ended: bool) -> bool {
+    if row.kind != "agent" || !ended {
         return false;
     }
     let (Some(owner), Some(pane)) = (row.owner_pane.as_deref(), pane) else {
@@ -1080,13 +1091,11 @@ impl Board {
         }
         let mut counts = std::collections::BTreeMap::new();
         for row in &self.rows {
-            let label = match (row.group, row.state.as_str()) {
-                (Group::ToLand, _) => (0, "to land"),
-                (Group::Attention, _) => (1, "attention"),
-                (Group::Running, "idle") => (2, "idle"),
-                (Group::Running, "done") => (3, "done"),
-                (Group::Running, _) => (4, "running"),
-                (Group::Waiting, _) => (5, "waiting"),
+            let label = match row.group {
+                Group::ToLand => (0, "ready to merge"),
+                Group::Attention => (1, "needs you"),
+                Group::Running => (2, "working"),
+                Group::Waiting => (3, "queued"),
             };
             *counts.entry(label).or_insert(0) += 1;
         }
@@ -1099,7 +1108,7 @@ impl Board {
         if let Some(names) = self.land_names() {
             let _ = writeln!(
                 out,
-                "To land: {names}. Review and integrate the retained branches. Finished children close at handoff, before landing."
+                "Ready to merge: {names}. Review and integrate the retained branches. Finished children close at handoff, before landing."
             );
         }
         out
@@ -1830,18 +1839,75 @@ mod tests {
         assert!(board.rows[0].unseen);
         let read = record("two", 2, crate::inbox::State::Delivered);
         let messages = [unread, read];
-        assert!(!unseen(&board.rows[0], Some("worker"), &messages));
-        for state in ["idle", "done", "closed"] {
-            board.rows[0].state = state.into();
-            assert!(unseen(&board.rows[0], Some("worker"), &messages[..1]));
-        }
-        board.rows[0].state = "working".into();
-        assert!(!unseen(&board.rows[0], Some("worker"), &messages[..1]));
-        board.rows[0].state = "idle".into();
+        assert!(!unseen(&board.rows[0], Some("worker"), &messages, true));
+        assert!(unseen(&board.rows[0], Some("worker"), &messages[..1], true));
+        assert!(!unseen(
+            &board.rows[0],
+            Some("worker"),
+            &messages[..1],
+            false
+        ));
         board.rows[0].owner_pane = None;
-        assert!(!unseen(&board.rows[0], Some("worker"), &messages[..1]));
+        assert!(!unseen(
+            &board.rows[0],
+            Some("worker"),
+            &messages[..1],
+            true
+        ));
         std::fs::remove_dir_all(ledger.dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn unread_blocked_agent_message_uses_lifecycle_not_the_display_label() {
+        let status = status(
+            vec![host(
+                "local",
+                "local",
+                vec![agent("worker", "pi", "blocked")],
+            )],
+            vec![item("child", "local", "worker")],
+        );
+        let mut board = build(&status, None, NOW);
+        let message = crate::inbox::Record {
+            id: "unread".into(),
+            terminal: "term_owner".into(),
+            pane: "w1:p1".into(),
+            from: crate::inbox::Sender {
+                pane: Some("worker".into()),
+                ..Default::default()
+            },
+            kind: "message".into(),
+            text: "Approval required".into(),
+            created_ms: 1,
+            state: crate::inbox::State::Pending,
+            lease: crate::backoff::Backoff::default(),
+            reason: None,
+            done_ms: None,
+        };
+        enrich_rows(
+            &mut board,
+            &status,
+            &[],
+            &[message],
+            &crate::shell::Fake::new(),
+        );
+        assert!(board.rows[0].unseen);
+    }
+
+    #[test]
+    fn explicit_questions_and_blockers_need_the_owner() {
+        use crate::lifecycle::{Evidence, Signal, classify};
+        for signal in [Signal::Ask, Signal::Blocked] {
+            let state = classify(&Evidence {
+                terminal: Some("idle"),
+                owns_open: true,
+                signal: Some(signal),
+                ..Evidence::default()
+            })
+            .state;
+            assert_eq!(group_for(state), Group::Attention);
+        }
     }
 
     #[test]
@@ -1990,22 +2056,48 @@ mod tests {
             groups,
             [
                 ("web-tests", Group::ToLand),
+                ("landed", Group::Attention),
                 ("i18n", Group::Attention),
                 ("asks", Group::Attention),
-                ("landed", Group::Running),
+                ("question", Group::Attention),
                 ("review-auth", Group::Running),
-                ("question", Group::Running),
             ]
         );
         assert_eq!(board.rows[0].activity, "+2 commits");
         assert_eq!(board.rows[0].host, "netcup");
-        assert_eq!(board.rows[1].activity, "quiet 11m · last: rg \"t(\" web/");
-        assert_eq!(board.rows[4].what, "codex · gpt-5.6-sol");
-        assert_eq!(board.rows[4].activity, "cargo test -p auth");
-        assert_eq!(board.summary(), "1 to land · 2 attention · 3 running");
-        assert!(board.owner_lines().starts_with("Your children and jobs: 1 to land · 2 attention · 2 idle · 1 running\nTo land: web-tests (+2)."));
+        assert_eq!(board.rows[2].activity, "quiet 11m · last: rg \"t(\" web/");
+        assert_eq!(board.rows[5].what, "codex · gpt-5.6-sol");
+        assert_eq!(board.rows[5].activity, "cargo test -p auth");
+        assert_eq!(
+            board.summary(),
+            "1 ready to merge · 4 needs you · 1 working"
+        );
+        assert!(board.owner_lines().starts_with("Your children and jobs: 1 ready to merge · 4 needs you · 1 working\nReady to merge: web-tests (+2)."));
         assert!(!board.owner_lines().contains("theirs"));
         assert_eq!(build(&status, None, NOW).rows.len(), 7);
+    }
+
+    #[test]
+    fn a_quiet_finishing_child_stays_working() {
+        let mut finishing = agent("w2:p1", "pi", "idle");
+        finishing.finishing = true;
+        finishing.handoff = Some("accepted".into());
+        finishing.transcript_modified = Some(NOW - 3 * QUIET_MS);
+        finishing.session.activity = Some("recording handoff".into());
+        let board = build(
+            &status(
+                vec![host("8103", "netcup", vec![finishing])],
+                vec![item("finishing", "8103", "w2:p1")],
+            ),
+            Some("w1:p1"),
+            NOW,
+        );
+        assert_eq!(board.rows.len(), 1);
+        assert_eq!(board.rows[0].quiet_ms, Some(3 * QUIET_MS));
+        assert_eq!(board.rows[0].group, Group::Running);
+        assert!(!board.rows.iter().any(|row| row.group == Group::Attention));
+        assert_eq!(board.rows[0].activity, "recording handoff");
+        assert_eq!(board.summary(), "1 working");
     }
 
     #[test]
@@ -2029,8 +2121,7 @@ mod tests {
         let mut waiting = agent("w2:p1", "pi", "idle");
         waiting.owns_open = true;
         let stopped = agent("w2:p2", "pi", "idle");
-        let mut asking = agent("w2:p3", "pi", "idle");
-        asking.handoff = Some("none".into());
+        let blocked = agent("w2:p3", "pi", "blocked");
         let mut finishing = agent("w2:p4", "pi", "idle");
         finishing.finishing = true;
         finishing.handoff = Some("accepted".into());
@@ -2042,7 +2133,7 @@ mod tests {
         let host = host(
             "8103",
             "netcup",
-            vec![waiting, stopped, asking, finishing, done, working, unknown],
+            vec![waiting, stopped, blocked, finishing, done, working, unknown],
         );
         let items: Vec<Item> = [
             "w2:p1", "w2:p2", "w2:p3", "w2:p4", "w2:p5", "w2:p6", "w2:p7",
@@ -2052,7 +2143,7 @@ mod tests {
         .map(|(i, pane)| item(&format!("i{i}"), "8103", pane))
         .collect();
         let board = build(&status(vec![host], items), None, NOW);
-        // The board keeps its own wording: the raw terminal state, unchanged.
+        // The board shows the display name of the lifecycle state the owner derived.
         let words: Vec<(&str, &str)> = board
             .rows
             .iter()
@@ -2061,17 +2152,17 @@ mod tests {
         assert_eq!(
             words,
             [
+                ("i1", "idle"),    // stopped: a turn that ended with no signal
+                ("i2", "blocked"), // explicit terminal blocker
                 ("i6", "unknown"), // an unreadable terminal state
                 ("i0", "idle"),    // owns open work
-                ("i1", "idle"),    // stopped
-                ("i2", "idle"),    // asking
                 ("i3", "idle"),    // finishing
-                ("i4", "idle"),    // a recorded handoff: the raw state stays as it was
+                ("i4", "done"),    // a recorded final handoff
                 ("i5", "working"),
             ]
         );
-        // The board's group comes from the owner's derivation: an unreadable agent and a
-        // blocked one need the owner, and the rest keep running.
+        // The board's group comes from the owner's derivation: an unreadable agent, a
+        // stopped one and a question need the owner, and the rest keep working.
         let groups: Vec<(&str, Group)> = board
             .rows
             .iter()
@@ -2080,10 +2171,10 @@ mod tests {
         assert_eq!(
             groups,
             [
+                ("i1", Group::Attention),
+                ("i2", Group::Attention),
                 ("i6", Group::Attention),
                 ("i0", Group::Running),
-                ("i1", Group::Running),
-                ("i2", Group::Running),
                 ("i3", Group::Running),
                 ("i4", Group::Running),
                 ("i5", Group::Running),
@@ -2100,6 +2191,63 @@ mod tests {
             crate::items::lifecycle(&item, &hosts).state,
             crate::lifecycle::State::Waiting
         );
+    }
+
+    /// NEEDS YOU holds every state the owner must act on: a question, a blocker, a
+    /// stopped turn, a lost agent, and an unreadable one. A Herdr `done` without the
+    /// native `done` is a stopped turn, never a finished handoff.
+    #[test]
+    fn the_states_that_need_the_owner_are_under_needs_you() {
+        let mut stopped = agent("w2:p1", "pi", "idle");
+        stopped.handoff = Some("none".into());
+        let blocked = agent("w2:p2", "pi", "blocked");
+        let second_stopped = agent("w2:p3", "pi", "idle");
+        let unknown = agent("w2:p5", "pi", "unknown");
+        // Herdr reports `done`, but the agent never called the native `done`.
+        let mut herdr_done = agent("w2:p6", "pi", "done");
+        herdr_done.handoff = Some("none".into());
+        let agents = vec![stopped, blocked, second_stopped, unknown, herdr_done];
+        let panes = ["w2:p1", "w2:p2", "w2:p3", "w2:p5", "w2:p6"];
+        let items: Vec<Item> = panes
+            .iter()
+            .enumerate()
+            .map(|(i, pane)| item(&format!("i{i}"), "8103", pane))
+            .collect();
+        let board = build(
+            &status(vec![host("8103", "netcup", agents)], items),
+            None,
+            NOW,
+        );
+        let groups: Vec<(&str, Group)> = board
+            .rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.group))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("i0", Group::Attention), // stopped
+                ("i1", Group::Attention), // blocked
+                ("i2", Group::Attention), // stopped
+                ("i3", Group::Attention), // unknown
+                ("i4", Group::Attention), // Herdr done without the native done
+            ],
+            "{groups:?}"
+        );
+        // Herdr's `done` is not the native `done`: the row never reads as done.
+        let herdr_done = board.rows.iter().find(|r| r.id == "i4").expect("the row");
+        assert_ne!(herdr_done.state, "done", "{herdr_done:?}");
+        assert_eq!(herdr_done.group, Group::Attention);
+        // A lost agent is one whose host cannot be read: it needs the owner too.
+        let mut down = host("8103", "netcup", vec![agent("w2:p4", "pi", "working")]);
+        down.service = "down".into();
+        let lost = build(
+            &status(vec![down], vec![item("lost", "8103", "w2:p4")]),
+            None,
+            NOW,
+        );
+        assert_eq!(lost.rows[0].group, Group::Attention);
+        assert_eq!(lost.rows[0].state, "unavailable");
     }
 
     #[test]

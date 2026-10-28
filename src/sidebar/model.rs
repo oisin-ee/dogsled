@@ -60,13 +60,19 @@ impl Card {
         let (pill, tone) = if row.group == Group::ToLand {
             ("to land", Tone::ToLand)
         } else {
+            // The board publishes the lifecycle display name of an agent, so the sidebar
+            // shows the same word the lifecycle owner publishes.
             match row.state.as_str() {
                 "stalled" => ("stalled", Tone::Alert),
                 "blocked" => ("blocked", Tone::Alert),
                 "working" => ("working", Tone::Busy),
                 "running" => ("running", Tone::Busy),
-                "idle" | "done" => ("idle", Tone::Idle),
-                "queued" | "starting" => ("queued", Tone::Queued),
+                "unavailable" => ("unavailable", Tone::Alert),
+                "unknown" => ("unknown", Tone::Alert),
+                "idle" => ("idle", Tone::Idle),
+                "done" => ("done", Tone::Idle),
+                "queued" => ("queued", Tone::Queued),
+                "starting" => ("starting", Tone::Queued),
                 state if state.starts_with("exit ") => ("failed", Tone::Alert),
                 _ if row.group == Group::Attention => ("blocked", Tone::Alert),
                 _ => ("queued", Tone::Queued),
@@ -722,6 +728,30 @@ pub mod tests {
         assert_eq!(ids, ["land", "stuck", "new-run", "old-run"]);
         let pills: Vec<_> = model.data.cards.iter().map(|c| c.pill.as_str()).collect();
         assert_eq!(pills, ["to land", "stalled", "idle", "working"]);
+    }
+
+    /// The sidebar label is the lifecycle display name the lifecycle owner publishes for
+    /// the state, so the two never disagree.
+    #[test]
+    fn the_label_is_the_lifecycle_display_name() {
+        use crate::lifecycle::{State, display};
+        for (state, tone) in [
+            (State::Working, Tone::Busy),
+            (State::Blocked, Tone::Alert),
+            (State::Lost, Tone::Alert),
+            (State::Unknown, Tone::Alert),
+            (State::Waiting, Tone::Idle),
+            (State::Stopped, Tone::Idle),
+            (State::Asking, Tone::Idle),
+            (State::Finishing, Tone::Idle),
+            (State::Done, Tone::Idle),
+            (State::Queued, Tone::Queued),
+            (State::Starting, Tone::Queued),
+        ] {
+            let label = display(state);
+            let card = Card::from_row(&row("s", Group::Running, label, 1));
+            assert_eq!((card.pill.as_str(), card.tone), (label, tone), "{state:?}");
+        }
     }
 
     #[test]

@@ -53,11 +53,9 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
     assert_eq!(gate(), "");
     let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
     cmd.env("HERDR_ENV", "1");
-    assert!(
-        String::from_utf8(bounded(cmd).stdout)
-            .unwrap()
-            .starts_with("Your children and jobs: 1 to land\nTo land: worker (uncommitted)")
-    );
+    assert!(String::from_utf8(bounded(cmd).stdout).unwrap().starts_with(
+        "Your children and jobs: 1 ready to merge\nReady to merge: worker (uncommitted)"
+    ));
     // Committing the work changes the signature, so the owner gets an integration reminder.
     host["probe"]["agent_panes"][0]["worktree"]["dirty"] = json!(false);
     host["probe"]["agent_panes"][0]["worktree"]["ahead"] = json!(1);
@@ -219,7 +217,7 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     cmd.env("HERDR_ENV", "1");
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
     assert!(
-        out.starts_with("Your children and jobs: 1 to land\nTo land: worker (+2)."),
+        out.starts_with("Your children and jobs: 1 ready to merge\nReady to merge: worker (+2)."),
         "{out}"
     );
     assert!(!out.contains("other"), "{out}");
@@ -243,7 +241,28 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
     cmd.env("HERDR_ENV", "1");
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
-    assert!(!out.contains("To land"), "{out}");
+    assert!(!out.contains("Ready to merge"), "{out}");
+}
+
+#[test]
+fn status_rows_derive_lifecycle_even_without_a_published_label() {
+    let rig = Rig::new("context-status-lifecycle");
+    for (terminal, expected) in [
+        ("idle", "stopped"),
+        ("done", "stopped"),
+        ("blocked", "blocked"),
+    ] {
+        rig.snapshot("state/host.json", now(), 1.0, 8);
+        let mut host = rig.read("state/host.json");
+        host["probe"]["agent_panes"][0]["state"] = json!(terminal);
+        host["probe"]["agent_panes"][0]["lifecycle"] = json!("done");
+        rig.put("state/host.json", &host);
+        let output = rig.run(&["status"]);
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(&format!("w1:p1 {expected} ")), "{text}");
+        assert!(text.contains(&format!("({expected} 1)")), "{text}");
+    }
 }
 
 /// The board's own word stays the same, and the lifecycle state travels beside it. An
@@ -271,10 +290,10 @@ fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
     assert_eq!(row["group"], "attention", "{board}");
 }
 
-/// A child whose pane is not observed yet is `starting`, not `unknown` and not `stopped`.
-/// The board's own word says `starting`, and it does not claim the work has landed.
+/// Missing observations without launch progress leave the lifecycle unknown.
+/// The board must not claim startup or a landed result.
 #[test]
-fn an_unobserved_child_is_starting_and_never_claims_a_landed_result() {
+fn an_unobserved_child_is_unknown_and_never_claims_a_landed_result() {
     let rig = Rig::new("context-starting");
     rig.snapshot("state/host.json", now(), 1.0, 8);
     rig.put(
@@ -285,8 +304,8 @@ fn an_unobserved_child_is_starting_and_never_claims_a_landed_result() {
     let (code, board) = rig.json(&["board"]);
     assert_eq!(code, 0);
     let row = &board["rows"][0];
-    assert_eq!(row["state"], "starting", "{board}");
-    assert_eq!(row["group"], "running", "{board}");
+    assert_eq!(row["state"], "unknown", "{board}");
+    assert_eq!(row["group"], "attention", "{board}");
     assert!(row["ahead"].is_null(), "{board}");
     assert!(!row["dirty"].as_bool().unwrap_or(false), "{board}");
 }

@@ -274,14 +274,26 @@ fn summary(host: &HostReport) -> String {
         || "mem ? disk ? agents ?".into(),
         |p| {
             let gib = 1024.0 * 1024.0 * 1024.0;
+            let mut states = std::collections::BTreeMap::new();
+            for agent in &p.agent_panes {
+                let state = crate::lifecycle::of_agent(
+                    agent,
+                    if host.reachable && host.service == "up" {
+                        crate::lifecycle::Host::Up
+                    } else {
+                        crate::lifecycle::Host::Unavailable
+                    },
+                )
+                .state;
+                *states.entry(state.as_str()).or_insert(0) += 1;
+            }
             format!(
                 "mem {:.1}/{:.1}GiB disk {:.0}% free agents {} ({})",
                 p.memory.used_bytes as f64 / gib,
                 p.memory.total_bytes as f64 / gib,
                 p.disk_free_percent,
                 p.agents.total,
-                p.agents
-                    .by_status
+                states
                     .iter()
                     .map(|(state, n)| format!("{} {n}", one_line(state)))
                     .collect::<Vec<_>>()
@@ -478,10 +490,23 @@ pub fn render(status: &Status) -> String {
         }
         if let Some(probe) = &host.probe {
             for agent in &probe.agent_panes {
+                // The lifecycle owner publishes the state beside the raw terminal state.
+                // The status row shows the derived state, so a Herdr `done` never reads
+                // as a finished handoff.
+                let state = crate::lifecycle::of_agent(
+                    agent,
+                    if host.reachable && host.service == "up" {
+                        crate::lifecycle::Host::Up
+                    } else {
+                        crate::lifecycle::Host::Unavailable
+                    },
+                )
+                .state
+                .as_str();
                 lines.push(format!(
                     "  {} {} {}{}",
                     agent.pane,
-                    agent.state,
+                    state,
                     agent.name.as_deref().unwrap_or(""),
                     agent.stalled_since_ms.map_or_else(String::new, |_| format!(
                         " stalled {}",
