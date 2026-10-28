@@ -11,13 +11,25 @@ use std::sync::Mutex;
 struct Commands {
     calls: Mutex<Vec<String>>,
     owner: Mutex<String>,
+    /// The custodian agent, when the test sets one.
+    custodian: Mutex<Option<serde_json::Value>>,
 }
 impl Shell for Commands {
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         let command = format!("{program} {}", args.join(" "));
         self.calls.lock().unwrap().push(command.clone());
         let stdout = if args == ["agent", "list"] {
-            json!({"result":{"agents":[{"pane_id":"owner","agent_status":*self.owner.lock().unwrap()}]}}).to_string()
+            let mut agents =
+                vec![json!({"pane_id":"owner","agent_status":*self.owner.lock().unwrap()})];
+            if let Some(custodian) = self.custodian.lock().unwrap().clone() {
+                let mut listed = custodian.clone();
+                if let Some(session) = listed.get("session").cloned() {
+                    listed["agent_session"] = json!({"kind":"id","value":session});
+                    listed.as_object_mut().unwrap().remove("session");
+                }
+                agents.push(listed);
+            }
+            json!({"result":{"agents":agents}}).to_string()
         } else if program == "ssh" {
             serde_json::to_string("peer log line").unwrap()
         } else if args.get(1).is_some_and(|s| s == "read") {
@@ -74,6 +86,35 @@ impl Rig {
         )
         .unwrap();
     }
+    /// A custodian pane, idle and live, that runs `session` and reads its inbox.
+    fn custodian(&self, session: Option<&str>) {
+        let mut agent = json!({"pane_id":"custodian","agent":"pi","agent_status":"idle",
+            "terminal_id":"term_custodian"});
+        if let Some(session) = session {
+            agent["session"] = json!(session);
+        }
+        *self.shell.custodian.lock().unwrap() = Some(agent);
+        crate::inbox::claim(
+            &self.ledger,
+            "term_custodian",
+            &crate::inbox::Reader {
+                harness: "pi".into(),
+                pane: "custodian".into(),
+                registered_ms: 0,
+            },
+            0,
+        )
+        .unwrap();
+    }
+    /// The custody record of `item`, held by `pane`.
+    fn custody(&self, item: &str, pane: &str, session: Option<&str>) {
+        let mut record = json!({"item":item,"host":"local","owner_pane":"owner",
+            "custodian_pane":pane,"revision":1,"claims":[]});
+        if let Some(session) = session {
+            record["custodian_session"] = json!(session);
+        }
+        self.ledger.write("custody.json", &json!([record])).unwrap();
+    }
     fn fleet(&self) -> Fleet<'_> {
         Fleet {
             shell: &self.shell,
@@ -108,12 +149,24 @@ impl Rig {
         modified: Option<u64>,
     ) -> Vec<HostReport> {
         *self.shell.owner.lock().unwrap() = owner.into();
+        let mut panes = vec![json!({"pane_id":"owner"}), json!({"pane_id":"child"})];
+        let mut agents = vec![
+            json!({"pane":"owner","agent":"pi","state":owner,"name":"parent","transcript":null,"transcript_modified":null,"terminal_id":"term_owner"}),
+            json!({"pane":"child","agent":"pi","state":child,"name":"test-child","transcript":modified.map(|_|"/transcript"),"transcript_modified":modified}),
+        ];
+        if let Some(custodian) = self.shell.custodian.lock().unwrap().clone() {
+            let mut entry = json!({"pane":custodian["pane_id"],"agent":"pi",
+                "state":custodian["agent_status"],"name":"custodian","transcript":null,
+                "transcript_modified":null,"terminal_id":custodian["terminal_id"]});
+            if let Some(session) = custodian.get("session") {
+                entry["agent_session"] = session.clone();
+            }
+            panes.push(json!({"pane_id":"custodian"}));
+            agents.push(entry);
+        }
         let mut snapshot: Snapshot = serde_json::from_value(json!({"sampled_ms":now,"probe":{
             "host":"local","label":"local","load1":0.0,"cores":1,"memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":99.0,"agents":{"total":2,"by_status":{}},"reservations":[],
-            "panes":[{"pane_id":"owner"},{"pane_id":"child"}],"agent_panes":[
-                {"pane":"owner","agent":"pi","state":owner,"name":"parent","transcript":null,"transcript_modified":null,"terminal_id":"term_owner"},
-                {"pane":"child","agent":"pi","state":child,"name":"test-child","transcript":modified.map(|_|"/transcript"),"transcript_modified":modified}
-            ]}})).unwrap();
+            "panes":panes,"agent_panes":agents}})).unwrap();
         observe(&mut snapshot.probe, None, now);
         self.ledger.write("host.json", &snapshot).unwrap();
         self.fleet().status(now).unwrap()
@@ -121,6 +174,16 @@ impl Rig {
     /// The check-ins in the owner's inbox, oldest first.
     fn check_ins(&self) -> Vec<String> {
         let mut notes: Vec<_> = crate::inbox::received(&self.ledger, "term_owner")
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == "check-in")
+            .collect();
+        notes.sort_by_key(|r| r.created_ms);
+        notes.into_iter().map(|r| r.text).collect()
+    }
+    /// The check-ins in the custodian's inbox, oldest first.
+    fn custodian_check_ins(&self) -> Vec<String> {
+        let mut notes: Vec<_> = crate::inbox::received(&self.ledger, "term_custodian")
             .unwrap()
             .into_iter()
             .filter(|r| r.kind == "check-in")
@@ -426,6 +489,45 @@ fn finished_child_ends_its_item_when_its_pane_is_gone() {
         crate::items::list(&rig.ledger).unwrap()[0].closed_ms,
         Some(60_001)
     );
+}
+
+#[test]
+fn a_claimed_child_is_checked_in_with_its_custodian_not_its_origin_owner() {
+    let rig = Rig::new();
+    rig.item("agent");
+    rig.custodian(Some("claimant-session"));
+    rig.custody("child", "custodian", Some("claimant-session"));
+    let reports = rig.reports(1_800_001, "idle", "working", Some(1_800_001));
+    tick(&rig.fleet(), &reports, 1_800_001).unwrap();
+    // The check-in reaches the pane that holds the child now.
+    assert_eq!(rig.custodian_check_ins().len(), 1);
+    assert!(rig.custodian_check_ins()[0].contains("test-child on local"));
+    // The origin owner holds no child now, so it hears nothing.
+    assert_eq!(rig.prompts(), 0);
+}
+
+#[test]
+fn a_child_without_a_custody_record_still_reaches_its_origin_owner() {
+    let rig = Rig::new();
+    rig.item("agent");
+    let reports = rig.reports(1_800_001, "idle", "working", Some(1_800_001));
+    tick(&rig.fleet(), &reports, 1_800_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
+    assert!(rig.check_ins()[0].contains("test-child on local"));
+}
+
+#[test]
+fn a_custodian_running_another_session_gets_no_check_in() {
+    let rig = Rig::new();
+    rig.item("agent");
+    // The custodian pane is live, but it runs another session than the recorded one.
+    rig.custodian(Some("other-session"));
+    rig.custody("child", "custodian", Some("claimant-session"));
+    let reports = rig.reports(1_800_001, "idle", "working", Some(1_800_001));
+    tick(&rig.fleet(), &reports, 1_800_001).unwrap();
+    // Nothing is delivered to a pane that does not hold the child.
+    assert_eq!(rig.custodian_check_ins().len(), 0);
+    assert_eq!(rig.prompts(), 0);
 }
 
 #[test]
