@@ -576,17 +576,43 @@ fn delivery_checks_the_live_session_of_the_recipient_not_the_snapshot() {
         &json!([custody("child", "w1:p2", Some("custodian-session"))]),
     );
     as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
-    // The pane now runs another session, but the snapshot still shows the old one.
-    let mut listed: Value =
-        serde_json::from_slice(&fs::read(rig.dir.join("agents.json")).unwrap()).unwrap();
+    // Publication samples the custodian, then the pane changes session before delivery.
+    let mut listed = rig.read("agents.json");
     for agent in listed["result"]["agents"].as_array_mut().unwrap() {
         if agent["pane_id"] == json!("w1:p2") {
             agent["agent_session"] = json!({"kind":"path","value":"another-session"});
         }
     }
-    rig.put("agents.json", &listed);
-    serve(&rig);
-    serve(&rig);
+    rig.put("live-agents.json", &listed);
+    fs::rename(rig.dir.join("bin/herdr"), rig.dir.join("bin/herdr-default")).unwrap();
+    rig.script(
+        "herdr",
+        r#"#!/bin/sh
+if test "$*" = 'agent list'; then
+  cat "$RIG/agents.json"
+  cp "$RIG/live-agents.json" "$RIG/agents.json"
+else
+  exec "$RIG/bin/herdr-default" "$@"
+fi
+"#,
+    );
+    // Finish one delivery pass before the next publication can refresh the snapshot.
+    let out = rig.run(&["serve", "--once", "--interval", "60"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let snapshot = rig.read("state/host.json");
+    assert_eq!(
+        snapshot["probe"]["agent_panes"][1]["agent_session"], "custodian-session",
+        "{snapshot}"
+    );
+    let live = rig.read("agents.json");
+    assert_eq!(
+        live["result"]["agents"][1]["agent_session"]["value"], "another-session",
+        "{live}"
+    );
     let owner = rig.read("state/inbox/term_owner.json");
     assert!(replies(&owner).is_empty(), "{owner}");
 }
