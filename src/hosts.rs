@@ -170,6 +170,10 @@ fn prepare_cause(value: &serde_json::Value, args: &[String]) -> Option<String> {
         let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
         return Some(format!("branch {branch} exists; omit --base"));
     }
+    if message == "branch exists; omit --base" {
+        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
+        return Some(format!("branch {branch} exists; omit --base"));
+    }
     if message.contains("workspace") && message.contains("already open") {
         return Some("workspace already open".to_owned());
     }
@@ -489,11 +493,12 @@ impl<'a> Fleet<'a> {
                 &host.label,
             );
             // A prepare failure may name its cause in a plain message, such as an unknown
-            // base. The cause reaches the ticket, and the peer's own text stays in the
-            // debug file.
+            // base. The cause reaches the ticket as the error itself, and the peer's own
+            // text stays in the debug file.
             if operation == crate::diagnostic::Operation::Prepare
                 && refusal.is_none()
-                && let Some(cause) = value.as_ref().and_then(|value| prepare_cause(value, args))
+                && let Some(value) = value.as_ref()
+                && let Some(cause) = prepare_cause(value, args)
             {
                 return Err(Error::Invalid(format!("ssh {}: {cause}", host.label)));
             }
@@ -1320,6 +1325,18 @@ mod tests {
         assert_eq!(
             read("{\"error\":\"branch worker exists; omit --base\"}".to_owned(),),
             "ssh peer: branch worker exists; omit --base"
+        );
+        assert_eq!(
+            read("{\"error\":\"branch exists; omit --base\"}".to_owned()),
+            "ssh peer: branch worker exists; omit --base"
+        );
+        assert_eq!(
+            read("{\"error\":\"requested base unavailable on this host\"}".to_owned()),
+            "ssh peer: unknown base origin/x"
+        );
+        assert_eq!(
+            read("{\"error\":\"workspace already open\"}".to_owned()),
+            "ssh peer: workspace already open"
         );
         assert_eq!(
             read("{\"error\":\"Herdr workspace w8 already shows the checkout\"}".to_owned()),

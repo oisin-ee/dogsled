@@ -94,6 +94,34 @@ fn real_peer_prepare(rig: &Rig) {
         "  *'host prepare'*) printf '%s\\n' '{\"pane_id\":\"w9:p1\",\"terminal_id\":\"term_remote\",\"path\":\"/remote/tree\"}' ;;", &handler));
 }
 
+/// The peer runs the real prepare command, so the cause it sends is the real one.
+#[test]
+fn a_real_remote_unknown_base_names_the_base_in_the_ticket() {
+    let (rig, repo) = place::place_rig("diagnostic-real-unknown-base");
+    rig.peer();
+    real_peer_prepare(&rig);
+    let (code, error) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/absent",
+        "--name",
+        "worker",
+        "--message",
+        "TASK_SECRET",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains("origin/absent"), "{error}");
+    assert!(text.contains("netcup"), "{error}");
+    assert!(!error.to_string().contains("TASK_SECRET"), "{error}");
+}
+
 /// A bare origin that holds one branch the clone has never fetched.
 fn origin_with_branch(rig: &Rig, repo: &Path, branch: &str) {
     let bare = rig.dir.join("origin.git");
@@ -1009,6 +1037,64 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
     let error: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
     assert_eq!(error["diagnostic"]["cause"], "base_unavailable");
     assert!(!text.contains("PRIVATE_SENTINEL"));
+}
+
+/// A plain prepare failure names its cause in the failed ticket, in the admission
+/// record, and in the owner's inbox.
+#[test]
+fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
+    let rig = Rig::new("diagnostic-plain-ticket");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.peer();
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}),
+    );
+    assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
+    rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let (code, queued) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/absent",
+        "--name",
+        "worker",
+        "--message",
+        "TASK_SECRET",
+    ]);
+    assert_eq!(code, 1, "{queued}");
+    rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
+    fail_peer(
+        &rig,
+        "prepare",
+        &json!({"error":"unknown base origin/absent PRIVATE_SENTINEL"}),
+    );
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    let error = ticket["error"].as_str().unwrap();
+    assert!(error.contains("unknown base origin/absent"), "{ticket}");
+    assert!(error.contains("netcup"), "{ticket}");
+    assert!(!error.contains("PRIVATE_SENTINEL"), "{ticket}");
+    let id = ticket["request"]["id"].as_str().unwrap();
+    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    assert!(
+        attempt["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown base origin/absent"),
+        "{attempt}"
+    );
+    let inbox = rig.read("state/inbox/term_owner.json");
+    let text = inbox[0]["text"].as_str().unwrap();
+    assert!(text.contains("unknown base origin/absent"), "{text}");
+    assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
+    assert!(!text.contains("TASK_SECRET"), "{text}");
 }
 
 #[test]
