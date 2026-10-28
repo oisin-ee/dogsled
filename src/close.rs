@@ -471,17 +471,7 @@ fn remove_target(
             retained_branch: None,
         });
     }
-    // Only the explicit orphan path can replace native done with correlated stopped evidence.
-    if let Guard::StoppedOrphan { episode } = guard {
-        episode.verify_live(shell, ledger, pane)?;
-    } else if guard != Guard::Clean
-        && target.agent.is_some()
-        && !crate::done::finished(ledger, &crate::probe::agent_list(shell)?)?.contains(pane)
-    {
-        return Err(refuse(&format!(
-            "{pane} has not called done; it waits for input"
-        )));
-    }
+    validate_completion(shell, ledger, target, guard)?;
     let tree = match validated {
         Some(tree) => Some(tree),
         None => target
@@ -569,6 +559,27 @@ fn remove_target(
         pane_closed,
         retained_branch,
     })
+}
+
+/// Only the explicit orphan path can replace native done with correlated stopped evidence.
+fn validate_completion(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    target: &crate::probe::Pane,
+    guard: Guard,
+) -> Result<()> {
+    let pane = target.pane_id.as_str();
+    if let Guard::StoppedOrphan { episode } = guard {
+        episode.verify_live(shell, ledger, pane)?;
+    } else if guard != Guard::Clean
+        && target.agent.is_some()
+        && !crate::done::finished(ledger, &crate::probe::agent_list(shell)?)?.contains(pane)
+    {
+        return Err(refuse(&format!(
+            "{pane} has not called done; it waits for input"
+        )));
+    }
+    Ok(())
 }
 
 /// Snapshot the branch while its checkout and repository protection still exist.
