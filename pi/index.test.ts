@@ -22,6 +22,7 @@ function rig() {
 	const renderers = new Map<string, any>();
 	const tools = new Map<string, any>();
 	const sent: any[] = [];
+	const receipts: { customType: string; data: unknown }[] = [];
 	const userMessages: string[] = [];
 	let active: string[] = ["read", "write", "edit", "bash"];
 	let code = 0;
@@ -41,6 +42,7 @@ function rig() {
 		registerCommand(name: string, options: unknown) { commands.set(name, options); },
 		registerShortcut(key: string, options: unknown) { shortcuts.set(key, options); },
 		registerMessageRenderer(type: string, fn: unknown) { renderers.set(type, fn); },
+		appendEntry(customType: string, data: unknown) { receipts.push({ customType, data }); },
 		registerTool(tool: unknown) { tools.set((tool as { name: string }).name, tool); },
 		getActiveTools() { return [...active]; },
 		setActiveTools(names: string[]) { active = [...names]; },
@@ -76,7 +78,7 @@ function rig() {
 		}, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
-	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, userMessages, active: () => [...active], ctx, next,
+	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, receipts, userMessages, active: () => [...active], ctx, next,
 		widget() { return component; },
 		gate: (text: string) => { gate = text; },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
@@ -93,6 +95,37 @@ function withPane(t: { after: (fn: () => void) => void }) {
 	process.env["HERDR_PANE_ID"] = "w1:p1";
 	t.after(() => { if (previous === undefined) delete process.env["HERDR_PANE_ID"]; else process.env["HERDR_PANE_ID"] = previous; });
 }
+
+test("successful claim and accept tools append audit receipts without task operations", async () => {
+	const r = rig();
+	for (const [kind, receipt] of [
+		["claim", { kind: "claim", item: "r-1", outcome: "claimed", claimId: "claim-1", revision: 1, custodianPane: "w1:p1" }],
+		["accept", { kind: "accept", item: "r-1", claimId: "claim-1", revision: 1, resultId: "res-1", reviewId: "review-1", applied: true }],
+	] as const) {
+		const event = { toolName: `mcp__dogsled__${kind}`, toolCallId: `call-${kind}`, content: [{ type: "text", text: JSON.stringify(receipt) }], isError: false, input: {} };
+		assert.equal(await r.invoke("tool_result", event), undefined);
+		assert.deepEqual(r.receipts.at(-1), { customType: "dogsled.custody.v1", data: receipt });
+	}
+	assert.equal(r.receipts.length, 2);
+	assert.deepEqual(r.calls, []);
+	assert.deepEqual(r.sent, []);
+	assert.deepEqual(r.userMessages, []);
+});
+
+test("custody audit ignores refusals, unrelated tools, and malformed receipts", async () => {
+	const r = rig();
+	for (const patch of [
+		{ isError: true },
+		{ toolName: "mcp__dogsled__status" },
+		{ content: [{ type: "text", text: "not JSON" }] },
+		{ content: [{ type: "text", text: JSON.stringify({ kind: "accept", item: "r-1" }) }] },
+		{ content: [{ type: "text", text: JSON.stringify({ error: "refused" }) }] },
+	]) {
+		await r.invoke("tool_result", { toolName: "mcp__dogsled__claim", toolCallId: "c", isError: false, input: {}, content: [{ type: "text", text: JSON.stringify({ kind: "claim", item: "r-1", outcome: "held", revision: 1 }) }], ...patch });
+	}
+	assert.deepEqual(r.receipts, []);
+	assert.deepEqual(r.calls, []);
+});
 
 test("Herdr owns the display: requests the side split and never sets a widget", async t => {
 	withPane(t);

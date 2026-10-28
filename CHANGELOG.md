@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- `dogsled claim <item> [--revision N]` takes custody of an orphaned child on its recording host. Claims use the live caller identity and preserve the original owner. Repeated claims by the custodian are harmless.
+- `dogsled accept <item> --result <id> --evidence <text>` records a review of the exact returned result after a custody claim. The original task stays open. MCP exposes both commands. Pi records successful receipts as `dogsled.custody.v1` audit entries without changes to task state.
+- Check-ins do not repeat orphan notices. Status lists each item once as `orphaned (unclaimed)`, `orphaned (claimed)`, or `unknown`.
+
 ## 0.26.1 - 2026-10-28
 
 - `dogsled drop` accepts an orphan from any session when the origin proves its owner pane is gone or its session ended, by the sweep's custody rule. Unreadable evidence keeps the owner rule.
@@ -269,7 +275,7 @@ Wrangle replaces Shepherdr for delegation: one board, one inbox, and children th
 ## 0.9.0 - 2026-10-15
 
 - `serve` sweeps on its own action worker, beside the watchdog and admission. Each pass builds the doctor plan in sweep scope and applies only entries whose removal loses nothing: ended job tabs and shells in deleted directories (and a workspace made only of them), clean integrated worktrees and clean detached worktrees whose HEAD is on a remote when no pane, workspace, or process holds them, and local branches with no worktree whose every commit is on a remote ref. It uses the same checks as `close` and `prune`, never touches the service's own pane, workspace, or directory, logs each removal as a `wrangle sweep:` line on stderr, and continues past a failed entry. Doctor and `prune` behave as before; everything else stays for `prune`.
-- The sweep closes an orphaned child as `wrangle close` would when its owner pane no longer exists, its agent is idle or done, and its worktree is clean with every commit on a remote ref. A remote child closes with the new `host close --pushed`. A dirty, unpushed, working, or blocked orphan stays open: `status` shows `orphaned:` with the reason, the brief counts it, and every check-in on the host lists it. Status JSON gains `orphans`.
+- The sweep closes an orphaned child as `wrangle close` would when its owner pane no longer exists, its agent is idle or done, and its worktree is clean with every commit on a remote ref. A remote child closes with the new `host close --pushed`. A dirty, unpushed, working, or blocked orphan stays open. Current status lists each item once as `orphaned (unclaimed)`, `orphaned (claimed)`, or `unknown`. Check-ins no longer repeat orphan notices. Status JSON gains `orphans`.
 - Doctor reports a `targets` class: build output, a directory with a `CACHEDIR.TAG` cache-directory signature directly under a main checkout or linked worktree, such as Rust's `target/`. It is removable when no workspace shows the checkout and no pane or process works in it; only `prune targets` removes it, after it checks the tag again.
 - Doctor also reports a branch as integrated when a clean `git merge-tree` result equals the default branch's tree. The detail names the merge-tree rule. Conflicts and changed trees do not satisfy this rule. Integration checks disable external diff tools and text conversion. The merge-tree check uses an isolated object store without user configuration or attributes.
 - Close each job tab after `exec` saves the final record and reports completion. `wait` and `logs` still work after the tab closes.

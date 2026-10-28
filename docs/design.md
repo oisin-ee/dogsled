@@ -105,6 +105,14 @@ The admission worker starts the child under the existing setup limit, independen
 CLI agent launches remain synchronous. Startup errors retain their original classification and add recent pane output when available.
 An interrupted startup can recover that output on confirmation. Diagnostic reads do not change launch receipts, holds, or closure checks.
 
+### Custody of orphaned children
+
+The original owner and task stay immutable. A separate host-local custody record names the current custodian, its session, the revision, and its claim history. `claim` uses the caller's live pane and session, never supplied identity. It transfers custody only after the host proves the current custodian is gone. The custody lock checks the expected revision and refuses custody that moved after the evidence read. A repeated claim by the current custodian changes nothing.
+
+`accept` delegates to the unit request's review owner. The review names the exact saved returned result, claim, custody revision, execution, reviewer, and evidence. Only the live custodian can record it. A matching replay changes nothing, and a conflicting review for the same claim is refused. The original task stays open. Result acceptance is not task completion.
+
+CLI and MCP share the same thin adapters. Pi appends successful tool receipts under `dogsled.custody.v1` for audit only. This path never calls todo or its provider. Status lists each item once as `orphaned (unclaimed)`, `orphaned (claimed)`, or `unknown`. Check-ins do not repeat orphan notices.
+
 ### 4. No wait without a deadline: stalls and check-ins
 
 Rule: an agent that owns an open child or job hears from dogsled at least every 30 min while it is idle, until that work ends. Nothing depends on the agent remembering.

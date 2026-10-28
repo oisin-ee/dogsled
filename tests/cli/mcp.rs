@@ -159,7 +159,7 @@ fn mcp_request_deadline_is_checked_before_each_receive() {
 }
 
 #[test]
-fn mcp_lists_the_eleven_tools_with_their_schemas() {
+fn mcp_lists_the_tools_with_their_schemas() {
     let rig = Rig::new("mcp-list");
     let mut client = Client::start(&rig);
     let tools = client.request("tools/list", &json!({}));
@@ -186,7 +186,9 @@ fn mcp_lists_the_eleven_tools_with_their_schemas() {
     assert_eq!(
         names,
         [
+            expect("accept", &["evidence", "item", "result"]),
             expect("cancel", &["id"]),
+            expect("claim", &["item"]),
             expect("close", &["pane"]),
             expect("done", &[]),
             expect("drop", &["id"]),
@@ -220,6 +222,45 @@ fn mcp_lists_the_eleven_tools_with_their_schemas() {
     for field in ["profile", "kind", "host", "branch", "base", "cwd"] {
         assert!(legacy["properties"][field].is_object(), "{spawn}");
     }
+}
+
+#[test]
+fn mcp_custody_tools_claim_and_accept_without_completing_the_item() {
+    let rig = super::claim::rig("mcp-custody", "w9:p9");
+    super::claim::returned(&rig);
+    let before = fs::read(rig.dir.join("state/items.json")).unwrap();
+    let mut client = Client::start(&rig);
+    let (claim, failed) = client.call("claim", &json!({"item":super::claim::ID,"revision":0}));
+    assert!(!failed, "{claim}");
+    assert_eq!(claim["custodianPane"], "w1:p1");
+    let (receipt, failed) = client.call(
+        "accept",
+        &json!({
+            "item":super::claim::ID,"result":"res-1","evidence":"reviewed exact result"
+        }),
+    );
+    assert!(!failed, "{receipt}");
+    assert_eq!(receipt["claimId"], claim["claimId"]);
+    assert_eq!(receipt["resultId"], "res-1");
+    assert_eq!(receipt["reviewer"], "w1:p1");
+    assert_eq!(fs::read(rig.dir.join("state/items.json")).unwrap(), before);
+}
+
+#[test]
+fn mcp_custody_tools_report_refusals() {
+    let rig = super::claim::rig("mcp-custody-refused", "w2:p1");
+    let mut client = Client::start(&rig);
+    let (error, failed) = client.call("claim", &json!({"item":super::claim::ID}));
+    assert!(failed, "{error}");
+    assert!(error.as_str().unwrap().contains("not_orphan"));
+    let (error, failed) = client.call(
+        "accept",
+        &json!({
+            "item":super::claim::ID,"result":"res-1","evidence":"reviewed"
+        }),
+    );
+    assert!(failed, "{error}");
+    assert!(error.as_str().unwrap().contains("custody"));
 }
 
 #[test]
