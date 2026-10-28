@@ -823,62 +823,43 @@ pub fn launch(
         });
     }
     // Final receipts replay without a repository lock, allocation, or store writes.
-    if matches!(launch.action, Action::Agent { .. }) {
-        if let Some(result) = crate::launch::replay(ledger, launch)? {
-            return Ok(result);
-        }
-    } else if let Some(value) = ledger
-        .child("launches")
-        .read::<Value>(&format!("{}.json", launch.id))?
-    {
-        if let Action::Job {
-            cmd,
-            timeout_ms,
-            idle_timeout_ms,
-            ..
-        } = &launch.action
-        {
-            correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
-        }
-        return Ok(value);
+    if let Some(result) = replay_launch(ledger, launch)? {
+        return Ok(result);
     }
-    // A stale job claim authorizes no discovery or generation creation on a replacement.
     if matches!(launch.action, Action::Job { .. }) {
         require_unclaimed(ledger, &launch.id)?;
     }
-    let preparation = crate::prepare::saved_tree(ledger, &launch.cwd, Some(&launch.id))?;
-    let (recorded, captured) = crate::launch::checkout_for_request(ledger, launch)?;
-    if preparation
-        .as_ref()
-        .zip(captured.as_ref())
-        .is_some_and(|(prepared, saved)| prepared.identity != saved.identity)
-    {
-        return Err(crate::worktree::refuse(
-            "preparation and launch checkout identities differ",
-        ));
-    }
-    let saved = preparation.or(captured);
+    let (_, saved) = launch_checkout(ledger, launch)?;
     let repo = saved.as_ref().map(|t| std::path::PathBuf::from(&t.repo));
     let common = crate::worktree::common_dir(shell, std::path::Path::new(&launch.cwd));
     if repo.is_none() && common.is_err() {
         return launch_guarded(ledger, shell, launch, None);
     }
-    if recorded && saved.is_none() {
-        return Err(crate::worktree::refuse(
-            "recorded launch has no checkout identity",
-        ));
-    }
     let root = repo
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new(&launch.cwd));
     crate::worktree::with_lifecycle(shell, ledger, root, |guard| {
+        // Another invocation may have completed or captured this request while we waited.
+        // Re-read every owner before fresh discovery can create a generation marker.
+        if let Some(result) = replay_launch(ledger, launch)? {
+            return Ok(result);
+        }
+        if matches!(launch.action, Action::Job { .. }) {
+            require_unclaimed(ledger, &launch.id)?;
+        }
+        let (recorded, saved) = launch_checkout(ledger, launch)?;
+        if recorded && saved.is_none() {
+            return Err(crate::worktree::refuse(
+                "recorded launch has no checkout identity",
+            ));
+        }
         let live = if let Some(saved) = &saved {
             let live = crate::worktree::snapshot(shell, &launch.cwd)?
                 .ok_or_else(|| crate::worktree::refuse("prepared checkout disappeared"))?;
             crate::worktree::validate_identity(shell, &live)?;
             if saved.identity != live.identity
                 || saved.branch != live.branch
-                || saved.path != live.path
+                || !crate::worktree::same(&saved.path, &live.path)
             {
                 return Err(crate::worktree::refuse(
                     "prepared checkout identity changed",
@@ -891,6 +872,46 @@ pub fn launch(
         let checkout = live.as_ref().map(crate::worktree::Linked::tree);
         launch_guarded(ledger, shell, launch, checkout.as_ref())
     })
+}
+
+fn replay_launch(ledger: &Ledger, launch: &Launch) -> Result<Option<Value>> {
+    if matches!(launch.action, Action::Agent { .. }) {
+        return crate::launch::replay(ledger, launch);
+    }
+    if let Some(value) = ledger
+        .child("launches")
+        .read::<Value>(&format!("{}.json", launch.id))?
+    {
+        if let Action::Job {
+            cmd,
+            timeout_ms,
+            idle_timeout_ms,
+            ..
+        } = &launch.action
+        {
+            correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
+        }
+        return Ok(Some(value));
+    }
+    Ok(None)
+}
+
+fn launch_checkout(
+    ledger: &Ledger,
+    launch: &Launch,
+) -> Result<(bool, Option<crate::cleanup::Tree>)> {
+    let preparation = crate::prepare::saved_tree(ledger, &launch.cwd, Some(&launch.id))?;
+    let (recorded, captured) = crate::launch::checkout_for_request(ledger, launch)?;
+    if preparation
+        .as_ref()
+        .zip(captured.as_ref())
+        .is_some_and(|(prepared, saved)| prepared.identity != saved.identity)
+    {
+        return Err(crate::worktree::refuse(
+            "preparation and launch checkout identities differ",
+        ));
+    }
+    Ok((recorded, preparation.or(captured)))
 }
 
 fn launch_guarded(

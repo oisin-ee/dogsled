@@ -643,7 +643,9 @@ pub fn dropped(ledger: &Ledger, item: &crate::items::Item, now: u64) -> Result<(
                 && m.branch
                     .as_ref()
                     .zip(item.branch.as_ref())
-                    .is_some_and(|(a, b)| a.repo == b.repo && a.name == b.name)
+                    .is_some_and(|(a, b)| {
+                        crate::worktree::same(&a.repo, &b.repo) && a.name == b.name
+                    })
         }) {
             mark.dropped_ms.get_or_insert(now);
             if let Some(branch) = &mut mark.branch {
@@ -825,8 +827,8 @@ pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Re
 }
 
 /// Checkout absence alone never establishes completion. Reconciliation needs the saved
-/// native-done boundary, sealed reply, and original checkout identity.
-fn removed_handoff(ledger: &Ledger, mark: &Mark) -> Result<bool> {
+/// native-done boundary, sealed reply, and original checkout and terminal identities.
+fn removed_handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, mark: &Mark) -> Result<bool> {
     if !mark.native_done || mark.item.is_none() {
         eprintln!(
             "dogsled handoff: {}: removed checkout handoff is unproven",
@@ -834,7 +836,23 @@ fn removed_handoff(ledger: &Ledger, mark: &Mark) -> Result<bool> {
         );
         return Ok(false);
     }
-    match crate::launch::validate_checkout_owner(ledger, &mark.pane, mark.item.as_deref(), None) {
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    let terminal = if panes.iter().any(|pane| pane.pane_id == mark.pane) {
+        let Some(terminal) = terminals.get(&mark.pane).filter(|id| !id.is_empty()) else {
+            eprintln!(
+                "dogsled handoff: {}: current terminal identity is unknown; nothing was closed",
+                mark.pane
+            );
+            return Ok(false);
+        };
+        Some(terminal.as_str())
+    } else {
+        // This is not proof of checkout absence. Only close_mark's guarded close may
+        // reconcile a missing pane, after verifying checkout absence under its lock.
+        None
+    };
+    match crate::launch::validate_checkout_owner(ledger, &mark.pane, mark.item.as_deref(), terminal)
+    {
         Ok(()) => (),
         Err(error @ crate::launch::CheckoutOwnerError::Refused(_)) => {
             eprintln!("dogsled handoff: {}: {error}", mark.pane);
@@ -902,7 +920,7 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
         // sealed native reply plus saved checkout identity permits finishing that handoff.
         if agent.is_none()
             && (agents.iter().any(|agent| agent.pane == mark.pane)
-                || !removed_handoff(ledger, &mark)?)
+                || !removed_handoff(ledger, shell, &mark)?)
         {
             continue;
         }

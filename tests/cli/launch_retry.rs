@@ -118,6 +118,120 @@ fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
     }
 }
 
+fn same_request_git_barrier(rig: &Rig) -> (Fifo, Fifo) {
+    let ready = lifecycle_git_barrier(rig);
+    let release = Fifo::new(&rig.dir, "launch-lookup-release");
+    let actual = isolated("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(actual.status.success());
+    let actual = String::from_utf8(actual.stdout).unwrap();
+    rig.script(
+        "git",
+        &format!(
+            r#"#!/bin/sh
+case "$*" in
+  *'rev-parse --path-format=absolute --git-common-dir')
+    if mkdir "$RIG/first-launch-lookup" 2>/dev/null; then
+      printf 'ready\n' > "$RIG/lifecycle-git-ready"
+      read released < "$RIG/launch-lookup-release"
+    fi ;;
+esac
+exec '{}' "$@"
+"#,
+            actual.trim()
+        ),
+    );
+    (ready, release)
+}
+
+#[test]
+fn launch_rechecks_same_request_after_waiting_before_discovery() {
+    for complete in [false, true] {
+        let (rig, repo) = place::place_rig(&format!("same-request-wait-{complete}"));
+        let (ready, release) = same_request_git_barrier(&rig);
+        let _ready_hold = ready.hold();
+        let _release_hold = release.hold();
+        let tree = repo.join(".worktrees/same-request");
+        close::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "same-request",
+                tree.to_str().unwrap(),
+            ],
+        );
+        let mut request = host_request(&rig);
+        request["cwd"] = json!(tree);
+        let text = request.to_string();
+        let args = [
+            "--json",
+            "--budget-ms",
+            "15000",
+            "host",
+            "launch",
+            "--request",
+            &text,
+        ];
+        let lock = repository_lifecycle_lock(&repo);
+        let mut waiter = rig.start(&args);
+        read_fifo(ready.path(), "first launch before repository protection");
+        probe_free_lock(&rig.dir.join("state/launches/recover-one.lock"));
+        probe_free_lock(&rig.dir.join("state/done.lock"));
+        lock.unlock().unwrap();
+        if !complete {
+            fs::write(rig.dir.join("start-fails"), "").unwrap();
+        }
+        let (code, first) = rig.json(&["host", "launch", "--request", &text]);
+        assert_eq!(code == 0, complete, "{first}");
+        let captured =
+            rig.read("state/launches/recover-one.progress.json")["result"]["checkout"].clone();
+        assert!(captured["identity"].is_object(), "{captured}");
+        let lock = repository_lifecycle_lock(&repo);
+        close::git(
+            &repo,
+            &["worktree", "remove", "-f", "-f", tree.to_str().unwrap()],
+        );
+        close::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                tree.to_str().unwrap(),
+                "same-request",
+            ],
+        );
+        let admin = PathBuf::from(close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim());
+        let marker = admin.join("dogsled-checkout-id");
+        assert!(!marker.exists());
+        let mut release_file = release.hold();
+        writeln!(release_file, "continue").unwrap();
+        lock.unlock().unwrap();
+        let status = waiter.wait();
+        let (stdout, stderr) = waiter.output();
+        assert_eq!(status.success(), complete, "{stdout} {stderr}");
+        if complete {
+            let replay: Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(replay, first);
+        } else {
+            assert!(stdout.contains("identity changed"), "{stdout} {stderr}");
+        }
+        assert!(
+            !marker.exists(),
+            "waiter minted an identity for the replacement"
+        );
+        assert_eq!(
+            rig.log("herdr.log").matches("agent start worker ").count(),
+            1
+        );
+    }
+}
+
 #[test]
 fn non_repository_launch_skips_repository_protection() {
     let rig = Rig::new("launch-outside-repository");
@@ -192,6 +306,7 @@ fn repository_lock_precedes_launch_and_store_locks() {
         let mut contender = rig.start(&arguments);
         read_fifo(ready.path(), "lock-order repository lookup");
         for name in [
+            "done.lock",
             "preparations.lock",
             "worktrees.lock",
             "jobs/c1-order.lock",
@@ -312,6 +427,40 @@ fn main_checkout_launch_recovery_preserves_the_same_captured_identity() {
     assert_eq!(
         captured["identity"]["common"],
         captured["identity"]["gitdir"]
+    );
+    assert!(captured["identity"]["generation"].is_string(), "{captured}");
+    rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w8:p1","terminal_id":"term_tree","name":"worker","agent":"pi","agent_status":"idle"}]}}));
+    let (code, recovered) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{recovered}");
+    assert_eq!(recovered["checkout"], captured);
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
+}
+
+#[test]
+fn unborn_main_checkout_recovers_an_interrupted_same_request_launch() {
+    let (rig, _) = place::place_rig("launch-unborn-recovery");
+    let repo = rig.dir.join("home/unborn");
+    fs::create_dir_all(&repo).unwrap();
+    close::git(&repo, &["init", "-q", "-b", "main"]);
+    let ready = lifecycle_git_barrier(&rig);
+    let _ready_hold = ready.hold();
+    let mut request = host_request(&rig);
+    request["cwd"] = json!(repo);
+    fs::write(rig.dir.join("start-fails"), "").unwrap();
+    let (code, failed) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_ne!(code, 0, "{failed}");
+    let captured =
+        rig.read("state/launches/recover-one.progress.json")["result"]["checkout"].clone();
+    assert_eq!(captured["head"], "", "{captured}");
+    assert_eq!(captured["branch"], "main", "{captured}");
+    assert_eq!(
+        std::path::Path::new(captured["identity"]["gitdir"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        repo.join(".git").canonicalize().unwrap()
     );
     assert!(captured["identity"]["generation"].is_string(), "{captured}");
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w8:p1","terminal_id":"term_tree","name":"worker","agent":"pi","agent_status":"idle"}]}}));

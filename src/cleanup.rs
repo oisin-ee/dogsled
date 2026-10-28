@@ -27,7 +27,7 @@ pub struct Tree {
 
 /// How a tree found after the plan relates to the planned tree.
 #[derive(Debug, PartialEq, Eq)]
-enum Drift {
+pub(crate) enum Drift {
     Same,
     /// The same repository, path, and branch at a new commit: live work, so a skip that the next
     /// survey re-plans.
@@ -39,7 +39,7 @@ enum Drift {
 impl Tree {
     /// Compare `now`, a fresh listing, with this planned tree. Every recheck uses this, so a new
     /// commit is a skip and an identity change is a failure on each path.
-    fn drift(&self, now: &Tree) -> Drift {
+    pub(crate) fn drift(&self, now: &Tree) -> Drift {
         if !crate::worktree::same(&self.repo, &now.repo)
             || !crate::worktree::same(&self.path, &now.path)
             || self.branch != now.branch
@@ -262,7 +262,7 @@ pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
     })?;
     ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
-        trees.retain(|t| t.path != tree.path);
+        trees.retain(|t| !crate::worktree::same(&t.path, &tree.path));
         trees.push(tree);
         ledger.write("worktrees.json", &trees)
     })
@@ -564,13 +564,6 @@ fn porcelain(shell: &dyn Shell, repo: &str) -> Result<Vec<(Tree, bool)>> {
         } else if field == "prunable" || field.starts_with("prunable ") {
             prunable = true;
         } else if field.is_empty() && !tree.path.is_empty() {
-            // Read only: a stale request must never acquire today's generation.
-            tree.identity = if crate::worktree::same(&tree.path, repo) {
-                None
-            } else {
-                crate::worktree::linked_or_detached(shell, &tree.path)?
-                    .and_then(|linked| linked.identity)
-            };
             result.push((tree.clone(), std::mem::take(&mut prunable)));
             tree.path.clear();
             tree.branch.clear();
@@ -771,6 +764,7 @@ fn readable(
         let discovered =
             crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&repo), |guard| {
                 let mut found = porcelain(node.shell, &repo)?;
+                let mut refused = BTreeSet::new();
                 for (tree, prunable) in found.iter_mut().skip(1) {
                     if *prunable || unlinked_reason(tree, Some(false)).is_some() {
                         continue;
@@ -778,28 +772,42 @@ fn readable(
                     let saved = recorded.iter().find(|saved| {
                         crate::worktree::same(&saved.path, &tree.path) && saved.identity.is_some()
                     });
-                    let linked = if let Some(saved) = saved {
-                        let linked = guard.observe(node.shell, &tree.path)?;
-                        if linked
-                            .as_ref()
-                            .is_some_and(|now| saved.identity != now.identity)
-                        {
-                            return Err(crate::worktree::refuse("worktree identity changed"));
+                    let captured = (|| {
+                        if let Some(saved) = saved {
+                            let linked = guard.observe(node.shell, &tree.path)?;
+                            if linked
+                                .as_ref()
+                                .is_some_and(|now| saved.identity != now.identity)
+                            {
+                                return Err(crate::worktree::refuse("worktree identity changed"));
+                            }
+                            Ok(linked)
+                        } else {
+                            guard.discover(node.shell, &tree.path)
                         }
-                        linked
-                    } else {
-                        guard.discover(node.shell, &tree.path)?
-                    };
-                    if let Some(linked) = linked {
-                        *tree = linked.tree();
+                    })();
+                    match captured {
+                        Ok(Some(linked)) => *tree = linked.tree(),
+                        Ok(None) => (),
+                        Err(error) => {
+                            let mut warning = entry(
+                                "worktrees",
+                                tree.path.clone(),
+                                format!("unreadable: {error}"),
+                                false,
+                            );
+                            warning.tree = Some(tree.clone());
+                            plan.entries.push(warning);
+                            refused.insert(tree.path.clone());
+                        }
                     }
                 }
-                Ok(found)
+                Ok((found, refused))
             });
         match discovered {
-            Ok(found) => {
+            Ok((found, refused)) => {
                 for (tree, prunable) in found.iter().skip(1) {
-                    if !Path::new(&tree.path).exists() {
+                    if refused.contains(&tree.path) || !Path::new(&tree.path).exists() {
                         continue;
                     }
                     match unlinked_reason(tree, Some(*prunable)) {
@@ -1748,13 +1756,15 @@ fn vanished(node: &Node<'_>, tree: &Tree) -> Option<Entry> {
     recorded
         .into_iter()
         .find(|t| crate::worktree::same(&t.path, &tree.path))
-        .map(|t| {
-            entry(
+        .map(|_| {
+            let mut vanished = entry(
                 "worktrees",
-                t.path,
+                tree.path.clone(),
                 "removed during the survey; drops the stale registration".into(),
                 true,
-            )
+            );
+            vanished.tree = Some(tree.clone());
+            vanished
         })
 }
 
@@ -1774,14 +1784,19 @@ fn validate_tree(
     node: &Node<'_>,
     planned: &Tree,
 ) -> Result<Recheck> {
-    let current = repository_trees(node.shell, &planned.repo)?
+    let mut current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
-        .find(|t| t.path == planned.path);
+        .find(|t| crate::worktree::same(&t.path, &planned.path));
     if gone(guard, node.shell, planned) {
         return Ok(Recheck::Gone);
     }
     // Git lost it after the survey: the next survey holds it; this pass touches nothing.
     let reason = unlinked_reason(planned, current.as_ref().map(|_| false));
+    if let Some(current) = current.as_mut() {
+        current.identity = guard
+            .observe(node.shell, &current.path)?
+            .and_then(|linked| linked.identity);
+    }
     let (Some(current), None) = (current, reason) else {
         return Err(Error::Invalid(format!(
             "refuse {}: {}; directory remains",
@@ -1856,7 +1871,7 @@ pub fn forget_matching(ledger: &Ledger, tree: &Tree) -> Result<()> {
         recorded.retain(|record| {
             !crate::worktree::same(&record.path, &tree.path)
                 || record.identity != tree.identity
-                || record.repo != tree.repo
+                || !crate::worktree::same(&record.repo, &tree.repo)
                 || record.branch != tree.branch
         });
         ledger.write("worktrees.json", &recorded)
@@ -1951,7 +1966,7 @@ fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
             let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
             repos.remove(repo);
             // An existing worktree may still hold content even when its main checkout is gone.
-            trees.retain(|tree| tree.repo != repo || !missing(&tree.path));
+            trees.retain(|tree| !crate::worktree::same(&tree.repo, repo) || !missing(&tree.path));
             node.ledger.write("worktrees.json", &trees)?;
             node.ledger.write("repositories.json", &repos)
         })
@@ -2883,7 +2898,7 @@ mod tests {
         let rig = Rig::new(json!([]));
         let repo = rig.ledger.dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let repo = repo.display().to_string();
+        let repo = std::fs::canonicalize(repo).unwrap().display().to_string();
         let tree = Tree {
             repo: repo.clone(),
             path: format!("{repo}/.worktrees/tiers-case"),
