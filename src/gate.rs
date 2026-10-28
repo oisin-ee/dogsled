@@ -484,6 +484,7 @@ mod tests {
                 path: "/t".into(),
                 branch: "feat/x".into(),
                 head: "h".into(),
+                identity: None,
             }),
             kind: None,
             dirty_paths: Vec::new(),

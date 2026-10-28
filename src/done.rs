@@ -824,6 +824,37 @@ pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Re
     ledger.with_lock("handoff", || handoff_locked(ledger, shell, now))
 }
 
+/// Checkout absence alone never establishes completion. Reconciliation needs the saved
+/// native-done boundary, sealed reply, and original checkout identity.
+fn removed_handoff(ledger: &Ledger, mark: &Mark) -> Result<bool> {
+    Ok(mark.native_done
+        && mark.sealed.is_some()
+        && mark.reply.as_ref().is_some_and(|reply| reply.done)
+        && crate::launch::checkout_for_pane(ledger, &mark.pane)?.is_some())
+}
+
+fn close_mark(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    mark: &mut Mark,
+    now: u64,
+) -> Result<()> {
+    let pane = mark.pane.clone();
+    crate::close::with_local(
+        shell,
+        ledger,
+        &pane,
+        &crate::close::Caller::from_env(),
+        crate::close::Guard::Writer,
+        |_| {
+            mark.closed_ms = Some(now);
+            save(ledger, mark)?;
+            crate::items::close(ledger, crate::hosts::LOCAL, &mark.pane, now)?;
+            Ok(())
+        },
+    )
+}
+
 fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
     if list(ledger)?.is_empty() {
         return Ok(());
@@ -845,9 +876,12 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
         if mark.closed_ms.is_some() {
             continue;
         }
-        let Some(agent) = agents.iter().find(|a| matches(&mark, a) && a.done) else {
+        let agent = agents.iter().find(|a| matches(&mark, a) && a.done);
+        // A removal can retire the pane before host-local reconciliation. Only an already
+        // sealed native reply plus saved checkout identity permits finishing that handoff.
+        if agent.is_none() && !removed_handoff(ledger, &mark)? {
             continue;
-        };
+        }
         if !crate::launch::handoff_ready(ledger, &mark.pane)? {
             continue;
         }
@@ -885,7 +919,10 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
         {
             crate::items::set_reply_with(ledger, id, reply.clone(), mark.native_done)?;
         }
-        if mark.branch.is_none() && !mark.detached {
+        if mark.branch.is_none()
+            && !mark.detached
+            && let Some(agent) = agent
+        {
             match preflight(shell, agent) {
                 Ok(Preflight::None) => {
                     save(ledger, &mark)?;
@@ -904,17 +941,8 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
                 }
             }
         }
-        match crate::close::local(
-            shell,
-            ledger,
-            &mark.pane,
-            &crate::close::Caller::from_env(),
-            crate::close::Guard::Writer,
-        ) {
-            Ok(_) => {
-                mark.closed_ms = Some(now);
-                save(ledger, &mark)?;
-                crate::items::close(ledger, crate::hosts::LOCAL, &mark.pane, now)?;
+        match close_mark(ledger, shell, &mut mark, now) {
+            Ok(()) => {
                 eprintln!("dogsled handoff: closed {}", mark.pane);
             }
             Err(error) => eprintln!("dogsled handoff: {}: {error}", mark.pane),

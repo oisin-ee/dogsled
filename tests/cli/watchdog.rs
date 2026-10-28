@@ -31,17 +31,23 @@ esac
 printf '%s\n' "$*" >> "$RIG/git.log"
 case "$*" in
  *'rev-parse --path-format=absolute --git-common-dir') printf '%s\n' "$RIG/home/repo/.git" ;;
+ *'rev-parse --path-format=absolute --git-common-dir --git-dir --show-toplevel HEAD --abbrev-ref HEAD')
+ common="$RIG/home/repo/.git"; admin="$common/worktrees/$(basename "$2")"; branch=feature; head=abc
+ if test "$2" = "$RIG/home/repo"; then admin="$common"; branch=main; fi
+ if test -f "$RIG/changed"; then head=def; fi
+ printf '%s\n' "$common" "$admin" "$2" "$head" "$branch" ;;
  *'rev-parse HEAD') printf 'abc\n' ;;
  *'worktree list --porcelain -z')
  head=abc; tree=tree
  if test -f "$RIG/changed"; then head=def; fi
  if test -f "$RIG/second-tree"; then tree=second; fi
- printf 'worktree %s\0HEAD abc\0branch refs/heads/main\0\0worktree %s\0HEAD %s\0branch refs/heads/feature\0\0' "$RIG/home/repo" "$RIG/home/repo/$tree" "$head" ;;
+ printf 'worktree %s\0HEAD abc\0branch refs/heads/main\0\0' "$RIG/home/repo"
+ if ! test -f "$RIG/removed"; then printf 'worktree %s\0HEAD %s\0branch refs/heads/feature\0\0' "$RIG/home/repo/$tree" "$head"; fi ;;
  *'worktree list --porcelain')
  printf 'worktree %s\n\n' "$RIG/home/repo"
  if ! test -f "$RIG/removed"; then printf 'worktree %s\nlocked agent:worktree\n\n' "$RIG/home/repo/tree"; fi ;;
  *'worktree unlock '*) ;;
- *'worktree remove '*) touch "$RIG/removed" ;;
+ *'worktree remove '*) touch "$RIG/removed"; rm -rf "$RIG/home/repo/tree" "$RIG/home/repo/.git/worktrees/tree" ;;
  *'branch -D feature') touch "$RIG/deleted" ;;
  *'show-ref --verify --quiet refs/heads/feature') if test -f "$RIG/deleted"; then exit 1; fi ;;
  *'symbolic-ref --quiet refs/remotes/origin/HEAD') printf 'refs/remotes/origin/main\n' ;;
@@ -73,13 +79,24 @@ case "$*" in
 esac
 "#);
     fs::create_dir_all(rig.dir.join("home/repo/tree")).unwrap();
+    for name in ["tree", "second"] {
+        let admin = rig.dir.join("home/repo/.git/worktrees").join(name);
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(
+            admin.join("dogsled-checkout-id"),
+            "0123456789abcdef0123456789abcdef\n",
+        )
+        .unwrap();
+    }
     // A linked worktree has a `.git` file; without one Git cannot remove it.
     fs::write(
         rig.dir.join("home/repo/tree/.git"),
         "gitdir: ../.git/worktrees/tree\n",
     )
     .unwrap();
-    rig.put("state/worktrees.json", &json!([{"repo":rig.dir.join("home/repo"),"path":rig.dir.join("home/repo/tree"),"branch":"feature"}]));
+    rig.put("state/worktrees.json", &json!([{"repo":rig.dir.join("home/repo"),"path":rig.dir.join("home/repo/tree"),"branch":"feature","head":"abc","identity":{
+        "common":rig.dir.join("home/repo/.git"),"gitdir":rig.dir.join("home/repo/.git/worktrees/tree"),"generation":"0123456789abcdef0123456789abcdef"
+    }}]));
     rig
 }
 

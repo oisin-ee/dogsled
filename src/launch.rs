@@ -385,7 +385,52 @@ pub fn handoff_reply(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
         .find_map(|(_, progress)| progress.terminal_receipt.map(|receipt| receipt.text)))
 }
 
-pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {
+/// Replay a final outcome without acquiring repository protection or changing host state.
+pub fn replay(ledger: &Ledger, request: &Launch) -> Result<Option<Value>> {
+    let receipts = ledger.child("launches");
+    let saved = receipts.read::<Progress>(&format!("{}.progress.json", request.id))?;
+    if saved.as_ref().is_some_and(|p| p.request != *request) {
+        return Err(Error::Invalid(format!(
+            "launch {} changed after it was recorded",
+            request.id
+        )));
+    }
+    match receipts.read::<Receipt>(&format!("{}.json", request.id))? {
+        Some(Receipt::Started(result)) => Ok(Some(result)),
+        Some(Receipt::Refused { failed }) => Err(Error::Invalid(failed)),
+        None => Ok(None),
+    }
+}
+
+/// Saved administrative identity survives checkout and preparation retirement.
+pub fn checkout_for_pane(ledger: &Ledger, pane: &str) -> Result<Option<crate::cleanup::Tree>> {
+    let candidates = recovery::candidates(&ledger.child("launches"), Some(pane))?;
+    let mut captured = None;
+    for (_, progress) in candidates {
+        if let Some(value) = progress.result.get("checkout") {
+            let tree: crate::cleanup::Tree = serde_json::from_value(value.clone())?;
+            if captured.as_ref().is_some_and(|old| old != &tree) {
+                return Err(crate::worktree::refuse(
+                    "pane has conflicting checkout identities",
+                ));
+            }
+            captured = Some(tree);
+        }
+    }
+    Ok(captured)
+}
+
+#[cfg(test)]
+fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Value> {
+    agent_guarded(ledger, shell, request, None)
+}
+
+pub fn agent_guarded(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    request: &Launch,
+    checkout: Option<&crate::cleanup::Tree>,
+) -> Result<Value> {
     let receipts = ledger.child("launches");
     receipts.with_lock(&request.id, || {
         let file = format!("{}.json", request.id);
@@ -404,7 +449,7 @@ pub fn agent(ledger: &Ledger, shell: &dyn Shell, request: &Launch) -> Result<Val
         }
         let mut progress = match saved {
             Some(progress) => progress,
-            None => allocate(&receipts, shell, request, &progress_file)?,
+            None => allocate(&receipts, shell, request, &progress_file, checkout)?,
         };
         let pane = progress.pane.clone().ok_or_else(|| {
             Error::Invalid(format!(
@@ -507,6 +552,7 @@ fn allocate(
     shell: &dyn Shell,
     request: &Launch,
     file: &str,
+    checkout: Option<&crate::cleanup::Tree>,
 ) -> Result<Progress> {
     let Action::Agent {
         kind,
@@ -545,6 +591,9 @@ fn allocate(
         }
     }
     let mut result = json!({"host":request.host,"name":name});
+    if let Some(checkout) = checkout {
+        result["checkout"] = serde_json::to_value(checkout)?;
+    }
     if let Some(profile) = &profile {
         result["profile"] = json!(profile.name);
         for (key, value) in [("model", &profile.model), ("role", &profile.role)] {

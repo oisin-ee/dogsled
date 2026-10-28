@@ -632,8 +632,65 @@ pub fn launch(
                 .to_owned(),
         });
     }
+    // Final receipts replay without a repository lock, allocation, or store writes.
     if matches!(launch.action, Action::Agent { .. }) {
-        let result = crate::launch::agent(ledger, shell, launch)?;
+        if let Some(result) = crate::launch::replay(ledger, launch)? {
+            return Ok(result);
+        }
+    } else if let Some(value) = ledger
+        .child("launches")
+        .read::<Value>(&format!("{}.json", launch.id))?
+    {
+        if let Action::Job {
+            cmd,
+            timeout_ms,
+            idle_timeout_ms,
+            ..
+        } = &launch.action
+        {
+            correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
+        }
+        return Ok(value);
+    }
+    let saved = crate::prepare::saved_tree(ledger, &launch.cwd, Some(&launch.id))?;
+    let repo = saved.as_ref().map(|t| std::path::PathBuf::from(&t.repo));
+    let common = crate::worktree::common_dir(shell, std::path::Path::new(&launch.cwd));
+    if repo.is_none() && common.is_err() {
+        return launch_guarded(ledger, shell, launch, None);
+    }
+    let root = repo
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new(&launch.cwd));
+    crate::worktree::with_lifecycle(shell, ledger, root, |guard| {
+        let live = if let Some(saved) = &saved {
+            let live = crate::worktree::linked_or_detached(shell, &launch.cwd)?
+                .ok_or_else(|| crate::worktree::refuse("prepared checkout disappeared"))?;
+            crate::worktree::validate_identity(shell, &live)?;
+            if saved.identity != live.identity
+                || saved.branch != live.branch
+                || saved.path != live.path
+            {
+                return Err(crate::worktree::refuse(
+                    "prepared checkout identity changed",
+                ));
+            }
+            Some(live)
+        } else {
+            guard.discover(shell, &launch.cwd)?
+        };
+        let checkout = live.as_ref().map(crate::worktree::Linked::tree);
+        launch_guarded(ledger, shell, launch, checkout.as_ref())
+    })
+}
+
+fn launch_guarded(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    launch: &Launch,
+    checkout: Option<&crate::cleanup::Tree>,
+) -> Result<Value> {
+    if matches!(launch.action, Action::Agent { .. }) {
+        let result = crate::launch::agent_guarded(ledger, shell, launch, checkout)?;
         crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
         return Ok(result);
     }
@@ -661,7 +718,7 @@ pub fn launch(
         if let Action::Job { validity, .. } = &launch.action {
             jobs::check_validity(ledger, validity.as_ref())?;
         }
-        let result = match &launch.action {
+        let mut result = match &launch.action {
             Action::Job {
                 cmd,
                 timeout_ms,
@@ -675,6 +732,9 @@ pub fn launch(
             }
             Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
         };
+        if let Some(checkout) = checkout {
+            result["checkout"] = serde_json::to_value(checkout)?;
+        }
         receipts.write(&file, &result)?;
         crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
         Ok(result)

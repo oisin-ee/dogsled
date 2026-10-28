@@ -664,14 +664,36 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
     rig.snapshot("state/host.json", now, 0.0, 8);
     // The worktree this launch would run in, and the preparation it would release.
     let tree = rig.dir.join("tree");
-    fs::create_dir_all(&tree).unwrap();
+    let repo = rig.dir.join("home");
+    close::git(&repo, &["init", "-q", "-b", "main"]);
+    close::git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    close::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work",
+            tree.to_str().unwrap(),
+        ],
+    );
+    let common = PathBuf::from(close::git(&repo, &["rev-parse", "--absolute-git-dir"]).trim());
+    let admin = PathBuf::from(close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim());
+    fs::write(
+        admin.join("dogsled-checkout-id"),
+        "0123456789abcdef0123456789abcdef\n",
+    )
+    .unwrap();
+    rig.put("worktrees.json", &json!({"result":{"worktrees":[]}}));
     rig.put(
         "state/preparations.json",
         &json!([{
-            "repo": rig.dir.join("home").display().to_string(),
-            "path": tree.display().to_string(),
+            "repo": repo,
+            "path": tree,
             "branch": "work",
-            "head": "",
+            "head": close::git(&tree, &["rev-parse", "HEAD"]).trim(),
+            "identity": {"common":common,"gitdir":admin,"generation":"0123456789abcdef0123456789abcdef"},
             "request_id": "job-1",
         }]),
     );

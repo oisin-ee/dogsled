@@ -72,17 +72,6 @@ pub fn run(
             base,
             Some(request_id),
         )?;
-        if let Some(path) = &prepared.path {
-            crate::cleanup::remember(
-                fleet.ledger,
-                crate::cleanup::Tree {
-                    repo: checkout.display().to_string(),
-                    path: path.clone(),
-                    branch: branch.into(),
-                    head: String::new(),
-                },
-            )?;
-        }
         return Ok(prepared);
     }
     let home = Path::new(&fleet.home);
@@ -249,19 +238,39 @@ fn local_once(
     base: Option<&str>,
     request_id: Option<&str>,
 ) -> Result<Prepared> {
-    let invalid = branch.is_empty()
+    let checkout = main_checkout(shell, repo)?;
+    worktree::with_lifecycle(shell, ledger, &checkout, |guard| {
+        local_guarded(guard, shell, ledger, repo, branch, base, request_id)
+    })
+}
+
+fn validate_branch(shell: &dyn Shell, branch: &str) -> Result<()> {
+    if branch.is_empty()
         || branch.starts_with('-')
         || !shell
             .run(
                 "git",
                 &["check-ref-format".into(), "--branch".into(), branch.into()],
             )?
-            .ok();
-    if invalid {
+            .ok()
+    {
         return Err(Error::Invalid(format!(
             "{branch} is not a valid branch name"
         )));
     }
+    Ok(())
+}
+
+fn local_guarded(
+    guard: &worktree::Guard,
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    repo: &str,
+    branch: &str,
+    base: Option<&str>,
+    request_id: Option<&str>,
+) -> Result<Prepared> {
+    validate_branch(shell, branch)?;
     shell
         .run_ok("herdr", &["workspace".into(), "list".into()])
         .map_err(|e| Error::Invalid(format!("no Herdr server is reachable on this host: {e}")))?;
@@ -343,13 +352,25 @@ fn local_once(
         ),
         branch: branch.into(),
         head: String::new(),
+        identity: None,
     };
     let held = pending.path.clone();
     record(ledger, pending, request_id)?;
     // A failed preparation is final: its admission never resumes it, so it holds nothing.
     // Only an interrupted preparation leaves its hold for inspection.
     make(
-        shell, &checkout, &settings, existing, branch, base, has_branch,
+        &Preparation {
+            guard,
+            shell,
+            ledger,
+            checkout: &checkout,
+            settings: &settings,
+            request_id,
+        },
+        existing,
+        branch,
+        base,
+        has_branch,
     )
     .or_else(|error| {
         used(ledger, &held, request_id)?;
@@ -357,16 +378,31 @@ fn local_once(
     })
 }
 
+struct Preparation<'a> {
+    guard: &'a worktree::Guard,
+    shell: &'a dyn Shell,
+    ledger: &'a crate::ledger::Ledger,
+    checkout: &'a Path,
+    settings: &'a crate::repository::Settings,
+    request_id: Option<&'a str>,
+}
+
 /// Create or reuse the worktree, run setup in a new one, and open it in Herdr.
 fn make(
-    shell: &dyn Shell,
-    checkout: &Path,
-    settings: &crate::repository::Settings,
+    preparation: &Preparation<'_>,
     existing: Option<worktree::Listed>,
     branch: &str,
     base: Option<&str>,
     has_branch: bool,
 ) -> Result<Prepared> {
+    let Preparation {
+        guard,
+        shell,
+        ledger,
+        checkout,
+        settings,
+        request_id,
+    } = *preparation;
     let (path, created) = if let Some(found) = existing {
         (reuse(shell, checkout, found)?, false)
     } else {
@@ -406,6 +442,11 @@ fn make(
         })?;
         (path, true)
     };
+    let linked = guard
+        .discover(shell, &path)?
+        .ok_or_else(|| worktree::refuse("prepared checkout disappeared"))?;
+    record(ledger, linked.tree(), request_id)?;
+    crate::cleanup::remember(ledger, linked.tree())?;
     if created {
         let values = Values {
             main: checkout,
@@ -413,7 +454,7 @@ fn make(
             branch,
         };
         if crate::repository::run(shell, "setup", &settings.worktree.setup, values).is_err() {
-            discard(shell, checkout, &path, (!has_branch).then_some(branch)).map_err(|error| {
+            discard(guard, shell, &linked, (!has_branch).then_some(branch)).map_err(|error| {
                 error.with_diagnostic(Diagnostic::new(
                     Operation::Prepare,
                     Cause::SetupFailed,
@@ -430,7 +471,10 @@ fn make(
             )));
         }
     }
-    open(shell, checkout, &path)
+    worktree::validate_identity(shell, &linked)?;
+    let prepared = open(shell, checkout, &path)?;
+    crate::cleanup::remember(ledger, linked.tree())?;
+    Ok(prepared)
 }
 
 fn record(
@@ -455,24 +499,13 @@ fn record(
 pub fn on_host(
     node: &crate::node::Node<'_>,
     repo: &str,
-    branch: String,
+    branch: &str,
     base: Option<&str>,
     request_id: Option<&str>,
 ) -> Result<Prepared> {
     let repo = Path::new(node.home).join(repo).display().to_string();
-    let prepared = local(node.shell, node.ledger, &repo, &branch, base, request_id)
+    let prepared = local(node.shell, node.ledger, &repo, branch, base, request_id)
         .map_err(|error| error.correlate(request_id))?;
-    if let Some(path) = &prepared.path {
-        crate::cleanup::remember(
-            node.ledger,
-            crate::cleanup::Tree {
-                repo,
-                path: path.clone(),
-                branch,
-                head: String::new(),
-            },
-        )?;
-    }
     Ok(prepared)
 }
 
@@ -495,6 +528,22 @@ pub fn pending_trees(
         }
     }
     Ok(pending)
+}
+
+/// The captured checkout of a preparation, never rebound from a stale path.
+pub fn saved_tree(
+    ledger: &crate::ledger::Ledger,
+    path: &str,
+    request: Option<&str>,
+) -> Result<Option<crate::cleanup::Tree>> {
+    let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    Ok(records
+        .into_iter()
+        .find(|p| {
+            worktree::same(&p.tree.path, path)
+                && request.is_none_or(|id| p.request_id.as_deref() == Some(id))
+        })
+        .map(|p| p.tree))
 }
 
 /// Release only this preparation owner. Legacy path-only callers cannot clear identified holds.
@@ -593,10 +642,21 @@ fn default_branch(shell: &dyn Shell, checkout: &Path) -> Result<String> {
 
 /// Remove a worktree that `place` just made and whose setup failed. It holds nothing yet, so
 /// the removal is forced through the agent lock, and a branch made for it goes too.
-fn discard(shell: &dyn Shell, checkout: &Path, path: &str, branch: Option<&str>) -> Result<()> {
-    git(checkout, &["worktree", "remove", "-f", "-f", path]).setup_ok(shell)?;
+fn discard(
+    guard: &worktree::Guard,
+    shell: &dyn Shell,
+    tree: &worktree::Linked,
+    branch: Option<&str>,
+) -> Result<()> {
+    guard.check_repository(shell, &tree.checkout)?;
+    worktree::validate_identity(shell, tree)?;
+    git(
+        &tree.checkout,
+        &["worktree", "remove", "-f", "-f", &tree.path],
+    )
+    .setup_ok(shell)?;
     if let Some(branch) = branch {
-        git(checkout, &["branch", "-D", branch]).run_ok(shell)?;
+        git(&tree.checkout, &["branch", "-D", branch]).run_ok(shell)?;
     }
     Ok(())
 }
@@ -729,7 +789,7 @@ mod tests {
     fn a_base_fetch_that_hits_the_deadline_reports_the_deadline() {
         let root = std::env::temp_dir().join(crate::ledger::new_id());
         let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
         let git = |args: &str| format!("git -C {} {args}", repo.display());
         let fake = Fake::new();
         fake.on("git check-ref-format --branch worker", "");

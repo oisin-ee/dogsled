@@ -1,6 +1,317 @@
 use super::*;
 use std::io::Write as _;
 
+/// The test process holds the same kernel mutex that separate host processes must acquire.
+fn repository_lifecycle_lock(repo: &Path) -> fs::File {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(repo.join(".git/dogsled-lifecycle.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+fn lifecycle_git_barrier(rig: &Rig) -> Fifo {
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'tab create'*|'workspace create'*) printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w8:p1\",\"terminal_id\":\"term_tree\"}}}' ;;\n  'pane run'*) printf '{}\\n' ;;"));
+    let ready = Fifo::new(&rig.dir, "lifecycle-git-ready");
+    let out = isolated("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let git = String::from_utf8(out.stdout).unwrap();
+    rig.script("git", &format!(r#"#!/bin/sh
+case "$*" in
+  *'rev-parse --path-format=absolute --git-common-dir') printf 'ready\n' > "$RIG/lifecycle-git-ready" ;;
+esac
+exec '{}' "$@"
+"#, git.trim()));
+    ready
+}
+
+#[test]
+fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
+    for kind in ["prepare", "agent", "job"] {
+        let (rig, repo) = place::place_rig(&format!("lifecycle-lock-{kind}"));
+        let ready = lifecycle_git_barrier(&rig);
+        let _ready_hold = ready.hold();
+        let lock = repository_lifecycle_lock(&repo);
+        let mut request = if kind == "job" {
+            job_launch_request(&rig, "c1-wait-job", &["true"])
+        } else {
+            host_request(&rig)
+        };
+        request["cwd"] = json!(repo);
+        let text = request.to_string();
+        let arguments = if kind == "prepare" {
+            vec![
+                "--json",
+                "--budget-ms",
+                "1500",
+                "host",
+                "prepare",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--branch",
+                "c1-wait",
+                "--base",
+                "main",
+                "--request-id",
+                "c1-wait",
+            ]
+        } else {
+            vec![
+                "--json",
+                "--budget-ms",
+                "1500",
+                "host",
+                "launch",
+                "--job-validity",
+                "1",
+                "--request",
+                &text,
+            ]
+        };
+        let mut contender = rig.start(&arguments);
+        read_fifo(ready.path(), "repository lookup");
+        let status = contender.wait();
+        let (stdout, stderr) = contender.output();
+        assert!(!status.success(), "{kind}: {stdout} {stderr}");
+        let error: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(error["deadline"], true, "{kind}: {error}");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("dogsled-lifecycle.lock"),
+            "{kind}: {error}"
+        );
+        assert!(!rig.dir.join("setup.log").exists());
+        assert!(!rig.dir.join("state/preparations.json").exists());
+        assert!(!rig.dir.join("state/jobs/c1-wait-job.json").exists());
+        let log = rig.log("herdr.log");
+        for effect in [
+            "worktree open",
+            "tab create",
+            "workspace create",
+            "pane run",
+            "agent start",
+        ] {
+            assert!(!log.contains(effect), "{kind}: {log}");
+        }
+        lock.unlock().unwrap();
+        // A new preparation request can proceed; failed receipt replay remains read-only.
+        let mut released = arguments.clone();
+        released[2] = "10000";
+        if kind == "prepare" {
+            *released.last_mut().unwrap() = "c1-after-release";
+        }
+        let mut contender = rig.start(&released);
+        read_fifo(ready.path(), "released repository lookup");
+        let status = contender.wait();
+        let (stdout, stderr) = contender.output();
+        assert!(status.success(), "{kind}: {stdout} {stderr}");
+    }
+}
+
+#[test]
+fn non_repository_launch_skips_repository_protection() {
+    let rig = Rig::new("launch-outside-repository");
+    let request = host_request(&rig);
+    let (code, result) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
+    assert!(!rig.dir.join("home/dogsled-lifecycle.lock").exists());
+    assert!(!rig.dir.join("state/dogsled-lifecycle.lock").exists());
+    assert!(!rig.dir.join("home/.git").exists());
+    assert!(result.get("checkout").is_none());
+}
+
+fn probe_free_lock(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.try_lock().unwrap_or_else(|error| {
+        panic!(
+            "{} was held before repository protection: {error}",
+            path.display()
+        )
+    });
+    file.unlock().unwrap();
+}
+
+#[test]
+fn repository_lock_precedes_launch_and_store_locks() {
+    for prepare in [true, false] {
+        let (rig, repo) = place::place_rig(&format!("lifecycle-order-{prepare}"));
+        let ready = lifecycle_git_barrier(&rig);
+        let _ready_hold = ready.hold();
+        let lock = repository_lifecycle_lock(&repo);
+        let mut request = host_request(&rig);
+        request["cwd"] = json!(repo);
+        let text = request.to_string();
+        let arguments = if prepare {
+            vec![
+                "--json",
+                "--budget-ms",
+                "1500",
+                "host",
+                "prepare",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--branch",
+                "c1-order",
+                "--base",
+                "main",
+                "--request-id",
+                "c1-order",
+            ]
+        } else {
+            vec![
+                "--json",
+                "--budget-ms",
+                "1500",
+                "host",
+                "launch",
+                "--request",
+                &text,
+            ]
+        };
+        let mut contender = rig.start(&arguments);
+        read_fifo(ready.path(), "lock-order repository lookup");
+        for name in [
+            "preparations.lock",
+            "worktrees.lock",
+            "jobs/c1-order.lock",
+            "launches/recover-one.lock",
+        ] {
+            probe_free_lock(&rig.dir.join("state").join(name));
+        }
+        let status = contender.wait();
+        let (stdout, stderr) = contender.output();
+        assert!(!status.success(), "{stdout} {stderr}");
+        let error: Value = serde_json::from_str(&stdout).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("dogsled-lifecycle.lock"),
+            "{error}"
+        );
+        lock.unlock().unwrap();
+        let mut released = arguments.clone();
+        released[2] = "10000";
+        if prepare {
+            *released.last_mut().unwrap() = "c1-order-after";
+        }
+        let mut contender = rig.start(&released);
+        read_fifo(ready.path(), "released lock-order lookup");
+        let status = contender.wait();
+        let (stdout, stderr) = contender.output();
+        assert!(status.success(), "{stdout} {stderr}");
+    }
+}
+
+#[test]
+fn setup_failure_preserves_replacement_checkout() {
+    let (rig, repo) = place::place_rig("setup-replacement");
+    let script = "git -C {main} worktree remove -f -f {path} && git -C {main} worktree add --lock --reason agent:worktree {path} {branch} && printf replacement > {path}/replacement; exit 1";
+    fs::write(
+        repo.join("dogsled.toml"),
+        format!(
+            "[worktree]\nsetup = [{}]\n",
+            serde_json::to_string(script).unwrap()
+        ),
+    )
+    .unwrap();
+    let (code, error) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "c1-replace",
+        "--base",
+        "main",
+        "--request-id",
+        "c1-replace",
+    ]);
+    assert_ne!(code, 0, "{error}");
+    let path = repo.join(".worktrees/c1-replace");
+    assert_eq!(
+        fs::read_to_string(path.join("replacement")).unwrap(),
+        "replacement"
+    );
+    assert!(close::git(&repo, &["branch", "--list", "c1-replace"]).contains("c1-replace"));
+    assert!(
+        close::git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree")
+    );
+    assert!(!rig.log("herdr.log").contains("worktree open"));
+}
+
+#[test]
+fn handoff_reconciles_removal_before_closed_mark_save() {
+    let (rig, tree) = close::close_rig("handoff-prior-removal");
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script(
+        "herdr",
+        &script.replace(
+            "case \"$*\" in",
+            "case \"$*\" in\n  'agent start'*) printf '{}\\n' ;;",
+        ),
+    );
+    rig.put("panes.json", &json!({"result":{"panes":[{"pane_id":"w2:p1","terminal_id":"term_child","workspace_id":"w2","cwd":tree}]}}));
+    let mut request = host_request(&rig);
+    request["id"] = json!("c1-handoff");
+    request["cwd"] = json!(tree);
+    request["pane"] = json!("w2:p1");
+    request["terminal"] = json!("term_child");
+    let (code, launched) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{launched}");
+    assert!(launched["checkout"]["identity"].is_object(), "{launched}");
+    let reply = json!({"seq":10,"text":"sealed native reply","captured_ms":2,"done":true});
+    rig.put("state/items.json", &json!([{"id":"c1-handoff","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1","name":"worker","created_ms":1,"closed_ms":null}]));
+    let mark_key = json!(["c1-handoff", "w2:p1", null]).to_string();
+    rig.put(
+        "state/done.json",
+        &json!({mark_key:{
+            "pane":"w2:p1","item":"c1-handoff","after":9,"sealed":10,"marked_ms":1,
+            "native_done":true,"reply":reply,
+            "branch":{"repo":rig.dir.join("home/repo"),"name":"feat/x","ahead":0,"landed":true}
+        }}),
+    );
+    let (code, removed) = rig.json(&["host", "close", "w2:p1"]);
+    assert_eq!(code, 0, "{removed}");
+    assert!(!tree.exists());
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let marks = rig.read("state/done.json");
+    let mark = marks.as_object().unwrap().values().next().unwrap();
+    assert!(mark["closed_ms"].is_u64(), "{mark}");
+    assert_eq!(mark["reply"], reply);
+    assert_eq!(mark["sealed"], 10);
+    assert_eq!(mark["native_done"], true);
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert_eq!(rig.log("hook.log").lines().count(), 1);
+}
+
 fn remote_agent(rig: &Rig, repo: Option<&Path>) -> (i32, Value) {
     let mut args = vec![
         "agent",

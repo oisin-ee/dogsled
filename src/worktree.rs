@@ -16,6 +16,99 @@ pub const AGENT_LOCK: &str = "agent:worktree";
 /// `place` opened it. The last child's removal closes that workspace.
 pub const ANCHOR_FILE: &str = "agent-worktree-anchor";
 
+/// Proof that this operation holds the repository-wide lifecycle mutex.
+/// The mutex address depends only on the canonical Git common directory.
+#[derive(Debug)]
+pub struct Guard {
+    common: PathBuf,
+}
+
+/// A Git administrative directory and its write-once checkout generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Identity {
+    pub common: PathBuf,
+    pub gitdir: PathBuf,
+    pub generation: String,
+}
+
+const CHECKOUT_ID: &str = "dogsled-checkout-id";
+
+fn generation(gitdir: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(gitdir.join(CHECKOUT_ID)) {
+        Ok(text) => {
+            let id = text.trim();
+            if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(refuse("malformed checkout generation"));
+            }
+            Ok(Some(id.into()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+impl Guard {
+    /// Fresh discovery only. Stale validation must never create a generation marker.
+    pub fn discover(&self, shell: &dyn Shell, path: &str) -> Result<Option<Linked>> {
+        let Some(mut tree) = linked_or_detached(shell, path)? else {
+            return Ok(None);
+        };
+        self.check_repository(shell, &tree.checkout)?;
+        if tree.identity.is_none() {
+            use std::io::Write as _;
+            let gitdir = git(shell, Path::new(path), &["rev-parse", "--absolute-git-dir"])?;
+            if !gitdir.ok() {
+                return Err(refuse("cannot read checkout administrative directory"));
+            }
+            let gitdir = Path::new(gitdir.stdout.trim()).canonicalize()?;
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes)
+                .map_err(|error| Error::Invalid(format!("checkout generation: {error}")))?;
+            let id = bytes
+                .iter()
+                .fold(String::with_capacity(32), |mut id, byte| {
+                    const HEX: &[u8; 16] = b"0123456789abcdef";
+                    id.push(char::from(HEX[usize::from(byte >> 4)]));
+                    id.push(char::from(HEX[usize::from(byte & 15)]));
+                    id
+                });
+            let mut marker = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(gitdir.join(CHECKOUT_ID))?;
+            writeln!(marker, "{id}")?;
+            marker.sync_all()?;
+            tree.identity = Some(Identity {
+                common: self.common.clone(),
+                gitdir,
+                generation: id,
+            });
+        }
+        Ok(Some(tree))
+    }
+
+    pub fn check_repository(&self, shell: &dyn Shell, checkout: &Path) -> Result<()> {
+        if common_dir(shell, checkout)?.canonicalize()? != self.common {
+            return Err(refuse("repository identity changed"));
+        }
+        Ok(())
+    }
+}
+
+pub fn with_lifecycle<T>(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    checkout: &Path,
+    operation: impl FnOnce(&Guard) -> Result<T>,
+) -> Result<T> {
+    let common = common_dir(shell, checkout)?.canonicalize()?;
+    let lock = Ledger {
+        dir: common.clone(),
+        budget: ledger.budget,
+    };
+    lock.with_lock("dogsled-lifecycle", || operation(&Guard { common }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Linked {
     /// The main checkout.
@@ -23,6 +116,20 @@ pub struct Linked {
     pub path: String,
     /// Empty for a detached worktree.
     pub branch: String,
+    pub head: String,
+    pub identity: Option<Identity>,
+}
+
+impl Linked {
+    pub fn tree(&self) -> crate::cleanup::Tree {
+        crate::cleanup::Tree {
+            repo: self.checkout.display().to_string(),
+            path: self.path.clone(),
+            branch: self.branch.clone(),
+            head: self.head.clone(),
+            identity: self.identity.clone(),
+        }
+    }
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -115,6 +222,7 @@ pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>
             "--git-common-dir",
             "--git-dir",
             "--show-toplevel",
+            "HEAD",
             "--abbrev-ref",
             "HEAD",
         ],
@@ -124,7 +232,7 @@ pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>
         return Ok(None);
     }
     let lines: Vec<&str> = out.stdout.lines().map(str::trim).collect();
-    let [common, dir, top, branch] = lines[..] else {
+    let [common, dir, top, head, branch] = lines[..] else {
         return Err(Error::Invalid(format!(
             "git rev-parse in {cwd} returned unexpected output"
         )));
@@ -132,8 +240,25 @@ pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>
     if common == dir {
         return Ok(None);
     }
+    let common = Path::new(common).canonicalize()?;
+    let checkout = if common.file_name().is_some_and(|name| name == ".git") {
+        common
+            .parent()
+            .ok_or_else(|| refuse("Git common directory has no parent"))?
+            .to_path_buf()
+    } else {
+        common.clone()
+    };
+    let gitdir = Path::new(dir).canonicalize()?;
+    let identity = generation(&gitdir)?.map(|generation| Identity {
+        common,
+        gitdir,
+        generation,
+    });
     Ok(Some(Linked {
-        checkout: crate::prepare::main_checkout(shell, cwd)?,
+        head: head.into(),
+        identity,
+        checkout,
         path: top.into(),
         branch: if branch == "HEAD" {
             String::new()
@@ -181,8 +306,58 @@ pub fn lock_reason(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Opt
         .and_then(|w| w.lock))
 }
 
-fn listed(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<bool> {
-    Ok(list(shell, checkout)?.iter().any(|w| same(&w.path, path)))
+/// Read-only incarnation validation, including after a setup or teardown hook.
+pub fn validate_identity(shell: &dyn Shell, tree: &Linked) -> Result<()> {
+    let now = linked_or_detached(shell, &tree.path)?;
+    if tree.identity.is_none()
+        || now.as_ref().is_none_or(|now| {
+            now.identity != tree.identity
+                || !same(&now.path, &tree.path)
+                || now.branch != tree.branch
+                || resolved(&now.checkout) != resolved(&tree.checkout)
+        })
+    {
+        return Err(refuse(&format!("{}: worktree identity changed", tree.path)));
+    }
+    Ok(())
+}
+
+/// Absence needs a readable original repository, an unfiltered Git listing, and ENOENT
+/// for both the checkout and its recorded administrative directory. Symlinks are not absent.
+pub fn verified_absent(guard: &Guard, shell: &dyn Shell, tree: &crate::cleanup::Tree) -> bool {
+    let Some(identity) = &tree.identity else {
+        return false;
+    };
+    let missing = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    };
+    identity.common == guard.common
+        && guard.check_repository(shell, Path::new(&tree.repo)).is_ok()
+        && raw_paths(shell, Path::new(&tree.repo)).is_ok_and(|listed| {
+            !listed.iter().any(|path| {
+                same(path, &tree.path)
+                    || linked_or_detached(shell, path)
+                        .ok()
+                        .flatten()
+                        .and_then(|live| live.identity)
+                        .is_some_and(|live| live == *identity)
+            })
+        })
+        && missing(Path::new(&tree.path))
+        && missing(&identity.gitdir)
+}
+
+fn raw_paths(shell: &dyn Shell, checkout: &Path) -> Result<Vec<String>> {
+    let out = git(shell, checkout, &["worktree", "list", "--porcelain", "-z"])?;
+    if !out.ok() {
+        return Err(refuse("cannot list worktrees for absence verification"));
+    }
+    Ok(out
+        .stdout
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree ").map(str::to_owned))
+        .collect())
 }
 
 /// Why `git worktree remove` cannot remove `path` although its directory remains: Git no
@@ -341,15 +516,28 @@ pub struct Removed {
 /// Then delete its branch when `integration::check` finds it integrated, and close the anchor
 /// workspace when no linked worktree shows in Herdr any more. The caller has already refused a
 /// dirty, foreign-locked, or busy worktree.
+#[derive(Clone, Copy)]
+pub struct Removal<'a> {
+    pub guard: &'a Guard,
+    pub workspace: Option<&'a str>,
+    pub holders: &'a [&'a Pane],
+    pub caller_workspace: Option<&'a str>,
+    pub evidence: &'a crate::loss::Evidence,
+}
+
 pub fn remove(
     shell: &dyn Shell,
     ledger: &Ledger,
     tree: &Linked,
-    workspace: Option<&str>,
-    holders: &[&Pane],
-    caller_workspace: Option<&str>,
-    evidence: &crate::loss::Evidence,
+    removal: Removal<'_>,
 ) -> Result<Removed> {
+    let Removal {
+        guard,
+        workspace,
+        holders,
+        caller_workspace,
+        evidence,
+    } = removal;
     // Git cannot remove it, and its content is unknown: close nothing, unlock nothing.
     if let Some(reason) = unlinked(shell, &tree.checkout, &tree.path)? {
         return Err(refuse(&format!(
@@ -357,8 +545,15 @@ pub fn remove(
             tree.path
         )));
     }
+    guard.check_repository(shell, &tree.checkout)?;
+    validate_identity(shell, tree)?;
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
+    if verified_absent(guard, shell, &tree.tree()) {
+        crate::cleanup::forget_matching(ledger, &tree.tree())?;
+        return Ok(Removed::default());
+    }
+    validate_identity(shell, tree)?;
     if Path::new(&tree.path).is_dir() {
         // The teardown ran after the callers' loss check and can leave a commit or content
         // that no ref holds. Check the current HEAD and content again before anything closes
@@ -366,22 +561,7 @@ pub fn remove(
         recheck_loss(shell, tree, evidence)?;
         evidence.restore_deletions(shell, &tree.path)?;
     }
-    let open = crate::cleanup::current_panes(shell)?;
-    for pane in holders {
-        let outside = workspace.is_none() || pane.workspace_id.as_deref() != workspace;
-        if outside && open.iter().any(|p| p.pane_id == pane.pane_id) {
-            shell.run_ok(
-                "herdr",
-                &["pane".into(), "close".into(), pane.pane_id.clone()],
-            )?;
-        }
-    }
-    if let Some(workspace) = workspace {
-        shell.run_ok(
-            "herdr",
-            &["workspace".into(), "close".into(), workspace.into()],
-        )?;
-    }
+    close_holders(shell, ledger, workspace, holders)?;
     let lock = lock_reason(shell, &tree.checkout, &tree.path)?;
     match lock.as_deref() {
         None => (),
@@ -401,6 +581,11 @@ pub fn remove(
         &git_words(&tree.checkout, &["worktree", "remove", &tree.path]),
     )?;
     if !out.ok() {
+        if verified_absent(guard, shell, &tree.tree()) {
+            crate::cleanup::forget_matching(ledger, &tree.tree())?;
+            return Ok(Removed::default());
+        }
+        validate_identity(shell, tree)?;
         if lock.is_some() && Path::new(&tree.path).exists() {
             git_ok(
                 shell,
@@ -414,13 +599,13 @@ pub fn remove(
             out.stderr.trim()
         )));
     }
-    if listed(shell, &tree.checkout, &tree.path)? {
+    if !verified_absent(guard, shell, &tree.tree()) {
         return Err(Error::Invalid(format!(
             "git worktree remove exited 0 but {} is still a worktree",
             tree.path
         )));
     }
-    crate::cleanup::forget(ledger, &tree.path)?;
+    crate::cleanup::forget_matching(ledger, &tree.tree())?;
     let branch_deleted =
         !evidence.keeps_branch() && !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
     let anchor_closed = close_anchor(shell, &tree.checkout, caller_workspace)?;
@@ -428,6 +613,44 @@ pub fn remove(
         branch_deleted,
         anchor_closed,
     })
+}
+
+/// Pane and launch recovery effects begin only after teardown and incarnation validation.
+fn close_holders(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    workspace: Option<&str>,
+    holders: &[&Pane],
+) -> Result<()> {
+    let open = crate::cleanup::current_panes(shell)?;
+    for pane in holders {
+        // Recovery can close a final shell only after teardown and incarnation validation.
+        if pane.agent.is_none()
+            && matches!(
+                crate::launch::final_pane(ledger, shell, &pane.pane_id)?,
+                crate::launch::PaneLaunch::Final
+            )
+        {
+            if !crate::launch::close_final(ledger, shell, &pane.pane_id)? {
+                return Err(refuse("launch changed before removal"));
+            }
+            continue;
+        }
+        let outside = workspace.is_none() || pane.workspace_id.as_deref() != workspace;
+        if outside && open.iter().any(|p| p.pane_id == pane.pane_id) {
+            shell.run_ok(
+                "herdr",
+                &["pane".into(), "close".into(), pane.pane_id.clone()],
+            )?;
+        }
+    }
+    if let Some(workspace) = workspace {
+        shell.run_ok(
+            "herdr",
+            &["workspace".into(), "close".into(), workspace.into()],
+        )?;
+    }
+    Ok(())
 }
 
 /// The loss rule, once more, after the repository's `teardown`. Teardown runs after the
@@ -544,42 +767,103 @@ fn close_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{Fake, Output};
+    use crate::shell::Output;
+
+    #[derive(Debug, Default)]
+    struct RemovalProbe {
+        limit: std::sync::Mutex<Option<std::time::Duration>>,
+    }
+
+    impl Shell for RemovalProbe {
+        fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+            if program == "herdr" {
+                return Ok(Output {
+                    status: 0,
+                    stdout: r#"{"result":{"panes":[],"worktrees":[]}}"#.into(),
+                    stderr: String::new(),
+                });
+            }
+            let mut command = std::process::Command::new(program);
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("GIT_") {
+                    command.env_remove(key);
+                }
+            }
+            let out = command.args(args).output()?;
+            Ok(Output {
+                status: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        }
+
+        fn run_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            limit: std::time::Duration,
+        ) -> Result<Output> {
+            if args.get(2).is_some_and(|a| a == "worktree")
+                && args.get(3).is_some_and(|a| a == "remove")
+            {
+                *self.limit.lock().unwrap() = Some(limit);
+                return Ok(Output {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: "stop here".into(),
+                });
+            }
+            self.run(program, args)
+        }
+    }
 
     #[test]
     fn removal_gets_the_setup_limit_not_the_routine_limit() {
-        let shell = Fake::new();
+        let shell = RemovalProbe::default();
         let checkout = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&checkout).unwrap();
         let repo = checkout.display().to_string();
         let path = format!("{repo}/.worktrees/x");
-        shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
-        shell.on(
-            &format!("git -C {repo} worktree list --porcelain"),
-            &format!("worktree {repo}\n\nworktree {path}\nbranch refs/heads/x\n"),
-        );
-        let removal = format!("git -C {repo} worktree remove {path}");
-        shell.on_output(
-            &removal,
-            Output {
-                status: 1,
-                stdout: String::new(),
-                stderr: "stop here".into(),
-            },
-        );
-        let tree = Linked {
-            checkout,
-            path,
-            branch: "x".into(),
-        };
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            vec!["worktree", "add", "-q", "-b", "x", &path],
+        ] {
+            git_ok(&shell, &checkout, &args).unwrap();
+        }
+        let ledger = Ledger::new(checkout.join("state"));
         let evidence = crate::loss::Evidence::default_only(&repo);
-        let error = remove(&shell, &ledger, &tree, None, &[], None, &evidence).unwrap_err();
+        let error = with_lifecycle(&shell, &ledger, &checkout, |guard| {
+            let tree = guard.discover(&shell, &path)?.unwrap();
+            remove(
+                &shell,
+                &ledger,
+                &tree,
+                Removal {
+                    guard,
+                    workspace: None,
+                    holders: &[],
+                    caller_workspace: None,
+                    evidence: &evidence,
+                },
+            )
+        })
+        .unwrap_err();
         assert!(error.to_string().contains("stop here"), "{error}");
-        let limits = shell.limits.lock().unwrap();
-        let limit = limits
-            .iter()
-            .find(|(call, _)| *call == removal)
-            .map(|(_, l)| *l);
-        assert_eq!(limit, Some(crate::budget::SETUP_LIMIT));
+        assert_eq!(
+            *shell.limit.lock().unwrap(),
+            Some(crate::budget::SETUP_LIMIT)
+        );
+        std::fs::remove_dir_all(checkout).unwrap();
     }
 }

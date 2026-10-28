@@ -241,17 +241,22 @@ pub fn close(
         None => close_host(fleet, pane)?,
     };
     let closed: crate::close::Closed = if host.is_local() {
-        crate::close::local(
+        crate::close::with_local(
             fleet.shell,
             fleet.ledger,
             pane,
             &crate::close::Caller::from_env(),
             crate::close::Guard::Clean,
+            |closed| {
+                items::close(fleet.ledger, &host.id, pane, now_ms())?;
+                Ok(closed)
+            },
         )?
     } else {
-        fleet.remote_setup(host, &["close".into(), pane.into()])?
+        let closed = fleet.remote_setup(host, &["close".into(), pane.into()])?;
+        items::close(fleet.ledger, &host.id, pane, now_ms())?;
+        closed
     };
-    items::close(fleet.ledger, &host.id, pane, now_ms())?;
     Ok((closed, host.label.clone()))
 }
 

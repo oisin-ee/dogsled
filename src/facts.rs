@@ -493,14 +493,19 @@ mod tests {
     #[test]
     fn worktree_counts_commits_only_when_a_tip_moves() {
         let dir = std::env::temp_dir().join(crate::ledger::new_id());
-        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join(".git/worktrees/t")).unwrap();
+        std::fs::write(
+            dir.join(".git/worktrees/t/dogsled-checkout-id"),
+            "0123456789abcdef0123456789abcdef\n",
+        )
+        .unwrap();
         let cwd = dir.display().to_string();
         let shell = crate::shell::Fake::new();
         // The fixture has its own identity and resolves to its real root.
         shell.on(
-            &format!("git -C {cwd} rev-parse --path-format=absolute --git-common-dir --git-dir --show-toplevel --abbrev-ref HEAD"),
-            &format!("/r/.git\n/r/.git/worktrees/t\n{cwd}\nfeat/x\n"),
-        ).on(&format!("git -C {cwd} rev-parse --path-format=absolute --git-common-dir"), "/r/.git\n");
+            &format!("git -C {cwd} rev-parse --path-format=absolute --git-common-dir --git-dir --show-toplevel HEAD --abbrev-ref HEAD"),
+            &format!("{cwd}/.git\n{cwd}/.git/worktrees/t\n{cwd}\nh1\nfeat/x\n"),
+        ).on(&format!("git -C {cwd} rev-parse --path-format=absolute --git-common-dir"), &format!("{cwd}/.git\n"));
         linked(&shell, &cwd, "h1", "b1");
         shell
             .on(&format!("git -C {cwd} rev-list --count b1..h1"), "2\n")

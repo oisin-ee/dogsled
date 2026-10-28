@@ -95,9 +95,100 @@ pub fn local(
     caller: &Caller,
     guard: Guard,
 ) -> Result<Closed> {
+    with_local(shell, ledger, pane, caller, guard, Ok)
+}
+
+/// Keep repository protection through the caller's matching-record reconciliation.
+pub fn with_local<T>(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &Caller,
+    mode: Guard,
+    reconcile: impl FnOnce(Closed) -> Result<T>,
+) -> Result<T> {
     let panes = crate::cleanup::current_panes(shell)?;
-    let target = validate_target(shell, &panes, pane, caller)?;
-    remove_target(shell, ledger, target, &panes, caller, guard)
+    let target = panes.iter().find(|p| p.pane_id == pane);
+    let cwd = target.and_then(|p| p.cwd.as_deref());
+    let live = cwd
+        .map(|cwd| worktree::linked_or_detached(shell, cwd))
+        .transpose()?
+        .flatten();
+    let saved = crate::launch::checkout_for_pane(ledger, pane)?;
+    let planned = live
+        .as_ref()
+        .map(worktree::Linked::tree)
+        .or_else(|| saved.clone());
+    let Some(mut planned) = planned else {
+        let target = validate_target(shell, &panes, pane, caller)?;
+        return reconcile(remove_target(
+            shell, ledger, target, &panes, caller, mode, None,
+        )?);
+    };
+    let repo = planned.repo.clone();
+    worktree::with_lifecycle(shell, ledger, Path::new(&repo), |lifecycle| {
+        if live.is_some() && planned.identity.is_none() {
+            planned = lifecycle
+                .discover(shell, &planned.path)?
+                .ok_or_else(|| refuse("checkout disappeared before identity capture"))?
+                .tree();
+        }
+        if worktree::verified_absent(lifecycle, shell, &planned) {
+            crate::cleanup::forget_matching(ledger, &planned)?;
+            return reconcile(Closed {
+                pane: pane.into(),
+                worktree: Some(Worktree {
+                    path: planned.path,
+                    branch: planned.branch,
+                    workspace: None,
+                    branch_deleted: false,
+                    anchor_closed: None,
+                }),
+                pane_closed: false,
+            });
+        }
+        let now = validate_checkout(shell, &planned)?;
+        if saved
+            .as_ref()
+            .is_some_and(|saved| saved.identity != now.identity || saved.branch != now.branch)
+        {
+            return Err(refuse("worktree identity changed"));
+        }
+        let panes = crate::cleanup::current_panes(shell)?;
+        let target = validate_target(shell, &panes, pane, caller)?;
+        if worktree::lock_reason(shell, &now.checkout, &now.path)?.as_deref() == Some(AGENT_LOCK) {
+            crate::cleanup::remember(ledger, now.tree())?;
+        }
+        reconcile(remove_target(
+            shell,
+            ledger,
+            target,
+            &panes,
+            caller,
+            mode,
+            Some((lifecycle, &planned)),
+        )?)
+    })
+}
+
+/// Repeat the captured-resource check before entering any close effect.
+fn validate_checkout(
+    shell: &dyn crate::shell::Shell,
+    expected: &crate::cleanup::Tree,
+) -> Result<worktree::Linked> {
+    let now = worktree::linked_or_detached(shell, &expected.path)?
+        .ok_or_else(|| refuse("checkout identity is unreadable"))?;
+    if expected.identity.is_none()
+        || now.identity != expected.identity
+        || now.branch != expected.branch
+        || now.path != expected.path
+    {
+        return Err(refuse("worktree identity changed"));
+    }
+    if now.head != expected.head {
+        return Err(refuse("HEAD moved before close"));
+    }
+    Ok(now)
 }
 
 /// Validate pane safety before selecting checkout removal or pane-only closure.
@@ -125,6 +216,15 @@ fn validate_target<'a>(
     Ok(target)
 }
 
+fn pane_only(shell: &dyn crate::shell::Shell, pane: &str) -> Result<Closed> {
+    shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+    Ok(Closed {
+        pane: pane.into(),
+        worktree: None,
+        pane_closed: true,
+    })
+}
+
 fn remove_target(
     shell: &dyn crate::shell::Shell,
     ledger: &Ledger,
@@ -132,8 +232,12 @@ fn remove_target(
     panes: &[crate::probe::Pane],
     caller: &Caller,
     guard: Guard,
+    lifecycle: Option<(&worktree::Guard, &crate::cleanup::Tree)>,
 ) -> Result<Closed> {
     let pane = target.pane_id.as_str();
+    if let Some((_, expected)) = lifecycle {
+        validate_checkout(shell, expected)?;
+    }
     // An explicit recovery may end a stranded shell without removing its checkout or
     // assigning an outcome to the interrupted launch. Automatic cleanup cannot do this.
     if guard == Guard::Clean && crate::launch::close_unfinished(ledger, shell, pane)? {
@@ -168,24 +272,14 @@ fn remove_target(
     let Some(tree) =
         tree.filter(|_| lock.is_some() && (!automatic || lock.as_deref() == Some(AGENT_LOCK)))
     else {
-        shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
-        return Ok(Closed {
-            pane: pane.into(),
-            worktree: None,
-            pane_closed: true,
-        });
+        return pane_only(shell, pane);
     };
     let workspace = worktree::workspace(shell, &tree.checkout, &tree.path)?;
     let holders = worktree::holders(panes, &tree.path, workspace.as_deref());
     // Another agent, open item, or busy pane still uses the checkout. Even an explicit close
     // releases only its own pane: closing the others would close agents nobody asked to close.
     if shared(shell, ledger, pane, &holders)? {
-        shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
-        return Ok(Closed {
-            pane: pane.into(),
-            worktree: None,
-            pane_closed: true,
-        });
+        return pane_only(shell, pane);
     }
     outside(&tree, caller)?;
     let evidence = unsaved(shell, ledger, &tree, caller, guard)?;
@@ -220,10 +314,15 @@ fn remove_target(
         shell,
         ledger,
         &tree,
-        workspace.as_deref(),
-        &holders,
-        caller.workspace.as_deref(),
-        &evidence,
+        worktree::Removal {
+            guard: lifecycle
+                .ok_or_else(|| refuse("repository protection missing"))?
+                .0,
+            workspace: workspace.as_deref(),
+            holders: &holders,
+            caller_workspace: caller.workspace.as_deref(),
+            evidence: &evidence,
+        },
     )?;
     Ok(Closed {
         pane: pane.into(),
