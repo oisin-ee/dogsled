@@ -111,18 +111,30 @@ struct PromptHistory {
     prompted_after: u64,
     turn: crate::done::Turn,
     working_turn: Option<crate::done::Turn>,
+    #[serde(default)]
+    last_observed_working: bool,
+    #[serde(default)]
+    last_observed_ms: Option<u64>,
 }
 
 impl PromptHistory {
-    fn observe(&mut self, agent: &crate::probe::Agent, state: crate::lifecycle::State) {
-        let previous = self.working_turn.as_ref().unwrap_or(&self.turn);
-        // Transcript activity can move the observed state clock within one turn.
-        // Keep that turn's original start when its sequence still matches.
-        let same_turn = previous.state_change_seq.is_some()
-            && previous.state_change_seq == agent.state_change_seq;
-        if state == crate::lifecycle::State::Working && !same_turn && previous.precedes(agent) {
-            self.working_turn = Some(crate::done::Turn::of_agent(agent));
+    fn observe(&mut self, agent: &crate::probe::Agent, state: crate::lifecycle::State, now: u64) {
+        let working = state == crate::lifecycle::State::Working;
+        let seq_advanced = self
+            .working_turn
+            .as_ref()
+            .and_then(|turn| turn.state_change_seq)
+            .zip(agent.state_change_seq)
+            .is_some_and(|(previous, current)| current > previous);
+        if working && (!self.last_observed_working || seq_advanced) {
+            let mut turn = crate::done::Turn::of_agent(agent);
+            // Use this watchdog observation as the turn start. Transcript activity
+            // can move state_since_ms without starting a new response turn.
+            turn.state_since_ms = Some(now);
+            self.working_turn = Some(turn);
         }
+        self.last_observed_working = working;
+        self.last_observed_ms = Some(now);
     }
 
     fn eligible(&self, now: u64) -> bool {
@@ -618,7 +630,7 @@ fn stopped_prompts(
         let key = session_key(&item.host, session);
         let lifecycle = crate::items::lifecycle(item, reports).state;
         if let Some(previous) = state.prompted_after.get_mut(&key) {
-            previous.observe(agent, lifecycle);
+            previous.observe(agent, lifecycle, now);
         }
         if lifecycle != crate::lifecycle::State::Stopped {
             state.stopped.remove(&item.id);
@@ -664,6 +676,8 @@ fn stopped_prompts(
                 prompted_after: now,
                 turn: crate::done::Turn::of_agent(agent),
                 working_turn: None,
+                last_observed_working: false,
+                last_observed_ms: Some(now),
             },
         );
         // The durable id, attempt budget and fresh history precede the put, even if it
@@ -682,6 +696,8 @@ fn stopped_prompts(
                     prompted_after: now,
                     turn: crate::done::Turn::of_agent(agent),
                     working_turn: None,
+                    last_observed_working: false,
+                    last_observed_ms: Some(now),
                 },
             );
         }

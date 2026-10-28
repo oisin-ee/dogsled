@@ -439,18 +439,106 @@ fn stopped_consecutive_working_observations_track_the_latest_turn() {
     let rig = Rig::new();
     rig.item("agent");
     child_reader(&rig);
-    for (now, raw, seq) in [
-        (0, "idle", 1),
-        (1_000, "working", 2),
-        (130_000, "working", 4),
-        (140_000, "idle", 5),
+    for (now, raw, seq, since) in [
+        (0, "idle", 1, 0),
+        (1_000, "working", 2, 1_000),
+        // A strict sequence increase starts a turn at observation time, even
+        // when the source clock still names the previous turn.
+        (130_000, "working", 4, 1_000),
+        (140_000, "idle", 5, 140_000),
     ] {
         tick(
             &rig.fleet(),
-            &stopped_reports(&rig, now, raw, seq, now),
+            &stopped_reports(&rig, now, raw, seq, since),
             now,
         )
         .unwrap();
+    }
+    assert_eq!(stopped_messages(&rig).len(), 2);
+}
+
+#[test]
+fn stopped_prompt_equal_sequence_rearms_after_an_observed_stopped_gap() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    for (now, raw) in [
+        (0, "idle"),
+        (1_000, "idle"),
+        (130_000, "working"),
+        (140_000, "idle"),
+    ] {
+        tick(&rig.fleet(), &stopped_reports(&rig, now, raw, 7, now), now).unwrap();
+    }
+    assert_eq!(stopped_messages(&rig).len(), 2);
+}
+
+#[test]
+fn stopped_prompt_without_sequence_ignores_continuous_working_since_changes() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    for (now, raw) in [
+        (0, "idle"),
+        (1_000, "working"),
+        (60_000, "working"),
+        (130_000, "working"),
+        (140_000, "idle"),
+    ] {
+        let mut reports = stopped_reports(&rig, now, raw, 0, now);
+        reports[0].probe.as_mut().unwrap().agent_panes[1].state_change_seq = None;
+        tick(&rig.fleet(), &reports, now).unwrap();
+    }
+    assert_eq!(stopped_messages(&rig).len(), 1);
+}
+
+#[test]
+fn stopped_prompt_working_observation_survives_restart() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    let key = session_key("local", "session-child");
+    for (now, raw) in [(0, "idle"), (1_000, "working"), (130_000, "working")] {
+        let mut reports = stopped_reports(&rig, now, raw, 0, 1_000);
+        reports[0].probe.as_mut().unwrap().agent_panes[1].state_change_seq = None;
+        // Each tick reloads PromptHistory from the ledger, like a service restart.
+        tick(&rig.fleet(), &reports, now).unwrap();
+        let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+        assert_eq!(
+            saved.prompted_after[&key].last_observed_working,
+            raw == "working"
+        );
+        assert_eq!(saved.prompted_after[&key].last_observed_ms, Some(now));
+    }
+    tick(
+        &rig.fleet(),
+        &stopped_reports(&rig, 140_000, "idle", 0, 140_000),
+        140_000,
+    )
+    .unwrap();
+    assert_eq!(stopped_messages(&rig).len(), 1);
+    let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    assert!(!saved.prompted_after[&key].last_observed_working);
+    assert_eq!(saved.prompted_after[&key].last_observed_ms, Some(140_000));
+}
+
+#[test]
+fn stopped_prompt_legacy_history_defaults_to_not_working() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    tick(&rig.fleet(), &stopped_reports(&rig, 0, "idle", 7, 0), 0).unwrap();
+    let mut saved: serde_json::Value = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    let key = session_key("local", "session-child");
+    let history = saved["prompted_after"][&key].as_object_mut().unwrap();
+    history.remove("last_observed_working");
+    history.remove("last_observed_ms");
+    rig.ledger.write("watchdog.json", &saved).unwrap();
+    let legacy: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    assert!(!legacy.prompted_after[&key].last_observed_working);
+    assert_eq!(legacy.prompted_after[&key].last_observed_ms, None);
+    for (now, raw) in [(130_000, "working"), (140_000, "idle")] {
+        tick(&rig.fleet(), &stopped_reports(&rig, now, raw, 7, now), now).unwrap();
     }
     assert_eq!(stopped_messages(&rig).len(), 2);
 }
