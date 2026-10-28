@@ -1,5 +1,5 @@
 //! The stop gate: an owner about to end its turn hears once about its finished children with
-//! work to land. A prompt line is easy to skip; a continued turn is not.
+//! branches ready to merge. A prompt line is easy to skip; a continued turn is not.
 //!
 //! Each owner's reminded sets live in `gate.json`. The gate speaks once per distinct set,
 //! even when children change back to an earlier state. Closing all owner items clears that history.
@@ -253,7 +253,7 @@ pub fn deliver(
             && heard.entry(owner.to_owned()).or_default().insert(current)
         {
             messages.push(format!(
-            "Before you stop: your finished children still have work to land: {names}. \
+            "Before you stop: your finished children have branches ready to merge: {names}. \
              Review each child's result with `dogsled read`. \
              Ask children with uncommitted changes to finish and commit their work. \
              Integrate approved commits. Close a clean child only when you intend to drop its work. \
@@ -295,7 +295,13 @@ mod tests {
             title: None,
             cleanup: None,
             unseen: false,
-            state: "idle".into(),
+            state: match group {
+                Group::ToLand => "done",
+                Group::Running => "working",
+                Group::Attention => "blocked",
+                Group::Waiting => "queued",
+            }
+            .into(),
             activity: String::new(),
             age_ms: 0,
             quiet_ms: None,
@@ -322,7 +328,7 @@ mod tests {
         ]);
         let text = reminder(&ledger, &first, "w1:p1").unwrap().unwrap();
         assert!(
-            text.contains("work to land: web (+2), api (uncommitted)."),
+            text.contains("branches ready to merge: web (+2), api (uncommitted)."),
             "{text}"
         );
         assert!(!text.contains("busy"), "{text}");
@@ -359,6 +365,40 @@ mod tests {
             .is_err()
         );
         assert!(reminder(&ledger, &first, "failed").unwrap().is_some());
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn finishing_and_waiting_children_with_commits_do_not_trigger_the_gate() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        for state in [
+            crate::lifecycle::State::Finishing,
+            crate::lifecycle::State::Waiting,
+        ] {
+            let mut child = row("busy", Group::Running, Some(3), false);
+            child.state = crate::lifecycle::display(state).into();
+            let mut working = board(vec![child]);
+            let owner = state.as_str();
+            assert_eq!(reminder(&ledger, &working, owner).unwrap(), None);
+            working.rows[0].ahead = Some(4);
+            working.rows[0].dirty = true;
+            assert_eq!(reminder(&ledger, &working, owner).unwrap(), None);
+
+            working
+                .rows
+                .push(row("ready", Group::ToLand, Some(2), false));
+            let text = reminder(&ledger, &working, owner).unwrap().unwrap();
+            assert!(
+                text.contains("branches ready to merge: ready (+2)."),
+                "{text}"
+            );
+            assert!(!text.contains("busy"), "{text}");
+            // Changes to WORKING rows do not change the reminded set.
+            working.rows[0].ahead = Some(5);
+            assert_eq!(reminder(&ledger, &working, owner).unwrap(), None);
+            working.rows[1].ahead = Some(3);
+            assert!(reminder(&ledger, &working, owner).unwrap().is_some());
+        }
         std::fs::remove_dir_all(&ledger.dir).unwrap();
     }
 

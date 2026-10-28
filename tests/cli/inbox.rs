@@ -311,7 +311,12 @@ fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
         let value: Value = serde_json::from_str(&hook(&rig, harness, "Stop")).unwrap();
         assert_eq!(value["decision"], "block");
         let reason = value["reason"].as_str().unwrap();
-        assert!(reason.contains("child (uncommitted)"), "{reason}");
+        assert!(
+            reason.contains(
+                "your finished children have branches ready to merge: child (uncommitted)."
+            ),
+            "{reason}"
+        );
         assert!(reason.contains("please review"), "{reason}");
         assert_eq!(hook(&rig, harness, "Stop"), "");
         // New inbox messages are not suppressed by an already delivered gate reminder.
