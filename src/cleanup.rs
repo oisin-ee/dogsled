@@ -1433,9 +1433,9 @@ fn usage(node: &Node<'_>, tree: &Tree, seen: &Seen) -> Result<Usage> {
 /// item, and an automatic close by a live owner also waits for landing. Only an explicit close
 /// takes a checkout from an agent that has not called `done`.
 #[derive(Clone, Copy)]
-enum Decider {
+enum Decider<'a> {
     Cleanup,
-    Close { guard: crate::close::Guard },
+    Close { guard: crate::close::Guard<'a> },
 }
 
 /// Pane ownership holds: focus, unresolved launches, and agents still waiting for input.
@@ -1473,6 +1473,11 @@ fn pane_holds(usage: &Usage, seen: &Seen, decider: Decider) -> Vec<String> {
                 .holders
                 .iter()
                 .filter(|p| p.agent.is_some() && !seen.done.contains(&p.pane_id))
+                .filter(|p| {
+                    !matches!(decider, Decider::Close {
+                    guard: crate::close::Guard::StoppedOrphan { episode }
+                } if episode.pane() == p.pane_id)
+                })
                 .map(|p| format!("{} waits for input; it has not called done", p.pane_id)),
         );
     }

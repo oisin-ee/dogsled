@@ -51,23 +51,25 @@ impl Caller {
 
 /// Close context carried over host transport. Every variant uses the same loss rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Guard {
+pub enum Guard<'a> {
     /// Explicit close; inspect local item ownership.
     Clean,
     /// An orphan handoff; retain its branch.
     Pushed,
+    /// Host-verified stopped-orphan permission for this target pane only.
+    StoppedOrphan { episode: &'a StoppedOrphan },
     /// A finished reader handoff; retain its branch.
     Reader,
     /// A finished writer handoff; retain its branch.
     Writer,
 }
 
-impl Guard {
+impl Guard<'_> {
     /// The flags of `host close` for this guard.
     pub fn flags(self) -> &'static [&'static str] {
         match self {
             Self::Clean => &[],
-            Self::Pushed => &["--pushed"],
+            Self::Pushed | Self::StoppedOrphan { .. } => &["--pushed"],
             Self::Reader => &["--landed"],
             Self::Writer => &["--landed", "--writer"],
         }
@@ -81,6 +83,86 @@ impl Guard {
             _ => Self::Clean,
         }
     }
+}
+
+/// Session and turn evidence for the stopped-orphan-only close permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoppedOrphan {
+    pane: String,
+    agent_session: String,
+    turn: crate::done::Turn,
+}
+
+impl StoppedOrphan {
+    pub fn pane(&self) -> &str {
+        &self.pane
+    }
+
+    pub fn recorded(ledger: &Ledger, item: &str, agent: &crate::probe::Agent) -> Result<Self> {
+        #[derive(Default, Deserialize)]
+        struct Episodes {
+            #[serde(default)]
+            stopped: std::collections::BTreeMap<String, StoppedOrphan>,
+        }
+        let mut episodes: Episodes = ledger.read("watchdog.json")?.unwrap_or_default();
+        let episode = episodes
+            .stopped
+            .remove(item)
+            .ok_or_else(|| refuse("stopped orphan has no recorded episode"))?;
+        episode.validate(agent)?;
+        Ok(episode)
+    }
+
+    fn verify_live(
+        &self,
+        shell: &dyn crate::shell::Shell,
+        ledger: &Ledger,
+        pane: &str,
+    ) -> Result<()> {
+        let mut agents = crate::probe::agent_list(shell)?;
+        crate::done::observe(ledger, &mut agents)?;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.pane == pane)
+            .ok_or_else(|| refuse("stopped orphan agent disappeared"))?;
+        self.validate(agent)
+    }
+
+    fn validate(&self, agent: &crate::probe::Agent) -> Result<()> {
+        let turn = crate::done::Turn::of_agent(agent);
+        let axes = [
+            self.turn.state_change_seq.zip(turn.state_change_seq),
+            self.turn.state_since_ms.zip(turn.state_since_ms),
+        ];
+        if self.pane != agent.pane
+            || agent.agent_session.as_deref() != Some(self.agent_session.as_str())
+            || !axes.iter().any(Option::is_some)
+            || !axes.iter().flatten().all(|(old, now)| old == now)
+            || crate::lifecycle::of_agent(agent, crate::lifecycle::Host::Up).state
+                != crate::lifecycle::State::Stopped
+        {
+            return Err(refuse("stopped orphan session or turn changed"));
+        }
+        Ok(())
+    }
+}
+
+/// Close stopped orphan resources without creating a native handoff or a unit result.
+pub fn stopped_orphan(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &Caller,
+    stopped: &StoppedOrphan,
+) -> Result<Closed> {
+    with_local(
+        shell,
+        ledger,
+        pane,
+        caller,
+        Guard::StoppedOrphan { episode: stopped },
+        Ok,
+    )
 }
 
 /// Every refusal happens before anything changes. A child tab in the caller's workspace is
@@ -311,8 +393,10 @@ fn remove_target(
             pane_closed: true,
         });
     }
-    // An automatic close needs the child's own word: idle alone means it waits for input.
-    if guard != Guard::Clean
+    // Only the explicit orphan path can replace native done with correlated stopped evidence.
+    if let Guard::StoppedOrphan { episode } = guard {
+        episode.verify_live(shell, ledger, pane)?;
+    } else if guard != Guard::Clean
         && target.agent.is_some()
         && !crate::done::finished(ledger, &crate::probe::agent_list(shell)?)?.contains(pane)
     {

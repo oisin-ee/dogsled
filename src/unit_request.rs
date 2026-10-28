@@ -459,6 +459,7 @@ fn unlaunched(attempt: &Attempt, ticket: &work::Ticket) -> Option<String> {
 /// `enqueue` reuses them, `commit` returns their receipt, and admission never claims them, so
 /// no later launch can contradict this event. The admission lock orders it with commit.
 pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
+    let resource_closed = resource_closed_items(ledger)?;
     let tickets = work::queue(ledger)?;
     if !tickets
         .iter()
@@ -480,6 +481,9 @@ pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
             let Some(mut attempt) = attempts.read::<Attempt>(&file)? else {
                 return Ok(());
             };
+            if resource_only(&attempt, &resource_closed) {
+                return Ok(());
+            }
             let Some(reason) = unlaunched(&attempt, ticket) else {
                 return Ok(());
             };
@@ -525,8 +529,38 @@ impl Scope<'_> {
 /// final, so its unit is skipped too.
 /// Every in-scope remote unit on one host is read with one ssh call; units outside
 /// the scope or already acknowledged never enter a host's batch.
+fn resource_closed_items(ledger: &Ledger) -> Result<std::collections::BTreeSet<String>> {
+    Ok(crate::items::list(ledger)?
+        .into_iter()
+        .filter(|item| item.resource_closed_ms.is_some())
+        .map(|item| item.id)
+        .collect())
+}
+
+fn resource_only(attempt: &Attempt, closed: &std::collections::BTreeSet<String>) -> bool {
+    attempt.unit.as_ref().is_some_and(|unit| {
+        attempt.request["id"].as_str() == Some(unit.execution.request_id.as_str())
+            && closed.contains(&unit.execution.request_id)
+    })
+}
+
+fn refreshable(
+    attempt: &Attempt,
+    closed: &std::collections::BTreeSet<String>,
+    scope: Scope<'_>,
+) -> bool {
+    !resource_only(attempt, closed)
+        && attempt.unit.as_ref().is_some_and(|unit| {
+            unit.committed.is_some()
+                && unit.settlement_ack.is_none()
+                && unit.stopped.is_none()
+                && scope.includes(&unit.execution)
+        })
+}
+
 pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
     settle_unlaunched(fleet.ledger)?;
+    let resource_closed = resource_closed_items(fleet.ledger)?;
     let attempts = fleet.ledger.child("admissions");
     let mut remote: Vec<(crate::hosts::Host, Vec<Pending>)> = Vec::new();
     for file in records(&attempts)? {
@@ -536,11 +570,7 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
         let Some(unit) = attempt.unit.as_ref() else {
             continue;
         };
-        if unit.committed.is_none()
-            || unit.settlement_ack.is_some()
-            || unit.stopped.is_some()
-            || !scope.includes(&unit.execution)
-        {
+        if !refreshable(&attempt, &resource_closed, scope) {
             continue;
         }
         let Some(host) = attempt.host.as_ref() else {
