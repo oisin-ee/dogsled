@@ -537,30 +537,40 @@ fn what(item: &Item, agent: Option<&Agent>) -> String {
     model.map_or_else(|| harness.clone(), |model| format!("{harness} · {model}"))
 }
 
+/// A closed agent whose branch is not landed yet: its pane is gone, its branch stays.
+fn closed_branch_row(
+    item: &Item,
+    branch: &crate::done::Branch,
+    hosts: &[HostReport],
+    now: u64,
+) -> Row {
+    Row {
+        group: Group::ToLand,
+        kind: "agent".into(),
+        id: item.id.clone(),
+        name: item.name.clone().unwrap_or_else(|| item.pane.clone()),
+        what: what(item, None),
+        host: label(hosts, &item.host),
+        pane: None,
+        owner_pane: Some(item.owner_pane.clone()),
+        title: None,
+        cleanup: None,
+        unseen: false,
+        state: "closed".into(),
+        activity: format!("branch {} +{} to land", branch.name, branch.ahead),
+        age_ms: now.saturating_sub(item.created_ms),
+        quiet_ms: None,
+        ahead: Some(branch.ahead),
+        dirty: false,
+        repository: None,
+    }
+}
+
 fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     if item.closed_ms.is_some()
         && let Some(branch) = &item.branch
     {
-        return Row {
-            group: Group::ToLand,
-            kind: "agent".into(),
-            id: item.id.clone(),
-            name: item.name.clone().unwrap_or_else(|| item.pane.clone()),
-            what: what(item, None),
-            host: label(hosts, &item.host),
-            pane: None,
-            owner_pane: Some(item.owner_pane.clone()),
-            title: None,
-            cleanup: None,
-            unseen: false,
-            state: "closed".into(),
-            activity: format!("branch {} +{} to land", branch.name, branch.ahead),
-            age_ms: now.saturating_sub(item.created_ms),
-            quiet_ms: None,
-            ahead: Some(branch.ahead),
-            dirty: false,
-            repository: None,
-        };
+        return closed_branch_row(item, branch, hosts, now);
     }
     let found = agent(hosts, item);
     let host_up = hosts
