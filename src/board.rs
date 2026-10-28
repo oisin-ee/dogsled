@@ -612,6 +612,7 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         crate::lifecycle::display(lifecycle.state).to_owned()
     };
     let waiting = crate::watchdog::turn_ended(lifecycle.state);
+    let quiet_eligible = lifecycle.state == crate::lifecycle::State::Working;
     let finished = lifecycle.state == crate::lifecycle::State::Done;
     let needs_attention = stalled || group_for(lifecycle.state) == Group::Attention;
     let group = if needs_attention {
@@ -634,18 +635,19 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         (_, None) => crate::lifecycle::display(lifecycle.state).to_owned(),
         (_, Some(a)) => {
             let last = a.session.activity.clone().unwrap_or_default();
-            match quiet_ms.filter(|q| *q >= QUIET_MS && !waiting) {
+            match quiet_ms.filter(|q| *q >= QUIET_MS && quiet_eligible) {
                 Some(quiet) if last.is_empty() => format!("quiet {}", age(quiet)),
                 Some(quiet) => format!("quiet {} · last: {last}", age(quiet)),
                 None => last,
             }
         }
     };
-    let group = if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && !waiting {
-        Group::Attention
-    } else {
-        group
-    };
+    let group =
+        if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && quiet_eligible {
+            Group::Attention
+        } else {
+            group
+        };
     Row {
         group,
         kind: "agent".into(),
@@ -2073,6 +2075,29 @@ mod tests {
         assert!(board.owner_lines().starts_with("Your children and jobs: 1 ready to merge · 4 needs you · 1 working\nReady to merge: web-tests (+2)."));
         assert!(!board.owner_lines().contains("theirs"));
         assert_eq!(build(&status, None, NOW).rows.len(), 7);
+    }
+
+    #[test]
+    fn a_quiet_finishing_child_stays_working() {
+        let mut finishing = agent("w2:p1", "pi", "idle");
+        finishing.finishing = true;
+        finishing.handoff = Some("accepted".into());
+        finishing.transcript_modified = Some(NOW - 3 * QUIET_MS);
+        finishing.session.activity = Some("recording handoff".into());
+        let board = build(
+            &status(
+                vec![host("8103", "netcup", vec![finishing])],
+                vec![item("finishing", "8103", "w2:p1")],
+            ),
+            Some("w1:p1"),
+            NOW,
+        );
+        assert_eq!(board.rows.len(), 1);
+        assert_eq!(board.rows[0].quiet_ms, Some(3 * QUIET_MS));
+        assert_eq!(board.rows[0].group, Group::Running);
+        assert!(!board.rows.iter().any(|row| row.group == Group::Attention));
+        assert_eq!(board.rows[0].activity, "recording handoff");
+        assert_eq!(board.summary(), "1 working");
     }
 
     #[test]
