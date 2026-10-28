@@ -2,6 +2,7 @@
 
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use std::fmt::Write as _;
 
@@ -293,6 +294,43 @@ pub enum ReturnedResult {
 pub struct SettlementAck {
     pub execution: ExecutionRef,
     pub event_id: String,
+    /// Present when a custodian, not the origin owner, acknowledges the delivery.
+    #[serde(default)]
+    pub custody: Option<CustodyRef>,
+}
+
+/// The custody claim a delivery or an acknowledgement is bound to. The server compares it
+/// with the live custody record, never with identity the caller supplies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CustodyRef {
+    pub item_id: String,
+    pub claim_id: String,
+    pub revision: u64,
+    pub recipient: String,
+}
+
+/// A custodian's acceptance of the exact returned result. It is a review fact, not task
+/// completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Review {
+    pub claim_id: String,
+    pub revision: u64,
+    pub execution: ExecutionRef,
+    pub result_id: String,
+    pub review_id: String,
+    pub evidence: String,
+    pub reviewer: String,
+}
+
+/// A settlement delivered to the custodian. The settlement is the saved event, unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Delivery {
+    pub version: u64,
+    pub custody: CustodyRef,
+    pub settlement: Value,
 }
 
 #[derive(Debug, Deserialize)]

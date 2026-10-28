@@ -28,6 +28,14 @@ pub struct Prepared {
     pub terminal_receipt: Option<crate::unit_reply::Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_ack: Option<String>,
+    /// The custody claims whose custodian acknowledged the saved settlement. The owner's
+    /// `settlement_ack` never covers a later custodian.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custody_acks: Vec<String>,
+    /// The acceptance a custodian recorded for the returned result, one per custody claim.
+    /// It is a review fact only: it never completes or changes the original task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<crate::unit_transport::Review>,
     /// The settlement for host proof that the worker ended without a sealed reply. Final:
     /// refresh no longer reads its host, and later returned or refusal evidence is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +137,8 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
                 returned: None,
                 terminal_receipt: None,
                 settlement_ack: None,
+                custody_acks: Vec::new(),
+                reviews: Vec::new(),
                 stopped: None,
             }),
         };
@@ -137,11 +147,9 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
     })
 }
 
-fn load(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
+/// Read the record and check that it belongs to `execution`. It authorizes nobody.
+fn correlate(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
     crate::jobs::validate_id(&execution.request_id)?;
-    if execution.executor != "dogsled" || execution.owner_id != owner()? {
-        return Err(conflict("execution owner does not match caller"));
-    }
     let attempt = attempts
         .read::<Attempt>(&format!("{}.json", execution.request_id))?
         .ok_or_else(|| conflict("unknown prepared request"))?;
@@ -153,6 +161,43 @@ fn load(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
         return Err(conflict("execution does not match prepared request"));
     }
     Ok(attempt)
+}
+
+/// Commit and abandonment belong to the origin owner alone.
+fn load(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
+    if execution.executor != "dogsled" || execution.owner_id != owner()? {
+        return Err(conflict("execution owner does not match caller"));
+    }
+    correlate(attempts, execution)
+}
+
+/// The caller as custody knows it: its pane and its harness session.
+fn caller(fleet: &Fleet) -> Result<(String, Option<String>)> {
+    let pane = owner()?;
+    let session = crate::probe::agent_list(fleet.shell)
+        .ok()
+        .and_then(|agents| agents.into_iter().find(|agent| agent.pane == pane))
+        .and_then(|agent| agent.agent_session);
+    Ok((pane, session))
+}
+
+/// The claim that makes the caller the custodian of `item`, when the custody moved to it.
+/// An unclaimed custody stays with the origin owner and its own delivery path.
+fn claim_of(
+    custody: Option<&crate::custody::Custody>,
+    pane: &str,
+    session: Option<&str>,
+) -> Option<(String, u64)> {
+    let custody = custody?;
+    let claim = custody.latest_claim()?;
+    // A recorded custodian session must be readable now and equal. A reused pane with
+    // another session, or an unreadable session, is not the custodian.
+    let session_ok = match custody.custodian_session.as_deref() {
+        Some(recorded) => session == Some(recorded),
+        None => true,
+    };
+    (custody.host == crate::inbox::hostname() && custody.custodian_pane == pane && session_ok)
+        .then(|| (claim.id.clone(), custody.revision))
 }
 
 pub fn commit(fleet: &Fleet, input: &CommitInput) -> Result<Value> {
@@ -874,43 +919,182 @@ fn pending_preparations(ledger: &Ledger) -> Result<Value> {
 
 pub fn settlements(fleet: &Fleet) -> Result<Value> {
     let owner = owner()?;
+    let (pane, session) = caller(fleet)?;
     refresh(fleet, Scope::Owner(&owner))?;
     let attempts = fleet.ledger.child("admissions");
     let mut pending = Vec::new();
+    let mut inherited = Vec::new();
     for file in records(&attempts)? {
         if let Some(attempt) = attempts.read::<Attempt>(&file)?
             && let Some(unit) = attempt.unit
-            && unit.execution.owner_id == owner
-            && unit.settlement_ack.is_none()
         {
-            let event = settlement(&unit)?;
-            if !event.is_null() {
-                pending.push(event);
+            let custody = crate::custody::get(fleet.ledger, &unit.execution.request_id)?;
+            if custody.as_ref().is_some_and(|c| c.latest_claim().is_some()) {
+                if let Some((claim, revision)) =
+                    claim_of(custody.as_ref(), &pane, session.as_deref())
+                {
+                    inherited.push((unit, claim, revision));
+                }
+            } else if unit.execution.owner_id == owner && unit.settlement_ack.is_none() {
+                let event = settlement(&unit)?;
+                if !event.is_null() {
+                    pending.push(event);
+                }
             }
+        }
+    }
+    // The custodian reads what the origin owner never acknowledged and what it did.
+    for (unit, _, _) in &inherited {
+        refresh(fleet, Scope::Execution(&unit.execution))?;
+    }
+    for (unit, claim, revision) in inherited {
+        if unit.custody_acks.contains(&claim) {
+            continue;
+        }
+        let unit = attempts
+            .read::<Attempt>(&format!("{}.json", unit.execution.request_id))?
+            .and_then(|attempt| attempt.unit)
+            .unwrap_or(unit);
+        let event = settlement(&unit)?;
+        if !event.is_null() {
+            let delivery = crate::unit_transport::Delivery {
+                version: 1,
+                custody: crate::unit_transport::CustodyRef {
+                    item_id: unit.execution.request_id.clone(),
+                    claim_id: claim,
+                    revision,
+                    recipient: pane.clone(),
+                },
+                settlement: event,
+            };
+            pending.push(serde_json::to_value(delivery)?);
         }
     }
     Ok(json!(pending))
 }
 
-fn ack_settlement(ledger: &Ledger, input: &crate::unit_transport::SettlementAck) -> Result<Value> {
+fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -> Result<Value> {
     crate::jobs::validate_id(&input.execution.request_id)?;
-    let attempts = ledger.child("admissions");
+    let attempts = fleet.ledger.child("admissions");
+    let Some(reference) = &input.custody else {
+        return attempts.with_lock(&input.execution.request_id, || {
+            let mut attempt = load(&attempts, &input.execution)?;
+            let unit = attempt
+                .unit
+                .as_mut()
+                .ok_or_else(|| conflict("not a unit request"))?;
+            let event = settlement(unit)?;
+            if event["eventId"].as_str() != Some(input.event_id.as_str()) {
+                return Err(conflict(
+                    "settlement acknowledgement does not match pending event",
+                ));
+            }
+            let applied = unit.settlement_ack.is_none();
+            unit.settlement_ack = Some(input.event_id.clone());
+            attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+            Ok(json!({"applied":applied}))
+        });
+    };
+    let (pane, session) = caller(fleet)?;
     attempts.with_lock(&input.execution.request_id, || {
-        let mut attempt = load(&attempts, &input.execution)?;
-        let unit = attempt
-            .unit
-            .as_mut()
-            .ok_or_else(|| conflict("not a unit request"))?;
-        let event = settlement(unit)?;
+        let mut attempt = correlate(&attempts, &input.execution)?;
+        let event = settlement(
+            attempt
+                .unit
+                .as_ref()
+                .ok_or_else(|| conflict("not a unit request"))?,
+        )?;
         if event["eventId"].as_str() != Some(input.event_id.as_str()) {
             return Err(conflict(
                 "settlement acknowledgement does not match pending event",
             ));
         }
-        let applied = unit.settlement_ack.is_none();
-        unit.settlement_ack = Some(input.event_id.clone());
-        attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
-        Ok(json!({"applied":applied}))
+        // The reference is checked against live custody under the custody lock, and the
+        // acknowledgement is written inside it, so a claim cannot slip in between.
+        crate::custody::locked(fleet.ledger, &input.execution.request_id, |custody| {
+            let live = claim_of(custody, &pane, session.as_deref());
+            if live
+                .as_ref()
+                .map(|(claim, revision)| (claim.as_str(), *revision))
+                != Some((reference.claim_id.as_str(), reference.revision))
+                || reference.item_id != input.execution.request_id
+                || reference.recipient != pane
+            {
+                return Err(conflict("custody reference does not match live custody"));
+            }
+            let unit = attempt
+                .unit
+                .as_mut()
+                .ok_or_else(|| conflict("not a unit request"))?;
+            let applied = !unit.custody_acks.contains(&reference.claim_id);
+            if applied {
+                unit.custody_acks.push(reference.claim_id.clone());
+                attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+            }
+            Ok(json!({"applied":applied}))
+        })
+    })
+}
+
+/// Record that the current custodian accepted the exact returned result.
+///
+/// The reviewer is the live custodian, never caller-supplied identity. Stopped and
+/// not-started outcomes are not results. A matching replay changes nothing and a
+/// conflicting one for the same claim is refused. Task state is never touched.
+// The command surface for a fresh claimant arrives with O4.
+#[allow(dead_code)]
+pub fn record_review(fleet: &Fleet, input: &crate::unit_transport::Review) -> Result<Value> {
+    let (pane, session) = caller(fleet)?;
+    refresh(fleet, Scope::Execution(&input.execution))?;
+    record_review_as(fleet, &pane, session.as_deref(), input)
+}
+
+fn record_review_as(
+    fleet: &Fleet,
+    pane: &str,
+    session: Option<&str>,
+    input: &crate::unit_transport::Review,
+) -> Result<Value> {
+    use crate::unit_transport::ReturnedResult;
+    crate::jobs::validate_id(&input.execution.request_id)?;
+    let attempts = fleet.ledger.child("admissions");
+    attempts.with_lock(&input.execution.request_id, || {
+        let mut attempt = correlate(&attempts, &input.execution)?;
+        let unit = attempt
+            .unit
+            .as_ref()
+            .ok_or_else(|| conflict("not a unit request"))?;
+        let accepted = match unit.returned.as_ref().map(|event| &event.result) {
+            Some(ReturnedResult::Returned { evidence }) => evidence.result_id == input.result_id,
+            _ => false,
+        };
+        if !accepted {
+            return Err(conflict("no saved returned result matches the review"));
+        }
+        crate::custody::locked(fleet.ledger, &input.execution.request_id, |custody| {
+            let live = claim_of(custody, pane, session);
+            if live
+                .as_ref()
+                .map(|(claim, revision)| (claim.as_str(), *revision))
+                != Some((input.claim_id.as_str(), input.revision))
+                || input.reviewer != pane
+            {
+                return Err(conflict("review does not match live custody"));
+            }
+            let unit = attempt
+                .unit
+                .as_mut()
+                .ok_or_else(|| conflict("not a unit request"))?;
+            if let Some(saved) = unit.reviews.iter().find(|r| r.claim_id == input.claim_id) {
+                if saved == input {
+                    return Ok(json!({"applied":false}));
+                }
+                return Err(conflict("a different review is already recorded"));
+            }
+            unit.reviews.push(input.clone());
+            attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+            Ok(json!({"applied":true}))
+        })
     })
 }
 
@@ -963,7 +1147,7 @@ fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
             crate::launch::terminal_ack(fleet.ledger, fleet.shell, &decode(&input)?)?,
         )?),
         UnitCommand::Settlements => settlements(fleet),
-        UnitCommand::AckSettlement { input } => ack_settlement(fleet.ledger, &decode(&input)?),
+        UnitCommand::AckSettlement { input } => ack_settlement(fleet, &decode(&input)?),
         UnitCommand::AbandonPrepared { input } => Ok(serde_json::to_value(abandon(
             fleet.ledger,
             &decode::<crate::unit_transport::ExecutionInput>(&input)?.execution,
@@ -1047,6 +1231,130 @@ mod stopped_tests {
             settlement(&unit).unwrap()["eventId"],
             format!("{ID}-stopped")
         );
+        std::fs::remove_dir_all(&ledger.dir).ok();
+    }
+
+    fn fleet<'a>(
+        ledger: &'a Ledger,
+        shell: &'a crate::shell::Fake,
+        policy: &'a crate::config::Policy,
+    ) -> Fleet<'a> {
+        Fleet {
+            ledger,
+            shell,
+            policy,
+            home: "/".into(),
+            hosts: vec![crate::hosts::Host::local()],
+        }
+    }
+
+    fn claimed(ledger: &Ledger, host: &str, session: &str, revision: u64) {
+        ledger
+            .write(
+                "custody.json",
+                &json!([{"item":ID,"host":host,"owner_pane":"w1:p1","custodian_pane":"w2:p1",
+                    "custodian_session":session,"revision":revision,
+                    "claims":[{"id":format!("claim-{revision}"),"claimant_pane":"w2:p1",
+                        "claimed_ms":1,"revision":revision}]}]),
+            )
+            .unwrap();
+    }
+
+    fn review(ledger: &Ledger, evidence: &str) -> crate::unit_transport::Review {
+        let attempt: Attempt = ledger
+            .child("admissions")
+            .read(&format!("{ID}.json"))
+            .unwrap()
+            .unwrap();
+        let unit = attempt.unit.unwrap();
+        let Some(crate::unit_transport::ReturnedResult::Returned { evidence: saved }) =
+            unit.returned.map(|event| event.result)
+        else {
+            panic!("no returned result")
+        };
+        crate::unit_transport::Review {
+            claim_id: "claim-1".into(),
+            revision: 1,
+            execution: unit.execution,
+            result_id: saved.result_id,
+            review_id: "review-1".into(),
+            evidence: evidence.into(),
+            reviewer: "w2:p1".into(),
+        }
+    }
+
+    #[test]
+    fn a_review_is_idempotent_conflicts_are_refused_and_it_survives_restart() {
+        let (ledger, receipt) = admission(false);
+        let file = format!("{ID}.json");
+        import_receipt(&ledger, &file, receipt).unwrap();
+        claimed(&ledger, &crate::inbox::hostname(), "s2", 1);
+        let (shell, policy) = (crate::shell::Fake::new(), crate::config::Policy::default());
+        let fleet = fleet(&ledger, &shell, &policy);
+        let path = ledger.child("admissions").dir.join(&file);
+        let before: Attempt = ledger.child("admissions").read(&file).unwrap().unwrap();
+        let first = review(&ledger, "accepted");
+        let record = |input| record_review_as(&fleet, "w2:p1", Some("s2"), input);
+        assert_eq!(record(&first).unwrap()["applied"], true);
+        assert_eq!(record(&first).unwrap()["applied"], false);
+        let saved = std::fs::read(&path).unwrap();
+        assert!(record(&review(&ledger, "different")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        // A new read of the ledger, as after a restart, holds the receipt and nothing else.
+        let after = Ledger::new(ledger.dir.clone());
+        let attempt: Attempt = after.child("admissions").read(&file).unwrap().unwrap();
+        let unit = attempt.unit.unwrap();
+        assert_eq!(unit.reviews, vec![first]);
+        let old = before.unit.unwrap();
+        assert_eq!(unit.returned, old.returned);
+        assert!(unit.settlement_ack.is_none() && unit.custody_acks.is_empty());
+        std::fs::remove_dir_all(&ledger.dir).ok();
+    }
+
+    #[test]
+    fn a_review_is_refused_without_a_returned_result_or_live_custody() {
+        let (shell, policy) = (crate::shell::Fake::new(), crate::config::Policy::default());
+        // A stopped outcome is not a returned result.
+        let (ledger, receipt) = admission(true);
+        let fleet_stopped = fleet(&ledger, &shell, &policy);
+        claimed(&ledger, &crate::inbox::hostname(), "s2", 1);
+        let (_, other) = admission(false);
+        std::fs::remove_dir_all(&other.ack.execution.request_id).ok();
+        let mut input = crate::unit_transport::Review {
+            claim_id: "claim-1".into(),
+            revision: 1,
+            execution: receipt.ack.execution.clone(),
+            result_id: "FINAL".into(),
+            review_id: "review-1".into(),
+            evidence: "x".into(),
+            reviewer: "w2:p1".into(),
+        };
+        assert!(record_review_as(&fleet_stopped, "w2:p1", Some("s2"), &input).is_err());
+        std::fs::remove_dir_all(&ledger.dir).ok();
+
+        let (ledger, receipt) = admission(false);
+        import_receipt(&ledger, &format!("{ID}.json"), receipt).unwrap();
+        let fleet = fleet(&ledger, &shell, &policy);
+        input = review(&ledger, "x");
+        let attempt = |pane: &str, session: Option<&str>, input: &crate::unit_transport::Review| {
+            record_review_as(&fleet, pane, session, input).is_err()
+        };
+        // A foreign host, a session mismatch and an unreadable session are refused.
+        claimed(&ledger, "elsewhere", "s2", 1);
+        assert!(attempt("w2:p1", Some("s2"), &input));
+        claimed(&ledger, &crate::inbox::hostname(), "s2", 1);
+        assert!(attempt("w2:p1", Some("other"), &input));
+        assert!(attempt("w2:p1", None, &input));
+        // The previous custodian, a stale revision and a wrong result are refused.
+        assert!(attempt("w1:p1", Some("s2"), &input));
+        let mut stale = input.clone();
+        stale.revision = 0;
+        assert!(attempt("w2:p1", Some("s2"), &stale));
+        let mut wrong = input.clone();
+        wrong.result_id = "other".into();
+        assert!(attempt("w2:p1", Some("s2"), &wrong));
+        // Control: the live custodian is accepted.
+        assert!(!attempt("w2:p1", Some("s2"), &input));
         std::fs::remove_dir_all(&ledger.dir).ok();
     }
 }
