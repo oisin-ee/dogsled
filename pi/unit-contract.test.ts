@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,6 +10,17 @@ import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { UnitBridge } from "./unit-bridge.ts";
 import { acquire, prepared, receipt, unwrap, type Prepared } from "./unit-protocol.ts";
+
+test("native turn guidance agrees across launch, MCP, and Pi without changing todo", async () => {
+	const guidance = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children.";
+	for (const path of ["../src/done.rs", "../src/mcp.rs", "./index.ts"]) {
+		const text = await readFile(new URL(path, import.meta.url), "utf8");
+		assert.ok(text.includes(guidance), path);
+		assert.ok(!text.includes("or run `dogsled done`"), path);
+	}
+	const mcp = await readFile(new URL("../src/mcp.rs", import.meta.url), "utf8");
+	for (const name of ["done", "ask", "blocked"]) assert.ok(mcp.includes(`async fn ${name}(`), name);
+});
 
 const source = process.env["PI_TODO_SOURCE"];
 // Git hooks export repository selectors; fixture subprocesses must address only their own checkouts.

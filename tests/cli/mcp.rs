@@ -187,6 +187,8 @@ fn mcp_lists_the_tools_with_their_schemas() {
         names,
         [
             expect("accept", &["evidence", "item", "result"]),
+            expect("ask", &["question"]),
+            expect("blocked", &["reason"]),
             expect("cancel", &["id"]),
             expect("claim", &["item"]),
             expect("close", &["pane"]),

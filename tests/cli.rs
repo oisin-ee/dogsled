@@ -39,6 +39,8 @@ mod request_validity;
 mod review;
 #[path = "cli/review_fixes.rs"]
 mod review_fixes;
+#[path = "cli/signals.rs"]
+mod signals;
 #[path = "cli/stop_sweep.rs"]
 mod stop_sweep;
 #[path = "cli/sweep.rs"]
@@ -540,7 +542,7 @@ fn now() -> u64 {
 }
 
 /// What dogsled tells each child at launch: `src/done.rs`'s `CONTRACT`, as Herdr logs it.
-const CONTRACT: &str = "Dogsled started you as a child agent. When your whole task is complete, call the dogsled `done` tool (or run `dogsled done`) once, then end your turn with your final reply. Do not call `done` when you ask a question, wait for input, or own open children. Commit your changes first. `done` hands your work back: Dogsled closes your pane and agent worktree when this turn ends, keeps your branch, and leaves landing to your owner. After that turn, messages cannot reopen you; more work needs a new child.";
+const CONTRACT: &str = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use the native tools. Commit your changes before done. Call done once during the turn that completes the whole task, then end the turn with your final reply. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not call done when you need an answer, cannot continue, or own open children.";
 
 struct Rig {
     dir: PathBuf,

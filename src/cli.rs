@@ -245,6 +245,14 @@ pub enum Command {
     /// task; dogsled closes the child after that turn ends and keeps its branch. Without
     /// it, an idle child waits for input and stays open. Refused while it owns open children.
     Done,
+    /// Ask your owner a question without completing the task.
+    Ask {
+        question: String,
+    },
+    /// Report why you cannot continue without completing the task.
+    Blocked {
+        reason: String,
+    },
     /// Show a child's or job's newest output and its captured final reply.
     Read {
         /// A child's name or pane, a job id, or any agent's name or pane.

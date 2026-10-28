@@ -625,7 +625,7 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 ### Tools
 
-`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `drop`, `done`, `stop`, `cancel`, and `place`.
+`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `drop`, `done`, `ask`, `blocked`, `stop`, `cancel`, and `place`.
 Tools share the CLI action code. `spawn` returns a durable queued ticket, even when a host has room.
 The service owns startup confirmation outside the MCP call budget. `dogsled agent` still starts synchronously under `--max`.
 Startup errors include recent pane output in the launch record and ticket when the pane read succeeds.

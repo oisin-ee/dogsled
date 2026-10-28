@@ -149,6 +149,25 @@ fn done_command(ledger: &Ledger, shell: &System, json: bool) -> Result<()> {
     })
 }
 
+/// Turn-ending command receipts share the local agent identity and output boundary.
+fn turn_command(ledger: &Ledger, shell: &System, json: bool, command: Command) -> Result<()> {
+    let (kind, text) = match command {
+        Command::Done => return done_command(ledger, shell, json),
+        Command::Ask { question } => (lifecycle::Signal::Ask, question),
+        Command::Blocked { reason } => (lifecycle::Signal::Blocked, reason),
+        _ => return Err(Error::Invalid("not a turn signal command".into())),
+    };
+    let signal = done::signal(
+        ledger,
+        shell,
+        &inbox::own_pane(None)?,
+        kind,
+        &text,
+        now_ms(),
+    )?;
+    print(json, &signal, || format!("{}\n", signal.event_id))
+}
+
 fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
     let shell = System { budget };
@@ -222,7 +241,9 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             let dropped = drop::drop(&fleet, &id, host.as_deref())?;
             print(cli.json, &dropped, || dropped.line())?;
         }
-        Command::Done => done_command(&ledger, &shell, cli.json)?,
+        command @ (Command::Done | Command::Ask { .. } | Command::Blocked { .. }) => {
+            turn_command(&ledger, &shell, cli.json, command)?;
+        }
         Command::Send {
             target,
             host,

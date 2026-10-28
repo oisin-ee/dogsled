@@ -194,6 +194,9 @@ test("registers the dogsled tools, the panel command, and the message renderer",
 	assert.deepEqual(r.servers.map(s => (s as [string, Record<string, unknown>])[0]), ["dogsled"]);
 	const config = (r.servers[0] as [string, Record<string, unknown>])[1];
 	assert.deepEqual([config["args"], config["exposure"]], [["mcp"], "direct"]);
+	assert.match(String(config["description"]), /native done, ask, and blocked tools/);
+	assert.match(String(config["description"]), /End every turn with exactly one of: done \(whole task complete\), ask \(you need an answer from your owner\), blocked \(you cannot continue\), or waiting for your own open children/);
+	assert.ok(!String(config["description"]).includes("dogsled done"));
 	assert.ok(r.commands.has("dogsled"));
 	// The card names the sender and kind and shows the text, folded past 12 lines.
 	const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
