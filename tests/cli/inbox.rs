@@ -62,6 +62,7 @@ fn serve(rig: &Rig) -> String {
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     let journal = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "{journal}");
+    assert!(!journal.contains("dogsled service lane "), "{journal}");
     journal
 }
 
@@ -478,8 +479,9 @@ fn a_childs_reply_reaches_its_custodian_and_not_its_origin_owner() {
     assert_eq!(reached.len(), 1, "{custodian}");
     assert_eq!(reached[0]["kind"], "reply");
     assert_eq!(reached[0]["pane"], "w1:p4");
-    let owner = rig.read("state/inbox/term_owner.json");
-    assert!(replies(&owner).is_empty(), "{owner}");
+    let (code, owner) = as_pane(&rig, "w1:p2", &["inbox", "list"]);
+    assert_eq!(code, 0, "{owner}");
+    assert!(replies(&owner["received"]).is_empty(), "{owner}");
 }
 
 #[test]
@@ -494,10 +496,15 @@ fn a_childs_reply_without_a_custody_record_reaches_its_origin_owner() {
             ("w1:p3", "term_child", "child"),
         ],
     );
-    rig.put("state/items.json", &child_item());
+    // A closed legacy child can retain an untold reply without a custody record.
+    // Open children acquire origin custody during the sweep before delivery.
+    let mut items = child_item();
+    items[0]["closed_ms"] = json!(3);
+    rig.put("state/items.json", &items);
     as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
     serve(&rig);
     serve(&rig);
+    assert!(!rig.dir.join("state/custody.json").exists());
     let owner = rig.read("state/inbox/term_owner.json");
     let reached = replies(&owner);
     assert_eq!(reached.len(), 1, "{owner}");
@@ -589,8 +596,11 @@ fn delivery_checks_the_live_session_of_the_recipient_not_the_snapshot() {
         "herdr",
         r#"#!/bin/sh
 if test "$*" = 'agent list'; then
-  cat "$RIG/agents.json"
-  cp "$RIG/live-agents.json" "$RIG/agents.json"
+  if mkdir "$RIG/agents-switched" 2>/dev/null; then
+    cat "$RIG/agents.json"
+  else
+    cat "$RIG/live-agents.json"
+  fi
 else
   exec "$RIG/bin/herdr-default" "$@"
 fi
@@ -603,12 +613,14 @@ fi
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let journal = String::from_utf8_lossy(&out.stderr);
+    assert!(!journal.contains("dogsled service lane "), "{journal}");
     let snapshot = rig.read("state/host.json");
     assert_eq!(
         snapshot["probe"]["agent_panes"][1]["agent_session"], "custodian-session",
         "{snapshot}"
     );
-    let live = rig.read("agents.json");
+    let live = rig.read("live-agents.json");
     assert_eq!(
         live["result"]["agents"][1]["agent_session"]["value"], "another-session",
         "{live}"
