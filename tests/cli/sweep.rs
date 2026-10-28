@@ -802,12 +802,128 @@ fn orphan(rig: &Rig, owner: &str, host: &str) {
     );
 }
 
+/// A child whose owner pane is `owner`, and whose owner session is `session`.
+fn child_with_owner_session(rig: &Rig, owner: &str, session: Option<&str>) {
+    let mut item = json!({"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":owner,
+        "name":"worker","created_ms":1,"closed_ms":null});
+    if let Some(session) = session {
+        item["owner_session"] = json!(session);
+    }
+    rig.put("state/items.json", &json!([item]));
+}
+
 fn kept_reason(rig: &Rig) -> String {
     let (_, status) = rig.json(&["status"]);
     status["orphans"][0]["reason"]
         .as_str()
         .unwrap_or_else(|| panic!("{status}"))
         .to_owned()
+}
+
+#[test]
+fn the_sweep_classifies_a_child_by_its_current_custodian_not_its_origin_owner() {
+    let (rig, tree) = close_rig("sweep-custody");
+    // The origin owner is gone, but a lead claimed the child. The custodian lives and runs
+    // its session, so the child is not an orphan.
+    child_with_owner_session(&rig, "w9:p1", Some("owner-session"));
+    rig.put(
+        "state/custody.json",
+        &json!([{"item":"i1","host":"local","owner_pane":"w9:p1","owner_session":"owner-session",
+            "custodian_pane":"w1:p1","custodian_session":"claimant-session","revision":1,
+            "claims":[{"id":"claim-1","claimant_pane":"w1:p1","claimant_session":"claimant-session",
+                "claimed_ms":1,"previous_custodian":"w9:p1","revision":1}]}]),
+    );
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
+            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":"working","cwd":tree}
+        ]}}),
+    );
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[
+            {"pane_id":"w1:p1","agent":"pi","agent_status":"working",
+                "agent_session":{"kind":"id","value":"claimant-session"}},
+            {"pane_id":"w2:p1","agent":"pi","agent_status":"working","terminal_id":"term_child",
+                "completion_seq":1,"state_change_seq":1}
+        ]}}),
+    );
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    assert_eq!(status["orphans"], json!([]), "{status}");
+    assert!(
+        rig.read("state/items.json")[0]["closed_ms"].is_null(),
+        "a claimed child is not closed as an orphan"
+    );
+    // The custodian pane is gone: the child is an orphan, and the claim shows in the status.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":"working","cwd":tree}
+        ]}}),
+    );
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    assert_eq!(status["orphans"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(
+        status["orphans"][0]["status"],
+        json!("orphaned"),
+        "{status}"
+    );
+    assert_eq!(status["orphans"][0]["claimed"], json!(true), "{status}");
+    assert!(
+        status["orphans"][0]["custodian_pane"] == json!("w1:p1"),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_child_with_a_legacy_owner_session_is_never_called_session_ended() {
+    let (rig, tree) = close_rig("sweep-legacy-session");
+    // The owner pane lives, but the item records no owner session. The session-ended rule
+    // needs a recorded identity, so the child is unknown, not orphaned.
+    child_with_owner_session(&rig, "w1:p1", None);
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 1, "{status}");
+    assert_eq!(orphans[0]["status"], json!("unknown"), "{status}");
+    assert!(
+        orphans[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("custodian session"),
+        "{status}"
+    );
+    // The child is not closed as an orphan: the evidence proves nothing.
+    assert!(
+        rig.read("state/items.json")[0]["closed_ms"].is_null(),
+        "{status}"
+    );
+}
+
+#[test]
+fn the_status_lists_an_unclaimed_orphan_once() {
+    let (rig, tree) = close_rig("sweep-status-once");
+    // The owner pane is gone, so the child is an orphan the sweep keeps.
+    orphan(&rig, "w9:p1", "local");
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 1, "{status}");
+    assert_eq!(orphans[0]["status"], json!("orphaned"), "{status}");
+    assert_eq!(orphans[0]["claimed"], json!(false), "{status}");
+    // The human status names it once, on its own item line.
+    let human = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
+    assert!(human.contains("orphaned (unclaimed)"), "{human}");
+    assert_eq!(human.matches("orphaned (unclaimed)").count(), 1, "{human}");
+    // The brief counts the orphan once.
+    let brief = String::from_utf8_lossy(&rig.run(&["status", "--brief"]).stdout).into_owned();
+    assert!(brief.contains("1 orphaned"), "{brief}");
+    assert_eq!(brief.matches("1 orphaned").count(), 1, "{brief}");
 }
 
 #[test]

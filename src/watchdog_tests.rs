@@ -429,7 +429,7 @@ fn finished_child_ends_its_item_when_its_pane_is_gone() {
 }
 
 #[test]
-fn check_ins_report_orphans_the_sweep_keeps() {
+fn check_ins_do_not_report_orphans_the_sweep_keeps() {
     let rig = Rig::new();
     rig.item("agent");
     crate::items::record(
@@ -457,10 +457,8 @@ fn check_ins_report_orphans_the_sweep_keeps() {
     let reports = rig.reports(1_800_001, "idle", "done", Some(1));
     tick(&rig.fleet(), &reports, 1_800_001).unwrap();
     let prompt = &rig.check_ins()[0];
-    assert!(
-        prompt.contains(
-            "Orphaned children the sweep keeps: lost-child on local (owner gone is gone; the child is working)."
-        ),
-        "{prompt}"
-    );
+    // An orphan has no owner to hear about it, but `dogsled status` lists it. A check-in
+    // must not repeat it on every turn.
+    assert!(!prompt.contains("Orphaned children"), "{prompt}");
+    assert!(!prompt.contains("lost-child"), "{prompt}");
 }

@@ -337,7 +337,14 @@ pub fn fleet(status: &Status) -> Vec<String> {
     let orphans = if status.orphans.is_empty() {
         String::new()
     } else {
-        format!(" · {} orphaned", status.orphans.len())
+        format!(
+            " · {} orphaned",
+            status
+                .orphans
+                .iter()
+                .filter(|orphan| orphan.status == crate::sweep::CustodyState::Orphaned)
+                .count()
+        )
     };
     rows.push(format!(
         "{} open items{}{orphans} · {} queued · {} stalls. Run `dogsled status` for details.",
@@ -363,6 +370,16 @@ pub fn fleet(status: &Status) -> Vec<String> {
     rows
 }
 
+/// What the status says about a child the sweep keeps: it is orphaned and unclaimed, or its
+/// custody cannot be proven.
+fn orphan_state(orphan: &crate::sweep::Orphan) -> &'static str {
+    match orphan.status {
+        crate::sweep::CustodyState::Orphaned if orphan.claimed => "orphaned (claimed)",
+        crate::sweep::CustodyState::Orphaned => "orphaned (unclaimed)",
+        crate::sweep::CustodyState::Unknown => "unknown",
+    }
+}
+
 fn item_lines(status: &Status, lines: &mut Vec<String>) {
     for item in &status.items {
         if let Some(branch) = &item.branch
@@ -386,7 +403,7 @@ fn item_lines(status: &Status, lines: &mut Vec<String>) {
             item.host,
             item.pane,
             if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
-                format!(" orphaned: {}", one_line(&orphan.reason))
+                format!(" {}: {}", orphan_state(orphan), one_line(&orphan.reason))
             } else if crate::items::finished(item, &status.hosts) {
                 format!(
                     " finished; run {}",

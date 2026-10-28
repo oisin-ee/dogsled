@@ -4,6 +4,7 @@
 //! guarded close backstop: own done, idle/done, clean, branch retained. No landing wait.
 
 use crate::close::Guard;
+use crate::custody::{Custody, PaneState, SessionState, Status};
 use crate::error::Result;
 use crate::hosts::{Fleet, HostReport};
 use crate::items::{Item, Reply};
@@ -11,8 +12,19 @@ use crate::ledger::Ledger;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// An open child whose owner pane no longer exists, which the sweep keeps. Status and check-ins
-/// report it, because nothing else will.
+/// What the custody evidence proves about a child the sweep keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CustodyState {
+    /// The custodian is gone: the child is an orphan.
+    #[default]
+    Orphaned,
+    /// The evidence cannot prove the custodian is gone.
+    Unknown,
+}
+
+/// An open child whose custodian is gone, or whose custodian cannot be proven. The sweep keeps
+/// it, and `dogsled status` lists it, because nothing else will.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Orphan {
     pub item: String,
@@ -24,6 +36,15 @@ pub struct Orphan {
     /// Why the sweep keeps it: dirty, unpushed, working, blocked, or unreachable.
     pub reason: String,
     pub since_ms: u64,
+    /// The custody evidence: the custodian is gone, or it cannot be proven.
+    #[serde(default)]
+    pub status: CustodyState,
+    /// Whether a lead claimed the custody of this child.
+    #[serde(default)]
+    pub claimed: bool,
+    /// The pane that holds the custody now. It is the owner pane until a lead claims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custodian_pane: Option<String>,
 }
 
 const FILE: &str = "orphans.json";
@@ -223,18 +244,11 @@ pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
         .collect();
     let mut kept = Vec::new();
     if !items.is_empty() {
-        // An owner is a pane on this host, where its items are recorded. A failed pane list
-        // proves nothing is gone, so it stops the pass.
-        let live: BTreeSet<String> = crate::cleanup::current_panes(fleet.shell)?
-            .into_iter()
-            .map(|p| p.pane_id)
-            .collect();
-        let (orphaned, owned): (Vec<&Item>, Vec<&Item>) =
-            items.iter().partition(|i| !live.contains(&i.owner_pane));
         let reports = fleet.status(now)?;
-        landing(fleet, &owned, &reports, now)?;
-        for item in orphaned {
-            let Some(reason) = settle(fleet, item, &reports, now) else {
+        let classified = classify(fleet, &items.iter().collect::<Vec<_>>());
+        landing(fleet, &classified.owned, &reports, now)?;
+        for (item, custody, note) in classified.orphaned {
+            let Some(reason) = settle(fleet, item, &note, &reports, now) else {
                 continue;
             };
             let since_ms = previous.get(&item.id).map_or(now, |o| o.since_ms);
@@ -244,15 +258,23 @@ pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
                     item.pane, item.host
                 );
             }
-            kept.push(Orphan {
-                item: item.id.clone(),
-                host: item.host.clone(),
-                pane: item.pane.clone(),
-                owner_pane: item.owner_pane.clone(),
-                name: item.name.clone(),
+            kept.push(kept_orphan(
+                item,
+                &custody,
                 reason,
                 since_ms,
-            });
+                CustodyState::Orphaned,
+            ));
+        }
+        for (item, custody, reason) in classified.unknown {
+            let since_ms = previous.get(&item.id).map_or(now, |o| o.since_ms);
+            kept.push(kept_orphan(
+                item,
+                &custody,
+                reason,
+                since_ms,
+                CustodyState::Unknown,
+            ));
         }
     }
     // A reply captured before its child closed is told even when no open item remains.
@@ -268,10 +290,134 @@ pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
     fleet.ledger.write(FILE, &kept)
 }
 
+/// The children of this host, split by what their custody proves.
+struct Classified<'a> {
+    /// The children their custodian still holds.
+    owned: Vec<&'a Item>,
+    /// The children whose custodian is gone, with the note that proves it.
+    orphaned: Vec<(&'a Item, Custody, String)>,
+    /// The children whose custody cannot be proven, with the reason.
+    unknown: Vec<(&'a Item, Custody, String)>,
+}
+
+/// Classify each open child by its current custodian. The custody record decides who holds
+/// a child now; the origin owner is only the custodian until a lead claims the child.
+fn classify<'a>(fleet: &Fleet, items: &[&'a Item]) -> Classified<'a> {
+    let mut classified = Classified {
+        owned: Vec::new(),
+        orphaned: Vec::new(),
+        unknown: Vec::new(),
+    };
+    let mut evidence: BTreeMap<String, (PaneState, SessionState)> = BTreeMap::new();
+    for item in items {
+        let custody = match custody_of(fleet, item) {
+            Ok(custody) => custody,
+            Err(error) => {
+                eprintln!(
+                    "dogsled sweep: cannot read the custody of {}: {error}",
+                    item.id
+                );
+                continue;
+            }
+        };
+        let (panes, session) = evidence
+            .entry(custody.custodian_pane.clone())
+            .or_insert_with(|| crate::custody::evidence(fleet.shell, &custody.custodian_pane))
+            .clone();
+        match crate::custody::classify(&custody, &panes, &session) {
+            Status::Owned => classified.owned.push(item),
+            Status::Orphaned => {
+                let note = orphan_note(&custody.custodian_pane, &panes);
+                classified.orphaned.push((item, custody, note));
+            }
+            Status::Unknown => {
+                // Missing evidence is never proof of an orphan. A live custodian pane keeps
+                // the child with its custodian, so it settles as an owned child, and the
+                // status says that its custody cannot be proven.
+                if matches!(panes, PaneState::Live) {
+                    classified.owned.push(item);
+                }
+                let reason = unknown_reason(&custody, &panes, &session);
+                classified.unknown.push((item, custody, reason));
+            }
+        }
+    }
+    classified
+}
+
+/// The record of a child the sweep keeps.
+fn kept_orphan(
+    item: &Item,
+    custody: &Custody,
+    reason: String,
+    since_ms: u64,
+    status: CustodyState,
+) -> Orphan {
+    Orphan {
+        item: item.id.clone(),
+        host: item.host.clone(),
+        pane: item.pane.clone(),
+        owner_pane: item.owner_pane.clone(),
+        name: item.name.clone(),
+        reason,
+        since_ms,
+        status,
+        claimed: !custody.claims.is_empty(),
+        custodian_pane: Some(custody.custodian_pane.clone()),
+    }
+}
+
+/// The custody of an item: the record this host holds, or the origin record it starts with.
+///
+/// The origin record is built here instead of written, so the sweep can classify a child
+/// even when the ledger cannot be written. It mirrors the origin the custody record starts
+/// with: the owner pane and its session hold the child until a lead claims it.
+fn custody_of(fleet: &Fleet, item: &Item) -> Result<Custody> {
+    match crate::custody::get(fleet.ledger, &item.id)? {
+        Some(custody) => Ok(custody),
+        None => Ok(Custody {
+            item: item.id.clone(),
+            host: crate::inbox::hostname(),
+            owner_pane: item.owner_pane.clone(),
+            owner_session: item.owner_session.clone(),
+            custodian_pane: item.owner_pane.clone(),
+            custodian_session: item.owner_session.clone(),
+            revision: 0,
+            claims: Vec::new(),
+        }),
+    }
+}
+
+/// Why the custody of a child cannot be proven.
+fn unknown_reason(custody: &Custody, panes: &PaneState, session: &SessionState) -> String {
+    match (panes, session) {
+        (PaneState::Unreadable, _) => "the pane list cannot be read".to_owned(),
+        (_, SessionState::Unreadable) => "the custodian session cannot be read".to_owned(),
+        (PaneState::Live, _) if custody.custodian_session.is_none() => {
+            "the custody records no custodian session, so it cannot be proven".to_owned()
+        }
+        _ => "the evidence cannot prove the custodian is gone".to_owned(),
+    }
+}
+
+/// Why the custodian of a child is gone: its pane is gone, or its session ended.
+fn orphan_note(custodian: &str, panes: &PaneState) -> String {
+    match panes {
+        PaneState::Gone => format!("owner {custodian} is gone"),
+        _ => format!("owner {custodian} ended its session"),
+    }
+}
+
 /// Close `item` when that loses nothing, or say why it stays. `None` when it was closed, or when
 /// its pane is gone and item reconciliation ends it.
-fn settle(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Option<String> {
-    let owner = format!("owner {} is gone", item.owner_pane);
+fn settle(
+    fleet: &Fleet,
+    item: &Item,
+    note: &str,
+    reports: &[HostReport],
+    now: u64,
+) -> Option<String> {
+    let owner = note.to_owned();
     let Some(report) = reports
         .iter()
         .find(|h| h.host.id == item.host && h.service == "up")
@@ -310,10 +456,10 @@ fn settle(fleet: &Fleet, item: &Item, reports: &[HostReport], now: u64) -> Optio
                 eprintln!("dogsled sweep: failed: close item {}: {error}", item.id);
             }
             eprintln!(
-                "dogsled sweep: closed orphan {} on {} (owner {} is gone){}",
+                "dogsled sweep: closed orphan {} on {} ({}){}",
                 item.pane,
                 report.host.label,
-                item.owner_pane,
+                note,
                 closed.worktree.map_or_else(String::new, |tree| format!(
                     "; removed {} ({})",
                     tree.path, tree.branch
@@ -594,7 +740,7 @@ mod liveness_tests {
         assert_eq!(reports[0].service, "down");
         assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
         assert!(
-            settle(&fleet, &item, &reports, 61_000)
+            settle(&fleet, &item, "owner w98:p1 is gone", &reports, 61_000)
                 .unwrap()
                 .contains("unavailable")
         );
@@ -612,7 +758,7 @@ mod liveness_tests {
                 // The same old observation cannot close an agent after its done mark disappears.
                 ledger.write("done.json", &json!({}))?;
                 assert!(
-                    settle(&fleet, &item, &reports, 61_000)
+                    settle(&fleet, &item, "owner w98:p1 is gone", &reports, 61_000)
                         .unwrap()
                         .contains("has not called done")
                 );

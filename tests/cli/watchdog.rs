@@ -123,6 +123,55 @@ fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
 }
 
 #[test]
+fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
+    let rig = watchdog_rig("watchdog-orphan-notice");
+    // The owner is idle with an open child, so it gets a check-in.
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"idle",
+            "terminal_id":"term_owner","completion_seq":1,"state_change_seq":1}]}}),
+    );
+    rig.snapshot("state/host.json", NOW, 0.0, 1);
+    let mut snapshot = rig.read("state/host.json");
+    snapshot["probe"]["agent_panes"] = json!([{"pane":"w1:p1","agent":"pi","state":"idle",
+        "terminal_id":"term_owner"}]);
+    rig.put("state/host.json", &snapshot);
+    // The owner's own item is open, and the sweep keeps an orphan on this host.
+    rig.put(
+        "state/items.json",
+        &json!([{"id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
+            "name":"worker","created_ms":1,"closed_ms":null}]),
+    );
+    rig.put(
+        "state/orphans.json",
+        &json!([{"item":"orphan","host":"local","pane":"w3:p1","owner_pane":"gone",
+            "name":"lost-child","reason":"owner gone is gone; the child is working","since_ms":1}]),
+    );
+    // The owner reads its inbox.
+    fs::create_dir_all(rig.dir.join("state/inbox")).unwrap();
+    rig.put(
+        "state/inbox/term_owner.reader.json",
+        &json!({"pane":"w1:p1","harness":"pi","registered_ms":1}),
+    );
+    assert!(
+        rig.run(&["serve", "--once", "--interval", "1"])
+            .status
+            .success()
+    );
+    let inbox = rig.read("state/inbox/term_owner.json");
+    let text = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["kind"] == "check-in")
+        .map(|record| record["text"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("Orphaned children"), "{text}");
+    assert!(!text.contains("lost-child"), "{text}");
+}
+
+#[test]
 fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
     let rig = watchdog_rig("doctor");
     rig.snapshot("state/host.json", NOW, 0.0, 1);

@@ -395,25 +395,8 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
             finished.join(", ")
         );
     }
-    // An orphan has no owner to hear about it, so every check-in on this host reports it.
-    if let Ok(orphans) = crate::sweep::list(fleet.ledger)
-        && !orphans.is_empty()
-    {
-        let _ = writeln!(
-            note,
-            "Orphaned children the sweep keeps: {}. See `dogsled status`.",
-            orphans
-                .iter()
-                .map(|o| format!(
-                    "{} on {} ({})",
-                    o.name.as_deref().unwrap_or(&o.pane),
-                    o.host,
-                    o.reason
-                ))
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-    }
+    // An orphan has no owner to hear about it, but `dogsled status` lists it. A check-in
+    // must not repeat it on every turn.
     note.push_str("Decide whether to keep waiting, message a child (`dogsled send`), close one (`dogsled close`), or stop a job (`dogsled stop`).\n");
     crate::activity::plain(&note)
 }
