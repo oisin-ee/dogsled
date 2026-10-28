@@ -303,6 +303,9 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
     let host = fleet.find(&item.host)?;
     let tail = if item.kind == "agent" && item.closed_ms.is_some() {
         String::new()
+    } else if item.kind == "job" && host.is_local() && jobs::expired(fleet.ledger, &item.id)? {
+        // The job's output expired: the reader is told, and the read never fails.
+        jobs::OUTPUT_EXPIRED.to_owned()
     } else {
         crate::watchdog::item_tail(fleet, &item, host)?
     };

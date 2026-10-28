@@ -5,6 +5,53 @@ fn complete(id: &str) -> Value {
         "state":"idle","exit":0,"signal":null,"reason":null,"started_ms":100,"ended_ms":101,"timeout_ms":null,"idle_timeout_ms":null})
 }
 
+/// The job retention windows: the output goes after a day, the record after 30 days.
+const LOG_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+const RECORD_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+/// What a reader sees when a job's output expired.
+const EXPIRED: &str = "output expired";
+
+/// A terminal job record that ended at `ended_ms`.
+fn terminal(id: &str, ended_ms: u64) -> Value {
+    let mut job = complete(id);
+    job["started_ms"] = json!(ended_ms);
+    job["ended_ms"] = json!(ended_ms);
+    job["cwd"] = json!("/tmp");
+    job
+}
+
+/// Write a job record and its log into a rig.
+fn put_job(rig: &Rig, id: &str, job: &Value, output: &str) {
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    rig.put(&format!("state/jobs/{id}.json"), job);
+    fs::write(
+        rig.dir.join(format!("state/jobs/{id}.log")),
+        format!("{output}\n"),
+    )
+    .unwrap();
+}
+
+/// Set the rig's host clock.
+fn set_clock(rig: &Rig, at: u64) {
+    fs::write(rig.dir.join("clock"), at.to_string()).unwrap();
+}
+
+/// One service pass. The retention lane runs on the timer, so a pass expires the jobs
+/// whose windows passed.
+fn serve(rig: &Rig) {
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The job's log, when it is still there.
+fn log_of(rig: &Rig, id: &str) -> Option<String> {
+    fs::read_to_string(rig.dir.join(format!("state/jobs/{id}.log"))).ok()
+}
+
 /// A wrapper runs nothing when its claim is missing, corrupt, for another command, already
 /// started, ended, or uncertain. No process, no log, and no pane exist for such a job.
 #[test]
@@ -690,5 +737,166 @@ esac
         !error
             .to_string()
             .contains("https://expected.invalid/repo.git")
+    );
+}
+
+/// A job's output goes after a day. It stays at exactly 24 hours, and it goes at 24
+/// hours and one millisecond.
+#[test]
+fn a_job_log_expires_after_a_day() {
+    let rig = Rig::new("retention-log");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    // Exactly 24 hours: the log stays.
+    set_clock(&rig, ended + LOG_WINDOW_MS);
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("the output\n"));
+    assert!(rig.dir.join("state/jobs/aged.json").exists());
+    // One millisecond more: the log is gone and the record says so.
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+    let job = rig.read("state/jobs/aged.json");
+    assert_eq!(job["output_expired"], true, "{job}");
+    // The record itself is still there: only a day passed.
+    assert!(rig.dir.join("state/jobs/aged.json").exists());
+}
+
+/// A job's record goes after 30 days. It stays at exactly 30 days, and it goes at 30
+/// days and one millisecond.
+#[test]
+fn a_job_record_expires_after_thirty_days() {
+    let rig = Rig::new("retention-record");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    // Exactly 30 days: the record stays.
+    set_clock(&rig, ended + RECORD_WINDOW_MS);
+    serve(&rig);
+    assert!(rig.dir.join("state/jobs/aged.json").exists());
+    // One millisecond more: the record and its log are gone.
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+}
+
+/// A running job never expires. Its age changes nothing.
+#[test]
+fn a_running_job_never_expires() {
+    let rig = Rig::new("retention-running");
+    let started = now() - 90 * 86_400_000;
+    set_clock(&rig, now());
+    let mut job = complete("running");
+    job["started_ms"] = json!(started);
+    job["ended_ms"] = Value::Null;
+    job["exit"] = Value::Null;
+    job["state"] = json!("working");
+    put_job(&rig, "running", &job, "the output");
+    serve(&rig);
+    assert!(rig.dir.join("state/jobs/running.json").exists());
+    assert_eq!(log_of(&rig, "running").as_deref(), Some("the output\n"));
+}
+
+/// An uncertain job never expires. Its age changes nothing.
+#[test]
+fn an_uncertain_job_never_expires() {
+    let rig = Rig::new("retention-uncertain");
+    set_clock(&rig, now());
+    let mut job = complete("uncertain");
+    job["started_ms"] = Value::Null;
+    job["ended_ms"] = Value::Null;
+    job["exit"] = Value::Null;
+    job["state"] = json!("uncertain");
+    job["reason"] = json!("dispatch outcome unknown");
+    put_job(&rig, "uncertain", &job, "the output");
+    serve(&rig);
+    assert!(rig.dir.join("state/jobs/uncertain.json").exists());
+    assert_eq!(log_of(&rig, "uncertain").as_deref(), Some("the output\n"));
+}
+
+/// A reader sees the expiry instead of a missing output. The job list says it, and the
+/// tail of the job says it.
+#[test]
+fn an_expired_output_is_reported_not_missing() {
+    let rig = Rig::new("retention-readers");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    serve(&rig);
+    // The list carries the expiry marker, so a reader never sees a job that never ran.
+    let listed = rig.json(&["host", "jobs"]).1;
+    let job = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == "aged")
+        .expect("the record is still listed");
+    assert_eq!(job["output_expired"], true, "{job}");
+    // The log read reports the expiry and does not fail.
+    let logs = rig.json(&["host", "logs", "aged"]).1;
+    assert_eq!(logs["expired"], true, "{logs}");
+    assert_eq!(
+        logs["bytes"],
+        json!(format!("{EXPIRED}\n").as_bytes()),
+        "{logs}"
+    );
+    // The tail says it too.
+    let tail = rig.json(&["host", "tail", "job", "aged"]).1;
+    assert_eq!(tail, json!(EXPIRED), "{tail}");
+}
+
+/// The expiry pass repeats safely. A second pass changes nothing.
+#[test]
+fn a_second_expiry_pass_changes_nothing() {
+    let rig = Rig::new("retention-repeat");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    // A second pass at the same time is a no-op.
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+    // And a pass at a later time is a no-op too.
+    set_clock(&rig, ended + 100 * RECORD_WINDOW_MS);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+}
+
+/// A list that runs while the expiry runs does not fail. The record is either there or
+/// gone, never half read.
+#[test]
+fn a_list_during_the_expiry_does_not_fail() {
+    let rig = Rig::new("retention-concurrent");
+    let ended = now();
+    set_clock(&rig, ended);
+    for index in 0..20 {
+        put_job(
+            &rig,
+            &format!("aged-{index}"),
+            &terminal(&format!("aged-{index}"), ended),
+            "the output",
+        );
+    }
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    let out = rig.run(&["host", "jobs"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 20, "{listed}");
+    serve(&rig);
+    let out = rig.run(&["host", "jobs"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

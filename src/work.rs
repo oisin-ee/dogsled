@@ -527,6 +527,7 @@ fn launch_job(
         timeout_ms,
         idle_timeout_ms,
         validity: launch_validity(launch),
+        output_expired: false,
     };
     // The job's ownership is read before any pane side effect. A job that already
     // has an owner keeps it: this launch never takes it over, never allocates a
