@@ -261,9 +261,25 @@ pub fn reader(ledger: &Ledger, terminal: &str) -> Result<Option<Reader>> {
 
 /// Put `record` in its terminal's inbox on this host. Refuses a terminal that is not in this
 /// host's latest snapshot, or that has no reader: nothing would ever deliver the record.
-fn put_checked(ledger: &Ledger, shell: &dyn crate::shell::Shell, record: Record) -> Result<Record> {
+///
+/// The live agent of the pane is read once, and it must be the custodian: a pane another
+/// session took over never inherits the custody, so the record waits for its own agent.
+fn put_checked(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    record: Record,
+    custodian: Option<&Custodian>,
+) -> Result<Record> {
     // Read live state: an ended turn seals done before a message can reopen it.
     let agent = local_agent(shell, &record.pane)?;
+    if let Some(custodian) = custodian
+        && !holds(custodian, &record.pane, agent.agent_session.as_deref())
+    {
+        return Err(Error::Invalid(format!(
+            "{} runs another session than the one that holds the custody",
+            record.pane
+        )));
+    }
     let from = record.from.clone();
     crate::done::input(
         ledger,
@@ -594,7 +610,7 @@ pub fn send(
         done_ms: None,
     };
     let stored = if target.host.is_local() {
-        put_checked(fleet.ledger, fleet.shell, record)?
+        put_checked(fleet.ledger, fleet.shell, record, None)?
     } else {
         fleet.remote_setup(
             target.host,
@@ -737,7 +753,7 @@ fn report(ledger: &Ledger, shell: &dyn crate::shell::Shell, s: &Sent, now: u64) 
         reason: None,
         done_ms: None,
     };
-    match put_checked(ledger, shell, record) {
+    match put_checked(ledger, shell, record, None) {
         // The sender itself may be gone; nobody is left to tell.
         Ok(_) | Err(Error::Invalid(_) | Error::Refused { .. }) => Ok(()),
         Err(e) => Err(e),
@@ -1027,15 +1043,136 @@ pub fn host(
     cmd: crate::cli::HostCommand,
 ) -> Result<()> {
     let value = match cmd {
-        crate::cli::HostCommand::InboxPut { record } => {
-            serde_json::to_value(put_checked(ledger, shell, serde_json::from_str(&record)?)?)?
-        }
+        crate::cli::HostCommand::InboxPut { record } => serde_json::to_value(put_checked(
+            ledger,
+            shell,
+            serde_json::from_str(&record)?,
+            None,
+        )?)?,
         crate::cli::HostCommand::InboxState { terminal, ids } => {
             serde_json::to_value(states(ledger, &terminal, &ids)?)?
         }
         _ => return Err(Error::Invalid("not an inbox command".into())),
     };
     crate::print(true, &value, String::new)
+}
+
+/// The agent that answers for an item now.
+///
+/// The custody record names the current custodian by pane and by session. An item with no
+/// custody record is still held by its origin owner, which is the custody the record
+/// would have started from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Custodian {
+    /// The pane that answers for the item.
+    pub pane: String,
+    /// The custodian's harness session, when one is recorded.
+    pub session: Option<String>,
+}
+
+/// The current custodian of `item`, from the custody records this host holds.
+///
+/// A custody record wins: it names the custodian and the session that holds the custody.
+/// Without one the origin owner holds the item, as it did before the custody existed, and
+/// it holds it by pane alone: an item with no custody record has no recorded custodian
+/// session to prove, so the pane decides then.
+#[must_use]
+pub fn custodian_of(records: &[crate::custody::Custody], item: &crate::items::Item) -> Custodian {
+    match records.iter().find(|record| record.item == item.id) {
+        Some(record) => Custodian {
+            pane: record.custodian_pane.clone(),
+            session: record.custodian_session.clone(),
+        },
+        None => Custodian {
+            pane: item.owner_pane.clone(),
+            session: None,
+        },
+    }
+}
+
+/// Whether the agent in `pane`, running `session`, holds `custodian`.
+///
+/// The pane must match. A session both sides know decides: a pane id that was reused by
+/// another session never inherits the custody. A custody that names a session needs a live
+/// session that is readable and equal: a session nobody can read proves nothing, so the
+/// custody is not held then.
+#[must_use]
+pub fn holds(custodian: &Custodian, pane: &str, session: Option<&str>) -> bool {
+    if custodian.pane != pane {
+        return false;
+    }
+    match (custodian.session.as_deref(), session) {
+        (Some(recorded), Some(live)) => recorded == live,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+/// Whether an event id names `item`.
+///
+/// A child event names its item in the record id: `reply-{item}-{seq}`,
+/// `blocked-{item}-{seq}`, or `unit-reply-{result}`, whose result carries the item id.
+/// The tail of the first two is a number, so only the item it was built for matches.
+fn names(id: &str, item: &crate::items::Item) -> bool {
+    if let Some(result) = id.strip_prefix("unit-reply-") {
+        return item
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.result_id.as_deref())
+            == Some(result);
+    }
+    let Some(rest) = ["reply-", "blocked-"]
+        .iter()
+        .find_map(|prefix| id.strip_prefix(prefix))
+    else {
+        return false;
+    };
+    let Some(tail) = rest
+        .strip_prefix(&item.id)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
+        return false;
+    };
+    !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The child an event names, when it names exactly one.
+///
+/// The event reaches the pane that answers for the child, so the child is looked up by the
+/// pane that holds its custody as well as by its origin owner.
+fn subject(
+    ledger: &Ledger,
+    records: &[crate::custody::Custody],
+    owner: &str,
+    id: &str,
+) -> Result<Option<crate::items::Item>> {
+    let named: Vec<_> = crate::items::list(ledger)?
+        .into_iter()
+        .filter(|item| names(id, item))
+        .filter(|item| item.owner_pane == owner || custodian_of(records, item).pane == owner)
+        .collect();
+    Ok(match named.as_slice() {
+        [item] => Some(item.clone()),
+        _ => None,
+    })
+}
+
+/// The custodian that answers for the event `id`.
+///
+/// A child event goes to the current custodian of the child, so a reused pane id never
+/// inherits the custody. An event about no child keeps the pane it names, with no session
+/// to prove. The session of the custodian is proved against the live agent when the record
+/// is put: the published snapshot can name a session that already ended, so it never
+/// decides who holds the custody.
+fn custodian_of_event(ledger: &Ledger, owner: &str, id: &str) -> Result<Custodian> {
+    let records = crate::custody::list(ledger)?;
+    let Some(item) = subject(ledger, &records, owner, id)? else {
+        return Ok(Custodian {
+            pane: owner.to_owned(),
+            session: None,
+        });
+    };
+    Ok(custodian_of(&records, &item))
 }
 
 /// The terminal of `owner`, an agent pane on this host, when a reader reads its inbox.
@@ -1056,9 +1193,14 @@ pub fn readable(
     Ok(reader(ledger, &terminal)?.map(|_| terminal))
 }
 
-/// Put a note from dogsled in the inbox of `owner`, an agent pane on this host. `id` makes it
-/// idempotent. `Ok(false)` when the owner is not running or has no reader: nothing would
-/// deliver it, so the caller keeps it for later.
+/// Put a note from dogsled in the inbox of the agent that answers for it. `id` makes it
+/// idempotent. `Ok(false)` when that agent is not running, has no reader, or runs another
+/// session than the one that holds the custody: nothing would deliver it, so the caller
+/// keeps it for later.
+///
+/// A note about a child reaches the child's current custodian, found by pane and by
+/// session, so a reused pane id never inherits the custody. A note about no child reaches
+/// the pane it names, as it did before.
 pub fn notify(
     fleet: &Fleet,
     reports: &[crate::hosts::HostReport],
@@ -1070,13 +1212,14 @@ pub fn notify(
 ) -> Result<bool> {
     let ledger = fleet.ledger;
     let shell = fleet.shell;
-    let Some(terminal) = readable(ledger, reports, owner)? else {
+    let custodian = custodian_of_event(ledger, owner, id)?;
+    let Some(terminal) = readable(ledger, reports, &custodian.pane)? else {
         return Ok(false);
     };
     let record = Record {
         id: id.into(),
         terminal,
-        pane: owner.into(),
+        pane: custodian.pane.clone(),
         from: Sender::dogsled(),
         kind: kind.into(),
         text,
@@ -1086,7 +1229,9 @@ pub fn notify(
         reason: None,
         done_ms: None,
     };
-    match put_checked(ledger, shell, record) {
+    // The live agent of the custodian's pane is the one that must receive the record: a
+    // pane another session took over never inherits the custody.
+    match put_checked(ledger, shell, record, Some(&custodian)) {
         Ok(_) => Ok(true),
         Err(Error::Invalid(_) | Error::Refused { .. }) => Ok(false),
         Err(e) => Err(e),

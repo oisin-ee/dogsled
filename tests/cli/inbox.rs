@@ -43,6 +43,29 @@ fn as_pane(rig: &Rig, pane: &str, args: &[&str]) -> (i32, Value) {
     (out.status.code().unwrap(), value)
 }
 
+/// The custody record of `item`, held by `pane` in `session`.
+fn custody(item: &str, pane: &str, session: Option<&str>) -> Value {
+    json!({
+        "item": item,
+        "host": "local",
+        "owner_pane": "w1:p2",
+        "owner_session": "origin-session",
+        "custodian_pane": pane,
+        "custodian_session": session,
+        "revision": 1,
+        "claims": [],
+    })
+}
+
+/// One `serve --once` pass. It must succeed; its stderr is the journal.
+fn serve(rig: &Rig) -> String {
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    let journal = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{journal}");
+    assert!(!journal.contains("dogsled service lane "), "{journal}");
+    journal
+}
+
 #[test]
 fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
     let rig = Rig::new("inbox-local");
@@ -382,4 +405,226 @@ fn claude_and_codex_hooks_hand_over_the_inbox_without_typing() {
         .output()
         .unwrap();
     assert!(out.status.success() && out.stdout.is_empty());
+}
+
+/// A child of `w1:p2`, with the reply its host captured.
+fn child_item() -> Value {
+    json!([{
+        "id":"child","kind":"agent","host":"local","pane":"w1:p3","owner_pane":"w1:p2",
+        "owner_session":"origin-session","name":"child","created_ms":1,"closed_ms":null,
+        "reply":{"seq":3,"result_id":null,"text":"Found 3 bugs.","captured_ms":2,
+            "reported_ms":null,"done":true},
+    }])
+}
+
+/// The reply records in an inbox file. The check-in note of the watchdog is about the
+/// owner's work in general, so it says nothing about the custody of a child.
+fn replies(inbox: &Value) -> Vec<&Value> {
+    inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["kind"] == "reply")
+        .collect()
+}
+
+/// The custody holder of a child, with the session its pane runs.
+fn custody_session(rig: &Rig, pane: &str, session: &str) {
+    let mut listed: Value =
+        serde_json::from_slice(&fs::read(rig.dir.join("agents.json")).unwrap()).unwrap();
+    for agent in listed["result"]["agents"].as_array_mut().unwrap() {
+        if agent["pane_id"] == json!(pane) {
+            agent["agent_session"] = json!({"kind":"path","value":session});
+        }
+    }
+    rig.put("agents.json", &listed);
+    let mut host: Value =
+        serde_json::from_slice(&fs::read(rig.dir.join("state/host.json")).unwrap()).unwrap();
+    for agent in host["probe"]["agent_panes"].as_array_mut().unwrap() {
+        if agent["pane"] == json!(pane) {
+            agent["agent_session"] = json!(session);
+        }
+    }
+    rig.put("state/host.json", &host);
+}
+
+#[test]
+fn a_childs_reply_reaches_its_custodian_and_not_its_origin_owner() {
+    let rig = Rig::new("inbox-custodian");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_owner", "owner"),
+            ("w1:p3", "term_child", "child"),
+            ("w1:p4", "term_claimant", "claimant"),
+        ],
+    );
+    custody_session(&rig, "w1:p4", "claimant-session");
+    rig.put("state/items.json", &child_item());
+    // The custody moved to the claimant: it holds the child now.
+    rig.put(
+        "state/custody.json",
+        &json!([custody("child", "w1:p4", Some("claimant-session"))]),
+    );
+    // Both panes read their inbox.
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    as_pane(&rig, "w1:p4", &["inbox", "claim", "--harness", "pi"]);
+    serve(&rig);
+    serve(&rig);
+    // The reply reaches the custodian, never the origin owner.
+    let custodian = rig.read("state/inbox/term_claimant.json");
+    let reached = replies(&custodian);
+    assert_eq!(reached.len(), 1, "{custodian}");
+    assert_eq!(reached[0]["kind"], "reply");
+    assert_eq!(reached[0]["pane"], "w1:p4");
+    let (code, owner) = as_pane(&rig, "w1:p2", &["inbox", "list"]);
+    assert_eq!(code, 0, "{owner}");
+    assert!(replies(&owner["received"]).is_empty(), "{owner}");
+}
+
+#[test]
+fn a_childs_reply_without_a_custody_record_reaches_its_origin_owner() {
+    let rig = Rig::new("inbox-no-custody");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_owner", "owner"),
+            ("w1:p3", "term_child", "child"),
+        ],
+    );
+    // A closed legacy child can retain an untold reply without a custody record.
+    // Open children acquire origin custody during the sweep before delivery.
+    let mut items = child_item();
+    items[0]["closed_ms"] = json!(3);
+    rig.put("state/items.json", &items);
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    serve(&rig);
+    serve(&rig);
+    assert!(!rig.dir.join("state/custody.json").exists());
+    let owner = rig.read("state/inbox/term_owner.json");
+    let reached = replies(&owner);
+    assert_eq!(reached.len(), 1, "{owner}");
+    assert_eq!(reached[0]["kind"], "reply");
+    assert_eq!(reached[0]["pane"], "w1:p2");
+}
+
+#[test]
+fn a_reused_pane_id_never_inherits_the_custody_of_a_child() {
+    let rig = Rig::new("inbox-reused-pane");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_owner", "owner"),
+            ("w1:p3", "term_child", "child"),
+        ],
+    );
+    // The custodian pane is the owner's pane, but it runs another session now.
+    custody_session(&rig, "w1:p2", "another-session");
+    rig.put("state/items.json", &child_item());
+    rig.put(
+        "state/custody.json",
+        &json!([custody("child", "w1:p2", Some("custodian-session"))]),
+    );
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    serve(&rig);
+    serve(&rig);
+    // The reply waits: the pane that answers for the child runs another session.
+    let owner = rig.read("state/inbox/term_owner.json");
+    assert!(replies(&owner).is_empty(), "{owner}");
+}
+
+#[test]
+fn a_recorded_custodian_session_that_cannot_be_read_receives_nothing() {
+    let rig = Rig::new("inbox-unread-session");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_owner", "owner"),
+            ("w1:p3", "term_child", "child"),
+        ],
+    );
+    // The custody records a session, but no live session of the pane can be read.
+    rig.put("state/items.json", &child_item());
+    rig.put(
+        "state/custody.json",
+        &json!([custody("child", "w1:p2", Some("custodian-session"))]),
+    );
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    serve(&rig);
+    serve(&rig);
+    let owner = rig.read("state/inbox/term_owner.json");
+    assert!(replies(&owner).is_empty(), "{owner}");
+}
+
+#[test]
+fn delivery_checks_the_live_session_of_the_recipient_not_the_snapshot() {
+    let rig = Rig::new("inbox-stale-snapshot");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_owner", "owner"),
+            ("w1:p3", "term_child", "child"),
+        ],
+    );
+    custody_session(&rig, "w1:p2", "custodian-session");
+    rig.put("state/items.json", &child_item());
+    rig.put(
+        "state/custody.json",
+        &json!([custody("child", "w1:p2", Some("custodian-session"))]),
+    );
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    // Publication samples the custodian, then the pane changes session before delivery.
+    let mut listed = rig.read("agents.json");
+    for agent in listed["result"]["agents"].as_array_mut().unwrap() {
+        if agent["pane_id"] == json!("w1:p2") {
+            agent["agent_session"] = json!({"kind":"path","value":"another-session"});
+        }
+    }
+    rig.put("live-agents.json", &listed);
+    fs::rename(rig.dir.join("bin/herdr"), rig.dir.join("bin/herdr-default")).unwrap();
+    rig.script(
+        "herdr",
+        r#"#!/bin/sh
+if test "$*" = 'agent list'; then
+  if mkdir "$RIG/agents-switched" 2>/dev/null; then
+    cat "$RIG/agents.json"
+  else
+    cat "$RIG/live-agents.json"
+  fi
+else
+  exec "$RIG/bin/herdr-default" "$@"
+fi
+"#,
+    );
+    // Finish one delivery pass before the next publication can refresh the snapshot.
+    let out = rig.run(&["serve", "--once", "--interval", "60"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let journal = String::from_utf8_lossy(&out.stderr);
+    assert!(!journal.contains("dogsled service lane "), "{journal}");
+    let snapshot = rig.read("state/host.json");
+    assert_eq!(
+        snapshot["probe"]["agent_panes"][1]["agent_session"], "custodian-session",
+        "{snapshot}"
+    );
+    let live = rig.read("live-agents.json");
+    assert_eq!(
+        live["result"]["agents"][1]["agent_session"]["value"], "another-session",
+        "{live}"
+    );
+    let owner = rig.read("state/inbox/term_owner.json");
+    assert!(replies(&owner).is_empty(), "{owner}");
 }
