@@ -107,9 +107,25 @@ struct QueueEnvelope {
     tickets: Value,
 }
 
-/// Legacy arrays are version zero. Check the envelope before decoding any tickets, so
-/// a future schema cannot lose fields through this binary's older types.
+#[derive(Deserialize, Serialize)]
+struct QueueFormat {
+    version: u64,
+}
+
+/// Keep arrays readable by older servers. Check the format sidecar before decoding
+/// tickets, and tolerate envelopes written before the sidecar was introduced.
 pub(crate) fn queue_records(ledger: &Ledger) -> Result<Vec<Value>> {
+    if let Some(format) = ledger.read::<QueueFormat>("queue-format.json")?
+        && format.version > QUEUE_VERSION
+    {
+        return Err(Error::Refused {
+            code: crate::error::Refusal::QueueVersionUnsupported,
+            detail: format!(
+                "queue format version {} is newer than supported version {QUEUE_VERSION}; write refused",
+                format.version
+            ),
+        });
+    }
     let Some(value) = ledger.read::<Value>("queue.json")? else {
         return Ok(Vec::new());
     };
@@ -133,9 +149,12 @@ fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
     // Every caller holds the queue lock. Recheck at the write boundary as well.
     queue_records(ledger)?;
     ledger.write(
-        "queue.json",
-        &json!({"version":QUEUE_VERSION,"tickets":tickets}),
-    )
+        "queue-format.json",
+        &QueueFormat {
+            version: QUEUE_VERSION,
+        },
+    )?;
+    ledger.write("queue.json", &tickets)
 }
 
 /// Terminal tickets and their sidecars share the 30-day record window. Pending

@@ -12,6 +12,83 @@ use serde_json::json;
 mod reconcile;
 
 #[test]
+fn enqueue_writes_an_array_readable_by_older_servers() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let id = work::enqueue(&ledger, place_request("array-queue"), false, 100).unwrap();
+    let bytes = std::fs::read(ledger.dir.join("queue.json")).unwrap();
+    let tickets: Vec<work::Ticket> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0].id, id);
+    assert_eq!(
+        ledger
+            .read::<serde_json::Value>("queue-format.json")
+            .unwrap(),
+        Some(json!({"version": 1}))
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn an_envelope_queue_is_read_and_rewritten_as_an_array() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let id = work::enqueue(&ledger, place_request("envelope-queue"), false, 100).unwrap();
+    let tickets = work::queue(&ledger).unwrap();
+    ledger
+        .write("queue.json", &json!({"version": 1, "tickets": tickets}))
+        .unwrap();
+    std::fs::remove_file(ledger.dir.join("queue-format.json")).unwrap();
+    assert_eq!(work::queue(&ledger).unwrap()[0].id, id);
+    work::cancel(&ledger, &id).unwrap();
+    let bytes = std::fs::read(ledger.dir.join("queue.json")).unwrap();
+    let tickets: Vec<work::Ticket> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0].id, id);
+    assert_eq!(tickets[0].state, "cancelled");
+    assert_eq!(
+        ledger
+            .read::<serde_json::Value>("queue-format.json")
+            .unwrap(),
+        Some(json!({"version": 1}))
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn a_newer_queue_sidecar_refuses_writes_without_changing_the_files() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let id = work::enqueue(&ledger, place_request("future-queue"), false, 100).unwrap();
+    let future = json!({"version": 2});
+    ledger.write("queue-format.json", &future).unwrap();
+    let before = std::fs::read(ledger.dir.join("queue.json")).unwrap();
+    for error in [
+        work::enqueue(&ledger, place_request("new-request"), false, 100).unwrap_err(),
+        work::cancel(&ledger, &id).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::Refused {
+                    code: crate::error::Refusal::QueueVersionUnsupported,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(ledger.dir.join("queue.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        ledger
+            .read::<serde_json::Value>("queue-format.json")
+            .unwrap(),
+        Some(future)
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
 fn a_newer_queue_version_refuses_writes_without_changing_the_file() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     let future = json!({"version": u32::MAX, "tickets": []});

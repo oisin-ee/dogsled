@@ -59,6 +59,11 @@ fn stripped_queued_job(rig: &Rig, remote: bool) -> String {
     let (code, result) = rig.json(&args);
     assert_eq!(code, 1, "{result}");
     let mut tickets = rig.read("state/queue.json");
+    assert!(
+        tickets.is_array(),
+        "older servers must read the queue: {tickets}"
+    );
+    assert_eq!(rig.read("state/queue-format.json"), json!({"version": 1}));
     let id = tickets[0]["request"]["id"].as_str().unwrap().to_owned();
     tickets[0]["request"]["action"]
         .as_object_mut()
