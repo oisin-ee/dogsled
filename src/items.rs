@@ -40,6 +40,9 @@ pub struct Item {
     /// The child's final reply, captured before the sweep closes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Reply>,
+    /// A turn signal is not a final reply and never proves completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<ItemSignal>,
     /// The item's final reply came from the native `done` handoff, so it proves the child
     /// finished. A sealed terminal receipt is a result, not a native `done`, so it never
     /// proves a handoff. Records from before this field load with `false`.
@@ -48,6 +51,26 @@ pub struct Item {
     /// Retained branch on the child's host, observed without a live pane or checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<crate::done::Branch>,
+}
+
+/// The owner-side projection of a child-host turn signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemSignal {
+    pub kind: crate::lifecycle::Signal,
+    pub text: String,
+    pub event_id: String,
+    pub recorded_ms: u64,
+}
+
+impl From<&crate::done::Signal> for ItemSignal {
+    fn from(signal: &crate::done::Signal) -> Self {
+        Self {
+            kind: signal.kind,
+            text: signal.text.clone(),
+            event_id: signal.event_id.clone(),
+            recorded_ms: signal.recorded_ms,
+        }
+    }
 }
 
 /// A finished child's final reply, for the completion Herdr numbered `seq`.

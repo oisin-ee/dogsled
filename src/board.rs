@@ -1689,6 +1689,7 @@ mod tests {
             transcript_modified: Some(NOW - 60_000),
             stalled_since_ms: None,
             state_since_ms: None,
+            signal: None,
             terminal_id: None,
             agent_session: None,
             completion_seq: None,

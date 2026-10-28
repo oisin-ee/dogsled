@@ -1,6 +1,501 @@
+#[test]
+fn legacy_mark_without_signals_loads_unchanged() {
+    let mark: Mark = serde_json::from_value(serde_json::json!({
+        "pane": "w1:p1", "marked_ms": 42
+    }))
+    .unwrap();
+    assert!(mark.signal.is_none());
+    assert_eq!(mark.marked_ms, 42);
+}
+
 use super::*;
 use crate::shell::Fake;
 use serde_json::json;
+
+fn live_signal_agent(shell: &Fake, child: &Agent) {
+    shell.on(
+        "herdr agent list",
+        &json!({"result":{"agents":[{
+            "pane_id": child.pane, "agent":"pi", "agent_status":child.state,
+            "agent_session": child.agent_session.as_ref().map(|s| json!({"kind":"path","value":s})),
+            "state_change_seq":child.state_change_seq, "state_since_ms":child.state_since_ms
+        }]}})
+        .to_string(),
+    );
+}
+
+#[test]
+fn signals_record_without_terminal_evidence_and_derive_after_the_turn() {
+    for (kind, state) in [
+        (crate::lifecycle::Signal::Ask, "asking"),
+        (crate::lifecycle::Signal::Blocked, "blocked"),
+    ] {
+        let ledger = ledger();
+        let shell = Fake::new();
+        let mut child = agent("working");
+        child.state_since_ms = Some(100);
+        live_signal_agent(&shell, &child);
+        let saved = signal(&ledger, &shell, &child.pane, kind, "need input", 110).unwrap();
+        assert_eq!(saved.session, "session");
+        assert_eq!(saved.turn.state_change_seq, Some(10));
+        assert_eq!(saved.turn.state_since_ms, Some(100));
+        let mut agents = vec![child.clone()];
+        observe(&ledger, &mut agents).unwrap();
+        assert_eq!(agents[0].lifecycle.as_deref(), Some("working"));
+        child.state = "idle".into();
+        let mut agents = vec![child];
+        observe(&ledger, &mut agents).unwrap();
+        assert_eq!(agents[0].lifecycle.as_deref(), Some(state));
+        assert!(!agents[0].done);
+        assert!(!agents[0].finishing);
+        let mark = list(&ledger).unwrap().remove(0);
+        assert!(mark.sealed.is_none());
+        assert!(mark.reply.is_none());
+        assert!(!mark.native_done);
+    }
+}
+
+#[test]
+fn identical_signals_deduplicate_and_conflicting_repeats_refuse() {
+    let ledger = ledger();
+    let shell = Fake::new();
+    live_signal_agent(&shell, &agent("working"));
+    let first = signal(
+        &ledger,
+        &shell,
+        "w2:p1",
+        crate::lifecycle::Signal::Ask,
+        "question",
+        1,
+    )
+    .unwrap();
+    let again = signal(
+        &ledger,
+        &shell,
+        "w2:p1",
+        crate::lifecycle::Signal::Ask,
+        "question",
+        2,
+    )
+    .unwrap();
+    assert_eq!(first, again);
+    for (kind, text) in [
+        (crate::lifecycle::Signal::Ask, "different"),
+        (crate::lifecycle::Signal::Blocked, "question"),
+    ] {
+        assert!(matches!(
+            signal(&ledger, &shell, "w2:p1", kind, text, 3),
+            Err(Error::Refused {
+                code: crate::error::Refusal::SignalConflict,
+                ..
+            })
+        ));
+    }
+    assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&first));
+}
+
+#[test]
+fn signals_are_session_bound_and_clear_only_on_a_proven_next_turn() {
+    for (session, before_seq, before_since, seq, since, visible, cleared) in [
+        (
+            "other",
+            Some(10),
+            Some(100),
+            Some(11),
+            Some(200),
+            false,
+            false,
+        ),
+        (
+            "session",
+            Some(10),
+            Some(100),
+            Some(9),
+            Some(200),
+            false,
+            true,
+        ),
+        ("session", None, Some(100), None, Some(200), false, true),
+        ("session", Some(10), Some(100), Some(11), None, false, true),
+        (
+            "session",
+            Some(10),
+            Some(100),
+            Some(11),
+            Some(200),
+            false,
+            true,
+        ),
+        (
+            "session",
+            Some(10),
+            Some(100),
+            Some(9),
+            Some(100),
+            true,
+            false,
+        ),
+        ("session", Some(10), Some(100), Some(9), None, true, false),
+        (
+            "session",
+            Some(10),
+            Some(100),
+            Some(10),
+            Some(100),
+            true,
+            false,
+        ),
+        ("session", None, None, None, None, true, false),
+    ] {
+        let ledger = ledger();
+        let shell = Fake::new();
+        let mut child = agent("working");
+        child.state_change_seq = before_seq;
+        child.state_since_ms = before_since;
+        live_signal_agent(&shell, &child);
+        let mut saved = signal(
+            &ledger,
+            &shell,
+            &child.pane,
+            crate::lifecycle::Signal::Ask,
+            "question",
+            110,
+        )
+        .unwrap();
+        child.agent_session = Some(session.into());
+        child.state_change_seq = seq;
+        child.state_since_ms = since;
+        let mut agents = vec![child];
+        observe(&ledger, &mut agents).unwrap();
+        let context = format!("{session}: {before_seq:?}/{before_since:?} -> {seq:?}/{since:?}");
+        assert_eq!(agents[0].signal.is_some(), visible, "{context}");
+        let current = list(&ledger).unwrap().remove(0).signal.unwrap();
+        assert_eq!(current.cleared_ms.is_some(), cleared, "{context}");
+        saved.cleared_ms = current.cleared_ms;
+        assert_eq!(current, saved, "{context}");
+    }
+}
+
+#[test]
+fn unmatched_turns_never_block_a_new_signal_or_done() {
+    for (before_seq, before_since, seq, since) in [
+        (Some(10), Some(100), Some(11), None),
+        (None, Some(100), None, Some(200)),
+        (Some(10), Some(100), Some(9), Some(200)),
+        (Some(10), Some(100), Some(9), Some(100)),
+        (Some(10), Some(100), Some(9), None),
+        (None, None, None, None),
+        (Some(10), None, None, Some(100)),
+        (Some(10), Some(100), None, None),
+    ] {
+        for finish in [false, true] {
+            let ledger = ledger();
+            let shell = Fake::new();
+            let mut child = agent("working");
+            child.state_change_seq = before_seq;
+            child.state_since_ms = before_since;
+            live_signal_agent(&shell, &child);
+            let old = signal(
+                &ledger,
+                &shell,
+                &child.pane,
+                crate::lifecycle::Signal::Ask,
+                "question",
+                110,
+            )
+            .unwrap();
+            child.state_change_seq = seq;
+            child.state_since_ms = since;
+            live_signal_agent(&shell, &child);
+            shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+            if finish {
+                let done = mark(&ledger, &shell, &child.pane, 210).unwrap();
+                assert!(done.signal.is_none());
+                assert_eq!(done.done_turn, Some(Turn::of_agent(&child)));
+            } else {
+                let next = signal(
+                    &ledger,
+                    &shell,
+                    &child.pane,
+                    crate::lifecycle::Signal::Ask,
+                    "question",
+                    210,
+                )
+                .unwrap();
+                assert_ne!(next.event_id, old.event_id);
+                assert_eq!(next.recorded_ms, 210);
+                assert_eq!(next.turn, Turn::of_agent(&child));
+                assert!(next.cleared_ms.is_none());
+                assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&next));
+            }
+            assert_eq!(list(&ledger).unwrap().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn shared_equal_axes_prove_the_same_turn_despite_missing_evidence() {
+    for (before_seq, before_since, seq, since) in [
+        (Some(10), Some(100), Some(10), None),
+        (Some(10), None, Some(10), Some(100)),
+        (Some(10), Some(100), None, Some(100)),
+        (None, Some(100), Some(10), Some(100)),
+    ] {
+        let ledger = ledger();
+        let shell = Fake::new();
+        let mut child = agent("working");
+        child.state_change_seq = before_seq;
+        child.state_since_ms = before_since;
+        live_signal_agent(&shell, &child);
+        let old = signal(
+            &ledger,
+            &shell,
+            &child.pane,
+            crate::lifecycle::Signal::Ask,
+            "question",
+            110,
+        )
+        .unwrap();
+        child.state_change_seq = seq;
+        child.state_since_ms = since;
+        live_signal_agent(&shell, &child);
+        assert_eq!(
+            signal(&ledger, &shell, &child.pane, old.kind, "question", 210).unwrap(),
+            old
+        );
+        shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+        for error in [
+            signal(&ledger, &shell, &child.pane, old.kind, "different", 210).unwrap_err(),
+            mark(&ledger, &shell, &child.pane, 210).unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                Error::Refused {
+                    code: crate::error::Refusal::SignalConflict,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&old));
+    }
+}
+
+#[test]
+fn an_equal_counter_with_a_later_timestamp_clears_a_signal() {
+    let ledger = ledger();
+    let shell = Fake::new();
+    let mut child = agent("working");
+    child.state_since_ms = Some(100);
+    live_signal_agent(&shell, &child);
+    signal(
+        &ledger,
+        &shell,
+        "w2:p1",
+        crate::lifecycle::Signal::Blocked,
+        "reason",
+        110,
+    )
+    .unwrap();
+    child.state_since_ms = Some(200);
+    let mut agents = vec![child];
+    observe(&ledger, &mut agents).unwrap();
+    assert!(agents[0].signal.is_none());
+}
+
+#[test]
+fn done_and_signals_conflict_in_both_orders() {
+    for signal_first in [true, false] {
+        let ledger = ledger();
+        let shell = Fake::new();
+        live_signal_agent(&shell, &agent("working"));
+        shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+        if signal_first {
+            signal(
+                &ledger,
+                &shell,
+                "w2:p1",
+                crate::lifecycle::Signal::Ask,
+                "question",
+                1,
+            )
+            .unwrap();
+            assert!(matches!(
+                mark(&ledger, &shell, "w2:p1", 2),
+                Err(Error::Refused {
+                    code: crate::error::Refusal::SignalConflict,
+                    ..
+                })
+            ));
+        } else {
+            mark(&ledger, &shell, "w2:p1", 1).unwrap();
+            assert!(matches!(
+                signal(
+                    &ledger,
+                    &shell,
+                    "w2:p1",
+                    crate::lifecycle::Signal::Ask,
+                    "question",
+                    2
+                ),
+                Err(Error::Refused {
+                    code: crate::error::Refusal::SignalConflict,
+                    ..
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn signal_refuses_missing_session_and_nonworking_agents() {
+    for state in ["working", "idle", "done", "blocked", "unknown"] {
+        let ledger = ledger();
+        let shell = Fake::new();
+        let mut child = agent(state);
+        if state == "working" {
+            child.agent_session = None;
+        }
+        live_signal_agent(&shell, &child);
+        let error = signal(
+            &ledger,
+            &shell,
+            "w2:p1",
+            crate::lifecycle::Signal::Ask,
+            "question",
+            1,
+        )
+        .unwrap_err();
+        if state == "working" {
+            assert!(matches!(
+                error,
+                Error::Refused {
+                    code: crate::error::Refusal::SignalUnproven,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(list(&ledger).unwrap(), []);
+    }
+}
+
+#[test]
+fn signals_do_not_require_clean_source_or_finished_children() {
+    let ledger = ledger();
+    let shell = Fake::new();
+    let child = agent("working");
+    live_signal_agent(&shell, &child);
+    crate::items::record(
+        &ledger,
+        crate::items::Item {
+            id: "open-child".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "w3:p1".into(),
+            owner_pane: child.pane.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // The fake has no Git responses: source preflight must not run.
+    signal(
+        &ledger,
+        &shell,
+        &child.pane,
+        crate::lifecycle::Signal::Blocked,
+        "dependency",
+        1,
+    )
+    .unwrap();
+    let mut agents = vec![agent("idle")];
+    observe(&ledger, &mut agents).unwrap();
+    assert_eq!(agents[0].lifecycle.as_deref(), Some("blocked"));
+    assert!(agents[0].owns_open);
+}
+
+#[test]
+fn later_idle_observation_does_not_clear_a_signal() {
+    let ledger = ledger();
+    let shell = Fake::new();
+    let mut child = agent("working");
+    child.state_since_ms = Some(100);
+    live_signal_agent(&shell, &child);
+    let saved = signal(
+        &ledger,
+        &shell,
+        &child.pane,
+        crate::lifecycle::Signal::Ask,
+        "question",
+        110,
+    )
+    .unwrap();
+    child.state = "idle".into();
+    child.state_change_seq = Some(11);
+    child.state_since_ms = Some(200);
+    let mut agents = vec![child];
+    observe(&ledger, &mut agents).unwrap();
+    assert_eq!(agents[0].signal.as_deref(), Some("ask"));
+    assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&saved));
+}
+
+#[test]
+fn next_turn_can_record_a_new_event() {
+    let ledger = ledger();
+    let shell = Fake::new();
+    let mut child = agent("working");
+    child.state_since_ms = Some(100);
+    live_signal_agent(&shell, &child);
+    let first = signal(
+        &ledger,
+        &shell,
+        &child.pane,
+        crate::lifecycle::Signal::Ask,
+        "question",
+        110,
+    )
+    .unwrap();
+    child.state_change_seq = Some(11);
+    child.state_since_ms = Some(200);
+    live_signal_agent(&shell, &child);
+    let next = signal(
+        &ledger,
+        &shell,
+        &child.pane,
+        crate::lifecycle::Signal::Blocked,
+        "dependency",
+        210,
+    )
+    .unwrap();
+    assert_ne!(first.event_id, next.event_id);
+    let projection = crate::items::ItemSignal::from(&next);
+    assert_eq!(projection.event_id, next.event_id);
+    assert_eq!(projection.text, "dependency");
+    assert_eq!(projection.recorded_ms, 210);
+    assert!(list(&ledger).unwrap()[0].reply.is_none());
+}
+
+#[test]
+fn inbox_acceptance_does_not_remove_turn_signals() {
+    let ledger = ledger();
+    let shell = Fake::new();
+    live_signal_agent(&shell, &agent("working"));
+    let saved = signal(
+        &ledger,
+        &shell,
+        "w2:p1",
+        crate::lifecycle::Signal::Ask,
+        "question",
+        1,
+    )
+    .unwrap();
+    input(
+        &ledger,
+        &agent("working"),
+        Input::Put { from: None },
+        || Ok(((), true)),
+    )
+    .unwrap();
+    assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&saved));
+}
 
 fn ledger() -> Ledger {
     Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
@@ -27,6 +522,8 @@ fn mark_at() -> Mark {
         after: Some(10),
         sealed: None,
         marked_ms: 1,
+        done_turn: None,
+        signal: None,
         branch: None,
         detached: false,
         reply: None,

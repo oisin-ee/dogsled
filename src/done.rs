@@ -1,4 +1,5 @@
-//! A durable, terminal handoff owned by the child's host. Idle without `done` is not consent.
+//! Durable terminal handoffs and turn signals owned by the child's host.
+//! Idle without `done` is not consent.
 //! Identity is launch/item + pane + harness session, never the restorable Herdr terminal.
 
 use crate::error::{Error, Result};
@@ -26,6 +27,53 @@ pub struct Branch {
     pub landed: bool,
 }
 
+/// A live working turn. Missing evidence remains missing across restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Turn {
+    pub state_change_seq: Option<u64>,
+    pub state_since_ms: Option<u64>,
+}
+
+impl Turn {
+    fn of_agent(agent: &Agent) -> Self {
+        Self {
+            state_change_seq: agent.state_change_seq,
+            state_since_ms: agent.state_since_ms,
+        }
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        let axes = [
+            self.state_change_seq.zip(other.state_change_seq),
+            self.state_since_ms.zip(other.state_since_ms),
+        ];
+        axes.iter().any(Option::is_some) && axes.iter().flatten().all(|(a, b)| a == b)
+    }
+
+    fn precedes(&self, agent: &Agent) -> bool {
+        let later_seq = matches!(
+            (self.state_change_seq, agent.state_change_seq),
+            (Some(before), Some(after)) if after > before
+        );
+        let later_since = matches!(
+            (self.state_since_ms, agent.state_since_ms),
+            (Some(since), Some(now)) if now > since
+        );
+        agent.state == "working" && (later_seq || later_since)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Signal {
+    pub kind: crate::lifecycle::Signal,
+    pub text: String,
+    pub event_id: String,
+    pub turn: Turn,
+    pub session: String,
+    pub recorded_ms: u64,
+    pub cleared_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mark {
     pub pane: String,
@@ -41,6 +89,11 @@ pub struct Mark {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed: Option<u64>,
     pub marked_ms: u64,
+    /// New done calls retain their turn identity; legacy done marks have no turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_turn: Option<Turn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<Signal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<Branch>,
     /// The child's checkout is detached: it has no branch to land, and its commits must be
@@ -61,6 +114,30 @@ pub struct Mark {
 }
 
 type Marks = BTreeMap<String, Mark>;
+
+fn has_done(mark: &Mark) -> bool {
+    // A legacy mark is a done call. A signal-only record always keeps its signal,
+    // including after clearing, and has no done turn.
+    mark.done_turn.is_some() || mark.signal.is_none()
+}
+
+fn conflict(pane: &str) -> Error {
+    Error::Refused {
+        code: crate::error::Refusal::SignalConflict,
+        detail: format!("{pane}: the turn already has a conflicting signal or done handoff"),
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired by -17 turn-signal delivery")
+)]
+fn unproven(pane: &str) -> Error {
+    Error::Refused {
+        code: crate::error::Refusal::SignalUnproven,
+        detail: format!("{pane}: turn signal identity is unproven; nothing was recorded"),
+    }
+}
 
 fn waiting(agent: &Agent) -> bool {
     matches!(agent.state.as_str(), "idle" | "done")
@@ -155,7 +232,7 @@ fn closable(evidence: &Evidence) -> bool {
 /// An unreturned unit is not sealed. A seal written before this rule stays, and `terminal`
 /// decides.
 fn seal(mark: &mut Mark, agent: &Agent, evidence: &Evidence) {
-    if mark.sealed.is_none() && waiting(agent) && closable(evidence) {
+    if has_done(mark) && mark.sealed.is_none() && waiting(agent) && closable(evidence) {
         mark.sealed = Some(agent.completion_seq.unwrap_or(0));
     }
 }
@@ -191,7 +268,21 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
             let mut called = false;
             // The terminal evidence the unit return needs. It is one read per pane.
             let mut ready = false;
+            let mut active_signal = None;
             for mark in marks.values_mut().filter(|m| matches(m, agent)) {
+                if let Some(signal) = &mut mark.signal
+                    && signal.session == agent.agent_session.as_deref().unwrap_or("")
+                {
+                    if signal.cleared_ms.is_none() && signal.turn.precedes(agent) {
+                        signal.cleared_ms = Some(crate::ledger::now_ms());
+                    }
+                    if signal.cleared_ms.is_none() {
+                        active_signal = Some(signal.kind.as_str().to_owned());
+                    }
+                }
+                if !has_done(mark) {
+                    continue;
+                }
                 let evidence = evidence(ledger, mark, agent);
                 seal(mark, agent, &evidence);
                 let closable = terminal(mark, &evidence)
@@ -210,6 +301,7 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
             }
             // `done` stays the guard's turn-end fact: the handoff that records the reply
             // looks for it. The published handoff below is the stricter claim.
+            agent.signal = active_signal;
             agent.done = done;
             // The native `done` was accepted, but the handoff is not complete.
             agent.finishing = called && !recorded;
@@ -282,10 +374,12 @@ pub fn mark(
         pane: pane.into(),
         item,
         session: Some(session),
-        name: agent.name,
+        name: agent.name.clone(),
         after: agent.state_change_seq,
         sealed: None,
         marked_ms: now,
+        done_turn: Some(Turn::of_agent(&agent)),
+        signal: None,
         branch,
         detached,
         reply: None,
@@ -295,6 +389,14 @@ pub fn mark(
     };
     ledger.with_lock("done", || {
         let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+        for existing in marks.values().filter(|m| matches(m, &agent)) {
+            if let Some(signal) = &existing.signal
+                && signal.cleared_ms.is_none()
+                && signal.turn.same_as(&Turn::of_agent(&agent))
+            {
+                return Err(conflict(pane));
+            }
+        }
         if let Some(existing) = marks.get(&key(&mark))
             && existing.sealed.is_some()
         {
@@ -306,6 +408,91 @@ pub fn mark(
         ledger.write(FILE, &marks)
     })?;
     Ok(mark)
+}
+
+/// Record a nonterminal turn signal without checkout or child-work preconditions.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired by -17 turn-signal delivery")
+)]
+pub fn signal(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    pane: &str,
+    kind: crate::lifecycle::Signal,
+    text: &str,
+    now: u64,
+) -> Result<Signal> {
+    let agent = crate::inbox::local_agent(shell, pane)?;
+    if agent.state != "working" {
+        return Err(Error::Invalid(format!(
+            "{pane} is {}; call {} during the working turn",
+            agent.state,
+            kind.as_str()
+        )));
+    }
+    let session = agent
+        .agent_session
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| unproven(pane))?;
+    let turn = Turn::of_agent(&agent);
+    let item = identity(ledger, pane)?;
+    ledger.with_lock("done", || {
+        let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+        for mark in marks.values().filter(|m| matches(m, &agent)) {
+            if has_done(mark) {
+                return Err(conflict(pane));
+            }
+            if let Some(existing) = &mark.signal
+                && existing.cleared_ms.is_none()
+                && existing.turn.same_as(&turn)
+            {
+                return if existing.kind == kind && existing.text == text {
+                    Ok(existing.clone())
+                } else {
+                    Err(conflict(pane))
+                };
+            }
+        }
+        let session_hash = crate::unit_transport::digest_hex(session.as_bytes());
+        let signal = Signal {
+            kind,
+            text: text.to_owned(),
+            event_id: format!(
+                "sig-{pane}-{session_hash}-{}-{}-{}",
+                turn.state_change_seq
+                    .map_or_else(|| "unknown".into(), |s| s.to_string()),
+                turn.state_since_ms
+                    .map_or_else(|| "unknown".into(), |s| s.to_string()),
+                crate::ledger::new_id()
+            ),
+            turn,
+            session: session.clone(),
+            recorded_ms: now,
+            cleared_ms: None,
+        };
+        let mark = Mark {
+            pane: pane.to_owned(),
+            item,
+            session: Some(session.clone()),
+            name: agent.name.clone(),
+            after: None,
+            sealed: None,
+            marked_ms: now,
+            done_turn: None,
+            signal: Some(signal.clone()),
+            branch: None,
+            detached: false,
+            reply: None,
+            native_done: false,
+            closed_ms: None,
+            dropped_ms: None,
+        };
+        marks.insert(key(&mark), mark);
+        ledger.write(FILE, &marks)?;
+        Ok(signal)
+    })
 }
 
 /// What the child's checkout is: no agent worktree, a detached one with no branch to land, or
@@ -551,14 +738,14 @@ fn guarded<T>(
         let mut refusal = None;
         let mut continued = false;
         let mut legacy = None;
-        let matched = marks.values().filter(|m| matches(m, agent)).count();
+        let matched = marks.values().filter(|m| matches(m, agent) && has_done(m)).count();
         if matches!(input, Input::Legacy { .. }) && matched > 1 {
             return Err(Error::Invalid(format!(
                 "{}: competing done marks; nothing was accepted",
                 agent.pane
             )));
         }
-        for (key, mark) in marks.iter_mut().filter(|(_, m)| matches(m, agent)) {
+        for (key, mark) in marks.iter_mut().filter(|(_, m)| matches(m, agent) && has_done(m)) {
             let evidence = evidence(ledger, mark, agent);
             seal(mark, agent, &evidence);
             let name = mark
@@ -635,7 +822,7 @@ fn guarded<T>(
                 marks.remove(key);
             }
         } else if received && (agent.state == "working" || continued) {
-            marks.retain(|_, m| !matches(m, agent));
+            marks.retain(|_, m| !matches(m, agent) || !has_done(m));
         }
         if marks != before {
             ledger.write(FILE, &marks)?;
