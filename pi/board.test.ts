@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { age, type Board, renderBoard } from "./board.ts";
+import { age, type Board, parseBoard, renderBoard } from "./board.ts";
 
 const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
 const board: Board = {
@@ -21,9 +21,9 @@ const board: Board = {
 
 test("groups rows in action order with one header and meters for each host", () => {
 	const lines = renderBoard(board, 160, plain);
-	assert.match(lines[0]!, /^ dogsled {2}1 to land · 1 need attention · 2 running · 1 waiting +local ▰▱▱▱ 1\/12 {2}netcup ▰▱▱▱ 2\/16 {2}momokaya-2 \?$/);
+	assert.match(lines[0]!, /^ dogsled {2}1 ready to merge · 1 needs you · 2 working · 1 queued +local ▰▱▱▱ 1\/12 {2}netcup ▰▱▱▱ 2\/16 {2}momokaya-2 \?$/);
 	const titles = lines.filter(l => /^ [A-Z]/.test(l)).map(l => l.trim());
-	assert.deepEqual(titles, ["TO LAND", "ATTENTION", "RUNNING", "WAITING"]);
+	assert.deepEqual(titles, ["READY TO MERGE", "NEEDS YOU", "WORKING", "QUEUED"]);
 	assert.ok(lines.some(l => l.includes("● web-tests") && l.includes("done 3m")));
 	assert.ok(lines.some(l => l.includes("▸ cargo test") && l.includes("job")));
 	// Control characters from a transcript never reach the terminal.
@@ -42,6 +42,25 @@ test("fits 60, 100, and 160 columns, dropping activity and then the host first",
 	}
 	// Too narrow for the meters: the header keeps only the counts.
 	assert.ok(!renderBoard(board, 60, plain)[0]!.includes("netcup"));
+});
+
+test("every lifecycle state and stalled renders without state validation", () => {
+	for (const state of ["queued", "starting", "working", "waiting", "asking", "blocked", "finishing", "done", "stopped", "lost", "unknown", "stalled", "future-state"]) {
+		const input = { hosts: [], rows: [{ ...board.rows[0]!, state, activity: "" }] };
+		const decoded = parseBoard(JSON.parse(JSON.stringify(input)));
+		assert.equal(decoded.rows[0]!.state, state);
+		assert.ok(renderBoard(decoded, 120, plain).some(line => line.includes("api-dups") && line.includes(state)), state);
+	}
+});
+
+test("unknown groups retain their rows under NEEDS YOU", () => {
+	for (const group of ["future-group", "constructor", "__proto__", ""]) {
+		const input = parseBoard({ hosts: [], rows: [{ ...board.rows[0]!, group, state: "future-state" }] });
+		const lines = renderBoard(input, 120, plain);
+		assert.match(lines[0]!, /1 needs you/);
+		assert.equal(lines[1], " NEEDS YOU");
+		assert.ok(lines[2]!.includes("! api-dups"), group);
+	}
 });
 
 test("an empty board draws nothing", () => {

@@ -1,6 +1,6 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, Key, matchesKey, Text, ScrollView, truncateToWidth } from "@earendil-works/pi-tui";
-import { boardColumns, boardHeader, boardRow, clean, cleanRow, groupTitle, GROUPS, type Group, type Row } from "./board.ts";
+import { boardColumns, boardGroup, boardHeader, boardRow, clean, cleanRow, groupTitle, GROUPS, type Group, type Row } from "./board.ts";
 import { taskLines, type WorkState } from "./work.ts";
 import type { TodoView, WorkTodo } from "./work-todo.ts";
 import type { JobHistory, WorkExec } from "./work-history.ts";
@@ -23,9 +23,9 @@ export function workEntries(data: WorkData, tab: WorkTab, history: boolean): Wor
 	const todos: WorkEntry[] = data.todo && !data.todo.display.empty ? [{ value: "todos", label: clean(data.todo.display.summary), description: clean(data.todo.display.current), kind: "todo" }] : [];
 	const canonicalHost = (label: string) => data.history.hosts?.find(host => host.label === label)?.id ?? label;
 	// Board order: the task, then the groups in action order, as the collapsed board draws them.
-	const rows: WorkEntry[] = GROUPS.flatMap(group => data.board.rows.filter(row => row.group === group)).map(raw => {
+	const rows: WorkEntry[] = GROUPS.flatMap(group => data.board.rows.filter(row => boardGroup(row.group) === group)).map(raw => {
 		const row = cleanRow(raw);
-		return { value: `${raw.kind}:${canonicalHost(raw.host)}:${raw.id}`, id: raw.id, host: canonicalHost(raw.host), ...(raw.pane ? { pane: raw.pane } : {}), kind: raw.group === "waiting" ? "queued" : raw.kind === "job" ? "job" : "agent", label: `${raw.group === "attention" || raw.group === "to_land" ? "!" : "●"} ${row.name} · ${row.state}`, description: row.host, running: raw.group === "running", row };
+		return { value: `${raw.kind}:${canonicalHost(raw.host)}:${raw.id}`, id: raw.id, host: canonicalHost(raw.host), ...(raw.pane ? { pane: raw.pane } : {}), kind: row.group === "waiting" ? "queued" : raw.kind === "job" ? "job" : "agent", label: `${row.group === "attention" || row.group === "to_land" ? "!" : "●"} ${row.name} · ${row.state}`, description: row.host, running: row.group === "running", row };
 	});
 	const visible = tab === "todos" ? todos : tab === "agents" ? rows.filter(row => row.value.startsWith("agent:")) : tab === "jobs" ? rows.filter(row => row.value.startsWith("job:")) : [...todos, ...rows];
 	if (tab === "all" || tab === "jobs") {
@@ -129,7 +129,8 @@ export class WorkPanel {
 		this.entries.forEach((entry, index) => {
 			const mark = index === this.selected ? this.theme.fg("accent", "→ ") : "  ";
 			if (entry.row) {
-				if (entry.row.group !== group) { group = entry.row.group; lines.push({ text: groupTitle(group, this.theme) }); }
+				const nextGroup = boardGroup(entry.row.group);
+				if (nextGroup !== group) { group = nextGroup; lines.push({ text: groupTitle(group, this.theme) }); }
 				lines.push({ text: boardRow(entry.row, columns, width, this.theme, mark), entry: index });
 				return;
 			}

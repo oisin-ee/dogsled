@@ -40,6 +40,14 @@ test("Status shows each host's retry and reads an unreachable host again on Ente
 	assert.equal(items("hosts", { ...data, errors: { hosts: "herdr failed" } })[0]!.action?.do, "refresh");
 });
 
+test("Status retains lifecycle states and unknown groups without hiding rows", () => {
+	for (const state of ["queued", "starting", "working", "waiting", "asking", "blocked", "finishing", "done", "stopped", "lost", "unknown", "stalled", "future-state"]) {
+		const next = { ...data, board: { ...data.board, rows: [{ ...data.board.rows[0]!, group: "future-group", state }] } };
+		assert.equal(items("status", next).length, 3);
+		assert.equal(items("status", next)[2]!.label, `api  pi · sol · local · ${state}`);
+	}
+});
+
 test("tabs cycle both ways, Enter returns the row's action, and every line fits", () => {
 	const chosen: unknown[] = [];
 	const panel = new Panel("status", data, plain, keys, a => chosen.push(a));

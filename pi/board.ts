@@ -20,7 +20,7 @@ export async function herdrAvailable(env: NodeJS.ProcessEnv = process.env): Prom
 export type Group = "to_land" | "attention" | "running" | "waiting";
 
 export interface Row {
-	group: Group;
+	group: string;
 	kind: string;
 	id: string;
 	name: string;
@@ -57,11 +57,16 @@ export interface Paint {
 	bold(text: string): string;
 }
 
-const TITLES: Record<Group, string> = { to_land: "TO LAND", attention: "ATTENTION", running: "RUNNING", waiting: "WAITING" };
+const TITLES: Record<Group, string> = { to_land: "READY TO MERGE", attention: "NEEDS YOU", running: "WORKING", waiting: "QUEUED" };
 /** Groups in action order: what the owner must do first comes first. */
 export const GROUPS: readonly Group[] = ["to_land", "attention", "running", "waiting"];
 const ORDER = GROUPS;
-const COUNTS: Record<Group, string> = { to_land: "to land", attention: "need attention", running: "running", waiting: "waiting" };
+const COUNTS: Record<Group, string> = { to_land: "ready to merge", attention: "needs you", running: "working", waiting: "queued" };
+
+/** Unknown evidence stays visible in the group that needs the owner. */
+export function boardGroup(group: string): Group {
+	return GROUPS.find(known => known === group) ?? "attention";
+}
 
 export function parseBoard(value: unknown): Board {
 	const data = value as Partial<Board> | null;
@@ -84,9 +89,10 @@ export function clean(text: string): string {
 }
 
 function icon(row: Row): [string, ThemeColor] {
-	if (row.group === "to_land") return ["●", "success"];
-	if (row.group === "attention") return ["!", "warning"];
-	if (row.group === "waiting") return ["⋯", "muted"];
+	const group = boardGroup(row.group);
+	if (group === "to_land") return ["●", "success"];
+	if (group === "attention") return ["!", "warning"];
+	if (group === "waiting") return ["⋯", "muted"];
 	if (row.kind === "job") return ["▸", "accent"];
 	return row.state === "working" ? ["◐", "accent"] : ["○", "muted"];
 }
@@ -108,7 +114,7 @@ function pad(text: string, width: number): string {
 
 /** A row whose transcript text is safe to draw. */
 export function cleanRow(row: Row): Row {
-	return { ...row, name: clean(row.name), what: clean(row.what), host: clean(row.host), state: clean(row.state), activity: clean(row.activity || row.state) };
+	return { ...row, group: boardGroup(row.group), name: clean(row.name), what: clean(row.what), host: clean(row.host), state: clean(row.state), activity: clean(row.activity || row.state) };
 }
 
 /** Column widths shared by every row drawn together, so the columns line up. */
@@ -141,7 +147,7 @@ export function boardColumns(rows: Row[], width: number): Columns {
 
 /** `dogsled  <counts>` on the left and one load meter per host on the right. */
 export function boardHeader(board: Board, width: number, paint: Paint): string {
-	const counts = ORDER.map(g => [g, board.rows.filter(r => r.group === g).length] as const)
+	const counts = ORDER.map(g => [g, board.rows.filter(r => boardGroup(r.group) === g).length] as const)
 		.filter(([, n]) => n > 0)
 		.map(([g, n]) => `${n} ${COUNTS[g]}`)
 		.join(" · ");
@@ -151,8 +157,9 @@ export function boardHeader(board: Board, width: number, paint: Paint): string {
 	return truncateToWidth(gap >= 2 ? `${left}${" ".repeat(gap)}${meters}` : left, width);
 }
 
-export function groupTitle(group: Group, paint: Paint): string {
-	return ` ${paint.fg(group === "attention" ? "warning" : "muted", TITLES[group])}`;
+export function groupTitle(group: string, paint: Paint): string {
+	const known = boardGroup(group);
+	return ` ${paint.fg(known === "attention" ? "warning" : "muted", TITLES[known])}`;
 }
 
 /** One cleaned row. `prefix` is two columns wide: blank, or a selection marker. */
