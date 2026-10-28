@@ -1,5 +1,6 @@
 //! Local, non-destructive recovery snapshots. No recovery ref is pushed or expired here.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,8 @@ pub enum Refusal {
     CheckoutChanged,
     #[error("snapshot verification failed")]
     VerificationFailed,
+    #[error("Git is redirected outside the requested checkout")]
+    Redirected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +70,8 @@ pub struct Snapshot {
     pub head: Head,
     pub index_tree: String,
     pub worktree_tree: String,
+    /// Working-tree blobs contain raw, unfiltered bytes. Restore without smudge filters.
+    pub raw_worktree_bytes: bool,
     pub created_ms: u64,
     /// Ignored files stay in the live checkout and are explicitly excluded.
     pub ignored_files_captured: bool,
@@ -80,6 +85,7 @@ struct Record {
     head: Head,
     index_tree: String,
     worktree_tree: String,
+    raw_worktree_bytes: bool,
     created_ms: u64,
     ignored_files_captured: bool,
 }
@@ -92,6 +98,7 @@ impl Snapshot {
             head: self.head.clone(),
             index_tree: self.index_tree.clone(),
             worktree_tree: self.worktree_tree.clone(),
+            raw_worktree_bytes: self.raw_worktree_bytes,
             created_ms: self.created_ms,
             ignored_files_captured: self.ignored_files_captured,
         }
@@ -117,7 +124,6 @@ impl Drop for Scratch {
 }
 
 fn random_id() -> Result<String> {
-    use std::fmt::Write as _;
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(bytes.iter().fold(String::new(), |mut out, byte| {
@@ -128,6 +134,16 @@ fn random_id() -> Result<String> {
 
 /// Environment changes belong to the child only, never to this multithreaded process.
 fn git(shell: &dyn Shell, checkout: &Path, index: Option<&Path>, args: &[&str]) -> Result<Output> {
+    git_input(shell, checkout, index, args, None)
+}
+
+fn git_input(
+    shell: &dyn Shell,
+    checkout: &Path,
+    index: Option<&Path>,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<Output> {
     // Hooks export repository-local routing. The explicit checkout, not the caller's
     // repository or index, owns every Git operation in this module.
     let mut words = Vec::new();
@@ -141,8 +157,18 @@ fn git(shell: &dyn Shell, checkout: &Path, index: Option<&Path>, args: &[&str]) 
         "GIT_PREFIX",
         "GIT_SHALLOW_FILE",
         "GIT_NAMESPACE",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
     ] {
         words.extend(["-u".into(), key.into()]);
+    }
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"GIT_CONFIG_") {
+            words.extend(["-u".into(), key.to_string_lossy().into_owned()]);
+        }
     }
     words.push("GIT_OPTIONAL_LOCKS=0".into());
     if let Some(index) = index {
@@ -156,7 +182,11 @@ fn git(shell: &dyn Shell, checkout: &Path, index: Option<&Path>, args: &[&str]) 
         "core.fsmonitor=false".into(),
     ]);
     words.extend(args.iter().map(ToString::to_string));
-    Ok(shell.run("env", &words)?)
+    Ok(if let Some(input) = input {
+        shell.run_input_bounded("env", &words, input, shell.budget().remaining("git")?)?
+    } else {
+        shell.run("env", &words)?
+    })
 }
 
 fn checked(
@@ -277,30 +307,140 @@ fn worktree_tree(
         Some(&index),
         &["-c", "core.sparseCheckout=false", "read-tree", staged],
     )?;
-    checked(
+    let paths = checked(
         shell,
         checkout,
         Some(&index),
         &[
-            "-c",
-            "core.sparseCheckout=false",
-            "-c",
-            "core.fileMode=true",
-            "-c",
-            "core.symlinks=true",
-            "add",
-            "-A",
-            "--",
-            ".",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
         ],
     )?;
+    let mut entries = String::new();
+    for path in paths.split('\0').filter(|path| !path.is_empty()) {
+        let absolute = checkout.join(path);
+        let meta = match fs::symlink_metadata(&absolute) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                checked(
+                    shell,
+                    checkout,
+                    Some(&index),
+                    &["update-index", "--force-remove", "--", path],
+                )?;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if meta.is_dir() {
+            // Keep clean submodule gitlinks, but remove files replaced by directories.
+            if !absolute.join(".git").exists() {
+                checked(
+                    shell,
+                    checkout,
+                    Some(&index),
+                    &["update-index", "--force-remove", "--", path],
+                )?;
+            }
+            continue;
+        }
+        let (mode, source) = if meta.is_symlink() {
+            let target = fs::read_link(&absolute)?;
+            let source = scratch.0.join("link-target");
+            fs::write(&source, target.as_os_str().as_encoded_bytes())?;
+            ("120000", source)
+        } else if meta.is_file() {
+            (
+                if meta.permissions().mode() & 0o111 == 0 {
+                    "100644"
+                } else {
+                    "100755"
+                },
+                absolute,
+            )
+        } else {
+            return Err(Refusal::UnsupportedFileType(absolute).into());
+        };
+        let hash = checked(
+            shell,
+            checkout,
+            None,
+            &[
+                "hash-object",
+                "-w",
+                "--no-filters",
+                "--",
+                &source.to_string_lossy(),
+            ],
+        )?;
+        let _ = write!(entries, "{mode} {}\t{path}\0", hash.trim());
+    }
+    let args = ["update-index", "-z", "--index-info"];
+    let out = git_input(
+        shell,
+        checkout,
+        Some(&index),
+        &args,
+        Some(entries.as_bytes()),
+    )?;
+    if !out.ok() {
+        return Err(crate::error::Error::Command {
+            program: "git".into(),
+            args: args.join(" "),
+            status: out.status.to_string(),
+            stderr: out.stderr,
+        }
+        .into());
+    }
     Ok(checked(shell, checkout, Some(&index), &["write-tree"])?
         .trim()
         .into())
 }
 
-/// Reject content Git would omit or cannot faithfully store before running `add`.
+/// Verify Git's resolved routing against the checkout's own on-disk metadata.
+fn check_routing(shell: &dyn Shell, checkout: &Path) -> Result<()> {
+    let root = checkout.canonicalize()?;
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git.canonicalize()?
+    } else {
+        let content = fs::read_to_string(&dot_git)?;
+        let path = content
+            .trim()
+            .strip_prefix("gitdir: ")
+            .ok_or(Refusal::Redirected)?;
+        root.join(path).canonicalize()?
+    };
+    let common_dir = match fs::read_to_string(git_dir.join("commondir")) {
+        Ok(path) => git_dir.join(path.trim()).canonicalize()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir.clone(),
+        Err(error) => return Err(error.into()),
+    };
+    for (arg, expected) in [
+        ("--show-toplevel", &root),
+        ("--git-dir", &git_dir),
+        ("--git-common-dir", &common_dir),
+    ] {
+        let out = git(
+            shell,
+            checkout,
+            None,
+            &["rev-parse", "--path-format=absolute", arg],
+        )?;
+        if !out.ok() || Path::new(out.stdout.trim()).canonicalize().ok().as_ref() != Some(expected)
+        {
+            return Err(Refusal::Redirected.into());
+        }
+    }
+    Ok(())
+}
+
+/// Reject content Git would omit or cannot faithfully store before capture.
 fn preflight(shell: &dyn Shell, checkout: &Path) -> Result<()> {
+    check_routing(shell, checkout)?;
     if !checked(shell, checkout, None, &["ls-files", "--unmerged", "-z"])?.is_empty() {
         return Err(Refusal::ConflictedIndex.into());
     }
@@ -433,7 +573,9 @@ fn pin(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<()> {
     Err(crate::error::Error::Invalid(format!("cannot pin recovery ref: {}", out.stderr)).into())
 }
 
-/// Capture and pin work without clearing anything. Failures leave all live content intact.
+/// Capture and pin raw, unfiltered work without clearing anything.
+/// Restore must write the captured bytes directly, without Git smudge filters.
+/// Failures leave all live content intact.
 pub fn snapshot(shell: &dyn Shell, checkout: &Path) -> Result<Snapshot> {
     preflight(shell, checkout)?;
     let before = observe(shell, checkout)?;
@@ -448,6 +590,7 @@ pub fn snapshot(shell: &dyn Shell, checkout: &Path) -> Result<Snapshot> {
         head: before.head.clone(),
         index_tree: staged,
         worktree_tree: working,
+        raw_worktree_bytes: true,
         created_ms: crate::ledger::now_ms(),
         ignored_files_captured: false,
     };
@@ -520,6 +663,7 @@ pub fn verify(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result
     let current_index = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
     let current_working = worktree_tree(shell, checkout, &scratch, &current_index)?;
     if record != snapshot.record()
+        || !snapshot.raw_worktree_bytes
         || before.head != snapshot.head
         || tree.trim() != snapshot.worktree_tree
         || staged.trim() != snapshot.index_tree
@@ -582,6 +726,19 @@ mod tests {
                 restored.to_str().unwrap(),
                 &saved.commit,
             ]);
+            // P2 must restore raw blobs without checkout's smudge/EOL conversion.
+            for entry in self
+                .git(&["ls-tree", "-r", "-z", &saved.commit])
+                .split('\0')
+                .filter(|entry| !entry.is_empty())
+            {
+                let (info, path) = entry.split_once('\t').unwrap();
+                if info.starts_with("100") {
+                    let oid = info.split_whitespace().nth(2).unwrap();
+                    let bytes = self.git(&["cat-file", "blob", oid]);
+                    fs::write(restored.join(path), bytes.as_bytes()).unwrap();
+                }
+            }
             // Restore only inside the NEW checkout: original HEAD, working tree, then staged tree.
             if let Some(head) = saved.head.commit() {
                 checked(
@@ -666,6 +823,138 @@ mod tests {
         let repo = Repo::new(true);
         fs::write(repo.path.join("file"), b"working\0bytes").unwrap();
         repo.round_trip();
+    }
+
+    #[test]
+    fn crlf_attributes_preserve_raw_bytes() {
+        let repo = Repo::new(true);
+        fs::write(repo.path.join(".gitattributes"), b"* text eol=lf\n").unwrap();
+        let bytes = b"working\r\nbytes\r\n";
+        fs::write(repo.path.join("file"), bytes).unwrap();
+        let saved = repo.round_trip();
+        assert!(saved.raw_worktree_bytes);
+        assert_eq!(
+            repo.git(&["cat-file", "blob", &format!("{}:file", saved.commit)])
+                .as_bytes(),
+            bytes
+        );
+        fs::write(repo.path.join("file"), b"working\nbytes\n").unwrap();
+        assert!(matches!(
+            verify(&System::default(), &repo.path, &saved),
+            Err(Error::Refused(Refusal::VerificationFailed))
+        ));
+    }
+
+    #[test]
+    fn clean_filter_preserves_raw_bytes() {
+        let repo = Repo::new(true);
+        repo.git(&["config", "filter.x.clean", "tr a-z A-Z"]);
+        fs::write(repo.path.join(".gitattributes"), b"file filter=x\n").unwrap();
+        fs::write(repo.path.join("file"), b"staged lowercase\n").unwrap();
+        repo.git(&["add", "file"]);
+        fs::write(repo.path.join("file"), b"working lowercase\n").unwrap();
+        let saved = repo.round_trip();
+        assert_eq!(
+            repo.git(&["cat-file", "blob", &format!("{}:file", saved.commit)]),
+            "working lowercase\n"
+        );
+        assert_eq!(
+            repo.git(&["cat-file", "blob", &format!("{}:file", saved.index_tree)]),
+            "STAGED LOWERCASE\n"
+        );
+    }
+
+    #[test]
+    fn autocrlf_preserves_raw_bytes() {
+        let repo = Repo::new(true);
+        repo.git(&["config", "core.autocrlf", "true"]);
+        fs::write(repo.path.join("file"), b"working\r\nbytes\r\n").unwrap();
+        let saved = repo.round_trip();
+        assert_eq!(
+            repo.git(&["cat-file", "blob", &format!("{}:file", saved.commit)])
+                .as_bytes(),
+            b"working\r\nbytes\r\n"
+        );
+    }
+
+    #[derive(Debug)]
+    struct ConfigInjected {
+        other: PathBuf,
+    }
+
+    impl ConfigInjected {
+        fn args(&self, program: &str, args: &[String]) -> Vec<String> {
+            let mut words = vec![
+                "GIT_CONFIG_COUNT=1".into(),
+                "GIT_CONFIG_KEY_0=core.worktree".into(),
+                format!("GIT_CONFIG_VALUE_0={}", self.other.display()),
+                program.into(),
+            ];
+            words.extend_from_slice(args);
+            words
+        }
+    }
+
+    impl Shell for ConfigInjected {
+        fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {
+            System::default().run("env", &self.args(program, args))
+        }
+
+        fn run_input_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            input: &[u8],
+            timeout: std::time::Duration,
+        ) -> crate::error::Result<Output> {
+            System::default().run_input_bounded("env", &self.args(program, args), input, timeout)
+        }
+    }
+
+    #[test]
+    fn config_environment_cannot_redirect_capture() {
+        let repo = Repo::new(true);
+        let other = Repo::new(true);
+        fs::write(repo.path.join("file"), b"requested checkout\n").unwrap();
+        fs::write(other.path.join("file"), b"wrong checkout\n").unwrap();
+        let shell = ConfigInjected {
+            other: other.path.clone(),
+        };
+        // Prove the injection was removed, even on Git versions that resolve
+        // their worktree before consulting environment-injected configuration.
+        assert!(
+            !git(
+                &shell,
+                &repo.path,
+                None,
+                &["config", "--get", "core.worktree"]
+            )
+            .unwrap()
+            .ok()
+        );
+        let saved = snapshot(&shell, &repo.path).unwrap();
+        verify(&shell, &repo.path, &saved).unwrap();
+        assert_eq!(
+            repo.git(&["cat-file", "blob", &format!("{}:file", saved.commit)]),
+            "requested checkout\n"
+        );
+        assert_eq!(
+            fs::read(other.path.join("file")).unwrap(),
+            b"wrong checkout\n"
+        );
+    }
+
+    #[test]
+    fn repository_core_worktree_redirect_refuses() {
+        let repo = Repo::new(true);
+        let other = Repo::new(true);
+        repo.git(&["config", "core.worktree", other.path.to_str().unwrap()]);
+        assert!(matches!(
+            snapshot(&System::default(), &repo.path),
+            Err(Error::Refused(Refusal::Redirected))
+        ));
+        assert_eq!(fs::read(repo.path.join("file")).unwrap(), b"base\n");
+        assert_eq!(fs::read(other.path.join("file")).unwrap(), b"base\n");
     }
 
     #[test]
@@ -875,6 +1164,16 @@ mod tests {
     }
 
     impl Shell for Injected {
+        fn run_input_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            input: &[u8],
+            timeout: std::time::Duration,
+        ) -> crate::error::Result<Output> {
+            System::default().run_input_bounded(program, args, input, timeout)
+        }
+
         fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {
             let pinning = args.iter().any(|arg| arg == "update-ref");
             if pinning && matches!(self.injection, Injection::FailPin) {
