@@ -1283,6 +1283,8 @@ fn worktree_removed_after_listing_is_reconciled_not_failed() {
                     "feature",
                 ],
             );
+            // This is a fresh checkout, not the incarnation saved by the previous survey.
+            registered(&repo, &ledger);
             racing
                 .fired
                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1732,6 +1734,84 @@ fn gone_checkout_does_not_reconcile_a_reused_pane_or_item() {
                 .closed_ms
                 .is_none()
         );
+        assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn handoff_skips_unproven_owner_and_closes_the_next_mark() {
+    let fixture = lifecycle_fixture(false);
+    let captured = recorded(&fixture.ledger)[0].clone();
+    fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+        "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
+        "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
+        "result":{"checkout":captured},"error":null
+    })).unwrap();
+    fixture.ledger.write("items.json", &serde_json::json!([
+        {"id":"a-missing","kind":"agent","host":"local","pane":"gone-child","owner_pane":"parent","created_ms":1,"closed_ms":null},
+        {"id":"c1-old","kind":"agent","host":"local","pane":"placed-shell","owner_pane":"parent","created_ms":1,"closed_ms":null}
+    ])).unwrap();
+    fixture.ledger.write("done.json", &serde_json::json!({
+        "[\"a-missing\",\"gone-child\",null]":{"pane":"gone-child","item":"a-missing","sealed":10,"marked_ms":1,"native_done":true,
+            "reply":{"seq":10,"text":"unproven checkout","captured_ms":2,"done":true}},
+        "[\"c1-old\",\"placed-shell\",null]":{"pane":"placed-shell","item":"c1-old","sealed":10,"marked_ms":1,"native_done":true,
+            "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}}
+    })).unwrap();
+    external_remove(&fixture.repo);
+    let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    shell.open.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::done::handoff(&fixture.ledger, &shell, 100).unwrap();
+    let items = crate::items::list(&fixture.ledger).unwrap();
+    assert!(items[0].closed_ms.is_none());
+    assert_eq!(items[1].closed_ms, Some(100));
+    let marks = crate::done::list(&fixture.ledger).unwrap();
+    assert!(marks[0].closed_ms.is_none());
+    assert_eq!(marks[1].closed_ms, Some(100));
+}
+
+#[test]
+fn saved_close_never_recreates_checkout_identity() {
+    for malformed in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        let captured = recorded(&fixture.ledger)[0].clone();
+        let marker = captured
+            .identity
+            .as_ref()
+            .unwrap()
+            .gitdir
+            .join("dogsled-checkout-id");
+        fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+            "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
+            "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
+            "result":{"checkout":captured},"error":null
+        })).unwrap();
+        if malformed {
+            std::fs::write(&marker, "invalid generation").unwrap();
+        } else {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        let result = crate::close::local(
+            &shell,
+            &fixture.ledger,
+            "placed-shell",
+            &crate::close::Caller::default(),
+            crate::close::Guard::Clean,
+        );
+        assert!(result.is_err(), "{result:?}");
+        if malformed {
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap(),
+                "invalid generation"
+            );
+        } else {
+            assert!(
+                !marker.exists(),
+                "stale close recreated the checkout marker"
+            );
+        }
+        assert!(shell.open.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(recorded(&fixture.ledger), [captured]);
         assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

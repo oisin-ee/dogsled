@@ -48,6 +48,19 @@ fn generation(gitdir: &Path) -> Result<Option<String>> {
 }
 
 impl Guard {
+    /// Read an existing checkout without creating its generation marker.
+    pub fn observe(&self, shell: &dyn Shell, path: &str) -> Result<Option<Linked>> {
+        let Some(tree) = snapshot(shell, path)? else {
+            return Ok(None);
+        };
+        self.check_repository(shell, &tree.checkout)?;
+        validate_identity(shell, &tree)?;
+        if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
+            return Err(refuse("HEAD moved during checkout observation"));
+        }
+        Ok(Some(tree))
+    }
+
     /// Fresh discovery only. Stale validation must never create a generation marker.
     pub fn discover(&self, shell: &dyn Shell, path: &str) -> Result<Option<Linked>> {
         let Some(mut tree) = snapshot(shell, path)? else {

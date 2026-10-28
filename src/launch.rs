@@ -426,19 +426,37 @@ pub fn checkout_for_request(
     ))
 }
 
+/// Ownership refusal is local to one checkout; evidence I/O failures remain pass-wide.
+#[derive(Debug, thiserror::Error)]
+pub enum CheckoutOwnerError {
+    #[error("refuse: {0}; nothing was closed")]
+    Refused(&'static str),
+    #[error(transparent)]
+    Evidence(#[from] Error),
+}
+
+impl From<CheckoutOwnerError> for Error {
+    fn from(error: CheckoutOwnerError) -> Self {
+        match error {
+            CheckoutOwnerError::Refused(reason) => crate::worktree::refuse(reason),
+            CheckoutOwnerError::Evidence(error) => error,
+        }
+    }
+}
+
 /// A reused pane or a replacement item cannot inherit a removed launch's checkout.
 pub fn validate_checkout_owner(
     ledger: &Ledger,
     pane: &str,
     request: Option<&str>,
     terminal: Option<&str>,
-) -> Result<()> {
+) -> std::result::Result<(), CheckoutOwnerError> {
     let captured: Vec<_> = recovery::candidates(&ledger.child("launches"), Some(pane))?
         .into_iter()
         .filter(|(_, progress)| progress.result.get("checkout").is_some())
         .collect();
     let [(id, progress)] = captured.as_slice() else {
-        return Err(crate::worktree::refuse(
+        return Err(CheckoutOwnerError::Refused(
             "checkout has no unique saved launch owner",
         ));
     };
@@ -451,7 +469,7 @@ pub fn validate_checkout_owner(
                 && item.id != *id
         })
     {
-        return Err(crate::worktree::refuse(
+        return Err(CheckoutOwnerError::Refused(
             "pane or item belongs to another checkout owner",
         ));
     }

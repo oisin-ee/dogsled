@@ -211,6 +211,69 @@ fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
 }
 
 #[test]
+fn unprovable_disappeared_child_does_not_block_the_next_handoff() {
+    let (rig, tree) = close_rig("done-unprovable-first");
+    worker(&rig, &tree, "idle");
+    let mut items = rig.read("state/items.json");
+    items.as_array_mut().unwrap().push(json!({
+        "id":"missing","kind":"agent","host":"local","pane":"w9:p1",
+        "owner_pane":"w1:p1","name":"disappeared","created_ms":1,"closed_ms":null
+    }));
+    rig.put("state/items.json", &items);
+    // Herdr lost the child agent, but its non-repository shell pane remains.
+    let mut panes = rig.read("panes.json");
+    panes["result"]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "pane_id":"w9:p1","workspace_id":"w9","cwd":rig.dir
+        }));
+    rig.put("panes.json", &panes);
+    rig.put(
+        "state/done.json",
+        &json!({
+            "0-missing": {
+                "pane":"w9:p1","item":"missing","after":9,"sealed":10,"marked_ms":1,
+                "native_done":true,
+                "reply":{"seq":10,"text":"unproven checkout","captured_ms":2,"done":true}
+            },
+            "term_child": {
+                "pane":"w2:p1","after":9,"sealed":10,"marked_ms":1,"native_done":true,
+                "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}
+            }
+        }),
+    );
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let journal = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        journal
+            .contains("dogsled handoff: w9:p1: refuse: checkout has no unique saved launch owner"),
+        "{journal}"
+    );
+    assert!(
+        journal.contains("dogsled handoff: closed w2:p1"),
+        "{journal}"
+    );
+    assert!(!tree.exists());
+    let items = rig.read("state/items.json");
+    assert!(items[0]["closed_ms"].is_u64(), "{items}");
+    assert!(items[1]["closed_ms"].is_null(), "{items}");
+    let marks = rig.read("state/done.json");
+    let missing = marks
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|m| m["pane"] == "w9:p1")
+        .unwrap();
+    assert!(missing["closed_ms"].is_null(), "{missing}");
+}
+
+#[test]
 fn done_refuses_a_queued_ticket_before_writing() {
     let (rig, tree) = close_rig("done-queued");
     worker(&rig, &tree, "working");

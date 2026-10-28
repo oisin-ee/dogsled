@@ -131,11 +131,15 @@ pub fn with_local<T>(
     };
     let repo = planned.repo.clone();
     worktree::with_lifecycle(shell, ledger, Path::new(&repo), |lifecycle| {
-        if live.is_some() && planned.identity.is_none() {
-            planned = lifecycle
-                .discover(shell, &planned.path)?
-                .ok_or_else(|| refuse("checkout disappeared before identity capture"))?
-                .tree();
+        if live.is_some() && (saved.is_some() || planned.identity.is_none()) {
+            let observed = if saved.is_some() {
+                lifecycle.observe(shell, &planned.path)?
+            } else {
+                lifecycle.discover(shell, &planned.path)?
+            };
+            if let Some(now) = observed {
+                planned = now.tree();
+            }
         }
         if worktree::verified_absent(lifecycle, shell, &planned) {
             validate_absent_target(

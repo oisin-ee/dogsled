@@ -828,13 +828,30 @@ pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Re
 /// native-done boundary, sealed reply, and original checkout identity.
 fn removed_handoff(ledger: &Ledger, mark: &Mark) -> Result<bool> {
     if !mark.native_done || mark.item.is_none() {
+        eprintln!(
+            "dogsled handoff: {}: removed checkout handoff is unproven",
+            mark.pane
+        );
         return Ok(false);
     }
-    crate::launch::validate_checkout_owner(ledger, &mark.pane, mark.item.as_deref(), None)?;
-    Ok(mark.native_done
-        && mark.sealed.is_some()
+    match crate::launch::validate_checkout_owner(ledger, &mark.pane, mark.item.as_deref(), None) {
+        Ok(()) => (),
+        Err(error @ crate::launch::CheckoutOwnerError::Refused(_)) => {
+            eprintln!("dogsled handoff: {}: {error}", mark.pane);
+            return Ok(false);
+        }
+        Err(crate::launch::CheckoutOwnerError::Evidence(error)) => return Err(error),
+    }
+    let proven = mark.sealed.is_some()
         && mark.reply.as_ref().is_some_and(|reply| reply.done)
-        && crate::launch::checkout_for_pane(ledger, &mark.pane)?.is_some())
+        && crate::launch::checkout_for_pane(ledger, &mark.pane)?.is_some();
+    if !proven {
+        eprintln!(
+            "dogsled handoff: {}: removed checkout handoff is unproven",
+            mark.pane
+        );
+    }
+    Ok(proven)
 }
 
 fn close_mark(

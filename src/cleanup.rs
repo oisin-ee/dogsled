@@ -772,10 +772,25 @@ fn readable(
             crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&repo), |guard| {
                 let mut found = porcelain(node.shell, &repo)?;
                 for (tree, prunable) in found.iter_mut().skip(1) {
-                    if !*prunable
-                        && unlinked_reason(tree, Some(false)).is_none()
-                        && let Some(linked) = guard.discover(node.shell, &tree.path)?
-                    {
+                    if *prunable || unlinked_reason(tree, Some(false)).is_some() {
+                        continue;
+                    }
+                    let saved = recorded.iter().find(|saved| {
+                        crate::worktree::same(&saved.path, &tree.path) && saved.identity.is_some()
+                    });
+                    let linked = if let Some(saved) = saved {
+                        let linked = guard.observe(node.shell, &tree.path)?;
+                        if linked
+                            .as_ref()
+                            .is_some_and(|now| saved.identity != now.identity)
+                        {
+                            return Err(crate::worktree::refuse("worktree identity changed"));
+                        }
+                        linked
+                    } else {
+                        guard.discover(node.shell, &tree.path)?
+                    };
+                    if let Some(linked) = linked {
                         *tree = linked.tree();
                     }
                 }
