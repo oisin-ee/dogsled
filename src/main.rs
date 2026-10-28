@@ -37,6 +37,8 @@ mod mcp;
 mod node;
 mod plan;
 mod prepare;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by P2/P3"))]
+mod preservation;
 mod probe;
 mod profiles;
 mod quota;
