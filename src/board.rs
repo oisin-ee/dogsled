@@ -622,23 +622,31 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     } else {
         group_for(lifecycle.state)
     };
-    let activity = match (group, agent) {
-        (Group::ToLand, _) => [
-            ahead.map(|n| format!("+{n} commit{}", if n == 1 { "" } else { "s" })),
-            dirty.then(|| "uncommitted changes".to_owned()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · "),
-        (_, None) if !host_up => format!("{} is unavailable", label(hosts, &item.host)),
-        (_, None) => crate::lifecycle::display(lifecycle.state).to_owned(),
-        (_, Some(a)) => {
-            let last = a.session.activity.clone().unwrap_or_default();
-            match quiet_ms.filter(|q| *q >= QUIET_MS && quiet_eligible) {
-                Some(quiet) if last.is_empty() => format!("quiet {}", age(quiet)),
-                Some(quiet) => format!("quiet {} · last: {last}", age(quiet)),
-                None => last,
+    let signal = item
+        .signal
+        .as_ref()
+        .filter(|s| agent.is_some_and(|a| a.signal.as_deref() == Some(s.kind.as_str())));
+    let activity = if let Some(signal) = signal {
+        signal.text.clone()
+    } else {
+        match (group, agent) {
+            (Group::ToLand, _) => [
+                ahead.map(|n| format!("+{n} commit{}", if n == 1 { "" } else { "s" })),
+                dirty.then(|| "uncommitted changes".to_owned()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+            (_, None) if !host_up => format!("{} is unavailable", label(hosts, &item.host)),
+            (_, None) => crate::lifecycle::display(lifecycle.state).to_owned(),
+            (_, Some(a)) => {
+                let last = a.session.activity.clone().unwrap_or_default();
+                match quiet_ms.filter(|q| *q >= QUIET_MS && quiet_eligible) {
+                    Some(quiet) if last.is_empty() => format!("quiet {}", age(quiet)),
+                    Some(quiet) => format!("quiet {} · last: {last}", age(quiet)),
+                    None => last,
+                }
             }
         }
     };

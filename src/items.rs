@@ -60,6 +60,11 @@ pub struct ItemSignal {
     pub text: String,
     pub event_id: String,
     pub recorded_ms: u64,
+    /// Session that recorded this event; absent on older owner-side projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_ms: Option<u64>,
 }
 
 impl From<&crate::done::Signal> for ItemSignal {
@@ -69,6 +74,8 @@ impl From<&crate::done::Signal> for ItemSignal {
             text: signal.text.clone(),
             event_id: signal.event_id.clone(),
             recorded_ms: signal.recorded_ms,
+            session: Some(signal.session.clone()),
+            reported_ms: None,
         }
     }
 }
@@ -189,6 +196,7 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
             .filter(|i| i.closed_ms.is_none() && i.host == host && i.pane == pane)
         {
             item.closed_ms = Some(now);
+            item.signal = None;
             count += 1;
         }
         ledger.write("items.json", &items)?;
@@ -243,6 +251,46 @@ pub fn handoffs(ledger: &Ledger, hosts: &[HostReport]) -> Result<()> {
 
 pub fn merge_handoffs(items: &mut [Item], hosts: &[HostReport]) {
     for item in items {
+        if item.closed_ms.is_some() {
+            item.signal = None;
+        } else if let Some(host) = hosts.iter().find(|h| h.host.id == item.host)
+            && host.reachable
+            && host.failure.is_none()
+            && host.service == "up"
+        {
+            let live = host.agent(&item.pane);
+            if item.signal.as_ref().is_some_and(|s| {
+                s.session.as_ref().is_some_and(|session| {
+                    live.and_then(|a| a.agent_session.as_ref())
+                        .is_some_and(|current| current != session)
+                })
+            }) {
+                item.signal = None;
+            }
+            let signal_mark = host
+                .handoffs
+                .iter()
+                .filter(|m| m.pane == item.pane && m.item.as_deref().is_none_or(|id| id == item.id))
+                .filter(|m| m.signal.is_some())
+                .filter(|m| live.is_none_or(|a| m.session == a.agent_session))
+                .max_by_key(|m| m.marked_ms);
+            if let Some(mark) = signal_mark {
+                let next = mark
+                    .signal
+                    .as_ref()
+                    .filter(|s| s.cleared_ms.is_none())
+                    .map(ItemSignal::from);
+                if item.signal.as_ref().map(|s| &s.event_id) != next.as_ref().map(|s| &s.event_id) {
+                    item.signal = next;
+                } else if let (Some(saved), Some(next)) = (&mut item.signal, next) {
+                    // Backfill identity without resetting an unchanged event's delivery stamp.
+                    if saved.session.is_none() {
+                        saved.session = next.session;
+                    }
+                }
+            }
+            // Missing marks, including failed reads with cached agents, prove no clearance.
+        }
         let Some(mark) = hosts.iter().find(|h| h.host.id == item.host).and_then(|h| {
             h.handoffs
                 .iter()
@@ -265,6 +313,7 @@ pub fn merge_handoffs(items: &mut [Item], hosts: &[HostReport]) {
         }
         if let Some(closed) = mark.closed_ms {
             item.closed_ms.get_or_insert(closed);
+            item.signal = None;
         }
         if let Some(dropped) = mark.dropped_ms {
             item.dropped_ms.get_or_insert(dropped);
@@ -273,6 +322,38 @@ pub fn merge_handoffs(items: &mut [Item], hosts: &[HostReport]) {
             item.branch.clone_from(&mark.branch);
         }
     }
+}
+
+/// Deliver nonterminal child events through the same live-custodian route as replies.
+pub fn deliver_signals(fleet: &crate::hosts::Fleet, hosts: &[HostReport], now: u64) -> Result<()> {
+    handoffs(fleet.ledger, hosts)?;
+    for item in list(fleet.ledger)? {
+        let Some(signal) = item.signal.as_ref().filter(|s| s.reported_ms.is_none()) else {
+            continue;
+        };
+        crate::custody::ensure(fleet.ledger, &item)?;
+        if crate::inbox::notify(
+            fleet,
+            hosts,
+            &item.owner_pane,
+            &format!("signal-{}-{}", item.id, signal.event_id),
+            signal.kind.as_str(),
+            signal.text.clone(),
+            now,
+        )? {
+            change(fleet.ledger, |items| {
+                if let Some(saved) = items
+                    .iter_mut()
+                    .find(|i| i.id == item.id)
+                    .and_then(|i| i.signal.as_mut())
+                    .filter(|s| s.event_id == signal.event_id)
+                {
+                    saved.reported_ms.get_or_insert(now);
+                }
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// An open agent item whose agent called `done` and ended that turn: its result is ready, and
@@ -341,6 +422,7 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
             let gone = after_launch && !probe.panes.iter().any(|p| p.pane_id == item.pane);
             if ended || gone {
                 item.closed_ms = Some(now);
+                item.signal = None;
             }
         }
         ledger.write("items.json", &items)

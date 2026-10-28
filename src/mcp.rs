@@ -130,6 +130,16 @@ pub struct SendArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct AskArgs {
+    pub question: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct BlockedArgs {
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct Target {
     /// A child's name or pane, a job id, or any agent's name or pane.
     pub target: String,
@@ -410,10 +420,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Say that your whole task is complete. Call it once, during the turn that \
-        completes the task, then end the turn with your final reply. Dogsled closes you after \
-        that turn and keeps your branch for the owner to land. Do not call it when you stop to ask a question or \
-        to wait for your own children: an idle agent without `done` stays open."
+        description = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use this native done tool once when the whole task is complete, then end the turn with your final reply. Commit your changes first. Dogsled closes you after that turn and keeps your branch for the owner to land."
     )]
     async fn done(&self) -> Result<String, String> {
         self.call(move |fleet| {
@@ -422,6 +429,40 @@ impl Server {
                 fleet.ledger,
                 fleet.shell,
                 &pane,
+                now_ms(),
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Ask your owner a question with this native tool. End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Does not seal or close input; works with dirty work and open children."
+    )]
+    async fn ask(&self, Parameters(args): Parameters<AskArgs>) -> Result<String, String> {
+        self.call(move |fleet| {
+            Ok(serde_json::to_value(crate::done::signal(
+                fleet.ledger,
+                fleet.shell,
+                &crate::inbox::own_pane(None)?,
+                crate::lifecycle::Signal::Ask,
+                &args.question,
+                now_ms(),
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Report why you cannot continue with this native tool. End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Does not seal or close input; works with dirty work and open children."
+    )]
+    async fn blocked(&self, Parameters(args): Parameters<BlockedArgs>) -> Result<String, String> {
+        self.call(move |fleet| {
+            Ok(serde_json::to_value(crate::done::signal(
+                fleet.ledger,
+                fleet.shell,
+                &crate::inbox::own_pane(None)?,
+                crate::lifecycle::Signal::Blocked,
+                &args.reason,
                 now_ms(),
             )?)?)
         })

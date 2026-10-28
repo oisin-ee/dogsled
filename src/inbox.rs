@@ -1114,6 +1114,11 @@ pub fn holds(custodian: &Custodian, pane: &str, session: Option<&str>) -> bool {
 /// `blocked-{item}-{seq}`, or `unit-reply-{result}`, whose result carries the item id.
 /// The tail of the first two is a number, so only the item it was built for matches.
 fn names(id: &str, item: &crate::items::Item) -> bool {
+    if let Some(signal) = &item.signal
+        && id == format!("signal-{}-{}", item.id, signal.event_id)
+    {
+        return true;
+    }
     if let Some(result) = id.strip_prefix("unit-reply-") {
         return item
             .reply

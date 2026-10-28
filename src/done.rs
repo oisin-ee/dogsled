@@ -11,12 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const FILE: &str = "done.json";
 
 /// One line because Herdr refuses newlines in an argument.
-pub const CONTRACT: &str = "Dogsled started you as a child agent. When your whole task is \
-complete, call the dogsled `done` tool (or run `dogsled done`) once, then end your turn with \
-your final reply. Do not call `done` when you ask a question, wait for input, or own open \
-children. Commit your changes first. `done` hands your work back: Dogsled closes your pane \
-and agent worktree when this turn ends, keeps your branch, and leaves landing to your owner. \
-After that turn, messages cannot reopen you; more work needs a new child.";
+pub const CONTRACT: &str = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use the native tools. Commit your changes before done. Call done once during the turn that completes the whole task, then end the turn with your final reply. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not call done when you need an answer, cannot continue, or own open children.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branch {
@@ -128,10 +123,6 @@ fn conflict(pane: &str) -> Error {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by -17 turn-signal delivery")
-)]
 fn unproven(pane: &str) -> Error {
     Error::Refused {
         code: crate::error::Refusal::SignalUnproven,
@@ -411,10 +402,6 @@ pub fn mark(
 }
 
 /// Record a nonterminal turn signal without checkout or child-work preconditions.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by -17 turn-signal delivery")
-)]
 pub fn signal(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
