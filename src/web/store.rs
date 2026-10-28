@@ -14,7 +14,7 @@ use std::fs;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use portal_types::questions::{AskBody, Pending, ResponseItem, Responses};
+use portal_types::questions::{AskBody, Pending, Rejection, ResponseItem, Responses};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
@@ -30,12 +30,25 @@ struct Entry {
     pending: Pending,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     answers: Option<Vec<ResponseItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejection: Option<Rejection>,
+}
+
+impl Entry {
+    fn resolved(&self) -> bool {
+        self.answers.is_some() || self.rejection.is_some()
+    }
+}
+
+enum Resolution {
+    Answers(Vec<ResponseItem>),
+    Rejected(Rejection),
 }
 
 /// What a long poll found.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Poll {
-    /// The owner answered. The answers are the ones of the question.
+    /// The owner answered or rejected the interview. The outcome is retained.
     Answered(Responses),
     /// Nothing changed before the time ended.
     Timeout,
@@ -50,7 +63,7 @@ pub enum Answered {
     Saved,
     /// The question is not there: it was withdrawn or never existed.
     Gone,
-    /// The question already holds answers.
+    /// The question already holds an answer or rejection.
     Already,
 }
 
@@ -86,6 +99,7 @@ impl Store {
                     questions: body.questions,
                 },
                 answers: None,
+                rejection: None,
             };
             ledger.with_lock(LOCK, || ledger.write(&file(&id), &entry))?;
             Ok(id)
@@ -99,7 +113,7 @@ impl Store {
         run(move || {
             let mut pending: Vec<Pending> = load_all(&ledger)?
                 .into_iter()
-                .filter(|entry| entry.answers.is_none())
+                .filter(|entry| !entry.resolved())
                 .map(|entry| entry.pending)
                 .collect();
             pending.sort_by(|left, right| {
@@ -114,6 +128,15 @@ impl Store {
 
     /// Keep the owner's answers and wake the long poll of the question.
     pub async fn answer(&self, id: &str, responses: Vec<ResponseItem>) -> Result<Answered> {
+        self.resolve(id, Resolution::Answers(responses)).await
+    }
+
+    /// Keep a rejection through the same lock and wake-up as submitted answers.
+    pub async fn reject(&self, id: &str, rejection: Rejection) -> Result<Answered> {
+        self.resolve(id, Resolution::Rejected(rejection)).await
+    }
+
+    async fn resolve(&self, id: &str, resolution: Resolution) -> Result<Answered> {
         if !valid_id(id) {
             return Ok(Answered::Gone);
         }
@@ -124,10 +147,13 @@ impl Store {
                 let Some(mut entry) = ledger.read::<Entry>(&file(&owned))? else {
                     return Ok(Answered::Gone);
                 };
-                if entry.answers.is_some() {
+                if entry.resolved() {
                     return Ok(Answered::Already);
                 }
-                entry.answers = Some(responses);
+                match resolution {
+                    Resolution::Answers(responses) => entry.answers = Some(responses),
+                    Resolution::Rejected(rejection) => entry.rejection = Some(rejection),
+                }
                 ledger.write(&file(&owned), &entry)?;
                 Ok(Answered::Saved)
             })
@@ -135,6 +161,33 @@ impl Store {
         .await?;
         if outcome == Answered::Saved {
             self.wake(id);
+        }
+        Ok(outcome)
+    }
+
+    /// Cancel only a pending question. A racing answer or rejection must survive.
+    pub async fn withdraw_pending(&self, id: &str) -> Result<Answered> {
+        if !valid_id(id) {
+            return Ok(Answered::Gone);
+        }
+        let ledger = self.ledger.clone();
+        let owned = id.to_owned();
+        let outcome = run(move || {
+            ledger.with_lock(LOCK, || {
+                let Some(entry) = ledger.read::<Entry>(&file(&owned))? else {
+                    return Ok(Answered::Gone);
+                };
+                if entry.resolved() {
+                    return Ok(Answered::Already);
+                }
+                remove(&ledger, &owned)?;
+                Ok(Answered::Saved)
+            })
+        })
+        .await?;
+        if outcome == Answered::Saved {
+            self.wake(id);
+            self.forget(id);
         }
         Ok(outcome)
     }
@@ -196,12 +249,13 @@ impl Store {
                 let Some(entry) = ledger.read::<Entry>(&file(&owned))? else {
                     return Ok(Some(Poll::Gone));
                 };
-                let Some(items) = entry.answers else {
+                if !entry.resolved() {
                     return Ok(None);
-                };
+                }
                 Ok(Some(Poll::Answered(Responses {
                     id: owned,
-                    responses: items,
+                    responses: entry.answers.unwrap_or_default(),
+                    rejection: entry.rejection,
                 })))
             })
         })
