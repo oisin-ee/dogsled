@@ -6,8 +6,19 @@ fn agents(rig: &Rig, state: &str, seq: u64, session: &str, owner_session: &str) 
          "agent_session":{"kind":"path","value":owner_session}},
         {"pane_id":"w2:p1","agent":"pi","agent_status":state,"name":"worker","terminal_id":"term_child",
          "agent_session":{"kind":"path","value":session},"state_change_seq":seq,"state_since_ms":seq * 100},
-        {"pane_id":"w3:p1","agent":"pi","agent_status":"working","terminal_id":"term_grandchild"}
+        {"pane_id":"w3:p1","agent":"pi","agent_status":"working","terminal_id":"term_grandchild",
+         "agent_session":{"kind":"path","value":"grandchild-session"}}
     ]}}));
+    // Every listed agent also has a live pane, as it does after a real spawn.
+    // Reconciliation uses pane list, not agent list, to prove that a child is gone.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi"},
+            {"pane_id":"w2:p1","terminal_id":"term_child","agent":"pi"},
+            {"pane_id":"w3:p1","terminal_id":"term_grandchild","agent":"pi"}
+        ]}}),
+    );
 }
 
 fn setup(name: &str) -> Rig {
@@ -162,7 +173,7 @@ fn ask_works_with_dirty_work_and_open_children_and_does_not_close_input() {
     fs::write(tree.join("scratch"), "uncommitted work").unwrap();
     rig.put("state/items.json", &json!([
         {"id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null},
-        {"id":"grandchild","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"w2:p1","created_ms":1,"closed_ms":null}
+        {"id":"grandchild","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"w2:p1","owner_session":"child-session","created_ms":1,"closed_ms":null}
     ]));
     let (code, event) = signal(&rig, "ask", "Can I expand scope?");
     assert_eq!(code, 0, "{event}");
@@ -429,19 +440,30 @@ fn open_children_without_a_signal_show_waiting() {
     let rig = setup("signal-waiting");
     let mut items = rig.read("state/items.json");
     items.as_array_mut().unwrap().push(json!({
-        "id":"grandchild","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"w2:p1","created_ms":1,"closed_ms":null
+        "id":"grandchild","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"w2:p1",
+        "owner_session":"child-session","created_ms":1,"closed_ms":null
     }));
     rig.put("state/items.json", &items);
     agents(&rig, "idle", 11, "child-session", "owner-session");
-    serve(&rig);
-    let host = rig.read("state/host.json");
-    let child = host["probe"]["agent_panes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|a| a["pane"] == "w2:p1")
-        .unwrap();
-    assert_eq!(child["lifecycle"], "waiting", "{child}");
-    assert_eq!(row(&rig)["group"], "running");
-    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    for pass in 1..=2 {
+        serve(&rig);
+        let items = rig.read("state/items.json");
+        let grandchild = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "grandchild")
+            .unwrap();
+        assert!(grandchild["closed_ms"].is_null(), "serve {pass}: {items}");
+        let host = rig.read("state/host.json");
+        let child = host["probe"]["agent_panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["pane"] == "w2:p1")
+            .unwrap();
+        assert_eq!(child["lifecycle"], "waiting", "serve {pass}: {child}");
+        assert_eq!(row(&rig)["group"], "running", "serve {pass}");
+        assert!(items[0]["signal"].is_null(), "serve {pass}: {items}");
+    }
 }

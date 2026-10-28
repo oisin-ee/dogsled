@@ -599,7 +599,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             job_validity,
         } => print(
             true,
-            &work::launch(
+            &work::receive_launch(
                 node.ledger,
                 node.shell,
                 &serde_json::from_str(&request)?,
