@@ -21,8 +21,8 @@ type Executor = ExtensionAPI["exec"];
 
 /** Real extension, provider, WASM core, importer, guard, runtime and tool entry points.
  * Only executor transport is simulated here; Rust tests and the authorized live scenario own launch proof. */
-async function runtime(cwd: string, providerFirst: boolean, execute: Executor, options: { id?: string; seed?: string; spawn?: (input: unknown) => Promise<void> } = {}) {
-	const events = createEventBus(), manager = SessionManager.inMemory(cwd, options.id ? { id: options.id } : undefined);
+async function runtime(cwd: string, providerFirst: boolean, execute: Executor, options: { id?: string; seed?: string; manager?: SessionManager; spawn?: (input: unknown) => Promise<void> } = {}) {
+	const events = createEventBus(), manager = options.manager ?? SessionManager.inMemory(cwd, options.id ? { id: options.id } : undefined);
 	const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
 	let bridge!: UnitBridge, context!: ExtensionContext;
 	const adapter: ExtensionFactory = pi => {
@@ -110,6 +110,56 @@ for (const order of ["todo-first", "dogsled-first", "dogsled-only"] as const) te
 	}
 });
 
+test("a resumed original session settles the unchanged delivery and completes only with native done", { skip: !source }, async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "unit-recovery-"));
+	execFileSync("git", ["init", "--quiet", cwd]);
+	execFileSync("git", ["-C", cwd, "remote", "add", "origin", "git@github.com:owner/repo.git"]);
+	const execution = { executor: "dogsled", ownerId: "recovery-owner", requestId: "recovery-worker" };
+	const pending: unknown[] = [], acknowledged: any[] = [];
+	const execute: Executor = async (_binary, args) => {
+		let value: unknown = {};
+		switch (args[1]) {
+			case "settlements": value = pending; break;
+			case "ack-settlement": acknowledged.push(JSON.parse(args[3]!)); pending.length = 0; break;
+			default: throw new Error(`Unexpected fixture executor operation: ${args.join(" ")}`);
+		}
+		return { code: 0, stdout: JSON.stringify(value), stderr: "", killed: false };
+	};
+	const custody = { itemId: "", claimId: "recovery-claim", revision: 1, recipient: "recovery-session" };
+	let settlement: any;
+	const original = await runtime(cwd, true, execute, { manager: SessionManager.create(cwd, join(cwd, "sessions"), { id: "recovery-session" }) });
+	try {
+		await todo(original.session, { op: "init", items: [{ content: "Recovery task", contract: {
+			deliverable: "Settle the delivery in the original session", scope: { repositoryId: "github.com/owner/repo", owns: ["src/"], reads: [], generates: [] },
+			acceptance: { kind: "review", artifact: "fixture result", criterion: "reviewed" }, dependsOn: [], assignment: { kind: "worker", profile: "general" },
+		} }] });
+		const id = snapshot(original.manager).tasks[0].unit.reference.unitId;
+		const inspected = unwrap(original.provider().inspect(id)) as any;
+		const claimed = unwrap(original.provider().claim({ expected: inspected.ref, execution })) as any;
+		settlement = { version: 1, eventId: "recovery-returned", binding: claimed.binding, result: { kind: "returned", evidence: { execution, resultId: "recovery-result", summary: "Fixture deliverable complete." } } };
+		custody.itemId = id;
+		original.faux.setResponses([fauxAssistantMessage("Original history recorded.")]);
+		await original.session.prompt("Record the original history.");
+		const file = original.manager.getSessionFile()!;
+		original.session.dispose();
+		pending.push({ version: 1, custody, settlement });
+		const resumed = await runtime(cwd, true, execute, { manager: SessionManager.open(file, undefined, cwd) });
+		try {
+			const reopened = unwrap(resumed.provider().inspect(id)) as any;
+			assert.deepEqual(reopened.ref, inspected.ref, "the resumed provider returns the complete original reference");
+			await resumed.bridge.drain(resumed.context);
+			assert.equal(acknowledged.length, 1, JSON.stringify(acknowledged));
+			assert.deepEqual(acknowledged[0], { execution, eventId: "recovery-returned", custody }, "the acknowledgement carries the delivered custody");
+			const state = snapshot(resumed.manager);
+			assert.equal(state.tasks[0].status, "in_progress", "settlement alone never completes the task");
+			assert.equal(state.tasks[0].unit.evidence.length, 1, "the unchanged evidence is recorded");
+			assert.deepEqual(state.tasks[0].unit.evidence[0], settlement.result.evidence);
+			await todo(resumed.session, { op: "done", task: id, evidence: "Original session reviewed the delivery" });
+			assert.equal(snapshot(resumed.manager).tasks[0].status, "completed");
+		} finally { resumed.session.dispose(); }
+	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 for (const providerFirst of [true, false]) test(`real unit export/import/result/acceptance (providerFirst=${providerFirst})`, { skip: !source }, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "unit-contract-"));
 	execFileSync("git", ["init", "--quiet", cwd]);
@@ -117,7 +167,7 @@ for (const providerFirst of [true, false]) test(`real unit export/import/result/
 	const execution = { executor: "dogsled", ownerId: "fixture-owner", requestId: "fixture-worker-session" };
 	let envelope: Prepared | undefined, origin: unknown, phase = "prepared", acknowledgements = 0, commits = 0;
 	let worker: Awaited<ReturnType<typeof runtime>> | undefined;
-	const pending: unknown[] = [], commands: string[][] = [], terminal: any[] = [];
+	const pending: unknown[] = [], commands: string[][] = [], terminal: any[] = [], acknowledged: any[] = [];
 	const execute: Executor = async (_binary, args) => {
 		commands.push(args); let value: unknown = {};
 		switch (args[1]) {
@@ -125,7 +175,7 @@ for (const providerFirst of [true, false]) test(`real unit export/import/result/
 			case "prepare": origin = JSON.parse(args[3]!).origin; value = execution; break;
 			case "observe": value = { execution, phase }; break;
 			case "settlements": value = pending; break;
-			case "ack-settlement": acknowledgements++; pending.length = 0; break;
+			case "ack-settlement": acknowledgements++; acknowledged.push(JSON.parse(args[3]!)); pending.length = 0; break;
 			case "terminal-ack": terminal.push(JSON.parse(args[3]!)); break;
 			default: throw new Error(`Unexpected fixture executor operation: ${args.join(" ")}`);
 		}
@@ -167,14 +217,18 @@ for (const providerFirst of [true, false]) test(`real unit export/import/result/
 		assert.equal(acknowledgements, 1, JSON.stringify(lead.session.messages.filter(message => message.role === "toolResult"))); assert.equal(snapshot(lead.manager).tasks[0].status, "in_progress");
 		assert.equal(snapshot(lead.manager).tasks[0].unit.evidence.length, 1);
 		const leaf = lead.manager.getLeafId();
-		pending.push({ version: 1, eventId: "stale-returned", binding: { ...envelope!.binding, contract: { ...envelope!.binding.contract, contractEntryId: "another-branch" } }, result: { kind: "returned", evidence: { execution, resultId: "stale-result", summary: "Stale branch" } } });
+		const custody = { itemId: envelope!.binding.contract.unitId, claimId: "fixture-claim", revision: 1, recipient: lead.manager.getSessionId() };
+		pending.push({ version: 1, custody, settlement: { version: 1, eventId: "stale-returned", binding: { ...envelope!.binding, contract: { ...envelope!.binding.contract, contractEntryId: "another-branch" } }, result: { kind: "returned", evidence: { execution, resultId: "stale-result", summary: "Stale branch" } } } });
 		await lead.bridge.drain(lead.context);
 		assert.equal(acknowledgements, 1); assert.equal(pending.length, 1, "stale evidence remains pending");
 		assert.equal(lead.manager.getLeafId(), leaf);
 		pending.length = 0;
-		pending.push({ version: 1, eventId: "fixture-returned", binding: envelope!.binding, result: { kind: "returned", evidence: { execution, resultId: "fixture-result", summary: "Fixture deliverable complete." } } });
+		pending.push({ version: 1, custody, settlement: { version: 1, eventId: "fixture-returned", binding: envelope!.binding, result: { kind: "returned", evidence: { execution, resultId: "fixture-result", summary: "Fixture deliverable complete." } } } });
 		await lead.bridge.drain(lead.context);
 		assert.equal(lead.manager.getLeafId(), leaf, "duplicate delivery appends no task mutation"); assert.equal(acknowledgements, 2);
+		assert.deepEqual(acknowledged[1], { execution, eventId: "fixture-returned", custody }, "the acknowledgement carries the delivered custody");
+		assert.equal(snapshot(lead.manager).tasks[0].status, "in_progress", "settlement alone never completes the task");
+		assert.equal(snapshot(lead.manager).tasks[0].unit.evidence.length, 1, "a duplicate success causes no second mutation");
 		await todo(lead.session, { op: "done", task: id, evidence: "Lead reviewed fixture evidence" });
 		assert.equal(snapshot(lead.manager).tasks[0].status, "completed");
 	} finally { worker?.session.dispose(); lead.session.dispose(); await rm(cwd, { recursive: true, force: true }); }

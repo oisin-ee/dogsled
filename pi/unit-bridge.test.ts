@@ -2,7 +2,28 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { rig } from "./unit-fixture.test.ts";
-import { repositoryIdentity } from "./unit-protocol.ts";
+import { repositoryIdentity, type Result } from "./unit-protocol.ts";
+
+/** The rig provider, with a captured settlement and a replaceable inspected reference. */
+function capture(r: ReturnType<typeof rig>) {
+	const target = r.provider as unknown as { inspect: (id: string) => Result; settle: (input: unknown) => Result };
+	const settled: unknown[] = [], original = target.settle;
+	target.settle = (input: unknown) => { settled.push(input); return original(input); };
+	return {
+		settled,
+		inspect: (ref: unknown) => { target.inspect = () => ({ ok: true, value: { ...r.contract, ref } }); },
+		settle: (implementation: (input: unknown) => Result) => { target.settle = implementation; },
+	};
+}
+/** The last acknowledgement input the bridge sent to the server. */
+function acknowledged(r: ReturnType<typeof rig>): unknown {
+	const call = r.calls.filter(args => args[2] === "ack-settlement").at(-1);
+	return call ? JSON.parse(call[call.indexOf("--input") + 1]!) : undefined;
+}
+/** One delivery envelope with its custody reference and its unchanged settlement. */
+function delivery(settlement: unknown, custody: Record<string, unknown> = { itemId: "u-1", claimId: "claim-1", revision: 3, recipient: "lead" }) {
+	return { version: 1, custody, settlement };
+}
 
 test("one spawn prepares, claims and enriches exact bytes but never commits in the hook", async () => {
 	const r = rig(), event = r.event();
@@ -72,6 +93,99 @@ test("settlement stays pending on the wrong branch and duplicate success is ackn
 	const r = rig(); r.settlements.push({ version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } });
 	r.settleOK(false); await r.bridge.drain(r.ctx); assert.equal(r.state().acks, 0);
 	r.settleOK(true); await r.bridge.drain(r.ctx); assert.equal(r.state().acks, 1);
+});
+
+test("a delivery envelope settles the unchanged event and acknowledges its custody", async () => {
+	const r = rig(), provider = capture(r);
+	const custody = { itemId: "u-1", claimId: "claim-1", revision: 3, recipient: "lead" };
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push(delivery(settlement, custody));
+	await r.bridge.drain(r.ctx);
+	assert.equal(r.state().acks, 1);
+	assert.deepEqual(provider.settled, [settlement], "the provider receives only the unchanged settlement");
+	assert.deepEqual(acknowledged(r), { execution: r.execution, eventId: "returned", custody });
+});
+
+test("an unknown delivery version keeps the delivery pending", async () => {
+	const r = rig();
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push({ version: 2, custody: { itemId: "u-1", claimId: "claim-1", revision: 3, recipient: "lead" }, settlement });
+	await assert.rejects(r.bridge.drain(r.ctx), /LAUNCH_UNRESOLVED/);
+	assert.equal(r.state().acks, 0);
+	assert.equal(r.settlements.length, 1, "the delivery stays pending");
+});
+
+test("a malformed custody reference keeps the delivery pending", async () => {
+	const r = rig();
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push(delivery(settlement, { itemId: "u-1", revision: 3, recipient: "lead" }));
+	await assert.rejects(r.bridge.drain(r.ctx), /LAUNCH_UNRESOLVED/);
+	assert.equal(r.state().acks, 0);
+	assert.equal(r.settlements.length, 1, "the delivery stays pending");
+});
+
+test("a delivery for another session stays pending", async () => {
+	const r = rig(), provider = capture(r);
+	const settlement = { version: 1, eventId: "returned", binding: { ...r.prepared.binding, contract: { ...r.ref, sessionId: "other-session" } }, result: { kind: "returned" } };
+	r.settlements.push(delivery(settlement));
+	await r.bridge.drain(r.ctx);
+	assert.equal(r.state().acks, 0);
+	assert.deepEqual(provider.settled, [], "another session never reaches the provider");
+	assert.equal(r.settlements.length, 1, "the delivery stays pending");
+});
+
+test("a changed origin keeps the delivery pending", async () => {
+	const r = rig(), provider = capture(r);
+	provider.inspect({ ...r.ref, contractEntryId: "another-branch" });
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push(delivery(settlement));
+	await r.bridge.drain(r.ctx);
+	assert.equal(r.state().acks, 0);
+	assert.deepEqual(provider.settled, [], "another branch never reaches the provider");
+	assert.equal(r.settlements.length, 1, "the delivery stays pending");
+});
+
+test("a provider rejection keeps the delivery pending", async () => {
+	const r = rig(), provider = capture(r);
+	r.settleOK(false);
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push(delivery(settlement));
+	await r.bridge.drain(r.ctx);
+	assert.equal(r.state().acks, 0);
+	assert.equal(provider.settled.length, 1);
+	assert.equal(r.settlements.length, 1, "the delivery stays pending");
+});
+
+test("a runtime replacement during the delivery keeps the delivery pending", async () => {
+	const r = rig(), provider = capture(r);
+	provider.settle(() => { r.bridge.stop(); return { ok: true, value: { applied: true } }; });
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push(delivery(settlement));
+	await assert.rejects(r.bridge.drain(r.ctx), /STALE_ORIGIN/);
+	assert.equal(r.state().acks, 0);
+	assert.equal(r.settlements.length, 1, "the delivery stays pending");
+});
+
+test("a duplicate provider success is acknowledged without a second mutation", async () => {
+	const r = rig(), provider = capture(r);
+	provider.settle(() => ({ ok: true, value: { applied: false } }));
+	const custody = { itemId: "u-1", claimId: "claim-1", revision: 3, recipient: "lead" };
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push(delivery(settlement, custody));
+	await r.bridge.drain(r.ctx);
+	assert.equal(r.state().acks, 1);
+	assert.deepEqual(acknowledged(r), { execution: r.execution, eventId: "returned", custody });
+	assert.equal(r.settlements.length, 0, "the acknowledged delivery leaves the pending list");
+});
+
+test("the un-enveloped settlement form still settles and acknowledges without custody", async () => {
+	const r = rig(), provider = capture(r);
+	const settlement = { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } };
+	r.settlements.push(settlement);
+	await r.bridge.drain(r.ctx);
+	assert.equal(r.state().acks, 1);
+	assert.deepEqual(provider.settled, [settlement], "the provider receives the event unchanged");
+	assert.deepEqual(acknowledged(r), { execution: r.execution, eventId: "returned" });
 });
 
 test("fresh runtime recovers current-session prepared requests without redispatch or model setup", async () => {
