@@ -12,6 +12,10 @@ pub struct Item {
     pub host: String,
     pub pane: String,
     pub owner_pane: String,
+    /// The owner's harness session when the item was created. Records from before this field
+    /// load with `None`, and an unrecorded session never proves the owner's session ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_session: Option<String>,
     pub name: Option<String>,
     pub created_ms: u64,
     /// Successful launch confirmation, measured on `host`, not the owner's clock.
@@ -321,9 +325,25 @@ mod tests {
         assert_eq!(items[0].harness, None);
         assert_eq!(items[0].role, None);
         assert_eq!(items[0].launch_confirmed_ms, None);
+        assert_eq!(items[0].owner_session, None);
         let text = serde_json::to_string(&items[0]).unwrap();
         assert!(!text.contains("harness"), "{text}");
+        assert!(!text.contains("owner_session"), "{text}");
         std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    /// A record from before the owner session existed has none. The session-ended rule
+    /// needs a recorded identity, so it never applies to that item.
+    #[test]
+    fn a_record_without_the_owner_session_loads_and_records_none() {
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "id":"a","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p2",
+            "name":null,"created_ms":1,"closed_ms":null
+        }))
+        .unwrap();
+        assert_eq!(item.owner_session, None);
+        let text = serde_json::to_string(&item).unwrap();
+        assert!(!text.contains("owner_session"), "{text}");
     }
 
     /// An item from before the native `done` provenance existed has none. It never proves
