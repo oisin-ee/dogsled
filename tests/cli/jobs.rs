@@ -988,6 +988,40 @@ fn expired_record_logs_report_expiry_to_the_owner() {
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
 }
 
+/// A non-marker-sized log is replaced without opening or reading its content.
+#[test]
+fn retention_skips_reading_a_non_marker_sized_log() {
+    let rig = Rig::new("retention-log-no-read");
+    let ended = now();
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    let log = rig.dir.join("state/jobs/aged.log");
+    fs::remove_file(&log).unwrap();
+    assert!(Command::new("mkfifo").arg(&log).status().unwrap().success());
+    // A FIFO has length zero. Opening it would wait for a writer; metadata alone
+    // proves it cannot contain the marker, so retention must replace it directly.
+    assert_eq!(fs::metadata(&log).unwrap().len(), 0);
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    let mut service = rig.start(&["serve", "--once", "--interval", "1"]);
+    assert!(service.wait().success());
+    assert!(fs::metadata(&log).unwrap().is_file());
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+}
+
+#[test]
+fn retention_replaces_a_large_log_with_the_marker() {
+    let rig = Rig::new("retention-large-log");
+    let ended = now();
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    fs::write(
+        rig.dir.join("state/jobs/aged.log"),
+        vec![b'x'; 4 * 1024 * 1024],
+    )
+    .unwrap();
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+}
+
 /// The expiry pass repeats safely. A second pass changes nothing.
 #[test]
 fn a_second_expiry_pass_changes_nothing() {

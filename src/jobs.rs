@@ -434,7 +434,9 @@ fn expire_log(ledger: &Ledger, jobs: &Ledger, job: &Job) -> Result<()> {
     }
     let log = jobs.dir.join(format!("{}.log", job.id));
     let marker = format!("{OUTPUT_EXPIRED}\n");
-    if !fs::read_to_string(&log).is_ok_and(|text| text == marker) {
+    let is_marker = fs::metadata(&log).is_ok_and(|metadata| metadata.len() == marker.len() as u64)
+        && fs::read_to_string(&log).is_ok_and(|text| text == marker);
+    if !is_marker {
         // The rename is atomic, so a reader sees the old output or the marker, and never
         // a half-written file.
         let tmp = jobs.dir.join(format!("{}.log.new", job.id));
