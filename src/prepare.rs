@@ -294,20 +294,18 @@ fn local_once(
             ),
         );
     }
-    // Read-only preflight, after the existing-branch refusal and before any new hold,
-    // worktree, or branch. Never fetch or move refs to make an unavailable base resolve.
+    // Preflight, after the existing-branch refusal and before any new hold, worktree, or
+    // branch. A base this clone has not fetched is fetched once, so a branch pushed after
+    // the clone resolves. Nothing else moves: no other ref, and no local branch.
     if !has_branch && let Some(base) = base {
-        let resolved = git(
-            &checkout,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{base}^{{commit}}"),
-            ],
-        )
-        .run(shell)?;
-        if !resolved.ok() {
+        let mut resolved = resolve_base(shell, &checkout, base)?;
+        if !resolved && let Some(remote) = remote_branch(base) {
+            // One bounded fetch of that one remote branch. A fetch that fails leaves the
+            // base unresolved, and the refusal below names it.
+            let _ = git(&checkout, &["fetch", "--no-tags", "--", "origin", remote]).setup_ok(shell);
+            resolved = resolve_base(shell, &checkout, base)?;
+        }
+        if !resolved {
             return Err(
                 Error::Invalid("requested base unavailable on this host".into()).with_diagnostic(
                     Diagnostic::new(
@@ -543,6 +541,37 @@ fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<
     Ok(found.path)
 }
 
+/// Whether the base resolves to a commit on this host.
+fn resolve_base(shell: &dyn Shell, checkout: &Path, base: &str) -> Result<bool> {
+    Ok(git(
+        checkout,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+    )
+    .run(shell)?
+    .ok())
+}
+
+/// The remote branch of an `origin/<branch>` base, when this host may fetch that name.
+/// A name that could be read as an option, or that carries a path, is not fetched.
+fn remote_branch(base: &str) -> Option<&str> {
+    let branch = base.strip_prefix("origin/")?;
+    if branch.is_empty()
+        || branch.starts_with('-')
+        || branch.contains("..")
+        || !branch
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/_-.".contains(&c))
+    {
+        return None;
+    }
+    Some(branch)
+}
+
 /// The local name of the repository's default branch, the base of a new branch.
 fn default_branch(shell: &dyn Shell, checkout: &Path) -> Result<String> {
     let base = crate::integration::base(shell, &checkout.display().to_string())?;
@@ -665,6 +694,26 @@ mod tests {
     use super::*;
     use crate::error::{Refusal, RetainedKind};
     use crate::hosts::Failure;
+
+    /// Only an `origin/<branch>` base names a remote branch this host may fetch, and the
+    /// name must not read as an option or carry a path.
+    #[test]
+    fn only_an_origin_branch_base_names_a_fetchable_branch() {
+        assert_eq!(remote_branch("origin/feature"), Some("feature"));
+        assert_eq!(remote_branch("origin/feature/sub"), Some("feature/sub"));
+        for base in [
+            "main",
+            "origin/",
+            "origin/-x",
+            "origin/a..b",
+            "origin/a b",
+            "origin/a^b",
+            "upstream/feature",
+            "origin/feature^{commit}",
+        ] {
+            assert_eq!(remote_branch(base), None, "{base}");
+        }
+    }
 
     /// A retained failure keeps its classification, so a replay is still a deadline, a
     /// refusal, or a transport failure, and not an opaque error.

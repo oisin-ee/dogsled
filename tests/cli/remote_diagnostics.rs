@@ -94,6 +94,130 @@ fn real_peer_prepare(rig: &Rig) {
         "  *'host prepare'*) printf '%s\\n' '{\"pane_id\":\"w9:p1\",\"terminal_id\":\"term_remote\",\"path\":\"/remote/tree\"}' ;;", &handler));
 }
 
+/// A bare origin that holds one branch the clone has never fetched.
+fn origin_with_branch(rig: &Rig, repo: &Path, branch: &str) {
+    let bare = rig.dir.join("origin.git");
+    let out = isolated("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    let out = isolated("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["push", "-q"])
+        .arg(&bare)
+        .arg(format!("main:refs/heads/{branch}"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = isolated("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["remote", "set-url", "origin"])
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+}
+
+/// A base that the origin holds, but the clone has never fetched, resolves after one
+/// fetch of that branch.
+#[test]
+fn a_base_pushed_after_the_clone_is_fetched_and_resolves() {
+    let (rig, repo) = place::place_rig("diagnostic-fetch-base");
+    origin_with_branch(&rig, &repo, "feature");
+    let unresolved = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(!unresolved.status.success());
+    let (code, prepared) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/feature",
+        "--request-id",
+        "fetched",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    let tree = repo.join(".worktrees/worker");
+    assert!(tree.is_dir(), "{tree:?}");
+    let head = isolated("git")
+        .arg("-C")
+        .arg(&tree)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let base = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(head.stdout, base.stdout);
+    // The remote branch is now a remote-tracking ref of this clone.
+    let fetched = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(fetched.status.success());
+}
+
+/// A base the origin does not hold still fails, and the failure names the base.
+#[test]
+fn a_base_missing_on_origin_still_fails_with_its_name() {
+    let (rig, repo) = place::place_rig("diagnostic-missing-base");
+    origin_with_branch(&rig, &repo, "feature");
+    let (code, error) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/absent",
+        "--request-id",
+        "absent",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["diagnostic"]["cause"], "base_unavailable", "{error}");
+    assert_eq!(
+        error["diagnostic"]["context"]["base"], "origin/absent",
+        "{error}"
+    );
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("requested base unavailable"),
+        "{error}"
+    );
+    assert!(!repo.join(".worktrees/worker").exists());
+    let absent = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/absent"])
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+}
+
 #[test]
 fn real_preflight_is_read_only_and_existing_branch_refusal_still_wins() {
     let (rig, repo) = place::place_rig("diagnostic-preflight");
