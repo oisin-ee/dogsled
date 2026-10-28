@@ -61,7 +61,7 @@ const TITLES: Record<Group, string> = { to_land: "READY TO MERGE", attention: "N
 /** Groups in action order: what the owner must do first comes first. */
 export const GROUPS: readonly Group[] = ["to_land", "attention", "running", "waiting"];
 const ORDER = GROUPS;
-const COUNTS: Record<Group, string> = { to_land: "ready to merge", attention: "need you", running: "working", waiting: "queued" };
+const COUNTS: Record<Group, string> = { to_land: "ready to merge", attention: "needs you", running: "working", waiting: "queued" };
 
 /** Unknown evidence stays visible in the group that needs the owner. */
 export function boardGroup(group: string): Group {

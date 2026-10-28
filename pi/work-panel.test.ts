@@ -86,7 +86,7 @@ test("expanded work keeps the board's header, groups, glyphs, and aligned column
 	d.board.hosts = [{ label: "local", service: "up", reachable: true, busy: 3, cores: 12, eligible: true }];
 	const panel = new WorkPanel(d, { tab: "all", selected: undefined, history: false }, plain, () => {}, () => {}, () => 40);
 	const lines = panel.render(120).map(line => line.trimEnd());
-	assert.match(lines[0]!, /^ dogsled {2}1 need you · 1 working · 1 queued +local ▰▱▱▱ 3\/12$/);
+	assert.match(lines[0]!, /^ dogsled {2}1 needs you · 1 working · 1 queued +local ▰▱▱▱ 3\/12$/);
 	assert.deepEqual(lines.slice(2, 10).map(line => line.trim().split(/ {2,}/)[0]), ["TASK", "→ ◆ Verify changes", "NEEDS YOU", "! reviewer", "WORKING", "▸ tests", "QUEUED", "⋯ queued"]);
 	const rows = lines.filter(line => /reviewer|tests|queued/.test(line) && !/^ (?:[A-Z]|dogsled)/.test(line));
 	assert.equal(new Set(rows.map(line => line.indexOf(line.includes("reviewer") ? "pi" : "job"))).size, 1);
@@ -118,7 +118,7 @@ test("unknown groups stay under NEEDS YOU and retained branches keep the attenti
 		const lines = panel.render(120);
 		assert.equal(lines[2], group === "to_land" ? " READY TO MERGE" : " NEEDS YOU");
 		assert.ok(lines[3]!.includes("reviewer"), group);
-		assert.match(lines[0]!, group === "to_land" ? /1 ready to merge/ : /1 need you/);
+		assert.match(lines[0]!, group === "to_land" ? /1 ready to merge/ : /1 needs you/);
 	}
 });
 

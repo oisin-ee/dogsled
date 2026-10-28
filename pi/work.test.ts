@@ -98,7 +98,7 @@ test("the board widget shows the current task above the board groups at bounded 
 		if (width >= 20) assert.match(lines[4]!, /!/);
 	}
 	const wide = workBoard({ board, todo, error: undefined }, 160, plain);
-	assert.match(wide[0]!, /^ dogsled {2}1 need you/);
+	assert.match(wide[0]!, /^ dogsled {2}1 needs you/);
 	assert.deepEqual(wide.slice(1, 4).map(line => line.trim().split(/ {2,}/)), [["TASK"], ["◆ Verify changes", "Todo list: 1/3 completed"], ["NEEDS YOU"]]);
 	const closed = { ...todo, display: todoDisplay({ current: "", summary: "Todo list: 1/2 completed" }) };
 	assert.match(workBoard({ board, todo: closed, error: undefined }, 160, plain).join("\n"), /1\/2 completed/);

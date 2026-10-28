@@ -21,7 +21,7 @@ const board: Board = {
 
 test("groups rows in action order with one header and meters for each host", () => {
 	const lines = renderBoard(board, 160, plain);
-	assert.match(lines[0]!, /^ dogsled {2}1 ready to merge · 1 need you · 2 working · 1 queued +local ▰▱▱▱ 1\/12 {2}netcup ▰▱▱▱ 2\/16 {2}momokaya-2 \?$/);
+	assert.match(lines[0]!, /^ dogsled {2}1 ready to merge · 1 needs you · 2 working · 1 queued +local ▰▱▱▱ 1\/12 {2}netcup ▰▱▱▱ 2\/16 {2}momokaya-2 \?$/);
 	const titles = lines.filter(l => /^ [A-Z]/.test(l)).map(l => l.trim());
 	assert.deepEqual(titles, ["READY TO MERGE", "NEEDS YOU", "WORKING", "QUEUED"]);
 	assert.ok(lines.some(l => l.includes("● web-tests") && l.includes("done 3m")));
@@ -57,7 +57,7 @@ test("unknown groups retain their rows under NEEDS YOU", () => {
 	for (const group of ["future-group", "constructor", "__proto__", ""]) {
 		const input = parseBoard({ hosts: [], rows: [{ ...board.rows[0]!, group, state: "future-state" }] });
 		const lines = renderBoard(input, 120, plain);
-		assert.match(lines[0]!, /1 need you/);
+		assert.match(lines[0]!, /1 needs you/);
 		assert.equal(lines[1], " NEEDS YOU");
 		assert.ok(lines[2]!.includes("! api-dups"), group);
 	}
