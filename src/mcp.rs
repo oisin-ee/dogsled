@@ -347,7 +347,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Discard a closed child's retained local and origin branch. Only the item's owner can drop it. Refuses a branch checked out in a worktree.",
+        description = "Discard a closed child's retained local and origin branch. Only the item's owner can drop it, unless the child is an orphan whose owner is provably gone. Refuses a branch checked out in a worktree.",
         annotations(destructive_hint = true)
     )]
     async fn drop(&self, Parameters(args): Parameters<DropArgs>) -> Result<String, String> {

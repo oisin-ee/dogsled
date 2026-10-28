@@ -51,9 +51,9 @@ pub fn drop(fleet: &Fleet<'_>, id: &str, host: Option<&str>) -> Result<Dropped> 
         .ok_or_else(|| Error::Invalid(format!("unknown item {id}")))?;
     validate(&item)?;
     let caller = crate::inbox::own_pane(None)?;
-    if caller != item.owner_pane {
+    if caller != item.owner_pane && !orphaned(fleet, &item)? {
         return Err(Error::Invalid(format!(
-            "only owner {} can drop {id}",
+            "only owner {} can drop {id} while it holds the child",
             item.owner_pane
         )));
     }
@@ -78,6 +78,17 @@ pub fn drop(fleet: &Fleet<'_>, id: &str, host: Option<&str>) -> Result<Dropped> 
     };
     items::dropped(fleet.ledger, id, now_ms())?;
     Ok(dropped)
+}
+
+/// Any session may drop an orphan: the origin's custody evidence proves its custodian is
+/// gone, by the rule the sweep uses. Unreadable or unprovable evidence keeps the owner rule.
+fn orphaned(fleet: &Fleet<'_>, item: &Item) -> Result<bool> {
+    let custody = match crate::custody::get(fleet.ledger, &item.id)? {
+        Some(custody) => custody,
+        None => crate::custody::ensure(fleet.ledger, item)?,
+    };
+    let (panes, session) = crate::custody::evidence(fleet.shell, &custody.custodian_pane);
+    Ok(crate::custody::classify(&custody, &panes, &session) == crate::custody::Status::Orphaned)
 }
 
 fn git(shell: &dyn Shell, repo: &str, args: &[&str]) -> Result<crate::shell::Output> {

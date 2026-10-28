@@ -182,7 +182,7 @@ dogsled drop <item-id> --host netcup
 dogsled done                       # as a child: my whole task is complete
 ```
 
-`drop` deletes a closed child's retained local and origin branches, including unmerged commits. Only the item's owner can use it. It refuses a branch checked out in a worktree. Already absent branches count as success. The item and its done mark stay settled and leave the board.
+`drop` deletes a closed child's retained local and origin branches, including unmerged commits. Only the item's owner can use it, except on an orphan: when the origin's evidence proves the owner pane is gone or its session ended, any session can drop it. It refuses a branch checked out in a worktree. Already absent branches count as success. The item and its done mark stay settled and leave the board.
 
 `close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
 
