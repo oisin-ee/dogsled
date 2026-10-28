@@ -170,12 +170,13 @@ fn prepare_cause(value: &serde_json::Value, args: &[String]) -> Option<String> {
         let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
         return Some(format!("branch {branch} exists; omit --base"));
     }
-    if message.contains("workspace")
-        && (message.contains("already open")
-            || message.contains("already shows")
-            || message.contains("is occupied"))
-    {
+    if message.contains("workspace") && message.contains("already open") {
         return Some("workspace already open".to_owned());
+    }
+    if message.contains("workspace")
+        && (message.contains("already shows") || message.contains("is occupied"))
+    {
+        return Some("workspace occupied".to_owned());
     }
     None
 }
@@ -1322,7 +1323,11 @@ mod tests {
         );
         assert_eq!(
             read("{\"error\":\"Herdr workspace w8 already shows the checkout\"}".to_owned()),
-            "ssh peer: workspace already open"
+            "ssh peer: workspace occupied"
+        );
+        assert_eq!(
+            read("{\"error\":\"workspace path is occupied\"}".to_owned()),
+            "ssh peer: workspace occupied"
         );
         // A peer's own text never reaches the error, and an unknown cause stays hidden.
         for stdout in [

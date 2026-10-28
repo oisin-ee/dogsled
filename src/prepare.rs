@@ -302,7 +302,7 @@ fn local_once(
         if !resolved && let Some(remote) = remote_branch(base) {
             // One bounded fetch of that one remote branch. A fetch that fails leaves the
             // base unresolved, and the refusal below names it.
-            let _ = git(&checkout, &["fetch", "--no-tags", "--", "origin", remote]).setup_ok(shell);
+            let _ = git(&checkout, &["fetch", "--no-tags", "--", "origin", remote]).setup(shell);
             resolved = resolve_base(shell, &checkout, base)?;
         }
         if !resolved {
@@ -686,6 +686,12 @@ impl Git {
     /// Making or removing a checkout can take longer than an ordinary call.
     fn setup_ok(&self, shell: &dyn Shell) -> Result<()> {
         shell.run_setup_ok("git", &self.0).map(drop)
+    }
+
+    /// A call that may take longer than an ordinary one, whose own status is the
+    /// caller's to judge.
+    fn setup(&self, shell: &dyn Shell) -> Result<crate::shell::Output> {
+        shell.run_setup("git", &self.0)
     }
 }
 
