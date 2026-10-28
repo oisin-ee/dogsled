@@ -300,9 +300,18 @@ fn local_once(
     if !has_branch && let Some(base) = base {
         let mut resolved = resolve_base(shell, &checkout, base)?;
         if !resolved && let Some(remote) = remote_branch(base) {
-            // One bounded fetch of that one remote branch. A fetch that fails leaves the
-            // base unresolved, and the refusal below names it.
-            let _ = git(&checkout, &["fetch", "--no-tags", "--", "origin", remote]).run(shell);
+            // One bounded fetch of that one remote branch, into its own remote-tracking ref
+            // whatever the clone's configured refspec. The destination is named, so a
+            // single-branch clone resolves the base too.
+            // A fetch that cannot run, or that exceeds its budget, is a failure of the
+            // fetch itself and is reported as itself. A fetch that runs and exits non-zero
+            // leaves the base unresolved, and the refusal below names it.
+            let refspec = format!("+refs/heads/{remote}:refs/remotes/origin/{remote}");
+            git(
+                &checkout,
+                &["fetch", "--no-tags", "--", "origin", refspec.as_str()],
+            )
+            .run(shell)?;
             resolved = resolve_base(shell, &checkout, base)?;
         }
         if !resolved {
