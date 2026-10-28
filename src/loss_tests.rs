@@ -1394,6 +1394,7 @@ fn worktree_git_lost_after_listing_with_its_directory_is_still_refused() {
 /// A real checkout with a stateful pane and controllable teardown.
 struct LifecycleShell {
     path: PathBuf,
+    cwd: std::sync::Arc<std::sync::Mutex<PathBuf>>,
     open: std::sync::atomic::AtomicBool,
     teardowns: std::sync::atomic::AtomicUsize,
     hook: Box<dyn Fn() + Send + Sync>,
@@ -1414,6 +1415,7 @@ impl LifecycleShell {
     fn new(path: &Path, hook: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             path: path.into(),
+            cwd: std::sync::Arc::new(std::sync::Mutex::new(path.into())),
             open: std::sync::atomic::AtomicBool::new(true),
             teardowns: std::sync::atomic::AtomicUsize::new(0),
             hook: Box::new(hook),
@@ -1439,7 +1441,7 @@ impl Shell for LifecycleShell {
         }
         let value = if program == "herdr" && args == ["pane", "list"] {
             Some(if self.open.load(SeqCst) {
-                serde_json::json!({"result":{"panes":[{"pane_id":"placed-shell","cwd":self.path,"terminal_id":self.terminal}]}})
+                serde_json::json!({"result":{"panes":[{"pane_id":"placed-shell","cwd":*self.cwd.lock().unwrap(),"terminal_id":self.terminal}]}})
             } else {
                 serde_json::json!({"result":{"panes":[]}})
             })
@@ -1591,6 +1593,163 @@ fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
     );
     assert!(shell.open.load(SeqCst));
     assert_eq!(shell.teardowns.load(SeqCst), 0);
+}
+
+fn save_close_checkout(fixture: &Landed) {
+    let captured = recorded(&fixture.ledger)[0].clone();
+    fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+        "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
+        "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
+        "result":{"checkout":captured},"error":null
+    })).unwrap();
+    fixture
+        .ledger
+        .child("launches")
+        .write("c1-old.json", &serde_json::json!({"checkout": captured}))
+        .unwrap();
+}
+
+fn another_checkout(fixture: &Landed) -> PathBuf {
+    let path = fixture.repo.repo.join(".worktrees/another");
+    git(
+        &fixture.repo.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--lock",
+            "--reason",
+            "agent:worktree",
+            "-b",
+            "another",
+            path.to_str().unwrap(),
+            "main",
+        ],
+    );
+    crate::worktree::with_lifecycle(&System, &fixture.ledger, &fixture.repo.repo, |guard| {
+        guard.discover(&System, path.to_str().unwrap())
+    })
+    .unwrap();
+    path
+}
+
+fn assert_moved_close_preserved(
+    fixture: &Landed,
+    shell: &LifecycleShell,
+    other: &Path,
+    captured: &crate::cleanup::Tree,
+    result: Result<crate::close::Closed>,
+) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("pane moved to another checkout"), "{error}");
+    assert!(fixture.repo.tree.is_dir(), "saved checkout was removed");
+    assert!(other.is_dir(), "pane's current checkout was removed");
+    assert!(shell.open.load(SeqCst));
+    assert_eq!(recorded(&fixture.ledger), std::slice::from_ref(captured));
+}
+
+#[test]
+fn saved_close_refuses_pane_in_another_checkout() {
+    let fixture = lifecycle_fixture(false);
+    let captured = recorded(&fixture.ledger)[0].clone();
+    save_close_checkout(&fixture);
+    let other = another_checkout(&fixture);
+    let shell = LifecycleShell::new(&other, || {});
+    let result = crate::close::local(
+        &shell,
+        &fixture.ledger,
+        "placed-shell",
+        &crate::close::Caller::default(),
+        crate::close::Guard::Clean,
+    );
+    assert_moved_close_preserved(&fixture, &shell, &other, &captured, result);
+    assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn close_refuses_pane_moved_while_waiting() {
+    use std::sync::Barrier;
+    for saved in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        let captured = recorded(&fixture.ledger)[0].clone();
+        if saved {
+            save_close_checkout(&fixture);
+        }
+        let other = another_checkout(&fixture);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        shell.lock_attempt = Some(tx);
+        let barrier = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let close = crate::worktree::with_lifecycle(
+                &shell,
+                &fixture.ledger,
+                &fixture.repo.repo,
+                |_| {
+                    let close = std::thread::Builder::new()
+                        .name("lifecycle-contender".into())
+                        .spawn_scoped(scope, || {
+                            barrier.wait();
+                            crate::close::local(
+                                &shell,
+                                &fixture.ledger,
+                                "placed-shell",
+                                &crate::close::Caller::default(),
+                                crate::close::Guard::Clean,
+                            )
+                        })
+                        .unwrap();
+                    barrier.wait();
+                    // Close has captured A and reached the held repository mutex.
+                    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    *shell.cwd.lock().unwrap() = other.clone();
+                    Ok(close)
+                },
+            )
+            .unwrap();
+            let result = close.join().unwrap();
+            assert_moved_close_preserved(&fixture, &shell, &other, &captured, result);
+        });
+        assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn close_refuses_pane_moved_during_locked_teardown() {
+    use std::sync::{Arc, Barrier, atomic::Ordering::SeqCst};
+    let fixture = lifecycle_fixture(false);
+    let captured = recorded(&fixture.ledger)[0].clone();
+    save_close_checkout(&fixture);
+    let other = another_checkout(&fixture);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let (ready, finish) = (entered.clone(), release.clone());
+    let shell = LifecycleShell::new(&fixture.repo.tree, move || {
+        ready.wait();
+        finish.wait();
+    });
+    std::thread::scope(|scope| {
+        let close = scope.spawn(|| {
+            crate::close::local(
+                &shell,
+                &fixture.ledger,
+                "placed-shell",
+                &crate::close::Caller::default(),
+                crate::close::Guard::Clean,
+            )
+        });
+        entered.wait();
+        assert!(
+            Ledger::new(fixture.repo.repo.join(".git"))
+                .locked("dogsled-lifecycle")
+                .unwrap()
+        );
+        *shell.cwd.lock().unwrap() = other.clone();
+        release.wait();
+        assert_moved_close_preserved(&fixture, &shell, &other, &captured, close.join().unwrap());
+    });
+    assert_eq!(shell.teardowns.load(SeqCst), 1);
 }
 
 #[test]

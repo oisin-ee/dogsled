@@ -166,6 +166,15 @@ pub struct Linked {
 }
 
 impl Linked {
+    /// Compare checkout location and administrative identity without recapturing HEAD.
+    pub(crate) fn matches_checkout(&self, expected: &crate::cleanup::Tree) -> bool {
+        same(&self.path, &expected.path)
+            && expected.identity.as_ref().is_none_or(|identity| {
+                identity.gitdir == self.gitdir
+                    && self.identity.as_ref().is_none_or(|now| now == identity)
+            })
+    }
+
     pub fn tree(&self) -> crate::cleanup::Tree {
         crate::cleanup::Tree {
             repo: self.checkout.display().to_string(),
@@ -373,6 +382,39 @@ pub fn validate_identity(shell: &dyn Shell, tree: &Linked) -> Result<()> {
         })
     {
         return Err(refuse(&format!("{}: worktree identity changed", tree.path)));
+    }
+    Ok(())
+}
+
+/// A pane can move independently of the repository mutex. Its cwd is comparison-only:
+/// it must never select a different checkout for removal.
+pub(crate) fn validate_pane_checkout(shell: &dyn Shell, pane: &Pane, tree: &Linked) -> Result<()> {
+    let current = pane
+        .cwd
+        .as_deref()
+        .map(|cwd| snapshot(shell, cwd))
+        .transpose()?
+        .flatten();
+    if current
+        .as_ref()
+        .is_none_or(|now| now.gitdir != tree.gitdir || !now.matches_checkout(&tree.tree()))
+    {
+        return Err(refuse("pane moved to another checkout"));
+    }
+    Ok(())
+}
+
+/// Check only cwd-based holders; workspace siblings can legitimately work elsewhere.
+fn validate_holder_checkouts(shell: &dyn Shell, tree: &Linked, holders: &[&Pane]) -> Result<()> {
+    let panes = crate::cleanup::current_panes(shell)?;
+    for original in holders.iter().filter(|pane| {
+        pane.cwd
+            .as_deref()
+            .is_some_and(|cwd| inside(cwd, &tree.path))
+    }) {
+        if let Some(current) = panes.iter().find(|pane| pane.pane_id == original.pane_id) {
+            validate_pane_checkout(shell, current, tree)?;
+        }
     }
     Ok(())
 }
@@ -602,6 +644,7 @@ pub fn remove(
     }
     guard.check_repository(shell, &tree.checkout)?;
     validate_identity(shell, tree)?;
+    validate_holder_checkouts(shell, tree, holders)?;
     let settings = crate::repository::load(&tree.checkout)?;
     teardown(shell, &settings, tree)?;
     if verified_absent(guard, shell, &tree.tree()) {
@@ -616,6 +659,7 @@ pub fn remove(
         recheck_loss(shell, tree, evidence)?;
         evidence.restore_deletions(shell, &tree.path)?;
     }
+    validate_holder_checkouts(shell, tree, holders)?;
     close_holders(shell, ledger, workspace, holders)?;
     let lock = lock_reason(shell, &tree.checkout, &tree.path)?;
     match lock.as_deref() {

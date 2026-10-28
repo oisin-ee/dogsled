@@ -136,6 +136,11 @@ pub fn with_local<T>(
     };
     let repo = planned.repo.clone();
     worktree::with_lifecycle(shell, ledger, Path::new(&repo), |lifecycle| {
+        if let (Some(saved), Some(live)) = (&saved, &live)
+            && !live.matches_checkout(saved)
+        {
+            return Err(refuse("pane moved to another checkout"));
+        }
         let planned = if saved.is_none() && planned.identity.is_none() {
             // Establish the generation before capturing the expectation, and keep
             // this same lock through validation, teardown, removal, and reconciliation.
@@ -194,12 +199,8 @@ pub fn with_local<T>(
                 pane_closed: false,
             });
         }
-        let now = validate_checkout(shell, &planned)?;
         let panes = crate::cleanup::current_panes(shell)?;
         let target = validate_target(shell, &panes, pane, caller)?;
-        if worktree::lock_reason(shell, &now.checkout, &now.path)?.as_deref() == Some(AGENT_LOCK) {
-            crate::cleanup::remember(ledger, now.tree())?;
-        }
         reconcile(remove_target(
             shell,
             ledger,
@@ -254,6 +255,7 @@ fn validate_absent_target(
 /// Repeat the captured-resource check before entering any close effect.
 fn validate_checkout(
     shell: &dyn crate::shell::Shell,
+    target: &crate::probe::Pane,
     expected: &crate::cleanup::Tree,
 ) -> Result<worktree::Linked> {
     let now = worktree::linked_or_detached(shell, &expected.path)?
@@ -268,6 +270,7 @@ fn validate_checkout(
     if now.head != expected.head {
         return Err(refuse("HEAD moved before close"));
     }
+    worktree::validate_pane_checkout(shell, target, &now)?;
     Ok(now)
 }
 
@@ -315,9 +318,9 @@ fn remove_target(
     lifecycle: Option<(&worktree::Guard, &crate::cleanup::Tree)>,
 ) -> Result<Closed> {
     let pane = target.pane_id.as_str();
-    if let Some((_, expected)) = lifecycle {
-        validate_checkout(shell, expected)?;
-    }
+    let validated = lifecycle
+        .map(|(_, expected)| validate_checkout(shell, target, expected))
+        .transpose()?;
     // An explicit recovery may end a stranded shell without removing its checkout or
     // assigning an outcome to the interrupted launch. Automatic cleanup cannot do this.
     if guard == Guard::Clean && crate::launch::close_unfinished(ledger, shell, pane)? {
@@ -336,12 +339,15 @@ fn remove_target(
             "{pane} has not called done; it waits for input"
         )));
     }
-    let tree = target
-        .cwd
-        .as_deref()
-        .map(|cwd| worktree::linked_or_detached(shell, cwd))
-        .transpose()?
-        .flatten();
+    let tree = match validated {
+        Some(tree) => Some(tree),
+        None => target
+            .cwd
+            .as_deref()
+            .map(|cwd| worktree::linked_or_detached(shell, cwd))
+            .transpose()?
+            .flatten(),
+    };
     // Dogsled locks every worktree it makes. An unlocked one is someone's own checkout that
     // the child only ran in, such as its owner's: closing the child closes its pane alone.
     let lock = match &tree {
@@ -354,6 +360,9 @@ fn remove_target(
     else {
         return pane_only(shell, pane);
     };
+    if lock.as_deref() == Some(AGENT_LOCK) {
+        crate::cleanup::remember(ledger, tree.tree())?;
+    }
     let workspace = worktree::workspace(shell, &tree.checkout, &tree.path)?;
     let holders = worktree::holders(panes, &tree.path, workspace.as_deref());
     // Another agent, open item, or busy pane still uses the checkout. Even an explicit close
