@@ -60,12 +60,17 @@ impl Card {
         let (pill, tone) = if row.group == Group::ToLand {
             ("to land", Tone::ToLand)
         } else {
+            // The board publishes the lifecycle display name of an agent, so the sidebar
+            // shows the same word the lifecycle owner publishes.
             match row.state.as_str() {
                 "stalled" => ("stalled", Tone::Alert),
                 "blocked" => ("blocked", Tone::Alert),
                 "working" => ("working", Tone::Busy),
                 "running" => ("running", Tone::Busy),
-                "idle" | "done" => ("idle", Tone::Idle),
+                "unavailable" => ("unavailable", Tone::Alert),
+                "unknown" => ("unknown", Tone::Alert),
+                "idle" => ("idle", Tone::Idle),
+                "done" => ("done", Tone::Idle),
                 "queued" | "starting" => ("queued", Tone::Queued),
                 state if state.starts_with("exit ") => ("failed", Tone::Alert),
                 _ if row.group == Group::Attention => ("blocked", Tone::Alert),
@@ -722,6 +727,25 @@ pub mod tests {
         assert_eq!(ids, ["land", "stuck", "new-run", "old-run"]);
         let pills: Vec<_> = model.data.cards.iter().map(|c| c.pill.as_str()).collect();
         assert_eq!(pills, ["to land", "stalled", "idle", "working"]);
+    }
+
+    /// The sidebar label is the lifecycle display name the lifecycle owner publishes for
+    /// the state, so the two never disagree.
+    #[test]
+    fn the_label_is_the_lifecycle_display_name() {
+        for (state, pill, tone) in [
+            ("working", "working", Tone::Busy),
+            ("blocked", "blocked", Tone::Alert),
+            ("unavailable", "unavailable", Tone::Alert),
+            ("unknown", "unknown", Tone::Alert),
+            ("idle", "idle", Tone::Idle),
+            ("done", "done", Tone::Idle),
+            ("queued", "queued", Tone::Queued),
+            ("starting", "queued", Tone::Queued),
+        ] {
+            let card = Card::from_row(&row("s", Group::Running, state, 1));
+            assert_eq!((card.pill.as_str(), card.tone), (pill, tone), "{state}");
+        }
     }
 
     #[test]

@@ -233,12 +233,14 @@ fn stall_requires_old_transcript_and_working_or_unknown() {
 }
 
 #[test]
-fn immediate_stall_waits_for_idle_and_survives_restart_without_repeat() {
+fn immediate_stall_waits_for_a_turn_that_ended_and_survives_restart_without_repeat() {
     let rig = Rig::new();
     rig.item("agent");
+    // The check-in reaches an owner whose turn ended. A blocked owner is one: the
+    // lifecycle owner derives the state, and a blocked agent waits for its owner.
     for (now, owner, count) in [
         (600_001, "working", 0),
-        (660_001, "blocked", 0),
+        (660_001, "blocked", 1),
         (720_001, "idle", 1),
         (780_001, "done", 1),
     ] {
@@ -247,7 +249,7 @@ fn immediate_stall_waits_for_idle_and_survives_restart_without_repeat() {
         assert_eq!(rig.prompts(), count);
     }
     let log = rig.check_ins().join("\n");
-    assert!(log.contains("test-child on local: stalled; age 12m; transcript changed 12m ago"));
+    assert!(log.contains("test-child on local: stalled; age 11m; transcript changed 11m ago"));
     assert!(log.contains("line5"));
     assert!(log.contains("dogsled send"));
     // Unknown/working changes within the same stall do not rearm its event.
@@ -435,6 +437,25 @@ fn closed_item_does_not_observe_reused_or_retracked_pane() {
     let prompt = &rig.check_ins()[0];
     assert!(prompt.contains("new-child-name"));
     assert!(!prompt.contains("test-child on"));
+}
+
+/// The check-in reaches every owner whose turn ended: one that waits for input, and one
+/// that stopped without a signal. The lifecycle owner derives both states.
+#[test]
+fn a_check_in_reaches_an_idle_owner_and_a_stopped_owner() {
+    for owner in ["idle", "done"] {
+        let rig = Rig::new();
+        rig.item("agent");
+        // A working owner is in a turn: no check-in.
+        let reports = rig.reports(1, "working", "working", Some(1));
+        tick(&rig.fleet(), &reports, 1).unwrap();
+        assert_eq!(rig.prompts(), 0, "{owner}");
+        // The owner's turn ended: it hears about its open child.
+        let reports = rig.reports(1_860_001, owner, "working", Some(1));
+        tick(&rig.fleet(), &reports, 1_860_001).unwrap();
+        assert_eq!(rig.prompts(), 1, "{owner}");
+        assert!(rig.check_ins()[0].contains("test-child"), "{owner}");
+    }
 }
 
 #[test]

@@ -478,10 +478,17 @@ pub fn render(status: &Status) -> String {
         }
         if let Some(probe) = &host.probe {
             for agent in &probe.agent_panes {
+                // The lifecycle owner publishes the state beside the raw terminal state.
+                // The status row shows the derived state, so a Herdr `done` never reads
+                // as a finished handoff.
+                let state = agent
+                    .lifecycle
+                    .clone()
+                    .unwrap_or_else(|| agent.state.clone());
                 lines.push(format!(
                     "  {} {} {}{}",
                     agent.pane,
-                    agent.state,
+                    state,
                     agent.name.as_deref().unwrap_or(""),
                     agent.stalled_since_ms.map_or_else(String::new, |_| format!(
                         " stalled {}",

@@ -40,9 +40,11 @@ pub fn observe(probe: &mut Probe, previous: Option<&Probe>, now: u64) {
         let old = previous.and_then(|p| p.agent_panes.iter().find(|a| a.pane == agent.pane));
         agent.state_since_ms = Some(
             old.filter(|a| {
+                // The lifecycle owner decides whether the state changed. Herdr's `idle`
+                // and `done` are one state, so a flip between them is no new event.
                 (a.state == agent.state
-                    || (matches!(a.state.as_str(), "idle" | "done")
-                        && matches!(agent.state.as_str(), "idle" | "done")))
+                    || (turn_ended(state_of(a), a.state.as_str())
+                        && turn_ended(state_of(agent), agent.state.as_str())))
                     && a.transcript == agent.transcript
                     && a.transcript_modified == agent.transcript_modified
             })
@@ -105,6 +107,25 @@ pub fn register_parent(ledger: &Ledger, shell: &dyn crate::shell::Shell, pane: &
     })
 }
 
+/// The lifecycle state of an observed agent, from the one owner that derives it.
+fn state_of(agent: &crate::probe::Agent) -> crate::lifecycle::State {
+    crate::lifecycle::of_agent(agent, crate::lifecycle::Host::Up).state
+}
+
+/// The agent's turn ended. The lifecycle owner decides it, so a Herdr `idle` or `done`
+/// string never decides it on its own: Herdr's `done` alone is not the native `done`.
+/// The check-in reaches a stopped, asking or blocked agent as well as a waiting one.
+#[must_use]
+pub fn turn_ended(state: crate::lifecycle::State, terminal: &str) -> bool {
+    use crate::lifecycle::State;
+    match state {
+        State::Waiting | State::Stopped | State::Asking | State::Blocked | State::Done => true,
+        // A pending handoff is a live turn while the agent still works.
+        State::Finishing => terminal != "working",
+        _ => false,
+    }
+}
+
 fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
     ledger.with_lock("parents", || {
         let mut parents: BTreeMap<String, Parent> =
@@ -112,7 +133,7 @@ fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
         parents.retain(|pane, parent| {
             probe.agent_panes.iter().any(|agent| {
                 agent.pane == *pane
-                    && !matches!(agent.state.as_str(), "idle" | "done")
+                    && !turn_ended(state_of(agent), agent.state.as_str())
                     && parent
                         .transcript
                         .as_ref()
@@ -241,14 +262,16 @@ fn item_state<'a>(
             .iter()
             .find(|a| a.pane == item.pane)?;
         // Neither is urgent: the sweep sends each completed turn's reply, and closes a child
-        // that called `done`. Idle and done are one Herdr state, so a flip between them is no
-        // new event.
-        let state = if agent.done {
-            "finished".to_owned()
-        } else if matches!(agent.state.as_str(), "idle" | "done") {
-            "waiting".to_owned()
-        } else {
-            agent.state.clone()
+        // that called `done`. The lifecycle owner names the state, so a Herdr `done` never
+        // reads as a finished handoff.
+        let state = match state_of(agent) {
+            crate::lifecycle::State::Done => "finished".to_owned(),
+            crate::lifecycle::State::Waiting
+            | crate::lifecycle::State::Stopped
+            | crate::lifecycle::State::Asking
+            | crate::lifecycle::State::Blocked
+            | crate::lifecycle::State::Finishing => state_of(agent).as_str().to_owned(),
+            _ => agent.state.clone(),
         };
         Some((
             host,
@@ -500,7 +523,7 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
                 .find(|h| h.host.is_local() && h.fresh(now))
                 .and_then(|h| h.probe.as_ref())
                 .and_then(|p| p.agent_panes.iter().find(|a| a.pane == owner))
-                .filter(|a| matches!(a.state.as_str(), "idle" | "done"))
+                .filter(|a| turn_ended(state_of(a), a.state.as_str()))
             else {
                 continue;
             };
