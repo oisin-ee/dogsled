@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TodoPublisher, snapshot as parseSnapshot, type TodoSnapshot } from "./work-todo.ts";
 import { todoDisplay, todoSections } from "./todo-fixture.test.ts";
-import { herdrAvailable } from "./board.ts";
+import { herdrAvailable, parseBoard, renderBoard } from "./board.ts";
 
 function snapshot(): TodoSnapshot {
 	return { version: 3, presenter: "presenter", publisher: "publisher", request: "request", session: "session", branch: "branch", revision: 1, display: todoDisplay() };
@@ -52,6 +52,18 @@ test("publisher rejects a path without a string and the integration boundary rej
 	assert.equal(parseSnapshot({ ...snapshot(), display: { ...display, sections: display.sections.slice(1) } }), undefined);
 	assert.equal(parseSnapshot({ ...snapshot(), display: { ...display, sections: [...display.sections].reverse() } }), undefined);
 	assert.equal(parseSnapshot({ ...snapshot(), display: { ...display, sections: undefined } }), undefined);
+});
+
+test("the board decoder keeps lifecycle strings and unknown groups visible", () => {
+	const board = parseBoard({ hosts: [], rows: [
+		{ group: "running", kind: "agent", id: "a", name: "finishing-child", what: "pi", host: "local", state: "finishing", activity: "", age_ms: 0 },
+		{ group: "new-group", kind: "agent", id: "b", name: "unknown-child", what: "pi", host: "local", state: "new-state", activity: "", age_ms: 0 },
+	] });
+	const plain = { fg: (_: string, text: string) => text, bold: (text: string) => text };
+	const lines = renderBoard(board, 120, plain);
+	assert.deepEqual(lines.filter(line => /^ [A-Z]/.test(line)), [" NEEDS YOU", " WORKING"]);
+	assert.ok(lines.some(line => line.includes("unknown-child") && line.includes("new-state")));
+	assert.ok(lines.some(line => line.includes("finishing-child") && line.includes("finishing")));
 });
 
 test("Herdr detection requires the managed environment and a reachable socket", async () => {

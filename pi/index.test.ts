@@ -288,7 +288,7 @@ test("the board widget follows dogsled board, refreshes every 10 s, and stops at
 	const [key, , options] = r.widgets.at(-1);
 	assert.deepEqual([key, options], ["dogsled", { placement: "aboveEditor" }]);
 	const lines: string[] = r.widget().render(80);
-	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)), [["dogsled", "1 running", "local ▰▱▱▱ 1/8"], ["RUNNING"], ["▸ cargo test", "job", "local", "cargo test", "1m"]]);
+	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)), [["dogsled", "1 working", "local ▰▱▱▱ 1/8"], ["WORKING"], ["▸ cargo test", "job", "local", "cargo test", "1m"]]);
 	await r.invoke("session_shutdown");
 	const after = r.calls.length;
 	t.mock.timers.tick(10_000);
