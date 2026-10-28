@@ -30,7 +30,7 @@ pub struct Turn {
 }
 
 impl Turn {
-    fn of_agent(agent: &Agent) -> Self {
+    pub(crate) fn of_agent(agent: &Agent) -> Self {
         Self {
             state_change_seq: agent.state_change_seq,
             state_since_ms: agent.state_since_ms,
@@ -45,7 +45,7 @@ impl Turn {
         axes.iter().any(Option::is_some) && axes.iter().flatten().all(|(a, b)| a == b)
     }
 
-    fn precedes(&self, agent: &Agent) -> bool {
+    pub(crate) fn precedes(&self, agent: &Agent) -> bool {
         let later_seq = matches!(
             (self.state_change_seq, agent.state_change_seq),
             (Some(before), Some(after)) if after > before

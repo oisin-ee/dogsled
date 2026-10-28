@@ -64,6 +64,7 @@ Do not copy these:
 | wasm-bindgen | 0.2.129 | 0.2.129 (through Dioxus) | No conflict. Keep the CLI pin in `.prototools`. |
 | moon | 2.6.1 | 2.6.1 | No change. |
 | shfmt | 3.14.1 | none | Add. The guardrails shell parser needs it. |
+| dx | none | 0.7.10, unpinned (`~/.cargo/bin`, CI `cargo binstall`) | Pin `dx = "0.7.10"` through `.config/proto/plugins/dx.toml`, which installs the Dioxus release binary with its checksum. Remove the CI binstall and cache steps. An unpinned `dx` resolves to any proto-installed version, and a global 0.8.0-alpha.3 broke `web-build`. |
 
 The root `package.json` becomes the pnpm workspace root and stays the published `@oisin-ee/pi-dogsled` package.
 `pnpm-lock.yaml` replaces `package-lock.json`. The `dogsled.toml` worktree setup uses the oisinpi form: `proto trust .prototools`, then `pnpm install --frozen-lockfile`.

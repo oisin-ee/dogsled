@@ -39,7 +39,7 @@ Put small specified edits of one request in one unit, even across files. Never s
 | Facts only: paths, versions, call sites | `scout` |
 | A finished diff, plan, or design to check | `reviewer` |
 
-Every writer plans on Sonnet or Sol and then hands the typing to MiniMax. You do not choose models.
+The default writer uses GPT Sol for the whole session, with no typing-tier handoff. The profile owns model selection and effort.
 
 ## 3. Brief
 

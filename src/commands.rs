@@ -14,19 +14,25 @@ pub struct Status {
     /// Open children whose owner is gone and that the sweep keeps, with the reason.
     pub orphans: Vec<crate::sweep::Orphan>,
     pub sweep: Option<crate::sweep::Report>,
+    #[serde(default)]
+    pub stopped_activity: std::collections::BTreeMap<String, String>,
 }
 
 pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
     let hosts = fleet.status(crate::ledger::now_ms())?;
     let mut items = crate::items::list(fleet.ledger)?;
     crate::items::merge_handoffs(&mut items, &hosts);
-    Ok(Status {
+    let mut status = Status {
         hosts,
         items,
         queue: crate::work::queue(fleet.ledger)?,
         orphans: crate::sweep::list(fleet.ledger)?,
         sweep: crate::sweep::latest(fleet.ledger)?,
-    })
+        stopped_activity: std::collections::BTreeMap::new(),
+    };
+    status.stopped_activity =
+        crate::watchdog::stopped_activity(fleet.ledger, &status, crate::ledger::now_ms())?;
+    Ok(status)
 }
 
 #[derive(Debug, Serialize)]
