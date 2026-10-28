@@ -91,7 +91,7 @@ A later decision can adopt the stricter policy for the `dogsled` crate. Measure 
 - Merge the `implicitInputs` of the two `all.yml` files.
 - Move the oisinpi root `format` and `fix` tasks (oxfmt) to the moved paths only. In oisinpi they cover the whole tree, which includes all Dogsled files.
 - Change the `dogsled` project tasks `install`, `typecheck`, and `test-shim` from npm to pnpm.
-- Set `PI_TODO_SOURCE=packages/pi-todo/src` on `test-shim`, and make it depend on `pi-todo:generate`. Then the contract tests run on every check.
+- Set `PI_TODO_SOURCE=$workspaceRoot/packages/pi-todo/src` on `test-shim`, and make it depend on `pi-todo:generate`. Then the contract tests run on every check. The path must be absolute, because `pi/unit-contract.test.ts` loads it from a temporary working directory.
 
 The `dogsled` project keeps `tsc` and `node --test` until step 3. The moved packages keep oxlint and vitest.
 Step 3 selects one linter and one test runner for the merged extension.
