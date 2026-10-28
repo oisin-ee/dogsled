@@ -49,6 +49,33 @@ pub const RECORD_KEEP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// What a reader sees when a job's output has expired.
 pub const OUTPUT_EXPIRED: &str = "output expired";
 
+/// Read the request-owned authority, which old queue writers never touch.
+pub fn request_validity(ledger: &Ledger, id: &str) -> Result<Option<Validity>> {
+    validate_id(id)?;
+    ledger
+        .child("job-validity")
+        .read(&format!("{id}.json"))
+        .map_err(|_| refuse(crate::error::Refusal::JobValidityUnprovable))
+}
+
+/// Only a request origin or transport ingress may create a sidecar. Once published,
+/// the same id cannot acquire a different creation time. Ledger writes are atomic.
+pub fn record_request_validity(
+    ledger: &Ledger,
+    id: &str,
+    validity: Option<Validity>,
+) -> Result<()> {
+    validate_id(id)?;
+    let sidecars = ledger.child("job-validity");
+    sidecars.with_lock(id, || match (request_validity(ledger, id)?, validity) {
+        (Some(saved), Some(incoming)) if saved != incoming => {
+            Err(Error::Invalid(format!("job {id} request validity changed")))
+        }
+        (None, Some(incoming)) => sidecars.write(&format!("{id}.json"), &incoming),
+        _ => Ok(()),
+    })
+}
+
 /// The host's job validity clock. Its high-water time never moves back, so a host clock
 /// that moves back cannot reopen an expired request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,14 +123,14 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
         note(&value, "/request/action/validity/created_ms");
         note(&value, "/launch/action/validity/created_ms");
     }
-    if let Some(tickets) = ledger
-        .read::<Vec<Value>>("queue.json")
+    for value in json_files(&ledger.child("job-validity").dir)? {
+        note(&value, "/created_ms");
+    }
+    for ticket in crate::work::queue_records(ledger)
         .map_err(|_| refuse(crate::error::Refusal::JobClockUnavailable))?
     {
-        for ticket in &tickets {
-            note(ticket, "/created_ms");
-            note(ticket, "/request/action/validity/created_ms");
-        }
+        note(&ticket, "/created_ms");
+        note(&ticket, "/request/action/validity/created_ms");
     }
     Ok(newest)
 }
@@ -334,7 +361,7 @@ const TERMINAL_STATES: [&str; 2] = ["idle", "blocked"];
 
 /// What a job's own record says about its retention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Expiry {
+pub(crate) enum Expiry {
     /// The job is live, unproved, or young: it keeps everything.
     Keep,
     /// The job's output is older than the log window.
@@ -346,7 +373,7 @@ enum Expiry {
 /// What the record says about a job's age. Only a conclusively terminal job expires: a
 /// running, pending, claiming, or uncertain job keeps everything, and so does a job whose
 /// state this build does not know.
-fn expiry(job: &Job, now: u64) -> Expiry {
+pub(crate) fn expiry(job: &Job, now: u64) -> Expiry {
     let Some(ended) = job.ended_ms else {
         return Expiry::Keep;
     };
@@ -371,6 +398,7 @@ fn expiry(job: &Job, now: u64) -> Expiry {
 pub fn expire(ledger: &Ledger, now: u64) -> Result<()> {
     // Persist the validity fence before any deletion, even when the wall clock rolled back.
     let now = advance_clock(ledger, now)?;
+    crate::work::expire_requests(ledger, now)?;
     let store = store(ledger);
     let entries = match fs::read_dir(&store.dir) {
         Ok(entries) => entries,
