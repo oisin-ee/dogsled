@@ -251,25 +251,23 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
             let Some(probe) = &host.probe else {
                 continue;
             };
-            let after_launch = if item.kind == "agent"
-                && let Some(confirmed) = item.launch_confirmed_ms
-            {
-                // Both timestamps belong to the child host. Equality cannot prove ordering.
-                host.sampled_ms.is_some_and(|sampled| sampled > confirmed)
-            } else {
-                // Old items without launch evidence keep today's creation-time rule, as do jobs.
-                host.sampled_ms
-                    .is_some_and(|sampled| sampled >= item.created_ms)
-            };
-            if !after_launch {
-                continue;
-            }
+            // A job's own record proves its end, whenever the snapshot was sampled.
             let ended = item.kind == "job"
                 && host
                     .jobs
                     .iter()
                     .any(|j| j.id == item.id && j.ended_ms.is_some());
-            let gone = !probe.panes.iter().any(|p| p.pane_id == item.pane);
+            // A missing pane proves only that a sample taken after the pane existed lacks it.
+            // Admission time is earlier than the pane: a launch can take many seconds.
+            let after_launch = if let Some(confirmed) = item.launch_confirmed_ms {
+                // Both timestamps belong to the child host. Equality cannot prove ordering.
+                host.sampled_ms.is_some_and(|sampled| sampled > confirmed)
+            } else {
+                // Old items without launch evidence keep the creation-time rule.
+                host.sampled_ms
+                    .is_some_and(|sampled| sampled >= item.created_ms)
+            };
+            let gone = after_launch && !probe.panes.iter().any(|p| p.pane_id == item.pane);
             if ended || gone {
                 item.closed_ms = Some(now);
             }
