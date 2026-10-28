@@ -72,6 +72,27 @@ test("reload recovery uses the real session boundary without a model request", a
 	} finally { rt.session.dispose(); }
 });
 
+test("a settlement delivered through the real runtime boundary is acknowledged with its custody", async () => {
+	const r = rig();
+	let bridge!: UnitBridge, context: any;
+	const extension: ExtensionFactory = pi => {
+		pi.events.on("oisin.tasks.acquire.v1", (value: any) => value.reply(r.provider));
+		bridge = new UnitBridge({ events: pi.events, exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled");
+		pi.on("session_start", (event, ctx) => { context = ctx; bridge.start(event.reason); });
+	};
+	const rt = await runtime([extension]);
+	try {
+		await rt.session.bindExtensions({});
+		r.ref.sessionId = rt.manager.getSessionId();
+		const custody = { itemId: "u-1", claimId: "claim-1", revision: 1, recipient: rt.manager.getSessionId() };
+		r.settlements.push({ version: 1, custody, settlement: { version: 1, eventId: "returned", binding: r.prepared.binding, result: { kind: "returned" } } });
+		await bridge.settled(context);
+		assert.equal(r.state().acks, 1);
+		const call = r.calls.filter(args => args[2] === "ack-settlement").at(-1)!;
+		assert.deepEqual(JSON.parse(call[call.indexOf("--input") + 1]!), { execution: r.execution, eventId: "returned", custody });
+	} finally { rt.session.dispose(); }
+});
+
 for (const mode of ["missing", "invalid", "valid", "sealed"] as const) test(`fresh loaded worker guard: ${mode} acknowledgement`, async () => {
 	const data = fixture(), dir = await mkdtemp(join(tmpdir(), "dogsled-guard-")), path = join(dir, "seed.json");
 	const acknowledgements: string[][] = [];
