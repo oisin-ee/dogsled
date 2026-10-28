@@ -46,8 +46,20 @@ pub fn findings(
     let items = crate::items::list(ledger)?;
     let panes = crate::cleanup::current_panes(shell)?;
     let launches = crate::launch::requests(ledger)?;
+    let custody = crate::custody::list(ledger)?;
+    let session = crate::probe::agent_list(shell).ok().and_then(|agents| {
+        agents
+            .into_iter()
+            .find(|agent| agent.pane == owner)
+            .and_then(|agent| agent.agent_session)
+    });
+    let holder = Holder {
+        pane: owner,
+        session: session.as_deref(),
+        records: &custody,
+    };
     let recipient =
-        |entry: &crate::cleanup::Entry| created(entry, owner, &items, &panes, &launches);
+        |entry: &crate::cleanup::Entry| created(entry, &holder, &items, &panes, &launches);
     let failures = applied
         .failures
         .iter()
@@ -125,12 +137,43 @@ fn entries(
         .collect()
 }
 
-/// An entry concerns only the agent that created its work: the owner of a live local item
+/// The agent that asks, and the custody records that say who answers for each item.
+struct Holder<'a> {
+    pane: &'a str,
+    session: Option<&'a str>,
+    records: &'a [crate::custody::Custody],
+}
+
+impl Holder<'_> {
+    /// The agent answers for `item` now. The current custodian does, found by pane and by
+    /// session, so a reused pane id never inherits the custody. An item with no custody
+    /// record is still held by its origin owner.
+    fn answers_for(&self, item: &crate::items::Item) -> bool {
+        let custodian = crate::inbox::custodian_of(self.records, item);
+        crate::inbox::holds(&custodian, self.pane, self.session)
+    }
+
+    /// The agent answers for the launch. The launch names the child it started, and the
+    /// child's current custodian answers for it. A launch with no child record keeps its
+    /// own owner.
+    fn answers_for_launch(
+        &self,
+        launch: &crate::work::Launch,
+        items: &[crate::items::Item],
+    ) -> bool {
+        match items.iter().find(|item| item.id == launch.id) {
+            Some(item) => self.answers_for(item),
+            None => launch.owner == self.pane,
+        }
+    }
+}
+
+/// An entry concerns only the agent that created its work: the custodian of a live local item
 /// whose pane holds the entry, or the requester of a launch into the entry's worktree.
 /// An agent that created nothing there hears nothing, whether Dogsled launched it or not.
 fn created(
     entry: &crate::cleanup::Entry,
-    owner: &str,
+    holder: &Holder<'_>,
     items: &[crate::items::Item],
     panes: &[crate::probe::Pane],
     launches: &[crate::work::Launch],
@@ -157,12 +200,13 @@ fn created(
     let holds = items
         .iter()
         .filter(|item| item.closed_ms.is_none() && item.host == crate::hosts::LOCAL)
-        .filter(|item| item.owner_pane == owner)
+        .filter(|item| holder.answers_for(item))
         .any(|item| holders.iter().any(|pane| pane.pane_id == item.pane));
     let requested = tree.is_some_and(|path| {
         launches
             .iter()
-            .filter(|launch| launch.owner == owner && launch.host == crate::hosts::LOCAL)
+            .filter(|launch| launch.host == crate::hosts::LOCAL)
+            .filter(|launch| holder.answers_for_launch(launch, items))
             .any(|launch| crate::worktree::same(&launch.cwd, path))
     });
     holds || requested
@@ -322,6 +366,142 @@ mod tests {
         assert!(!text.contains("child-5"));
         many.rows[5].ahead = Some(1);
         assert!(reminder(&ledger, &many, "owner").unwrap().is_some());
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
+    }
+
+    /// A child of `owner`.
+    fn item(id: &str, owner: &str) -> crate::items::Item {
+        crate::items::Item {
+            id: id.into(),
+            kind: "agent".into(),
+            host: crate::hosts::LOCAL.into(),
+            pane: "w1:p3".into(),
+            owner_pane: owner.into(),
+            name: Some(id.into()),
+            created_ms: 1,
+            closed_ms: None,
+            ..crate::items::Item::default()
+        }
+    }
+
+    fn custody(
+        item: &crate::items::Item,
+        pane: &str,
+        session: Option<&str>,
+    ) -> crate::custody::Custody {
+        crate::custody::Custody {
+            item: item.id.clone(),
+            host: crate::hosts::LOCAL.into(),
+            owner_pane: item.owner_pane.clone(),
+            owner_session: None,
+            custodian_pane: pane.into(),
+            custodian_session: session.map(str::to_owned),
+            revision: 1,
+            claims: Vec::new(),
+        }
+    }
+
+    /// A pane list that holds the child's pane, in a worktree. The agents in `w1:p1` and
+    /// `w1:p2` run the sessions the names say.
+    fn shell_in_tree(sessions: &[(&str, &str)]) -> crate::shell::Fake {
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "herdr pane list",
+            r#"{"result":{"panes":[{"pane_id":"w1:p3","cwd":"/t"}]}}"#,
+        );
+        let agents: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|(pane, session)| {
+                serde_json::json!({"pane_id":pane,"agent":"pi",
+                    "agent_session":{"kind":"path","value":session}})
+            })
+            .collect();
+        shell.on(
+            "herdr agent list",
+            &serde_json::json!({"result":{"agents":agents}}).to_string(),
+        );
+        shell
+    }
+
+    /// The entry of a worktree the child's pane holds.
+    fn worktree_entry() -> crate::cleanup::Entry {
+        crate::cleanup::Entry {
+            class: "worktrees".into(),
+            id: "/t".into(),
+            detail: "the worktree cannot be removed".into(),
+            removable: true,
+            tree: Some(crate::cleanup::Tree {
+                repo: "/repo".into(),
+                path: "/t".into(),
+                branch: "feat/x".into(),
+                head: "h".into(),
+            }),
+            kind: None,
+            dirty_paths: Vec::new(),
+            dirty_count: None,
+        }
+    }
+
+    /// The findings of one failed pass, for the agent that asks.
+    fn findings_for(ledger: &Ledger, shell: &crate::shell::Fake, owner: &str) -> Findings {
+        let report = crate::sweep::Report {
+            ts_ms: 1,
+            started_ms: 1,
+            finished_ms: 2,
+            applied: crate::cleanup::Applied {
+                results: Vec::new(),
+                failures: vec!["the worktree cannot be removed".into()],
+                skipped: Vec::new(),
+                failure_entries: vec![crate::cleanup::Failure {
+                    entry: worktree_entry(),
+                    detail: "the worktree cannot be removed".into(),
+                }],
+                repositories: Vec::new(),
+                landed_dirty: Vec::new(),
+                unlinked: Vec::new(),
+            },
+        };
+        findings(ledger, shell, owner, &report).unwrap()
+    }
+
+    #[test]
+    fn the_gate_finds_the_work_of_the_current_custodian() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let child = item("child", "w1:p1");
+        crate::items::record(&ledger, child.clone()).unwrap();
+        // The custody moved to another pane: the origin owner hears nothing about it.
+        ledger
+            .write(
+                "custody.json",
+                &vec![custody(&child, "w1:p2", Some("custodian-session"))],
+            )
+            .unwrap();
+        let shell = shell_in_tree(&[("w1:p1", "origin-session"), ("w1:p2", "custodian-session")]);
+        assert!(
+            findings_for(&ledger, &shell, "w1:p1").failures.is_empty(),
+            "the origin owner must hear nothing"
+        );
+        assert_eq!(findings_for(&ledger, &shell, "w1:p2").failures.len(), 1);
+        // Another session in the custodian's pane is another agent: it hears nothing.
+        let reused = shell_in_tree(&[("w1:p1", "origin-session"), ("w1:p2", "another-session")]);
+        assert!(
+            findings_for(&ledger, &reused, "w1:p2").failures.is_empty(),
+            "a reused pane id must not inherit the custody"
+        );
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn the_gate_finds_the_work_of_the_origin_owner_without_a_custody_record() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        crate::items::record(&ledger, item("child", "w1:p1")).unwrap();
+        let shell = shell_in_tree(&[("w1:p1", "origin-session"), ("w1:p2", "other-session")]);
+        // No custody record: the origin owner answers for the child.
+        assert_eq!(findings_for(&ledger, &shell, "w1:p1").failures.len(), 1);
+        assert!(
+            findings_for(&ledger, &shell, "w1:p2").failures.is_empty(),
+            "another pane must hear nothing"
+        );
         std::fs::remove_dir_all(&ledger.dir).unwrap();
     }
 }

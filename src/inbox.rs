@@ -1038,6 +1038,136 @@ pub fn host(
     crate::print(true, &value, String::new)
 }
 
+/// The agent that answers for an item now.
+///
+/// The custody record names the current custodian by pane and by session. An item with no
+/// custody record is still held by its origin owner, which is the custody the record
+/// would have started from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Custodian {
+    /// The pane that answers for the item.
+    pub pane: String,
+    /// The custodian's harness session, when one is recorded.
+    pub session: Option<String>,
+}
+
+/// The current custodian of `item`, from the custody records this host holds.
+///
+/// A custody record wins. Without one the origin owner holds the item, as it did before
+/// the custody existed.
+#[must_use]
+pub fn custodian_of(records: &[crate::custody::Custody], item: &crate::items::Item) -> Custodian {
+    match records.iter().find(|record| record.item == item.id) {
+        Some(record) => Custodian {
+            pane: record.custodian_pane.clone(),
+            session: record.custodian_session.clone(),
+        },
+        None => Custodian {
+            pane: item.owner_pane.clone(),
+            session: item.owner_session.clone(),
+        },
+    }
+}
+
+/// Whether the agent in `pane`, running `session`, holds `custodian`.
+///
+/// The pane must match. A session both sides know decides: a pane id that was reused by
+/// another session never inherits the custody. A session nobody can read proves nothing,
+/// so the pane decides then.
+#[must_use]
+pub fn holds(custodian: &Custodian, pane: &str, session: Option<&str>) -> bool {
+    if custodian.pane != pane {
+        return false;
+    }
+    match (custodian.session.as_deref(), session) {
+        (Some(recorded), Some(live)) => recorded == live,
+        _ => true,
+    }
+}
+
+/// The session running in `pane`, as this host's snapshot reports it.
+fn live_session(reports: &[crate::hosts::HostReport], pane: &str) -> Option<String> {
+    reports
+        .iter()
+        .find(|host| host.host.is_local())
+        .and_then(|host| host.probe.as_ref())
+        .and_then(|probe| probe.agent_panes.iter().find(|agent| agent.pane == pane))
+        .and_then(|agent| agent.agent_session.clone())
+}
+
+/// Whether an event id names `item`.
+///
+/// A child event names its item in the record id: `reply-{item}-{seq}`,
+/// `blocked-{item}-{seq}`, or `unit-reply-{result}`, whose result carries the item id.
+/// The tail of the first two is a number, so only the item it was built for matches.
+fn names(id: &str, item: &crate::items::Item) -> bool {
+    if let Some(result) = id.strip_prefix("unit-reply-") {
+        return item
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.result_id.as_deref())
+            == Some(result);
+    }
+    let Some(rest) = ["reply-", "blocked-"]
+        .iter()
+        .find_map(|prefix| id.strip_prefix(prefix))
+    else {
+        return false;
+    };
+    let Some(tail) = rest
+        .strip_prefix(&item.id)
+        .and_then(|rest| rest.strip_prefix('-'))
+    else {
+        return false;
+    };
+    !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The child an event names, when it names exactly one.
+///
+/// The event reaches the pane that answers for the child, so the child is looked up by the
+/// pane that holds its custody as well as by its origin owner.
+fn subject(
+    ledger: &Ledger,
+    records: &[crate::custody::Custody],
+    owner: &str,
+    id: &str,
+) -> Result<Option<crate::items::Item>> {
+    let named: Vec<_> = crate::items::list(ledger)?
+        .into_iter()
+        .filter(|item| names(id, item))
+        .filter(|item| item.owner_pane == owner || custodian_of(records, item).pane == owner)
+        .collect();
+    Ok(match named.as_slice() {
+        [item] => Some(item.clone()),
+        _ => None,
+    })
+}
+
+/// The pane that answers for the event `id`.
+///
+/// A child event goes to the current custodian of the child, found by pane and by session,
+/// so a reused pane id never inherits the custody. An event about no child keeps the pane
+/// it names. `None` when the custodian runs another session: nothing would deliver the
+/// event to the right agent, so the caller keeps it for later.
+fn custodian_pane(
+    ledger: &Ledger,
+    reports: &[crate::hosts::HostReport],
+    owner: &str,
+    id: &str,
+) -> Result<Option<String>> {
+    let records = crate::custody::list(ledger)?;
+    let Some(item) = subject(ledger, &records, owner, id)? else {
+        return Ok(Some(owner.to_owned()));
+    };
+    let custodian = custodian_of(&records, &item);
+    let session = live_session(reports, &custodian.pane);
+    if !holds(&custodian, &custodian.pane, session.as_deref()) {
+        return Ok(None);
+    }
+    Ok(Some(custodian.pane))
+}
+
 /// The terminal of `owner`, an agent pane on this host, when a reader reads its inbox.
 pub fn readable(
     ledger: &Ledger,
@@ -1056,9 +1186,13 @@ pub fn readable(
     Ok(reader(ledger, &terminal)?.map(|_| terminal))
 }
 
-/// Put a note from dogsled in the inbox of `owner`, an agent pane on this host. `id` makes it
-/// idempotent. `Ok(false)` when the owner is not running or has no reader: nothing would
+/// Put a note from dogsled in the inbox of the agent that answers for it. `id` makes it
+/// idempotent. `Ok(false)` when that agent is not running or has no reader: nothing would
 /// deliver it, so the caller keeps it for later.
+///
+/// A note about a child reaches the child's current custodian, found by pane and by
+/// session, so a reused pane id never inherits the custody. A note about no child reaches
+/// the pane it names, as it did before.
 pub fn notify(
     fleet: &Fleet,
     reports: &[crate::hosts::HostReport],
@@ -1070,13 +1204,16 @@ pub fn notify(
 ) -> Result<bool> {
     let ledger = fleet.ledger;
     let shell = fleet.shell;
-    let Some(terminal) = readable(ledger, reports, owner)? else {
+    let Some(pane) = custodian_pane(ledger, reports, owner, id)? else {
+        return Ok(false);
+    };
+    let Some(terminal) = readable(ledger, reports, &pane)? else {
         return Ok(false);
     };
     let record = Record {
         id: id.into(),
         terminal,
-        pane: owner.into(),
+        pane,
         from: Sender::dogsled(),
         kind: kind.into(),
         text,
