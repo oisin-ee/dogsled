@@ -188,6 +188,56 @@ fn real_remote_preparation_causes_are_safe_through_transport() {
     }
 }
 
+/// A remote preparation failure that names its cause reaches the ticket. The peer's other
+/// text does not.
+#[test]
+fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
+    let rig = Rig::new("diagnostic-remote-cause");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.peer();
+    fail_peer(
+        &rig,
+        "prepare",
+        &json!({"error":"unknown base origin/x PRIVATE_SENTINEL"}),
+    );
+    let (code, error) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/x",
+        "--name",
+        "worker",
+        "--message",
+        "TASK_SECRET",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains("unknown base origin/x"), "{error}");
+    assert!(text.contains("netcup"), "{error}");
+    assert!(!error.to_string().contains("TASK_SECRET"), "{error}");
+    // The cause is the caller's own base, not the peer's text.
+    assert!(!error.to_string().contains("PRIVATE_SENTINEL"), "{error}");
+    let admission = fs::read_dir(rig.dir.join("state/admissions"))
+        .unwrap()
+        .flatten()
+        .find(|f| f.path().extension().is_some_and(|e| e == "json"))
+        .unwrap();
+    let attempt: Value = serde_json::from_slice(&fs::read(admission.path()).unwrap()).unwrap();
+    assert!(
+        attempt["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown base origin/x"),
+        "{attempt}"
+    );
+}
+
 /// The peer fails to prepare and cannot record the outcome. The caller on the other side of
 /// the transport must see that persistence failure itself, with its own correlation, and
 /// without any of the peer's own text.
