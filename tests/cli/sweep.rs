@@ -794,10 +794,12 @@ fn child(rig: &Rig, status: &str, tree: &Path) {
     );
 }
 
-fn orphan(rig: &Rig, owner: &str, host: &str) {
+/// An open child with the id `id`, whose owner pane is `owner`. Every child has its own id,
+/// because the custody record of a child is written once and never changes its custodian.
+fn orphan(rig: &Rig, id: &str, owner: &str, host: &str) {
     rig.put(
         "state/items.json",
-        &json!([{"id":"i1","kind":"agent","host":host,"pane":"w2:p1","owner_pane":owner,
+        &json!([{"id":id,"kind":"agent","host":host,"pane":"w2:p1","owner_pane":owner,
             "name":"worker","created_ms":1,"closed_ms":null}]),
     );
 }
@@ -908,7 +910,7 @@ fn a_child_with_a_legacy_owner_session_is_never_called_session_ended() {
 fn the_status_lists_an_unclaimed_orphan_once() {
     let (rig, tree) = close_rig("sweep-status-once");
     // The owner pane is gone, so the child is an orphan the sweep keeps.
-    orphan(&rig, "w9:p1", "local");
+    orphan(&rig, "i1", "w9:p1", "local");
     child(&rig, "working", &tree);
     serve(&rig);
     let (_, status) = rig.json(&["status"]);
@@ -943,12 +945,12 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
         );
     };
     // An owner that still exists closes its own children.
-    orphan(&rig, "w1:p1", "local");
+    orphan(&rig, "i1", "w1:p1", "local");
     child(&rig, "idle", &tree);
     serve(&rig);
     untouched(&rig, "owner alive");
     // The owner is gone. A working or blocked child is reported, not closed.
-    orphan(&rig, "w9:p1", "local");
+    orphan(&rig, "i2", "w9:p1", "local");
     for status in ["working", "blocked"] {
         child(&rig, status, &tree);
         let journal = serve(&rig);
@@ -1009,7 +1011,7 @@ fn serve_closes_a_remote_orphan_over_ssh_with_the_pushed_check() {
     remote["probe"]["agent_panes"][0]["done"] = json!(true);
     remote["probe"]["panes"] = json!([{"pane_id":"w2:p1","workspace_id":"w2"}]);
     rig.put("remote.json", &remote);
-    orphan(&rig, "w9:p1", "8103");
+    orphan(&rig, "i1", "w9:p1", "8103");
     rig.script(
         "ssh",
         r#"#!/bin/sh

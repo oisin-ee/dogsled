@@ -369,22 +369,13 @@ fn kept_orphan(
 
 /// The custody of an item: the record this host holds, or the origin record it starts with.
 ///
-/// The origin record is built here instead of written, so the sweep can classify a child
-/// even when the ledger cannot be written. It mirrors the origin the custody record starts
-/// with: the owner pane and its session hold the child until a lead claims it.
+/// A legacy item has no custody record. The origin record is written for it, so the child
+/// has the same custody as every other child: its owner pane holds it until a lead claims
+/// it.
 fn custody_of(fleet: &Fleet, item: &Item) -> Result<Custody> {
     match crate::custody::get(fleet.ledger, &item.id)? {
         Some(custody) => Ok(custody),
-        None => Ok(Custody {
-            item: item.id.clone(),
-            host: crate::inbox::hostname(),
-            owner_pane: item.owner_pane.clone(),
-            owner_session: item.owner_session.clone(),
-            custodian_pane: item.owner_pane.clone(),
-            custodian_session: item.owner_session.clone(),
-            revision: 0,
-            claims: Vec::new(),
-        }),
+        None => crate::custody::ensure(fleet.ledger, item),
     }
 }
 
