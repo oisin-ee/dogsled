@@ -217,6 +217,20 @@ pub enum Command {
         #[arg(long)]
         host: Option<String>,
     },
+    /// Claim custody of an orphaned child on this host.
+    Claim {
+        item: String,
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    /// Accept an exact returned result without completing its original task.
+    Accept {
+        item: String,
+        #[arg(long)]
+        result: String,
+        #[arg(long)]
+        evidence: String,
+    },
     /// Delete a closed child's retained branch, including its origin branch.
     Drop {
         /// The closed agent item's id.

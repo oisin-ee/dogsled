@@ -333,7 +333,6 @@ pub fn ensure(ledger: &Ledger, item: &Item) -> Result<Custody> {
 ///
 /// The claim is atomic on `expected_revision`: it holds the custody lock, so two leads
 /// cannot both win. A refused claim writes nothing.
-#[allow(dead_code)]
 pub fn claim(
     ledger: &Ledger,
     request: &ClaimRequest,

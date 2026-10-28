@@ -5,6 +5,7 @@ mod backoff;
 mod board;
 mod budget;
 mod checkout;
+mod claim;
 mod cleanup;
 mod cli;
 mod close;
@@ -245,10 +246,20 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         Command::Hook(cmd) => hook(cmd, &ledger, &shell, &policy, home)?,
         command => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            return runtime::dispatch(&fleet, command, cli.json);
+            return dispatch(&fleet, command, cli.json);
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Route commands after fleet discovery, keeping their adapters with their owners.
+fn dispatch(fleet: &hosts::Fleet<'_>, command: Command, json: bool) -> Result<ExitCode> {
+    match command {
+        command @ (Command::Claim { .. } | Command::Accept { .. }) => {
+            claim::command(fleet, command, json)
+        }
+        command => runtime::dispatch(fleet, command, json),
+    }
 }
 
 /// The shape of the status command: what to print, and whether to keep printing it.
