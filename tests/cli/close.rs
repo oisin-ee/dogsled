@@ -350,7 +350,7 @@ fn a_teardown_file_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
 }
 
 /// A launch receipt with no result, as an interrupted or failed launch leaves it.
-fn unfinished_launch(rig: &Rig, id: &str, tree: &Path, pane: &str) {
+pub(super) fn unfinished_launch(rig: &Rig, id: &str, tree: &Path, pane: &str) {
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     rig.put(
         &format!("state/launches/{id}.progress.json"),
@@ -359,6 +359,98 @@ fn unfinished_launch(rig: &Rig, id: &str, tree: &Path, pane: &str) {
             "pane":pane,"terminal":"term_gone","attempted":true,"confirmed":false,
             "result":{"host":"local","name":"worker","pane":pane},"error":"startup response lost"}),
     );
+}
+
+#[test]
+fn host_stopped_orphan_flag_cannot_override_launch_progress() {
+    for progress in ["allocated", "attempted", "ambiguous"] {
+        let (rig, tree) = close_rig(&format!("close-stopped-launch-{progress}"));
+        panes(&rig, "idle", &tree);
+        rig.put(
+            "agents.json",
+            &json!({"result":{"agents":[{
+                "pane_id":"w2:p1","terminal_id":"term_child","agent":"pi","agent_status":"idle",
+                "agent_session":{"kind":"id","value":"child-session"},"state_change_seq":1
+            }]}}),
+        );
+        unfinished_launch(&rig, "pending", &tree, "w2:p1");
+        if progress == "allocated" {
+            let mut record = rig.read("state/launches/pending.progress.json");
+            record["attempted"] = json!(false);
+            rig.put("state/launches/pending.progress.json", &record);
+        } else if progress == "ambiguous" {
+            unfinished_launch(&rig, "competing", &tree, "w2:p1");
+        }
+        let episode = json!({"pane":"w2:p1","agent_session":"child-session",
+            "turn":{"state_change_seq":1,"state_since_ms":null}});
+        let out = rig.run(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--stopped-orphan",
+            &episode.to_string(),
+        ]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{progress}: {stderr}");
+        assert!(
+            stderr.contains("stopped orphan session or turn changed"),
+            "{progress}: {stderr}"
+        );
+        assert!(tree.exists(), "{progress}");
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("workspace close") && !log.contains("pane close"),
+            "{progress}: {log}"
+        );
+        assert!(rig.log("hook.log").is_empty(), "{progress}");
+    }
+}
+
+#[test]
+fn host_stopped_orphan_close_fails_closed_when_lifecycle_facts_cannot_be_read() {
+    for source in ["launch", "snapshot", "done", "probe"] {
+        let (rig, tree) = close_rig(&format!("close-stopped-facts-{source}"));
+        panes(&rig, "idle", &tree);
+        rig.put(
+            "agents.json",
+            &json!({"result":{"agents":[{
+                "pane_id":"w2:p1","terminal_id":"term_child","agent":"pi","agent_status":"idle",
+                "agent_session":{"kind":"id","value":"child-session"},"state_change_seq":1
+            }]}}),
+        );
+        match source {
+            "launch" => {
+                fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+                fs::write(rig.dir.join("state/launches/bad.progress.json"), "{").unwrap();
+            }
+            "snapshot" => fs::write(rig.dir.join("state/host.json"), "{").unwrap(),
+            "done" => fs::write(rig.dir.join("state/done.json"), "{").unwrap(),
+            "probe" => fs::write(rig.dir.join("agents.json"), "{").unwrap(),
+            _ => unreachable!(),
+        }
+        let episode = json!({"pane":"w2:p1","agent_session":"child-session",
+            "turn":{"state_change_seq":1,"state_since_ms":null}});
+        let out = rig.run(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--stopped-orphan",
+            &episode.to_string(),
+        ]);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{source}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(tree.exists(), "{source}");
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("workspace close") && !log.contains("pane close"),
+            "{source}: {log}"
+        );
+        assert!(rig.log("hook.log").is_empty(), "{source}");
+    }
 }
 
 #[test]

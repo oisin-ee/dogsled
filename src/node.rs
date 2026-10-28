@@ -98,16 +98,7 @@ impl Node<'_> {
 
     /// Publication never waits for prompts, notifications, or cleanup.
     pub fn tick(&self, now: u64) -> Result<()> {
-        let mut probe = probe::local(self.shell, self.home)?;
-        // Transcript and Git reads stay outside the lock, so a reservation never waits on them.
-        // Reading the last snapshot without the lock is safe: writes replace it atomically.
-        let last: Option<Snapshot> = self.ledger.read("host.json")?;
-        crate::facts::observe(self.shell, &mut probe, last.as_ref().map(|s| &s.probe));
-        // The launch progress rides with each agent, so the owner can tell startup in
-        // progress from a launch that never reached its pane. It is published before the
-        // states, so the derivation sees it.
-        self.publish_launch_progress(&mut probe.agent_panes)?;
-        crate::done::observe(self.ledger, &mut probe.agent_panes)?;
+        let mut probe = observed_probe(self.ledger, self.shell, self.home)?;
         self.ledger.with_lock("host", || {
             let previous: Option<Snapshot> = self.ledger.read("host.json")?;
             crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);
@@ -126,18 +117,6 @@ impl Node<'_> {
                 },
             )
         })
-    }
-
-    /// The launch progress this host recorded for each observed agent.
-    fn publish_launch_progress(&self, agents: &mut [crate::probe::Agent]) -> Result<()> {
-        for agent in agents {
-            let progress = crate::launch::progress(self.ledger, &agent.pane)?;
-            agent.launch_progress = match progress {
-                crate::launch::LaunchProgress::None => None,
-                progress => Some(progress.as_str().to_owned()),
-            };
-        }
-        Ok(())
     }
 
     fn append_sample(&self, probe: &Probe, headroom: &Headroom, now: u64) -> Result<()> {
@@ -219,6 +198,25 @@ impl Node<'_> {
             })
         })
     }
+}
+
+/// Observe the same lifecycle facts for publication and host-side close verification.
+pub fn observed_probe(ledger: &Ledger, shell: &dyn Shell, home: &str) -> Result<Probe> {
+    let mut probe = probe::local(shell, home)?;
+    // Transcript and Git reads stay outside the lock, so a reservation never waits on them.
+    // Reading the last snapshot without the lock is safe: writes replace it atomically.
+    let last: Option<Snapshot> = ledger.read("host.json")?;
+    crate::facts::observe(shell, &mut probe, last.as_ref().map(|s| &s.probe));
+    // Publish launch progress before deriving states, including pending and contended launches.
+    for agent in &mut probe.agent_panes {
+        let progress = crate::launch::progress(ledger, &agent.pane)?;
+        agent.launch_progress = match progress {
+            crate::launch::LaunchProgress::None => None,
+            progress => Some(progress.as_str().to_owned()),
+        };
+    }
+    crate::done::observe(ledger, &mut probe.agent_panes)?;
+    Ok(probe)
 }
 
 #[cfg(test)]

@@ -1358,6 +1358,100 @@ fn host_stopped_orphan_close_rechecks_session_turn_and_lifecycle() {
 }
 
 #[test]
+fn remote_stopped_orphan_flag_cannot_override_host_launch_progress() {
+    for progress in ["attempted", "ambiguous"] {
+        let (rig, tree) = close_rig(&format!("sweep-remote-stopped-launch-{progress}"));
+        stopped_orphan(&rig, &tree);
+        orphan(&rig, "i1", "w9:p1", "8103");
+        rig.peer();
+        super::close::unfinished_launch(&rig, "pending", &tree, "w2:p1");
+        if progress == "ambiguous" {
+            super::close::unfinished_launch(&rig, "competing", &tree, "w2:p1");
+        }
+        let episode = rig.read("state/watchdog.json")["stopped"]["i1"].clone();
+        // Forge stopped evidence at the owner. The real peer must check its own launch facts.
+        let mut remote = rig.read("remote.json");
+        remote["probe"]["agent_panes"][0] = json!({
+            "pane":"w2:p1","agent":"pi","state":"idle","done":false,
+            "agent_session":episode["agent_session"],"completion_seq":1,"state_change_seq":1,
+            "lifecycle":"stopped"
+        });
+        remote["probe"]["panes"] = json!([{"pane_id":"w2:p1"}]);
+        rig.put("remote.json", &remote);
+        rig.script(
+            "ssh",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+case "$*" in
+  *'host snapshot'*) cat "$RIG/remote.json" ;;
+  *'host tail agent w2:p1'*) printf '%s\n' '"Remote stopped reply"' ;;
+  *'host close w2:p1 --stopped-orphan'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    sh -c '{} host '"$remote" ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#,
+                env!("CARGO_BIN_EXE_dogsled")
+            ),
+        );
+        let journal = serve(&rig);
+        let log = rig.log("ssh.log");
+        assert!(
+            log.contains("host close w2:p1 --stopped-orphan"),
+            "{progress}: {journal}\n{log}"
+        );
+        assert!(tree.exists(), "{progress}: {journal}");
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("workspace close") && !log.contains("pane close"),
+            "{progress}: {log}"
+        );
+        assert!(
+            rig.read("state/items.json")[0]["closed_ms"].is_null(),
+            "{progress}: {journal}"
+        );
+        assert!(
+            !journal.contains("closed stopped orphan"),
+            "{progress}: {journal}"
+        );
+    }
+}
+
+#[test]
+fn sweep_keeps_stopped_looking_children_with_published_launch_progress() {
+    for (progress, state) in [("attempted", "starting"), ("ambiguous", "unknown")] {
+        let (rig, tree) = close_rig(&format!("sweep-published-launch-{progress}"));
+        stopped_orphan(&rig, &tree);
+        super::close::unfinished_launch(&rig, "pending", &tree, "w2:p1");
+        if progress == "ambiguous" {
+            super::close::unfinished_launch(&rig, "competing", &tree, "w2:p1");
+        }
+        let journal = serve(&rig);
+        let snapshot = rig.read("state/host.json");
+        let agent = snapshot["probe"]["agent_panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["pane"] == "w2:p1")
+            .unwrap();
+        assert_eq!(agent["launch_progress"], progress, "{journal}");
+        assert_eq!(agent["lifecycle"], state, "{journal}");
+        assert!(tree.exists(), "{journal}");
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("workspace close") && !log.contains("pane close"),
+            "{log}"
+        );
+        assert!(
+            rig.read("state/items.json")[0]["closed_ms"].is_null(),
+            "{journal}"
+        );
+    }
+}
+
+#[test]
 fn serve_closes_a_remote_stopped_orphan_with_explicit_correlated_permission() {
     let (rig, tree) = close_rig("sweep-stopped-remote");
     stopped_orphan(&rig, &tree);

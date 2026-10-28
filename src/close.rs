@@ -122,9 +122,10 @@ impl StoppedOrphan {
         ledger: &Ledger,
         pane: &str,
     ) -> Result<()> {
-        let mut agents = crate::probe::agent_list(shell)?;
-        crate::done::observe(ledger, &mut agents)?;
-        let agent = agents
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let probe = crate::node::observed_probe(ledger, shell, &home)?;
+        let agent = probe
+            .agent_panes
             .iter()
             .find(|agent| agent.pane == pane)
             .ok_or_else(|| refuse("stopped orphan agent disappeared"))?;
