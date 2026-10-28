@@ -93,6 +93,8 @@ pub enum Refusal {
     JobClockUnavailable,
     /// The peer does not speak the job validity protocol.
     JobValidityUnsupported,
+    /// The shared queue uses a schema newer than this binary can safely write.
+    QueueVersionUnsupported,
 }
 
 impl Refusal {
@@ -107,6 +109,7 @@ impl Refusal {
             Self::JobFromFuture => "JOB_FROM_FUTURE",
             Self::JobClockUnavailable => "JOB_CLOCK_UNAVAILABLE",
             Self::JobValidityUnsupported => "JOB_VALIDITY_UNSUPPORTED",
+            Self::QueueVersionUnsupported => "QUEUE_VERSION_UNSUPPORTED",
         }
     }
 
@@ -121,6 +124,7 @@ impl Refusal {
             Self::JobFromFuture,
             Self::JobClockUnavailable,
             Self::JobValidityUnsupported,
+            Self::QueueVersionUnsupported,
         ]
         .into_iter()
         .find(|r| r.code() == code)
@@ -145,6 +149,9 @@ impl Refusal {
             Self::JobClockUnavailable => "job validity clock is unavailable; new execution refused",
             Self::JobValidityUnsupported => {
                 "this host does not support job request validity (unsupported validity protocol); new execution refused"
+            }
+            Self::QueueVersionUnsupported => {
+                "queue format version is newer than this binary supports; write refused"
             }
         }
     }

@@ -11,6 +11,93 @@ use serde_json::json;
 
 mod reconcile;
 
+#[test]
+fn a_newer_queue_version_refuses_writes_without_changing_the_file() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let future = json!({"version": u32::MAX, "tickets": []});
+    ledger.write("queue.json", &future).unwrap();
+    let error = work::enqueue(
+        &ledger,
+        Request {
+            id: "future-queue".into(),
+            action: Action::Place,
+            host: None,
+            branch: None,
+            base: None,
+            cwd: "/".into(),
+            repository: None,
+            workspace: None,
+            workspace_name: None,
+            owner: "owner".into(),
+            owner_host: None,
+        },
+        false,
+        100,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            crate::error::Error::Refused {
+                code: crate::error::Refusal::QueueVersionUnsupported,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert_eq!(
+        ledger.read::<serde_json::Value>("queue.json").unwrap(),
+        Some(future)
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let created = crate::ledger::now_ms();
+    for id in ["terminal", "pending"] {
+        let mut request = place_request(id);
+        request.action = Action::Job {
+            cmd: vec!["true".into()],
+            timeout_ms: None,
+            idle_timeout_ms: None,
+            validity: Some(crate::jobs::Validity::new(created)),
+        };
+        let ticket = work::enqueue(&ledger, request, false, created).unwrap();
+        if id == "terminal" {
+            work::cancel(&ledger, &ticket).unwrap();
+        }
+    }
+    let orphan = crate::jobs::Validity::new(created);
+    crate::jobs::record_request_validity(&ledger, "orphan", Some(orphan)).unwrap();
+    work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS).unwrap();
+    assert_eq!(work::queue(&ledger).unwrap().len(), 2);
+    assert!(
+        crate::jobs::request_validity(&ledger, "terminal")
+            .unwrap()
+            .is_some()
+    );
+    work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
+    assert_eq!(work::queue(&ledger).unwrap().len(), 1);
+    assert!(
+        crate::jobs::request_validity(&ledger, "terminal")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        crate::jobs::request_validity(&ledger, "pending")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        crate::jobs::request_validity(&ledger, "orphan")
+            .unwrap()
+            .is_none()
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
 fn service(ledger: &Ledger) -> std::fs::File {
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let lock = std::fs::OpenOptions::new()

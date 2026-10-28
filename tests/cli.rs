@@ -780,7 +780,13 @@ esac
         );
     }
     fn read(&self, path: &str) -> Value {
-        serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap()
+        let mut value: Value =
+            serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap();
+        // Scenario tests inspect tickets, independently of the on-disk queue envelope.
+        if path == "state/queue.json" && value.is_object() {
+            value = value["tickets"].take();
+        }
+        value
     }
     /// A job claim that a wrapper may run: the command, the options, and a pane.
     /// A wrapper runs only from a claim like this one.

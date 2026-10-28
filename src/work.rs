@@ -98,8 +98,109 @@ pub struct Ticket {
     pub retry: crate::backoff::Backoff,
 }
 
+const QUEUE_VERSION: u64 = 1;
+
+#[derive(Deserialize)]
+struct QueueEnvelope {
+    version: u64,
+    #[serde(default)]
+    tickets: Value,
+}
+
+/// Legacy arrays are version zero. Check the envelope before decoding any tickets, so
+/// a future schema cannot lose fields through this binary's older types.
+pub(crate) fn queue_records(ledger: &Ledger) -> Result<Vec<Value>> {
+    let Some(value) = ledger.read::<Value>("queue.json")? else {
+        return Ok(Vec::new());
+    };
+    if value.is_array() {
+        return Ok(serde_json::from_value(value)?);
+    }
+    let envelope: QueueEnvelope = serde_json::from_value(value)?;
+    if envelope.version > QUEUE_VERSION {
+        return Err(Error::Refused {
+            code: crate::error::Refusal::QueueVersionUnsupported,
+            detail: format!(
+                "queue format version {} is newer than supported version {QUEUE_VERSION}; write refused",
+                envelope.version
+            ),
+        });
+    }
+    Ok(serde_json::from_value(envelope.tickets)?)
+}
+
+fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
+    // Every caller holds the queue lock. Recheck at the write boundary as well.
+    queue_records(ledger)?;
+    ledger.write(
+        "queue.json",
+        &json!({"version":QUEUE_VERSION,"tickets":tickets}),
+    )
+}
+
+/// Terminal tickets and their sidecars share the 30-day record window. Pending
+/// tickets and active/uncertain jobs never expire. Orphan sidecars from an interrupted
+/// publication are also collected, so a crash before queue publication leaks nothing.
+pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
+    ledger.with_lock("queue", || {
+        let mut tickets = queue(ledger)?;
+        let mut expired = Vec::new();
+        for ticket in &tickets {
+            if matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
+                && now.saturating_sub(ticket.created_ms) > jobs::RECORD_KEEP_MS
+                && jobs::record(ledger, &ticket.request.id)?
+                    .is_none_or(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
+            {
+                expired.push(ticket.id.clone());
+            }
+        }
+        if !expired.is_empty() {
+            tickets.retain(|t| !expired.contains(&t.id));
+            save_queue(ledger, &tickets)?;
+        }
+        let sidecars = ledger.child("job-validity");
+        let entries = match std::fs::read_dir(&sidecars.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if tickets.iter().any(|t| t.request.id == id) {
+                continue;
+            }
+            sidecars.with_lock(id, || {
+                let Some(validity) = jobs::request_validity(ledger, id)? else {
+                    return Ok(());
+                };
+                if now.saturating_sub(validity.created_ms) > jobs::RECORD_KEEP_MS
+                    && jobs::record(ledger, id)?
+                        .is_none_or(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
+                {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => (),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })
+}
+
 pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
-    let mut tickets: Vec<Ticket> = ledger.read("queue.json")?.unwrap_or_default();
+    let mut tickets: Vec<Ticket> = queue_records(ledger)?
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<_, _>>()?;
     for ticket in &mut tickets {
         if ticket
             .waiting_until_ms
@@ -111,21 +212,36 @@ pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
     Ok(tickets)
 }
 
-/// A job request's own validity evidence. A request that is not a job has no age to
-/// check: agents and prepared units are unchanged by this rule.
-fn request_validity(request: &Request) -> Option<&crate::jobs::Validity> {
-    match &request.action {
-        Action::Job { validity, .. } => validity.as_ref(),
-        _ => None,
+/// Inline evidence is transport only. After ingress, the immutable sidecar is the
+/// authority, even when an older queue writer strips or changes the inline copy.
+fn request_validity(ledger: &Ledger, request: &Request) -> Result<Option<jobs::Validity>> {
+    if matches!(request.action, Action::Job { .. }) {
+        jobs::request_validity(ledger, &request.id)
+    } else {
+        Ok(None)
     }
 }
 
-/// The validity evidence a launch carries in its own action.
-fn launch_validity(launch: &Launch) -> Option<crate::jobs::Validity> {
-    match &launch.action {
-        Action::Job { validity, .. } => *validity,
-        _ => None,
+fn launch_validity(ledger: &Ledger, launch: &Launch) -> Result<Option<jobs::Validity>> {
+    if matches!(launch.action, Action::Job { .. }) {
+        jobs::request_validity(ledger, &launch.id)
+    } else {
+        Ok(None)
     }
+}
+
+fn record_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
+    if let Action::Job { validity, .. } = &request.action
+        && !queue_records(ledger)?
+            .iter()
+            .any(|t| t["request"]["id"] == request.id)
+    {
+        if jobs::request_validity(ledger, &request.id)?.is_none() {
+            jobs::check_validity(ledger, validity.as_ref())?;
+        }
+        jobs::record_request_validity(ledger, &request.id, *validity)?;
+    }
+    Ok(())
 }
 
 /// Check a request against this host's clock. A request that may not start new execution
@@ -134,17 +250,25 @@ fn check_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
     if !matches!(request.action, Action::Job { .. }) {
         return Ok(());
     }
-    crate::jobs::check_validity(ledger, request_validity(request))
+    crate::jobs::check_validity(ledger, request_validity(ledger, request)?.as_ref())
 }
 
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
     ledger.with_lock("queue", || {
-        // A request that may not start new execution never enters the queue. The refusal
-        // is recorded on the clock, and the queue stays as it was.
-        check_request_validity(ledger, &request)?;
+        jobs::validate_id(&request.id)?;
         let mut tickets = queue(ledger)?;
+        if !tickets.iter().any(|t| t.request.id == request.id) {
+            // Publish the atomic sidecar before the ticket becomes visible. Existing
+            // tickets never recover missing evidence from their inline copy.
+            record_request_validity(ledger, &request)?;
+        }
+        check_request_validity(ledger, &request)?;
         if let Some(ticket) = tickets.iter_mut().find(|t| t.request.id == request.id) {
-            if serde_json::to_value(&ticket.request)? != serde_json::to_value(&request)? {
+            let mut queued = ticket.request.clone();
+            if let Action::Job { validity, .. } = &mut queued.action {
+                *validity = jobs::request_validity(ledger, &queued.id)?;
+            }
+            if serde_json::to_value(&queued)? != serde_json::to_value(&request)? {
                 return Err(crate::unit_transport::conflict("queued request changed"));
             }
             let id = ticket.id.clone();
@@ -152,7 +276,7 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             if waiting && !ticket.waiting {
                 ticket.waiting = true;
                 ticket.waiting_until_ms = waiting_until(ledger, now);
-                ledger.write("queue.json", &tickets)?;
+                save_queue(ledger, &tickets)?;
             }
             return Ok(id);
         }
@@ -171,7 +295,7 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             diagnostic: None,
             retry: crate::backoff::Backoff::default(),
         });
-        ledger.write("queue.json", &tickets)?;
+        save_queue(ledger, &tickets)?;
         Ok(id)
     })
 }
@@ -242,7 +366,7 @@ pub fn cancel(ledger: &Ledger, id: &str) -> Result<()> {
             return Err(Error::Invalid(format!("ticket {id} is {}", ticket.state)));
         }
         ticket.state = "cancelled".into();
-        ledger.write("queue.json", &tickets)
+        save_queue(ledger, &tickets)
     })
 }
 
@@ -392,20 +516,21 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
 /// dispatched, so the receipt alone proves which job it belongs to. The job record keeps
 /// the same facts, and the prune removes that record.
 fn request_evidence(
+    ledger: &Ledger,
     launch: &Launch,
     cmd: &[String],
     timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
-) -> Value {
+) -> Result<Value> {
     let mut evidence = json!({"cmd":cmd,"cwd":launch.cwd,"owner":launch.owner,
         "timeout_ms":timeout_ms,"idle_timeout_ms":idle_timeout_ms});
     // The validity evidence joins the receipt only when the request carries it. A legacy
     // receipt keeps its own shape, and a new request never correlates to a receipt that
     // names no request time.
-    if let Some(validity) = launch_validity(launch) {
+    if let Some(validity) = launch_validity(ledger, launch)? {
         evidence["validity"] = json!(validity);
     }
-    evidence
+    Ok(evidence)
 }
 
 /// The saved receipt of a job launch must name this request and the command it dispatched.
@@ -438,7 +563,7 @@ pub(crate) fn correlate(
     }
     // The receipt's own evidence is the first check. A receipt that names another command
     // or another request dispatched another job, whether or not its job record remains.
-    let evidence = request_evidence(launch, cmd, timeout_ms, idle_timeout_ms);
+    let evidence = request_evidence(ledger, launch, cmd, timeout_ms, idle_timeout_ms)?;
     if let Some(request) = saved.get("request")
         && *request != evidence
     {
@@ -491,7 +616,7 @@ pub(crate) fn correlate(
         || job.owner != launch.owner
         || job.timeout_ms != timeout_ms
         || job.idle_timeout_ms != idle_timeout_ms
-        || job.validity != launch_validity(launch)
+        || job.validity != launch_validity(ledger, launch)?
     {
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another command or request",
@@ -526,7 +651,7 @@ fn launch_job(
         ended_ms: None,
         timeout_ms,
         idle_timeout_ms,
-        validity: launch_validity(launch),
+        validity: launch_validity(ledger, launch)?,
         output_expired: false,
     };
     // The job's ownership is read before any pane side effect. A job that already
@@ -604,7 +729,35 @@ fn launch_job(
     // snapshot sampled before it may predate the pane, so it cannot prove the pane gone.
     Ok(json!({"id":launch.id,"host":launch.host,"pane":pane,
         "launch_confirmed_ms":crate::ledger::now_ms(),
-        "request":request_evidence(launch, cmd, timeout_ms, idle_timeout_ms)}))
+        "request":request_evidence(ledger, launch, cmd, timeout_ms, idle_timeout_ms)?}))
+}
+
+/// Transport ingress records evidence before the execution path reads it. Internal
+/// launches do not reconstitute a missing sidecar from a rewritten queue action.
+pub fn receive_launch(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    launch: &Launch,
+    now: u64,
+    peer_validity: Option<u32>,
+) -> Result<Value> {
+    if let Action::Job { validity, .. } = &launch.action
+        && peer_validity == Some(jobs::VALIDITY_PROTOCOL_VERSION)
+        && !queue_records(ledger)?
+            .iter()
+            .any(|t| t["request"]["id"] == launch.id)
+    {
+        if jobs::request_validity(ledger, &launch.id)?.is_none()
+            && ledger
+                .child("launches")
+                .read::<Value>(&format!("{}.json", launch.id))?
+                .is_none()
+        {
+            jobs::check_validity(ledger, validity.as_ref())?;
+        }
+        jobs::record_request_validity(ledger, &launch.id, *validity)?;
+    }
+    self::launch(ledger, shell, launch, now, peer_validity)
 }
 
 pub fn launch(
@@ -658,8 +811,8 @@ pub fn launch(
         }
         // New execution checks the request's age before it claims anything, allocates a
         // pane, or dispatches the command.
-        if let Action::Job { validity, .. } = &launch.action {
-            jobs::check_validity(ledger, validity.as_ref())?;
+        if matches!(launch.action, Action::Job { .. }) {
+            jobs::check_validity(ledger, launch_validity(ledger, launch)?.as_ref())?;
         }
         let result = match &launch.action {
             Action::Job {
@@ -803,6 +956,7 @@ pub fn agent_args(
 /// it; otherwise the caller enqueues it, and admission serves the queue in order. `None` means
 /// queue it.
 pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    record_request_validity(fleet.ledger, request)?;
     if waits_behind(fleet, request)? {
         return Ok(None);
     }
@@ -905,6 +1059,11 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
     // Admission checks the request's age before it places, prepares, or dispatches
     // anything. A request that may not start new execution is refused here.
     check_request_validity(fleet.ledger, request)?;
+    let mut request = request.clone();
+    if let Action::Job { validity, .. } = &mut request.action {
+        *validity = jobs::request_validity(fleet.ledger, &request.id)?;
+    }
+    let request = &request;
     let attempts = fleet.ledger.child("admissions");
     let file = format!("{}.json", request.id);
     if let Some(mut attempt) = attempts.read::<Attempt>(&file)? {
@@ -1032,7 +1191,7 @@ fn begin(
 }
 
 fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
-    let validity = request_validity(request).copied();
+    let validity = request_validity(fleet.ledger, request)?;
     let placed =
         commands::place_with(fleet, host, &request.id, now, validity).map_err(prelaunch_error)?;
     if let Placement::Full { hosts, .. } = &placed {
@@ -1102,10 +1261,14 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
         .and_then(|a| a.unit)
         .and_then(|u| u.committed)
         .map(crate::unit_transport::Seed::from);
+    let mut action = request.action.clone();
+    if let Action::Job { validity, .. } = &mut action {
+        *validity = jobs::request_validity(fleet.ledger, &request.id)?;
+    }
     Ok(Launch {
         id: request.id.clone(),
         unit,
-        action: request.action.clone(),
+        action,
         host: host.id.clone(),
         cwd,
         pane: if matches!(request.action, Action::Agent { .. } | Action::Place) {
@@ -1273,7 +1436,7 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
             .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))?;
         update(ticket);
         let result = ticket.clone();
-        ledger.write("queue.json", &tickets)?;
+        save_queue(ledger, &tickets)?;
         Ok(result)
     })
 }

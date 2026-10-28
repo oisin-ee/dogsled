@@ -39,6 +39,94 @@ fn request_at(rig: &Rig, created_ms: u64) -> Value {
     })
 }
 
+/// Queue a job while capacity is unavailable, then imitate a pre-validity writer.
+fn stripped_queued_job(rig: &Rig, remote: bool) -> String {
+    let now = clock(rig);
+    set_clock(rig, now);
+    rig.config("free_core_fraction_min = 2\n");
+    rig.snapshot("state/host.json", now, 0.0, 8);
+    if remote {
+        rig.peer();
+        let mut snapshot = rig.read("remote.json");
+        snapshot["job_validity"] = json!(1);
+        rig.put("remote.json", &snapshot);
+    }
+    let args = if remote {
+        vec!["run", "--host", "netcup", "--", "true"]
+    } else {
+        vec!["run", "--", "true"]
+    };
+    let (code, result) = rig.json(&args);
+    assert_eq!(code, 1, "{result}");
+    let mut tickets = rig.read("state/queue.json");
+    let id = tickets[0]["request"]["id"].as_str().unwrap().to_owned();
+    tickets[0]["request"]["action"]
+        .as_object_mut()
+        .unwrap()
+        .remove("validity");
+    // An old binary writes its original array, losing all unknown action fields.
+    rig.put("state/queue.json", &tickets);
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    id
+}
+
+#[test]
+fn an_old_queue_writer_cannot_erase_job_validity() {
+    let rig = Rig::new("validity-old-queue-writer");
+    let id = stripped_queued_job(&rig, false);
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    let tickets = rig.read("state/queue.json");
+    assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
+    let job = rig.read(&format!("state/jobs/{id}.json"));
+    assert_eq!(job["validity"], rig.job_validity());
+}
+
+#[test]
+fn a_queued_job_without_its_sidecar_refuses_even_with_inline_validity() {
+    let rig = Rig::new("validity-missing-sidecar");
+    let id = stripped_queued_job(&rig, false);
+    let mut tickets = rig.read("state/queue.json");
+    tickets[0]["request"]["action"]["validity"] = rig.job_validity();
+    rig.put("state/queue.json", &tickets);
+    let sidecar = rig.dir.join(format!("state/job-validity/{id}.json"));
+    if sidecar.exists() {
+        fs::remove_file(sidecar).unwrap();
+    }
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    let tickets = rig.read("state/queue.json");
+    assert_eq!(tickets[0]["state"], "failed", "{tickets}");
+    assert!(
+        tickets[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("validity is unprovable")
+    );
+    assert!(!rig.dir.join(format!("state/jobs/{id}.json")).exists());
+    assert!(!rig.log("herdr.log").contains("pane run"));
+}
+
+#[test]
+fn remote_dispatch_forwards_sidecar_validity_after_an_old_queue_rewrite() {
+    let rig = Rig::new("validity-remote-sidecar");
+    let id = stripped_queued_job(&rig, true);
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let remote = format!(
+        r#"case "$*" in
+  *'host launch'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    rig.script("ssh", &script.replace("case \"$*\" in", &remote));
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    let tickets = rig.read("state/queue.json");
+    assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
+    let job = rig.read(&format!("peer-state/jobs/{id}.json"));
+    assert_eq!(job["validity"], rig.job_validity());
+    assert!(rig.log("ssh.log").contains("--job-validity"));
+}
+
 /// The error code the CLI reports for a refusal.
 fn refusal_code(error: &Value) -> String {
     error["code"].as_str().unwrap_or_default().to_owned()
