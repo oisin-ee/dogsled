@@ -157,18 +157,19 @@ fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
     ledger.write("queue.json", &tickets)
 }
 
-/// Terminal tickets and their sidecars share the 30-day record window. Pending
-/// tickets and active/uncertain jobs never expire. Orphan sidecars from an interrupted
-/// publication are also collected, so a crash before queue publication leaks nothing.
+/// Job tickets expire only with a conclusively terminal local job record. Missing
+/// execution evidence and non-job tickets are kept. Orphan sidecars expire only
+/// without a ticket, job record, or launch receipt.
 pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
     ledger.with_lock("queue", || {
         let mut tickets = queue(ledger)?;
         let mut expired = Vec::new();
         for ticket in &tickets {
-            if matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
+            if matches!(ticket.request.action, Action::Job { .. })
+                && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
                 && now.saturating_sub(ticket.created_ms) > jobs::RECORD_KEEP_MS
                 && jobs::record(ledger, &ticket.request.id)?
-                    .is_none_or(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
+                    .is_some_and(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
             {
                 expired.push(ticket.id.clone());
             }
@@ -191,7 +192,12 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if tickets.iter().any(|t| t.request.id == id) {
+            if tickets.iter().any(|t| t.request.id == id)
+                || ledger
+                    .child("launches")
+                    .read::<Value>(&format!("{id}.json"))?
+                    .is_some()
+            {
                 continue;
             }
             sidecars.with_lock(id, || {
@@ -766,15 +772,23 @@ pub fn receive_launch(
             .iter()
             .any(|t| t["request"]["id"] == launch.id)
     {
-        if jobs::request_validity(ledger, &launch.id)?.is_none()
-            && ledger
+        match jobs::request_validity(ledger, &launch.id)? {
+            Some(saved) if validity.is_some_and(|incoming| saved != incoming) => {
+                return Err(Error::Invalid(format!(
+                    "job {} request validity changed",
+                    launch.id
+                )));
+            }
+            None if ledger
                 .child("launches")
                 .read::<Value>(&format!("{}.json", launch.id))?
-                .is_none()
-        {
-            jobs::check_validity(ledger, validity.as_ref())?;
+                .is_none() =>
+            {
+                jobs::check_validity(ledger, validity.as_ref())?;
+                jobs::record_request_validity(ledger, &launch.id, *validity)?;
+            }
+            _ => (),
         }
-        jobs::record_request_validity(ledger, &launch.id, *validity)?;
     }
     self::launch(ledger, shell, launch, now, peer_validity)
 }

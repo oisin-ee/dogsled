@@ -146,6 +146,20 @@ fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
             work::cancel(&ledger, &ticket).unwrap();
         }
     }
+    // Cancellation alone proves no terminal job outcome. This local record does.
+    ledger
+        .child("jobs")
+        .write(
+            "terminal.json",
+            &json!({
+                "id":"terminal", "cmd":["true"], "cwd":"/", "host":"local",
+                "owner":"owner", "pane":"pane", "state":"idle", "exit":0,
+                "signal":null, "reason":null, "started_ms":created, "ended_ms":created,
+                "timeout_ms":null, "idle_timeout_ms":null,
+                "validity":{"version":1,"created_ms":created}, "output_expired":false
+            }),
+        )
+        .unwrap();
     let orphan = crate::jobs::Validity::new(created);
     crate::jobs::record_request_validity(&ledger, "orphan", Some(orphan)).unwrap();
     work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS).unwrap();
@@ -171,6 +185,132 @@ fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
         crate::jobs::request_validity(&ledger, "orphan")
             .unwrap()
             .is_none()
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn request_expiry_keeps_failed_lost_replies_and_non_job_tickets() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let created = crate::ledger::now_ms();
+    for id in ["lost-reply", "cancelled", "placed", "agent"] {
+        let mut request = place_request(id);
+        if matches!(id, "lost-reply" | "cancelled") {
+            request.action = Action::Job {
+                cmd: vec!["true".into()],
+                timeout_ms: None,
+                idle_timeout_ms: None,
+                validity: Some(crate::jobs::Validity::new(created)),
+            };
+        } else if id == "agent" {
+            request.action = Action::Agent {
+                kind: "pi".into(),
+                name: "agent".into(),
+                message: "task".into(),
+                profile: None,
+            };
+        }
+        work::enqueue(&ledger, request, false, created).unwrap();
+    }
+    let mut tickets = work::queue(&ledger).unwrap();
+    tickets[0].state = "failed".into();
+    tickets[0].retry.attempts = 3;
+    tickets[0].error = Some("remote launch reply lost".into());
+    tickets[1].state = "cancelled".into();
+    tickets[2].state = "admitted".into();
+    tickets[3].state = "admitted".into();
+    ledger.write("queue.json", &tickets).unwrap();
+    work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
+    assert_eq!(work::queue(&ledger).unwrap().len(), 4);
+    for id in ["lost-reply", "cancelled"] {
+        assert!(crate::jobs::record(&ledger, id).unwrap().is_none());
+        assert!(
+            crate::jobs::request_validity(&ledger, id)
+                .unwrap()
+                .is_some()
+        );
+    }
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn orphan_request_sidecars_expire_only_without_launch_receipts() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let created = crate::ledger::now_ms();
+    for id in ["orphan", "receipt"] {
+        crate::jobs::record_request_validity(
+            &ledger,
+            id,
+            Some(crate::jobs::Validity::new(created)),
+        )
+        .unwrap();
+    }
+    ledger
+        .child("launches")
+        .write("receipt.json", &json!({"id":"receipt"}))
+        .unwrap();
+    work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
+    assert!(
+        crate::jobs::request_validity(&ledger, "orphan")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        crate::jobs::request_validity(&ledger, "receipt")
+            .unwrap()
+            .is_some()
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let now = crate::ledger::now_ms();
+    let shell = Fake::new();
+    let launch = work::Launch {
+        id: "receipted".into(),
+        unit: None,
+        action: Action::Job {
+            cmd: vec!["true".into()],
+            timeout_ms: None,
+            idle_timeout_ms: None,
+            validity: Some(crate::jobs::Validity::new(now)),
+        },
+        host: "local".into(),
+        cwd: "/work".into(),
+        pane: None,
+        terminal: None,
+        workspace: None,
+        workspace_name: None,
+        owner: "owner".into(),
+        owner_host: None,
+    };
+    let saved = json!({
+        "id":"receipted", "host":"local", "pane":"pane",
+        "request":{"cmd":["true"], "cwd":"/work", "owner":"owner",
+            "timeout_ms":null, "idle_timeout_ms":null,
+            "validity":{"version":1,"created_ms":now}}
+    });
+    ledger
+        .child("launches")
+        .write("receipted.json", &saved)
+        .unwrap();
+    let result = work::receive_launch(&ledger, &shell, &launch, now, Some(1));
+    assert!(
+        crate::jobs::request_validity(&ledger, "receipted")
+            .unwrap()
+            .is_none()
+    );
+    assert!(result.is_err(), "missing authority refuses: {result:?}");
+    assert!(crate::jobs::record(&ledger, "receipted").unwrap().is_none());
+    assert!(shell.calls.lock().unwrap().is_empty());
+    assert_eq!(
+        ledger
+            .child("launches")
+            .read::<serde_json::Value>("receipted.json")
+            .unwrap(),
+        Some(saved)
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }

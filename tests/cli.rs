@@ -643,6 +643,23 @@ esac
         }
     }
     fn put(&self, path: &str, value: &Value) {
+        // Production publishes request authority before either a job or its receipt.
+        // A fixture for either record must include that earlier publication too.
+        let validity = if path.starts_with("state/jobs/") {
+            value.get("validity")
+        } else if path.starts_with("state/launches/") {
+            value.pointer("/request/validity")
+        } else {
+            None
+        };
+        if let Some(validity) = validity.filter(|v| !v.is_null()) {
+            let sidecars = self.dir.join("state/job-validity");
+            fs::create_dir_all(&sidecars).unwrap();
+            let sidecar = sidecars.join(Path::new(path).file_name().unwrap());
+            if !sidecar.exists() {
+                fs::write(sidecar, serde_json::to_vec_pretty(validity).unwrap()).unwrap();
+            }
+        }
         if path == "state/host.json" {
             self.service();
         }

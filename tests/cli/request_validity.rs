@@ -83,7 +83,10 @@ fn an_old_queue_writer_cannot_erase_job_validity() {
     let tickets = rig.read("state/queue.json");
     assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
     let job = rig.read(&format!("state/jobs/{id}.json"));
-    assert_eq!(job["validity"], rig.job_validity());
+    assert_eq!(
+        job["validity"],
+        rig.read(&format!("state/job-validity/{id}.json"))
+    );
 }
 
 #[test]
@@ -128,7 +131,10 @@ fn remote_dispatch_forwards_sidecar_validity_after_an_old_queue_rewrite() {
     let tickets = rig.read("state/queue.json");
     assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
     let job = rig.read(&format!("peer-state/jobs/{id}.json"));
-    assert_eq!(job["validity"], rig.job_validity());
+    assert_eq!(
+        job["validity"],
+        rig.read(&format!("state/job-validity/{id}.json"))
+    );
     assert!(rig.log("ssh.log").contains("--job-validity"));
 }
 
