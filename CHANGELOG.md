@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.27.0 - 2026-10-28
 
 - `dogsled claim <item> [--revision N]` takes custody of an orphaned child on its recording host. Claims use the live caller identity and preserve the original owner. Repeated claims by the custodian are harmless.
 - `dogsled accept <item> --result <id> --evidence <text>` records a review of the exact returned result after a custody claim. The original task stays open. MCP exposes both commands. Pi records successful receipts as `dogsled.custody.v1` audit entries without changes to task state.

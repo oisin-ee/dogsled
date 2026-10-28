@@ -56,15 +56,31 @@ impl State {
     }
 }
 
-/// A typed turn signal. The signal units record these; this slice always passes `None`,
-/// so the derivation already accepts them and no consumer can derive its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+/// A typed turn signal recorded by the child host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Signal {
     /// The agent asked its owner a question.
     Ask,
     /// The agent reported that it cannot continue.
     Blocked,
+}
+
+impl Signal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    fn of_agent(agent: &Agent) -> Option<Self> {
+        match agent.signal.as_deref() {
+            Some("ask") => Some(Self::Ask),
+            Some("blocked") => Some(Self::Blocked),
+            _ => None,
+        }
+    }
 }
 
 /// Where the native `done` handoff stands.
@@ -263,6 +279,7 @@ pub fn of_agent(agent: &Agent, host: Host) -> Derived {
         host,
         terminal: Some(agent.state.as_str()),
         handoff: handoff(agent),
+        signal: Signal::of_agent(agent),
         owns_open: agent.owns_open,
         launch: agent_launch(agent),
         pane: Pane::Present,
@@ -369,6 +386,7 @@ pub fn evidence<'a>(
             None if recorded_handoff(item, report) => Handoff::Recorded,
             None => Handoff::None,
         },
+        signal: agent.and_then(Signal::of_agent),
         owns_open: agent.is_some_and(|a| a.owns_open),
         launch,
         pane,
@@ -428,6 +446,18 @@ mod tests {
 
     fn state(e: &Evidence) -> State {
         classify(e).state
+    }
+
+    #[test]
+    fn published_agent_signals_feed_both_lifecycle_projections() {
+        for (kind, state) in [("ask", State::Asking), ("blocked", State::Blocked)] {
+            let mut child = agent("w2:p1", "idle");
+            child.signal = Some(kind.into());
+            publish(&mut child, Host::Up);
+            assert_eq!(of_agent(&child, Host::Up).state, state);
+            let (item, hosts) = host_with(child);
+            assert_eq!(classify(&evidence(&item, &hosts).0).state, state);
+        }
     }
 
     #[test]
@@ -728,6 +758,8 @@ mod tests {
             after: Some(10),
             sealed: Some(0),
             marked_ms: 1,
+            done_turn: None,
+            signal: None,
             branch: None,
             detached: false,
             reply: Some(crate::items::Reply {
@@ -796,6 +828,8 @@ mod tests {
             after: Some(10),
             sealed: Some(0),
             marked_ms: 1,
+            done_turn: None,
+            signal: None,
             branch: None,
             detached: false,
             reply: Some(crate::items::Reply {
