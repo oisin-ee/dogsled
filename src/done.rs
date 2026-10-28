@@ -56,6 +56,8 @@ pub struct Mark {
     pub native_done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_ms: Option<u64>,
 }
 
 type Marks = BTreeMap<String, Mark>;
@@ -289,6 +291,7 @@ pub fn mark(
         reply: None,
         native_done: false,
         closed_ms: None,
+        dropped_ms: None,
     };
     ledger.with_lock("done", || {
         let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
@@ -382,7 +385,7 @@ fn preflight(shell: &dyn crate::shell::Shell, agent: &Agent) -> Result<Preflight
     Ok(Preflight::Branch(branch))
 }
 
-fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> Result<()> {
+pub fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> Result<()> {
     let mut tip = None;
     for reference in [
         format!("refs/heads/{}", branch.name),
@@ -456,6 +459,28 @@ pub fn list(ledger: &Ledger) -> Result<Vec<Mark>> {
         .collect())
 }
 
+/// Keep explicit branch disposal even when the origin is on another host.
+pub fn dropped(ledger: &Ledger, item: &crate::items::Item, now: u64) -> Result<()> {
+    ledger.with_lock("done", || {
+        let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+        for mark in marks.values_mut().filter(|m| {
+            m.pane == item.pane
+                && m.item.as_deref().is_none_or(|id| id == item.id)
+                && m.branch
+                    .as_ref()
+                    .zip(item.branch.as_ref())
+                    .is_some_and(|(a, b)| a.repo == b.repo && a.name == b.name)
+        }) {
+            mark.dropped_ms.get_or_insert(now);
+            if let Some(branch) = &mut mark.branch {
+                branch.landed = true;
+                branch.ahead = 0;
+            }
+        }
+        ledger.write(FILE, &marks)
+    })
+}
+
 fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
     ledger.with_lock("done", || {
         let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
@@ -466,6 +491,10 @@ fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
             // with an older unsealed observation from the start of this handoff pass.
             updated.sealed = entry.get().sealed.or(updated.sealed);
             updated.closed_ms = entry.get().closed_ms.or(updated.closed_ms);
+            updated.dropped_ms = entry.get().dropped_ms.or(updated.dropped_ms);
+            if updated.dropped_ms.is_some() {
+                updated.branch.clone_from(&entry.get().branch);
+            }
             entry.insert(updated);
             ledger.write(FILE, &marks)?;
         }
@@ -628,6 +657,9 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
     let mut agents = crate::probe::agent_list(shell)?;
     observe(ledger, &mut agents)?;
     for mut mark in list(ledger)? {
+        if mark.dropped_ms.is_some() {
+            continue;
+        }
         if let Some(branch) = &mut mark.branch
             && !(mark.closed_ms.is_some() && branch.landed)
         {

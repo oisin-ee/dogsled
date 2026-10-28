@@ -7,6 +7,8 @@ mod close;
 mod context;
 #[path = "cli/done.rs"]
 mod done;
+#[path = "cli/drop.rs"]
+mod drop;
 #[path = "cli/inbox.rs"]
 mod inbox;
 #[path = "cli/jobs.rs"]

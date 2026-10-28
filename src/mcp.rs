@@ -146,6 +146,14 @@ pub struct CloseArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct DropArgs {
+    /// The closed agent item id.
+    pub id: String,
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct Id {
     pub id: String,
 }
@@ -334,6 +342,21 @@ impl Server {
         self.call(move |fleet| {
             let (closed, _) = crate::runtime::close(fleet, &args.pane, args.host.as_deref())?;
             Ok(serde_json::to_value(closed)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Discard a closed child's retained local and origin branch. Only the item's owner can drop it. Refuses a branch checked out in a worktree.",
+        annotations(destructive_hint = true)
+    )]
+    async fn drop(&self, Parameters(args): Parameters<DropArgs>) -> Result<String, String> {
+        self.call(move |fleet| {
+            Ok(serde_json::to_value(crate::drop::drop(
+                fleet,
+                &args.id,
+                args.host.as_deref(),
+            )?)?)
         })
         .await
     }

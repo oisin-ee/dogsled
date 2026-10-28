@@ -797,7 +797,8 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
         .iter()
         .filter(|i| {
             mine(&i.owner_pane)
-                && (i.closed_ms.is_none() || i.branch.as_ref().is_some_and(|b| !b.landed))
+                && (i.closed_ms.is_none()
+                    || (i.dropped_ms.is_none() && i.branch.as_ref().is_some_and(|b| !b.landed)))
         })
         .map(|i| {
             if i.kind == "job" {
@@ -1759,6 +1760,37 @@ mod tests {
             orphans: Vec::new(),
             sweep: None,
         }
+    }
+
+    #[test]
+    fn only_a_closed_item_leaves_the_board_once_its_branch_is_landed_or_dropped() {
+        let branch = |landed: bool| crate::done::Branch {
+            repo: "/repo".into(),
+            name: "feat/x".into(),
+            ahead: u64::from(!landed),
+            landed,
+        };
+        let closed = |id: &str, landed, dropped_ms| Item {
+            closed_ms: Some(NOW - 1),
+            dropped_ms,
+            branch: Some(branch(landed)),
+            ..item(id, "8103", id)
+        };
+        let status = status(
+            vec![host("8103", "netcup", vec![agent("open", "pi", "idle")])],
+            vec![
+                Item {
+                    branch: Some(branch(true)),
+                    ..item("open", "8103", "open")
+                },
+                closed("retained", false, None),
+                closed("landed", true, None),
+                closed("dropped", false, Some(NOW - 1)),
+            ],
+        );
+        let board = build(&status, Some("w1:p1"), NOW);
+        let names: Vec<_> = board.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["retained", "open"]);
     }
 
     #[test]

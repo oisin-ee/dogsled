@@ -22,6 +22,11 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_confirmed_ms: Option<u64>,
     pub closed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_ms: Option<u64>,
+    /// Last successful missing-mark branch check on the origin clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_checked_ms: Option<u64>,
     /// What was asked for. Records from before these fields load with `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
@@ -168,6 +173,46 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
     })
 }
 
+/// Settle an explicitly discarded branch on the origin.
+pub fn dropped(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
+    change(ledger, |items| {
+        if let Some(item) = items.iter_mut().find(|i| i.id == id) {
+            item.dropped_ms.get_or_insert(now);
+            if let Some(branch) = &mut item.branch {
+                branch.landed = true;
+                branch.ahead = 0;
+            }
+        }
+    })
+}
+
+/// Import one successful batch without replacing a newer or different branch observation.
+pub fn checked(
+    ledger: &Ledger,
+    host: &str,
+    checked: &[crate::drop::Checked],
+    now: u64,
+) -> Result<()> {
+    change(ledger, |items| {
+        for check in checked {
+            if let Some(item) = items
+                .iter_mut()
+                .find(|i| i.id == check.item && i.host == host)
+                && item.closed_ms.is_some()
+                && item.dropped_ms.is_none()
+                && let Some(branch) = &mut item.branch
+                && branch.repo == check.branch.repo
+                && branch.name == check.branch.name
+                && !branch.landed
+                && item.branch_checked_ms.is_none_or(|t| t <= now)
+            {
+                branch.clone_from(&check.branch);
+                item.branch_checked_ms = Some(now);
+            }
+        }
+    })
+}
+
 /// Import durable child-host handoffs, including after pane closure or owner downtime.
 pub fn handoffs(ledger: &Ledger, hosts: &[HostReport]) -> Result<()> {
     change(ledger, |items| merge_handoffs(items, hosts))
@@ -198,7 +243,10 @@ pub fn merge_handoffs(items: &mut [Item], hosts: &[HostReport]) {
         if let Some(closed) = mark.closed_ms {
             item.closed_ms.get_or_insert(closed);
         }
-        if mark.branch.is_some() {
+        if let Some(dropped) = mark.dropped_ms {
+            item.dropped_ms.get_or_insert(dropped);
+        }
+        if item.dropped_ms.is_none() && mark.branch.is_some() {
             item.branch.clone_from(&mark.branch);
         }
     }

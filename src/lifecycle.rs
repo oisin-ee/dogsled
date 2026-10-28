@@ -740,6 +740,7 @@ mod tests {
             }),
             native_done: true,
             closed_ms: None,
+            dropped_ms: None,
         });
         let (found, observed) = evidence(&item, &hosts);
         assert!(observed.is_none(), "the pane is not observed any more");
@@ -807,6 +808,7 @@ mod tests {
             }),
             native_done: true,
             closed_ms: None,
+            dropped_ms: None,
         });
         // The owner imports the mark into the item.
         let mut items = vec![item.clone()];

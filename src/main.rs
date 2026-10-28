@@ -15,6 +15,7 @@ mod continuation;
 mod custody;
 mod diagnostic;
 mod done;
+mod drop;
 mod error;
 mod facts;
 mod gate;
@@ -215,6 +216,11 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         }
         Command::Mcp => mcp::serve(policy, ledger, home)?,
 
+        Command::Drop { id, host } => {
+            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
+            let dropped = drop::drop(&fleet, &id, host.as_deref())?;
+            print(cli.json, &dropped, || dropped.line())?;
+        }
         Command::Done => done_command(&ledger, &shell, cli.json)?,
         Command::Send {
             target,
@@ -532,6 +538,20 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             )?;
             print(true, &closed, String::new)?;
         }
+        HostCommand::Parent { pane } => {
+            watchdog::register_parent(node.ledger, node.shell, &pane)?;
+            print(true, &true, String::new)?;
+        }
+        HostCommand::Drop { item } => print(
+            true,
+            &drop::local(node.shell, node.ledger, &serde_json::from_str(&item)?)?,
+            String::new,
+        )?,
+        HostCommand::RefreshBranches { items } => print(
+            true,
+            &drop::refresh(node.shell, serde_json::from_str(&items)?)?,
+            String::new,
+        )?,
         _ => unreachable!("only child commands"),
     }
     Ok(())
@@ -574,10 +594,6 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             &checkout::local(node.shell, node.home, &host_label, &path, &origin)?,
             String::new,
         )?,
-        HostCommand::Parent { pane } => {
-            watchdog::register_parent(node.ledger, node.shell, &pane)?;
-            print(true, &true, String::new)?;
-        }
         HostCommand::Tail { kind, id } => {
             let tail = if kind == "job" {
                 watchdog::job_tail(node.ledger, &id)?
@@ -590,7 +606,10 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         HostCommand::Reply { .. }
         | HostCommand::Close { .. }
         | HostCommand::UnitReceipt { .. }
-        | HostCommand::UnitReceipts { .. } => {
+        | HostCommand::UnitReceipts { .. }
+        | HostCommand::Drop { .. }
+        | HostCommand::RefreshBranches { .. }
+        | HostCommand::Parent { .. } => {
             child(cmd, node)?;
         }
         HostCommand::Prune { plan } => print(
