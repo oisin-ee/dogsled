@@ -283,7 +283,10 @@ pub fn get(ledger: &Ledger, id: &str) -> Result<Job> {
     validate_id(id)?;
     store(ledger)
         .read(&format!("{id}.json"))?
-        .ok_or_else(|| Error::Invalid(format!("unknown job {id}")))
+        .ok_or_else(|| Error::Refused {
+            code: crate::error::Refusal::UnknownJob,
+            detail: format!("unknown job {id}"),
+        })
 }
 
 pub fn save(ledger: &Ledger, job: &Job) -> Result<()> {
@@ -476,7 +479,7 @@ pub struct LogChunk {
 }
 
 /// The marker once: a read past it is empty, so a following reader ends.
-fn expired_chunk(offset: u64) -> LogChunk {
+pub fn expired_chunk(offset: u64) -> LogChunk {
     let marker = format!("{OUTPUT_EXPIRED}\n").into_bytes();
     let length = marker.len() as u64;
     let bytes = if offset < length {

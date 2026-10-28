@@ -1,7 +1,7 @@
 //! CLI orchestration and bounded waits, separate from persisted action policy.
 
 use crate::cli::{Command, WorkArgs};
-use crate::error::{Error, Result};
+use crate::error::{Error, Refusal, Result};
 use crate::hosts::Fleet;
 use crate::items::{self, Item};
 use crate::jobs::{self, Job};
@@ -307,7 +307,23 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
         // The job's output expired: the reader is told, and the read never fails.
         jobs::OUTPUT_EXPIRED.to_owned()
     } else {
-        crate::watchdog::item_tail(fleet, &item, host)?
+        match crate::watchdog::item_tail(fleet, &item, host) {
+            Err(error)
+                if item.kind == "job"
+                    && !host.is_local()
+                    && matches!(
+                        error.root(),
+                        Error::Ssh {
+                            refusal: Some(Refusal::UnknownJob),
+                            ..
+                        }
+                    ) =>
+            {
+                // The owner item survives remote retention; nothing runs again.
+                jobs::OUTPUT_EXPIRED.to_owned()
+            }
+            result => result?,
+        }
     };
     Ok(json!({
         "name": item.name,
@@ -514,6 +530,58 @@ fn close_host<'a>(fleet: &'a Fleet, pane: &str) -> Result<&'a crate::hosts::Host
     }
 }
 
+/// Stream job output, translating remote retention only for an owner-held job.
+fn logs(fleet: &Fleet, id: &str, follow: bool) -> Result<()> {
+    let host = work::job_host(fleet, id, now_ms())?;
+    let owned_remote_job = !host.is_local()
+        && items::list(fleet.ledger)?
+            .iter()
+            .any(|item| item.kind == "job" && item.id == id && item.host == host.id);
+    let mut offset = 0;
+    loop {
+        let chunk = if host.is_local() {
+            jobs::logs(fleet.ledger, id, offset)?
+        } else {
+            match fleet.remote(
+                host,
+                &[
+                    "logs".into(),
+                    id.to_owned(),
+                    "--offset".into(),
+                    offset.to_string(),
+                ],
+            ) {
+                Err(error)
+                    if owned_remote_job
+                        && matches!(
+                            error.root(),
+                            Error::Ssh {
+                                refusal: Some(Refusal::UnknownJob),
+                                ..
+                            }
+                        ) =>
+                {
+                    jobs::expired_chunk(offset)
+                }
+                result => result?,
+            }
+        };
+        std::io::stdout().write_all(&chunk.bytes)?;
+        std::io::stdout().flush()?;
+        offset = chunk.next;
+        if chunk.expired {
+            break;
+        }
+        if chunk.bytes.is_empty() {
+            if !follow || chunk.done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
 fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
     match command {
         Command::Items { owner } => {
@@ -583,34 +651,7 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
         }
         Command::Stop { id } => stop(fleet, &id)?,
         Command::Wait { id, .. } => return Ok(ExitCode::from(wait_job(fleet, &id)? as u8)),
-        Command::Logs { id, follow } => {
-            let host = work::job_host(fleet, &id, now_ms())?;
-            let mut offset = 0;
-            loop {
-                let chunk = if host.is_local() {
-                    jobs::logs(fleet.ledger, &id, offset)?
-                } else {
-                    fleet.remote(
-                        host,
-                        &[
-                            "logs".into(),
-                            id.clone(),
-                            "--offset".into(),
-                            offset.to_string(),
-                        ],
-                    )?
-                };
-                std::io::stdout().write_all(&chunk.bytes)?;
-                std::io::stdout().flush()?;
-                offset = chunk.next;
-                if chunk.bytes.is_empty() {
-                    if !follow || chunk.done {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
+        Command::Logs { id, follow } => logs(fleet, &id, follow)?,
         _ => return Err(Error::Invalid("unexpected command dispatcher".into())),
     }
     Ok(ExitCode::SUCCESS)

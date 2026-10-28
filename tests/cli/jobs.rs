@@ -988,6 +988,94 @@ fn expired_record_logs_report_expiry_to_the_owner() {
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
 }
 
+/// Remote retention leaves only the owner item; the execution host keeps nothing.
+fn remote_expired_item_rig(name: &str) -> Rig {
+    let rig = Rig::new(name);
+    rig.peer();
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let remote = format!(
+        r#"case "$*" in
+  *'host tail'*|*'host logs'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    rig.script("ssh", &script.replace("case \"$*\" in", &remote));
+    rig.put(
+        "state/items.json",
+        &json!([{
+            "id":"aged","kind":"job","host":"8103","pane":"w9:p1",
+            "owner_pane":"w1:p1","created_ms":0,"closed_ms":1,"name":null
+        }]),
+    );
+    rig
+}
+
+#[test]
+fn remote_expired_record_read_reports_expiry_to_the_owner() {
+    let rig = remote_expired_item_rig("remote-expired-read");
+    let (code, read) = rig.json(&["read", "aged"]);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["tail"], EXPIRED, "{read}");
+    assert!(!rig.dir.join("peer-state/jobs/aged.json").exists());
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+#[test]
+fn remote_expired_record_tail_reports_expiry_to_the_owner() {
+    let rig = remote_expired_item_rig("remote-expired-tail");
+    let output = rig.run(&["read", "w9:p1", "--host", "netcup"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(EXPIRED));
+    assert!(!rig.dir.join("peer-state/jobs/aged.log").exists());
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+#[test]
+fn remote_expired_record_logs_report_expiry_to_the_owner_once() {
+    let rig = remote_expired_item_rig("remote-expired-logs");
+    for args in [vec!["logs", "aged"], vec!["logs", "aged", "--follow"]] {
+        let mut command = rig.start(&args);
+        assert!(command.wait().success());
+        let (stdout, stderr) = command.output();
+        assert_eq!(stdout, format!("{EXPIRED}\n"), "{stderr}");
+    }
+    assert!(!rig.dir.join("peer-state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("peer-state/jobs/aged.log").exists());
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+#[test]
+fn unknown_jobs_without_an_owner_item_still_error() {
+    let rig = remote_expired_item_rig("remote-expired-unknown");
+    for args in [vec!["read", "unknown"], vec!["logs", "unknown"]] {
+        assert_eq!(rig.json(&args).0, 2);
+    }
+    for args in [
+        vec!["host", "tail", "job", "unknown"],
+        vec!["host", "logs", "unknown"],
+    ] {
+        let (code, error) = rig.json(&args);
+        assert_eq!(code, 2, "{error}");
+        assert_eq!(error["code"], "UNKNOWN_JOB", "{error}");
+    }
+}
+
+#[test]
+fn a_record_without_output_still_reports_no_log_yet() {
+    let rig = Rig::new("pending-no-log");
+    rig.claim("pending", &["true"]);
+    let (code, tail) = rig.json(&["host", "tail", "job", "pending"]);
+    assert_eq!(code, 0, "{tail}");
+    assert_eq!(tail, "(no log yet)");
+}
+
 /// A non-marker-sized log is replaced without opening or reading its content.
 #[test]
 fn retention_skips_reading_a_non_marker_sized_log() {

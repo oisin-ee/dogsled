@@ -81,6 +81,8 @@ pub enum Refusal {
     NoInboxReader,
     /// The peer could not clone the repository.
     CloneFailed,
+    /// No retained job is known on this host.
+    UnknownJob,
     /// A job request carries no usable validity evidence.
     JobValidityUnprovable,
     /// A job request is older than the validity window.
@@ -99,6 +101,7 @@ impl Refusal {
         match self {
             Self::NoInboxReader => "NO_INBOX_READER",
             Self::CloneFailed => "CLONE_FAILED",
+            Self::UnknownJob => "UNKNOWN_JOB",
             Self::JobValidityUnprovable => "JOB_VALIDITY_UNPROVABLE",
             Self::JobExpired => "JOB_EXPIRED",
             Self::JobFromFuture => "JOB_FROM_FUTURE",
@@ -112,6 +115,7 @@ impl Refusal {
         [
             Self::NoInboxReader,
             Self::CloneFailed,
+            Self::UnknownJob,
             Self::JobValidityUnprovable,
             Self::JobExpired,
             Self::JobFromFuture,
@@ -130,6 +134,7 @@ impl Refusal {
                 "the target has no dogsled inbox reader, so nothing would deliver the message; nothing was sent"
             }
             Self::CloneFailed => "the peer could not clone the repository",
+            Self::UnknownJob => "unknown job",
             Self::JobValidityUnprovable => {
                 "job request validity is unprovable; new execution refused"
             }

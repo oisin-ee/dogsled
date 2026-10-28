@@ -312,7 +312,11 @@ pub fn job_tail(ledger: &Ledger, id: &str) -> Result<String> {
     let path = crate::jobs::store(ledger).dir.join(format!("{id}.log"));
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("(no log yet)".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Only an existing record can still be waiting for its first output.
+            crate::jobs::get(ledger, id)?;
+            return Ok("(no log yet)".into());
+        }
         Err(e) => return Err(e.into()),
     };
     let len = file.metadata()?.len();
