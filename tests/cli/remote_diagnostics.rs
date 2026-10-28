@@ -94,6 +94,235 @@ fn real_peer_prepare(rig: &Rig) {
         "  *'host prepare'*) printf '%s\\n' '{\"pane_id\":\"w9:p1\",\"terminal_id\":\"term_remote\",\"path\":\"/remote/tree\"}' ;;", &handler));
 }
 
+/// The peer runs the real prepare command, so the cause it sends is the real one.
+#[test]
+fn a_real_remote_unknown_base_names_the_base_in_the_ticket() {
+    let (rig, repo) = place::place_rig("diagnostic-real-unknown-base");
+    rig.peer();
+    real_peer_prepare(&rig);
+    let (code, error) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/absent",
+        "--name",
+        "worker",
+        "--message",
+        "TASK_SECRET",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains("origin/absent"), "{error}");
+    assert!(text.contains("netcup"), "{error}");
+    assert!(!error.to_string().contains("TASK_SECRET"), "{error}");
+}
+
+/// A bare origin that holds one branch the clone has never fetched.
+fn origin_with_branch(rig: &Rig, repo: &Path, branch: &str) {
+    let bare = rig.dir.join("origin.git");
+    let out = isolated("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    let out = isolated("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["push", "-q"])
+        .arg(&bare)
+        .arg(format!("main:refs/heads/{branch}"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = isolated("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["remote", "set-url", "origin"])
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+}
+
+/// A base that the origin holds, but the clone has never fetched, resolves after one
+/// fetch of that branch.
+#[test]
+fn a_base_pushed_after_the_clone_is_fetched_and_resolves() {
+    let (rig, repo) = place::place_rig("diagnostic-fetch-base");
+    origin_with_branch(&rig, &repo, "feature");
+    let unresolved = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(!unresolved.status.success());
+    let (code, prepared) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/feature",
+        "--request-id",
+        "fetched",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    let tree = repo.join(".worktrees/worker");
+    assert!(tree.is_dir(), "{tree:?}");
+    let head = isolated("git")
+        .arg("-C")
+        .arg(&tree)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let base = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(head.stdout, base.stdout);
+    // The remote branch is now a remote-tracking ref of this clone.
+    let fetched = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(fetched.status.success());
+}
+
+/// A clone that fetches one branch resolves a base on another branch, because the fetch
+/// names its own destination.
+#[test]
+fn a_single_branch_clone_resolves_a_base_on_another_branch() {
+    let (rig, repo) = place::place_rig("diagnostic-single-branch-fetch");
+    origin_with_branch(&rig, &repo, "feature");
+    // The clone follows one branch only, so a fetch by name creates no remote-tracking ref.
+    let narrowed = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args([
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ])
+        .output()
+        .unwrap();
+    assert!(narrowed.status.success());
+    let (code, prepared) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/feature",
+        "--request-id",
+        "narrow",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    let tree = repo.join(".worktrees/worker");
+    assert!(tree.is_dir(), "{tree:?}");
+    let fetched = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(fetched.status.success());
+}
+
+/// The same fetch happens on a remote peer: a base the peer's clone has not fetched
+/// resolves there too.
+#[test]
+fn a_remote_peer_fetches_a_base_its_clone_has_not_fetched() {
+    let (rig, repo) = place::place_rig("diagnostic-remote-fetch-base");
+    origin_with_branch(&rig, &repo, "feature");
+    rig.peer();
+    real_peer_prepare(&rig);
+    let (code, prepared) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/feature",
+        "--name",
+        "worker",
+        "--message",
+        "go",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    let tree = repo.join(".worktrees/worker");
+    assert!(tree.is_dir(), "{tree:?}");
+    let fetched = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(fetched.status.success());
+}
+
+/// A base the origin does not hold still fails, and the failure names the base.
+#[test]
+fn a_base_missing_on_origin_still_fails_with_its_name() {
+    let (rig, repo) = place::place_rig("diagnostic-missing-base");
+    origin_with_branch(&rig, &repo, "feature");
+    let (code, error) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/absent",
+        "--request-id",
+        "absent",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["diagnostic"]["cause"], "base_unavailable", "{error}");
+    assert_eq!(
+        error["diagnostic"]["context"]["base"], "origin/absent",
+        "{error}"
+    );
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("requested base unavailable"),
+        "{error}"
+    );
+    assert!(!repo.join(".worktrees/worker").exists());
+    let absent = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/absent"])
+        .output()
+        .unwrap();
+    assert!(!absent.status.success());
+}
+
 #[test]
 fn real_preflight_is_read_only_and_existing_branch_refusal_still_wins() {
     let (rig, repo) = place::place_rig("diagnostic-preflight");
@@ -186,6 +415,56 @@ fn real_remote_preparation_causes_are_safe_through_transport() {
         );
         assert!(!rig.log("ssh.log").contains("host launch"));
     }
+}
+
+/// A remote preparation failure that names its cause reaches the ticket. The peer's other
+/// text does not.
+#[test]
+fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
+    let rig = Rig::new("diagnostic-remote-cause");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.peer();
+    fail_peer(
+        &rig,
+        "prepare",
+        &json!({"error":"unknown base origin/x PRIVATE_SENTINEL"}),
+    );
+    let (code, error) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/x",
+        "--name",
+        "worker",
+        "--message",
+        "TASK_SECRET",
+    ]);
+    assert_eq!(code, 2, "{error}");
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains("unknown base origin/x"), "{error}");
+    assert!(text.contains("netcup"), "{error}");
+    assert!(!error.to_string().contains("TASK_SECRET"), "{error}");
+    // The cause is the caller's own base, not the peer's text.
+    assert!(!error.to_string().contains("PRIVATE_SENTINEL"), "{error}");
+    let admission = fs::read_dir(rig.dir.join("state/admissions"))
+        .unwrap()
+        .flatten()
+        .find(|f| f.path().extension().is_some_and(|e| e == "json"))
+        .unwrap();
+    let attempt: Value = serde_json::from_slice(&fs::read(admission.path()).unwrap()).unwrap();
+    assert!(
+        attempt["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown base origin/x"),
+        "{attempt}"
+    );
 }
 
 /// The peer fails to prepare and cannot record the outcome. The caller on the other side of
@@ -835,6 +1114,64 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
     let error: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
     assert_eq!(error["diagnostic"]["cause"], "base_unavailable");
     assert!(!text.contains("PRIVATE_SENTINEL"));
+}
+
+/// A plain prepare failure names its cause in the failed ticket, in the admission
+/// record, and in the owner's inbox.
+#[test]
+fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
+    let rig = Rig::new("diagnostic-plain-ticket");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.peer();
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}),
+    );
+    assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
+    rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let (code, queued) = rig.json(&[
+        "agent",
+        "--host",
+        "netcup",
+        "--cwd",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/absent",
+        "--name",
+        "worker",
+        "--message",
+        "TASK_SECRET",
+    ]);
+    assert_eq!(code, 1, "{queued}");
+    rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
+    fail_peer(
+        &rig,
+        "prepare",
+        &json!({"error":"unknown base origin/absent PRIVATE_SENTINEL"}),
+    );
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    let error = ticket["error"].as_str().unwrap();
+    assert!(error.contains("unknown base origin/absent"), "{ticket}");
+    assert!(error.contains("netcup"), "{ticket}");
+    assert!(!error.contains("PRIVATE_SENTINEL"), "{ticket}");
+    let id = ticket["request"]["id"].as_str().unwrap();
+    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    assert!(
+        attempt["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown base origin/absent"),
+        "{attempt}"
+    );
+    let inbox = rig.read("state/inbox/term_owner.json");
+    let text = inbox[0]["text"].as_str().unwrap();
+    assert!(text.contains("unknown base origin/absent"), "{text}");
+    assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
+    assert!(!text.contains("TASK_SECRET"), "{text}");
 }
 
 #[test]

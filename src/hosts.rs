@@ -150,6 +150,52 @@ impl std::fmt::Display for Failure {
 /// in an `Error`, a ticket, a handoff, a unit record, or a log line.
 pub const SSH_DEBUG_FILE: &str = "DOGSLED_SSH_DEBUG_FILE";
 
+/// The cause a peer named in a plain prepare failure, without any of the peer's own text.
+/// The names come from this caller's arguments, never from the peer's message.
+fn prepare_cause(value: &serde_json::Value, args: &[String]) -> Option<String> {
+    if value.get("diagnostic").is_some() {
+        return None;
+    }
+    let message = value["error"].as_str()?.trim();
+    let arg = |flag: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+    };
+    if message.starts_with("unknown base") || message.contains("requested base unavailable") {
+        let base = arg("--base").filter(|base| safe_ref(base))?;
+        return Some(format!("unknown base {base}"));
+    }
+    if message.starts_with("branch ") && message.ends_with(" exists; omit --base") {
+        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
+        return Some(format!("branch {branch} exists; omit --base"));
+    }
+    if message == "branch exists; omit --base" {
+        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
+        return Some(format!("branch {branch} exists; omit --base"));
+    }
+    if message.contains("workspace") && message.contains("already open") {
+        return Some("workspace already open".to_owned());
+    }
+    if message.contains("workspace")
+        && (message.contains("already shows") || message.contains("is occupied"))
+    {
+        return Some("workspace occupied".to_owned());
+    }
+    None
+}
+
+/// A reference that carries no origin, no credential, and no path.
+fn safe_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('-')
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/_-.~^".contains(&c))
+}
+
 fn record_ssh_detail(target: &str, detail: &str) {
     let Some(path) = std::env::var_os(SSH_DEBUG_FILE) else {
         return;
@@ -446,6 +492,16 @@ impl<'a> Fleet<'a> {
                 Some(out.status),
                 &host.label,
             );
+            // A prepare failure may name its cause in a plain message, such as an unknown
+            // base. The cause reaches the ticket as the error itself, and the peer's own
+            // text stays in the debug file.
+            if operation == crate::diagnostic::Operation::Prepare
+                && refusal.is_none()
+                && let Some(value) = value.as_ref()
+                && let Some(cause) = prepare_cause(value, args)
+            {
+                return Err(Error::Invalid(format!("ssh {}: {cause}", host.label)));
+            }
             if operation == crate::diagnostic::Operation::Other
                 && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none())
             {
@@ -1233,6 +1289,72 @@ mod tests {
         ] {
             let shown = read(stdout);
             assert_eq!(shown, "ssh peer: remote command failed");
+        }
+    }
+
+    #[test]
+    fn a_remote_prepare_failure_names_its_cause_and_keeps_the_peers_text_hidden() {
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let args = vec![
+            "prepare".to_owned(),
+            "--repo".to_owned(),
+            "repo".to_owned(),
+            "--branch".to_owned(),
+            "worker".to_owned(),
+            "--base".to_owned(),
+            "origin/x".to_owned(),
+        ];
+        let read = |stdout: String| {
+            let out = crate::shell::Output {
+                status: 2,
+                stdout,
+                stderr: String::new(),
+            };
+            Fleet::parse_remote::<serde_json::Value>(&host, &args, &out)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            read(format!("{{\"error\":\"unknown base {SECRET}\"}}")),
+            "ssh peer: unknown base origin/x"
+        );
+        assert_eq!(
+            read("{\"error\":\"branch worker exists; omit --base\"}".to_owned(),),
+            "ssh peer: branch worker exists; omit --base"
+        );
+        assert_eq!(
+            read("{\"error\":\"branch exists; omit --base\"}".to_owned()),
+            "ssh peer: branch worker exists; omit --base"
+        );
+        assert_eq!(
+            read("{\"error\":\"requested base unavailable on this host\"}".to_owned()),
+            "ssh peer: unknown base origin/x"
+        );
+        assert_eq!(
+            read("{\"error\":\"workspace already open\"}".to_owned()),
+            "ssh peer: workspace already open"
+        );
+        assert_eq!(
+            read("{\"error\":\"Herdr workspace w8 already shows the checkout\"}".to_owned()),
+            "ssh peer: workspace occupied"
+        );
+        assert_eq!(
+            read("{\"error\":\"workspace path is occupied\"}".to_owned()),
+            "ssh peer: workspace occupied"
+        );
+        // A peer's own text never reaches the error, and an unknown cause stays hidden.
+        for stdout in [
+            format!("{{\"error\":\"{SECRET}\"}}"),
+            format!("{{\"error\":\"unknown base {SECRET}\",\"diagnostic\":{{\"version\":1}}}}"),
+            format!("{{\"error\":\"no Herdr server is reachable: {SECRET}\"}}"),
+        ] {
+            let shown = read(stdout);
+            assert!(!shown.contains("EXAMPLE_SECRET"), "{shown}");
+            assert!(!shown.contains("unknown base"), "{shown}");
         }
     }
 
