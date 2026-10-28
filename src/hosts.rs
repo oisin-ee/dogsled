@@ -564,7 +564,7 @@ impl<'a> Fleet<'a> {
     }
 
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
-        let reports = std::thread::scope(|scope| {
+        let reports: Result<Vec<HostReport>> = std::thread::scope(|scope| {
             let handles: Vec<_> = self
                 .hosts
                 .iter()
@@ -580,7 +580,9 @@ impl<'a> Fleet<'a> {
                 .collect()
         });
         self.shell.budget().remaining("fleet status")?;
-        reports
+        let reports = reports?;
+        crate::drop::reconcile(self, &reports, now)?;
+        Ok(reports)
     }
 
     fn read_host(&self, host: &Host, now: u64) -> HostReport {

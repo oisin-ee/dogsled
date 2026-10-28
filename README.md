@@ -178,8 +178,11 @@ Closed children retain TO LAND rows: `<child>: branch <b> +N to land`. These row
 ```sh
 dogsled close w2:p1
 dogsled close w9:p1 --host netcup --json
+dogsled drop <item-id> --host netcup
 dogsled done                       # as a child: my whole task is complete
 ```
+
+`drop` deletes a closed child's retained local and origin branches, including unmerged commits. Only the item's owner can use it. It refuses a branch checked out in a worktree. Already absent branches count as success. The item and its done mark stay settled and leave the board.
 
 `close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
 
@@ -607,7 +610,7 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 ### Tools
 
-`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `done`, `stop`, `cancel`, and `place`.
+`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `drop`, `done`, `stop`, `cancel`, and `place`.
 Tools share the CLI action code. `spawn` returns a durable queued ticket, even when a host has room.
 The service owns startup confirmation outside the MCP call budget. `dogsled agent` still starts synchronously under `--max`.
 Startup errors include recent pane output in the launch record and ticket when the pane read succeeds.

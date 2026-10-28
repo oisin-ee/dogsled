@@ -189,6 +189,7 @@ fn mcp_lists_the_eleven_tools_with_their_schemas() {
             expect("cancel", &["id"]),
             expect("close", &["pane"]),
             expect("done", &[]),
+            expect("drop", &["id"]),
             expect("inbox", &[]),
             expect("place", &[]),
             expect("read", &["target"]),

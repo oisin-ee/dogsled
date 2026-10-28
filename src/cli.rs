@@ -217,6 +217,13 @@ pub enum Command {
         #[arg(long)]
         host: Option<String>,
     },
+    /// Delete a closed child's retained branch, including its origin branch.
+    Drop {
+        /// The closed agent item's id.
+        id: String,
+        #[arg(long)]
+        host: Option<String>,
+    },
     Cancel {
         ticket: String,
     },
@@ -419,6 +426,16 @@ pub enum HookCommand {
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
     Snapshot,
+    /// Delete an owner-authorized closed item's branch on this host.
+    Drop {
+        #[arg(long)]
+        item: String,
+    },
+    /// Refresh retained branches in one host call.
+    RefreshBranches {
+        #[arg(long)]
+        items: String,
+    },
     /// SSH transport for quota --store.
     QuotaStore,
     /// Read the service's rendered todo snapshot; no task state.

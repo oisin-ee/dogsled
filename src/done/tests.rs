@@ -32,6 +32,7 @@ fn mark_at() -> Mark {
         reply: None,
         native_done: false,
         closed_ms: None,
+        dropped_ms: None,
     }
 }
 

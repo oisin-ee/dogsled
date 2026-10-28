@@ -797,7 +797,9 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
         .iter()
         .filter(|i| {
             mine(&i.owner_pane)
-                && (i.closed_ms.is_none() || i.branch.as_ref().is_some_and(|b| !b.landed))
+                && i.dropped_ms.is_none()
+                && i.branch.as_ref().is_none_or(|b| !b.landed)
+                && (i.closed_ms.is_none() || i.branch.is_some())
         })
         .map(|i| {
             if i.kind == "job" {
