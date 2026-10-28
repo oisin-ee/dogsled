@@ -249,6 +249,9 @@ pub struct Agent {
     pub stalled_since_ms: Option<u64>,
     #[serde(default)]
     pub state_since_ms: Option<u64>,
+    /// The active, session-bound turn signal published by the done ledger.
+    #[serde(default)]
+    pub signal: Option<String>,
     /// Herdr's terminal identity: a reused pane id gets a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_id: Option<String>,
@@ -314,6 +317,8 @@ struct RawAgent {
     completion_seq: Option<u64>,
     #[serde(default)]
     state_change_seq: Option<u64>,
+    #[serde(default)]
+    state_since_ms: Option<u64>,
     #[serde(default)]
     cwd: Option<String>,
 }
@@ -435,7 +440,8 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 transcript,
                 transcript_modified,
                 stalled_since_ms: None,
-                state_since_ms: None,
+                state_since_ms: raw.state_since_ms,
+                signal: None,
                 terminal_id: raw.terminal_id,
                 agent_session,
                 completion_seq: raw.completion_seq,

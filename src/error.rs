@@ -79,6 +79,10 @@ pub enum Error {
 pub enum Refusal {
     /// The target agent has no dogsled inbox reader, so a message would never be delivered.
     NoInboxReader,
+    /// A turn signal has no proven session or turn identity.
+    SignalUnproven,
+    /// The turn already has a different signal or a done handoff.
+    SignalConflict,
     /// The peer could not clone the repository.
     CloneFailed,
     /// No retained job is known on this host.
@@ -100,6 +104,8 @@ impl Refusal {
     pub const fn code(self) -> &'static str {
         match self {
             Self::NoInboxReader => "NO_INBOX_READER",
+            Self::SignalUnproven => "SIGNAL_UNPROVEN",
+            Self::SignalConflict => "SIGNAL_CONFLICT",
             Self::CloneFailed => "CLONE_FAILED",
             Self::UnknownJob => "UNKNOWN_JOB",
             Self::JobValidityUnprovable => "JOB_VALIDITY_UNPROVABLE",
@@ -114,6 +120,8 @@ impl Refusal {
     pub fn from_code(code: &str) -> Option<Self> {
         [
             Self::NoInboxReader,
+            Self::SignalUnproven,
+            Self::SignalConflict,
             Self::CloneFailed,
             Self::UnknownJob,
             Self::JobValidityUnprovable,
@@ -133,6 +141,8 @@ impl Refusal {
             Self::NoInboxReader => {
                 "the target has no dogsled inbox reader, so nothing would deliver the message; nothing was sent"
             }
+            Self::SignalUnproven => "turn signal identity is unproven; nothing was recorded",
+            Self::SignalConflict => "the turn already has a conflicting signal or done handoff",
             Self::CloneFailed => "the peer could not clone the repository",
             Self::UnknownJob => "unknown job",
             Self::JobValidityUnprovable => {
