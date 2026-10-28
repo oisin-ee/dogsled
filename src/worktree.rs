@@ -68,8 +68,21 @@ impl Guard {
         };
         self.check_repository(shell, &tree.checkout)?;
         if tree.identity.is_none() {
+            tree.identity = Some(self.discover_identity(&tree.gitdir)?);
+        }
+        validate_identity(shell, &tree)?;
+        if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
+            return Err(refuse("HEAD moved during checkout discovery"));
+        }
+        Ok(Some(tree))
+    }
+
+    /// Discovery returns only the generation; it never supplies a new HEAD expectation.
+    fn discover_identity(&self, gitdir: &Path) -> Result<Identity> {
+        let id = if let Some(id) = generation(gitdir)? {
+            id
+        } else {
             use std::io::Write as _;
-            let gitdir = tree.gitdir.clone();
             let mut bytes = [0u8; 16];
             getrandom::fill(&mut bytes)
                 .map_err(|error| Error::Invalid(format!("checkout generation: {error}")))?;
@@ -81,27 +94,31 @@ impl Guard {
                     id.push(char::from(HEX[usize::from(byte & 15)]));
                     id
                 });
-            let mut marker = std::fs::OpenOptions::new()
+            match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(gitdir.join(CHECKOUT_ID))?;
-            writeln!(marker, "{id}")?;
-            marker.sync_all()?;
-            tree.identity = Some(Identity {
-                common: self.common.clone(),
-                gitdir,
-                generation: id,
-            });
-        }
-        validate_identity(shell, &tree)?;
-        if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
-            return Err(refuse("HEAD moved during checkout discovery"));
-        }
-        Ok(Some(tree))
+                .open(gitdir.join(CHECKOUT_ID))
+            {
+                Ok(mut marker) => {
+                    writeln!(marker, "{id}")?;
+                    marker.sync_all()?;
+                    id
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    generation(gitdir)?.ok_or_else(|| refuse("checkout generation disappeared"))?
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        Ok(Identity {
+            common: self.common.clone(),
+            gitdir: gitdir.into(),
+            generation: id,
+        })
     }
 
     /// Establish an unmarked checkout only if the pinned directory and the pre-wait
-    /// observation still agree. A newly observed generation belongs to another capture.
+    /// observation still agree. Discovery must not replace the request's HEAD.
     pub fn discover_unmarked(
         &self,
         shell: &dyn Shell,
@@ -111,8 +128,10 @@ impl Guard {
         pin.validate(before)?;
         let now = linked_or_detached(shell, &before.path)?
             .ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        let mut expected = before.tree();
+        expected.identity.clone_from(&now.identity);
         if before.identity.is_some()
-            || before.tree().drift(&now.tree()) == crate::cleanup::Drift::Identity
+            || expected.drift(&now.tree()) == crate::cleanup::Drift::Identity
             || before.gitdir != now.gitdir
         {
             return Err(refuse("worktree identity changed"));
@@ -120,9 +139,20 @@ impl Guard {
         if before.head != now.head {
             return Err(refuse("HEAD moved before close"));
         }
-        // Fresh discovery captures HEAD and generation together under this guard.
-        self.discover(shell, &before.path)?
-            .ok_or_else(|| refuse("checkout identity is unreadable"))
+        self.check_repository(shell, &before.checkout)?;
+        pin.validate(before)?;
+        let mut tree = before.clone();
+        tree.identity = Some(match now.identity {
+            Some(identity) => identity,
+            None => self.discover_identity(&before.gitdir)?,
+        });
+        pin.validate(before)?;
+        validate_identity(shell, &tree)?;
+        if snapshot(shell, &before.path)?.is_none_or(|now| now.head != before.head) {
+            return Err(refuse("HEAD moved during checkout discovery"));
+        }
+        pin.validate(before)?;
+        Ok(tree)
     }
 
     pub fn check_repository(&self, shell: &dyn Shell, checkout: &Path) -> Result<()> {
@@ -166,7 +196,7 @@ pub struct Pin {
 }
 
 impl Pin {
-    fn validate(&self, tree: &Linked) -> Result<()> {
+    pub(crate) fn validate(&self, tree: &Linked) -> Result<()> {
         use std::os::unix::fs::MetadataExt as _;
         for (file, path) in [
             (&self.root, Path::new(&tree.path)),
@@ -296,6 +326,113 @@ pub fn snapshot(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
     capture(shell, cwd, false)
 }
 
+/// The request observation and handles opened against the same directory tuple.
+/// Missing handles are retained as an absence candidate, never as permission to close.
+pub(crate) struct CloseCapture {
+    pub tree: Linked,
+    pub pin: Option<Pin>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static BEFORE_CLOSE_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn directory_key(metadata: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    (metadata.dev(), metadata.ino())
+}
+
+fn missing(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// Locate directories without observing HEAD. The observation is bracketed by root/admin
+/// stats, and subsequently opened handles must still name that captured tuple.
+pub(crate) fn capture_close(shell: &dyn Shell, cwd: &str) -> Result<Option<CloseCapture>> {
+    for attempt in 0..2 {
+        let out = git(
+            shell,
+            Path::new(cwd),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                "--git-dir",
+                "--show-toplevel",
+            ],
+        )?;
+        if !out.ok() {
+            return Ok(None);
+        }
+        let lines: Vec<_> = out.stdout.lines().map(str::trim).collect();
+        let [common, admin, root] = lines[..] else {
+            return Err(refuse("cannot locate checkout directories"));
+        };
+        if common == admin {
+            return Ok(None);
+        }
+        let keys = || -> std::io::Result<_> {
+            Ok((
+                directory_key(&std::fs::metadata(root)?),
+                directory_key(&std::fs::metadata(admin)?),
+            ))
+        };
+        let before = keys()?;
+        let Some(tree) = linked_or_detached(shell, cwd)? else {
+            if attempt == 0 {
+                continue;
+            }
+            return Err(refuse("worktree identity changed during observation"));
+        };
+        match keys() {
+            Ok(after)
+                if before == after
+                    && same(root, &tree.path)
+                    && same(admin, &tree.gitdir.display().to_string()) => {}
+            Err(error) if missing(&error) => return Ok(Some(CloseCapture { tree, pin: None })),
+            Err(error) => return Err(error.into()),
+            _ if attempt == 0 => continue,
+            _ => return Err(refuse("worktree identity changed during observation")),
+        }
+        #[cfg(test)]
+        BEFORE_CLOSE_PIN.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let pin = match tree.pin() {
+            Ok(pin) => pin,
+            Err(Error::Io(error)) if missing(&error) => {
+                return Ok(Some(CloseCapture { tree, pin: None }));
+            }
+            Err(error) => return Err(error),
+        };
+        if (
+            directory_key(&pin.root.metadata()?),
+            directory_key(&pin.admin.metadata()?),
+        ) != before
+        {
+            return Err(refuse("worktree identity changed before pinning"));
+        }
+        match pin.validate(&tree) {
+            Ok(()) => (),
+            Err(Error::Io(error)) if missing(&error) => {
+                return Ok(Some(CloseCapture { tree, pin: None }));
+            }
+            Err(error) => return Err(error),
+        }
+        return Ok(Some(CloseCapture {
+            tree,
+            pin: Some(pin),
+        }));
+    }
+    Err(refuse("worktree identity changed during observation"))
+}
+
 fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Linked>> {
     if !Path::new(cwd).is_dir() {
         return Ok(None);
@@ -314,11 +451,47 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
             "HEAD",
         ],
     )?;
-    // Not a repository: there is no worktree to remove.
-    if out.status != 0 {
-        return Ok(None);
-    }
-    let lines: Vec<&str> = out.stdout.lines().map(str::trim).collect();
+    // Administrative identity exists independently of HEAD in an unborn main checkout.
+    let unborn;
+    let output = if out.ok() {
+        &out.stdout
+    } else {
+        if linked_only {
+            return Ok(None);
+        }
+        let location = git(
+            shell,
+            Path::new(cwd),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                "--git-dir",
+                "--show-toplevel",
+            ],
+        )?;
+        if !location.ok() {
+            return Ok(None);
+        }
+        let branch = git(shell, Path::new(cwd), &["symbolic-ref", "--short", "HEAD"])?;
+        if !branch.ok() {
+            return Err(refuse("cannot read checkout HEAD"));
+        }
+        let tip = git(
+            shell,
+            Path::new(cwd),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+        )?;
+        let head = tip.ok().then(|| tip.stdout.trim());
+        unborn = format!(
+            "{}\n{}\n{}\n",
+            location.stdout.trim_end(),
+            head.unwrap_or_default(),
+            branch.stdout.trim()
+        );
+        &unborn
+    };
+    let lines: Vec<&str> = output.lines().map(str::trim).collect();
     let [common, dir, top, head, branch] = lines[..] else {
         return Err(Error::Invalid(format!(
             "git rev-parse in {cwd} returned unexpected output"
@@ -467,6 +640,21 @@ pub fn verified_absent(guard: &Guard, shell: &dyn Shell, tree: &crate::cleanup::
         })
         && missing(Path::new(&tree.path))
         && missing(&identity.gitdir)
+}
+
+/// An unmarked request can prove disappearance from its captured root/admin locations.
+/// This is read-only and cannot bless a replacement with a new generation.
+pub(crate) fn verified_absent_unmarked(guard: &Guard, shell: &dyn Shell, tree: &Linked) -> bool {
+    tree.identity.is_none()
+        && guard.check_repository(shell, &tree.checkout).is_ok()
+        && raw_paths(shell, &tree.checkout)
+            .is_ok_and(|listed| !listed.iter().any(|path| same(path, &tree.path)))
+        && [Path::new(&tree.path), &tree.gitdir]
+            .into_iter()
+            .all(|path| {
+                std::fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            })
 }
 
 fn raw_paths(shell: &dyn Shell, checkout: &Path) -> Result<Vec<String>> {

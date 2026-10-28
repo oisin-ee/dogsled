@@ -1402,6 +1402,7 @@ struct LifecycleShell {
     lock_attempt: Option<std::sync::mpsc::Sender<()>>,
     fail_listing: bool,
     terminal: String,
+    observation_hook: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl std::fmt::Debug for LifecycleShell {
@@ -1423,6 +1424,7 @@ impl LifecycleShell {
             lock_attempt: None,
             fail_listing: false,
             terminal: "c1-original".into(),
+            observation_hook: None,
         }
     }
 }
@@ -1460,13 +1462,21 @@ impl Shell for LifecycleShell {
         } else {
             None
         };
-        match value {
-            Some(value) => Ok(Output {
+        if let Some(value) = value {
+            Ok(Output {
                 status: 0,
                 stdout: value.to_string(),
                 stderr: String::new(),
-            }),
-            None => System.run(program, args),
+            })
+        } else {
+            let output = System.run(program, args)?;
+            if program == "git"
+                && args.ends_with(&["--abbrev-ref".into(), "HEAD".into()])
+                && let Some(hook) = &self.observation_hook
+            {
+                hook();
+            }
+            Ok(output)
         }
     }
 }
@@ -1844,6 +1854,200 @@ fn unmarked_close_preserves_replacement_while_waiting() {
         assert_eq!(marker.exists(), marked_replacement);
         assert_eq!(recorded(&fixture.ledger), []);
     }
+}
+
+#[test]
+fn unmarked_close_preserves_identical_replacement_before_pinning() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let fixture = lifecycle_fixture(false);
+    let marker = unmark_checkout(&fixture);
+    // Keep A's inodes allocated even after the external removal.
+    let _root = std::fs::File::open(&fixture.repo.tree).unwrap();
+    let _admin = std::fs::File::open(marker.parent().unwrap()).unwrap();
+    let repo = fixture.repo.repo.clone();
+    let path = fixture.repo.tree.clone();
+    let marker_for_hook = marker.clone();
+    crate::worktree::BEFORE_CLOSE_PIN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            replace_checkout(&repo, &path, false);
+            std::fs::remove_file(marker_for_hook).unwrap();
+        }));
+    });
+    let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    let error = crate::close::local(
+        &shell,
+        &fixture.ledger,
+        "placed-shell",
+        &crate::close::Caller::default(),
+        crate::close::Guard::Clean,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("identity changed"), "{error}");
+    assert!(fixture.repo.tree.is_dir());
+    assert!(!marker.exists());
+    assert!(shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 0);
+}
+
+#[test]
+fn unmarked_close_retries_one_unstable_observation_then_refuses() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering::SeqCst},
+    };
+    let fixture = lifecycle_fixture(false);
+    let marker = unmark_checkout(&fixture);
+    let repo = fixture.repo.repo.clone();
+    let path = fixture.repo.tree.clone();
+    let marker_for_hook = marker.clone();
+    let observations = Arc::new(AtomicUsize::new(0));
+    let observed = observations.clone();
+    // Prevent inode reuse from obscuring each real replacement in the test.
+    let handles = Mutex::new(Vec::new());
+    let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    shell.observation_hook = Some(Box::new(move || {
+        let mut handles = handles.lock().unwrap();
+        handles.push(std::fs::File::open(&path).unwrap());
+        handles.push(std::fs::File::open(marker_for_hook.parent().unwrap()).unwrap());
+        replace_checkout(&repo, &path, false);
+        std::fs::remove_file(&marker_for_hook).unwrap();
+        observed.fetch_add(1, SeqCst);
+    }));
+    let error = crate::close::local(
+        &shell,
+        &fixture.ledger,
+        "placed-shell",
+        &crate::close::Caller::default(),
+        crate::close::Guard::Clean,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("identity changed during observation"),
+        "{error}"
+    );
+    assert_eq!(observations.load(SeqCst), 2);
+    assert!(fixture.repo.tree.is_dir());
+    assert!(!marker.exists());
+    assert!(shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 0);
+}
+
+#[test]
+fn close_reconciles_removal_before_pinning() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for saved in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        if saved {
+            save_close_checkout(&fixture);
+        } else {
+            unmark_checkout(&fixture);
+        }
+        let repo = fixture.repo.repo.clone();
+        let path = fixture.repo.tree.clone();
+        crate::worktree::BEFORE_CLOSE_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                git(
+                    &repo,
+                    &["worktree", "remove", "-f", "-f", path.to_str().unwrap()],
+                );
+            }));
+        });
+        let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        let closed = crate::close::local(
+            &shell,
+            &fixture.ledger,
+            "placed-shell",
+            &crate::close::Caller::default(),
+            crate::close::Guard::Clean,
+        )
+        .unwrap();
+        assert!(closed.worktree.is_some());
+        assert!(!fixture.repo.tree.exists());
+        assert!(
+            shell.open.load(SeqCst),
+            "absence reconciliation closed the pane"
+        );
+        assert_eq!(shell.teardowns.load(SeqCst), 0);
+        assert_eq!(recorded(&fixture.ledger), []);
+    }
+}
+
+#[test]
+fn unmarked_close_keeps_request_head_when_discovery_moves_it() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let fixture = lifecycle_fixture(false);
+    unmark_checkout(&fixture);
+    let path = fixture.repo.tree.clone();
+    let observations = AtomicUsize::new(0);
+    let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    shell.observation_hook = Some(Box::new(move || {
+        if observations.fetch_add(1, SeqCst) == 1 {
+            git(
+                &path,
+                &[
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "moved during discovery",
+                ],
+            );
+            git(&path, &["push", "-q", "origin", "feature"]);
+        }
+    }));
+    let error = crate::close::local(
+        &shell,
+        &fixture.ledger,
+        "placed-shell",
+        &crate::close::Caller::default(),
+        crate::close::Guard::Clean,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("HEAD moved"), "{error}");
+    assert!(fixture.repo.tree.is_dir());
+    assert!(shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 0);
+}
+
+#[test]
+fn unmarked_close_accepts_survey_generation_on_the_same_checkout() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let fixture = lifecycle_fixture(false);
+    unmark_checkout(&fixture);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    shell.lock_attempt = Some(tx);
+    std::thread::scope(|scope| {
+        let close =
+            crate::worktree::with_lifecycle(&shell, &fixture.ledger, &fixture.repo.repo, |guard| {
+                let close = std::thread::Builder::new()
+                    .name("lifecycle-contender".into())
+                    .spawn_scoped(scope, || {
+                        crate::close::local(
+                            &shell,
+                            &fixture.ledger,
+                            "placed-shell",
+                            &crate::close::Caller::default(),
+                            crate::close::Guard::Clean,
+                        )
+                    })
+                    .unwrap();
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                // Another discovery marks the exact checkout while close waits for the mutex.
+                guard
+                    .discover(&System, fixture.repo.tree.to_str().unwrap())?
+                    .unwrap();
+                Ok(close)
+            })
+            .unwrap();
+        close.join().unwrap().unwrap();
+    });
+    assert!(!fixture.repo.tree.exists());
+    assert!(!shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 1);
 }
 
 #[test]

@@ -114,12 +114,14 @@ pub fn with_local<T>(
     let owners = local_owners(ledger, pane)?;
     let target = panes.iter().find(|p| p.pane_id == pane);
     let cwd = target.and_then(|p| p.cwd.as_deref());
-    let live = cwd
-        .map(|cwd| worktree::linked_or_detached(shell, cwd))
+    let capture = cwd
+        .map(|cwd| worktree::capture_close(shell, cwd))
         .transpose()?
         .flatten();
-    // Pin the checkout root and admin directory, not a movable cwd subdirectory.
-    let directory = live.as_ref().map(worktree::Linked::pin).transpose()?;
+    let (live, directory) = match capture {
+        Some(capture) => (Some(capture.tree), capture.pin),
+        None => (None, None),
+    };
     let saved = crate::launch::checkout_for_pane(ledger, pane)?;
     let planned = close_expectation(saved.as_ref(), live.as_ref());
     let Some(planned) = planned else {
@@ -135,33 +137,24 @@ pub fn with_local<T>(
         {
             return Err(refuse("pane moved to another checkout"));
         }
-        let planned = if saved.is_none() && planned.identity.is_none() {
-            // Establish the generation before capturing the expectation, and keep
-            // this same lock through validation, teardown, removal, and reconciliation.
-            lifecycle
-                .discover_unmarked(
-                    shell,
-                    live.as_ref()
-                        .ok_or_else(|| refuse("checkout identity is unreadable"))?,
-                    directory
-                        .as_ref()
-                        .ok_or_else(|| refuse("checkout identity is unreadable"))?,
-                )?
-                .tree()
-        } else {
-            // Identity stays launch-bound; HEAD is the close request's own observation.
-            if let Some(now) = lifecycle.observe(shell, &planned.path)? {
-                let drift = planned.drift(&now.tree());
-                if drift == crate::cleanup::Drift::Identity {
-                    return Err(refuse("worktree identity changed"));
-                }
-                if drift == crate::cleanup::Drift::HeadMoved {
-                    return Err(refuse("HEAD moved before close"));
-                }
-            }
+        let absent = worktree::verified_absent(lifecycle, shell, &planned)
+            || (saved.is_none()
+                && live.as_ref().is_some_and(|tree| {
+                    worktree::verified_absent_unmarked(lifecycle, shell, tree)
+                }));
+        let planned = if absent {
             planned
+        } else {
+            establish_close_identity(
+                lifecycle,
+                shell,
+                planned,
+                live.as_ref(),
+                directory.as_ref(),
+                saved.is_none(),
+            )?
         };
-        if worktree::verified_absent(lifecycle, shell, &planned) {
+        if absent || worktree::verified_absent(lifecycle, shell, &planned) {
             validate_absent_target(
                 shell,
                 ledger,
@@ -192,8 +185,17 @@ pub fn with_local<T>(
                 pane_closed: false,
             });
         }
+        if let Some(live) = &live {
+            directory
+                .as_ref()
+                .ok_or_else(|| refuse("checkout identity is unreadable"))?
+                .validate(live)?;
+        }
         let panes = crate::cleanup::current_panes(shell)?;
         let target = validate_target(shell, &panes, pane, caller)?;
+        if let (Some(live), Some(pin)) = (&live, &directory) {
+            pin.validate(live)?;
+        }
         reconcile(remove_target(
             shell,
             ledger,
@@ -204,6 +206,35 @@ pub fn with_local<T>(
             Some((lifecycle, &planned)),
         )?)
     })
+}
+
+/// Add only an unmarked checkout's generation; never replace the request's HEAD.
+fn establish_close_identity(
+    lifecycle: &worktree::Guard,
+    shell: &dyn crate::shell::Shell,
+    planned: crate::cleanup::Tree,
+    live: Option<&worktree::Linked>,
+    pin: Option<&worktree::Pin>,
+    unsaved: bool,
+) -> Result<crate::cleanup::Tree> {
+    if unsaved && planned.identity.is_none() {
+        return Ok(lifecycle
+            .discover_unmarked(
+                shell,
+                live.ok_or_else(|| refuse("checkout identity is unreadable"))?,
+                pin.ok_or_else(|| refuse("checkout identity is unreadable"))?,
+            )?
+            .tree());
+    }
+    // Saved identity stays launch-bound; HEAD is the close request's observation.
+    if let Some(now) = lifecycle.observe(shell, &planned.path)? {
+        match planned.drift(&now.tree()) {
+            crate::cleanup::Drift::Identity => return Err(refuse("worktree identity changed")),
+            crate::cleanup::Drift::HeadMoved => return Err(refuse("HEAD moved before close")),
+            crate::cleanup::Drift::Same => (),
+        }
+    }
+    Ok(planned)
 }
 
 /// Retain launch identity, but capture HEAD at the start of this close request.

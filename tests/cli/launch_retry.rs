@@ -440,6 +440,35 @@ fn main_checkout_launch_recovery_preserves_the_same_captured_identity() {
 }
 
 #[test]
+fn unborn_main_checkout_recovers_an_interrupted_same_request_launch() {
+    let (rig, _) = place::place_rig("launch-unborn-recovery");
+    let repo = rig.dir.join("home/unborn");
+    fs::create_dir_all(&repo).unwrap();
+    close::git(&repo, &["init", "-q", "-b", "main"]);
+    let ready = lifecycle_git_barrier(&rig);
+    let _ready_hold = ready.hold();
+    let mut request = host_request(&rig);
+    request["cwd"] = json!(repo);
+    fs::write(rig.dir.join("start-fails"), "").unwrap();
+    let (code, failed) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_ne!(code, 0, "{failed}");
+    let captured =
+        rig.read("state/launches/recover-one.progress.json")["result"]["checkout"].clone();
+    assert_eq!(captured["head"], "", "{captured}");
+    assert_eq!(captured["branch"], "main", "{captured}");
+    assert_eq!(captured["identity"]["gitdir"], json!(repo.join(".git")));
+    assert!(captured["identity"]["generation"].is_string(), "{captured}");
+    rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w8:p1","terminal_id":"term_tree","name":"worker","agent":"pi","agent_status":"idle"}]}}));
+    let (code, recovered) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{recovered}");
+    assert_eq!(recovered["checkout"], captured);
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
+}
+
+#[test]
 fn setup_failure_preserves_replacement_checkout() {
     let (rig, repo) = place::place_rig("setup-replacement");
     let script = "git -C {main} worktree remove -f -f {path} && git -C {main} worktree add --lock --reason agent:worktree {path} {branch} && printf replacement > {path}/replacement; exit 1";
