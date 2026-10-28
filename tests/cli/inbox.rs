@@ -533,7 +533,6 @@ fn a_reused_pane_id_never_inherits_the_custody_of_a_child() {
 }
 
 #[test]
-#[ignore = "red until the custodian session check is fixed"]
 fn a_recorded_custodian_session_that_cannot_be_read_receives_nothing() {
     let rig = Rig::new("inbox-unread-session");
     agents(
@@ -559,7 +558,6 @@ fn a_recorded_custodian_session_that_cannot_be_read_receives_nothing() {
 }
 
 #[test]
-#[ignore = "red until the delivery live session check is fixed"]
 fn delivery_checks_the_live_session_of_the_recipient_not_the_snapshot() {
     let rig = Rig::new("inbox-stale-snapshot");
     agents(

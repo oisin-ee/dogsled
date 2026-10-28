@@ -47,12 +47,15 @@ pub fn findings(
     let panes = crate::cleanup::current_panes(shell)?;
     let launches = crate::launch::requests(ledger)?;
     let custody = crate::custody::list(ledger)?;
-    let session = crate::probe::agent_list(shell).ok().and_then(|agents| {
-        agents
+    // A probe that cannot be read proves no session. The custody that names a session then
+    // stays unproven, and the holder is no custodian of it.
+    let session = match crate::probe::agent_list(shell) {
+        Ok(agents) => agents
             .into_iter()
             .find(|agent| agent.pane == owner)
-            .and_then(|agent| agent.agent_session)
-    });
+            .and_then(|agent| agent.agent_session),
+        Err(_) => None,
+    };
     let holder = Holder {
         pane: owner,
         session: session.as_deref(),
@@ -146,8 +149,10 @@ struct Holder<'a> {
 
 impl Holder<'_> {
     /// The agent answers for `item` now. The current custodian does, found by pane and by
-    /// session, so a reused pane id never inherits the custody. An item with no custody
-    /// record is still held by its origin owner.
+    /// session, so a reused pane id never inherits the custody. A custody that names a
+    /// session needs a live session that is readable and equal: a session nobody can read
+    /// proves nothing, so the custody is not held then. An item with no custody record is
+    /// still held by its origin owner.
     fn answers_for(&self, item: &crate::items::Item) -> bool {
         let custodian = crate::inbox::custodian_of(self.records, item);
         crate::inbox::holds(&custodian, self.pane, self.session)
