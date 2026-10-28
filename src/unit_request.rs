@@ -977,22 +977,32 @@ fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -
     crate::jobs::validate_id(&input.execution.request_id)?;
     let attempts = fleet.ledger.child("admissions");
     let Some(reference) = &input.custody else {
+        // A legacy acknowledgement carries no custody reference, so it may only speak for
+        // an item whose custody never moved. The check and the write hold the custody
+        // lock, so a claim cannot slip in between them.
         return attempts.with_lock(&input.execution.request_id, || {
-            let mut attempt = load(&attempts, &input.execution)?;
-            let unit = attempt
-                .unit
-                .as_mut()
-                .ok_or_else(|| conflict("not a unit request"))?;
-            let event = settlement(unit)?;
-            if event["eventId"].as_str() != Some(input.event_id.as_str()) {
-                return Err(conflict(
-                    "settlement acknowledgement does not match pending event",
-                ));
-            }
-            let applied = unit.settlement_ack.is_none();
-            unit.settlement_ack = Some(input.event_id.clone());
-            attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
-            Ok(json!({"applied":applied}))
+            crate::custody::locked(fleet.ledger, &input.execution.request_id, |custody| {
+                if custody.is_some_and(|record| !record.is_unclaimed()) {
+                    return Err(conflict(
+                        "custody was claimed; the acknowledgement must carry the custody reference",
+                    ));
+                }
+                let mut attempt = load(&attempts, &input.execution)?;
+                let unit = attempt
+                    .unit
+                    .as_mut()
+                    .ok_or_else(|| conflict("not a unit request"))?;
+                let event = settlement(unit)?;
+                if event["eventId"].as_str() != Some(input.event_id.as_str()) {
+                    return Err(conflict(
+                        "settlement acknowledgement does not match pending event",
+                    ));
+                }
+                let applied = unit.settlement_ack.is_none();
+                unit.settlement_ack = Some(input.event_id.clone());
+                attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+                Ok(json!({"applied":applied}))
+            })
         });
     };
     let (pane, session) = caller(fleet)?;

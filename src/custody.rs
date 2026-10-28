@@ -212,6 +212,12 @@ impl Custody {
         self.custodian_pane == pane && self.custodian_session.as_deref() == session
     }
 
+    /// Whether the custody never moved: revision 0, no claims, and the origin pane holds it.
+    #[must_use]
+    pub fn is_unclaimed(&self) -> bool {
+        self.revision == 0 && self.claims.is_empty() && self.custodian_pane == self.owner_pane
+    }
+
     /// The latest claim, when the custody ever moved.
     #[must_use]
     pub fn latest_claim(&self) -> Option<&Claim> {

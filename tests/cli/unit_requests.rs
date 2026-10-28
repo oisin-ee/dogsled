@@ -879,3 +879,30 @@ fn a_new_custodian_gets_acknowledged_evidence_once_and_duplicate_acks_are_harmle
     let saved = rig.read(&format!("state/admissions/{ID}.json"));
     assert_eq!(saved["unit"]["settlement_ack"], format!("{ID}-returned"));
 }
+
+#[test]
+fn a_custody_less_ack_is_refused_once_custody_is_claimed() {
+    let (rig, execution) = settled("unit-custody-legacy-ack", "returned");
+    let path = format!("state/admissions/{ID}.json");
+    let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")});
+    // Before any claim the legacy acknowledgement still works.
+    assert_eq!(
+        operation(&rig, "ack-settlement", &legacy).1["applied"],
+        true
+    );
+    let (rig, execution) = settled("unit-custody-legacy-claimed", "returned");
+    claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
+    live_session(&rig, "w2:p1", "s2");
+    let before = fs::read(rig.dir.join(&path)).unwrap();
+    // The origin owner passes the owner check, but custody has moved.
+    let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")}).to_string();
+    let (code, _) = rig.json(&["unit", "ack-settlement", "--input", &legacy]);
+    assert_eq!(code, 2);
+    assert_eq!(fs::read(rig.dir.join(&path)).unwrap(), before);
+    let saved = rig.read(&path);
+    assert!(saved["unit"]["settlement_ack"].is_null(), "{saved}");
+    // The live custodian still acknowledges with its custody reference.
+    let input = ack(&execution, "returned", &reference(1, "w2:p1"));
+    let args = ["unit", "ack-settlement", "--input", &input];
+    assert_eq!(as_pane(&rig, "w2:p1", &args).1["applied"], true);
+}
