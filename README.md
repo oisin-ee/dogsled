@@ -184,6 +184,21 @@ dogsled done                       # as a child: my whole task is complete
 
 `drop` deletes a closed child's retained local and origin branches, including unmerged commits. Only the item's owner can use it, except on an orphan: when the origin's evidence proves the owner pane is gone or its session ended, any session can drop it. It refuses a branch checked out in a worktree. Already absent branches count as success. The item and its done mark stay settled and leave the board.
 
+### Claim custody and accept a result
+
+```sh
+dogsled claim <item-id> --revision 0 --json
+dogsled accept <item-id> --result <result-id> --evidence "Reviewed the exact returned result" --json
+```
+
+`claim` takes custody of an orphaned child recorded on this host. Dogsled uses the caller's live pane and harness session. The original owner, task, reply, and result do not change. `--revision` names the expected custody revision. Without it, Dogsled reads the current revision before the atomic claim. A repeated claim by the current custodian returns `held` without another transfer.
+
+A claim refuses a wrong host, a live custodian, an unproven orphan, a stale revision, or custody that moved during the claim. Refusals include a typed reason.
+
+`accept` records the custodian's review of the exact saved result from a unit request. The caller must hold a custody claim. The receipt names the claim, revision, execution, result, reviewer, and review evidence. The original task stays open. Acceptance does not prove original task completion. An identical acceptance returns the same review without another write. A different review for the same claim is refused.
+
+Both commands support `--json`. MCP exposes `claim` and `accept`, named `mcp__dogsled__claim` and `mcp__dogsled__accept` in Pi. Pi stores successful receipts with the custom type `dogsled.custody.v1`. These entries are audit receipts only. They do not call todo or its provider, and they do not change task state.
+
 `close` ends a child now, for an owner who does not want to wait for the sweep. `--host` defaults to the host of the pane's open item, else local.
 
 For an interrupted launch with no final receipt, explicit `close` can retire its exact idle shell under the request and pane locks. This closes **only the pane**, retaining the checkout, preparation holds, and unknown launch evidence. It does not report that the task never started. Competing launch records, a changed terminal, any agent, or incomplete foreground evidence refuse recovery. Automatic cleanup never uses this recovery path; normal cleanup can assess the retained checkout after its holds are resolved.
@@ -407,7 +422,7 @@ The report includes start and finish times, removals, failures, repository warni
 `dogsled status` and `status --json` show the latest pass. Prompt context adds one summary line when that pass has errors or warnings.
 The service also writes removals, failures, repository warnings, and holds to stderr.
 Child completion and orphan checks remain independent of requested doctor cleanup.
-An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. Status shows `orphaned:` and the reason on its item line, the brief counts it, and every check-in on the host lists it.
+An orphan that is dirty, unpushed, `working`, `blocked`, or on an unreachable host stays open. `dogsled status` lists each item once as `orphaned (unclaimed)`, `orphaned (claimed)`, or `unknown`. Check-ins no longer repeat orphan notices.
 Prune also handles ended jobs and `targets`. Disk and process findings are report-only. Repository findings remain report-only except for absent remembered paths.
 
 ## Placement
