@@ -106,15 +106,9 @@ impl Guard {
         &self,
         shell: &dyn Shell,
         before: &Linked,
-        directory: &std::fs::File,
-        cwd: &str,
+        pin: &Pin,
     ) -> Result<Linked> {
-        use std::os::unix::fs::MetadataExt as _;
-        let original = directory.metadata()?;
-        let current = std::fs::metadata(cwd)?;
-        if original.dev() != current.dev() || original.ino() != current.ino() {
-            return Err(refuse("worktree identity changed"));
-        }
+        pin.validate(before)?;
         let now = linked_or_detached(shell, &before.path)?
             .ok_or_else(|| refuse("checkout identity is unreadable"))?;
         if before.identity.is_some()
@@ -165,7 +159,37 @@ pub struct Linked {
     pub identity: Option<Identity>,
 }
 
+/// Open handles keep both checkout-root and administrative inodes alive during a wait.
+pub struct Pin {
+    root: std::fs::File,
+    admin: std::fs::File,
+}
+
+impl Pin {
+    fn validate(&self, tree: &Linked) -> Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        for (file, path) in [
+            (&self.root, Path::new(&tree.path)),
+            (&self.admin, &tree.gitdir),
+        ] {
+            let original = file.metadata()?;
+            let current = std::fs::metadata(path)?;
+            if original.dev() != current.dev() || original.ino() != current.ino() {
+                return Err(refuse("worktree identity changed"));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Linked {
+    pub(crate) fn pin(&self) -> Result<Pin> {
+        Ok(Pin {
+            root: std::fs::File::open(&self.path)?,
+            admin: std::fs::File::open(&self.gitdir)?,
+        })
+    }
+
     /// Compare checkout location and administrative identity without recapturing HEAD.
     pub(crate) fn matches_checkout(&self, expected: &crate::cleanup::Tree) -> bool {
         same(&self.path, &expected.path)

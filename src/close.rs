@@ -114,20 +114,14 @@ pub fn with_local<T>(
     let owners = local_owners(ledger, pane)?;
     let target = panes.iter().find(|p| p.pane_id == pane);
     let cwd = target.and_then(|p| p.cwd.as_deref());
-    // Keep the directory alive across discovery and the mutex wait. An unmarked
-    // checkout has no generation yet, and its path/admin name can both be reused.
-    let directory = cwd
-        .filter(|cwd| Path::new(cwd).is_dir())
-        .map(std::fs::File::open)
-        .transpose()?;
     let live = cwd
         .map(|cwd| worktree::linked_or_detached(shell, cwd))
         .transpose()?
         .flatten();
+    // Pin the checkout root and admin directory, not a movable cwd subdirectory.
+    let directory = live.as_ref().map(worktree::Linked::pin).transpose()?;
     let saved = crate::launch::checkout_for_pane(ledger, pane)?;
-    let planned = saved
-        .clone()
-        .or_else(|| live.as_ref().map(worktree::Linked::tree));
+    let planned = close_expectation(saved.as_ref(), live.as_ref());
     let Some(planned) = planned else {
         let target = validate_target(shell, &panes, pane, caller)?;
         return reconcile(remove_target(
@@ -152,11 +146,10 @@ pub fn with_local<T>(
                     directory
                         .as_ref()
                         .ok_or_else(|| refuse("checkout identity is unreadable"))?,
-                    cwd.ok_or_else(|| refuse("checkout identity is unreadable"))?,
                 )?
                 .tree()
         } else {
-            // Saved plans retain their HEAD and identity; observation never repairs them.
+            // Identity stays launch-bound; HEAD is the close request's own observation.
             if let Some(now) = lifecycle.observe(shell, &planned.path)? {
                 let drift = planned.drift(&now.tree());
                 if drift == crate::cleanup::Drift::Identity {
@@ -213,13 +206,26 @@ pub fn with_local<T>(
     })
 }
 
-fn local_owners(ledger: &Ledger, pane: &str) -> Result<std::collections::BTreeSet<String>> {
+/// Retain launch identity, but capture HEAD at the start of this close request.
+fn close_expectation(
+    saved: Option<&crate::cleanup::Tree>,
+    live: Option<&worktree::Linked>,
+) -> Option<crate::cleanup::Tree> {
+    let mut planned = saved
+        .cloned()
+        .or_else(|| live.map(worktree::Linked::tree))?;
+    if let Some(live) = live {
+        planned.head.clone_from(&live.head);
+    }
+    Some(planned)
+}
+
+fn local_owners(ledger: &Ledger, pane: &str) -> Result<Vec<crate::items::Item>> {
     Ok(crate::items::list(ledger)?
         .into_iter()
         .filter(|item| {
             item.host == crate::hosts::LOCAL && item.pane == pane && item.closed_ms.is_none()
         })
-        .map(|item| item.id)
         .collect())
 }
 
@@ -231,10 +237,30 @@ fn validate_absent_target(
     caller: &Caller,
     tree: &crate::cleanup::Tree,
     terminal: Option<&str>,
-    owners: &std::collections::BTreeSet<String>,
+    owners: &[crate::items::Item],
 ) -> Result<()> {
     let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
-    if local_owners(ledger, pane)? != *owners {
+    let items = crate::items::list(ledger)?;
+    let new_owner = items.iter().any(|item| {
+        item.host == crate::hosts::LOCAL
+            && item.pane == pane
+            && item.closed_ms.is_none()
+            && !owners.iter().any(|owner| owner.id == item.id)
+    });
+    let lost_owner = owners.iter().any(|owner| {
+        items
+            .iter()
+            .find(|item| item.id == owner.id)
+            .is_none_or(|item| {
+                item.host != owner.host
+                    || item.pane != owner.pane
+                    || item.owner_pane != owner.owner_pane
+                    || item.owner_session != owner.owner_session
+                    || item.created_ms != owner.created_ms
+            })
+    });
+    // Only the same captured item becoming closed may leave the open owner set.
+    if new_owner || lost_owner {
         return Err(refuse("checkout item ownership changed"));
     }
     if panes.iter().any(|target| target.pane_id == pane) {
