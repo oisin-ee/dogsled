@@ -1228,6 +1228,133 @@ fn owned_child(rig: &Rig, status: &str, tree: &Path, seq: Option<u64>, role: &st
     );
 }
 
+/// An open child with an untold reply and an origin owner session, but no custody record.
+/// The sweep must create origin custody before deciding whether the live owner receives it.
+fn open_child_origin_session(name: &str, live_session: Option<&str>) -> (Rig, PathBuf) {
+    let (rig, tree) = close_rig(name);
+    owned_child(&rig, "idle", &tree, Some(4), "writer");
+    let mut items = rig.read("state/items.json");
+    items[0]["owner_session"] = json!("origin-session");
+    // The host already captured the reply, as in the inbox custody fixtures. This tests
+    // delivery even when the owner no longer holds custody and landing cannot capture it.
+    items[0]["reply"] = json!({"seq":4,"result_id":null,
+        "text":"Found 3 bugs; notes in review.md.","captured_ms":2,
+        "reported_ms":null,"done":false});
+    rig.put("state/items.json", &items);
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"][0]["terminal_id"] = json!("term_lead");
+    if let Some(session) = live_session {
+        agents["result"]["agents"][0]["agent_session"] = json!({"kind":"path","value":session});
+    }
+    rig.put("agents.json", &agents);
+    let (code, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
+    assert_eq!((code, claimed), (0, json!([])));
+    assert!(!rig.dir.join("state/custody.json").exists());
+    (rig, tree)
+}
+
+#[test]
+fn an_open_child_reply_reaches_its_matching_origin_owner_session() {
+    let (rig, tree) =
+        open_child_origin_session("sweep-open-origin-session-match", Some("origin-session"));
+    serve(&rig);
+    serve(&rig);
+    assert!(item_open(&rig));
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("close"));
+    let custody = rig.read("state/custody.json");
+    assert_eq!(custody[0]["custodian_pane"], "w1:p1", "{custody}");
+    assert_eq!(
+        custody[0]["custodian_session"], "origin-session",
+        "{custody}"
+    );
+    let inbox = rig.read("state/inbox/term_lead.json");
+    assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
+    assert_eq!(inbox[0]["kind"], "reply");
+    assert_eq!(inbox[0]["pane"], "w1:p1");
+    assert!(
+        inbox[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("Found 3 bugs; notes in review.md."),
+        "{inbox}"
+    );
+    assert!(rig.read("state/items.json")[0]["reply"]["reported_ms"].is_u64());
+    let (code, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
+    assert_eq!(code, 0, "{claimed}");
+    assert_eq!(claimed[0]["kind"], "reply", "{claimed}");
+    let (_, status) = rig.json(&["status"]);
+    assert_eq!(status["orphans"], json!([]), "{status}");
+    assert!(!rig.log("herdr.log").contains("agent prompt"));
+}
+
+/// A refused reply stays untold, and status keeps the open child visible for custody.
+fn assert_origin_reply_held(rig: &Rig, tree: &Path, expected_status: &str) {
+    serve(rig);
+    serve(rig);
+    assert!(item_open(rig));
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("close"));
+    let (code, inbox) = rig.json(&["inbox", "list"]);
+    assert_eq!(code, 0, "{inbox}");
+    assert!(
+        inbox["received"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["kind"] != "reply"),
+        "{inbox}"
+    );
+    let (code, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
+    assert_eq!(code, 0, "{claimed}");
+    assert!(
+        claimed
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["kind"] != "reply"),
+        "{claimed}"
+    );
+    let items = rig.read("state/items.json");
+    assert_eq!(items[0]["owner_session"], "origin-session", "{items}");
+    let reply = &items[0]["reply"];
+    assert_eq!(
+        reply["text"], "Found 3 bugs; notes in review.md.",
+        "{reply}"
+    );
+    assert!(reply["reported_ms"].is_null(), "{reply}");
+    let custody = rig.read("state/custody.json");
+    assert_eq!(custody[0]["custodian_pane"], "w1:p1", "{custody}");
+    assert_eq!(
+        custody[0]["custodian_session"], "origin-session",
+        "{custody}"
+    );
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 1, "{status}");
+    assert_eq!(orphans[0]["item"], "i1", "{status}");
+    assert_eq!(orphans[0]["status"], expected_status, "{status}");
+    assert_eq!(orphans[0]["custodian_pane"], "w1:p1", "{status}");
+    assert!(
+        orphans[0]["reason"].as_str().unwrap().contains("session"),
+        "{status}"
+    );
+    assert!(!rig.log("herdr.log").contains("agent prompt"));
+}
+
+#[test]
+fn an_open_child_reply_is_held_when_its_origin_owner_pane_runs_another_session() {
+    let (rig, tree) =
+        open_child_origin_session("sweep-open-origin-session-reused", Some("another-session"));
+    assert_origin_reply_held(&rig, &tree, "orphaned");
+}
+
+#[test]
+fn an_open_child_reply_is_held_when_its_origin_owner_session_is_unreadable() {
+    let (rig, tree) = open_child_origin_session("sweep-open-origin-session-unreadable", None);
+    assert_origin_reply_held(&rig, &tree, "unknown");
+}
+
 fn item_open(rig: &Rig) -> bool {
     rig.read("state/items.json")[0]["closed_ms"].is_null()
 }
