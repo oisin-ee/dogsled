@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
@@ -35,6 +36,8 @@ pub enum Refusal {
     UnreadablePath(PathBuf),
     #[error("Git cannot store this file type: {0}")]
     UnsupportedFileType(PathBuf),
+    #[error("path cannot be transported byte-exactly: {0:?}")]
+    UnsupportedPath(Vec<u8>),
     #[error("recovery ref already exists: {0}")]
     RefConflict(String),
     #[error("the live checkout changed during preservation")]
@@ -172,12 +175,18 @@ fn git_input(
     }
     words.push("GIT_OPTIONAL_LOCKS=0".into());
     if let Some(index) = index {
-        words.push(format!("GIT_INDEX_FILE={}", index.display()));
+        let index = index
+            .to_str()
+            .ok_or_else(|| Refusal::UnsupportedPath(index.as_os_str().as_bytes().to_vec()))?;
+        words.push(format!("GIT_INDEX_FILE={index}"));
     }
     words.extend([
         "git".into(),
         "-C".into(),
-        checkout.display().to_string(),
+        checkout
+            .to_str()
+            .ok_or_else(|| Refusal::UnsupportedPath(checkout.as_os_str().as_bytes().to_vec()))?
+            .into(),
         "-c".into(),
         "core.fsmonitor=false".into(),
     ]);
@@ -266,9 +275,10 @@ fn observe(shell: &dyn Shell, checkout: &Path) -> Result<Observation> {
             checkout,
             None,
             &[
+                "-c",
+                "core.quotePath=true",
                 "status",
                 "--porcelain=v1",
-                "-z",
                 "--untracked-files=all",
                 "--ignore-submodules=none",
             ],
@@ -294,6 +304,88 @@ fn index_tree(
         .into())
 }
 
+/// Decode Git's core.quotePath=true output without passing filenames through UTF-8.
+fn unquote_path(quoted: &str) -> Result<Vec<u8>> {
+    let bytes = quoted.as_bytes();
+    let unsupported = || Refusal::UnsupportedPath(bytes.to_vec());
+    if !bytes.is_ascii() || bytes.contains(&0) {
+        return Err(unsupported().into());
+    }
+    if !bytes.starts_with(b"\"") {
+        return Ok(bytes.to_vec());
+    }
+    let escaped = bytes
+        .strip_prefix(b"\"")
+        .and_then(|bytes| bytes.strip_suffix(b"\""))
+        .ok_or_else(unsupported)?;
+    let mut decoded = Vec::new();
+    let mut offset = 0;
+    while offset < escaped.len() {
+        let byte = escaped[offset];
+        offset += 1;
+        if byte != b'\\' {
+            if byte == b'"' {
+                return Err(unsupported().into());
+            }
+            decoded.push(byte);
+            continue;
+        }
+        let byte = *escaped.get(offset).ok_or_else(unsupported)?;
+        offset += 1;
+        decoded.push(match byte {
+            b'a' => 7,
+            b'b' => 8,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => b'\r',
+            b'"' | b'\\' => byte,
+            b'0'..=b'3' => {
+                let rest = escaped.get(offset..offset + 2).ok_or_else(unsupported)?;
+                if !rest.iter().all(|digit| matches!(digit, b'0'..=b'7')) {
+                    return Err(unsupported().into());
+                }
+                offset += 2;
+                (byte - b'0') * 64 + (rest[0] - b'0') * 8 + (rest[1] - b'0')
+            }
+            _ => return Err(unsupported().into()),
+        });
+    }
+    if decoded.contains(&0) {
+        return Err(unsupported().into());
+    }
+    Ok(decoded)
+}
+
+fn removed_path(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// Never traverse a replaced directory, particularly a symlink out of the checkout.
+fn worktree_metadata(checkout: &Path, path: &Path) -> Result<Option<fs::Metadata>> {
+    let mut ancestor = checkout.to_path_buf();
+    if let Some(parent) = path.parent() {
+        for component in parent.components() {
+            ancestor.push(component);
+            match fs::symlink_metadata(&ancestor) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => return Ok(None),
+                Err(error) if removed_path(&error) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    match fs::symlink_metadata(checkout.join(path)) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(error) if removed_path(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn worktree_tree(
     shell: &dyn Shell,
     checkout: &Path,
@@ -312,46 +404,35 @@ fn worktree_tree(
         checkout,
         Some(&index),
         &[
+            "-c",
+            "core.quotePath=true",
             "ls-files",
             "--cached",
             "--others",
             "--exclude-standard",
-            "-z",
         ],
     )?;
+    let mut removals = String::new();
     let mut entries = String::new();
-    for path in paths.split('\0').filter(|path| !path.is_empty()) {
+    for quoted in paths.lines().filter(|path| !path.is_empty()) {
+        let bytes = unquote_path(quoted)?;
+        let path = Path::new(std::ffi::OsStr::from_bytes(&bytes));
         let absolute = checkout.join(path);
-        let meta = match fs::symlink_metadata(&absolute) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                checked(
-                    shell,
-                    checkout,
-                    Some(&index),
-                    &["update-index", "--force-remove", "--", path],
-                )?;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
+        let meta = worktree_metadata(checkout, path)?;
+        let Some(meta) = meta else {
+            let _ = writeln!(removals, "0 {}\t{quoted}", "0".repeat(staged.len()));
+            continue;
         };
         if meta.is_dir() {
             // Keep clean submodule gitlinks, but remove files replaced by directories.
             if !absolute.join(".git").exists() {
-                checked(
-                    shell,
-                    checkout,
-                    Some(&index),
-                    &["update-index", "--force-remove", "--", path],
-                )?;
+                let _ = writeln!(removals, "0 {}\t{quoted}", "0".repeat(staged.len()));
             }
             continue;
         }
-        let (mode, source) = if meta.is_symlink() {
+        let (mode, content) = if meta.is_symlink() {
             let target = fs::read_link(&absolute)?;
-            let source = scratch.0.join("link-target");
-            fs::write(&source, target.as_os_str().as_encoded_bytes())?;
-            ("120000", source)
+            ("120000", target.as_os_str().as_bytes().to_vec())
         } else if meta.is_file() {
             (
                 if meta.permissions().mode() & 0o111 == 0 {
@@ -359,26 +440,20 @@ fn worktree_tree(
                 } else {
                     "100755"
                 },
-                absolute,
+                fs::read(&absolute)?,
             )
         } else {
             return Err(Refusal::UnsupportedFileType(absolute).into());
         };
-        let hash = checked(
-            shell,
-            checkout,
-            None,
-            &[
-                "hash-object",
-                "-w",
-                "--no-filters",
-                "--",
-                &source.to_string_lossy(),
-            ],
-        )?;
-        let _ = write!(entries, "{mode} {}\t{path}\0", hash.trim());
+        let args = ["hash-object", "-w", "--no-filters", "--stdin"];
+        let out = git_input(shell, checkout, None, &args, Some(&content))?;
+        let hash = crate::shell::checked("git", &args.map(String::from), out)?.stdout;
+        let _ = writeln!(entries, "{mode} {}\t{quoted}", hash.trim());
     }
-    let args = ["update-index", "-z", "--index-info"];
+    // Remove directory/file conflicts before adding their replacements.
+    removals.push_str(&entries);
+    let entries = removals;
+    let args = ["update-index", "--index-info"];
     let out = git_input(
         shell,
         checkout,
@@ -444,16 +519,23 @@ fn preflight(shell: &dyn Shell, checkout: &Path) -> Result<()> {
     if !checked(shell, checkout, None, &["ls-files", "--unmerged", "-z"])?.is_empty() {
         return Err(Refusal::ConflictedIndex.into());
     }
-    let entries = checked(shell, checkout, None, &["ls-files", "--stage", "-z"])?;
+    let entries = checked(
+        shell,
+        checkout,
+        None,
+        &["-c", "core.quotePath=true", "ls-files", "--stage"],
+    )?;
     let mut submodules = Vec::new();
-    for entry in entries
-        .split('\0')
-        .filter(|entry| entry.starts_with("160000 "))
-    {
+    for entry in entries.lines().filter(|entry| entry.starts_with("160000 ")) {
         let Some((info, path)) = entry.split_once('\t') else {
             return Err(Refusal::VerificationFailed.into());
         };
-        let path = checkout.join(path);
+        let bytes = unquote_path(path)?;
+        let relative = Path::new(std::ffi::OsStr::from_bytes(&bytes));
+        if worktree_metadata(checkout, relative)?.is_none() {
+            continue;
+        }
+        let path = checkout.join(relative);
         if path.join(".git").exists() {
             let current = head(shell, &path)?;
             let oid = info.split_whitespace().nth(1);
@@ -816,6 +898,132 @@ mod tests {
         let mut out = std::collections::BTreeMap::new();
         collect(root, root, &mut out);
         out
+    }
+
+    #[test]
+    fn git_quoted_paths_decode_byte_exactly() {
+        for (quoted, expected) in [
+            (r#""name-\377""#, b"name-\xff".as_slice()),
+            (r#""caf\303\251""#, "café".as_bytes()),
+            (r#""a\tb\nc\"d\\e""#, b"a\tb\nc\"d\\e".as_slice()),
+            ("plain name", b"plain name".as_slice()),
+            (r#""\a\b\v\f\r""#, b"\x07\x08\x0b\x0c\r".as_slice()),
+        ] {
+            assert_eq!(unquote_path(quoted).unwrap(), expected, "{quoted}");
+        }
+    }
+
+    #[test]
+    fn malformed_quoted_paths_refuse_instead_of_changing_names() {
+        for quoted in [
+            r#""\400""#,
+            r#""\37""#,
+            r#""\q""#,
+            r#""\000""#,
+            "\"unterminated",
+            "café",
+            "bad\0name",
+        ] {
+            assert!(matches!(
+                unquote_path(quoted),
+                Err(Error::Refused(Refusal::UnsupportedPath(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn non_utf8_and_accented_names_round_trip_byte_exactly() {
+        let repo = Repo::new(true);
+        repo.git(&["config", "core.quotePath", "false"]);
+        let names: [&[u8]; 2] = [b"name-\xff", "café".as_bytes()];
+        for name in names {
+            fs::write(
+                repo.path.join(std::ffi::OsStr::from_bytes(name)),
+                b"exact content\n",
+            )
+            .unwrap();
+        }
+        repo.git(&["add", "."]);
+        for name in names {
+            fs::write(
+                repo.path.join(std::ffi::OsStr::from_bytes(name)),
+                b"working content\n",
+            )
+            .unwrap();
+        }
+        let untracked = std::ffi::OsStr::from_bytes(b"untracked-\xff\t\n\"\\");
+        fs::write(repo.path.join(untracked), b"untracked bytes\0\xff").unwrap();
+        let saved = snapshot(&System::default(), &repo.path).unwrap();
+        verify(&System::default(), &repo.path, &saved).unwrap();
+        let restored = repo.scratch.0.join("restored");
+        repo.git(&[
+            "worktree",
+            "add",
+            "--detach",
+            restored.to_str().unwrap(),
+            &saved.commit,
+        ]);
+        assert_eq!(tree_files(&repo.path), tree_files(&restored));
+        for name in names {
+            assert_eq!(
+                fs::read(restored.join(std::ffi::OsStr::from_bytes(name))).unwrap(),
+                b"working content\n"
+            );
+        }
+        // A quoted tracked path must also be removable without renaming it.
+        for name in names {
+            fs::remove_file(repo.path.join(std::ffi::OsStr::from_bytes(name))).unwrap();
+        }
+        fs::remove_file(repo.path.join(untracked)).unwrap();
+        let removed = snapshot(&System::default(), &repo.path).unwrap();
+        assert_eq!(
+            repo.git(&["ls-tree", "--name-only", &removed.commit]),
+            "file\n"
+        );
+    }
+
+    #[test]
+    fn tracked_directory_replaced_by_regular_file_round_trips() {
+        let repo = Repo::new(true);
+        fs::create_dir(repo.path.join("dir")).unwrap();
+        fs::write(repo.path.join("dir/file"), b"old content").unwrap();
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "tracked directory"]);
+        fs::remove_dir_all(repo.path.join("dir")).unwrap();
+        fs::write(repo.path.join("dir"), b"replacement file").unwrap();
+        let saved = repo.round_trip();
+        let restored = repo.scratch.0.join("restored");
+        assert_eq!(fs::read(restored.join("dir")).unwrap(), b"replacement file");
+        assert!(!restored.join("dir/file").exists());
+        assert!(
+            repo.git(&["ls-tree", &saved.commit, "dir"])
+                .starts_with("100644 blob ")
+        );
+    }
+
+    #[test]
+    fn tracked_directory_replaced_by_symlink_never_captures_outside_content() {
+        let repo = Repo::new(true);
+        fs::create_dir(repo.path.join("dir")).unwrap();
+        fs::write(repo.path.join("dir/file"), b"old content").unwrap();
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-m", "tracked directory"]);
+        let outside = repo.scratch.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("file"), b"outside secret").unwrap();
+        fs::remove_dir_all(repo.path.join("dir")).unwrap();
+        symlink(&outside, repo.path.join("dir")).unwrap();
+        let saved = repo.round_trip();
+        let entry = repo.git(&["ls-tree", "-r", &saved.commit, "dir"]);
+        assert!(entry.starts_with("120000 blob "), "{entry}");
+        assert_eq!(entry.lines().count(), 1);
+        assert_eq!(repo.git(&["ls-tree", "-r", &saved.commit, "dir/file"]), "");
+        assert_eq!(
+            fs::read_link(repo.scratch.0.join("restored/dir")).unwrap(),
+            outside
+        );
+        fs::write(outside.join("file"), b"changed outside secret").unwrap();
+        verify(&System::default(), &repo.path, &saved).unwrap();
     }
 
     #[test]
