@@ -473,23 +473,16 @@ pub struct LogChunk {
     pub bytes: Vec<u8>,
     pub next: u64,
     pub done: bool,
-    /// The job's output expired: the bytes are the marker, not output.
+    /// The job's output expired: the reader reports expiry and ignores the bytes.
     #[serde(default)]
     pub expired: bool,
 }
 
-/// The marker once: a read past it is empty, so a following reader ends.
+/// Expiry is a terminal transition, independent of the output cursor.
 pub fn expired_chunk(offset: u64) -> LogChunk {
-    let marker = format!("{OUTPUT_EXPIRED}\n").into_bytes();
-    let length = marker.len() as u64;
-    let bytes = if offset < length {
-        marker[offset as usize..].to_vec()
-    } else {
-        Vec::new()
-    };
     LogChunk {
-        next: offset.max(length),
-        bytes,
+        bytes: Vec::new(),
+        next: offset,
         done: true,
         expired: true,
     }

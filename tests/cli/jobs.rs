@@ -882,17 +882,14 @@ fn an_expired_output_is_reported_not_missing() {
     // The log read reports the expiry and does not fail.
     let logs = rig.json(&["host", "logs", "aged"]).1;
     assert_eq!(logs["expired"], true, "{logs}");
-    assert_eq!(
-        logs["bytes"],
-        json!(format!("{EXPIRED}\n").as_bytes()),
-        "{logs}"
-    );
+    assert_eq!(logs["bytes"], json!([]), "{logs}");
+    assert_eq!(logs["done"], true, "{logs}");
     // The tail says it too.
     let tail = rig.json(&["host", "tail", "job", "aged"]).1;
     assert_eq!(tail, json!(EXPIRED), "{tail}");
 }
 
-/// Expired output advances its cursor and ends both plain and following log reads.
+/// Expired chunks carry a terminal signal, not bytes from the output cursor.
 #[test]
 fn expired_logs_end_after_one_marker() {
     let rig = Rig::new("retention-log-cursor");
@@ -902,9 +899,11 @@ fn expired_logs_end_after_one_marker() {
     let marker = format!("{EXPIRED}\n");
     let (code, first) = rig.json(&["host", "logs", "aged"]);
     assert_eq!(code, 0, "{first}");
-    assert_eq!(first["bytes"], json!(marker.as_bytes()), "{first}");
-    assert_eq!(first["next"], marker.len() as u64, "{first}");
-    for offset in [marker.len() as u64, u64::MAX] {
+    assert_eq!(first["bytes"], json!([]), "{first}");
+    assert_eq!(first["next"], 0, "{first}");
+    assert_eq!(first["expired"], true, "{first}");
+    assert_eq!(first["done"], true, "{first}");
+    for offset in [3, marker.len() as u64, u64::MAX] {
         let (code, end) = rig.json(&["host", "logs", "aged", "--offset", &offset.to_string()]);
         assert_eq!(code, 0, "{end}");
         assert_eq!(end["bytes"], json!([]), "{end}");
@@ -912,19 +911,80 @@ fn expired_logs_end_after_one_marker() {
         assert_eq!(end["done"], true, "{end}");
         assert_eq!(end["expired"], true, "{end}");
     }
-    let (code, partial) = rig.json(&["host", "logs", "aged", "--offset", "3"]);
-    assert_eq!(code, 0, "{partial}");
-    assert_eq!(
-        partial["bytes"],
-        json!(&marker.as_bytes()[3..]),
-        "{partial}"
-    );
     for args in [vec!["logs", "aged"], vec!["logs", "aged", "--follow"]] {
         let mut command = rig.start(&args);
         assert!(command.wait().success());
         let (stdout, stderr) = command.output();
         assert_eq!(stdout, marker, "{stderr}");
     }
+}
+
+/// Start a following reader and wait until it has consumed real output.
+fn partially_read_logs(rig: &Rig) -> Owned {
+    let mut command = rig.cmd(&["logs", "aged", "--follow"]);
+    command.stdout(fs::File::create(rig.dir.join("stream-output")).unwrap());
+    command.stderr(fs::File::create(rig.dir.join("stream-error")).unwrap());
+    let reader = Owned::spawn(&mut command);
+    assert_eq!(
+        read_command(&rig.dir.join("stream-output"), "the log reader"),
+        "output already consumed before retention"
+    );
+    reader
+}
+
+fn assert_stream_expired_once(rig: &Rig, reader: &mut Owned) {
+    assert!(reader.wait().success(), "{}", rig.log("stream-error"));
+    assert_eq!(
+        rig.log("stream-output"),
+        format!("output already consumed before retention\n{EXPIRED}\n")
+    );
+}
+
+#[test]
+fn local_stream_expiry_after_partial_output_prints_the_full_marker_once() {
+    let rig = Rig::new("local-stream-expiry");
+    let mut running = terminal("aged", now());
+    running["ended_ms"] = Value::Null;
+    running["exit"] = Value::Null;
+    running["state"] = json!("working");
+    put_job(
+        &rig,
+        "aged",
+        &running,
+        "output already consumed before retention",
+    );
+    let mut reader = partially_read_logs(&rig);
+    // Publish the same transition as retention atomically, while the reader follows.
+    let mut expired = terminal("aged", now());
+    expired["output_expired"] = json!(true);
+    rig.put("state/jobs/aged.json.new", &expired);
+    fs::rename(
+        rig.dir.join("state/jobs/aged.json.new"),
+        rig.dir.join("state/jobs/aged.json"),
+    )
+    .unwrap();
+    assert_stream_expired_once(&rig, &mut reader);
+}
+
+#[test]
+fn remote_stream_expiry_after_partial_output_prints_the_full_marker_once() {
+    let rig = remote_expired_item_rig("remote-stream-expiry");
+    fs::create_dir_all(rig.dir.join("peer-state/jobs")).unwrap();
+    let mut running = terminal("aged", now());
+    running["ended_ms"] = Value::Null;
+    running["exit"] = Value::Null;
+    running["state"] = json!("working");
+    rig.put("peer-state/jobs/aged.json", &running);
+    fs::write(
+        rig.dir.join("peer-state/jobs/aged.log"),
+        "output already consumed before retention\n",
+    )
+    .unwrap();
+    let mut reader = partially_read_logs(&rig);
+    // The owner keeps its item after remote retention removes the record.
+    fs::remove_file(rig.dir.join("peer-state/jobs/aged.json")).unwrap();
+    assert_stream_expired_once(&rig, &mut reader);
+    assert!(!rig.log("ssh.log").contains("host launch"));
 }
 
 /// A returning owner retains its item after retention removes the job record and log.
@@ -970,9 +1030,10 @@ fn expired_record_logs_report_expiry_to_the_owner() {
     let marker = format!("{EXPIRED}\n");
     let (code, chunk) = rig.json(&["host", "logs", "aged"]);
     assert_eq!(code, 0, "{chunk}");
-    assert_eq!(chunk["bytes"], json!(marker.as_bytes()), "{chunk}");
+    assert_eq!(chunk["bytes"], json!([]), "{chunk}");
     assert_eq!(chunk["expired"], true, "{chunk}");
-    assert_eq!(chunk["next"], marker.len(), "{chunk}");
+    assert_eq!(chunk["done"], true, "{chunk}");
+    assert_eq!(chunk["next"], 0, "{chunk}");
     let (code, end) = rig.json(&[
         "host",
         "logs",
@@ -1049,6 +1110,28 @@ fn remote_expired_record_logs_report_expiry_to_the_owner_once() {
     assert!(!rig.dir.join("peer-state/jobs/aged.json").exists());
     assert!(!rig.dir.join("peer-state/jobs/aged.log").exists());
     assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+#[test]
+fn remote_expired_chunks_ignore_wire_bytes() {
+    let rig = remote_expired_item_rig("remote-expired-wire-bytes");
+    // A peer may still send a legacy marker fragment; the reader owns the message.
+    rig.put(
+        "logs.json",
+        &json!({"bytes":b"expired\n","next":15,"done":true,"expired":true}),
+    );
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &script.replace(
+            "case \"$*\" in",
+            "case \"$*\" in\n  *'host logs'*) cat \"$RIG/logs.json\" ;;",
+        ),
+    );
+    let mut reader = rig.start(&["logs", "aged", "--follow"]);
+    assert!(reader.wait().success());
+    let (stdout, stderr) = reader.output();
+    assert_eq!(stdout, format!("{EXPIRED}\n"), "{stderr}");
 }
 
 #[test]

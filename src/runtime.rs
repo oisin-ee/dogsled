@@ -566,12 +566,14 @@ fn logs(fleet: &Fleet, id: &str, follow: bool) -> Result<()> {
                 result => result?,
             }
         };
+        if chunk.expired {
+            writeln!(std::io::stdout(), "{}", jobs::OUTPUT_EXPIRED)?;
+            std::io::stdout().flush()?;
+            break;
+        }
         std::io::stdout().write_all(&chunk.bytes)?;
         std::io::stdout().flush()?;
         offset = chunk.next;
-        if chunk.expired {
-            break;
-        }
         if chunk.bytes.is_empty() {
             if !follow || chunk.done {
                 break;
