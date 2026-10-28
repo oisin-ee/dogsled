@@ -82,7 +82,19 @@ fn stop_kills_running_process_after_child_output_without_test_sleep() {
 fn waiting_queue_caller_observes_service_admission_without_sleep() {
     let rig = Rig::new("queue-wait");
     rig.snapshot("state/host.json", now(), 99.0, 1);
-    let mut command = rig.cmd(&["run", "--wait", "--max", "10s", "--", "sh", "-c", "exit 3"]);
+    // Queueing, the service pass, and observing admission each need scheduling
+    // headroom. This is only a failure bound: the output handshake drives progress.
+    let admission_deadline = format!("{}s", (PROCESS_DEADLINE * 3).as_secs());
+    let mut command = rig.cmd(&[
+        "run",
+        "--wait",
+        "--max",
+        &admission_deadline,
+        "--",
+        "sh",
+        "-c",
+        "exit 3",
+    ]);
     command.stdout(std::process::Stdio::piped());
     // The test owns the command as its own child, so the test reaps it and reads its
     // exit status. A failed assertion kills the command and its own group.

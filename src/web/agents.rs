@@ -497,9 +497,12 @@ mod tests {
             .expect("subscription acknowledgement");
             // No events arrive. Only dropping the subscription can wake its reader.
             let mut buffer = [0; 1];
-            socket
-                .read(&mut buffer)
-                .expect("read until the subscription closes")
+            loop {
+                match socket.read(&mut buffer) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    result => break result.expect("read until the subscription closes"),
+                }
+            }
         });
         let state = state(Some(Client::at(&path)));
         let response = call(
