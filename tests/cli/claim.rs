@@ -51,6 +51,48 @@ fn claiming_an_orphan_succeeds() {
 }
 
 #[test]
+fn claim_with_an_unreadable_agent_list_is_refused() {
+    let rig = rig("claim-unreadable-agents", "w9:p9");
+    fs::remove_file(rig.dir.join("agents.json")).unwrap();
+    let (code, receipt) = rig.json(&["claim", ID]);
+    assert_eq!(code, 2, "{receipt}");
+    assert!(
+        receipt["error"].as_str().unwrap().contains("unproven"),
+        "{receipt}"
+    );
+    assert!(!rig.dir.join("state/custody.json").exists());
+}
+
+#[test]
+fn claim_from_an_agent_without_a_session_is_refused() {
+    let rig = rig("claim-no-session", "w9:p9");
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w1:p1"}]}}),
+    );
+    let (code, receipt) = rig.json(&["claim", ID]);
+    assert_eq!(code, 2, "{receipt}");
+    assert!(
+        receipt["error"].as_str().unwrap().contains("unproven"),
+        "{receipt}"
+    );
+    assert!(!rig.dir.join("state/custody.json").exists());
+}
+
+#[test]
+fn claim_without_an_agent_in_the_caller_pane_is_refused() {
+    let rig = rig("claim-no-caller-agent", "w9:p9");
+    rig.put("agents.json", &json!({"result":{"agents":[]}}));
+    let (code, receipt) = rig.json(&["claim", ID]);
+    assert_eq!(code, 2, "{receipt}");
+    assert!(
+        receipt["error"].as_str().unwrap().contains("unproven"),
+        "{receipt}"
+    );
+    assert!(!rig.dir.join("state/custody.json").exists());
+}
+
+#[test]
 fn claiming_a_non_orphan_is_refused() {
     let rig = rig("claim-live", "w2:p1");
     let (code, receipt) = rig.json(&["claim", ID]);
@@ -122,6 +164,54 @@ fn accept_after_claim_writes_receipt_and_leaves_item_open() {
     assert_eq!(code, 0, "{replay}");
     assert_eq!(replay["applied"], false);
     assert_eq!(replay["reviewId"], receipt["reviewId"]);
+}
+
+#[test]
+fn accept_from_a_replacement_session_is_refused() {
+    let rig = rig("accept-replacement-session", "w9:p9");
+    returned(&rig);
+    let (code, claim) = rig.json(&["claim", ID]);
+    assert_eq!(code, 0, "{claim}");
+    let before = fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap();
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[
+            {"pane_id":"w1:p1","agent_session":{"kind":"id","value":"replacement-session"}}
+        ]}}),
+    );
+    let (code, receipt) = rig.json(&["accept", ID, "--result", "res-1", "--evidence", "reviewed"]);
+    assert_eq!(code, 2, "{receipt}");
+    assert!(
+        receipt["error"].as_str().unwrap().contains("session"),
+        "{receipt}"
+    );
+    assert_eq!(
+        fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn accept_with_a_sessionless_claim_is_refused() {
+    let rig = rig("accept-sessionless-claim", "w9:p9");
+    returned(&rig);
+    let (code, claim) = rig.json(&["claim", ID]);
+    assert_eq!(code, 0, "{claim}");
+    let mut custody = rig.read("state/custody.json");
+    custody[0]["custodian_session"] = Value::Null;
+    custody[0]["claims"][0]["claimant_session"] = Value::Null;
+    rig.put("state/custody.json", &custody);
+    let before = fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap();
+    let (code, receipt) = rig.json(&["accept", ID, "--result", "res-1", "--evidence", "reviewed"]);
+    assert_eq!(code, 2, "{receipt}");
+    assert!(
+        receipt["error"].as_str().unwrap().contains("session"),
+        "{receipt}"
+    );
+    assert_eq!(
+        fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap(),
+        before
+    );
 }
 
 #[test]

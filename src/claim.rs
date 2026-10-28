@@ -110,12 +110,26 @@ fn validate_item(item: &str) -> Result<()> {
 ///
 /// The pane comes from the environment and the session from the live agent list. Nothing
 /// the caller supplies is identity.
-fn identity(fleet: &Fleet<'_>) -> Result<(String, Option<String>)> {
+fn identity(fleet: &Fleet<'_>) -> Result<(String, String)> {
     let pane = crate::inbox::own_pane(None)?;
-    let session = crate::probe::agent_list(fleet.shell)
-        .ok()
-        .and_then(|agents| agents.into_iter().find(|agent| agent.pane == pane))
-        .and_then(|agent| agent.agent_session);
+    let agents = crate::probe::agent_list(fleet.shell).map_err(|error| {
+        Error::Invalid(format!(
+            "unproven: cannot verify the caller session in {pane}: {error}"
+        ))
+    })?;
+    let agent = agents
+        .into_iter()
+        .find(|agent| agent.pane == pane)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "unproven: no agent is recorded in the caller pane {pane}"
+            ))
+        })?;
+    let session = agent.agent_session.ok_or_else(|| {
+        Error::Invalid(format!(
+            "unproven: the agent in caller pane {pane} has no session"
+        ))
+    })?;
     Ok((pane, session))
 }
 
@@ -158,7 +172,7 @@ pub fn claim(fleet: &Fleet<'_>, item: &str, revision: Option<u64>) -> Result<Cla
         item: item.to_owned(),
         host: crate::inbox::hostname(),
         pane,
-        session,
+        session: Some(session),
         expected_revision,
         now: now_ms(),
     };
@@ -217,7 +231,7 @@ pub fn accept(
     evidence: &str,
 ) -> Result<AcceptReceipt> {
     validate_item(item)?;
-    let (pane, _session) = identity(fleet)?;
+    let (pane, session) = identity(fleet)?;
     let custody = custody::get(fleet.ledger, item)?.ok_or_else(|| {
         Error::Invalid(format!("{item} has no custody; the acceptance is refused"))
     })?;
@@ -232,6 +246,11 @@ pub fn accept(
             "{item} has no custody claim; the acceptance is refused"
         ))
     })?;
+    if custody.custodian_session.as_deref() != Some(session.as_str()) {
+        return Err(Error::Invalid(format!(
+            "{item}: the custody session is missing or does not match the caller; the acceptance is refused"
+        )));
+    }
     let review = Review {
         claim_id: claim.id.clone(),
         revision: custody.revision,
