@@ -100,6 +100,37 @@ impl Guard {
         Ok(Some(tree))
     }
 
+    /// Establish an unmarked checkout only if the pinned directory and the pre-wait
+    /// observation still agree. A newly observed generation belongs to another capture.
+    pub fn discover_unmarked(
+        &self,
+        shell: &dyn Shell,
+        before: &Linked,
+        directory: &std::fs::File,
+        cwd: &str,
+    ) -> Result<Linked> {
+        use std::os::unix::fs::MetadataExt as _;
+        let original = directory.metadata()?;
+        let current = std::fs::metadata(cwd)?;
+        if original.dev() != current.dev() || original.ino() != current.ino() {
+            return Err(refuse("worktree identity changed"));
+        }
+        let now = linked_or_detached(shell, &before.path)?
+            .ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        if before.identity.is_some()
+            || before.tree().drift(&now.tree()) == crate::cleanup::Drift::Identity
+            || before.gitdir != now.gitdir
+        {
+            return Err(refuse("worktree identity changed"));
+        }
+        if before.head != now.head {
+            return Err(refuse("HEAD moved before close"));
+        }
+        // Fresh discovery captures HEAD and generation together under this guard.
+        self.discover(shell, &before.path)?
+            .ok_or_else(|| refuse("checkout identity is unreadable"))
+    }
+
     pub fn check_repository(&self, shell: &dyn Shell, checkout: &Path) -> Result<()> {
         if common_dir(shell, checkout)?.canonicalize()? != self.common {
             return Err(refuse("repository identity changed"));

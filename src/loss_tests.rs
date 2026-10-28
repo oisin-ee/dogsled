@@ -1603,6 +1603,138 @@ fn discovered_close_preserves_head_moved_while_waiting() {
     close_preserves_head_moved_while_waiting(false);
 }
 
+fn unmark_checkout(fixture: &Landed) -> PathBuf {
+    let marker = recorded(&fixture.ledger)[0]
+        .identity
+        .as_ref()
+        .unwrap()
+        .gitdir
+        .join("dogsled-checkout-id");
+    std::fs::remove_file(&marker).unwrap();
+    fixture
+        .ledger
+        .write("worktrees.json", &Vec::<crate::cleanup::Tree>::new())
+        .unwrap();
+    marker
+}
+
+#[test]
+fn unmarked_close_preserves_replacement_while_waiting() {
+    use std::sync::{Barrier, atomic::Ordering::SeqCst};
+    for marked_replacement in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        let marker = unmark_checkout(&fixture);
+        let original =
+            crate::worktree::linked_or_detached(&System, fixture.repo.tree.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        shell.lock_attempt = Some(tx);
+        let barrier = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let close = crate::worktree::with_lifecycle(
+                &shell,
+                &fixture.ledger,
+                &fixture.repo.repo,
+                |_| {
+                    let close = std::thread::Builder::new()
+                        .name("lifecycle-contender".into())
+                        .spawn_scoped(scope, || {
+                            barrier.wait();
+                            crate::close::local(
+                                &shell,
+                                &fixture.ledger,
+                                "placed-shell",
+                                &crate::close::Caller::default(),
+                                crate::close::Guard::Clean,
+                            )
+                        })
+                        .unwrap();
+                    barrier.wait();
+                    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    // Real Git removes/recreates the checkout in another process while
+                    // the contender waits; the administrative directory name is reused.
+                    let replacement =
+                        replace_checkout(&fixture.repo.repo, &fixture.repo.tree, false);
+                    let identity = replacement.identity.as_ref().unwrap();
+                    assert_eq!(identity.gitdir, original.gitdir);
+                    assert_eq!(replacement.head, original.head);
+                    assert_eq!(replacement.branch, original.branch);
+                    assert_eq!(replacement.path, original.path);
+                    if !marked_replacement {
+                        std::fs::remove_file(&marker).unwrap();
+                    }
+                    Ok(close)
+                },
+            )
+            .unwrap();
+            let result = close.join().unwrap();
+            assert!(result.is_err(), "{result:?}");
+        });
+        assert!(fixture.repo.tree.is_dir());
+        assert!(shell.open.load(SeqCst));
+        assert_eq!(shell.teardowns.load(SeqCst), 0);
+        assert_eq!(marker.exists(), marked_replacement);
+        assert_eq!(recorded(&fixture.ledger), []);
+    }
+}
+
+#[test]
+fn saved_close_keeps_its_original_head_expectation() {
+    let fixture = lifecycle_fixture(false);
+    let captured = recorded(&fixture.ledger)[0].clone();
+    fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+        "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
+        "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
+        "result":{"checkout":captured},"error":null
+    })).unwrap();
+    git(
+        &fixture.repo.tree,
+        &["commit", "-q", "--allow-empty", "-m", "new live work"],
+    );
+    git(&fixture.repo.tree, &["push", "-q", "origin", "feature"]);
+    let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    let result = crate::close::local(
+        &shell,
+        &fixture.ledger,
+        "placed-shell",
+        &crate::close::Caller::default(),
+        crate::close::Guard::Clean,
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("HEAD moved"), "{error}");
+    assert!(fixture.repo.tree.is_dir());
+    assert_eq!(recorded(&fixture.ledger), [captured]);
+    assert!(shell.open.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn unmarked_close_establishes_identity_under_the_same_lock() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let fixture = lifecycle_fixture(false);
+    let marker = unmark_checkout(&fixture);
+    let lock = Ledger::new(fixture.repo.repo.join(".git"));
+    let shell = LifecycleShell::new(&fixture.repo.tree, move || {
+        assert!(lock.locked("dogsled-lifecycle").unwrap());
+        let generation = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(generation.trim().len(), 32);
+    });
+    crate::close::local(
+        &shell,
+        &fixture.ledger,
+        "placed-shell",
+        &crate::close::Caller::default(),
+        crate::close::Guard::Clean,
+    )
+    .unwrap();
+    assert!(!fixture.repo.tree.exists());
+    assert!(!shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 1);
+    assert_eq!(recorded(&fixture.ledger), []);
+}
+
 #[test]
 fn concurrent_close_and_prune_run_one_teardown() {
     use std::sync::{Arc, Barrier, atomic::Ordering::SeqCst};
@@ -1703,12 +1835,18 @@ fn close_after_prior_removal_reconciles_without_teardown() {
 }
 
 fn replace_checkout(repo: &Path, path: &Path, alternate_admin: bool) -> crate::cleanup::Tree {
+    let original_admin = git(path, &["rev-parse", "--absolute-git-dir"]);
+    let admin_name = Path::new(original_admin.trim()).file_name().unwrap();
     git(
         repo,
         &["worktree", "remove", "-f", "-f", path.to_str().unwrap()],
     );
-    let temporary = path.with_file_name("different-admin");
-    let create = if alternate_admin { &temporary } else { path };
+    let temporary = if alternate_admin {
+        path.with_file_name("different-admin")
+    } else {
+        path.with_file_name(admin_name)
+    };
+    let create = &temporary;
     git(
         repo,
         &[
@@ -1722,7 +1860,7 @@ fn replace_checkout(repo: &Path, path: &Path, alternate_admin: bool) -> crate::c
             "feature",
         ],
     );
-    if alternate_admin {
+    if create != path {
         git(repo, &["worktree", "unlock", create.to_str().unwrap()]);
         git(
             repo,

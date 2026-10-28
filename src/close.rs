@@ -114,16 +114,21 @@ pub fn with_local<T>(
     let owners = local_owners(ledger, pane)?;
     let target = panes.iter().find(|p| p.pane_id == pane);
     let cwd = target.and_then(|p| p.cwd.as_deref());
+    // Keep the directory alive across discovery and the mutex wait. An unmarked
+    // checkout has no generation yet, and its path/admin name can both be reused.
+    let directory = cwd
+        .filter(|cwd| Path::new(cwd).is_dir())
+        .map(std::fs::File::open)
+        .transpose()?;
     let live = cwd
         .map(|cwd| worktree::linked_or_detached(shell, cwd))
         .transpose()?
         .flatten();
     let saved = crate::launch::checkout_for_pane(ledger, pane)?;
-    let planned = live
-        .as_ref()
-        .map(worktree::Linked::tree)
-        .or_else(|| saved.clone());
-    let Some(mut planned) = planned else {
+    let planned = saved
+        .clone()
+        .or_else(|| live.as_ref().map(worktree::Linked::tree));
+    let Some(planned) = planned else {
         let target = validate_target(shell, &panes, pane, caller)?;
         return reconcile(remove_target(
             shell, ledger, target, &panes, caller, mode, None,
@@ -131,30 +136,33 @@ pub fn with_local<T>(
     };
     let repo = planned.repo.clone();
     worktree::with_lifecycle(shell, ledger, Path::new(&repo), |lifecycle| {
-        if live.is_some() && (saved.is_some() || planned.identity.is_none()) {
-            let observed = if saved.is_some() {
-                lifecycle.observe(shell, &planned.path)?
-            } else {
-                lifecycle.discover(shell, &planned.path)?
-            };
-            if let Some(now) = observed {
-                // Discovery may supply an identity, never a new plan or HEAD expectation.
-                if planned.identity.is_none() {
-                    planned.identity.clone_from(&now.identity);
-                }
-                let drift = planned.drift(&now.tree());
-                if drift == crate::cleanup::Drift::Identity
-                    || live
+        let planned = if saved.is_none() && planned.identity.is_none() {
+            // Establish the generation before capturing the expectation, and keep
+            // this same lock through validation, teardown, removal, and reconciliation.
+            lifecycle
+                .discover_unmarked(
+                    shell,
+                    live.as_ref()
+                        .ok_or_else(|| refuse("checkout identity is unreadable"))?,
+                    directory
                         .as_ref()
-                        .is_some_and(|before| before.gitdir != now.gitdir)
-                {
+                        .ok_or_else(|| refuse("checkout identity is unreadable"))?,
+                    cwd.ok_or_else(|| refuse("checkout identity is unreadable"))?,
+                )?
+                .tree()
+        } else {
+            // Saved plans retain their HEAD and identity; observation never repairs them.
+            if let Some(now) = lifecycle.observe(shell, &planned.path)? {
+                let drift = planned.drift(&now.tree());
+                if drift == crate::cleanup::Drift::Identity {
                     return Err(refuse("worktree identity changed"));
                 }
                 if drift == crate::cleanup::Drift::HeadMoved {
                     return Err(refuse("HEAD moved before close"));
                 }
             }
-        }
+            planned
+        };
         if worktree::verified_absent(lifecycle, shell, &planned) {
             validate_absent_target(
                 shell,
@@ -187,12 +195,6 @@ pub fn with_local<T>(
             });
         }
         let now = validate_checkout(shell, &planned)?;
-        if saved
-            .as_ref()
-            .is_some_and(|saved| saved.identity != now.identity || saved.branch != now.branch)
-        {
-            return Err(refuse("worktree identity changed"));
-        }
         let panes = crate::cleanup::current_panes(shell)?;
         let target = validate_target(shell, &panes, pane, caller)?;
         if worktree::lock_reason(shell, &now.checkout, &now.path)?.as_deref() == Some(AGENT_LOCK) {
