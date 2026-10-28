@@ -774,7 +774,10 @@ mod tests {
 
     impl Repo {
         fn new(committed: bool) -> Self {
-            let scratch = Scratch::new().unwrap();
+            Self::new_in(Scratch::new().unwrap(), committed)
+        }
+
+        fn new_in(scratch: Scratch, committed: bool) -> Self {
             let path = scratch.0.join("repo");
             fs::create_dir(&path).unwrap();
             let repo = Self { scratch, path };
@@ -935,8 +938,27 @@ mod tests {
     fn non_utf8_and_accented_names_round_trip_byte_exactly() {
         let repo = Repo::new(true);
         repo.git(&["config", "core.quotePath", "false"]);
-        let names: [&[u8]; 2] = [b"name-\xff", "café".as_bytes()];
-        for name in names {
+        let mut names: Vec<&[u8]> = vec!["café".as_bytes()];
+        let non_utf8 = b"name-\xff";
+        match fs::write(
+            repo.path.join(std::ffi::OsStr::from_bytes(non_utf8)),
+            b"exact content\n",
+        ) {
+            Ok(()) => names.push(non_utf8),
+            Err(error) => {
+                assert!(
+                    !cfg!(target_os = "linux")
+                        && (error.kind() == std::io::ErrorKind::InvalidFilename
+                            || error.raw_os_error() == Some(nix::errno::Errno::EILSEQ as i32)),
+                    "creating invalid-UTF-8 filename: {error}"
+                );
+                // APFS cannot represent this sub-case. Skip only invalid-UTF-8
+                // names, never the accented-name or other byte-exact assertions.
+                // Linux must exercise the invalid-UTF-8 round trip below.
+                eprintln!("skipping invalid-UTF-8 filename sub-case: {error}");
+            }
+        }
+        for name in &names {
             fs::write(
                 repo.path.join(std::ffi::OsStr::from_bytes(name)),
                 b"exact content\n",
@@ -944,14 +966,18 @@ mod tests {
             .unwrap();
         }
         repo.git(&["add", "."]);
-        for name in names {
+        for name in &names {
             fs::write(
                 repo.path.join(std::ffi::OsStr::from_bytes(name)),
                 b"working content\n",
             )
             .unwrap();
         }
-        let untracked = std::ffi::OsStr::from_bytes(b"untracked-\xff\t\n\"\\");
+        let untracked = std::ffi::OsStr::from_bytes(if names.contains(&non_utf8.as_slice()) {
+            b"untracked-\xff\t\n\"\\"
+        } else {
+            b"untracked-\t\n\"\\"
+        });
         fs::write(repo.path.join(untracked), b"untracked bytes\0\xff").unwrap();
         let saved = snapshot(&System::default(), &repo.path).unwrap();
         verify(&System::default(), &repo.path, &saved).unwrap();
@@ -964,14 +990,14 @@ mod tests {
             &saved.commit,
         ]);
         assert_eq!(tree_files(&repo.path), tree_files(&restored));
-        for name in names {
+        for name in &names {
             assert_eq!(
                 fs::read(restored.join(std::ffi::OsStr::from_bytes(name))).unwrap(),
                 b"working content\n"
             );
         }
         // A quoted tracked path must also be removable without renaming it.
-        for name in names {
+        for name in &names {
             fs::remove_file(repo.path.join(std::ffi::OsStr::from_bytes(name))).unwrap();
         }
         fs::remove_file(repo.path.join(untracked)).unwrap();
@@ -1288,8 +1314,16 @@ mod tests {
 
     #[test]
     fn unsupported_socket_refuses() {
-        let repo = Repo::new(true);
-        let _socket = std::os::unix::net::UnixListener::bind(repo.path.join("socket")).unwrap();
+        // Keep the socket inside the checkout without macOS's long $TMPDIR.
+        let scratch = Scratch(Path::new("/tmp").join(format!("ds-{}", random_id().unwrap())));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&scratch.0)
+            .unwrap();
+        let repo = Repo::new_in(scratch, true);
+        let socket = repo.path.join("socket");
+        assert!(socket.as_os_str().as_bytes().len() < 100);
+        let _socket = std::os::unix::net::UnixListener::bind(socket).unwrap();
         assert!(matches!(
             snapshot(&System::default(), &repo.path),
             Err(Error::Refused(Refusal::UnsupportedFileType(_)))
