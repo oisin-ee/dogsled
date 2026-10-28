@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod context;
 mod continuation;
+mod custody;
 mod diagnostic;
 mod done;
 mod error;
@@ -25,6 +26,7 @@ mod items;
 mod jobs;
 mod launch;
 mod ledger;
+mod lifecycle;
 mod loss;
 #[cfg(test)]
 mod loss_tests;
@@ -159,10 +161,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         cleanup: &policy.cleanup,
     };
     match cli.command {
-        Command::Quota(args) => {
-            let snapshot = quota::command(&shell, &ledger, &policy, &home, &args)?;
-            print(cli.json, &snapshot, || snapshot.render(now_ms()))?;
-        }
+        Command::Quota(args) => quota_command(&shell, &ledger, &policy, &home, &args, cli.json)?,
         Command::Serve { interval, once } => service::serve(
             &node,
             &policy,
@@ -175,35 +174,36 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             cmd,
             timeout,
             idle_timeout,
-        } => return runtime::exec(&ledger, &shell, &id, &cmd, timeout, idle_timeout),
+            job_validity,
+        } => {
+            return runtime::exec(
+                &ledger,
+                &shell,
+                &id,
+                &cmd,
+                timeout,
+                idle_timeout,
+                job_validity,
+            );
+        }
         Command::Status {
             watch,
             interval,
             line,
             brief,
-        } => loop {
-            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home.clone())?;
-            let status = commands::status(&fleet)?;
-            if watch && !cli.json && !line && !brief {
-                print!("\x1b[2J\x1b[H");
-            }
-            print(cli.json, &status, || {
-                if line {
-                    commands::line(&status)
-                } else if brief {
-                    commands::brief(&status)
-                } else {
-                    commands::render(&status)
-                }
-            })?;
-            if !watch {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(interval));
-        },
+        } => {
+            let ask = Watch {
+                watch,
+                interval,
+                line,
+                brief,
+            };
+            status_command(&shell, &ledger, &policy, &home, ask, cli.json)?;
+        }
         command @ Command::Board { .. } => {
             board::command(&shell, &ledger, &policy, home, command, cli.json)?;
         }
+        Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
         Command::Sidebar { owner } => sidebar::command(shell, &ledger, &policy, &home, owner)?,
         Command::Web { port } => web::serve(&ledger, &policy, &home, port)?,
         command @ (Command::Interview { .. } | Command::Review { .. }) => {
@@ -214,8 +214,8 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             return unit_request::run(&fleet, command);
         }
         Command::Mcp => mcp::serve(policy, ledger, home)?,
+
         Command::Done => done_command(&ledger, &shell, cli.json)?,
-        Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
         Command::Send {
             target,
             host,
@@ -223,10 +223,8 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             message,
             kind,
         } => {
-            let text = inbox::message_text(message, message_file)?;
-            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            let sent = inbox::send_to(&fleet, &target, host.as_deref(), &kind, text, now_ms())?;
-            print(cli.json, &sent, || sent.line())?;
+            let ask = Ask::new(target, host, kind, message, message_file);
+            send_message(&shell, &ledger, &policy, &home, ask, cli.json)?;
         }
         Command::LegacyContinue {
             pane,
@@ -234,10 +232,10 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             message,
             kind,
         } => {
-            let text = inbox::message_text(message, message_file)?;
-            let sent = continuation::legacy(&ledger, &shell, &pane, &kind, &text, now_ms())?;
-            print(cli.json, &sent, || sent.line())?;
+            let ask = Ask::new(pane, None, kind, message, message_file);
+            legacy_continue(&ledger, &shell, ask, cli.json)?;
         }
+
         Command::Hook(cmd) => hook(cmd, &ledger, &shell, &policy, home)?,
         command => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
@@ -245,6 +243,146 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The shape of the status command: what to print, and whether to keep printing it.
+#[derive(Clone, Copy)]
+struct Watch {
+    watch: bool,
+    interval: u64,
+    line: bool,
+    brief: bool,
+}
+
+/// The status command: the fleet's state, printed once or watched.
+fn status_command(
+    shell: &System,
+    ledger: &Ledger,
+    policy: &config::Policy,
+    home: &str,
+    ask: Watch,
+    json: bool,
+) -> Result<()> {
+    loop {
+        let fleet = hosts::Fleet::discover(shell, ledger, policy, home.to_owned())?;
+        let status = commands::status(&fleet)?;
+        if ask.watch && !json && !ask.line && !ask.brief {
+            print!("\x1b[2J\x1b[H");
+        }
+        print(json, &status, || {
+            if ask.line {
+                commands::line(&status)
+            } else if ask.brief {
+                commands::brief(&status)
+            } else {
+                commands::render(&status)
+            }
+        })?;
+        if !ask.watch {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(ask.interval));
+    }
+    Ok(())
+}
+
+/// The message a send command carries.
+struct Ask {
+    target: String,
+    host: Option<String>,
+    kind: String,
+    message: Option<String>,
+    message_file: Option<std::path::PathBuf>,
+}
+
+impl Ask {
+    fn new(
+        target: String,
+        host: Option<String>,
+        kind: String,
+        message: Option<String>,
+        message_file: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            target,
+            host,
+            kind,
+            message,
+            message_file,
+        }
+    }
+}
+
+/// The send command: it hands a message to an agent, on any host, through its inbox.
+fn send_message(
+    shell: &System,
+    ledger: &Ledger,
+    policy: &config::Policy,
+    home: &str,
+    ask: Ask,
+    json: bool,
+) -> Result<()> {
+    let text = inbox::message_text(ask.message, ask.message_file)?;
+    let fleet = hosts::Fleet::discover(shell, ledger, policy, home.to_owned())?;
+    let sent = inbox::send_to(
+        &fleet,
+        &ask.target,
+        ask.host.as_deref(),
+        &ask.kind,
+        text,
+        now_ms(),
+    )?;
+    print(json, &sent, || sent.line())?;
+    Ok(())
+}
+
+/// The legacy continue command: it hands a message to a pane that never answered.
+fn legacy_continue(ledger: &Ledger, shell: &System, ask: Ask, json: bool) -> Result<()> {
+    let text = inbox::message_text(ask.message, ask.message_file)?;
+    let sent = continuation::legacy(ledger, shell, &ask.target, &ask.kind, &text, now_ms())?;
+    print(json, &sent, || sent.line())?;
+    Ok(())
+}
+
+/// The quota command: this host's share of the fleet's capacity.
+fn quota_command(
+    shell: &System,
+    ledger: &Ledger,
+    policy: &config::Policy,
+    home: &str,
+    args: &cli::QuotaArgs,
+    json: bool,
+) -> Result<()> {
+    let snapshot = quota::command(shell, ledger, policy, home, args)?;
+    print(json, &snapshot, || snapshot.render(now_ms()))?;
+    Ok(())
+}
+
+/// The validity evidence a peer sends with a job reservation. A peer that names another
+/// protocol version, or names a time without the protocol, is refused here.
+fn reservation_validity(
+    job_validity: Option<u32>,
+    job_created_ms: Option<u64>,
+) -> Result<Option<crate::jobs::Validity>> {
+    let refuse = |code: crate::error::Refusal| {
+        Err(Error::Refused {
+            code,
+            detail: code.message().to_owned(),
+        })
+    };
+    match (job_validity, job_created_ms) {
+        (Some(version), Some(created_ms)) => {
+            if version != crate::jobs::VALIDITY_PROTOCOL_VERSION {
+                return refuse(crate::error::Refusal::JobValidityUnsupported);
+            }
+            Ok(Some(crate::jobs::Validity {
+                version,
+                created_ms,
+            }))
+        }
+        (Some(_), None) | (None, Some(_)) => refuse(crate::error::Refusal::JobValidityUnprovable),
+        (None, None) => Ok(None),
+    }
 }
 
 /// The harness hooks: prompt context, and the inbox for Claude Code and Codex.
@@ -404,13 +542,17 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
             inbox::host(node.ledger, node.shell, cmd)?;
         }
-        HostCommand::Launch { request } => print(
+        HostCommand::Launch {
+            request,
+            job_validity,
+        } => print(
             true,
             &work::launch(
                 node.ledger,
                 node.shell,
                 &serde_json::from_str(&request)?,
                 now_ms(),
+                job_validity,
             )?,
             String::new,
         )?,
@@ -463,12 +605,18 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             &quota::store(node.ledger, std::io::stdin().lock())?,
             String::new,
         )?,
-        HostCommand::Reserve { id, thresholds } => {
+        HostCommand::Reserve {
+            id,
+            thresholds,
+            job_validity,
+            job_created_ms,
+        } => {
             let node = Node {
                 thresholds: thresholds.over(node.thresholds),
                 ..*node
             };
-            let out = node.reserve(&id, now_ms())?;
+            let validity = reservation_validity(job_validity, job_created_ms)?;
+            let out = node.reserve(&id, now_ms(), validity)?;
             print(true, &out, String::new)?;
             if !out.reserved {
                 return Ok(Error::Full.exit_code());

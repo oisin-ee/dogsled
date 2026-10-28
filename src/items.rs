@@ -12,6 +12,10 @@ pub struct Item {
     pub host: String,
     pub pane: String,
     pub owner_pane: String,
+    /// The owner's harness session when the item was created. Records from before this field
+    /// load with `None`, and an unrecorded session never proves the owner's session ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_session: Option<String>,
     pub name: Option<String>,
     pub created_ms: u64,
     /// Successful launch confirmation, measured on `host`, not the owner's clock.
@@ -31,6 +35,11 @@ pub struct Item {
     /// The child's final reply, captured before the sweep closes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Reply>,
+    /// The item's final reply came from the native `done` handoff, so it proves the child
+    /// finished. A sealed terminal receipt is a result, not a native `done`, so it never
+    /// proves a handoff. Records from before this field load with `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_done: bool,
     /// Retained branch on the child's host, observed without a live pane or checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<crate::done::Branch>,
@@ -58,6 +67,16 @@ impl Item {
     pub fn untold(&self) -> Option<&Reply> {
         self.reply.as_ref().filter(|r| r.reported_ms.is_none())
     }
+
+    /// The item's final reply came from the native `done` handoff. Only that provenance
+    /// proves the child finished: a terminal receipt or a legacy reply does not.
+    pub fn native_done_reply(&self) -> Option<&Reply> {
+        if self.native_done {
+            self.reply.as_ref()
+        } else {
+            None
+        }
+    }
 }
 
 fn change(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>)) -> Result<()> {
@@ -70,6 +89,12 @@ fn change(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>)) -> Result<()> {
 
 /// Keep `reply` as `id`'s final reply.
 pub fn set_reply(ledger: &Ledger, id: &str, reply: Reply) -> Result<()> {
+    set_reply_with(ledger, id, reply, false)
+}
+
+/// Keep `reply` as `id`'s final reply, and record whether it came from the native `done`
+/// handoff. Only that provenance proves the child finished later, when the pane is gone.
+pub fn set_reply_with(ledger: &Ledger, id: &str, reply: Reply, native_done: bool) -> Result<()> {
     ledger.with_lock("items", || {
         let mut items = list(ledger)?;
         let Some(item) = items.iter_mut().find(|i| i.id == id) else {
@@ -84,9 +109,14 @@ pub fn set_reply(ledger: &Ledger, id: &str, reply: Reply) -> Result<()> {
                 ));
             }
             // Keep captured_ms and reported_ms: an identical replay is not new delivery.
-            return Ok(());
+            if !native_done || item.native_done {
+                return Ok(());
+            }
+            item.native_done = true;
+            return ledger.write("items.json", &items);
         }
         item.reply = Some(reply);
+        item.native_done |= native_done;
         ledger.write("items.json", &items)
     })
 }
@@ -161,6 +191,9 @@ pub fn merge_handoffs(items: &mut [Item], hosts: &[HostReport]) {
             {
                 item.reply = Some(reply.clone());
             }
+            // The mark knows whether its reply came from the native `done` handoff. The
+            // item keeps that provenance, so a gone pane still proves the handoff.
+            item.native_done |= mark.native_done;
         }
         if let Some(closed) = mark.closed_ms {
             item.closed_ms.get_or_insert(closed);
@@ -179,9 +212,15 @@ pub fn finished(item: &Item, hosts: &[HostReport]) -> bool {
         && hosts
             .iter()
             .filter(|h| h.host.id == item.host)
-            .filter_map(|h| h.probe.as_ref())
-            .flat_map(|p| &p.agent_panes)
-            .any(|a| a.pane == item.pane && a.done)
+            .filter_map(|h| h.agent(&item.pane))
+            .any(|a| a.done)
+}
+
+/// The lifecycle state of an item, from the same owner the board reads. The result and the
+/// resource closure stay separate facts: this returns only the agent's state.
+pub fn lifecycle(item: &Item, hosts: &[HostReport]) -> crate::lifecycle::Derived {
+    let (evidence, _) = crate::lifecycle::evidence(item, hosts);
+    crate::lifecycle::classify(&evidence)
 }
 
 /// The exact command that closes `item`, naming its host by label.
@@ -286,8 +325,124 @@ mod tests {
         assert_eq!(items[0].harness, None);
         assert_eq!(items[0].role, None);
         assert_eq!(items[0].launch_confirmed_ms, None);
+        assert_eq!(items[0].owner_session, None);
         let text = serde_json::to_string(&items[0]).unwrap();
         assert!(!text.contains("harness"), "{text}");
+        assert!(!text.contains("owner_session"), "{text}");
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    /// A record from before the owner session existed has none. The session-ended rule
+    /// needs a recorded identity, so it never applies to that item.
+    #[test]
+    fn a_record_without_the_owner_session_loads_and_records_none() {
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "id":"a","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p2",
+            "name":null,"created_ms":1,"closed_ms":null
+        }))
+        .unwrap();
+        assert_eq!(item.owner_session, None);
+        let text = serde_json::to_string(&item).unwrap();
+        assert!(!text.contains("owner_session"), "{text}");
+    }
+
+    /// An item from before the native `done` provenance existed has none. It never proves
+    /// a handoff, and the old record still decodes.
+    #[test]
+    fn an_item_without_the_provenance_loads_and_proves_no_handoff() {
+        let item: Item = serde_json::from_value(serde_json::json!({
+            "id":"a","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p2",
+            "name":null,"created_ms":1,"closed_ms":null,
+            "reply":{"seq":0,"text":"the final reply","captured_ms":2,"done":true}
+        }))
+        .unwrap();
+        assert!(!item.native_done);
+        assert!(item.native_done_reply().is_none());
+        let text = serde_json::to_string(&item).unwrap();
+        assert!(!text.contains("native_done"), "{text}");
+    }
+
+    /// The mark the child host kept carries the native `done` provenance, and the owner
+    /// imports it into the item.
+    #[test]
+    fn the_native_done_provenance_survives_the_handoff_import() {
+        let mut item = Item {
+            id: "launch".into(),
+            host: "remote".into(),
+            pane: "w2:p1".into(),
+            ..Item::default()
+        };
+        let host: HostReport = serde_json::from_value(serde_json::json!({
+            "id":"remote","label":"remote","target":"remote-dev",
+            "service":"up","reachable":true,"sampled_ms":1,"probe":null,
+            "headroom":null,"error":null,"jobs":[],"handoffs":[{
+                "pane":"w2:p1","item":"launch","session":"session","marked_ms":1,
+                "sealed":0,"closed_ms":2,
+                "native_done":true,
+                "reply":{"seq":0,"text":"final reply","captured_ms":2,"done":true},
+                "branch":{"repo":"/repo","name":"feature","ahead":3,"landed":false}
+            }]
+        }))
+        .unwrap();
+        merge_handoffs(std::slice::from_mut(&mut item), std::slice::from_ref(&host));
+        assert!(item.native_done_reply().is_some());
+        // A reply that is already there keeps the owner's stamp and gains the provenance.
+        item.reply.as_mut().unwrap().reported_ms = Some(3);
+        merge_handoffs(std::slice::from_mut(&mut item), std::slice::from_ref(&host));
+        assert_eq!(item.reply.as_ref().unwrap().reported_ms, Some(3));
+        assert!(item.native_done_reply().is_some());
+    }
+
+    /// A mark without the native `done` provenance never proves a handoff, even when it
+    /// keeps a reply.
+    #[test]
+    fn a_mark_without_the_provenance_proves_no_handoff() {
+        let mut item = Item {
+            id: "launch".into(),
+            host: "remote".into(),
+            pane: "w2:p1".into(),
+            ..Item::default()
+        };
+        let host: HostReport = serde_json::from_value(serde_json::json!({
+            "id":"remote","label":"remote","target":"remote-dev",
+            "service":"up","reachable":true,"sampled_ms":1,"probe":null,
+            "headroom":null,"error":null,"jobs":[],"handoffs":[{
+                "pane":"w2:p1","item":"launch","session":"session","marked_ms":1,
+                "sealed":0,
+                "reply":{"seq":0,"text":"final reply","captured_ms":2,"done":true}
+            }]
+        }))
+        .unwrap();
+        merge_handoffs(std::slice::from_mut(&mut item), &[host]);
+        assert!(item.native_done_reply().is_none());
+    }
+
+    /// The local handoff keeps the native `done` provenance on the item it writes.
+    #[test]
+    fn the_local_handoff_keeps_the_native_done_provenance() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let item = Item {
+            id: "launch".into(),
+            host: "local".into(),
+            pane: "w2:p1".into(),
+            ..Item::default()
+        };
+        crate::items::record(&ledger, item).unwrap();
+        let reply = Reply {
+            seq: 0,
+            result_id: None,
+            text: "the final reply".into(),
+            captured_ms: 2,
+            reported_ms: None,
+            done: true,
+        };
+        set_reply_with(&ledger, "launch", reply.clone(), true).unwrap();
+        let items = list(&ledger).unwrap();
+        assert!(items[0].native_done_reply().is_some());
+        // A plain reply carries no provenance.
+        set_reply_with(&ledger, "launch", reply, false).unwrap();
+        let items = list(&ledger).unwrap();
+        assert!(items[0].native_done_reply().is_some());
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 }

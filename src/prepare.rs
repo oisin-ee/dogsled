@@ -294,20 +294,27 @@ fn local_once(
             ),
         );
     }
-    // Read-only preflight, after the existing-branch refusal and before any new hold,
-    // worktree, or branch. Never fetch or move refs to make an unavailable base resolve.
+    // Preflight, after the existing-branch refusal and before any new hold, worktree, or
+    // branch. A base this clone has not fetched is fetched once, so a branch pushed after
+    // the clone resolves. Nothing else moves: no other ref, and no local branch.
     if !has_branch && let Some(base) = base {
-        let resolved = git(
-            &checkout,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{base}^{{commit}}"),
-            ],
-        )
-        .run(shell)?;
-        if !resolved.ok() {
+        let mut resolved = resolve_base(shell, &checkout, base)?;
+        if !resolved && let Some(remote) = remote_branch(base) {
+            // One bounded fetch of that one remote branch, into its own remote-tracking ref
+            // whatever the clone's configured refspec. The destination is named, so a
+            // single-branch clone resolves the base too.
+            // A fetch that cannot run, or that exceeds its budget, is a failure of the
+            // fetch itself and is reported as itself. A fetch that runs and exits non-zero
+            // leaves the base unresolved, and the refusal below names it.
+            let refspec = format!("+refs/heads/{remote}:refs/remotes/origin/{remote}");
+            git(
+                &checkout,
+                &["fetch", "--no-tags", "--", "origin", refspec.as_str()],
+            )
+            .run(shell)?;
+            resolved = resolve_base(shell, &checkout, base)?;
+        }
+        if !resolved {
             return Err(
                 Error::Invalid("requested base unavailable on this host".into()).with_diagnostic(
                     Diagnostic::new(
@@ -543,6 +550,37 @@ fn reuse(shell: &dyn Shell, checkout: &Path, found: worktree::Listed) -> Result<
     Ok(found.path)
 }
 
+/// Whether the base resolves to a commit on this host.
+fn resolve_base(shell: &dyn Shell, checkout: &Path, base: &str) -> Result<bool> {
+    Ok(git(
+        checkout,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+    )
+    .run(shell)?
+    .ok())
+}
+
+/// The remote branch of an `origin/<branch>` base, when this host may fetch that name.
+/// A name that could be read as an option, or that carries a path, is not fetched.
+fn remote_branch(base: &str) -> Option<&str> {
+    let branch = base.strip_prefix("origin/")?;
+    if branch.is_empty()
+        || branch.starts_with('-')
+        || branch.contains("..")
+        || !branch
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/_-.".contains(&c))
+    {
+        return None;
+    }
+    Some(branch)
+}
+
 /// The local name of the repository's default branch, the base of a new branch.
 fn default_branch(shell: &dyn Shell, checkout: &Path) -> Result<String> {
     let base = crate::integration::base(shell, &checkout.display().to_string())?;
@@ -665,6 +703,104 @@ mod tests {
     use super::*;
     use crate::error::{Refusal, RetainedKind};
     use crate::hosts::Failure;
+    use crate::shell::Fake;
+
+    /// A shell that ends the base fetch at its deadline, and runs every other command
+    /// from the scripted fake.
+    #[derive(Debug)]
+    struct DeadlineFetch(Fake);
+
+    impl Shell for DeadlineFetch {
+        fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
+            let key = std::iter::once(program.to_string())
+                .chain(args.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if key.contains(" fetch ") {
+                return Err(Error::Deadline("git".into()));
+            }
+            self.0.run(program, args)
+        }
+    }
+
+    /// A fetch that hits the command deadline reports the deadline. The cause is not an
+    /// unavailable base, because the base never got its chance to resolve.
+    #[test]
+    fn a_base_fetch_that_hits_the_deadline_reports_the_deadline() {
+        let root = std::env::temp_dir().join(crate::ledger::new_id());
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &str| format!("git -C {} {args}", repo.display());
+        let fake = Fake::new();
+        fake.on("git check-ref-format --branch worker", "");
+        fake.on("herdr workspace list", "");
+        fake.on(
+            &git("rev-parse --path-format=absolute --git-common-dir"),
+            &format!("{}/.git", repo.display()),
+        );
+        fake.on(&git("worktree list --porcelain"), "");
+        fake.on_output(
+            &git("show-ref --verify --quiet refs/heads/worker"),
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        fake.on_output(
+            &git("rev-parse --verify --end-of-options origin/feature^{commit}"),
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let shell = DeadlineFetch(fake);
+        let ledger = crate::ledger::Ledger::new(root.join("state"));
+        let error = local_once(
+            &shell,
+            &ledger,
+            repo.to_str().unwrap(),
+            "worker",
+            Some("origin/feature"),
+            Some("deadline"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error.root(), Error::Deadline(_)),
+            "the fetch deadline is reported as itself: {error}"
+        );
+        assert_ne!(
+            error.diagnostic().map(|diagnostic| diagnostic.cause),
+            Some(Cause::BaseUnavailable),
+            "the deadline is not an unavailable base: {error}"
+        );
+        // The retained record keeps the deadline classification, so a replay of the same
+        // request reports the deadline too.
+        let retained = error.retained(Operation::Prepare, Some("deadline"));
+        assert_eq!(retained.kind, RetainedKind::Deadline);
+        assert!(matches!(retained.restore().root(), Error::Deadline(_)));
+    }
+
+    /// Only an `origin/<branch>` base names a remote branch this host may fetch, and the
+    /// name must not read as an option or carry a path.
+    #[test]
+    fn only_an_origin_branch_base_names_a_fetchable_branch() {
+        assert_eq!(remote_branch("origin/feature"), Some("feature"));
+        assert_eq!(remote_branch("origin/feature/sub"), Some("feature/sub"));
+        for base in [
+            "main",
+            "origin/",
+            "origin/-x",
+            "origin/a..b",
+            "origin/a b",
+            "origin/a^b",
+            "upstream/feature",
+            "origin/feature^{commit}",
+        ] {
+            assert_eq!(remote_branch(base), None, "{base}");
+        }
+    }
 
     /// A retained failure keeps its classification, so a replay is still a deadline, a
     /// refusal, or a transport failure, and not an opaque error.

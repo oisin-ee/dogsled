@@ -575,18 +575,33 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     let ahead = tree.map(|t| t.ahead).filter(|n| *n > 0);
     let dirty = tree.is_some_and(|t| t.dirty);
     let landed = tree.is_some_and(|t| t.landed);
+    // The lifecycle owner derives the state from the evidence. The board keeps its own
+    // wording and its own groups: it asks the owner, and it never derives a second
+    // state of its own.
+    let lifecycle = crate::items::lifecycle(item, hosts);
+    let stalled = agent.is_some_and(|a| a.stalled_since_ms.is_some());
     let state = match agent {
-        Some(a) if a.stalled_since_ms.is_some() => "stalled".to_owned(),
+        Some(_) if stalled => "stalled".to_owned(),
         Some(a) => a.state.clone(),
         None if host_up => "starting".to_owned(),
         None => "unavailable".to_owned(),
     };
-    // Idle alone waits for input; only a child that called `done` has finished.
+    // A turn that ended waits for input; only a recorded final handoff has finished.
     let waiting = matches!(state.as_str(), "idle" | "done");
-    let finished = agent.is_some_and(|a| a.done) && waiting;
-    let group = if !host_up || matches!(state.as_str(), "stalled" | "blocked" | "unknown") {
+    let finished = lifecycle.state == crate::lifecycle::State::Done;
+    // An observed agent whose state the owner cannot read, or that is blocked, needs the
+    // owner. An agent that is not observed yet keeps today's group: the board's own
+    // wording for it says `starting`, and the group change belongs to a later unit.
+    let needs_attention = !host_up
+        || stalled
+        || (agent.is_some()
+            && matches!(
+                lifecycle.state,
+                crate::lifecycle::State::Blocked | crate::lifecycle::State::Unknown
+            ));
+    let group = if needs_attention {
         Group::Attention
-    } else if finished && (dirty || (ahead.is_some() && !landed)) {
+    } else if finished && waiting && (dirty || (ahead.is_some() && !landed)) {
         Group::ToLand
     } else {
         Group::Running
@@ -747,7 +762,10 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
         title: None,
         cleanup: None,
         unseen: false,
-        state: "queued".into(),
+        state: crate::lifecycle::display(
+            crate::lifecycle::classify(&crate::lifecycle::ticket_evidence(&ticket.state)).state,
+        )
+        .to_owned(),
         activity: reason.map_or_else(|| "for a host with room".to_owned(), |r| format!("for {r}")),
         age_ms: now.saturating_sub(ticket.created_ms),
         quiet_ms: None,
@@ -1660,6 +1678,12 @@ mod tests {
             worktree: None,
             repository: None,
             done: false,
+            finishing: false,
+            handoff: None,
+            launch_progress: None,
+            owns_open: false,
+            lifecycle: None,
+            lifecycle_gap: None,
         }
     }
 
@@ -1693,7 +1717,15 @@ mod tests {
             jobs: Vec::new(),
             handoffs: Vec::new(),
             retry_ms: None,
+            job_validity: None,
         }
+    }
+
+    /// The host reports the board projection reads.
+    fn board_hosts() -> Vec<HostReport> {
+        let mut waiting = agent("w2:p1", "pi", "idle");
+        waiting.owns_open = true;
+        vec![host("8103", "netcup", vec![waiting])]
     }
 
     fn item(id: &str, host: &str, pane: &str) -> Item {
@@ -1948,6 +1980,86 @@ mod tests {
         assert_eq!(board.rows[0].activity, "netcup is unavailable");
     }
 
+    /// The production board projection must read the state from the one owner, so a
+    /// consumer can never derive a second, different state.
+    #[test]
+    fn the_board_projection_reads_the_shared_lifecycle_owner() {
+        let mut waiting = agent("w2:p1", "pi", "idle");
+        waiting.owns_open = true;
+        let stopped = agent("w2:p2", "pi", "idle");
+        let mut asking = agent("w2:p3", "pi", "idle");
+        asking.handoff = Some("none".into());
+        let mut finishing = agent("w2:p4", "pi", "idle");
+        finishing.finishing = true;
+        finishing.handoff = Some("accepted".into());
+        let mut done = agent("w2:p5", "pi", "idle");
+        done.done = true;
+        done.handoff = Some("recorded".into());
+        let working = agent("w2:p6", "pi", "working");
+        let unknown = agent("w2:p7", "pi", "unknown");
+        let host = host(
+            "8103",
+            "netcup",
+            vec![waiting, stopped, asking, finishing, done, working, unknown],
+        );
+        let items: Vec<Item> = [
+            "w2:p1", "w2:p2", "w2:p3", "w2:p4", "w2:p5", "w2:p6", "w2:p7",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, pane)| item(&format!("i{i}"), "8103", pane))
+        .collect();
+        let board = build(&status(vec![host], items), None, NOW);
+        // The board keeps its own wording: the raw terminal state, unchanged.
+        let words: Vec<(&str, &str)> = board
+            .rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.state.as_str()))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                ("i6", "unknown"), // an unreadable terminal state
+                ("i0", "idle"),    // owns open work
+                ("i1", "idle"),    // stopped
+                ("i2", "idle"),    // asking
+                ("i3", "idle"),    // finishing
+                ("i4", "idle"),    // a recorded handoff: the raw state stays as it was
+                ("i5", "working"),
+            ]
+        );
+        // The board's group comes from the owner's derivation: an unreadable agent and a
+        // blocked one need the owner, and the rest keep running.
+        let groups: Vec<(&str, Group)> = board
+            .rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.group))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("i6", Group::Attention),
+                ("i0", Group::Running),
+                ("i1", Group::Running),
+                ("i2", Group::Running),
+                ("i3", Group::Running),
+                ("i4", Group::Running),
+                ("i5", Group::Running),
+            ]
+        );
+        // The owner's raw terminal states stay intact: the board did not rewrite them.
+        for row in &board.rows {
+            assert_ne!(row.state, "stalled");
+        }
+        // The shared owner gives the same answer as the board's own row.
+        let item = item("i0", "8103", "w2:p1");
+        let hosts = board_hosts();
+        assert_eq!(
+            crate::items::lifecycle(&item, &hosts).state,
+            crate::lifecycle::State::Waiting
+        );
+    }
+
     #[test]
     fn a_child_before_its_first_answer_shows_the_requested_model() {
         let item = Item {
@@ -1982,6 +2094,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -2023,6 +2136,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -2064,6 +2178,7 @@ mod tests {
             ended_ms: None,
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         });
         let board = build(
             &status(
@@ -2131,6 +2246,7 @@ mod tests {
                     cmd: vec!["cargo".into(), "test".into()],
                     timeout_ms: None,
                     idle_timeout_ms: None,
+                    validity: None,
                 },
                 host: None,
                 branch: None,

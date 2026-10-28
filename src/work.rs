@@ -19,6 +19,9 @@ pub enum Action {
         cmd: Vec<String>,
         timeout_ms: Option<u64>,
         idle_timeout_ms: Option<u64>,
+        /// The request's own creation time, stamped once at its origin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        validity: Option<crate::jobs::Validity>,
     },
     Agent {
         kind: String,
@@ -108,8 +111,37 @@ pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
     Ok(tickets)
 }
 
+/// A job request's own validity evidence. A request that is not a job has no age to
+/// check: agents and prepared units are unchanged by this rule.
+fn request_validity(request: &Request) -> Option<&crate::jobs::Validity> {
+    match &request.action {
+        Action::Job { validity, .. } => validity.as_ref(),
+        _ => None,
+    }
+}
+
+/// The validity evidence a launch carries in its own action.
+fn launch_validity(launch: &Launch) -> Option<crate::jobs::Validity> {
+    match &launch.action {
+        Action::Job { validity, .. } => *validity,
+        _ => None,
+    }
+}
+
+/// Check a request against this host's clock. A request that may not start new execution
+/// is refused here, before any placement, preparation, dispatch, or ownership change.
+fn check_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
+    if !matches!(request.action, Action::Job { .. }) {
+        return Ok(());
+    }
+    crate::jobs::check_validity(ledger, request_validity(request))
+}
+
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
     ledger.with_lock("queue", || {
+        // A request that may not start new execution never enters the queue. The refusal
+        // is recorded on the clock, and the queue stays as it was.
+        check_request_validity(ledger, &request)?;
         let mut tickets = queue(ledger)?;
         if let Some(ticket) = tickets.iter_mut().find(|t| t.request.id == request.id) {
             if serde_json::to_value(&ticket.request)? != serde_json::to_value(&request)? {
@@ -262,6 +294,60 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
     Ok((pane, terminal))
 }
 
+/// The pane's live terminal identity, or an error when the pane is not listed with one.
+/// A pane that is not listed has no proven identity, and a pane that is listed without a
+/// terminal id has none either.
+fn live_terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
+    crate::cleanup::pane_snapshot(shell)?
+        .1
+        .get(pane)
+        .cloned()
+        .ok_or_else(|| Error::Invalid(format!("{pane}: cannot establish launch terminal identity")))
+}
+
+/// Retire a pane this launch allocated. Only that pane is closed, and only after the same
+/// guards the launch cleanup uses: the caller's own pane, a focused pane, a pane an agent
+/// owns, a busy pane, and a pane whose terminal identity changed are never closed here.
+///
+/// The terminal identity must be proven before the pane closes. The launch recorded one,
+/// the pane is listed, and the listed terminal equals the recorded one. A missing recorded
+/// identity, an unlisted pane, or a different live terminal is not proof, so the pane
+/// stays open.
+pub(crate) fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>) -> Result<()> {
+    if std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
+        || crate::cleanup::current_panes(shell)?
+            .iter()
+            .any(|p| p.pane_id == pane && p.focused)
+    {
+        return Err(Error::Invalid(format!("{pane}: caller or focused pane")));
+    }
+    let Some(expected) = terminal.filter(|id| !id.is_empty()) else {
+        return Err(Error::Invalid(format!(
+            "{pane}: the launch recorded no terminal identity"
+        )));
+    };
+    if live_terminal(shell, pane)? != expected {
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+    }
+    if crate::probe::agent_list(shell)?
+        .iter()
+        .any(|agent| agent.pane == pane)
+    {
+        return Err(Error::Invalid(format!(
+            "{pane}: an agent now owns the pane"
+        )));
+    }
+    if crate::probe::foreground(shell, pane)?.is_some() {
+        return Err(Error::Invalid(format!("{pane}: the pane is busy")));
+    }
+    // Inspection must not authorize closing a replacement terminal.
+    if live_terminal(shell, pane)? != expected {
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+    }
+    shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
+    Ok(())
+}
+
 fn tab(workspace: String) -> Vec<String> {
     vec![
         "tab".into(),
@@ -311,8 +397,15 @@ fn request_evidence(
     timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
 ) -> Value {
-    json!({"cmd":cmd,"cwd":launch.cwd,"owner":launch.owner,
-        "timeout_ms":timeout_ms,"idle_timeout_ms":idle_timeout_ms})
+    let mut evidence = json!({"cmd":cmd,"cwd":launch.cwd,"owner":launch.owner,
+        "timeout_ms":timeout_ms,"idle_timeout_ms":idle_timeout_ms});
+    // The validity evidence joins the receipt only when the request carries it. A legacy
+    // receipt keeps its own shape, and a new request never correlates to a receipt that
+    // names no request time.
+    if let Some(validity) = launch_validity(launch) {
+        evidence["validity"] = json!(validity);
+    }
+    evidence
 }
 
 /// The saved receipt of a job launch must name this request and the command it dispatched.
@@ -398,6 +491,7 @@ pub(crate) fn correlate(
         || job.owner != launch.owner
         || job.timeout_ms != timeout_ms
         || job.idle_timeout_ms != idle_timeout_ms
+        || job.validity != launch_validity(launch)
     {
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another command or request",
@@ -432,6 +526,7 @@ fn launch_job(
         ended_ms: None,
         timeout_ms,
         idle_timeout_ms,
+        validity: launch_validity(launch),
     };
     // The job's ownership is read before any pane side effect. A job that already
     // has an owner keeps it: this launch never takes it over, never allocates a
@@ -463,7 +558,19 @@ fn launch_job(
     // executable: an allocation that stops here stays uncertain, and no other
     // allocation may take the job over.
     jobs::publish_intent(ledger, &job)?;
-    let (pane, _) = pane(shell, launch)?;
+    let (pane, terminal) = pane(shell, launch)?;
+    // Allocation blocks, so the request can expire during it. The recheck runs before the
+    // executable claim is published and before the command is dispatched. A refusal writes
+    // no receipt, releases no preparation, and retires only the pane this attempt
+    // allocated.
+    if let Err(refusal) = jobs::check_validity(ledger, job.validity.as_ref()) {
+        if launch.pane.is_none()
+            && let Err(error) = retire_pane(shell, &pane, terminal.as_deref())
+        {
+            eprintln!("dogsled pane close: {error}");
+        }
+        return Err(refusal);
+    }
     // The pane is known, so the claim becomes executable. The wrapper reads it
     // before it runs anything.
     let mut claim = job.clone();
@@ -471,10 +578,13 @@ fn launch_job(
     claim.state = jobs::PENDING.into();
     jobs::publish_claim(ledger, &claim)?;
     let executable = std::env::current_exe()?.display().to_string();
+    // The wrapper carries the protocol it speaks and the request's own creation time, so
+    // the wrapper checks the same age the launch checked.
     let command = format!(
-        "DOGSLED_STATE={} {} exec {} -- {}",
+        "DOGSLED_STATE={} {} exec --job-validity {} {} -- {}",
         quote(&ledger.dir.display().to_string()),
         quote(&executable),
+        crate::jobs::VALIDITY_PROTOCOL_VERSION,
         quote(&launch.id),
         cmd.iter().map(|c| quote(c)).collect::<Vec<_>>().join(" ")
     );
@@ -493,12 +603,30 @@ fn launch_job(
         "request":request_evidence(launch, cmd, timeout_ms, idle_timeout_ms)}))
 }
 
-pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, _now: u64) -> Result<Value> {
+pub fn launch(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    launch: &Launch,
+    _now: u64,
+    peer_validity: Option<u32>,
+) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
     if launch.unit.is_some() && !matches!(launch.action, Action::Agent { .. }) {
         return Err(crate::unit_transport::conflict(
             "seed requires an agent launch",
         ));
+    }
+    // A job launch needs the validity protocol. A peer that speaks another version, or
+    // none, never creates a claim or a pane.
+    if matches!(launch.action, Action::Job { .. })
+        && peer_validity != Some(jobs::VALIDITY_PROTOCOL_VERSION)
+    {
+        return Err(Error::Refused {
+            code: crate::error::Refusal::JobValidityUnsupported,
+            detail: crate::error::Refusal::JobValidityUnsupported
+                .message()
+                .to_owned(),
+        });
     }
     if matches!(launch.action, Action::Agent { .. }) {
         let result = crate::launch::agent(ledger, shell, launch)?;
@@ -515,17 +643,26 @@ pub fn launch(ledger: &Ledger, shell: &dyn Shell, launch: &Launch, _now: u64) ->
                 cmd,
                 timeout_ms,
                 idle_timeout_ms,
+                ..
             } = &launch.action
             {
+                // A correlated receipt replays after expiry. It is read-only: it returns
+                // the saved result and dispatches nothing.
                 correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
             }
             return Ok(value);
+        }
+        // New execution checks the request's age before it claims anything, allocates a
+        // pane, or dispatches the command.
+        if let Action::Job { validity, .. } = &launch.action {
+            jobs::check_validity(ledger, validity.as_ref())?;
         }
         let result = match &launch.action {
             Action::Job {
                 cmd,
                 timeout_ms,
                 idle_timeout_ms,
+                ..
             } => launch_job(ledger, shell, launch, cmd, *timeout_ms, *idle_timeout_ms)?,
             Action::Agent { .. } => {
                 return Err(Error::Invalid(
@@ -761,6 +898,9 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
 /// The caller owns the request's admission lock. Commit uses this path so the lock is
 /// never reacquired while `runtime::start` enters admission.
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    // Admission checks the request's age before it places, prepares, or dispatches
+    // anything. A request that may not start new execution is refused here.
+    check_request_validity(fleet.ledger, request)?;
     let attempts = fleet.ledger.child("admissions");
     let file = format!("{}.json", request.id);
     if let Some(mut attempt) = attempts.read::<Attempt>(&file)? {
@@ -888,7 +1028,9 @@ fn begin(
 }
 
 fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
-    let placed = commands::place(fleet, host, &request.id, now).map_err(prelaunch_error)?;
+    let validity = request_validity(request).copied();
+    let placed =
+        commands::place_with(fleet, host, &request.id, now, validity).map_err(prelaunch_error)?;
     if let Placement::Full { hosts, .. } = &placed {
         defer(fleet, request, hosts, now)?;
     }
@@ -987,16 +1129,28 @@ fn finish(
     now: u64,
 ) -> Result<Value> {
     let launched = if host.is_local() {
-        launch(fleet.ledger, fleet.shell, launch_request, now)
-    } else {
-        fleet.remote_setup(
-            host,
-            &[
-                "launch".into(),
-                "--request".into(),
-                serde_json::to_string(launch_request)?,
-            ],
+        launch(
+            fleet.ledger,
+            fleet.shell,
+            launch_request,
+            now,
+            Some(jobs::VALIDITY_PROTOCOL_VERSION),
         )
+    } else {
+        let mut args = vec![
+            "launch".into(),
+            "--request".into(),
+            serde_json::to_string(launch_request)?,
+        ];
+        // The validity protocol rides with a job launch. A peer that does not speak it
+        // rejects the flag, and the caller reports an unsupported protocol.
+        if matches!(request.action, Action::Job { .. }) {
+            args.extend([
+                "--job-validity".into(),
+                crate::jobs::VALIDITY_PROTOCOL_VERSION.to_string(),
+            ]);
+        }
+        fleet.remote_setup(host, &args)
     };
     let result = launched.map_err(|e| {
         if retryable(&e) && matches!(request.action, Action::Agent { .. }) {
@@ -1010,16 +1164,61 @@ fn finish(
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;
     // Queued and still-launching requests have no item: only a successful receipt
     // reaches this point. Preserve its host-clock confirmation, not admission's `now`.
-    items::record(
-        fleet.ledger,
-        item(request, host.id.clone(), pane, &result, now)?,
-    )?;
+    // Only a child can be orphaned, so only a child records an owner session.
+    let owner_session = match request.action {
+        Action::Agent { .. } => owner_session(fleet, request),
+        _ => None,
+    };
+    let item = item(request, host.id.clone(), pane, &result, now, owner_session)?;
+    record_child(fleet.ledger, &item, result)
+}
+
+/// Record the launched child and its custody, and return the launch result.
+///
+/// The custody starts at the origin: the owner holds the child until a lead claims it.
+/// A custody record that cannot be read or written is a diagnostic only. The child is
+/// running, and a claim derives the origin record from the item when the custody file
+/// holds none, so a custody failure never turns confirmed execution into a failed
+/// launch.
+pub(crate) fn record_child(ledger: &Ledger, item: &Item, result: Value) -> Result<Value> {
+    items::record(ledger, item.clone())?;
+    if item.kind == "agent"
+        && let Err(error) = crate::custody::ensure(ledger, item)
+    {
+        eprintln!(
+            "dogsled: custody record for {} failed: {error}; a claim derives it from the item",
+            item.id
+        );
+    }
     Ok(result)
+}
+
+/// The owner's harness session identity, when this host can prove it.
+///
+/// The session-ended rule needs a recorded identity. A host that cannot prove the owner
+/// is on this host records none, so the rule never applies to that item.
+fn owner_session(fleet: &Fleet, request: &Request) -> Option<String> {
+    let hostname = crate::inbox::hostname();
+    if request.owner_host.as_deref() != Some(hostname.as_str()) {
+        return None;
+    }
+    crate::probe::agent_list(fleet.shell)
+        .ok()?
+        .into_iter()
+        .find(|agent| agent.pane == request.owner)
+        .and_then(|agent| agent.agent_session)
 }
 
 /// The owner's record of what `request` started. The profile's role wins; otherwise a child
 /// with a branch is a writer.
-fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -> Result<Item> {
+fn item(
+    request: &Request,
+    host: String,
+    pane: &str,
+    result: &Value,
+    now: u64,
+    owner_session: Option<String>,
+) -> Result<Item> {
     let text = |key: &str| result[key].as_str().map(str::to_owned);
     let (kind, name, harness) = match &request.action {
         // A job is named for its program, so the board shows it before any snapshot has it.
@@ -1048,6 +1247,7 @@ fn item(request: &Request, host: String, pane: &str, result: &Value, now: u64) -
         host,
         pane: pane.into(),
         owner_pane: request.owner.clone(),
+        owner_session,
         name,
         created_ms: now,
         launch_confirmed_ms: result["launch_confirmed_ms"].as_u64(),

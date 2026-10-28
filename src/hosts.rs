@@ -53,6 +53,9 @@ pub struct HostReport {
     /// When an unreachable peer is read again, after backoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_ms: Option<u64>,
+    /// The job validity protocol this host speaks. A host without it cannot run a job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_validity: Option<u32>,
 }
 
 /// Why a host could not be read, as a fixed category.
@@ -147,6 +150,52 @@ impl std::fmt::Display for Failure {
 /// in an `Error`, a ticket, a handoff, a unit record, or a log line.
 pub const SSH_DEBUG_FILE: &str = "DOGSLED_SSH_DEBUG_FILE";
 
+/// The cause a peer named in a plain prepare failure, without any of the peer's own text.
+/// The names come from this caller's arguments, never from the peer's message.
+fn prepare_cause(value: &serde_json::Value, args: &[String]) -> Option<String> {
+    if value.get("diagnostic").is_some() {
+        return None;
+    }
+    let message = value["error"].as_str()?.trim();
+    let arg = |flag: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+    };
+    if message.starts_with("unknown base") || message.contains("requested base unavailable") {
+        let base = arg("--base").filter(|base| safe_ref(base))?;
+        return Some(format!("unknown base {base}"));
+    }
+    if message.starts_with("branch ") && message.ends_with(" exists; omit --base") {
+        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
+        return Some(format!("branch {branch} exists; omit --base"));
+    }
+    if message == "branch exists; omit --base" {
+        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
+        return Some(format!("branch {branch} exists; omit --base"));
+    }
+    if message.contains("workspace") && message.contains("already open") {
+        return Some("workspace already open".to_owned());
+    }
+    if message.contains("workspace")
+        && (message.contains("already shows") || message.contains("is occupied"))
+    {
+        return Some("workspace occupied".to_owned());
+    }
+    None
+}
+
+/// A reference that carries no origin, no credential, and no path.
+fn safe_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('-')
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/_-.~^".contains(&c))
+}
+
 fn record_ssh_detail(target: &str, detail: &str) {
     let Some(path) = std::env::var_os(SSH_DEBUG_FILE) else {
         return;
@@ -189,6 +238,17 @@ pub fn unreachable(failure: Failure) -> String {
 }
 
 impl HostReport {
+    /// The observed agent in `pane`, when this host's snapshot holds one. The lifecycle
+    /// owner reads the agent through here, so every consumer sees the same observation.
+    #[must_use]
+    pub fn agent(&self, pane: &str) -> Option<&crate::probe::Agent> {
+        self.probe
+            .as_ref()?
+            .agent_panes
+            .iter()
+            .find(|a| a.pane == pane)
+    }
+
     /// Why the host is in this state, for one status line: unreachable, or its service.
     #[must_use]
     pub fn condition(&self) -> String {
@@ -253,6 +313,9 @@ struct Cached {
     /// every cache expiry.
     #[serde(default)]
     retry: crate::backoff::Backoff,
+    /// The job validity protocol the peer speaks. A peer without it cannot run a job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    job_validity: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -429,6 +492,16 @@ impl<'a> Fleet<'a> {
                 Some(out.status),
                 &host.label,
             );
+            // A prepare failure may name its cause in a plain message, such as an unknown
+            // base. The cause reaches the ticket as the error itself, and the peer's own
+            // text stays in the debug file.
+            if operation == crate::diagnostic::Operation::Prepare
+                && refusal.is_none()
+                && let Some(value) = value.as_ref()
+                && let Some(cause) = prepare_cause(value, args)
+            {
+                return Err(Error::Invalid(format!("ssh {}: {cause}", host.label)));
+            }
             if operation == crate::diagnostic::Operation::Other
                 && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none())
             {
@@ -451,29 +524,43 @@ impl<'a> Fleet<'a> {
         })
     }
 
-    pub fn reserve(&self, host: &Host, id: &str, now: u64) -> Result<ReserveOutcome> {
+    pub fn reserve(
+        &self,
+        host: &Host,
+        id: &str,
+        now: u64,
+        validity: Option<crate::jobs::Validity>,
+    ) -> Result<ReserveOutcome> {
         if host.is_local() {
-            return self.node().reserve(id, now);
+            return self.node().reserve(id, now, validity);
         }
         let t = self.thresholds();
-        self.remote(
-            host,
-            &[
-                "reserve".into(),
-                "--id".into(),
-                id.into(),
-                "--free-core-fraction-min".into(),
-                t.free_core_fraction_min.to_string(),
-                "--memory-reserve-bytes".into(),
-                t.memory_reserve_bytes.to_string(),
-                "--disk-free-min-percent".into(),
-                t.disk_free_min_percent.to_string(),
-                "--reservation-load".into(),
-                t.reservation_load.to_string(),
-                "--reservation-ttl-ms".into(),
-                t.reservation_ttl_ms.to_string(),
-            ],
-        )
+        let mut args = vec![
+            "reserve".into(),
+            "--id".into(),
+            id.into(),
+            "--free-core-fraction-min".into(),
+            t.free_core_fraction_min.to_string(),
+            "--memory-reserve-bytes".into(),
+            t.memory_reserve_bytes.to_string(),
+            "--disk-free-min-percent".into(),
+            t.disk_free_min_percent.to_string(),
+            "--reservation-load".into(),
+            t.reservation_load.to_string(),
+            "--reservation-ttl-ms".into(),
+            t.reservation_ttl_ms.to_string(),
+        ];
+        // The validity protocol rides with a job reservation. A peer that does not
+        // speak it refuses the flag, and the caller reports an unsupported protocol.
+        if let Some(validity) = validity {
+            args.extend([
+                "--job-validity".into(),
+                crate::jobs::VALIDITY_PROTOCOL_VERSION.to_string(),
+                "--job-created-ms".into(),
+                validity.created_ms.to_string(),
+            ]);
+        }
+        self.remote(host, &args)
     }
 
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
@@ -509,6 +596,7 @@ impl<'a> Fleet<'a> {
                 error: None,
                 failure: None,
                 retry: crate::backoff::Backoff::default(),
+                job_validity: report.job_validity,
             })
         } else {
             self.cached_peer(host, now)
@@ -524,6 +612,7 @@ impl<'a> Fleet<'a> {
             error: None,
             failure: Some(Failure::of(&e)),
             retry: crate::backoff::Backoff::default(),
+            job_validity: None,
         });
         // Only the category describes an unreachable host. This also covers a cache written
         // before categories existed, which may still hold raw ssh text.
@@ -582,6 +671,7 @@ impl<'a> Fleet<'a> {
             handoffs: cached.handoffs,
             retry_ms: (!cached.reachable && cached.retry.attempts > 0)
                 .then_some(cached.retry.next_ms),
+            job_validity: cached.job_validity,
         }
     }
 
@@ -639,46 +729,45 @@ impl<'a> Fleet<'a> {
                 return Ok(cached.clone());
             }
             let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
-            let (snapshot, reachable, available, running, handoffs, error, failure) = match self
-                .remote::<Option<
-                crate::node::SnapshotReport,
-            >>(
-                host,
-                &["snapshot".into()],
-            ) {
-                Ok(Some(report)) => {
-                    let available = report.snapshot.is_some();
-                    (
-                        report
-                            .snapshot
-                            .or_else(|| previous.and_then(|c| c.snapshot)),
+            let (snapshot, reachable, available, running, handoffs, error, failure, job_validity) =
+                match self.remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
+                {
+                    Ok(Some(report)) => {
+                        let available = report.snapshot.is_some();
+                        (
+                            report
+                                .snapshot
+                                .or_else(|| previous.and_then(|c| c.snapshot)),
+                            true,
+                            available,
+                            report.running,
+                            report.handoffs,
+                            None,
+                            None,
+                            report.job_validity,
+                        )
+                    }
+                    Ok(None) => (
+                        previous.and_then(|c| c.snapshot),
                         true,
-                        available,
-                        report.running,
-                        report.handoffs,
+                        false,
+                        None,
+                        Vec::new(),
+                        Some("host.json is missing; service: down".into()),
                         None,
                         None,
-                    )
-                }
-                Ok(None) => (
-                    previous.and_then(|c| c.snapshot),
-                    true,
-                    false,
-                    None,
-                    Vec::new(),
-                    Some("host.json is missing; service: down".into()),
-                    None,
-                ),
-                Err(e) => (
-                    previous.and_then(|c| c.snapshot),
-                    false,
-                    false,
-                    None,
-                    Vec::new(),
-                    None,
-                    Some(Failure::of(&e)),
-                ),
-            };
+                    ),
+                    Err(e) => (
+                        previous.and_then(|c| c.snapshot),
+                        false,
+                        false,
+                        None,
+                        Vec::new(),
+                        None,
+                        Some(Failure::of(&e)),
+                        None,
+                    ),
+                };
             if reachable {
                 retry.reset();
             } else {
@@ -695,6 +784,7 @@ impl<'a> Fleet<'a> {
                 error,
                 failure,
                 retry,
+                job_validity,
             };
             self.ledger.write(&file, &cached)?;
             Ok(cached)
@@ -1199,6 +1289,72 @@ mod tests {
         ] {
             let shown = read(stdout);
             assert_eq!(shown, "ssh peer: remote command failed");
+        }
+    }
+
+    #[test]
+    fn a_remote_prepare_failure_names_its_cause_and_keeps_the_peers_text_hidden() {
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let args = vec![
+            "prepare".to_owned(),
+            "--repo".to_owned(),
+            "repo".to_owned(),
+            "--branch".to_owned(),
+            "worker".to_owned(),
+            "--base".to_owned(),
+            "origin/x".to_owned(),
+        ];
+        let read = |stdout: String| {
+            let out = crate::shell::Output {
+                status: 2,
+                stdout,
+                stderr: String::new(),
+            };
+            Fleet::parse_remote::<serde_json::Value>(&host, &args, &out)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            read(format!("{{\"error\":\"unknown base {SECRET}\"}}")),
+            "ssh peer: unknown base origin/x"
+        );
+        assert_eq!(
+            read("{\"error\":\"branch worker exists; omit --base\"}".to_owned(),),
+            "ssh peer: branch worker exists; omit --base"
+        );
+        assert_eq!(
+            read("{\"error\":\"branch exists; omit --base\"}".to_owned()),
+            "ssh peer: branch worker exists; omit --base"
+        );
+        assert_eq!(
+            read("{\"error\":\"requested base unavailable on this host\"}".to_owned()),
+            "ssh peer: unknown base origin/x"
+        );
+        assert_eq!(
+            read("{\"error\":\"workspace already open\"}".to_owned()),
+            "ssh peer: workspace already open"
+        );
+        assert_eq!(
+            read("{\"error\":\"Herdr workspace w8 already shows the checkout\"}".to_owned()),
+            "ssh peer: workspace occupied"
+        );
+        assert_eq!(
+            read("{\"error\":\"workspace path is occupied\"}".to_owned()),
+            "ssh peer: workspace occupied"
+        );
+        // A peer's own text never reaches the error, and an unknown cause stays hidden.
+        for stdout in [
+            format!("{{\"error\":\"{SECRET}\"}}"),
+            format!("{{\"error\":\"unknown base {SECRET}\",\"diagnostic\":{{\"version\":1}}}}"),
+            format!("{{\"error\":\"no Herdr server is reachable: {SECRET}\"}}"),
+        ] {
+            let shown = read(stdout);
+            assert!(!shown.contains("EXAMPLE_SECRET"), "{shown}");
+            assert!(!shown.contains("unknown base"), "{shown}");
         }
     }
 

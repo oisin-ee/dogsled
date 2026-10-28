@@ -263,6 +263,7 @@ impl Server {
                 cmd: args.cmd,
                 timeout_ms: duration(args.timeout)?,
                 idle_timeout_ms: duration(args.idle_timeout)?,
+                validity: None,
             };
             let request = crate::runtime::request(fleet, &args.placement.args(), action)?;
             crate::runtime::start(fleet, request, false)

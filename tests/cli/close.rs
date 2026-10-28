@@ -486,7 +486,14 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
     assert!(!rig.log("herdr.log").contains("agent start"));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     let request = before["request"].to_string();
-    let (code, _) = rig.json(&["host", "launch", "--request", &request]);
+    let (code, _) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request,
+    ]);
     assert_eq!(code, 2);
     assert_eq!(rig.read("state/launches/own.progress.json"), before);
     assert!(!rig.log("herdr.log").contains("agent start"));
@@ -497,7 +504,18 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
             "pane_id":"w2:p2","terminal_id":"replacement","cwd":tree
         }]}}),
     );
-    assert_eq!(rig.json(&["host", "launch", "--request", &request]).0, 2);
+    assert_eq!(
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "1",
+            "--request",
+            &request
+        ])
+        .0,
+        2
+    );
     assert_eq!(rig.read("state/launches/own.progress.json"), before);
     assert!(!rig.log("herdr.log").contains("agent start"));
 }

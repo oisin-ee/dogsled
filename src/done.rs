@@ -49,6 +49,11 @@ pub struct Mark {
     pub detached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<crate::items::Reply>,
+    /// The reply came from the native `done` handoff, so it proves the child finished. A
+    /// sealed terminal receipt is a result, not a native `done`, so it never proves a
+    /// handoff. Marks from before this field load with `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_ms: Option<u64>,
 }
@@ -180,14 +185,48 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
         let owners = owners(ledger)?;
         for agent in agents {
             let mut done = false;
+            let mut recorded = false;
+            let mut called = false;
+            // The terminal evidence the unit return needs. It is one read per pane.
+            let mut ready = false;
             for mark in marks.values_mut().filter(|m| matches(m, agent)) {
                 let evidence = evidence(ledger, mark, agent);
                 seal(mark, agent, &evidence);
-                done |= terminal(mark, &evidence)
+                let closable = terminal(mark, &evidence)
                     && waiting(agent)
                     && !owners.contains_key(&agent.pane);
+                done |= closable;
+                // The handoff is recorded only with its saved final reply and the
+                // launch evidence the unit return needs.
+                if closable && mark.reply.is_some() {
+                    if !ready {
+                        ready = crate::launch::handoff_ready(ledger, &agent.pane)?;
+                    }
+                    recorded |= ready;
+                }
+                called = true;
             }
+            // `done` stays the guard's turn-end fact: the handoff that records the reply
+            // looks for it. The published handoff below is the stricter claim.
             agent.done = done;
+            // The native `done` was accepted, but the handoff is not complete.
+            agent.finishing = called && !recorded;
+            // The handoff is published from these fresh facts, so a second observation
+            // never reads back its own previous value.
+            agent.handoff = Some(
+                match (recorded, agent.finishing) {
+                    (true, _) => "recorded",
+                    (false, true) => "accepted",
+                    (false, false) => "none",
+                }
+                .to_owned(),
+            );
+            // The same scan the done guard uses: open items and pending or admitting
+            // child tickets. A turn that ended while the agent owns work waits for it.
+            agent.owns_open = owners.contains_key(&agent.pane);
+            // The lifecycle owner publishes the state with the agent, so every reader of
+            // the host snapshot sees the state this host observed.
+            crate::lifecycle::publish(agent, crate::lifecycle::Host::Up);
         }
         if before != marks {
             ledger.write(FILE, &marks)?;
@@ -248,6 +287,7 @@ pub fn mark(
         branch,
         detached,
         reply: None,
+        native_done: false,
         closed_ms: None,
     };
     ledger.with_lock("done", || {
@@ -624,6 +664,9 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
                 reported_ms: None,
                 done: true,
             });
+            // The native `done` handoff produced this reply. It is the only provenance
+            // that proves the child finished.
+            mark.native_done = true;
             save(ledger, &mark)?;
         }
         if let (Some(id), Some(reply)) = (&mark.item, &mark.reply)
@@ -634,7 +677,7 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
                         .is_some_and(|r| r.result_id.is_some() || (r.seq == reply.seq && r.done))
             })
         {
-            crate::items::set_reply(ledger, id, reply.clone())?;
+            crate::items::set_reply_with(ledger, id, reply.clone(), mark.native_done)?;
         }
         if mark.branch.is_none() && !mark.detached {
             match preflight(shell, agent) {

@@ -81,6 +81,16 @@ pub enum Refusal {
     NoInboxReader,
     /// The peer could not clone the repository.
     CloneFailed,
+    /// A job request carries no usable validity evidence.
+    JobValidityUnprovable,
+    /// A job request is older than the validity window.
+    JobExpired,
+    /// A job request claims a creation time ahead of this host clock.
+    JobFromFuture,
+    /// The host's validity clock cannot be read or written.
+    JobClockUnavailable,
+    /// The peer does not speak the job validity protocol.
+    JobValidityUnsupported,
 }
 
 impl Refusal {
@@ -89,14 +99,27 @@ impl Refusal {
         match self {
             Self::NoInboxReader => "NO_INBOX_READER",
             Self::CloneFailed => "CLONE_FAILED",
+            Self::JobValidityUnprovable => "JOB_VALIDITY_UNPROVABLE",
+            Self::JobExpired => "JOB_EXPIRED",
+            Self::JobFromFuture => "JOB_FROM_FUTURE",
+            Self::JobClockUnavailable => "JOB_CLOCK_UNAVAILABLE",
+            Self::JobValidityUnsupported => "JOB_VALIDITY_UNSUPPORTED",
         }
     }
 
     #[must_use]
     pub fn from_code(code: &str) -> Option<Self> {
-        [Self::NoInboxReader, Self::CloneFailed]
-            .into_iter()
-            .find(|r| r.code() == code)
+        [
+            Self::NoInboxReader,
+            Self::CloneFailed,
+            Self::JobValidityUnprovable,
+            Self::JobExpired,
+            Self::JobFromFuture,
+            Self::JobClockUnavailable,
+            Self::JobValidityUnsupported,
+        ]
+        .into_iter()
+        .find(|r| r.code() == code)
     }
 
     /// The fixed, safe message for this refusal.
@@ -107,6 +130,17 @@ impl Refusal {
                 "the target has no dogsled inbox reader, so nothing would deliver the message; nothing was sent"
             }
             Self::CloneFailed => "the peer could not clone the repository",
+            Self::JobValidityUnprovable => {
+                "job request validity is unprovable; new execution refused"
+            }
+            Self::JobExpired => "job request is older than 30 days; new execution refused",
+            Self::JobFromFuture => {
+                "job request creation time is ahead of this host clock; new execution refused"
+            }
+            Self::JobClockUnavailable => "job validity clock is unavailable; new execution refused",
+            Self::JobValidityUnsupported => {
+                "this host does not support job request validity (unsupported validity protocol); new execution refused"
+            }
         }
     }
 }

@@ -1,6 +1,6 @@
 //! User-facing status formatting and placement. No agent spawning or queue.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host, HostReport};
 use crate::plan;
 use crate::prepare::Prepared;
@@ -51,10 +51,20 @@ struct ReservationAttempt {
     host: String,
 }
 
-pub fn place(fleet: &Fleet, host: Option<&str>, id: &str, now: u64) -> Result<Placement> {
+/// A placement for a job request. The request's own creation time rides with the
+/// reservation, so the host checks the age before it holds capacity.
+pub fn place_with(
+    fleet: &Fleet,
+    host: Option<&str>,
+    id: &str,
+    now: u64,
+    validity: Option<crate::jobs::Validity>,
+) -> Result<Placement> {
     crate::jobs::validate_id(id)?;
     let selections = fleet.ledger.child("placement-attempts");
-    selections.with_lock(id, || place_locked(fleet, host, id, now, &selections))
+    selections.with_lock(id, || {
+        place_locked(fleet, host, id, now, &selections, validity)
+    })
 }
 
 fn place_locked(
@@ -63,6 +73,7 @@ fn place_locked(
     id: &str,
     now: u64,
     selections: &crate::ledger::Ledger,
+    validity: Option<crate::jobs::Validity>,
 ) -> Result<Placement> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
     let file = format!("{id}.json");
@@ -86,6 +97,38 @@ fn place_locked(
     if saved.is_some() {
         reports.retain(|r| pinned.is_some_and(|h| h.id == r.host.id));
     }
+    // A job request needs a host that speaks the validity protocol. A peer that does not
+    // report it is not a candidate: a job never falls back to an older protocol. The
+    // refusal comes before any reservation, so no capacity is held for it.
+    if validity.is_some() {
+        let speaks = |r: &HostReport| {
+            r.host.is_local() || r.job_validity == Some(crate::jobs::VALIDITY_PROTOCOL_VERSION)
+        };
+        // A request pinned to a peer without the protocol is refused there and then. It
+        // never moves to another host.
+        if let Some(pinned) = pinned
+            && reports
+                .iter()
+                .find(|r| r.host.id == pinned.id)
+                .is_some_and(|r| !speaks(r))
+        {
+            return Err(Error::Refused {
+                code: crate::error::Refusal::JobValidityUnsupported,
+                detail: crate::error::Refusal::JobValidityUnsupported
+                    .message()
+                    .to_owned(),
+            });
+        }
+        reports.retain(speaks);
+        if reports.is_empty() {
+            return Err(Error::Refused {
+                code: crate::error::Refusal::JobValidityUnsupported,
+                detail: crate::error::Refusal::JobValidityUnsupported
+                    .message()
+                    .to_owned(),
+            });
+        }
+    }
     let mut candidates: Vec<_> = reports
         .iter()
         .filter(|r| pinned.is_none_or(|h| h.id == r.host.id))
@@ -104,7 +147,7 @@ fn place_locked(
                 host: host.id.clone(),
             }),
         )?;
-        let outcome = fleet.reserve(host, id, now)?;
+        let outcome = fleet.reserve(host, id, now, validity)?;
         if outcome.reserved {
             let prepared = Prepared::default();
             return Ok(Placement::Placed {

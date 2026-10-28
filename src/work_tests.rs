@@ -1,5 +1,5 @@
 //! Admission and reconciliation with injected timestamps and a scripted OS seam.
-use crate::config::Policy;
+use crate::config::{Policy, Thresholds};
 use crate::hosts::{Fleet, Host};
 use crate::items::{self, Item};
 use crate::ledger::{Ledger, new_id};
@@ -355,6 +355,7 @@ fn a_job_record_says_who_may_run_the_job() {
         ended_ms: None,
         timeout_ms: None,
         idle_timeout_ms: None,
+        validity: None,
     };
     assert!(matches!(
         crate::jobs::ownership(&ledger, "claimed").unwrap(),
@@ -405,6 +406,7 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
         ended_ms: None,
         timeout_ms: None,
         idle_timeout_ms: None,
+        validity: None,
     };
     // A.json holds B's identity.
     let mut other = job.clone();
@@ -456,6 +458,7 @@ fn a_job_launch_receipt_carries_its_own_request_evidence() {
             cmd: vec!["true".into()],
             timeout_ms: None,
             idle_timeout_ms: None,
+            validity: None,
         },
         host: "local".into(),
         cwd: "/work".into(),
@@ -507,4 +510,238 @@ fn a_job_launch_receipt_carries_its_own_request_evidence() {
         "{error}"
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A reservation for an expired request changes nothing. The capacity record is
+/// byte-identical, with or without an existing hold, and the request is never reserved.
+#[test]
+fn a_reservation_for_an_expired_request_changes_nothing() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    let shell = crate::shell::Fake::new();
+    let policy = Policy {
+        memory_reserve_bytes: 0,
+        ..Policy::default()
+    };
+    let node = crate::node::Node {
+        shell: &shell,
+        ledger: &ledger,
+        thresholds: Thresholds::from(&policy),
+        home: "/",
+        cleanup: &policy.cleanup,
+    };
+    let now = crate::jobs::VALIDITY_WINDOW_MS + 1_000_000_u64;
+    ledger
+        .write(
+            "host.json",
+            &crate::node::Snapshot {
+                sampled_ms: now,
+                jobs: Vec::new(),
+                probe: Probe {
+                    host: "local".into(),
+                    label: "local".into(),
+                    load1: 0.0,
+                    cores: 8,
+                    cpu_ticks: None,
+                    busy: Some(0.0),
+                    memory: Memory::default(),
+                    disk_free_percent: 50.0,
+                    agents: AgentCounts::default(),
+                    agent_panes: Vec::new(),
+                    reservations: Vec::new(),
+                    panes: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+    // The request is older than the validity window.
+    let expired = crate::jobs::Validity::new(now - crate::jobs::VALIDITY_WINDOW_MS - 1);
+    // The clock file is written directly, so the test controls the host time.
+    std::fs::write(
+        ledger.dir.join("job-validity-clock.json"),
+        serde_json::to_vec(&crate::jobs::Clock {
+            version: crate::jobs::Clock::VERSION,
+            high_water_ms: now,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    // Without an existing hold, the refusal changes no capacity record.
+    let error = node
+        .reserve("expired", now, Some(expired))
+        .expect_err("an expired request is refused");
+    assert!(error.to_string().contains("older than 30 days"), "{error}");
+    assert!(
+        !ledger.dir.join("placements.json").exists(),
+        "the refused reservation wrote no capacity record"
+    );
+    // With an existing hold, the refusal leaves the hold untouched.
+    let holds = vec![crate::ledger::Reservation {
+        id: "expired".into(),
+        created_ms: now,
+    }];
+    ledger.write("placements.json", &holds).unwrap();
+    let before = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    let error = node
+        .reserve("expired", now, Some(expired))
+        .expect_err("an expired request is refused");
+    assert!(error.to_string().contains("older than 30 days"), "{error}");
+    let after = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    assert_eq!(after, before, "the refused reservation changed the hold");
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A missing clock with a local record that cannot be read refuses. The bootstrap cannot
+/// account for a record it cannot read, so it never starts the clock behind it.
+#[test]
+fn a_missing_clock_with_an_unreadable_record_refuses() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    // A record that cannot be parsed.
+    let store = crate::jobs::store(&ledger);
+    std::fs::create_dir_all(&store.dir).unwrap();
+    std::fs::write(store.dir.join("broken.json"), "not json").unwrap();
+    let error = crate::jobs::clock(&ledger).expect_err("the bootstrap refuses");
+    assert!(
+        error.to_string().contains("clock is unavailable"),
+        "{error}"
+    );
+    // No clock was written.
+    assert!(!ledger.dir.join("job-validity-clock.json").exists());
+    // A missing record directory is empty, and the clock starts at the wall clock.
+    let empty = Ledger::new(std::env::temp_dir().join(new_id()));
+    std::fs::create_dir_all(&empty.dir).unwrap();
+    assert!(crate::jobs::clock(&empty).is_ok());
+    std::fs::remove_dir_all(&ledger.dir).unwrap();
+    std::fs::remove_dir_all(&empty.dir).unwrap();
+}
+
+/// The host's validity clock never moves back. A host clock that moves back cannot reopen
+/// an expired request, and the refusal is recorded at the time it was refused.
+#[test]
+fn the_validity_clock_never_moves_back() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    let created = 1_000_000_u64;
+    let validity = crate::jobs::Validity::new(created);
+    // The clock starts at the wall clock, which the test cannot move. The clock file is
+    // read and written directly here, so the test controls the host time.
+    let clock_file = ledger.dir.join("job-validity-clock.json");
+    let write = |high_water_ms: u64| {
+        std::fs::write(
+            &clock_file,
+            serde_json::to_vec(&crate::jobs::Clock {
+                version: crate::jobs::Clock::VERSION,
+                high_water_ms,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    // A request 30 days old is still valid, and one millisecond more is not.
+    let at = created + crate::jobs::VALIDITY_WINDOW_MS;
+    write(at);
+    assert!(crate::jobs::check_validity_at(&ledger, Some(&validity), at).is_ok());
+    write(at + 1);
+    let error = crate::jobs::check_validity_at(&ledger, Some(&validity), at + 1).unwrap_err();
+    assert!(error.to_string().contains("older than 30 days"), "{error}");
+    // The refusal advanced the clock, and the clock file holds the later time.
+    let saved: crate::jobs::Clock =
+        serde_json::from_slice(&std::fs::read(&clock_file).unwrap()).unwrap();
+    assert!(saved.high_water_ms > created + crate::jobs::VALIDITY_WINDOW_MS);
+    // A request without evidence never starts new execution.
+    let error = crate::jobs::check_validity_at(&ledger, None, at + 1).unwrap_err();
+    assert!(
+        error.to_string().contains("validity is unprovable"),
+        "{error}"
+    );
+    // A request from the future is refused.
+    let ahead = crate::jobs::Validity::new(u64::MAX / 2);
+    let error = crate::jobs::check_validity_at(&ledger, Some(&ahead), at + 1).unwrap_err();
+    assert!(
+        error.to_string().contains("ahead of this host clock"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A custody record that cannot be written after the child started is a diagnostic only.
+/// The launch result is returned, and the child stays recorded.
+#[test]
+fn a_custody_failure_after_the_launch_keeps_the_launch_result() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let item = Item {
+        id: "child".into(),
+        kind: "agent".into(),
+        host: "local".into(),
+        pane: "child".into(),
+        owner_pane: "owner".into(),
+        owner_session: Some("owner-session".into()),
+        created_ms: 100,
+        ..Item::default()
+    };
+    // The custody file holds something that is not a custody record, so the record cannot
+    // be read and cannot be written back.
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    std::fs::write(ledger.dir.join("custody.json"), b"not a custody record").unwrap();
+    // The custody record cannot be read or written here.
+    assert!(
+        crate::custody::ensure(&ledger, &item).is_err(),
+        "the custody store must fail here"
+    );
+    let result = work::record_child(&ledger, &item, json!({"pane":"child"}));
+    let result = result.expect("a custody failure must not fail the launch");
+    assert_eq!(result["pane"], json!("child"));
+    // The child is recorded, so the launch is not lost.
+    let recorded = items::list(&ledger).unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "child");
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A launch retires its own pane only when the terminal identity is proven: the launch
+/// recorded one, the pane is listed, and the listed terminal equals it. Missing,
+/// unlisted, or different identity is never proof, so the pane stays open.
+#[test]
+fn retire_pane_closes_only_on_proven_terminal_identity() {
+    let script = |listed: &str| {
+        let shell = Fake::new();
+        shell.on("herdr pane list", listed);
+        shell.on("herdr agent list", r#"{"result":{"agents":[]}}"#);
+        shell.on(
+            "herdr pane process-info --pane pane_new",
+            r#"{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}"#,
+        );
+        shell.on("herdr pane close pane_new", "{}");
+        shell
+    };
+    let closed = |shell: &Fake| {
+        shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "herdr pane close pane_new")
+    };
+    let listed = r#"{"result":{"panes":[{"pane_id":"pane_new","terminal_id":"term_a"}]}}"#;
+    let unlisted = r#"{"result":{"panes":[{"pane_id":"other","terminal_id":"term_a"}]}}"#;
+
+    // Positive control: recorded and live identity are equal.
+    let shell = script(listed);
+    work::retire_pane(&shell, "pane_new", Some("term_a")).expect("proven identity retires");
+    assert!(closed(&shell), "a proven identity closes the pane");
+
+    for (what, listed, terminal) in [
+        ("no recorded identity", listed, None),
+        ("an empty recorded identity", listed, Some("")),
+        ("a different live identity", listed, Some("term_b")),
+        ("a pane that is not listed", unlisted, Some("term_a")),
+    ] {
+        let shell = script(listed);
+        assert!(
+            work::retire_pane(&shell, "pane_new", terminal).is_err(),
+            "{what} must refuse"
+        );
+        assert!(!closed(&shell), "{what} must not close the pane");
+    }
 }
