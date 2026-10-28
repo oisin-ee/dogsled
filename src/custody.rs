@@ -212,6 +212,18 @@ impl Custody {
         self.custodian_pane == pane && self.custodian_session.as_deref() == session
     }
 
+    /// Whether the custody never moved: revision 0, no claims, and the origin pane holds it.
+    #[must_use]
+    pub fn is_unclaimed(&self) -> bool {
+        self.revision == 0 && self.claims.is_empty() && self.custodian_pane == self.owner_pane
+    }
+
+    /// The latest claim, when the custody ever moved.
+    #[must_use]
+    pub fn latest_claim(&self) -> Option<&Claim> {
+        self.claims.last()
+    }
+
     /// The custodian the last claim replaced.
     #[must_use]
     #[cfg(test)]
@@ -289,6 +301,16 @@ pub fn get(ledger: &Ledger, item: &str) -> Result<Option<Custody>> {
     Ok(list(ledger)?
         .into_iter()
         .find(|custody| custody.item == item))
+}
+
+/// Run `check` on the custody of `item` while the custody lock is held, so a claim cannot
+/// move the custody between the check and the write the caller makes inside it.
+pub fn locked<T>(
+    ledger: &Ledger,
+    item: &str,
+    check: impl FnOnce(Option<&Custody>) -> Result<T>,
+) -> Result<T> {
+    ledger.with_lock(LOCK, || check(get(ledger, item)?.as_ref()))
 }
 
 /// Record the custody of `item` at its origin, when this host holds none.

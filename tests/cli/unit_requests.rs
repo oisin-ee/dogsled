@@ -696,3 +696,213 @@ fn unknown_host_launch_outcome_reuses_attempt_without_safe_release() {
         1
     );
 }
+
+// ---- Custody: a claimant settles the inherited unit. ----
+
+const ID: &str = "r-1793174082524-94752-0";
+
+fn local_host() -> String {
+    let out = Command::new("hostname").output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+fn returned_event(execution: &Value, with: &str) -> Value {
+    let export = exported(0);
+    let binding = json!({"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]});
+    match with {
+        "returned" => json!({"version":1,"eventId":format!("{ID}-returned"),"binding":binding,
+            "result":{"kind":"returned","evidence":{"execution":execution,"resultId":"res-1","summary":"done"}}}),
+        _ => json!({"version":1,"eventId":format!("{ID}-stopped"),"binding":binding,
+            "result":{"kind":"stopped","reason":"worker pane closed without a final reply"}}),
+    }
+}
+
+/// A committed unit owned by `w1:p1` with a saved settlement of the given kind.
+fn settled(name: &str, kind: &str) -> (Rig, Value) {
+    let rig = Rig::new(name);
+    let export = exported(0);
+    let execution = json!({"executor":"dogsled","ownerId":"w1:p1","requestId":ID});
+    let binding = json!({"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]});
+    let mut unit = json!({
+        "origin":export["contract"]["ref"],"execution":execution,"placement":{},
+        "tool_call_id":"call-1","abandoned":null,
+        "committed":{"execution":execution,"binding":binding,"exported":export},
+    });
+    let key = if kind == "returned" {
+        "returned"
+    } else {
+        "stopped"
+    };
+    unit[key] = returned_event(&execution, kind);
+    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
+    rig.put(
+        &format!("state/admissions/{ID}.json"),
+        &json!({"request":{},"launch":null,"error":null,"unit":unit}),
+    );
+    (rig, execution)
+}
+
+/// Move the custody of the unit to `pane` with `session`, as a claim would.
+fn claimed(rig: &Rig, host: &str, pane: &str, session: Option<&str>, revision: u64) {
+    let mut record = json!({"item":ID,"host":host,"owner_pane":"w1:p1",
+        "custodian_pane":pane,"revision":revision,
+        "claims":[{"id":format!("claim-{revision}"),"claimant_pane":pane,"claimed_ms":1,
+            "previous_custodian":"w1:p1","revision":revision}]});
+    if let Some(session) = session {
+        record["custodian_session"] = json!(session);
+        record["claims"][0]["claimant_session"] = json!(session);
+    }
+    rig.put("state/custody.json", &json!([record]));
+}
+
+fn live_session(rig: &Rig, pane: &str, session: &str) {
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":pane,"agent":"pi","agent_status":"working",
+            "agent_session":{"kind":"id","value":session}}]}}),
+    );
+}
+
+fn as_pane(rig: &Rig, pane: &str, args: &[&str]) -> (i32, Value) {
+    let out = rig.cmd(args).env("HERDR_PANE_ID", pane).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    (
+        out.status.code().unwrap_or(-1),
+        serde_json::from_str(&text).unwrap_or(Value::Null),
+    )
+}
+
+fn reference(revision: u64, pane: &str) -> Value {
+    json!({"itemId":ID,"claimId":format!("claim-{revision}"),"revision":revision,"recipient":pane})
+}
+
+fn ack(execution: &Value, kind: &str, custody: &Value) -> String {
+    json!({"execution":execution,"eventId":format!("{ID}-{kind}"),"custody":custody}).to_string()
+}
+
+#[test]
+fn a_claimant_receives_the_unchanged_event_in_a_custody_envelope() {
+    let (rig, execution) = settled("unit-custody-delivery", "returned");
+    claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
+    live_session(&rig, "w2:p1", "s2");
+    let path = format!("state/admissions/{ID}.json");
+    let before = fs::read(rig.dir.join(&path)).unwrap();
+    let (code, pending) = as_pane(&rig, "w2:p1", &["unit", "settlements"]);
+    assert_eq!(code, 0, "{pending}");
+    assert_eq!(
+        pending,
+        json!([{"version":1,"custody":reference(1, "w2:p1"),
+            "settlement":returned_event(&execution, "returned")}])
+    );
+    assert_eq!(fs::read(rig.dir.join(&path)).unwrap(), before);
+    // The previous custodian no longer receives it.
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+}
+
+#[test]
+fn delivery_and_ack_refuse_a_caller_that_is_not_the_live_custodian() {
+    let (rig, execution) = settled("unit-custody-refused", "returned");
+    let host = local_host();
+    let custody = reference(1, "w2:p1");
+    let input = ack(&execution, "returned", &custody);
+    let attempt = |pane: &str| {
+        let (_, pending) = as_pane(&rig, pane, &["unit", "settlements"]);
+        let (code, _) = as_pane(&rig, pane, &["unit", "ack-settlement", "--input", &input]);
+        (pending, code)
+    };
+    // A foreign host record is refused.
+    claimed(&rig, "elsewhere", "w2:p1", Some("s2"), 2);
+    live_session(&rig, "w2:p1", "s2");
+    assert_eq!(attempt("w2:p1"), (json!([]), 2));
+    // The session behind a reused pane differs.
+    claimed(&rig, &host, "w2:p1", Some("s2"), 2);
+    live_session(&rig, "w2:p1", "other");
+    assert_eq!(attempt("w2:p1"), (json!([]), 2));
+    // An unreadable session is refused.
+    rig.put("agents.json", &json!({"result":{"agents":[]}}));
+    assert_eq!(attempt("w2:p1"), (json!([]), 2));
+    // A previous custodian is refused.
+    live_session(&rig, "w2:p1", "s2");
+    assert_eq!(attempt("w1:p1").1, 2);
+    // A stale revision is refused.
+    claimed(&rig, &host, "w2:p1", Some("s2"), 2);
+    assert_eq!(attempt("w2:p1").1, 2);
+    let saved = rig.read(&format!("state/admissions/{ID}.json"));
+    assert!(saved["unit"]["custody_acks"].is_null(), "{saved}");
+}
+
+#[test]
+fn custody_does_not_widen_commit_or_abandonment() {
+    let (rig, execution) = settled("unit-custody-narrow", "returned");
+    claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
+    live_session(&rig, "w2:p1", "s2");
+    let input = execution_input(&execution).to_string();
+    assert_eq!(
+        as_pane(
+            &rig,
+            "w2:p1",
+            &["unit", "abandon-prepared", "--input", &input]
+        )
+        .0,
+        2
+    );
+    let commit = commit_input(&execution, 0).to_string();
+    assert_eq!(
+        as_pane(&rig, "w2:p1", &["unit", "commit", "--input", &commit]).0,
+        2
+    );
+}
+
+#[test]
+fn a_new_custodian_gets_acknowledged_evidence_once_and_duplicate_acks_are_harmless() {
+    let (rig, execution) = settled("unit-custody-replay", "returned");
+    // The origin owner acknowledges first.
+    let owner_ack = json!({"execution":execution,"eventId":format!("{ID}-returned")});
+    assert_eq!(
+        operation(&rig, "ack-settlement", &owner_ack).1["applied"],
+        true
+    );
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+    claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
+    live_session(&rig, "w2:p1", "s2");
+    let (_, pending) = as_pane(&rig, "w2:p1", &["unit", "settlements"]);
+    assert_eq!(pending.as_array().unwrap().len(), 1, "{pending}");
+    let input = ack(&execution, "returned", &reference(1, "w2:p1"));
+    let args = ["unit", "ack-settlement", "--input", &input];
+    assert_eq!(as_pane(&rig, "w2:p1", &args).1["applied"], true);
+    assert_eq!(as_pane(&rig, "w2:p1", &args).1["applied"], false);
+    assert_eq!(
+        as_pane(&rig, "w2:p1", &["unit", "settlements"]).1,
+        json!([])
+    );
+    // The historical owner acknowledgement is kept.
+    let saved = rig.read(&format!("state/admissions/{ID}.json"));
+    assert_eq!(saved["unit"]["settlement_ack"], format!("{ID}-returned"));
+}
+
+#[test]
+fn a_custody_less_ack_is_refused_once_custody_is_claimed() {
+    let (rig, execution) = settled("unit-custody-legacy-ack", "returned");
+    let path = format!("state/admissions/{ID}.json");
+    let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")});
+    // Before any claim the legacy acknowledgement still works.
+    assert_eq!(
+        operation(&rig, "ack-settlement", &legacy).1["applied"],
+        true
+    );
+    let (rig, execution) = settled("unit-custody-legacy-claimed", "returned");
+    claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
+    live_session(&rig, "w2:p1", "s2");
+    let before = fs::read(rig.dir.join(&path)).unwrap();
+    // The origin owner passes the owner check, but custody has moved.
+    let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")}).to_string();
+    let (code, _) = rig.json(&["unit", "ack-settlement", "--input", &legacy]);
+    assert_eq!(code, 2);
+    assert_eq!(fs::read(rig.dir.join(&path)).unwrap(), before);
+    let saved = rig.read(&path);
+    assert!(saved["unit"]["settlement_ack"].is_null(), "{saved}");
+    // The live custodian still acknowledges with its custody reference.
+    let input = ack(&execution, "returned", &reference(1, "w2:p1"));
+    let args = ["unit", "ack-settlement", "--input", &input];
+    assert_eq!(as_pane(&rig, "w2:p1", &args).1["applied"], true);
+}
