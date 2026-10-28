@@ -703,6 +703,84 @@ mod tests {
     use super::*;
     use crate::error::{Refusal, RetainedKind};
     use crate::hosts::Failure;
+    use crate::shell::Fake;
+
+    /// A shell that ends the base fetch at its deadline, and runs every other command
+    /// from the scripted fake.
+    #[derive(Debug)]
+    struct DeadlineFetch(Fake);
+
+    impl Shell for DeadlineFetch {
+        fn run(&self, program: &str, args: &[String]) -> Result<crate::shell::Output> {
+            let key = std::iter::once(program.to_string())
+                .chain(args.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if key.contains(" fetch ") {
+                return Err(Error::Deadline("git".into()));
+            }
+            self.0.run(program, args)
+        }
+    }
+
+    /// A fetch that hits the command deadline reports the deadline. The cause is not an
+    /// unavailable base, because the base never got its chance to resolve.
+    #[test]
+    fn a_base_fetch_that_hits_the_deadline_reports_the_deadline() {
+        let root = std::env::temp_dir().join(crate::ledger::new_id());
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &str| format!("git -C {} {args}", repo.display());
+        let fake = Fake::new();
+        fake.on("git check-ref-format --branch worker", "");
+        fake.on("herdr workspace list", "");
+        fake.on(
+            &git("rev-parse --path-format=absolute --git-common-dir"),
+            &format!("{}/.git", repo.display()),
+        );
+        fake.on(&git("worktree list --porcelain"), "");
+        fake.on_output(
+            &git("show-ref --verify --quiet refs/heads/worker"),
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        fake.on_output(
+            &git("rev-parse --verify --end-of-options origin/feature^{commit}"),
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let shell = DeadlineFetch(fake);
+        let ledger = crate::ledger::Ledger::new(root.join("state"));
+        let error = local_once(
+            &shell,
+            &ledger,
+            repo.to_str().unwrap(),
+            "worker",
+            Some("origin/feature"),
+            Some("deadline"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error.root(), Error::Deadline(_)),
+            "the fetch deadline is reported as itself: {error}"
+        );
+        assert_ne!(
+            error.diagnostic().map(|diagnostic| diagnostic.cause),
+            Some(Cause::BaseUnavailable),
+            "the deadline is not an unavailable base: {error}"
+        );
+        // The retained record keeps the deadline classification, so a replay of the same
+        // request reports the deadline too.
+        let retained = error.retained(Operation::Prepare, Some("deadline"));
+        assert_eq!(retained.kind, RetainedKind::Deadline);
+        assert!(matches!(retained.restore().root(), Error::Deadline(_)));
+    }
 
     /// Only an `origin/<branch>` base names a remote branch this host may fetch, and the
     /// name must not read as an option or carry a path.

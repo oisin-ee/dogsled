@@ -206,6 +206,48 @@ fn a_base_pushed_after_the_clone_is_fetched_and_resolves() {
     assert!(fetched.status.success());
 }
 
+/// A clone that fetches one branch resolves a base on another branch, because the fetch
+/// names its own destination.
+#[test]
+fn a_single_branch_clone_resolves_a_base_on_another_branch() {
+    let (rig, repo) = place::place_rig("diagnostic-single-branch-fetch");
+    origin_with_branch(&rig, &repo, "feature");
+    // The clone follows one branch only, so a fetch by name creates no remote-tracking ref.
+    let narrowed = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args([
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ])
+        .output()
+        .unwrap();
+    assert!(narrowed.status.success());
+    let (code, prepared) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "worker",
+        "--base",
+        "origin/feature",
+        "--request-id",
+        "narrow",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    let tree = repo.join(".worktrees/worker");
+    assert!(tree.is_dir(), "{tree:?}");
+    let fetched = isolated("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "origin/feature"])
+        .output()
+        .unwrap();
+    assert!(fetched.status.success());
+}
+
 /// The same fetch happens on a remote peer: a base the peer's clone has not fetched
 /// resolves there too.
 #[test]
