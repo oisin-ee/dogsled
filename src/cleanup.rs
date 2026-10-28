@@ -262,7 +262,7 @@ pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
     })?;
     ledger.with_lock("worktrees", || {
         let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
-        trees.retain(|t| t.path != tree.path);
+        trees.retain(|t| !crate::worktree::same(&t.path, &tree.path));
         trees.push(tree);
         ledger.write("worktrees.json", &trees)
     })
@@ -1781,7 +1781,7 @@ fn validate_tree(
 ) -> Result<Recheck> {
     let mut current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
-        .find(|t| t.path == planned.path);
+        .find(|t| crate::worktree::same(&t.path, &planned.path));
     if gone(guard, node.shell, planned) {
         return Ok(Recheck::Gone);
     }
@@ -1866,7 +1866,7 @@ pub fn forget_matching(ledger: &Ledger, tree: &Tree) -> Result<()> {
         recorded.retain(|record| {
             !crate::worktree::same(&record.path, &tree.path)
                 || record.identity != tree.identity
-                || record.repo != tree.repo
+                || !crate::worktree::same(&record.repo, &tree.repo)
                 || record.branch != tree.branch
         });
         ledger.write("worktrees.json", &recorded)
@@ -1961,7 +1961,7 @@ fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
             let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
             repos.remove(repo);
             // An existing worktree may still hold content even when its main checkout is gone.
-            trees.retain(|tree| tree.repo != repo || !missing(&tree.path));
+            trees.retain(|tree| !crate::worktree::same(&tree.repo, repo) || !missing(&tree.path));
             node.ledger.write("worktrees.json", &trees)?;
             node.ledger.write("repositories.json", &repos)
         })

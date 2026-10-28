@@ -859,7 +859,7 @@ pub fn launch(
             crate::worktree::validate_identity(shell, &live)?;
             if saved.identity != live.identity
                 || saved.branch != live.branch
-                || saved.path != live.path
+                || !crate::worktree::same(&saved.path, &live.path)
             {
                 return Err(crate::worktree::refuse(
                     "prepared checkout identity changed",

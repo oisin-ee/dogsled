@@ -456,7 +456,12 @@ fn unborn_main_checkout_recovers_an_interrupted_same_request_launch() {
         rig.read("state/launches/recover-one.progress.json")["result"]["checkout"].clone();
     assert_eq!(captured["head"], "", "{captured}");
     assert_eq!(captured["branch"], "main", "{captured}");
-    assert_eq!(captured["identity"]["gitdir"], json!(repo.join(".git")));
+    assert_eq!(
+        std::path::Path::new(captured["identity"]["gitdir"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        repo.join(".git").canonicalize().unwrap()
+    );
     assert!(captured["identity"]["generation"].is_string(), "{captured}");
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w8:p1","terminal_id":"term_tree","name":"worker","agent":"pi","agent_status":"idle"}]}}));
     let (code, recovered) = rig.json(&["host", "launch", "--request", &request.to_string()]);

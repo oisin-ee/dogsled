@@ -24,12 +24,22 @@ pub struct Guard {
 }
 
 /// A Git administrative directory and its write-once checkout generation.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Identity {
     pub common: PathBuf,
     pub gitdir: PathBuf,
     pub generation: String,
 }
+
+impl PartialEq for Identity {
+    fn eq(&self, other: &Self) -> bool {
+        resolved(&self.common) == resolved(&other.common)
+            && resolved(&self.gitdir) == resolved(&other.gitdir)
+            && self.generation == other.generation
+    }
+}
+
+impl Eq for Identity {}
 
 const CHECKOUT_ID: &str = "dogsled-checkout-id";
 
@@ -132,7 +142,7 @@ impl Guard {
         expected.identity.clone_from(&now.identity);
         if before.identity.is_some()
             || expected.drift(&now.tree()) == crate::cleanup::Drift::Identity
-            || before.gitdir != now.gitdir
+            || resolved(&before.gitdir) != resolved(&now.gitdir)
         {
             return Err(refuse("worktree identity changed"));
         }
@@ -224,7 +234,7 @@ impl Linked {
     pub(crate) fn matches_checkout(&self, expected: &crate::cleanup::Tree) -> bool {
         same(&self.path, &expected.path)
             && expected.identity.as_ref().is_none_or(|identity| {
-                identity.gitdir == self.gitdir
+                resolved(&identity.gitdir) == resolved(&self.gitdir)
                     && self.identity.as_ref().is_none_or(|now| now == identity)
             })
     }
@@ -345,9 +355,9 @@ impl CloseCapture {
     pub(crate) fn bind_saved(
         self,
         saved: Option<&crate::cleanup::Tree>,
-    ) -> Result<(Option<Linked>, Option<Pin>)> {
+    ) -> Result<CloseObservation> {
         match self {
-            Self::Observed { tree, pin } => Ok((Some(tree), pin)),
+            Self::Observed { tree, pin } => Ok(CloseObservation::Live { tree, pin }),
             Self::Missing {
                 common,
                 gitdir,
@@ -356,15 +366,22 @@ impl CloseCapture {
                 if !saved.is_some_and(|saved| {
                     same(&saved.path, &path)
                         && saved.identity.as_ref().is_some_and(|identity| {
-                            identity.common == common && identity.gitdir == gitdir
+                            resolved(&identity.common) == resolved(&common)
+                                && resolved(&identity.gitdir) == resolved(&gitdir)
                         })
                 }) {
                     return Err(refuse("checkout identity is unreadable"));
                 }
-                Ok((None, None))
+                Ok(CloseObservation::Missing)
             }
         }
     }
+}
+
+/// A missing observation can only reconcile verified absence under the lifecycle lock.
+pub(crate) enum CloseObservation {
+    Live { tree: Linked, pin: Option<Pin> },
+    Missing,
 }
 
 #[cfg(test)]
@@ -407,7 +424,7 @@ pub(crate) fn capture_close(shell: &dyn Shell, cwd: &str) -> Result<Option<Close
         let [common, admin, root] = lines[..] else {
             return Err(refuse("cannot locate checkout directories"));
         };
-        if common == admin {
+        if same(common, admin) {
             return Ok(None);
         }
         let keys = || -> std::io::Result<_> {
@@ -550,7 +567,7 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
             "git rev-parse in {cwd} returned unexpected output"
         )));
     };
-    if linked_only && common == dir {
+    if linked_only && same(common, dir) {
         return Ok(None);
     }
     let common = Path::new(common).canonicalize()?;
@@ -573,7 +590,9 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
         gitdir,
         identity,
         checkout,
-        path: Path::new(top).canonicalize()?.display().to_string(),
+        // Keep Git's checkout spelling for listings and removal commands. Identity
+        // comparisons resolve aliases; administrative paths remain canonical.
+        path: top.into(),
         branch: if branch == "HEAD" {
             String::new()
         } else {
@@ -645,10 +664,9 @@ pub(crate) fn validate_pane_checkout(shell: &dyn Shell, pane: &Pane, tree: &Link
         .map(|cwd| snapshot(shell, cwd))
         .transpose()?
         .flatten();
-    if current
-        .as_ref()
-        .is_none_or(|now| now.gitdir != tree.gitdir || !now.matches_checkout(&tree.tree()))
-    {
+    if current.as_ref().is_none_or(|now| {
+        resolved(&now.gitdir) != resolved(&tree.gitdir) || !now.matches_checkout(&tree.tree())
+    }) {
         return Err(refuse("pane moved to another checkout"));
     }
     Ok(())
@@ -679,7 +697,7 @@ pub fn verified_absent(guard: &Guard, shell: &dyn Shell, tree: &crate::cleanup::
         std::fs::symlink_metadata(path)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     };
-    identity.common == guard.common
+    resolved(&identity.common) == resolved(&guard.common)
         && guard.check_repository(shell, Path::new(&tree.repo)).is_ok()
         && raw_paths(shell, Path::new(&tree.repo)).is_ok_and(|listed| {
             !listed.iter().any(|path| {

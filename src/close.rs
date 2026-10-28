@@ -119,11 +119,14 @@ pub fn with_local<T>(
         .transpose()?
         .flatten();
     let saved = crate::launch::checkout_for_pane(ledger, pane)?;
-    let (live, directory) = capture
+    let observation = capture
         .map(|capture| capture.bind_saved(saved.as_ref()))
-        .transpose()?
-        .unwrap_or((None, None));
-    let planned = close_expectation(saved.as_ref(), live.as_ref());
+        .transpose()?;
+    let (live, directory) = match &observation {
+        Some(worktree::CloseObservation::Live { tree, pin }) => (Some(tree), pin.as_ref()),
+        Some(worktree::CloseObservation::Missing) | None => (None, None),
+    };
+    let planned = close_expectation(saved.as_ref(), live);
     let Some(planned) = planned else {
         let target = validate_target(shell, &panes, pane, caller)?;
         return reconcile(remove_target(
@@ -132,27 +135,23 @@ pub fn with_local<T>(
     };
     let repo = planned.repo.clone();
     worktree::with_lifecycle(shell, ledger, Path::new(&repo), |lifecycle| {
-        if let (Some(saved), Some(live)) = (&saved, &live)
+        if let (Some(saved), Some(live)) = (&saved, live)
             && !live.matches_checkout(saved)
         {
             return Err(refuse("pane moved to another checkout"));
         }
         let absent = worktree::verified_absent(lifecycle, shell, &planned)
             || (saved.is_none()
-                && live.as_ref().is_some_and(|tree| {
+                && live.is_some_and(|tree| {
                     worktree::verified_absent_unmarked(lifecycle, shell, tree)
                 }));
+        if !absent && matches!(observation, Some(worktree::CloseObservation::Missing)) {
+            return Err(refuse("checkout reappeared"));
+        }
         let planned = if absent {
             planned
         } else {
-            establish_close_identity(
-                lifecycle,
-                shell,
-                planned,
-                live.as_ref(),
-                directory.as_ref(),
-                saved.is_none(),
-            )?
+            establish_close_identity(lifecycle, shell, planned, live, directory, saved.is_none())?
         };
         if absent || worktree::verified_absent(lifecycle, shell, &planned) {
             validate_absent_target(
@@ -185,17 +184,13 @@ pub fn with_local<T>(
                 pane_closed: false,
             });
         }
-        if let Some(live) = &live {
-            directory
-                .as_ref()
-                .ok_or_else(|| refuse("checkout identity is unreadable"))?
-                .validate(live)?;
-        }
+        // Every removal needs an observation and its original directory handles.
+        let live = live.ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        let directory = directory.ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        directory.validate(live)?;
         let panes = crate::cleanup::current_panes(shell)?;
         let target = validate_target(shell, &panes, pane, caller)?;
-        if let (Some(live), Some(pin)) = (&live, &directory) {
-            pin.validate(live)?;
-        }
+        directory.validate(live)?;
         reconcile(remove_target(
             shell,
             ledger,
@@ -320,7 +315,7 @@ fn validate_checkout(
     if expected.identity.is_none()
         || now.identity != expected.identity
         || now.branch != expected.branch
-        || now.path != expected.path
+        || !worktree::same(&now.path, &expected.path)
     {
         return Err(refuse("worktree identity changed"));
     }

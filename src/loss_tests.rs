@@ -1985,6 +1985,116 @@ fn close_reconciles_removal_before_initial_stat() {
 }
 
 #[test]
+fn missing_initial_stat_refuses_a_checkout_reappearing_before_the_lock() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let fixture = lifecycle_fixture(false);
+    save_close_checkout(&fixture);
+    let captured = recorded(&fixture.ledger);
+    let path = fixture.repo.tree.clone();
+    let parked = fixture.repo.root.join("parked");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut shell = LifecycleShell::new(&path, || {});
+    shell.lock_attempt = Some(tx);
+    std::thread::scope(|scope| {
+        let close =
+            crate::worktree::with_lifecycle(&shell, &fixture.ledger, &fixture.repo.repo, |_| {
+                let close = std::thread::Builder::new()
+                    .name("lifecycle-contender".into())
+                    .spawn_scoped(scope, || {
+                        let path = path.clone();
+                        let parked = parked.clone();
+                        crate::worktree::BEFORE_CLOSE_STAT.with(|hook| {
+                            *hook.borrow_mut() = Some(Box::new(move || {
+                                std::fs::rename(path, parked).unwrap();
+                            }));
+                        });
+                        crate::close::local(
+                            &shell,
+                            &fixture.ledger,
+                            "placed-shell",
+                            &crate::close::Caller::default(),
+                            crate::close::Guard::Clean,
+                        )
+                    })
+                    .unwrap();
+                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                // The initial stat saw ENOENT, but the original admin and generation remain.
+                std::fs::create_dir(&path).unwrap();
+                std::fs::copy(parked.join(".git"), path.join(".git")).unwrap();
+                git(&path, &["checkout", "HEAD", "--", "."]);
+                std::fs::write(fixture.repo.repo.join(".git/info/exclude"), "survivor\n").unwrap();
+                std::fs::write(path.join("survivor"), "replacement content").unwrap();
+                Ok(close)
+            })
+            .unwrap();
+        let error = close.join().unwrap().unwrap_err().to_string();
+        assert!(error.contains("checkout reappeared"), "{error}");
+    });
+    assert_eq!(
+        std::fs::read_to_string(path.join("survivor")).unwrap(),
+        "replacement content"
+    );
+    assert!(path.join("work").is_file());
+    assert!(shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 0);
+    assert_eq!(recorded(&fixture.ledger), captured);
+}
+
+#[test]
+fn symlinked_home_preserves_identity_through_prune_and_close() {
+    for close in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        let home = fixture.repo.root.join("home");
+        std::os::unix::fs::symlink(&fixture.repo.repo, &home).unwrap();
+        let path = home.join(".worktrees/feature");
+        let mut tree = recorded(&fixture.ledger).remove(0);
+        tree.repo = home.display().to_string();
+        tree.path = path.display().to_string();
+        let identity = tree.identity.as_mut().unwrap();
+        identity.gitdir = home.join(
+            identity
+                .gitdir
+                .strip_prefix(fixture.repo.repo.canonicalize().unwrap())
+                .unwrap(),
+        );
+        identity.common = home.join(".git");
+        fixture.ledger.write("worktrees.json", &vec![tree]).unwrap();
+        fixture
+            .ledger
+            .write("repositories.json", &vec![home.display().to_string()])
+            .unwrap();
+        if close {
+            save_close_checkout(&fixture);
+            let shell = LifecycleShell::new(&path, || {});
+            let closed = crate::close::local(
+                &shell,
+                &fixture.ledger,
+                "placed-shell",
+                &crate::close::Caller::default(),
+                crate::close::Guard::Clean,
+            )
+            .unwrap();
+            assert!(closed.worktree.is_some());
+        } else {
+            let shell = LifecycleShell::new(&path, || {});
+            shell.open.store(false, std::sync::atomic::Ordering::SeqCst);
+            let node = crate::node::Node {
+                home: home.to_str().unwrap(),
+                ..fixture.node(&shell)
+            };
+            let plan = fixture_plan(&node, Scope::Prune, &fixture.repo);
+            assert_eq!(plan.entries.len(), 1, "{plan:?}");
+            assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
+            let applied = crate::cleanup::apply_survey(&node, &plan, 100);
+            assert!(applied.failures.is_empty(), "{:?}", applied.failures);
+            assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+        }
+        assert!(!path.exists());
+        assert_eq!(recorded(&fixture.ledger), []);
+    }
+}
+
+#[test]
 fn missing_initial_stat_does_not_authorize_close() {
     use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
     for saved in [false, true] {

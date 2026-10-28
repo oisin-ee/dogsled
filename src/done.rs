@@ -643,7 +643,9 @@ pub fn dropped(ledger: &Ledger, item: &crate::items::Item, now: u64) -> Result<(
                 && m.branch
                     .as_ref()
                     .zip(item.branch.as_ref())
-                    .is_some_and(|(a, b)| a.repo == b.repo && a.name == b.name)
+                    .is_some_and(|(a, b)| {
+                        crate::worktree::same(&a.repo, &b.repo) && a.name == b.name
+                    })
         }) {
             mark.dropped_ms.get_or_insert(now);
             if let Some(branch) = &mut mark.branch {
