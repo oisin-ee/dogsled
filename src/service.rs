@@ -20,15 +20,17 @@ enum Lane {
     Children,
     Handoff,
     Inbox,
+    Retention,
     Quota,
 }
 
-const LANES: [Lane; 6] = [
+const LANES: [Lane; 7] = [
     Lane::Watchdog,
     Lane::Admission,
     Lane::Children,
     Lane::Handoff,
     Lane::Inbox,
+    Lane::Retention,
     Lane::Quota,
 ];
 
@@ -99,6 +101,11 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     if lane == Lane::Handoff {
         return crate::done::handoff(ledger, &shell, now_ms());
     }
+    if lane == Lane::Retention {
+        // The job retention pass needs no fleet and no other lane. It runs on the service
+        // timer, so it needs no Stop event and no doctor run.
+        return crate::jobs::expire(ledger, now_ms());
+    }
     let fleet = if items::list(ledger)?.is_empty()
         && work::queue(ledger)?.is_empty()
         && !crate::inbox::pending(ledger)?
@@ -123,7 +130,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
         Lane::Admission => work::tick(&fleet, now_ms()),
         Lane::Children => crate::sweep::children(&fleet, now_ms()),
         Lane::Inbox => crate::inbox::tick(&fleet, now_ms()),
-        Lane::Quota | Lane::Handoff => Ok(()),
+        Lane::Quota | Lane::Handoff | Lane::Retention => Ok(()),
     }
 }
 

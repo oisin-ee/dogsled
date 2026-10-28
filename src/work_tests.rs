@@ -356,6 +356,7 @@ fn a_job_record_says_who_may_run_the_job() {
         timeout_ms: None,
         idle_timeout_ms: None,
         validity: None,
+        output_expired: false,
     };
     assert!(matches!(
         crate::jobs::ownership(&ledger, "claimed").unwrap(),
@@ -407,6 +408,7 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
         timeout_ms: None,
         idle_timeout_ms: None,
         validity: None,
+        output_expired: false,
     };
     // A.json holds B's identity.
     let mut other = job.clone();

@@ -637,3 +637,26 @@ fn pass_history_keeps_only_seven_days_including_the_boundary() {
     assert_eq!(latest["ts_ms"], latest["finished_ms"]);
     assert_eq!(latest["ts_ms"], week + 2);
 }
+
+/// The service's retention pass runs on its own. A Stop request needs no doctor run and
+/// no cleanup pass: the timer expires the job records whose windows passed.
+#[test]
+fn the_service_retention_pass_expires_old_job_records_without_a_doctor_run() {
+    let rig = Rig::new("stop-retention-pass");
+    let ended = 1;
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    let job = json!({"id":"old","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
+    rig.put("state/jobs/old.json", &job);
+    fs::write(rig.dir.join("state/jobs/old.log"), "the output\n").unwrap();
+    // 40 days later the pass removes the record and its log.
+    fs::write(
+        rig.dir.join("clock"),
+        (ended + 40u64 * 86_400_000).to_string(),
+    )
+    .unwrap();
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/old.json").exists());
+    assert!(!rig.dir.join("state/jobs/old.log").exists());
+}

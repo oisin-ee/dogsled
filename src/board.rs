@@ -2285,6 +2285,7 @@ mod tests {
             timeout_ms: None,
             idle_timeout_ms: None,
             validity: None,
+            output_expired: false,
         });
         let board = build(
             &status(
@@ -2327,6 +2328,7 @@ mod tests {
             timeout_ms: None,
             idle_timeout_ms: None,
             validity: None,
+            output_expired: false,
         });
         let board = build(
             &status(
@@ -2369,6 +2371,7 @@ mod tests {
             timeout_ms: None,
             idle_timeout_ms: None,
             validity: None,
+            output_expired: false,
         });
         let board = build(
             &status(

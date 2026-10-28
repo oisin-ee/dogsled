@@ -42,6 +42,12 @@ pub const VALIDITY_PROTOCOL_VERSION: u32 = 1;
 pub const VALIDITY_WINDOW_MS: u64 = 2_592_000_000;
 /// How far ahead of this host clock a recorded request may claim to be: 5 minutes.
 pub const VALIDITY_SKEW_MS: u64 = 300_000;
+/// How long a job's output is kept after the job ended: 24 hours.
+pub const LOG_KEEP_MS: u64 = 24 * 60 * 60 * 1000;
+/// How long a conclusively terminal job record is kept after the job ended: 30 days.
+pub const RECORD_KEEP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+/// What a reader sees when a job's output has expired.
+pub const OUTPUT_EXPIRED: &str = "output expired";
 
 /// The host's job validity clock. Its high-water time never moves back, so a host clock
 /// that moves back cannot reopen an expired request.
@@ -237,6 +243,10 @@ pub struct Job {
     /// proves no age.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validity: Option<Validity>,
+    /// The job's output was deleted after its retention window. A reader sees this
+    /// instead of a missing log.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_expired: bool,
 }
 
 pub fn duration(text: &str) -> std::result::Result<u64, String> {
@@ -273,7 +283,10 @@ pub fn get(ledger: &Ledger, id: &str) -> Result<Job> {
     validate_id(id)?;
     store(ledger)
         .read(&format!("{id}.json"))?
-        .ok_or_else(|| Error::Invalid(format!("unknown job {id}")))
+        .ok_or_else(|| Error::Refused {
+            code: crate::error::Refusal::UnknownJob,
+            detail: format!("unknown job {id}"),
+        })
 }
 
 pub fn save(ledger: &Ledger, job: &Job) -> Result<()> {
@@ -288,12 +301,16 @@ pub fn list(ledger: &Ledger) -> Result<Vec<Job>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
-    let mut jobs = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
     for entry in entries {
         let entry = entry?;
         if entry.path().extension().is_some_and(|e| e == "json") {
-            let job: Job = serde_json::from_slice(&fs::read(entry.path())?)?;
-            jobs.push(job);
+            // A record that expired between the listing and the read is gone, not broken.
+            match fs::read(entry.path()) {
+                Ok(bytes) => jobs.push(serde_json::from_slice(&bytes)?),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
         }
     }
     jobs.sort_by(|a, b| a.id.cmp(&b.id));
@@ -311,16 +328,188 @@ pub fn stop(ledger: &Ledger, id: &str) -> Result<()> {
     })
 }
 
+/// The states a job holds when it finished. A job in any other state keeps its record and
+/// its output: age never ends ownership.
+const TERMINAL_STATES: [&str; 2] = ["idle", "blocked"];
+
+/// What a job's own record says about its retention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expiry {
+    /// The job is live, unproved, or young: it keeps everything.
+    Keep,
+    /// The job's output is older than the log window.
+    Log,
+    /// The job's record is older than the record window.
+    Record,
+}
+
+/// What the record says about a job's age. Only a conclusively terminal job expires: a
+/// running, pending, claiming, or uncertain job keeps everything, and so does a job whose
+/// state this build does not know.
+fn expiry(job: &Job, now: u64) -> Expiry {
+    let Some(ended) = job.ended_ms else {
+        return Expiry::Keep;
+    };
+    if !TERMINAL_STATES.contains(&job.state.as_str()) {
+        return Expiry::Keep;
+    }
+    let age = now.saturating_sub(ended);
+    if age > RECORD_KEEP_MS {
+        Expiry::Record
+    } else if age > LOG_KEEP_MS {
+        Expiry::Log
+    } else {
+        Expiry::Keep
+    }
+}
+
+/// Delete the output and the records of the jobs whose windows passed.
+///
+/// The pass runs on the service tick: it needs no Stop event and no doctor run. It
+/// repeats safely, because a job it already expired is not expired again, and one
+/// unreadable record never stops the others.
+pub fn expire(ledger: &Ledger, now: u64) -> Result<()> {
+    // Persist the validity fence before any deletion, even when the wall clock rolled back.
+    let now = advance_clock(ledger, now)?;
+    let store = store(ledger);
+    let entries = match fs::read_dir(&store.dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if validate_id(id).is_err() {
+            continue;
+        }
+        if let Err(error) = expire_one(ledger, id, now) {
+            // One unreadable record does not stop the others, and an unreadable record is
+            // kept: an unknown state never expires.
+            eprintln!("dogsled job expiry: {id}: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// Expire one job under its own record lock, so a job that starts or ends meanwhile is
+/// never half expired.
+fn expire_one(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
+    validate_id(id)?;
+    let jobs = store(ledger);
+    jobs.with_lock(id, || {
+        let Some(job) = record(ledger, id)? else {
+            return Ok(());
+        };
+        match expiry(&job, now) {
+            Expiry::Keep => Ok(()),
+            Expiry::Log => {
+                expire_log(ledger, &jobs, &job)?;
+                Ok(())
+            }
+            Expiry::Record => {
+                expire_log(ledger, &jobs, &job)?;
+                // The record goes last: a reader that still sees the record finds the
+                // expiry marker on it.
+                remove(&jobs.dir.join(format!("{id}.json")))?;
+                // The marker went with the record: nothing names this job any more.
+                remove(&jobs.dir.join(format!("{id}.log")))?;
+                Ok(())
+            }
+        }
+    })
+}
+
+/// The output of a job goes after a day. The record says so before the log changes, so a
+/// reader tells an expired output from a missing one. The log keeps only the marker, so
+/// every reader of the log reports the expiry instead of a missing file.
+fn expire_log(ledger: &Ledger, jobs: &Ledger, job: &Job) -> Result<()> {
+    if !job.output_expired {
+        let mut marked = job.clone();
+        marked.output_expired = true;
+        save(ledger, &marked)?;
+    }
+    let log = jobs.dir.join(format!("{}.log", job.id));
+    let marker = format!("{OUTPUT_EXPIRED}\n");
+    let is_marker = fs::metadata(&log).is_ok_and(|metadata| metadata.len() == marker.len() as u64)
+        && fs::read_to_string(&log).is_ok_and(|text| text == marker);
+    if !is_marker {
+        // The rename is atomic, so a reader sees the old output or the marker, and never
+        // a half-written file.
+        let tmp = jobs.dir.join(format!("{}.log.new", job.id));
+        fs::write(&tmp, &marker)?;
+        fs::rename(&tmp, &log)?;
+    }
+    // The stop marker belongs to the output: it goes with it.
+    remove(&jobs.dir.join(format!("{}.stop", job.id)))?;
+    Ok(())
+}
+
+/// Delete a file that may already be gone. A missing file is the wanted end state.
+fn remove(path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Whether output expired, including a deleted record still named by a job item.
+pub fn expired(ledger: &Ledger, id: &str) -> Result<bool> {
+    match record(ledger, id)? {
+        Some(job) => Ok(job.output_expired),
+        None => record_expired(ledger, id),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogChunk {
     pub bytes: Vec<u8>,
     pub next: u64,
     pub done: bool,
+    /// The job's output expired: the reader reports expiry and ignores the bytes.
+    #[serde(default)]
+    pub expired: bool,
+}
+
+/// Expiry is a terminal transition, independent of the output cursor.
+pub fn expired_chunk(offset: u64) -> LogChunk {
+    LogChunk {
+        bytes: Vec::new(),
+        next: offset,
+        done: true,
+        expired: true,
+    }
+}
+
+/// Whether the job's record expired: it is gone, and its job item still names it.
+pub fn record_expired(ledger: &Ledger, id: &str) -> Result<bool> {
+    validate_id(id)?;
+    if record(ledger, id)?.is_some() {
+        return Ok(false);
+    }
+    Ok(crate::items::list(ledger)?
+        .iter()
+        .any(|item| item.kind == "job" && item.id == id))
 }
 
 pub fn logs(ledger: &Ledger, id: &str, offset: u64) -> Result<LogChunk> {
     use std::io::{Seek, SeekFrom};
-    let job = get(ledger, id)?;
+    let job = match record(ledger, id)? {
+        Some(job) => job,
+        None if record_expired(ledger, id)? => return Ok(expired_chunk(offset)),
+        None => get(ledger, id)?,
+    };
+    if job.output_expired {
+        // The output expired: the read reports it and never fails.
+        return Ok(expired_chunk(offset));
+    }
     let mut bytes = Vec::new();
     match fs::File::open(store(ledger).dir.join(format!("{id}.log"))) {
         Ok(mut file) => {
@@ -334,6 +523,7 @@ pub fn logs(ledger: &Ledger, id: &str, offset: u64) -> Result<LogChunk> {
         next: offset + bytes.len() as u64,
         bytes,
         done: job.ended_ms.is_some(),
+        expired: false,
     })
 }
 

@@ -1247,10 +1247,15 @@ fn interrupted_job_admission_preserves_running_record_without_relaunch() {
 
 /// The host launch request for a job, as the peer receives it.
 fn job_launch_request(rig: &Rig, id: &str, cmd: &[&str]) -> Value {
+    job_launch_request_at(rig, id, cmd, rig.origin_ms)
+}
+
+/// The host launch request for a job whose request was created at `created_ms`.
+fn job_launch_request_at(rig: &Rig, id: &str, cmd: &[&str], created_ms: u64) -> Value {
     json!({
         "id": id,
         "action": {"type":"job","cmd":cmd,"timeout_ms":null,"idle_timeout_ms":null,
-            "validity":rig.job_validity()},
+            "validity":{"version":1,"created_ms":created_ms}},
         "host": "local",
         "cwd": rig.dir.join("home"),
         "pane": Value::Null,
@@ -2487,4 +2492,164 @@ fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("tab create").count(), 1, "{log}");
     assert!(!log.contains("pane close"), "{log}");
+}
+
+/// The retention pass removes a terminal job's metadata after 30 days. A request that
+/// may not start new execution is still refused afterwards, and it starts nothing. The
+/// refusal comes from the request's own age, not from the record the pass deleted.
+#[test]
+fn a_replay_after_the_retention_pass_removed_the_metadata_refuses_new_execution() {
+    let rig = Rig::new("replay-after-retention");
+    let ended = now() - 40 * 86_400_000;
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    // The request was created 40 days ago, so it may not start new execution.
+    let created = now() - 40 * 86_400_000;
+    let job = json!({"id":"expired","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null,
+        "validity":{"version":1,"created_ms":created}});
+    rig.put("state/jobs/expired.json", &job);
+    fs::write(rig.dir.join("state/jobs/expired.log"), "the output\n").unwrap();
+    // The service's retention pass removes the metadata of a job that ended 40 days ago.
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
+    assert!(!rig.dir.join("state/jobs/expired.log").exists());
+    // The request is older than 30 days, so it may not start new execution.
+    let request = job_launch_request_at(&rig, "expired", &["true"], created);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("older than 30 days"),
+        "{error}"
+    );
+    // Nothing was dispatched, and no job record came back.
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane run"), "{log}");
+    assert!(!log.contains("tab create"), "{log}");
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
+}
+
+/// Deleting a record advances the validity fence before a wall-clock rollback.
+#[test]
+fn retention_clock_deletion_still_fences_a_replay_after_rollback() {
+    let rig = Rig::new("retention-replay-rollback");
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    let created = now();
+    let deletion = created + 30 * 86_400_000 + 1;
+    rig.put(
+        "state/job-validity-clock.json",
+        &json!({"version":1,"high_water_ms":created}),
+    );
+    rig.put(
+        "state/jobs/expired.json",
+        &json!({
+            "id":"expired","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+            "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+            "started_ms":created,"ended_ms":created,"timeout_ms":null,"idle_timeout_ms":null,
+            "validity":{"version":1,"created_ms":created}
+        }),
+    );
+    fs::write(rig.dir.join("state/jobs/expired.log"), "old output\n").unwrap();
+    fs::write(rig.dir.join("clock"), deletion.to_string()).unwrap();
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
+    assert_eq!(
+        rig.read("state/job-validity-clock.json")["high_water_ms"],
+        deletion
+    );
+    fs::write(rig.dir.join("clock"), (created + 1_000).to_string()).unwrap();
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(out.status.success(), "{out:?}");
+    let request = job_launch_request_at(&rig, "expired", &["true"], created);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["code"], "JOB_EXPIRED", "{error}");
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
+    assert_eq!(
+        rig.read("state/job-validity-clock.json")["high_water_ms"],
+        deletion
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane run"), "{log}");
+    assert!(!log.contains("tab create"), "{log}");
+}
+
+/// A correlated replay after the retention pass removed the record stays read-only. It
+/// returns the saved result and dispatches nothing, and the pass never brings the record
+/// back.
+#[test]
+fn a_correlated_replay_after_the_retention_pass_stays_read_only() {
+    let rig = Rig::new("replay-after-retention-read-only");
+    let ended = now() - 40 * 86_400_000;
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    let job = json!({"id":"expired","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+        "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+        "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
+    rig.put("state/jobs/expired.json", &job);
+    fs::write(rig.dir.join("state/jobs/expired.log"), "the output\n").unwrap();
+    rig.put(
+        "state/launches/expired.json",
+        &job_receipt(
+            &rig,
+            "expired",
+            "local",
+            "w2:p1",
+            &["true"],
+            &rig.dir.join("home").display().to_string(),
+            "w1:p1",
+        ),
+    );
+    // The service's retention pass removes the record and its log, and keeps the receipt.
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
+    assert!(!rig.dir.join("state/jobs/expired.log").exists());
+    assert!(rig.dir.join("state/launches/expired.json").exists());
+    // The replay returns the recorded result. It allocates nothing and dispatches nothing.
+    let request = job_launch_request(&rig, "expired", &["true"]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["id"], "expired", "{result}");
+    assert_eq!(result["pane"], "w2:p1", "{result}");
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane run"), "{log}");
+    assert!(!log.contains("tab create"), "{log}");
+    // The pass did not bring the record back.
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
 }

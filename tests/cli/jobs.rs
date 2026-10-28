@@ -5,6 +5,53 @@ fn complete(id: &str) -> Value {
         "state":"idle","exit":0,"signal":null,"reason":null,"started_ms":100,"ended_ms":101,"timeout_ms":null,"idle_timeout_ms":null})
 }
 
+/// The job retention windows: the output goes after a day, the record after 30 days.
+const LOG_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+const RECORD_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+/// What a reader sees when a job's output expired.
+const EXPIRED: &str = "output expired";
+
+/// A terminal job record that ended at `ended_ms`.
+fn terminal(id: &str, ended_ms: u64) -> Value {
+    let mut job = complete(id);
+    job["started_ms"] = json!(ended_ms);
+    job["ended_ms"] = json!(ended_ms);
+    job["cwd"] = json!("/tmp");
+    job
+}
+
+/// Write a job record and its log into a rig.
+fn put_job(rig: &Rig, id: &str, job: &Value, output: &str) {
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    rig.put(&format!("state/jobs/{id}.json"), job);
+    fs::write(
+        rig.dir.join(format!("state/jobs/{id}.log")),
+        format!("{output}\n"),
+    )
+    .unwrap();
+}
+
+/// Set the rig's host clock.
+fn set_clock(rig: &Rig, at: u64) {
+    fs::write(rig.dir.join("clock"), at.to_string()).unwrap();
+}
+
+/// One service pass. The retention lane runs on the timer, so a pass expires the jobs
+/// whose windows passed.
+fn serve(rig: &Rig) {
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The job's log, when it is still there.
+fn log_of(rig: &Rig, id: &str) -> Option<String> {
+    fs::read_to_string(rig.dir.join(format!("state/jobs/{id}.log"))).ok()
+}
+
 /// A wrapper runs nothing when its claim is missing, corrupt, for another command, already
 /// started, ended, or uncertain. No process, no log, and no pane exist for such a job.
 #[test]
@@ -690,5 +737,511 @@ esac
         !error
             .to_string()
             .contains("https://expected.invalid/repo.git")
+    );
+}
+
+/// A job's output goes after a day. It stays at exactly 24 hours, and it goes at 24
+/// hours and one millisecond.
+#[test]
+fn a_job_log_expires_after_a_day() {
+    let rig = Rig::new("retention-log");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    // Exactly 24 hours: the log stays.
+    set_clock(&rig, ended + LOG_WINDOW_MS);
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("the output\n"));
+    assert!(rig.dir.join("state/jobs/aged.json").exists());
+    // One millisecond more: the log is gone and the record says so.
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+    let job = rig.read("state/jobs/aged.json");
+    assert_eq!(job["output_expired"], true, "{job}");
+    // The record itself is still there: only a day passed.
+    assert!(rig.dir.join("state/jobs/aged.json").exists());
+}
+
+/// A job's record goes after 30 days. It stays at exactly 30 days, and it goes at 30
+/// days and one millisecond.
+#[test]
+fn a_job_record_expires_after_thirty_days() {
+    let rig = Rig::new("retention-record");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    // Exactly 30 days: the record stays.
+    set_clock(&rig, ended + RECORD_WINDOW_MS);
+    serve(&rig);
+    assert!(rig.dir.join("state/jobs/aged.json").exists());
+    // One millisecond more: the record and its log are gone.
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+}
+
+/// Retention uses the durable high-water time after the wall clock moves back.
+#[test]
+fn retention_clock_rollback_preserves_exact_boundaries() {
+    let rig = Rig::new("retention-clock-rollback");
+    let ended = now();
+    let high_water = ended + LOG_WINDOW_MS + 1;
+    rig.put(
+        "state/job-validity-clock.json",
+        &json!({"version":1,"high_water_ms":high_water}),
+    );
+    set_clock(&rig, ended - 1_000);
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    put_job(
+        &rig,
+        "day-boundary",
+        &terminal("day-boundary", high_water - LOG_WINDOW_MS),
+        "day output",
+    );
+    put_job(
+        &rig,
+        "month-boundary",
+        &terminal("month-boundary", high_water - RECORD_WINDOW_MS),
+        "month output",
+    );
+    put_job(
+        &rig,
+        "future",
+        &terminal("future", high_water + 1),
+        "future output",
+    );
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+    assert_eq!(
+        log_of(&rig, "day-boundary").as_deref(),
+        Some("day output\n")
+    );
+    assert_eq!(log_of(&rig, "future").as_deref(), Some("future output\n"));
+    assert!(rig.dir.join("state/jobs/month-boundary.json").exists());
+    assert_eq!(
+        rig.read("state/job-validity-clock.json")["high_water_ms"],
+        high_water
+    );
+}
+
+/// A running job never expires. Its age changes nothing.
+#[test]
+fn a_running_job_never_expires() {
+    let rig = Rig::new("retention-running");
+    let started = now() - 90 * 86_400_000;
+    set_clock(&rig, now());
+    let mut job = complete("running");
+    job["started_ms"] = json!(started);
+    job["ended_ms"] = Value::Null;
+    job["exit"] = Value::Null;
+    job["state"] = json!("working");
+    put_job(&rig, "running", &job, "the output");
+    serve(&rig);
+    assert!(rig.dir.join("state/jobs/running.json").exists());
+    assert_eq!(log_of(&rig, "running").as_deref(), Some("the output\n"));
+}
+
+/// An uncertain job never expires. Its age changes nothing.
+#[test]
+fn an_uncertain_job_never_expires() {
+    let rig = Rig::new("retention-uncertain");
+    set_clock(&rig, now());
+    let mut job = complete("uncertain");
+    job["started_ms"] = Value::Null;
+    job["ended_ms"] = Value::Null;
+    job["exit"] = Value::Null;
+    job["state"] = json!("uncertain");
+    job["reason"] = json!("dispatch outcome unknown");
+    put_job(&rig, "uncertain", &job, "the output");
+    serve(&rig);
+    assert!(rig.dir.join("state/jobs/uncertain.json").exists());
+    assert_eq!(log_of(&rig, "uncertain").as_deref(), Some("the output\n"));
+}
+
+/// A reader sees the expiry instead of a missing output. The job list says it, and the
+/// tail of the job says it.
+#[test]
+fn an_expired_output_is_reported_not_missing() {
+    let rig = Rig::new("retention-readers");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    serve(&rig);
+    // The list carries the expiry marker, so a reader never sees a job that never ran.
+    let listed = rig.json(&["host", "jobs"]).1;
+    let job = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == "aged")
+        .expect("the record is still listed");
+    assert_eq!(job["output_expired"], true, "{job}");
+    // The log read reports the expiry and does not fail.
+    let logs = rig.json(&["host", "logs", "aged"]).1;
+    assert_eq!(logs["expired"], true, "{logs}");
+    assert_eq!(logs["bytes"], json!([]), "{logs}");
+    assert_eq!(logs["done"], true, "{logs}");
+    // The tail says it too.
+    let tail = rig.json(&["host", "tail", "job", "aged"]).1;
+    assert_eq!(tail, json!(EXPIRED), "{tail}");
+}
+
+/// Expired chunks carry a terminal signal, not bytes from the output cursor.
+#[test]
+fn expired_logs_end_after_one_marker() {
+    let rig = Rig::new("retention-log-cursor");
+    let mut job = terminal("aged", now());
+    job["output_expired"] = json!(true);
+    put_job(&rig, "aged", &job, EXPIRED);
+    let marker = format!("{EXPIRED}\n");
+    let (code, first) = rig.json(&["host", "logs", "aged"]);
+    assert_eq!(code, 0, "{first}");
+    assert_eq!(first["bytes"], json!([]), "{first}");
+    assert_eq!(first["next"], 0, "{first}");
+    assert_eq!(first["expired"], true, "{first}");
+    assert_eq!(first["done"], true, "{first}");
+    for offset in [3, marker.len() as u64, u64::MAX] {
+        let (code, end) = rig.json(&["host", "logs", "aged", "--offset", &offset.to_string()]);
+        assert_eq!(code, 0, "{end}");
+        assert_eq!(end["bytes"], json!([]), "{end}");
+        assert_eq!(end["next"], offset, "{end}");
+        assert_eq!(end["done"], true, "{end}");
+        assert_eq!(end["expired"], true, "{end}");
+    }
+    for args in [vec!["logs", "aged"], vec!["logs", "aged", "--follow"]] {
+        let mut command = rig.start(&args);
+        assert!(command.wait().success());
+        let (stdout, stderr) = command.output();
+        assert_eq!(stdout, marker, "{stderr}");
+    }
+}
+
+/// Start a following reader and wait until it has consumed real output.
+fn partially_read_logs(rig: &Rig) -> Owned {
+    let mut command = rig.cmd(&["logs", "aged", "--follow"]);
+    command.stdout(fs::File::create(rig.dir.join("stream-output")).unwrap());
+    command.stderr(fs::File::create(rig.dir.join("stream-error")).unwrap());
+    let reader = Owned::spawn(&mut command);
+    assert_eq!(
+        read_command(&rig.dir.join("stream-output"), "the log reader"),
+        "output already consumed before retention"
+    );
+    reader
+}
+
+fn assert_stream_expired_once(rig: &Rig, reader: &mut Owned) {
+    assert!(reader.wait().success(), "{}", rig.log("stream-error"));
+    assert_eq!(
+        rig.log("stream-output"),
+        format!("output already consumed before retention\n{EXPIRED}\n")
+    );
+}
+
+#[test]
+fn local_stream_expiry_after_partial_output_prints_the_full_marker_once() {
+    let rig = Rig::new("local-stream-expiry");
+    let mut running = terminal("aged", now());
+    running["ended_ms"] = Value::Null;
+    running["exit"] = Value::Null;
+    running["state"] = json!("working");
+    put_job(
+        &rig,
+        "aged",
+        &running,
+        "output already consumed before retention",
+    );
+    let mut reader = partially_read_logs(&rig);
+    // Publish the same transition as retention atomically, while the reader follows.
+    let mut expired = terminal("aged", now());
+    expired["output_expired"] = json!(true);
+    rig.put("state/jobs/aged.json.new", &expired);
+    fs::rename(
+        rig.dir.join("state/jobs/aged.json.new"),
+        rig.dir.join("state/jobs/aged.json"),
+    )
+    .unwrap();
+    assert_stream_expired_once(&rig, &mut reader);
+}
+
+#[test]
+fn remote_stream_expiry_after_partial_output_prints_the_full_marker_once() {
+    let rig = remote_expired_item_rig("remote-stream-expiry");
+    fs::create_dir_all(rig.dir.join("peer-state/jobs")).unwrap();
+    let mut running = terminal("aged", now());
+    running["ended_ms"] = Value::Null;
+    running["exit"] = Value::Null;
+    running["state"] = json!("working");
+    rig.put("peer-state/jobs/aged.json", &running);
+    fs::write(
+        rig.dir.join("peer-state/jobs/aged.log"),
+        "output already consumed before retention\n",
+    )
+    .unwrap();
+    let mut reader = partially_read_logs(&rig);
+    // The owner keeps its item after remote retention removes the record.
+    fs::remove_file(rig.dir.join("peer-state/jobs/aged.json")).unwrap();
+    assert_stream_expired_once(&rig, &mut reader);
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+/// A returning owner retains its item after retention removes the job record and log.
+fn expired_item_rig(name: &str) -> Rig {
+    let rig = Rig::new(name);
+    let ended = now();
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+    rig.put(
+        "state/items.json",
+        &json!([{
+            "id":"aged","kind":"job","host":"local","pane":"w2:p1",
+            "owner_pane":"w1:p1","created_ms":ended,"closed_ms":ended,"name":null
+        }]),
+    );
+    rig
+}
+
+#[test]
+fn expired_record_read_reports_expiry_to_the_owner() {
+    let rig = expired_item_rig("retention-gone-read");
+    let (code, read) = rig.json(&["read", "aged"]);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["tail"], EXPIRED, "{read}");
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+}
+
+#[test]
+fn expired_record_tail_reports_expiry_to_the_owner() {
+    let rig = expired_item_rig("retention-gone-tail");
+    let (code, tail) = rig.json(&["host", "tail", "job", "aged"]);
+    assert_eq!(code, 0, "{tail}");
+    assert_eq!(tail, EXPIRED, "{tail}");
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+}
+
+#[test]
+fn expired_record_logs_report_expiry_to_the_owner() {
+    let rig = expired_item_rig("retention-gone-logs");
+    let marker = format!("{EXPIRED}\n");
+    let (code, chunk) = rig.json(&["host", "logs", "aged"]);
+    assert_eq!(code, 0, "{chunk}");
+    assert_eq!(chunk["bytes"], json!([]), "{chunk}");
+    assert_eq!(chunk["expired"], true, "{chunk}");
+    assert_eq!(chunk["done"], true, "{chunk}");
+    assert_eq!(chunk["next"], 0, "{chunk}");
+    let (code, end) = rig.json(&[
+        "host",
+        "logs",
+        "aged",
+        "--offset",
+        &marker.len().to_string(),
+    ]);
+    assert_eq!(code, 0, "{end}");
+    assert_eq!(end["bytes"], json!([]), "{end}");
+    assert_eq!(end["done"], true, "{end}");
+    assert_eq!(rig.json(&["host", "logs", "unknown"]).0, 2);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+}
+
+/// Remote retention leaves only the owner item; the execution host keeps nothing.
+fn remote_expired_item_rig(name: &str) -> Rig {
+    let rig = Rig::new(name);
+    rig.peer();
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let remote = format!(
+        r#"case "$*" in
+  *'host tail'*|*'host logs'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    rig.script("ssh", &script.replace("case \"$*\" in", &remote));
+    rig.put(
+        "state/items.json",
+        &json!([{
+            "id":"aged","kind":"job","host":"8103","pane":"w9:p1",
+            "owner_pane":"w1:p1","created_ms":0,"closed_ms":1,"name":null
+        }]),
+    );
+    rig
+}
+
+#[test]
+fn remote_expired_record_read_reports_expiry_to_the_owner() {
+    let rig = remote_expired_item_rig("remote-expired-read");
+    let (code, read) = rig.json(&["read", "aged"]);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["tail"], EXPIRED, "{read}");
+    assert!(!rig.dir.join("peer-state/jobs/aged.json").exists());
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+#[test]
+fn remote_expired_record_tail_reports_expiry_to_the_owner() {
+    let rig = remote_expired_item_rig("remote-expired-tail");
+    let output = rig.run(&["read", "w9:p1", "--host", "netcup"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(EXPIRED));
+    assert!(!rig.dir.join("peer-state/jobs/aged.log").exists());
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+#[test]
+fn remote_expired_record_logs_report_expiry_to_the_owner_once() {
+    let rig = remote_expired_item_rig("remote-expired-logs");
+    for args in [vec!["logs", "aged"], vec!["logs", "aged", "--follow"]] {
+        let mut command = rig.start(&args);
+        assert!(command.wait().success());
+        let (stdout, stderr) = command.output();
+        assert_eq!(stdout, format!("{EXPIRED}\n"), "{stderr}");
+    }
+    assert!(!rig.dir.join("peer-state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("peer-state/jobs/aged.log").exists());
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
+#[test]
+fn remote_expired_chunks_ignore_wire_bytes() {
+    let rig = remote_expired_item_rig("remote-expired-wire-bytes");
+    // A peer may still send a legacy marker fragment; the reader owns the message.
+    rig.put(
+        "logs.json",
+        &json!({"bytes":b"expired\n","next":15,"done":true,"expired":true}),
+    );
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &script.replace(
+            "case \"$*\" in",
+            "case \"$*\" in\n  *'host logs'*) cat \"$RIG/logs.json\" ;;",
+        ),
+    );
+    let mut reader = rig.start(&["logs", "aged", "--follow"]);
+    assert!(reader.wait().success());
+    let (stdout, stderr) = reader.output();
+    assert_eq!(stdout, format!("{EXPIRED}\n"), "{stderr}");
+}
+
+#[test]
+fn unknown_jobs_without_an_owner_item_still_error() {
+    let rig = remote_expired_item_rig("remote-expired-unknown");
+    for args in [vec!["read", "unknown"], vec!["logs", "unknown"]] {
+        assert_eq!(rig.json(&args).0, 2);
+    }
+    for args in [
+        vec!["host", "tail", "job", "unknown"],
+        vec!["host", "logs", "unknown"],
+    ] {
+        let (code, error) = rig.json(&args);
+        assert_eq!(code, 2, "{error}");
+        assert_eq!(error["code"], "UNKNOWN_JOB", "{error}");
+    }
+}
+
+#[test]
+fn a_record_without_output_still_reports_no_log_yet() {
+    let rig = Rig::new("pending-no-log");
+    rig.claim("pending", &["true"]);
+    let (code, tail) = rig.json(&["host", "tail", "job", "pending"]);
+    assert_eq!(code, 0, "{tail}");
+    assert_eq!(tail, "(no log yet)");
+}
+
+/// A non-marker-sized log is replaced without opening or reading its content.
+#[test]
+fn retention_skips_reading_a_non_marker_sized_log() {
+    let rig = Rig::new("retention-log-no-read");
+    let ended = now();
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    let log = rig.dir.join("state/jobs/aged.log");
+    fs::remove_file(&log).unwrap();
+    assert!(Command::new("mkfifo").arg(&log).status().unwrap().success());
+    // A FIFO has length zero. Opening it would wait for a writer; metadata alone
+    // proves it cannot contain the marker, so retention must replace it directly.
+    assert_eq!(fs::metadata(&log).unwrap().len(), 0);
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    let mut service = rig.start(&["serve", "--once", "--interval", "1"]);
+    assert!(service.wait().success());
+    assert!(fs::metadata(&log).unwrap().is_file());
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+}
+
+#[test]
+fn retention_replaces_a_large_log_with_the_marker() {
+    let rig = Rig::new("retention-large-log");
+    let ended = now();
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    fs::write(
+        rig.dir.join("state/jobs/aged.log"),
+        vec![b'x'; 4 * 1024 * 1024],
+    )
+    .unwrap();
+    set_clock(&rig, ended + LOG_WINDOW_MS + 1);
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+}
+
+/// The expiry pass repeats safely. A second pass changes nothing.
+#[test]
+fn a_second_expiry_pass_changes_nothing() {
+    let rig = Rig::new("retention-repeat");
+    let ended = now();
+    set_clock(&rig, ended);
+    put_job(&rig, "aged", &terminal("aged", ended), "the output");
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    // A second pass at the same time is a no-op.
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+    // And a pass at a later time is a no-op too.
+    set_clock(&rig, ended + 100 * RECORD_WINDOW_MS);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+}
+
+/// A list that runs while the expiry runs does not fail. The record is either there or
+/// gone, never half read.
+#[test]
+fn a_list_during_the_expiry_does_not_fail() {
+    let rig = Rig::new("retention-concurrent");
+    let ended = now();
+    set_clock(&rig, ended);
+    for index in 0..20 {
+        put_job(
+            &rig,
+            &format!("aged-{index}"),
+            &terminal(&format!("aged-{index}"), ended),
+            "the output",
+        );
+    }
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    let out = rig.run(&["host", "jobs"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 20, "{listed}");
+    serve(&rig);
+    let out = rig.run(&["host", "jobs"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
