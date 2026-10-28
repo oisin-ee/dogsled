@@ -1534,6 +1534,14 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = pane_holds(usage, seen, decider);
+    // Reload under the final repository-protected check too, not just the survey.
+    // Corrupt Job evidence propagates an error and cannot authorize removal.
+    held.extend(
+        crate::jobs::list(node.ledger)?
+            .iter()
+            .filter(|job| crate::jobs::holds(job, tree))
+            .map(|job| format!("job {} owns this checkout ({})", job.id, job.state)),
+    );
     if matches!(decider, Decider::Cleanup) {
         held.extend(young_shells(node, usage)?);
     }

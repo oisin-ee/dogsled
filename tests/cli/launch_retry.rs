@@ -71,7 +71,7 @@ fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
                 "host",
                 "launch",
                 "--job-validity",
-                "1",
+                "2",
                 "--request",
                 &text,
             ]
@@ -1190,7 +1190,7 @@ fn failed_start_records_the_child_output_without_changing_unknown_outcome() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1212,7 +1212,7 @@ fn failed_start_records_the_child_output_without_changing_unknown_outcome() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -1264,7 +1264,7 @@ fn interrupted_start_can_recover_diagnostics_on_confirmation() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1302,7 +1302,7 @@ fn startup_diagnostics_do_not_turn_a_native_refusal_into_an_unknown_launch() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1323,7 +1323,7 @@ fn startup_diagnostics_do_not_turn_a_native_refusal_into_an_unknown_launch() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string()
         ])
@@ -1351,7 +1351,7 @@ fn empty_or_unavailable_pane_output_preserves_the_native_failure() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -1384,7 +1384,7 @@ fn failed_host_start(rig: &Rig, request: &Value) {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1419,7 +1419,7 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1434,7 +1434,7 @@ fn a_refused_start_fails_at_once_closes_its_pane_and_releases_its_checkout() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1469,7 +1469,7 @@ fn shell_initialization_is_owned_by_native_agent_start() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1528,7 +1528,7 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -1552,7 +1552,7 @@ fn refused_start_preserves_occupied_uninspectable_and_replaced_panes() {
                 "host",
                 "launch",
                 "--job-validity",
-                "1",
+                "2",
                 "--request",
                 &request.to_string()
             ])
@@ -1580,7 +1580,7 @@ fn refused_start_closes_its_idle_prepared_pane_and_records_the_refusal() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1624,7 +1624,7 @@ fn lost_start_response_reconciles_existing_agent_without_starting_twice() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1642,7 +1642,7 @@ fn lost_start_response_reconciles_existing_agent_without_starting_twice() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string()
         ])
@@ -1660,7 +1660,7 @@ fn lost_start_response_reconciles_existing_agent_without_starting_twice() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &different.to_string()
         ])
@@ -1682,7 +1682,7 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1701,7 +1701,7 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1720,7 +1720,7 @@ fn retry_refuses_replaced_terminal_and_foreign_agent_and_ambiguous_exit() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1841,7 +1841,7 @@ fn a_host_replay_without_a_receipt_does_not_dispatch_an_existing_claim_again() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1890,7 +1890,7 @@ fn a_host_replay_with_a_matching_receipt_replays_without_side_effects() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1924,7 +1924,7 @@ fn a_legacy_receipt_replays_while_its_job_record_survives() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -1984,7 +1984,7 @@ fn a_host_replay_with_a_conflicting_receipt_refuses() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -2013,7 +2013,7 @@ fn a_host_replay_with_a_conflicting_request_and_no_receipt_refuses() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2046,7 +2046,7 @@ fn a_host_replay_of_an_uncertain_claim_refuses_and_keeps_the_uncertainty() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2120,7 +2120,7 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2174,7 +2174,7 @@ fn a_legacy_receipt_without_request_evidence_fails_closed_after_the_prune() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2236,7 +2236,7 @@ fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -2292,7 +2292,7 @@ fn a_conflicting_receipt_fails_closed_after_the_prune() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -2333,44 +2333,18 @@ fn dispatch_order_herdr(rig: &Rig, order: DispatchOrder) {
     // parent and can reap it. The fake Herdr waits on a FIFO, so the order of the wrapper
     // and the dispatch failure is forced by the test, not by a sleep.
     let run = match order {
-        DispatchOrder::After => {
-            r#"
-    shift 3
-    # The wrapper's command is recorded for the test. The test spawns it as its own child.
-    printf '%s\n' "$*" > "$RIG/wrapper-command"
-    # The dispatch fails only after the test says the wrapper ended.
-    read -r release < "$RIG/wrapper-release"
-    echo 'pane refused' >&2
-    exit 1 ;;"#
-        }
-        DispatchOrder::During => {
-            r#"
-    shift 3
-    # The wrapper's command is recorded for the test. The test spawns it as its own child.
-    printf '%s\n' "$*" > "$RIG/wrapper-command"
-    # The dispatch fails while the wrapper is still running. The test says when.
-    read -r release < "$RIG/wrapper-release"
-    echo 'pane refused' >&2
-    exit 1 ;;"#
-        }
         DispatchOrder::Before => {
             r"
     shift 3
-    # The dispatch fails before the wrapper ever starts. The wrapper starts later, on its
-    # own, and must refuse the claim this failure made uncertain.
     echo 'pane refused' >&2
     exit 1 ;;"
         }
-        DispatchOrder::NoClose => {
+        _ => {
             r#"
     shift 3
-    # The wrapper's command is recorded for the test. The test spawns it as its own child.
+    # Dispatch enqueues; the test owns the delayed wrapper after gates release.
     printf '%s\n' "$*" > "$RIG/wrapper-command"
-    # The dispatch fails while the wrapper is still running, and the wrapper's pane never
-    # closes, so the close marker never arrives.
-    read -r release < "$RIG/wrapper-release"
-    echo 'pane refused' >&2
-    exit 1 ;;"#
+    printf '{}\n' ;;"#
         }
     };
     // A wrapper that never closes its pane leaves the close marker unwritten, so the
@@ -2423,7 +2397,7 @@ esac
 /// record. The wrapper runs to completion before the dispatch reports its failure, so the
 /// order is forced by the process, not by a sleep.
 #[test]
-fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
+fn a_failed_replay_after_a_real_wrapper_ended_keeps_its_terminal_record() {
     let rig = Rig::new("dispatch-after-wrapper-ended");
     // The fake Herdr waits for this FIFO. The test writes to it only after the wrapper
     // ended, so the dispatch failure comes after the wrapper's terminal record.
@@ -2436,7 +2410,7 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2446,13 +2420,23 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
     // The wrapper ended on its own. Its reaped exit status is the proof, and the wait is
     // bounded: a wrapper that never ends fails the test instead of hanging it.
     assert_eq!(wrapper.wait().code(), Some(7));
-    // The dispatch fails now, after the wrapper ended.
-    let mut release_writer = open_fifo(release.path());
-    release_writer.write_all(b"release\n").unwrap();
-    release_writer.flush().unwrap();
+    // Startup cannot precede dispatch completion. A conflicting host replay exercises
+    // the equivalent failure boundary without weakening the live ownership assertion.
     let status = launch.wait();
     let (stdout, stderr) = launch.output();
-    assert_eq!(status.code(), Some(2), "{stdout}{stderr}");
+    assert!(status.success(), "{stdout}{stderr}");
+    let mut conflict = request.clone();
+    conflict["action"]["cmd"] = json!(["false"]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &conflict.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(rig.log("herdr.log").matches("pane run ").count(), 1);
     // The wrapper's own terminal record survives the dispatch failure.
     let job = rig.read("state/jobs/dispatched.json");
     assert!(job["started_ms"].is_number(), "{job}");
@@ -2469,7 +2453,7 @@ fn a_dispatch_failure_after_a_real_wrapper_ended_keeps_its_terminal_record() {
 /// record. The wrapper's command signals a FIFO, which proves its started record is
 /// published before the dispatch reports its failure.
 #[test]
-fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
+fn a_failed_replay_during_a_real_wrapper_run_keeps_its_running_record() {
     let rig = Rig::new("dispatch-during-wrapper-run");
     // The ready FIFO is the command's own barrier. The test holds its ends open, so a
     // reader on either side never waits for an open that may never come.
@@ -2494,7 +2478,7 @@ fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2510,13 +2494,23 @@ fn a_dispatch_failure_during_a_real_wrapper_run_keeps_its_running_record() {
         read_fifo(ready.path(), "the command's readiness"),
         "ready\n"
     );
-    // The dispatch fails now, while the wrapper is still running.
-    let mut release_writer = open_fifo(release.path());
-    release_writer.write_all(b"release\n").unwrap();
-    release_writer.flush().unwrap();
+    // Startup cannot precede dispatch completion. A conflicting host replay exercises
+    // the equivalent failure boundary without weakening the live ownership assertion.
     let status = launch.wait();
     let (stdout, stderr) = launch.output();
-    assert_eq!(status.code(), Some(2), "{stdout}{stderr}");
+    assert!(status.success(), "{stdout}{stderr}");
+    let mut conflict = request.clone();
+    conflict["action"]["cmd"] = json!(["false"]);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &conflict.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(rig.log("herdr.log").matches("pane run ").count(), 1);
     // The wrapper is running: it published its started record, and the dispatch failure
     // did not overwrite it or invent an end.
     let job = rig.read("state/jobs/dispatched.json");
@@ -2571,14 +2565,12 @@ fn the_wrapper_guard_covers_the_command_group_it_started() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
     // The fake Herdr waits for the test's release. The test owns that process, so a
     // failed assertion kills it and it never outlives the test.
-    let herdr_pid = read_pid(&rig.dir.join("herdr-pid"), "the fake herdr");
-    let _herdr = Owned::adopt(herdr_pid);
     // The test spawns the wrapper as its own child, so the test is the wrapper's parent
     // and can reap it.
     let mut wrapper = rig.spawn_recorded(&rig.dir.join("wrapper-command"), "the wrapper");
@@ -2595,7 +2587,7 @@ fn the_wrapper_guard_covers_the_command_group_it_started() {
     release_writer.flush().unwrap();
     let status = launch.wait();
     let (stdout, stderr) = launch.output();
-    assert_eq!(status.code(), Some(2), "{stdout}{stderr}");
+    assert!(status.success(), "{stdout}{stderr}");
     assert_ne!(process_group(command_pid), None, "the command has no group");
     // The guard leaves nothing behind: the command group dies first. The wrapper records
     // the command's death, so it ends on its own, and the test reaps that end. Both are
@@ -2638,14 +2630,12 @@ fn a_wrapper_that_never_closes_its_pane_fails_the_race_on_the_bound() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
     // The fake Herdr waits for the test's release. The test owns that process, so a
     // failed assertion kills it and it never outlives the test.
-    let herdr_pid = read_pid(&rig.dir.join("herdr-pid"), "the fake herdr");
-    let _herdr = Owned::adopt(herdr_pid);
     // The test spawns the wrapper as its own child, so the test is the wrapper's parent
     // and can reap it.
     let mut wrapper = rig.spawn_recorded(&rig.dir.join("wrapper-command"), "the wrapper");
@@ -2661,7 +2651,7 @@ fn a_wrapper_that_never_closes_its_pane_fails_the_race_on_the_bound() {
     release_writer.flush().unwrap();
     let status = launch.wait();
     let (stdout, stderr) = launch.output();
-    assert_eq!(status.code(), Some(2), "{stdout}{stderr}");
+    assert!(status.success(), "{stdout}{stderr}");
     let mut go_writer = open_fifo(go.path());
     go_writer.write_all(b"go\n").unwrap();
     go_writer.flush().unwrap();
@@ -2697,7 +2687,7 @@ fn a_dispatch_failure_before_a_real_wrapper_starts_makes_the_late_wrapper_refuse
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2751,7 +2741,7 @@ esac
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2767,7 +2757,7 @@ esac
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2825,7 +2815,7 @@ esac
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -2861,7 +2851,7 @@ esac
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2880,7 +2870,7 @@ esac
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2907,7 +2897,7 @@ fn first_host_launch_refuses_a_terminal_replaced_after_preparation() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2926,7 +2916,7 @@ fn first_host_launch_refuses_a_terminal_replaced_after_preparation() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2964,7 +2954,7 @@ fn a_busy_start_is_repeated_on_the_same_pane_until_the_shell_is_ready() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -2986,7 +2976,7 @@ fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -3044,7 +3034,7 @@ fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -3086,7 +3076,7 @@ fn a_replay_after_the_retention_pass_removed_the_metadata_refuses_new_execution(
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -3142,7 +3132,7 @@ fn retention_clock_deletion_still_fences_a_replay_after_rollback() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -3200,7 +3190,7 @@ fn a_correlated_replay_after_the_retention_pass_stays_read_only() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);

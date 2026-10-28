@@ -595,7 +595,13 @@ case "$*" in
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}' ;;
   'worktree list --cwd'*) cat "$RIG/worktrees.json" ;;
   'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
-  'pane run'*) shift 3; sh -c "$*" > "$RIG/job-output" 2>&1; printf '{}\n' ;;
+  'pane run'*)
+    shift 3
+    case "$*" in
+      *' exec --job-validity '*) sh -c "$*" > "$RIG/job-output" 2>&1 < /dev/null & ;;
+      *) sh -c "$*" > "$RIG/job-output" 2>&1 ;;
+    esac
+    printf '{}\n' ;;
   'pane close '*)
     mkdir -p "$RIG/at-close"
     cp "$DOGSLED_STATE"/jobs/*.json "$RIG/at-close/"
@@ -849,6 +855,7 @@ esac
             "timeout_ms": timeout_ms,
             "idle_timeout_ms": idle_timeout_ms,
             "validity": {"version": 1, "created_ms": created_ms},
+            "startup": {"version":1,"scope":"non_repository","cwd":self.dir.join("home")},
         });
         fs::write(
             self.dir.join(format!("state/jobs/{id}.json")),

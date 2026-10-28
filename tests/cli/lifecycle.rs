@@ -163,7 +163,7 @@ fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string()
         ])
@@ -179,7 +179,7 @@ fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &next.to_string()
         ])
@@ -197,7 +197,7 @@ fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &next.to_string()
         ])

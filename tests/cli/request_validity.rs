@@ -48,7 +48,7 @@ fn stripped_queued_job(rig: &Rig, remote: bool) -> String {
     if remote {
         rig.peer();
         let mut snapshot = rig.read("remote.json");
-        snapshot["job_validity"] = json!(1);
+        snapshot["job_validity"] = json!(2);
         rig.put("remote.json", &snapshot);
     }
     let args = if remote {
@@ -156,7 +156,7 @@ fn one_timestamp_survives_the_queue_admission_claim_and_receipt() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -177,7 +177,7 @@ fn one_timestamp_survives_the_queue_admission_claim_and_receipt() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &changed.to_string(),
     ]);
@@ -214,7 +214,7 @@ fn the_age_and_skew_boundaries_are_exact() {
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request.to_string(),
         ]);
@@ -252,7 +252,7 @@ fn a_request_without_validity_evidence_never_starts_new_execution() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -279,7 +279,7 @@ fn a_corrupt_validity_clock_refuses_execution() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -304,7 +304,7 @@ fn a_validity_clock_that_cannot_be_written_refuses_execution() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -330,7 +330,7 @@ fn expiry_survives_a_restart_and_a_clock_rollback() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -345,7 +345,7 @@ fn expiry_survives_a_restart_and_a_clock_rollback() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -368,7 +368,7 @@ fn expiry_survives_the_deletion_of_the_record_and_the_receipt() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -384,7 +384,7 @@ fn expiry_survives_the_deletion_of_the_record_and_the_receipt() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -418,7 +418,7 @@ fn a_missing_clock_starts_at_the_newest_local_record() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -440,11 +440,17 @@ fn a_running_job_survives_the_age_expiry() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
     assert_eq!(code, 0, "{error}");
+    // Host dispatch is asynchronous. Establish completion before changing the clock.
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while rig.read("state/jobs/job-1.json")["ended_ms"].is_null() {
+        assert!(Instant::now() < deadline, "finite job did not finish");
+        std::thread::yield_now();
+    }
     // Long after the window, the record is still there and still readable.
     set_clock(&rig, created + 2 * WINDOW_MS);
     let job = rig.read("state/jobs/job-1.json");
@@ -465,7 +471,7 @@ fn an_expired_request_with_a_matching_receipt_replays_the_saved_result() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -478,7 +484,7 @@ fn an_expired_request_with_a_matching_receipt_replays_the_saved_result() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -557,7 +563,7 @@ fn a_wrapper_refuses_an_expired_claim() {
     let out = rig.run(&[
         "exec",
         "--job-validity",
-        "1",
+        "2",
         "expired",
         "--",
         "sh",
@@ -588,7 +594,7 @@ fn a_wrapper_refuses_a_claim_without_validity_evidence() {
     let out = rig.run(&[
         "exec",
         "--job-validity",
-        "1",
+        "2",
         "no-evidence",
         "--",
         "sh",
@@ -615,7 +621,7 @@ fn the_queue_refuses_an_expired_request() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -733,7 +739,7 @@ fn a_wrapper_that_expires_during_the_pane_report_starts_no_process() {
     let out = rig.run(&[
         "exec",
         "--job-validity",
-        "1",
+        "2",
         "crossing",
         "--",
         "sh",
@@ -815,7 +821,7 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);
@@ -857,7 +863,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
             "--id",
             "job-1",
             "--job-validity",
-            "1",
+            "2",
             "--job-created-ms",
             &expired.to_string(),
         ]);
@@ -887,7 +893,7 @@ fn a_missing_clock_with_a_corrupt_record_refuses_execution() {
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request.to_string(),
     ]);

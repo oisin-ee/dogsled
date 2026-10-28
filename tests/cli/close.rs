@@ -490,7 +490,7 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
         "host",
         "launch",
         "--job-validity",
-        "1",
+        "2",
         "--request",
         &request,
     ]);
@@ -509,7 +509,7 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
             "host",
             "launch",
             "--job-validity",
-            "1",
+            "2",
             "--request",
             &request
         ])
