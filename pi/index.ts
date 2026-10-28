@@ -308,7 +308,8 @@ export default function dogsled(pi: ExtensionAPI) {
 		units.stop();
 		planMode.stop();
 		planMode.stopWatching();
-		interviews.close();
+		try { await interviews.close(); }
+		catch (error) { ctx.ui.notify(`Interview cleanup failed: ${String(error)}`, "error"); }
 		workPanel?.dispose();
 		generation++;
 		workAbort?.abort();

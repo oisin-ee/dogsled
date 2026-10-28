@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { InterviewTool, loadQuestions } from "./interview.ts";
+import { DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, createAgentSession, createEventBus, type ExtensionFactory, type ExtensionToolContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { InterviewTool, loadQuestions, registerInterview } from "./interview.ts";
 import { PortalClient } from "./portal-client.ts";
 
 interface Call { method: string; path: string; headers: Record<string, string | string[] | undefined>; body: string }
@@ -13,7 +15,7 @@ interface Call { method: string; path: string; headers: Record<string, string | 
 const ANSWER = { id: "q-1", responses: [{ id: "q1", value: "B" }] };
 
 /** A portal that answers the interview routes, so the tool can be tested over real HTTP. */
-function portal(answer: (poll: number) => { status: number; body?: unknown }, attachment: { name?: string; status?: number } = {}) {
+function portal(answer: (poll: number) => { status: number; body?: unknown }, attachment: { name?: string; status?: number } = {}, withdrawal = 204) {
 	const calls: Call[] = [];
 	let polls = 0;
 	const server = createServer((request, response) => {
@@ -33,13 +35,14 @@ function portal(answer: (poll: number) => { status: number; body?: unknown }, at
 				return;
 			}
 			if (request.method === "DELETE") {
-				response.writeHead(204);
+				response.writeHead(withdrawal);
 				response.end();
 				return;
 			}
-			if (request.method === "GET" && request.url === "/api/questions/q-1/answer") {
+			if (request.method === "GET" && request.url?.split("?")[0] === "/api/questions/q-1/answer") {
 				polls++;
 				const result = answer(polls);
+				if (result.status === 0) return; // A long poll still waiting on the owner.
 				response.writeHead(result.status, { "content-type": "application/json" });
 				response.end(result.body === undefined ? "" : JSON.stringify(result.body));
 				return;
@@ -80,32 +83,20 @@ function context(): ExtensionToolContext {
 	return { cwd: "/repo", sessionManager: { getSessionId: () => "session-1" } } as unknown as ExtensionToolContext;
 }
 
-test("the interview opens its deep link once and polls until the portal has an answer", async t => {
+test("the interview stays in the inbox and returns its deep link without opening a tab", async t => {
 	withPane(t, "pane & name");
 	const p = portal(poll => poll < 2 ? { status: 204 } : { status: 200, body: ANSWER });
-	const port = await listen(p.server);
-	t.after(() => p.server.close());
-	const opened: string[] = [];
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, url => { opened.push(url); });
-	const url = `http://127.0.0.1:${port}/?question=q-1&pane=pane%20%26%20name`;
+	const port = await listen(p.server); t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	let updates = 0;
 	const result = await tool.run({ questions }, context(), undefined, update => {
-		assert.equal(p.polls(), 0, "the recovery URL is visible before waiting for an answer");
-		assert.equal(update.details.status, "started");
-		assert.equal(update.details.url, url);
-		assert.ok(update.content.some(item => item.type === "text" && item.text.includes(url)));
+		assert.equal(p.polls(), 0); assert.equal(update.details.status, "started");
+		assert.match(update.details.url, /question=q-1&pane=pane%20%26%20name/);
 		updates++;
 	});
-	assert.equal(updates, 1);
-	assert.deepEqual(opened, [url]);
-	assert.equal(result.details.url, url);
-	assert.equal(result.details.status, "completed");
-	assert.equal(result.details.responses[0]?.value, "B");
-	const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-	assert.match(text, /User completed the interview form/);
-	assert.ok(text.includes(url));
-	assert.match(text, /Which one\?: B/);
-	assert.ok(p.calls.some(call => call.method === "GET" && call.path === "/api/questions/q-1/answer"));
+	assert.equal(updates, 1); assert.equal(result.details.status, "completed");
+	assert.deepEqual(result.details.responses, ANSWER.responses);
+	assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /Which one\?: B/);
 });
 
 test("the interview posts the questions with the bearer token", async t => {
@@ -113,7 +104,7 @@ test("the interview posts the questions with the bearer token", async t => {
 	const p = portal(() => ({ status: 200, body: ANSWER }));
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	await tool.run({ questions }, context(), undefined);
 	const post = p.calls.find(call => call.method === "POST");
 	assert.ok(post);
@@ -130,7 +121,7 @@ test("the questions are read from a file and posted as the parsed object", async
 	const dir = mkdtempSync(join(tmpdir(), "dogsled-questions-"));
 	const file = join(dir, "questions.json");
 	writeFileSync(file, questions);
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	await tool.run({ questions: file }, context(), undefined);
 	const post = p.calls.find(call => call.method === "POST");
 	assert.ok(post);
@@ -143,7 +134,7 @@ test("a questions path is read relative to the working directory", async t => {
 	t.after(() => p.server.close());
 	const dir = mkdtempSync(join(tmpdir(), "dogsled-questions-"));
 	writeFileSync(join(dir, "questions.json"), questions);
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	const ctx = { ...context(), cwd: dir } as unknown as ExtensionToolContext;
 	await tool.run({ questions: "questions.json" }, ctx, undefined);
 	const post = p.calls.find(call => call.method === "POST");
@@ -155,7 +146,7 @@ test("a broken questions file is an error before any call to the portal", async 
 	const p = portal(() => ({ status: 200, body: ANSWER }));
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	await assert.rejects(() => tool.run({ questions: "/repo/missing-questions.json" }, context(), undefined), /Questions file not found/);
 	await assert.rejects(() => tool.run({ questions: "{not json" }, context(), undefined), /Invalid questions JSON/);
 	assert.equal(p.calls.length, 0);
@@ -165,7 +156,7 @@ test("an answer in another shape is an error that names the shape it expected", 
 	const p = portal(() => ({ status: 200, body: { answers: [{ id: "q1", value: "A" }] } }));
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	await assert.rejects(() => tool.run({ questions }, context(), undefined), /unexpected answer shape/);
 });
 
@@ -173,7 +164,7 @@ test("the answers are named from the questions the model sent", async t => {
 	const p = portal(() => ({ status: 200, body: { id: "q-1", responses: [{ id: "q1", value: "A" }] } }));
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	const result = await tool.run({ questions }, context(), undefined);
 	assert.equal(result.details.responses[0]?.value, "A");
 	const text = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -184,7 +175,7 @@ test("an aborted interview withdraws its form", async t => {
 	const p = portal(() => ({ status: 204 }));
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
 	const controller = new AbortController();
 	const promise = tool.run({ questions }, context(), controller.signal);
 	await new Promise(resolve => setTimeout(resolve, 50));
@@ -194,107 +185,172 @@ test("an aborted interview withdraws its form", async t => {
 	assert.ok(p.calls.some(call => call.method === "DELETE" && call.path === "/api/questions/q-1"), JSON.stringify(p.calls));
 });
 
-test("a withdrawn form is an error", async t => {
+test("a withdrawn form ends gracefully", async t => {
 	const p = portal(() => ({ status: 410 }));
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
-	const tool = new InterviewTool(new PortalClient(environment(port)), undefined, () => undefined);
-	await assert.rejects(() => tool.run({ questions }, context(), undefined), /withdrawn/);
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	assert.equal((await tool.run({ questions }, context(), undefined)).details.status, "cancelled");
 });
 
-test("an async interview opens its deep link once and delivers the answers as a message", async t => {
+test("an async interview stays in the inbox and delivers once", async t => {
 	withPane(t);
 	const p = portal(() => ({ status: 200, body: ANSWER }));
-	const port = await listen(p.server);
-	t.after(() => p.server.close());
+	const port = await listen(p.server); t.after(() => p.server.close());
 	const delivered: string[] = [];
-	const opened: string[] = [];
-	const tool = new InterviewTool(new PortalClient(environment(port)), content => { delivered.push(content); }, url => { opened.push(url); });
+	const tool = new InterviewTool(new PortalClient(environment(port)), text => { delivered.push(text); });
 	t.after(() => tool.close());
 	const result = await tool.run({ questions, async: true }, context(), undefined);
-	const url = `http://127.0.0.1:${port}/?question=q-1&pane=w1%3Ap1`;
-	assert.deepEqual(opened, [url]);
-	assert.equal(result.details.url, url);
-	assert.ok(result.content.some(item => item.type === "text" && item.text.includes(url)));
 	assert.equal(result.details.status, "started");
-	assert.match(String(result.content[0]?.type === "text" ? result.content[0].text : ""), /keep working and do not poll/);
-	const deadline = Date.now() + 5_000;
-	while (!delivered.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-	assert.equal(delivered.length, 1);
-	assert.match(delivered[0] ?? "", /Interview q-1 finished/);
+	assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /keep working and do not poll/);
+	await until(() => delivered.length === 1);
+	assert.match(delivered[0] ?? "", /Interview q-1 completed/);
 	assert.match(delivered[0] ?? "", /Which one\?: B/);
 });
-
-/** A real executable seam; no child-process mocks or global PATH changes. */
-function fallbackEnvironment(t: { after: (fn: () => void) => void }, script: string) {
-	const directory = mkdtempSync(join(tmpdir(), "dogsled-fallback-"));
-	const calls = join(directory, "calls.json");
-	const terminated = join(directory, "terminated");
-	writeFileSync(join(directory, "dogsled"), `#!${process.execPath}\nconst fs = require("node:fs");\nconst args = process.argv.slice(2);\nconst path = args[args.indexOf("--file") + 1];\n${script}\nfs.writeFileSync(${JSON.stringify(calls)}, JSON.stringify({ args, file: JSON.parse(fs.readFileSync(path, "utf8")) }));`, { mode: 0o755 });
-	t.after(() => rmSync(directory, { recursive: true, force: true }));
-	return { env: { PATH: directory, DOGSLED_STATE: join(directory, "state") }, calls, terminated };
-}
 
 async function until(condition: () => boolean): Promise<void> {
 	const deadline = Date.now() + 5_000;
 	while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-	assert.ok(condition(), "the background command completed");
+	assert.ok(condition(), "the background operation completed");
 }
 
-test("an unreachable portal runs dogsled interview with a private temporary questions file", async t => {
-	withPane(t);
-	const fake = fallbackEnvironment(t, `process.stdout.write(${JSON.stringify(JSON.stringify(ANSWER))});`);
-	const tool = new InterviewTool(new PortalClient(fake.env), undefined, () => undefined);
-	const result = await tool.run({ questions, timeout: 42 }, context(), undefined);
-	assert.equal(result.details.status, "completed");
-	assert.deepEqual(result.details.responses, ANSWER.responses);
-	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
-	assert.deepEqual(call.file, questionsFile);
-	const path = call.args[2];
-	assert.deepEqual(call.args, ["interview", "--file", path, "--pane", "w1:p1", "--session", "session-1", "--cwd", "/repo", "--timeout", "42"]);
-	assert.equal(existsSync(path), false, "the temporary file was removed");
+for (const async of [false, true]) test(`an unreachable portal reports the problem without a fallback (async=${async})`, async t => {
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-no-fallback-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const calls = join(dir, "launched");
+	for (const name of ["dogsled", "open", "xdg-open"]) {
+		writeFileSync(join(dir, name), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(calls)}, 'launched');`, { mode: 0o755 });
+	}
+	const tool = new InterviewTool(new PortalClient({ PATH: dir, DOGSLED_STATE: join(dir, "missing") }));
+	await assert.rejects(() => tool.run({ questions, async }, context(), undefined), /dogsled web is not running/);
+	assert.equal(existsSync(calls), false);
 });
 
-test("the fallback parses the existing answer contract", async t => {
-	const fake = fallbackEnvironment(t, 'process.stdout.write(JSON.stringify({answers: []}));');
-	const tool = new InterviewTool(new PortalClient(fake.env), undefined, () => undefined);
-	await assert.rejects(() => tool.run({ questions }, context(), undefined), /unexpected answer shape/);
-	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
-	assert.equal(existsSync(call.args[2]), false);
-});
-
-test("aborting the fallback terminates the child and removes the temporary file", async t => {
-	const fake = fallbackEnvironment(t, 'process.on("SIGTERM", () => { fs.writeFileSync(process.env.DOGSLED_TEST_TERMINATED, "yes"); process.exit(0); }); setInterval(() => {}, 1000);');
-	const tool = new InterviewTool(new PortalClient({ ...fake.env, DOGSLED_TEST_TERMINATED: fake.terminated }), undefined, () => undefined);
-	const controller = new AbortController();
-	const result = tool.run({ questions }, context(), controller.signal);
-	t.after(() => controller.abort());
-	await until(() => existsSync(fake.calls));
-	controller.abort();
-	assert.equal((await result).details.status, "aborted");
-	assert.equal(existsSync(fake.terminated), true);
-	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
-	assert.equal(existsSync(call.args[2]), false);
-});
-
-test("an async fallback returns before the child answers and delivers once", async t => {
-	const fake = fallbackEnvironment(t, `setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(ANSWER))}), 200);`);
+for (const async of [false, true]) test(`rejection preserves the owner's reason (async=${async})`, async t => {
+	const p = portal(() => ({ status: 200, body: { id: "q-1", responses: [], rejection: { reason: "Neither. Use Dioxus." } } }));
+	const port = await listen(p.server); t.after(() => p.server.close());
 	const delivered: string[] = [];
-	const tool = new InterviewTool(new PortalClient(fake.env), content => delivered.push(content), () => undefined);
-	t.after(() => tool.close());
-	const result = await tool.run({ questions, async: true }, context(), undefined);
-	assert.equal(result.details.status, "started");
-	assert.equal(delivered.length, 0);
-	await until(() => delivered.length === 1);
-	assert.match(delivered[0] ?? "", /Which one\?: B/);
-	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
-	await until(() => !existsSync(call.args[2]));
+	const tool = new InterviewTool(new PortalClient(environment(port)), text => { delivered.push(text); });
+	const result = await tool.run({ questions, async }, context(), undefined);
+	if (async) { await until(() => delivered.length === 1); assert.match(delivered[0] ?? "", /Neither. Use Dioxus./); }
+	else { assert.equal(result.details.status, "rejected"); assert.equal(result.details.reason, "Neither. Use Dioxus."); assert.deepEqual(result.details.responses, []); }
 });
 
-test("a failed one-shot interview is an error, not an empty answer", async t => {
-	const fake = fallbackEnvironment(t, 'process.exit(2);');
-	const tool = new InterviewTool(new PortalClient(fake.env), undefined, () => undefined);
-	await assert.rejects(() => tool.run({ questions }, context(), undefined), /interview exited with 2/);
+test("an explicit timeout interrupts a long poll and withdraws the unanswered form", { timeout: 5_000 }, async t => {
+	const p = portal(() => ({ status: 0 }));
+	const port = await listen(p.server); t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const result = await tool.run({ questions, timeout: 1 }, context(), undefined);
+	assert.equal(result.details.status, "timeout");
+	assert.ok(p.calls.some(call => call.method === "DELETE"));
+});
+
+for (const rejected of [false, true]) test(`cancellation preserves a racing ${rejected ? "rejection" : "answer"}`, async t => {
+	let ready = false;
+	const saved = rejected ? { id: "q-1", responses: [], rejection: { reason: "Dioxus" } } : ANSWER;
+	const p = portal(() => ready ? { status: 200, body: saved } : { status: 204 }, {}, 409);
+	const port = await listen(p.server); t.after(() => p.server.close());
+	const controller = new AbortController();
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const result = tool.run({ questions }, context(), controller.signal);
+	await until(() => p.polls() > 0);
+	ready = true;
+	controller.abort();
+	const outcome = await result;
+	assert.equal(outcome.details.status, rejected ? "rejected" : "completed");
+	assert.equal(rejected ? outcome.details.reason : outcome.details.responses[0]?.value, rejected ? "Dioxus" : "B");
+});
+
+test("the default interview remains answerable after ten minutes", async t => {
+	t.mock.timers.enable({ apis: ["Date"], now: 0 });
+	const p = portal(poll => {
+		if (poll === 1) { t.mock.timers.tick(601_000); return { status: 204 }; }
+		return { status: 200, body: ANSWER };
+	});
+	const port = await listen(p.server); t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	assert.equal((await tool.run({ questions }, context(), undefined)).details.status, "completed");
+	assert.equal(p.calls.some(call => call.method === "DELETE"), false);
+});
+
+test("closing a session withdraws background questions without messaging its replacement", async t => {
+	const p = portal(() => ({ status: 204 }));
+	const port = await listen(p.server); t.after(() => p.server.close());
+	const delivered: string[] = [];
+	const tool = new InterviewTool(new PortalClient(environment(port)), text => { delivered.push(text); });
+	await tool.run({ questions, async: true }, context(), undefined);
+	await tool.close();
+	assert.ok(p.calls.some(call => call.method === "DELETE"));
+	assert.deepEqual(delivered, []);
+});
+
+for (const busy of [false, true]) for (const rejected of [false, true]) test(`the real Pi runtime receives ${rejected ? "rejection" : "answers"} while ${busy ? "busy" : "idle"}`, async t => {
+	let ready = false;
+	const outcome = rejected ? { id: "q-1", responses: [], rejection: { reason: "Use Dioxus instead." } } : ANSWER;
+	const p = portal(() => ready ? { status: 200, body: outcome } : { status: 204 });
+	const port = await listen(p.server);
+	const manager = SessionManager.inMemory("/checkout");
+	const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	let holdStarted!: () => void;
+	const holding = new Promise<void>(resolve => { holdStarted = resolve; });
+	let releaseHold!: () => void;
+	const release = new Promise<void>(resolve => { releaseHold = resolve; });
+	let tool: InterviewTool | undefined;
+	const extension: ExtensionFactory = pi => {
+		tool = registerInterview(pi, new PortalClient(environment(port)));
+		pi.registerTool({ name: "hold", label: "Hold", description: "Hold the test run", parameters: { type: "object", properties: {} } as ToolDefinition["parameters"],
+			async execute() { holdStarted(); await release; return { content: [{ type: "text", text: "released" }], details: undefined }; }
+		});
+	};
+	const loader = new DefaultResourceLoader({ cwd: "/checkout", agentDir: "/nonexistent/dogsled-test", eventBus: createEventBus(), extensionFactories: [extension],
+		noContextFiles: true, noExtensions: true, noPromptTemplates: true, noSkills: true, noThemes: true, settingsManager: settings });
+	const models = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(), modelsPath: null, refreshOnCreate: false });
+	const faux = fauxProvider({ tokensPerSecond: 0 }); models.registerNativeProvider(faux.provider);
+	await loader.reload();
+	const { session } = await createAgentSession({ cwd: "/checkout", modelRuntime: models, model: faux.getModel(), sessionManager: manager, settingsManager: settings, resourceLoader: loader, thinkingLevel: "off" });
+	t.after(async () => { releaseHold(); await tool?.close(); session.dispose(); p.server.closeAllConnections(); p.server.close(); });
+	await session.bindExtensions({});
+	faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("interview", { questions, async: true })),
+		busy ? fauxAssistantMessage(fauxToolCall("hold", {})) : fauxAssistantMessage("Waiting"),
+		fauxAssistantMessage("Received"),
+	]);
+	const running = session.prompt("Ask the test interview");
+	if (busy) await holding; else await running;
+	ready = true;
+	// The message must queue while the original tool is still running.
+	if (busy) await until(() => session.pendingMessageCount > 0);
+	releaseHold();
+	await running;
+	const delivered = () => manager.getBranch().filter(entry => entry.type === "message" && entry.message.role === "user")
+		.some(entry => JSON.stringify(entry).includes(rejected ? "Use Dioxus instead." : "Interview q-1 completed"));
+	await until(delivered);
+	assert.ok(delivered());
+});
+
+test("custom answers and context reach the agent in the summary and structured result", async t => {
+	const responses = [
+		{ id: "single", value: { option: "Other", note: "Dioxus" } },
+		{ id: "multi", value: ["Rust", { option: "Other", note: "Dioxus\nKeep the UI in Rust." }] },
+		{ id: "context", value: { option: "Rust", note: "Use it for the UI too." } },
+	];
+	const p = portal(() => ({ status: 200, body: { id: "q-1", responses } }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const form = JSON.stringify({ questions: [
+		{ id: "single", type: "single", question: "Which UI?", options: ["React", "Leptos"] },
+		{ id: "multi", type: "multi", question: "Which tools?", options: ["Rust", "React"] },
+		{ id: "context", type: "single", question: "Which language?", options: ["Rust"] },
+	] });
+	const result = await tool.run({ questions: form }, context(), undefined);
+	assert.deepEqual(result.details.responses, responses);
+	const summary = result.content.find(item => item.type === "text");
+	assert.ok(summary && summary.type === "text");
+	assert.match(summary.text, /Which UI\?: Other \(Dioxus\)/);
+	assert.match(summary.text, /Which tools\?: Rust, Other \(Dioxus\nKeep the UI in Rust\.\)/);
+	assert.match(summary.text, /Which language\?: Rust \(Use it for the UI too\.\)/);
+	assert.doesNotMatch(summary.text, /\[object Object\]/);
 });
 
 test("the questions come from inline JSON or from a file", () => {
@@ -368,14 +424,9 @@ test("a portal that refuses the image is an error that names the file", async t 
 	await assert.rejects(() => tool.run({ questions: mediaQuestions(file) }, context(), undefined), /Cannot use the image/);
 });
 
-test("a portal that is down falls back to the one-shot interview even with a local image", async t => {
-	const fake = fallbackEnvironment(t, `process.stdout.write(${JSON.stringify(JSON.stringify(ANSWER))});`);
-	const tool = new InterviewTool(new PortalClient(fake.env));
-	const dir = mkdtempSync(join(tmpdir(), "dogsled-media-"));
-	const file = join(dir, "shot.png");
-	writeFileSync(file, "PNG-BYTES");
-	const result = await tool.run({ questions: mediaQuestions(file) }, context(), undefined);
-	assert.equal(result.details.status, "completed");
-	const call = JSON.parse(readFileSync(fake.calls, "utf8"));
-	assert.equal(call.file.questions[0].media.src, file, "the fallback keeps the path the model wrote");
+test("a missing portal reports its status before reading a local image", async t => {
+	const dir = mkdtempSync(join(tmpdir(), "dogsled-offline-image-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const tool = new InterviewTool(new PortalClient({ DOGSLED_STATE: dir }));
+	await assert.rejects(() => tool.run({ questions: mediaQuestions(join(dir, "missing.png")) }, context(), undefined), /dogsled web is not running/);
 });

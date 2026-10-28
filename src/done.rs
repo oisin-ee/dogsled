@@ -37,16 +37,24 @@ impl Turn {
         }
     }
 
+    fn same_as(&self, other: &Self) -> bool {
+        let axes = [
+            self.state_change_seq.zip(other.state_change_seq),
+            self.state_since_ms.zip(other.state_since_ms),
+        ];
+        axes.iter().any(Option::is_some) && axes.iter().flatten().all(|(a, b)| a == b)
+    }
+
     fn precedes(&self, agent: &Agent) -> bool {
-        let (Some(before), Some(after), Some(since), Some(now)) = (
-            self.state_change_seq,
-            agent.state_change_seq,
-            self.state_since_ms,
-            agent.state_since_ms,
-        ) else {
-            return false;
-        };
-        agent.state == "working" && (after > before || (after == before && now > since))
+        let later_seq = matches!(
+            (self.state_change_seq, agent.state_change_seq),
+            (Some(before), Some(after)) if after > before
+        );
+        let later_since = matches!(
+            (self.state_since_ms, agent.state_since_ms),
+            (Some(since), Some(now)) if now > since
+        );
+        agent.state == "working" && (later_seq || later_since)
     }
 }
 
@@ -375,7 +383,7 @@ pub fn mark(
         for existing in marks.values().filter(|m| matches(m, &agent)) {
             if let Some(signal) = &existing.signal
                 && signal.cleared_ms.is_none()
-                && !signal.turn.precedes(&agent)
+                && signal.turn.same_as(&Turn::of_agent(&agent))
             {
                 return Err(conflict(pane));
             }
@@ -423,17 +431,15 @@ pub fn signal(
             if has_done(mark) {
                 return Err(conflict(pane));
             }
-            if let Some(existing) = &mark.signal {
-                if existing.turn == turn {
-                    return if existing.kind == kind && existing.text == text {
-                        Ok(existing.clone())
-                    } else {
-                        Err(conflict(pane))
-                    };
-                }
-                if existing.cleared_ms.is_none() && !existing.turn.precedes(&agent) {
-                    return Err(unproven(pane));
-                }
+            if let Some(existing) = &mark.signal
+                && existing.cleared_ms.is_none()
+                && existing.turn.same_as(&turn)
+            {
+                return if existing.kind == kind && existing.text == text {
+                    Ok(existing.clone())
+                } else {
+                    Err(conflict(pane))
+                };
             }
         }
         let session_hash = crate::unit_transport::digest_hex(session.as_bytes());
@@ -441,11 +447,12 @@ pub fn signal(
             kind,
             text: text.to_owned(),
             event_id: format!(
-                "sig-{pane}-{session_hash}-{}-{}",
+                "sig-{pane}-{session_hash}-{}-{}-{}",
                 turn.state_change_seq
                     .map_or_else(|| "unknown".into(), |s| s.to_string()),
                 turn.state_since_ms
-                    .map_or_else(|| "unknown".into(), |s| s.to_string())
+                    .map_or_else(|| "unknown".into(), |s| s.to_string()),
+                crate::ledger::new_id()
             ),
             turn,
             session: session.clone(),

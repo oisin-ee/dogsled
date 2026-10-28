@@ -546,11 +546,21 @@ pub struct ResponseItem {
     pub attachments: Option<Vec<String>>,
 }
 
-/// The answers of a question, as the API sends and accepts them.
+/// A terminal interview outcome. Rejections carry no draft responses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Responses {
     pub id: String,
     pub responses: Vec<ResponseItem>,
+    /// A rejected interview is a terminal outcome, not an empty answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<Rejection>,
+}
+
+/// The owner's reason for declining an interview. A reason is optional.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rejection {
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// The body of the request that asks a question.

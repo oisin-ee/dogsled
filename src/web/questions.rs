@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use portal_types::questions::{AnswerBody, AskBody, PendingId, PendingList};
+use portal_types::questions::{AnswerBody, AskBody, PendingId, PendingList, Rejection};
 use serde_json::json;
 
 use crate::error::Error;
@@ -29,6 +29,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/questions", get(list).post(create))
         .route("/api/questions/{id}/answer", get(answer_wait).post(answer))
+        .route("/api/questions/{id}/reject", axum::routing::post(reject))
         .route("/api/questions/{id}", axum::routing::delete(withdraw))
 }
 
@@ -102,7 +103,25 @@ async fn answer(
     }
 }
 
-/// Withdraw a question. The agent that waits for it gets 410.
+/// Reject an interview without submitting any draft answers.
+async fn reject(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+    headers: HeaderMap,
+    Json(body): Json<Rejection>,
+) -> Response {
+    if !origin_allowed(&headers, state.port) {
+        return refused("the request needs the portal origin");
+    }
+    match state.questions.reject(&id, body).await {
+        Ok(Answered::Saved) => Json(json!({ "id": id, "rejected": true })).into_response(),
+        Ok(Answered::Already) => conflict("the interview is already resolved"),
+        Ok(Answered::Gone) => gone(),
+        Err(error) => failed(&error),
+    }
+}
+
+/// Withdraw a pending question. Never delete a racing answer or rejection.
 async fn withdraw(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
@@ -111,9 +130,10 @@ async fn withdraw(
     if !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
-    match state.questions.withdraw(&id).await {
-        Ok(true) => Json(json!({ "id": id, "withdrawn": true })).into_response(),
-        Ok(false) => gone(),
+    match state.questions.withdraw_pending(&id).await {
+        Ok(Answered::Saved) => Json(json!({ "id": id, "withdrawn": true })).into_response(),
+        Ok(Answered::Already) => conflict("the interview is already resolved"),
+        Ok(Answered::Gone) => gone(),
         Err(error) => failed(&error),
     }
 }
@@ -334,6 +354,128 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["id"], serde_json::json!(id));
         assert_eq!(body["responses"][0]["value"], serde_json::json!("B"));
+    }
+
+    #[tokio::test]
+    async fn rejection_is_persisted_delivered_and_removed_from_the_inbox() {
+        let state = fresh_state();
+        let id = ask(&state).await;
+        let rejected = call(
+            &state,
+            request(
+                Method::POST,
+                &format!("/api/questions/{id}/reject"),
+                Some(r#"{"reason":"Neither option. Use Dioxus."}"#),
+            ),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::OK);
+        let pending =
+            json_body(call(&state, request(Method::GET, "/api/questions", None)).await).await;
+        assert_eq!(pending["pending"], json!([]));
+        let saved = json_body(
+            call(
+                &state,
+                token_request(
+                    Method::GET,
+                    &format!("/api/questions/{id}/answer?wait=0"),
+                    None,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(saved["rejection"]["reason"], "Neither option. Use Dioxus.");
+        assert_eq!(saved["responses"], json!([]));
+        let reopened = crate::web::store::Store::new(state.web.child("questions"));
+        let crate::web::store::Poll::Answered(outcome) = reopened
+            .wait(&id, Duration::ZERO)
+            .await
+            .expect("saved outcome")
+        else {
+            panic!("rejection was not persisted");
+        };
+        assert_eq!(serde_json::to_value(outcome).expect("outcome"), saved);
+        // Cancellation and duplicate submission cannot erase a terminal outcome.
+        assert_eq!(
+            call(
+                &state,
+                token_request(Method::DELETE, &format!("/api/questions/{id}"), None)
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            call(
+                &state,
+                request(
+                    Method::POST,
+                    &format!("/api/questions/{id}/answer"),
+                    Some(r#"{"responses":[]}"#)
+                )
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn rejection_enforces_origin_shape_and_first_terminal_outcome() {
+        let state = fresh_state();
+        let id = ask(&state).await;
+        let path = format!("/api/questions/{id}/reject");
+        let mut foreign = request(Method::POST, &path, Some(r#"{"reason":"No"}"#));
+        foreign.headers_mut().insert(
+            header::ORIGIN,
+            "https://foreign.example".parse().expect("origin"),
+        );
+        assert_eq!(call(&state, foreign).await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            call(
+                &state,
+                request(Method::POST, &path, Some(r#"{"reason":42}"#))
+            )
+            .await
+            .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            call(
+                &state,
+                request(Method::POST, "/api/questions/missing/reject", Some("{}"))
+            )
+            .await
+            .status(),
+            StatusCode::GONE
+        );
+        // A reason is optional, and both terminal writes share the same lock.
+        let (answer, rejection) = tokio::join!(
+            call(
+                &state,
+                request(
+                    Method::POST,
+                    &format!("/api/questions/{id}/answer"),
+                    Some(r#"{"responses":[]}"#)
+                )
+            ),
+            call(&state, request(Method::POST, &path, Some("{}")))
+        );
+        assert!(
+            (answer.status() == StatusCode::OK && rejection.status() == StatusCode::CONFLICT)
+                || (answer.status() == StatusCode::CONFLICT
+                    && rejection.status() == StatusCode::OK)
+        );
+        assert_eq!(
+            call(
+                &state,
+                token_request(Method::DELETE, &format!("/api/questions/{id}"), None)
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
     }
 
     #[tokio::test]

@@ -32,6 +32,11 @@
 .qf-option { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem;
   padding: 12px 14px; border: 1px solid var(--surface1); border-radius: 6px;
   cursor: pointer; }
+.qf-choice, .qf-note { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.qf-note { color: var(--subtext0); }
+.qf-note textarea { box-sizing: border-box; resize: vertical; min-height: 4rem; color: var(--text); }
+.qf-note textarea::placeholder { color: var(--subtext0); opacity: 1; }
+.qf-note textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .qf-option:hover { background: var(--surface0); }
 .qf-option.checked { border-color: var(--accent); background: rgba(137, 180, 250, 0.07); }
 .qf-option-label { font-weight: 500; }
@@ -70,6 +75,14 @@
   background: var(--accent); border: 1px solid var(--accent); border-radius: 4px;
   font: inherit; cursor: pointer; }
 .qf-submit:disabled { opacity: 0.5; cursor: default; }
+.qf-reject { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--surface1); padding-top: 18px; }
+.qf-reject-button { align-self: flex-start; border: 1px solid var(--surface1); border-radius: 4px;
+  padding: 6px 12px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.qf-reject-button:hover:not(:disabled) { background: var(--surface0); }
+.qf-reject-button:disabled { opacity: 0.5; cursor: default; }
+@media (max-width: 600px) {
+  .qf-note, .qf-form textarea { font-size: 1rem; }
+}
 
 /* A media block that sits beside the question needs room for two columns. */
 @media (min-width: 900px) {
