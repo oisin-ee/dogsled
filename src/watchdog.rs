@@ -43,6 +43,7 @@ pub fn observe(probe: &mut Probe, previous: Option<&Probe>, now: u64) {
         agent.state_since_ms = Some(
             old.filter(|a| {
                 state_of(a) == state_of(agent)
+                    && a.state_change_seq == agent.state_change_seq
                     && a.transcript == agent.transcript
                     && a.transcript_modified == agent.transcript_modified
             })
@@ -110,19 +111,17 @@ struct PromptHistory {
     prompted_after: u64,
     turn: crate::done::Turn,
     working_turn: Option<crate::done::Turn>,
-    #[serde(default)]
-    working: bool,
 }
 
 impl PromptHistory {
     fn observe(&mut self, agent: &crate::probe::Agent, state: crate::lifecycle::State) {
-        if state == crate::lifecycle::State::Working {
-            if !self.working && self.turn.precedes(agent) {
-                self.working_turn = Some(crate::done::Turn::of_agent(agent));
-            }
-            self.working = true;
-        } else {
-            self.working = false;
+        let previous = self.working_turn.as_ref().unwrap_or(&self.turn);
+        // Transcript activity can move the observed state clock within one turn.
+        // Keep that turn's original start when its sequence still matches.
+        let same_turn = previous.state_change_seq.is_some()
+            && previous.state_change_seq == agent.state_change_seq;
+        if state == crate::lifecycle::State::Working && !same_turn && previous.precedes(agent) {
+            self.working_turn = Some(crate::done::Turn::of_agent(agent));
         }
     }
 
@@ -659,17 +658,17 @@ fn stopped_prompts(
             continue;
         };
         episode.attempts += 1;
-        state
-            .prompted_after
-            .entry(key.clone())
-            .or_insert_with(|| PromptHistory {
+        state.prompted_after.insert(
+            key.clone(),
+            PromptHistory {
                 prompted_after: now,
                 turn: crate::done::Turn::of_agent(agent),
                 working_turn: None,
-                working: false,
-            });
-        // The durable id and attempt budget precede the put, even if it succeeds and
-        // the process dies before recording success. Inbox retries deduplicate the id.
+            },
+        );
+        // The durable id, attempt budget and fresh history precede the put, even if it
+        // succeeds and the process dies before recording success. A possible delivery
+        // starts the prompt window; inbox retries deduplicate the id.
         fleet.ledger.write("watchdog.json", state)?;
         let put = put_stopped_prompt(fleet, reports, &host.host, agent, &id, now);
         if matches!(put, Ok(true))
@@ -683,7 +682,6 @@ fn stopped_prompts(
                     prompted_after: now,
                     turn: crate::done::Turn::of_agent(agent),
                     working_turn: None,
-                    working: false,
                 },
             );
         }

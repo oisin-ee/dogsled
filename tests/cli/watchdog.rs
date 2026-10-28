@@ -194,6 +194,20 @@ fn stopped_prompt_does_not_loop_but_a_later_working_turn_rearms() {
 }
 
 #[test]
+fn stopped_consecutive_working_turns_rearm_after_the_prompt_window() {
+    let rig = stopped_rig("stopped-working-turns", true);
+    for (offset, raw, seq) in [
+        (0, "idle", 1),
+        (1_000, "working", 2),
+        (130_000, "working", 4),
+        (140_000, "idle", 5),
+    ] {
+        stopped_tick(&rig, NOW + offset, raw, seq);
+    }
+    assert_eq!(corrective_messages(&rig).len(), 2);
+}
+
+#[test]
 fn working_blocked_and_unknown_children_get_no_corrective_prompt() {
     for raw in ["working", "blocked", "unreadable"] {
         let rig = stopped_rig(&format!("stopped-excluded-{raw}"), true);

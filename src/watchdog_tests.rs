@@ -14,12 +14,27 @@ struct Commands {
     /// The custodian agent, when the test sets one.
     custodian: Mutex<Option<serde_json::Value>>,
     child: Mutex<Option<serde_json::Value>>,
+    /// Capture the durable reservation when the inbox validates a prompt recipient.
+    reservation: Mutex<Option<(std::path::PathBuf, Option<State>)>>,
 }
 impl Shell for Commands {
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         let command = format!("{program} {}", args.join(" "));
         self.calls.lock().unwrap().push(command.clone());
         let stdout = if args == ["agent", "list"] {
+            if let Some((dir, saved)) = self.reservation.lock().unwrap().as_mut() {
+                let state: State = Ledger::new(dir.clone())
+                    .read("watchdog.json")?
+                    .unwrap_or_default();
+                if saved.is_none()
+                    && state
+                        .stopped
+                        .get("child")
+                        .is_some_and(|episode| episode.attempts > 0 && !episode.delivered)
+                {
+                    *saved = Some(state);
+                }
+            }
             let mut agents =
                 vec![json!({"pane_id":"owner","agent_status":*self.owner.lock().unwrap()})];
             if let Some(custodian) = self.custodian.lock().unwrap().clone() {
@@ -369,6 +384,74 @@ fn stopped_prompt_turn_does_not_loop_but_later_real_turn_rearms() {
         140_000,
     )
     .unwrap();
+    assert_eq!(stopped_messages(&rig).len(), 2);
+}
+
+#[test]
+fn stopped_successful_put_crash_keeps_the_new_prompt_window_on_restart() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    for (now, raw, seq) in [(1_000, "idle", 1), (130_000, "working", 2)] {
+        tick(
+            &rig.fleet(),
+            &stopped_reports(&rig, now, raw, seq, now),
+            now,
+        )
+        .unwrap();
+    }
+    *rig.shell.reservation.lock().unwrap() = Some((rig.ledger.dir.clone(), None));
+    tick(
+        &rig.fleet(),
+        &stopped_reports(&rig, 140_000, "idle", 3, 140_000),
+        140_000,
+    )
+    .unwrap();
+    let delivered = stopped_messages(&rig);
+    assert_eq!(delivered.len(), 2);
+    let (_, reserved) = rig.shell.reservation.lock().unwrap().take().unwrap();
+    let reserved = reserved.unwrap();
+    assert!(!reserved.stopped["child"].delivered);
+    assert!(
+        delivered
+            .iter()
+            .any(|record| { Some(&record.id) == reserved.stopped["child"].message_id.as_ref() })
+    );
+    // Keep the successful inbox put, but lose every write after its reservation.
+    rig.ledger.write("watchdog.json", &reserved).unwrap();
+    for (now, raw, seq) in [(141_000, "working", 4), (142_000, "idle", 5)] {
+        tick(
+            &rig.fleet(),
+            &stopped_reports(&rig, now, raw, seq, now),
+            now,
+        )
+        .unwrap();
+    }
+    assert_eq!(stopped_messages(&rig).len(), 2);
+    assert_eq!(
+        reserved.prompted_after[&session_key("local", "session-child")].prompted_after,
+        140_000
+    );
+}
+
+#[test]
+fn stopped_consecutive_working_observations_track_the_latest_turn() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    for (now, raw, seq) in [
+        (0, "idle", 1),
+        (1_000, "working", 2),
+        (130_000, "working", 4),
+        (140_000, "idle", 5),
+    ] {
+        tick(
+            &rig.fleet(),
+            &stopped_reports(&rig, now, raw, seq, now),
+            now,
+        )
+        .unwrap();
+    }
     assert_eq!(stopped_messages(&rig).len(), 2);
 }
 
