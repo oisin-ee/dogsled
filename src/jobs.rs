@@ -366,6 +366,8 @@ fn expiry(job: &Job, now: u64) -> Expiry {
 /// repeats safely, because a job it already expired is not expired again, and one
 /// unreadable record never stops the others.
 pub fn expire(ledger: &Ledger, now: u64) -> Result<()> {
+    // Persist the validity fence before any deletion, even when the wall clock rolled back.
+    let now = advance_clock(ledger, now)?;
     let store = store(ledger);
     let entries = match fs::read_dir(&store.dir) {
         Ok(entries) => entries,

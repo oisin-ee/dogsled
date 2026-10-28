@@ -782,6 +782,50 @@ fn a_job_record_expires_after_thirty_days() {
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
 }
 
+/// Retention uses the durable high-water time after the wall clock moves back.
+#[test]
+fn retention_clock_rollback_preserves_exact_boundaries() {
+    let rig = Rig::new("retention-clock-rollback");
+    let ended = now();
+    let high_water = ended + LOG_WINDOW_MS + 1;
+    rig.put(
+        "state/job-validity-clock.json",
+        &json!({"version":1,"high_water_ms":high_water}),
+    );
+    set_clock(&rig, ended - 1_000);
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    put_job(
+        &rig,
+        "day-boundary",
+        &terminal("day-boundary", high_water - LOG_WINDOW_MS),
+        "day output",
+    );
+    put_job(
+        &rig,
+        "month-boundary",
+        &terminal("month-boundary", high_water - RECORD_WINDOW_MS),
+        "month output",
+    );
+    put_job(
+        &rig,
+        "future",
+        &terminal("future", high_water + 1),
+        "future output",
+    );
+    serve(&rig);
+    assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
+    assert_eq!(
+        log_of(&rig, "day-boundary").as_deref(),
+        Some("day output\n")
+    );
+    assert_eq!(log_of(&rig, "future").as_deref(), Some("future output\n"));
+    assert!(rig.dir.join("state/jobs/month-boundary.json").exists());
+    assert_eq!(
+        rig.read("state/job-validity-clock.json")["high_water_ms"],
+        high_water
+    );
+}
+
 /// A running job never expires. Its age changes nothing.
 #[test]
 fn a_running_job_never_expires() {

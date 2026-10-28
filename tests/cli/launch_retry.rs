@@ -2545,6 +2545,59 @@ fn a_replay_after_the_retention_pass_removed_the_metadata_refuses_new_execution(
     assert!(!rig.dir.join("state/jobs/expired.json").exists());
 }
 
+/// Deleting a record advances the validity fence before a wall-clock rollback.
+#[test]
+fn retention_clock_deletion_still_fences_a_replay_after_rollback() {
+    let rig = Rig::new("retention-replay-rollback");
+    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+    let created = now();
+    let deletion = created + 30 * 86_400_000 + 1;
+    rig.put(
+        "state/job-validity-clock.json",
+        &json!({"version":1,"high_water_ms":created}),
+    );
+    rig.put(
+        "state/jobs/expired.json",
+        &json!({
+            "id":"expired","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
+            "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
+            "started_ms":created,"ended_ms":created,"timeout_ms":null,"idle_timeout_ms":null,
+            "validity":{"version":1,"created_ms":created}
+        }),
+    );
+    fs::write(rig.dir.join("state/jobs/expired.log"), "old output\n").unwrap();
+    fs::write(rig.dir.join("clock"), deletion.to_string()).unwrap();
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
+    assert_eq!(
+        rig.read("state/job-validity-clock.json")["high_water_ms"],
+        deletion
+    );
+    fs::write(rig.dir.join("clock"), (created + 1_000).to_string()).unwrap();
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(out.status.success(), "{out:?}");
+    let request = job_launch_request_at(&rig, "expired", &["true"], created);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "1",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["code"], "JOB_EXPIRED", "{error}");
+    assert!(!rig.dir.join("state/jobs/expired.json").exists());
+    assert_eq!(
+        rig.read("state/job-validity-clock.json")["high_water_ms"],
+        deletion
+    );
+    let log = rig.log("herdr.log");
+    assert!(!log.contains("pane run"), "{log}");
+    assert!(!log.contains("tab create"), "{log}");
+}
+
 /// A correlated replay after the retention pass removed the record stays read-only. It
 /// returns the saved result and dispatches nothing, and the pass never brings the record
 /// back.
