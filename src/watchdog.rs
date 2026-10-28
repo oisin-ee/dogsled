@@ -40,19 +40,17 @@ pub fn observe(probe: &mut Probe, previous: Option<&Probe>, now: u64) {
         let old = previous.and_then(|p| p.agent_panes.iter().find(|a| a.pane == agent.pane));
         agent.state_since_ms = Some(
             old.filter(|a| {
-                // The lifecycle owner decides whether the state changed. Herdr's `idle`
-                // and `done` are one state, so a flip between them is no new event.
-                (a.state == agent.state
-                    || (turn_ended(state_of(a), a.state.as_str())
-                        && turn_ended(state_of(agent), agent.state.as_str())))
+                state_of(a) == state_of(agent)
                     && a.transcript == agent.transcript
                     && a.transcript_modified == agent.transcript_modified
             })
             .and_then(|a| a.state_since_ms)
             .unwrap_or(now),
         );
-        agent.stalled_since_ms = if matches!(agent.state.as_str(), "working" | "unknown")
-            && agent.transcript.is_some()
+        agent.stalled_since_ms = if matches!(
+            state_of(agent),
+            crate::lifecycle::State::Working | crate::lifecycle::State::Unknown
+        ) && agent.transcript.is_some()
         {
             agent
                 .transcript_modified
@@ -116,14 +114,12 @@ fn state_of(agent: &crate::probe::Agent) -> crate::lifecycle::State {
 /// string never decides it on its own: Herdr's `done` alone is not the native `done`.
 /// The check-in reaches a stopped, asking or blocked agent as well as a waiting one.
 #[must_use]
-pub fn turn_ended(state: crate::lifecycle::State, terminal: &str) -> bool {
+pub fn turn_ended(state: crate::lifecycle::State) -> bool {
     use crate::lifecycle::State;
-    match state {
-        State::Waiting | State::Stopped | State::Asking | State::Blocked | State::Done => true,
-        // A pending handoff is a live turn while the agent still works.
-        State::Finishing => terminal != "working",
-        _ => false,
-    }
+    matches!(
+        state,
+        State::Waiting | State::Stopped | State::Asking | State::Blocked | State::Done
+    )
 }
 
 fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
@@ -133,7 +129,7 @@ fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
         parents.retain(|pane, parent| {
             probe.agent_panes.iter().any(|agent| {
                 agent.pane == *pane
-                    && !turn_ended(state_of(agent), agent.state.as_str())
+                    && !turn_ended(state_of(agent))
                     && parent
                         .transcript
                         .as_ref()
@@ -266,12 +262,7 @@ fn item_state<'a>(
         // reads as a finished handoff.
         let state = match state_of(agent) {
             crate::lifecycle::State::Done => "finished".to_owned(),
-            crate::lifecycle::State::Waiting
-            | crate::lifecycle::State::Stopped
-            | crate::lifecycle::State::Asking
-            | crate::lifecycle::State::Blocked
-            | crate::lifecycle::State::Finishing => state_of(agent).as_str().to_owned(),
-            _ => agent.state.clone(),
+            state => state.as_str().to_owned(),
         };
         Some((
             host,
@@ -523,7 +514,7 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
                 .find(|h| h.host.is_local() && h.fresh(now))
                 .and_then(|h| h.probe.as_ref())
                 .and_then(|p| p.agent_panes.iter().find(|a| a.pane == owner))
-                .filter(|a| turn_ended(state_of(a), a.state.as_str()))
+                .filter(|a| turn_ended(state_of(a)))
             else {
                 continue;
             };

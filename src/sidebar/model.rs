@@ -71,7 +71,8 @@ impl Card {
                 "unknown" => ("unknown", Tone::Alert),
                 "idle" => ("idle", Tone::Idle),
                 "done" => ("done", Tone::Idle),
-                "queued" | "starting" => ("queued", Tone::Queued),
+                "queued" => ("queued", Tone::Queued),
+                "starting" => ("starting", Tone::Queued),
                 state if state.starts_with("exit ") => ("failed", Tone::Alert),
                 _ if row.group == Group::Attention => ("blocked", Tone::Alert),
                 _ => ("queued", Tone::Queued),
@@ -733,18 +734,23 @@ pub mod tests {
     /// the state, so the two never disagree.
     #[test]
     fn the_label_is_the_lifecycle_display_name() {
-        for (state, pill, tone) in [
-            ("working", "working", Tone::Busy),
-            ("blocked", "blocked", Tone::Alert),
-            ("unavailable", "unavailable", Tone::Alert),
-            ("unknown", "unknown", Tone::Alert),
-            ("idle", "idle", Tone::Idle),
-            ("done", "done", Tone::Idle),
-            ("queued", "queued", Tone::Queued),
-            ("starting", "queued", Tone::Queued),
+        use crate::lifecycle::{State, display};
+        for (state, tone) in [
+            (State::Working, Tone::Busy),
+            (State::Blocked, Tone::Alert),
+            (State::Lost, Tone::Alert),
+            (State::Unknown, Tone::Alert),
+            (State::Waiting, Tone::Idle),
+            (State::Stopped, Tone::Idle),
+            (State::Asking, Tone::Idle),
+            (State::Finishing, Tone::Idle),
+            (State::Done, Tone::Idle),
+            (State::Queued, Tone::Queued),
+            (State::Starting, Tone::Queued),
         ] {
-            let card = Card::from_row(&row("s", Group::Running, state, 1));
-            assert_eq!((card.pill.as_str(), card.tone), (pill, tone), "{state}");
+            let label = display(state);
+            let card = Card::from_row(&row("s", Group::Running, label, 1));
+            assert_eq!((card.pill.as_str(), card.tone), (label, tone), "{state:?}");
         }
     }
 

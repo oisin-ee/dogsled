@@ -212,6 +212,24 @@ impl Drop for Rig {
 }
 
 #[test]
+fn lifecycle_changes_rearm_the_state_clock_but_herdr_done_does_not() {
+    let rig = Rig::new();
+    let mut probe = rig.reports(1, "idle", "idle", Some(1))[0]
+        .probe
+        .take()
+        .unwrap();
+    probe.agent_panes[1].state_since_ms = Some(1);
+    let mut waiting = probe.clone();
+    waiting.agent_panes[1].owns_open = true;
+    observe(&mut waiting, Some(&probe), 10);
+    assert_eq!(waiting.agent_panes[1].state_since_ms, Some(10));
+    let mut unread = waiting.clone();
+    unread.agent_panes[1].state = "done".into();
+    observe(&mut unread, Some(&waiting), 20);
+    assert_eq!(unread.agent_panes[1].state_since_ms, Some(10));
+}
+
+#[test]
 fn stall_requires_old_transcript_and_working_or_unknown() {
     let rig = Rig::new();
     for (state, modified, stalled) in [
@@ -443,7 +461,12 @@ fn closed_item_does_not_observe_reused_or_retracked_pane() {
 /// that stopped without a signal. The lifecycle owner derives both states.
 #[test]
 fn a_check_in_reaches_an_idle_owner_and_a_stopped_owner() {
-    for owner in ["idle", "done"] {
+    for (owner, owns_open) in [
+        ("idle", true),
+        ("idle", false),
+        ("done", false),
+        ("blocked", false),
+    ] {
         let rig = Rig::new();
         rig.item("agent");
         // A working owner is in a turn: no check-in.
@@ -451,7 +474,19 @@ fn a_check_in_reaches_an_idle_owner_and_a_stopped_owner() {
         tick(&rig.fleet(), &reports, 1).unwrap();
         assert_eq!(rig.prompts(), 0, "{owner}");
         // The owner's turn ended: it hears about its open child.
-        let reports = rig.reports(1_860_001, owner, "working", Some(1));
+        let mut reports = rig.reports(1_860_001, owner, "working", Some(1));
+        let agent = &mut reports[0].probe.as_mut().unwrap().agent_panes[0];
+        agent.owns_open = owns_open;
+        assert_eq!(
+            state_of(agent),
+            if owns_open {
+                crate::lifecycle::State::Waiting
+            } else if owner == "blocked" {
+                crate::lifecycle::State::Blocked
+            } else {
+                crate::lifecycle::State::Stopped
+            }
+        );
         tick(&rig.fleet(), &reports, 1_860_001).unwrap();
         assert_eq!(rig.prompts(), 1, "{owner}");
         assert!(rig.check_ins()[0].contains("test-child"), "{owner}");

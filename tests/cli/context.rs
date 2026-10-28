@@ -244,6 +244,27 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     assert!(!out.contains("Ready to merge"), "{out}");
 }
 
+#[test]
+fn status_rows_derive_lifecycle_even_without_a_published_label() {
+    let rig = Rig::new("context-status-lifecycle");
+    for (terminal, expected) in [
+        ("idle", "stopped"),
+        ("done", "stopped"),
+        ("blocked", "blocked"),
+    ] {
+        rig.snapshot("state/host.json", now(), 1.0, 8);
+        let mut host = rig.read("state/host.json");
+        host["probe"]["agent_panes"][0]["state"] = json!(terminal);
+        host["probe"]["agent_panes"][0]["lifecycle"] = json!("done");
+        rig.put("state/host.json", &host);
+        let output = rig.run(&["status"]);
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(&format!("w1:p1 {expected} ")), "{text}");
+        assert!(text.contains(&format!("({expected} 1)")), "{text}");
+    }
+}
+
 /// The board's own word stays the same, and the lifecycle state travels beside it. An
 /// unreadable terminal state is `unknown`: it never reads as `stopped` or `done`.
 #[test]

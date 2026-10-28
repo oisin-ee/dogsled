@@ -611,15 +611,9 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     } else {
         crate::lifecycle::display(lifecycle.state).to_owned()
     };
-    // A turn that ended waits for input; only a recorded final handoff has finished.
-    let terminal = agent.map_or("", |a| a.state.as_str());
-    let waiting = agent.is_some() && crate::watchdog::turn_ended(lifecycle.state, terminal);
+    let waiting = crate::watchdog::turn_ended(lifecycle.state);
     let finished = lifecycle.state == crate::lifecycle::State::Done;
-    // NEEDS YOU holds the states the owner must act on: a question, a blocker, a stopped
-    // turn, a lost agent, or an unreadable one. A child the board cannot see yet keeps
-    // its group: the board's own wording for it says `starting`.
-    let needs_attention =
-        !host_up || stalled || (agent.is_some() && group_for(lifecycle.state) == Group::Attention);
+    let needs_attention = stalled || group_for(lifecycle.state) == Group::Attention;
     let group = if needs_attention {
         Group::Attention
     } else if finished && waiting && (dirty || (ahead.is_some() && !landed)) {
@@ -911,7 +905,11 @@ fn enrich_rows(
             .pane
             .as_deref()
             .or_else(|| item.map(|item| item.pane.as_str()));
-        row.unseen = unseen(row, pane, messages);
+        let ended = item.is_some_and(|item| {
+            item.closed_ms.is_some()
+                || crate::watchdog::turn_ended(crate::items::lifecycle(item, &status.hosts).state)
+        });
+        row.unseen = unseen(row, pane, messages, ended);
         if row.group != Group::ToLand {
             continue;
         }
@@ -1013,8 +1011,8 @@ fn classify_cleanup(row: &Row, local_ancestry_status: i32) -> Option<portal_type
 
 /// Only the newest worker-to-owner inbox message matters. Pending and claimed
 /// messages are unread; delivered (acknowledged) and failed messages are not.
-fn unseen(row: &Row, pane: Option<&str>, messages: &[crate::inbox::Record]) -> bool {
-    if row.kind != "agent" || !matches!(row.state.as_str(), "idle" | "done" | "closed") {
+fn unseen(row: &Row, pane: Option<&str>, messages: &[crate::inbox::Record], ended: bool) -> bool {
+    if row.kind != "agent" || !ended {
         return false;
     }
     let (Some(owner), Some(pane)) = (row.owner_pane.as_deref(), pane) else {
@@ -1839,18 +1837,75 @@ mod tests {
         assert!(board.rows[0].unseen);
         let read = record("two", 2, crate::inbox::State::Delivered);
         let messages = [unread, read];
-        assert!(!unseen(&board.rows[0], Some("worker"), &messages));
-        for state in ["idle", "done", "closed"] {
-            board.rows[0].state = state.into();
-            assert!(unseen(&board.rows[0], Some("worker"), &messages[..1]));
-        }
-        board.rows[0].state = "working".into();
-        assert!(!unseen(&board.rows[0], Some("worker"), &messages[..1]));
-        board.rows[0].state = "idle".into();
+        assert!(!unseen(&board.rows[0], Some("worker"), &messages, true));
+        assert!(unseen(&board.rows[0], Some("worker"), &messages[..1], true));
+        assert!(!unseen(
+            &board.rows[0],
+            Some("worker"),
+            &messages[..1],
+            false
+        ));
         board.rows[0].owner_pane = None;
-        assert!(!unseen(&board.rows[0], Some("worker"), &messages[..1]));
+        assert!(!unseen(
+            &board.rows[0],
+            Some("worker"),
+            &messages[..1],
+            true
+        ));
         std::fs::remove_dir_all(ledger.dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn unread_blocked_agent_message_uses_lifecycle_not_the_display_label() {
+        let status = status(
+            vec![host(
+                "local",
+                "local",
+                vec![agent("worker", "pi", "blocked")],
+            )],
+            vec![item("child", "local", "worker")],
+        );
+        let mut board = build(&status, None, NOW);
+        let message = crate::inbox::Record {
+            id: "unread".into(),
+            terminal: "term_owner".into(),
+            pane: "w1:p1".into(),
+            from: crate::inbox::Sender {
+                pane: Some("worker".into()),
+                ..Default::default()
+            },
+            kind: "message".into(),
+            text: "Approval required".into(),
+            created_ms: 1,
+            state: crate::inbox::State::Pending,
+            lease: crate::backoff::Backoff::default(),
+            reason: None,
+            done_ms: None,
+        };
+        enrich_rows(
+            &mut board,
+            &status,
+            &[],
+            &[message],
+            &crate::shell::Fake::new(),
+        );
+        assert!(board.rows[0].unseen);
+    }
+
+    #[test]
+    fn explicit_questions_and_blockers_need_the_owner() {
+        use crate::lifecycle::{Evidence, Signal, classify};
+        for signal in [Signal::Ask, Signal::Blocked] {
+            let state = classify(&Evidence {
+                terminal: Some("idle"),
+                owns_open: true,
+                signal: Some(signal),
+                ..Evidence::default()
+            })
+            .state;
+            assert_eq!(group_for(state), Group::Attention);
+        }
     }
 
     #[test]
@@ -2041,8 +2096,7 @@ mod tests {
         let mut waiting = agent("w2:p1", "pi", "idle");
         waiting.owns_open = true;
         let stopped = agent("w2:p2", "pi", "idle");
-        let mut asking = agent("w2:p3", "pi", "idle");
-        asking.handoff = Some("none".into());
+        let blocked = agent("w2:p3", "pi", "blocked");
         let mut finishing = agent("w2:p4", "pi", "idle");
         finishing.finishing = true;
         finishing.handoff = Some("accepted".into());
@@ -2054,7 +2108,7 @@ mod tests {
         let host = host(
             "8103",
             "netcup",
-            vec![waiting, stopped, asking, finishing, done, working, unknown],
+            vec![waiting, stopped, blocked, finishing, done, working, unknown],
         );
         let items: Vec<Item> = [
             "w2:p1", "w2:p2", "w2:p3", "w2:p4", "w2:p5", "w2:p6", "w2:p7",
@@ -2074,7 +2128,7 @@ mod tests {
             words,
             [
                 ("i1", "idle"),    // stopped: a turn that ended with no signal
-                ("i2", "idle"),    // asking
+                ("i2", "blocked"), // explicit terminal blocker
                 ("i6", "unknown"), // an unreadable terminal state
                 ("i0", "idle"),    // owns open work
                 ("i3", "idle"),    // finishing
@@ -2122,12 +2176,12 @@ mod tests {
         let mut stopped = agent("w2:p1", "pi", "idle");
         stopped.handoff = Some("none".into());
         let blocked = agent("w2:p2", "pi", "blocked");
-        let asking = agent("w2:p3", "pi", "idle");
+        let second_stopped = agent("w2:p3", "pi", "idle");
         let unknown = agent("w2:p5", "pi", "unknown");
         // Herdr reports `done`, but the agent never called the native `done`.
         let mut herdr_done = agent("w2:p6", "pi", "done");
         herdr_done.handoff = Some("none".into());
-        let agents = vec![stopped, blocked, asking, unknown, herdr_done];
+        let agents = vec![stopped, blocked, second_stopped, unknown, herdr_done];
         let panes = ["w2:p1", "w2:p2", "w2:p3", "w2:p5", "w2:p6"];
         let items: Vec<Item> = panes
             .iter()
@@ -2149,7 +2203,7 @@ mod tests {
             [
                 ("i0", Group::Attention), // stopped
                 ("i1", Group::Attention), // blocked
-                ("i2", Group::Attention), // asking
+                ("i2", Group::Attention), // stopped
                 ("i3", Group::Attention), // unknown
                 ("i4", Group::Attention), // Herdr done without the native done
             ],
