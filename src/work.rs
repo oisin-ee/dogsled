@@ -1170,10 +1170,25 @@ fn finish(
         _ => None,
     };
     let item = item(request, host.id.clone(), pane, &result, now, owner_session)?;
-    items::record(fleet.ledger, item.clone())?;
-    // The custody starts at the origin: the owner holds the child until a lead claims it.
-    if item.kind == "agent" {
-        crate::custody::ensure(fleet.ledger, &item)?;
+    record_child(fleet.ledger, &item, result)
+}
+
+/// Record the launched child and its custody, and return the launch result.
+///
+/// The custody starts at the origin: the owner holds the child until a lead claims it.
+/// A custody record that cannot be read or written is a diagnostic only. The child is
+/// running, and a claim derives the origin record from the item when the custody file
+/// holds none, so a custody failure never turns confirmed execution into a failed
+/// launch.
+pub(crate) fn record_child(ledger: &Ledger, item: &Item, result: Value) -> Result<Value> {
+    items::record(ledger, item.clone())?;
+    if item.kind == "agent"
+        && let Err(error) = crate::custody::ensure(ledger, item)
+    {
+        eprintln!(
+            "dogsled: custody record for {} failed: {error}; a claim derives it from the item",
+            item.id
+        );
     }
     Ok(result)
 }

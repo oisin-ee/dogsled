@@ -65,35 +65,35 @@ pub struct Claim {
     pub revision: u64,
 }
 
-/// What the recording host proves about an item's owner pane.
+/// What the recording host proves about the custodian pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneState {
     /// The pane list could not be read. It proves nothing.
     Unreadable,
-    /// The pane list was read, and the owner pane is not in it.
+    /// The pane list was read, and the custodian pane is not in it.
     Gone,
-    /// The pane list was read, and the owner pane is in it.
+    /// The pane list was read, and the custodian pane is in it.
     Live,
 }
 
-/// What the recording host proves about the owner session.
+/// What the recording host proves about the custodian session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     /// The agent list could not be read. It proves nothing.
     Unreadable,
-    /// No agent runs in the owner pane. The session ended.
+    /// No agent runs in the custodian pane. The session ended.
     Ended,
-    /// An agent runs in the owner pane, with this session identity.
+    /// An agent runs in the custodian pane, with this session identity.
     Running(String),
 }
 
-/// What the evidence proves about the owner.
+/// What the evidence proves about the current custodian.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
-    /// The owner still holds the child.
+    /// The custodian still holds the child.
     Owned,
-    /// The owner is gone: its pane is gone, or its session provably ended.
+    /// The custodian is gone: its pane is gone, or its session provably ended.
     Orphaned,
     /// The evidence cannot prove either.
     Unknown,
@@ -146,8 +146,11 @@ pub enum Refusal {
         expected: u64,
         actual: u64,
     },
-    /// The owner still holds the child.
-    #[error("{item}: the owner is still there; the claim is refused")]
+    /// The custody moved to another custodian before the claim took the lock.
+    #[error("{item}: the custody moved while the claim was made; the claim is refused")]
+    Moved { item: String },
+    /// The current custodian still holds the child.
+    #[error("{item}: the custodian is still there; the claim is refused")]
     NotOrphan { item: String },
     /// The evidence cannot prove the child is an orphan.
     #[error("{item}: the evidence cannot prove the child is an orphan; the claim is refused")]
@@ -217,21 +220,21 @@ impl Custody {
     }
 }
 
-/// What the evidence proves about the owner of `item`.
+/// What the evidence proves about the current custodian of a custody record.
 ///
-/// The owner pane being gone proves an orphan. A surviving pane whose owner session has
-/// ended proves an orphan too: the shell stayed, the lead exited. An unreadable list
-/// proves nothing, and a legacy item records no owner session, so no session of it can
-/// have ended. Such a child is unknown, not orphaned.
+/// The custodian pane being gone proves an orphan. A surviving pane whose custodian
+/// session has ended proves an orphan too: the shell stayed, the lead exited. An
+/// unreadable list proves nothing, and a legacy custody records no custodian session, so
+/// no session of it can have ended. Such a child is unknown, not orphaned.
 #[must_use]
-pub fn classify(item: &Item, panes: &PaneState, session: &SessionState) -> Status {
+pub fn classify(custody: &Custody, panes: &PaneState, session: &SessionState) -> Status {
     match panes {
         PaneState::Unreadable => Status::Unknown,
         PaneState::Gone => Status::Orphaned,
         PaneState::Live => {
-            // A legacy item records no owner session. The session-ended rule needs one,
-            // and it never guesses, so the child stays unknown.
-            let Some(recorded) = item.owner_session.as_deref() else {
+            // A legacy custody records no custodian session. The session-ended rule needs
+            // one, and it never guesses, so the child stays unknown.
+            let Some(recorded) = custody.custodian_session.as_deref() else {
                 return Status::Unknown;
             };
             match session {
@@ -241,7 +244,7 @@ pub fn classify(item: &Item, panes: &PaneState, session: &SessionState) -> Statu
                     if live == recorded {
                         Status::Owned
                     } else {
-                        // The pane id was reused by another session. The owner is gone.
+                        // The pane id was reused by another session. The custodian is gone.
                         Status::Orphaned
                     }
                 }
@@ -250,19 +253,22 @@ pub fn classify(item: &Item, panes: &PaneState, session: &SessionState) -> Statu
     }
 }
 
-/// Read the recording host's evidence about the owner pane.
+/// Read the recording host's evidence about the custodian pane.
 #[must_use]
-pub fn evidence(shell: &dyn crate::shell::Shell, owner_pane: &str) -> (PaneState, SessionState) {
+pub fn evidence(
+    shell: &dyn crate::shell::Shell,
+    custodian_pane: &str,
+) -> (PaneState, SessionState) {
     let Ok(panes) = crate::cleanup::current_panes(shell) else {
         return (PaneState::Unreadable, SessionState::Unreadable);
     };
-    if !panes.iter().any(|pane| pane.pane_id == owner_pane) {
+    if !panes.iter().any(|pane| pane.pane_id == custodian_pane) {
         return (PaneState::Gone, SessionState::Ended);
     }
     let Ok(agents) = crate::probe::agent_list(shell) else {
         return (PaneState::Live, SessionState::Unreadable);
     };
-    let agent = agents.iter().find(|agent| agent.pane == owner_pane);
+    let agent = agents.iter().find(|agent| agent.pane == custodian_pane);
     let session = match agent {
         None => SessionState::Ended,
         Some(agent) => match agent.agent_session.clone() {
@@ -312,13 +318,14 @@ pub fn claim(
     shell: &dyn crate::shell::Shell,
 ) -> std::result::Result<ClaimOutcome, ClaimError> {
     // The evidence is read before the lock, so the lock never waits on a pane list.
-    let owner_pane = owner_pane(ledger, &request.item)?;
-    let (panes, session) = evidence(shell, &owner_pane);
+    // It describes the current custodian, never the origin owner.
+    let probed = custodian_pane(ledger, &request.item)?;
+    let (panes, session) = evidence(shell, &probed);
     // The lock carries the host error. A refusal is kept apart, so the caller can tell
     // a refused claim from a host that could not read or write its records.
     let mut refused: Option<Refusal> = None;
     let result = ledger.with_lock(LOCK, || {
-        match claim_locked(ledger, request, &panes, &session) {
+        match claim_locked(ledger, request, &probed, &panes, &session) {
             Ok(outcome) => Ok(outcome),
             Err(ClaimError::Refusal(refusal)) => {
                 refused = Some(refusal);
@@ -336,10 +343,11 @@ pub fn claim(
     }
 }
 
-/// The pane that holds the origin of `item`.
-fn owner_pane(ledger: &Ledger, item: &str) -> std::result::Result<String, ClaimError> {
+/// The pane that holds the custody of `item` now: the custodian once a record exists,
+/// otherwise the origin owner.
+fn custodian_pane(ledger: &Ledger, item: &str) -> std::result::Result<String, ClaimError> {
     if let Some(record) = get(ledger, item)? {
-        return Ok(record.owner_pane);
+        return Ok(record.custodian_pane);
     }
     crate::items::list(ledger)?
         .into_iter()
@@ -357,6 +365,7 @@ fn owner_pane(ledger: &Ledger, item: &str) -> std::result::Result<String, ClaimE
 fn claim_locked(
     ledger: &Ledger,
     request: &ClaimRequest,
+    probed: &str,
     panes: &PaneState,
     session: &SessionState,
 ) -> std::result::Result<ClaimOutcome, ClaimError> {
@@ -395,8 +404,16 @@ fn claim_locked(
         }
         .into());
     }
-    // Only a proven orphan can be claimed.
-    match classify(item, panes, session) {
+    // The evidence describes one custodian. The custody moved since it was read, so the
+    // evidence proves nothing about the custodian that holds it now.
+    if record.custodian_pane != probed {
+        return Err(Refusal::Moved {
+            item: request.item.clone(),
+        }
+        .into());
+    }
+    // Only a proven orphan can be claimed: the current custodian must be gone.
+    match classify(&record, panes, session) {
         Status::Orphaned => {}
         Status::Owned => {
             return Err(Refusal::NotOrphan {
@@ -498,6 +515,22 @@ mod tests {
         shell
     }
 
+    /// A pane list that holds the custodian pane, running `session`.
+    fn shell_with_custodian(pane: &str, session: &str) -> Fake {
+        let shell = Fake::new();
+        shell.on(
+            "herdr pane list",
+            &format!(r#"{{"result":{{"panes":[{{"pane_id":"{pane}"}}]}}}}"#),
+        );
+        shell.on(
+            "herdr agent list",
+            &format!(
+                r#"{{"result":{{"agents":[{{"pane_id":"{pane}","agent":"pi","agent_session":{{"kind":"path","value":"{session}"}}}}]}}}}"#
+            ),
+        );
+        shell
+    }
+
     /// A pane list that holds the owner pane, and no agent runs in it.
     fn shell_with_idle_owner() -> Fake {
         let shell = Fake::new();
@@ -578,10 +611,11 @@ mod tests {
     fn a_legacy_item_is_never_session_ended() {
         let ledger = ledger();
         let item = item(&ledger, None);
-        // The pane lives and runs a session, but the item records none.
+        let custody = Custody::origin(&item);
+        // The pane lives and runs a session, but the custody records none.
         assert_eq!(
             classify(
-                &item,
+                &custody,
                 &PaneState::Live,
                 &SessionState::Running("other-session".into())
             ),
@@ -589,7 +623,7 @@ mod tests {
         );
         // The pane is gone: that still proves an orphan.
         assert_eq!(
-            classify(&item, &PaneState::Gone, &SessionState::Ended),
+            classify(&custody, &PaneState::Gone, &SessionState::Ended),
             Status::Orphaned
         );
         std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -599,17 +633,18 @@ mod tests {
     fn an_owner_pane_without_an_agent_is_an_orphaned_session() {
         let ledger = ledger();
         let item = item(&ledger, Some("owner-session"));
+        let custody = Custody::origin(&item);
         // The pane survives, but the owner's agent session ended.
         let shell = shell_with_idle_owner();
         let (panes, session) = evidence(&shell, "w1:p1");
         assert_eq!(panes, PaneState::Live);
         assert_eq!(session, SessionState::Ended);
-        assert_eq!(classify(&item, &panes, &session), Status::Orphaned);
+        assert_eq!(classify(&custody, &panes, &session), Status::Orphaned);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
     #[test]
-    fn a_reused_pane_with_another_session_is_not_the_owner() {
+    fn a_reused_pane_with_another_session_is_not_the_custodian() {
         let ledger = ledger();
         let item = item(&ledger, Some("owner-session"));
         ensure(&ledger, &item).unwrap();
@@ -617,10 +652,47 @@ mod tests {
         let shell = shell_with_owner("other-session");
         let (panes, session) = evidence(&shell, "w1:p1");
         assert_eq!(panes, PaneState::Live);
-        assert_eq!(classify(&item, &panes, &session), Status::Orphaned);
         let custody = get(&ledger, "child").unwrap().expect("the custody exists");
+        assert_eq!(classify(&custody, &panes, &session), Status::Orphaned);
         assert!(custody.held_by("w1:p1", Some("owner-session")));
         assert!(!custody.held_by("w1:p1", Some("other-session")));
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn a_claim_is_refused_while_the_custodian_lives_and_allowed_after_it_is_gone() {
+        let ledger = ledger();
+        let item = item(&ledger, Some("owner-session"));
+        ensure(&ledger, &item).unwrap();
+        // The origin owner is gone, so the first lead may claim.
+        let ClaimOutcome::Claimed { custody } =
+            claim(&ledger, &request(&host(), 0), &shell_without_owner()).unwrap()
+        else {
+            panic!("the claim was refused");
+        };
+        assert_eq!(custody.custodian_pane, "w3:p1");
+        let before = std::fs::read(ledger.dir.join(FILE)).unwrap();
+        // The custodian's pane lives and runs its session: the child is not an orphan.
+        let mut second = request(&host(), 1);
+        second.pane = "w5:p1".into();
+        second.session = Some("second-claimant".into());
+        let live = shell_with_custodian("w3:p1", "claimant-session");
+        let error = claim(&ledger, &second, &live).unwrap_err();
+        assert!(
+            matches!(refusal(&error), Refusal::NotOrphan { .. }),
+            "{error:?}"
+        );
+        // The refused claim wrote nothing.
+        assert_eq!(std::fs::read(ledger.dir.join(FILE)).unwrap(), before);
+        // Once the custodian's pane is gone, the next lead claims at the new revision.
+        let ClaimOutcome::Claimed { custody } =
+            claim(&ledger, &second, &shell_without_owner()).unwrap()
+        else {
+            panic!("the claim was refused");
+        };
+        assert_eq!(custody.revision, 2);
+        assert_eq!(custody.custodian_pane, "w5:p1");
+        assert_eq!(custody.previous_custodian(), Some("w3:p1"));
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
@@ -763,8 +835,9 @@ mod tests {
     fn an_unreadable_pane_list_proves_nothing() {
         let ledger = ledger();
         let item = item(&ledger, Some("owner-session"));
+        let custody = Custody::origin(&item);
         assert_eq!(
-            classify(&item, &PaneState::Unreadable, &SessionState::Unreadable),
+            classify(&custody, &PaneState::Unreadable, &SessionState::Unreadable),
             Status::Unknown
         );
         let shell = shell_without_panes();
@@ -773,6 +846,37 @@ mod tests {
             matches!(refusal(&error), Refusal::Unproven { .. }),
             "{error:?}"
         );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn a_custody_that_moved_after_the_evidence_was_read_is_refused() {
+        let ledger = ledger();
+        let item = item(&ledger, Some("owner-session"));
+        ensure(&ledger, &item).unwrap();
+        // The evidence is read for the origin owner, which is gone.
+        let probed = custodian_pane(&ledger, "child").unwrap();
+        assert_eq!(probed, "w1:p1");
+        let (panes, session) = evidence(&shell_without_owner(), &probed);
+        // The custody moves to a live custodian before the claim takes the lock.
+        let ClaimOutcome::Claimed { custody } =
+            claim(&ledger, &request(&host(), 0), &shell_without_owner()).unwrap()
+        else {
+            panic!("the claim was refused");
+        };
+        assert_eq!(custody.custodian_pane, "w3:p1");
+        // The stale evidence would prove an orphan, but the custody moved.
+        let mut stale = request(&host(), 1);
+        stale.pane = "w5:p1".into();
+        stale.session = Some("second-claimant".into());
+        let error = claim_locked(&ledger, &stale, &probed, &panes, &session).unwrap_err();
+        assert!(
+            matches!(refusal(&error), Refusal::Moved { .. }),
+            "{error:?}"
+        );
+        let custody = get(&ledger, "child").unwrap().expect("the custody exists");
+        assert_eq!(custody.revision, 1);
+        assert_eq!(custody.custodian_pane, "w3:p1");
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 }

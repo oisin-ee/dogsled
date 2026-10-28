@@ -665,6 +665,40 @@ fn the_validity_clock_never_moves_back() {
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
 
+/// A custody record that cannot be written after the child started is a diagnostic only.
+/// The launch result is returned, and the child stays recorded.
+#[test]
+fn a_custody_failure_after_the_launch_keeps_the_launch_result() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let item = Item {
+        id: "child".into(),
+        kind: "agent".into(),
+        host: "local".into(),
+        pane: "child".into(),
+        owner_pane: "owner".into(),
+        owner_session: Some("owner-session".into()),
+        created_ms: 100,
+        ..Item::default()
+    };
+    // The custody file holds something that is not a custody record, so the record cannot
+    // be read and cannot be written back.
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    std::fs::write(ledger.dir.join("custody.json"), b"not a custody record").unwrap();
+    // The custody record cannot be read or written here.
+    assert!(
+        crate::custody::ensure(&ledger, &item).is_err(),
+        "the custody store must fail here"
+    );
+    let result = work::record_child(&ledger, &item, json!({"pane":"child"}));
+    let result = result.expect("a custody failure must not fail the launch");
+    assert_eq!(result["pane"], json!("child"));
+    // The child is recorded, so the launch is not lost.
+    let recorded = items::list(&ledger).unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "child");
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
 /// A launch retires its own pane only when the terminal identity is proven: the launch
 /// recorded one, the pane is listed, and the listed terminal equals it. Missing,
 /// unlisted, or different identity is never proof, so the pane stays open.
