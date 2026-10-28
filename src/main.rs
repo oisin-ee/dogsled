@@ -559,17 +559,27 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
         HostCommand::Close {
             pane,
             pushed,
+            stopped_orphan,
             landed,
             writer,
         } => {
-            let guard = close::Guard::from_flags(pushed, landed, writer);
-            let closed = close::local(
-                node.shell,
-                node.ledger,
-                &pane,
-                &close::Caller::default(),
-                guard,
-            )?;
+            let closed = if let Some(episode) = stopped_orphan {
+                close::stopped_orphan(
+                    node.shell,
+                    node.ledger,
+                    &pane,
+                    &close::Caller::default(),
+                    &serde_json::from_str(&episode)?,
+                )?
+            } else {
+                close::local(
+                    node.shell,
+                    node.ledger,
+                    &pane,
+                    &close::Caller::default(),
+                    close::Guard::from_flags(pushed, landed, writer),
+                )?
+            };
             print(true, &closed, String::new)?;
         }
         HostCommand::Parent { pane } => {

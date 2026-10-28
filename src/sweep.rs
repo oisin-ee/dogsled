@@ -441,11 +441,12 @@ fn settle(
             .any(|p| p.pane_id == item.pane)
             .then(|| format!("{owner}; its pane runs no agent"));
     };
-    if !matches!(agent.state.as_str(), "idle" | "done") {
-        return Some(format!("{owner}; the child is {}", agent.state));
+    let state = crate::lifecycle::of_agent(agent, crate::lifecycle::Host::Up).state;
+    if state == crate::lifecycle::State::Stopped {
+        return settle_stopped(fleet, item, report, agent, now);
     }
-    if !agent.done {
-        return Some(format!("{owner}; the child has not called done"));
+    if state != crate::lifecycle::State::Done {
+        return Some(format!("{owner}; the child is {}", state.as_str()));
     }
     match crate::unit_request::managed_returned(fleet.ledger, &item.id) {
         Ok(Some(false)) => return Some("unit terminal acknowledgement is unresolved".into()),
@@ -478,6 +479,84 @@ fn settle(
         }
         Err(error) => Some(format!("{owner}; {}", reason(&error))),
     }
+}
+
+/// Preserve output before closing stopped resources. This never creates a result or handoff.
+fn settle_stopped(
+    fleet: &Fleet,
+    item: &Item,
+    report: &HostReport,
+    agent: &crate::probe::Agent,
+    now: u64,
+) -> Option<String> {
+    let episode = match crate::close::StoppedOrphan::recorded(fleet.ledger, &item.id, agent) {
+        Ok(episode) => episode,
+        Err(error) => return Some(reason(&error)),
+    };
+    let resource_only = match crate::unit_request::managed_returned(fleet.ledger, &item.id) {
+        Ok(returned) => returned == Some(false),
+        Err(error) => return Some(format!("cannot read unit evidence: {error}")),
+    };
+    let reply = match crate::watchdog::item_tail(fleet, item, &report.host) {
+        Ok(text) => Reply {
+            seq: agent.completion_seq.unwrap_or_default(),
+            text,
+            captured_ms: now,
+            ..Reply::default()
+        },
+        Err(error) => return Some(format!("cannot preserve stopped orphan reply: {error}")),
+    };
+    if let Err(error) = crate::items::orphan_reply(fleet.ledger, &item.id, reply) {
+        return Some(format!("cannot record stopped orphan reply: {error}"));
+    }
+    let reconcile = |closed: crate::close::Closed| {
+        crate::items::orphan_closed(
+            fleet.ledger,
+            &item.id,
+            now,
+            resource_only,
+            closed.retained_branch,
+        )
+    };
+    let closed = if report.host.is_local() {
+        crate::close::with_local(
+            fleet.shell,
+            fleet.ledger,
+            &item.pane,
+            &crate::close::Caller::from_env(),
+            Guard::StoppedOrphan { episode: &episode },
+            reconcile,
+        )
+    } else {
+        serde_json::to_string(&episode)
+            .map_err(crate::error::Error::from)
+            .and_then(|episode| {
+                fleet
+                    .remote_setup::<crate::close::Closed>(
+                        &report.host,
+                        &[
+                            "close".into(),
+                            item.pane.clone(),
+                            "--stopped-orphan".into(),
+                            episode,
+                        ],
+                    )
+                    .and_then(reconcile)
+            })
+    };
+    if let Err(error) = closed {
+        let detail = reason(&error);
+        return Some(if detail.contains("uncommitted changes") {
+            "stopped orphan has unsaved work; kept until preservation (P3)".into()
+        } else {
+            detail
+        });
+    }
+    eprintln!(
+        "dogsled sweep: closed stopped orphan {} on {}; reply recorded; task not completed",
+        item.pane, report.host.label,
+    );
+    None
 }
 
 /// Put each untold final reply, and each new blocked state, in the owner's inbox. A reply the

@@ -1063,16 +1063,16 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
         );
         untouched(&rig, status);
     }
-    // Idle, but it never called `done`: it may wait on a question.
+    // Idle without a correlated stopped episode never authorizes closure.
     child(&rig, "idle", &tree);
     serve(&rig);
-    assert_eq!(
-        kept_reason(&rig),
-        "owner w9:p1 is gone; the child has not called done"
-    );
+    assert_eq!(kept_reason(&rig), "stopped orphan has no recorded episode");
     untouched(&rig, "not done");
     // Done, but dirty.
     rig.done("term_child", "w2:p1", 1);
+    let mut marks = rig.read("state/done.json");
+    marks["term_child"]["reply"] = json!({"seq":1,"text":"Finished","captured_ms":1,"done":true});
+    rig.put("state/done.json", &marks);
     fs::write(tree.join("note"), "x").unwrap();
     serve(&rig);
     assert!(
@@ -1086,7 +1086,9 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     git(&repo, &["update-ref", "refs/remotes/origin/main", "main"]);
     let journal = serve(&rig);
     assert!(
-        journal.contains("dogsled sweep: closed orphan w2:p1 on local (owner w9:p1 is gone)"),
+        journal.contains("dogsled handoff: closed w2:p1")
+            || journal
+                .contains("dogsled sweep: closed orphan w2:p1 on local (owner w9:p1 is gone)"),
         "{journal}"
     );
     assert!(rig.log("herdr.log").contains("workspace close w2"));
@@ -1096,6 +1098,404 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["orphans"], json!([]));
+}
+
+/// A stopped child with session/turn evidence recorded by the stopped watchdog episode.
+fn stopped_orphan(rig: &Rig, tree: &Path) {
+    orphan(rig, "i1", "w9:p1", "local");
+    child(rig, "idle", tree);
+    let transcript = rig.dir.join("stopped.jsonl");
+    fs::write(
+        &transcript,
+        format!(
+            "{}\n",
+            json!({"type":"message","message":{
+                "role":"assistant","content":[{"type":"text","text":"Stopped last reply"}]}
+            })
+        ),
+    )
+    .unwrap();
+    let mut agents = rig.read("agents.json");
+    agents["result"]["agents"][1]["agent_session"] = json!({"kind":"path","value":transcript});
+    rig.put("agents.json", &agents);
+    rig.put(
+        "state/watchdog.json",
+        &json!({
+            "last_scan_ms":null,"sent":{},"events":{},"marks":{},"notified":{},
+            "stopped":{"i1":{"pane":"w2:p1","agent_session":transcript,
+                "turn":{"state_change_seq":1,"state_since_ms":null},
+                "message_id":null,"attempts":0,"delivered":false,"prompted_after":null}}
+        }),
+    );
+}
+
+#[test]
+fn a_clean_stopped_orphan_closes_and_records_output_not_a_result() {
+    let (rig, tree) = close_rig("sweep-stopped-clean");
+    stopped_orphan(&rig, &tree);
+    // Local-only committed work stays on the retained branch, just like done orphans.
+    fs::write(tree.join("committed"), "retained\n").unwrap();
+    git(&tree, &["add", "committed"]);
+    git(&tree, &["commit", "-q", "-m", "local-only work"]);
+    let journal = serve(&rig);
+    assert!(journal.contains("dogsled sweep: closed stopped orphan w2:p1 on local; reply recorded; task not completed"), "{journal}");
+    assert!(!tree.exists());
+    assert!(branch_exists(&rig, "feat/x"));
+    let item = &rig.read("state/items.json")[0];
+    assert!(item["closed_ms"].is_u64(), "{item}");
+    assert!(
+        item["orphan_reply"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Stopped last reply"),
+        "{item}"
+    );
+    assert!(item["reply"].is_null(), "{item}");
+    assert_ne!(item["native_done"], true);
+    assert!(item["orphan_reply"]["result_id"].is_null());
+    assert_ne!(item["orphan_reply"]["done"], true);
+    assert_eq!(item["branch"]["name"], "feat/x");
+    assert_eq!(item["branch"]["ahead"], 1);
+    assert_eq!(item["branch"]["landed"], false);
+    rig.put("agents.json", &json!({"result":{"agents":[]}}));
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
+    rig.service();
+    let (_, board) = rig.json(&["board", "--all"]);
+    assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
+    assert_eq!(
+        board["rows"][0]["activity"], "branch feat/x +1 to land",
+        "{board}"
+    );
+}
+
+#[test]
+fn a_dirty_stopped_orphan_stays_until_p3_preservation() {
+    let (rig, tree) = close_rig("sweep-stopped-dirty");
+    stopped_orphan(&rig, &tree);
+    fs::write(tree.join("dirty"), "unsaved\n").unwrap();
+    serve(&rig);
+    assert_eq!(
+        kept_reason(&rig),
+        "stopped orphan has unsaved work; kept until preservation (P3)"
+    );
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("close"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
+#[test]
+fn a_stopped_child_with_a_live_owner_stays() {
+    let (rig, tree) = close_rig("sweep-stopped-owned");
+    stopped_orphan(&rig, &tree);
+    orphan(&rig, "i1", "w1:p1", "local");
+    serve(&rig);
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("close"));
+    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+}
+
+#[test]
+fn protected_orphan_lifecycles_never_close() {
+    for state in [
+        "working",
+        "waiting",
+        "asking",
+        "blocked",
+        "finishing",
+        "unknown",
+        "lost",
+    ] {
+        let (rig, tree) = close_rig(&format!("sweep-protected-{state}"));
+        stopped_orphan(&rig, &tree);
+        match state {
+            "working" | "blocked" | "unknown" => {
+                child(&rig, state, &tree);
+            }
+            "waiting" => {
+                let mut items = rig.read("state/items.json");
+                items
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":"nested","kind":"job","host":"local",
+                    "pane":"w3:p1","owner_pane":"w2:p1","created_ms":1,"closed_ms":null}));
+                rig.put("state/items.json", &items);
+            }
+            "asking" => {
+                let agents = rig.read("agents.json");
+                let session = agents["result"]["agents"][1]["agent_session"]["value"].clone();
+                rig.put("state/done.json", &json!({"term_child":{
+                    "pane":"w2:p1","session":session,"marked_ms":1,
+                    "signal":{"kind":"ask","text":"Need an answer","event_id":"ask-1",
+                        "turn":{"state_change_seq":1,"state_since_ms":null},"session":session,"recorded_ms":1,"cleared_ms":null}
+                }}));
+            }
+            "finishing" => {
+                child(&rig, "working", &tree);
+                rig.done("term_child", "w2:p1", 1);
+            }
+            "lost" => {
+                orphan(&rig, "i1", "w9:p1", "8103");
+                rig.peer();
+                fs::write(rig.dir.join("unreachable"), "offline").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        serve(&rig);
+        assert!(tree.exists(), "{state}");
+        assert!(!rig.log("herdr.log").contains("close"), "{state}");
+        assert!(
+            rig.read("state/items.json")[0]["closed_ms"].is_null(),
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
+    let (source, execution, _) = super::unit_seeded::launched("sweep-stopped-unit-launch");
+    let (rig, tree) = close_rig("sweep-stopped-unit");
+    stopped_orphan(&rig, &tree);
+    let id = execution["requestId"].as_str().unwrap();
+    let path = format!("state/admissions/{id}.json");
+    let attempt = source.read(&path);
+    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
+    rig.put(&path, &attempt);
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    for suffix in [".json", ".progress.json", ".unit.json"] {
+        let file = format!("state/launches/{id}{suffix}");
+        rig.put(&file, &source.read(&file));
+    }
+    let mut items = rig.read("state/items.json");
+    items[0]["id"] = json!(id);
+    rig.put("state/items.json", &items);
+    let mut watchdog = rig.read("state/watchdog.json");
+    let episode = watchdog["stopped"]["i1"].clone();
+    watchdog["stopped"] = json!({id:episode});
+    rig.put("state/watchdog.json", &watchdog);
+    serve(&rig);
+    assert!(!tree.exists());
+    let item = &rig.read("state/items.json")[0];
+    assert!(item["resource_closed_ms"].is_u64(), "{item}");
+    assert_eq!(
+        item["resource_close_reason"],
+        "resource-only close; task unresolved"
+    );
+    assert!(item["reply"].is_null());
+    for _ in 0..2 {
+        serve(&rig);
+        let saved = rig.read(&path);
+        assert_eq!(saved, attempt);
+        assert!(saved["unit"]["returned"].is_null());
+        assert!(saved["unit"]["stopped"].is_null());
+        assert!(saved["unit"]["not_started"].is_null());
+        assert!(saved["unit"]["settlement_ack"].is_null());
+        assert!(rig.read(&format!("state/launches/{id}.progress.json"))["stopped"].is_null());
+    }
+}
+
+#[test]
+fn host_stopped_orphan_close_rechecks_session_turn_and_lifecycle() {
+    for changed in [
+        "session",
+        "turn",
+        "working",
+        "unknown",
+        "waiting",
+        "asking",
+        "finishing",
+    ] {
+        let (rig, tree) = close_rig(&format!("host-stopped-{changed}"));
+        stopped_orphan(&rig, &tree);
+        let episode = rig.read("state/watchdog.json")["stopped"]["i1"].clone();
+        let mut agents = rig.read("agents.json");
+        match changed {
+            "session" => {
+                agents["result"]["agents"][1]["agent_session"] =
+                    json!({"kind":"id","value":"replacement"});
+            }
+            "turn" => agents["result"]["agents"][1]["state_change_seq"] = json!(2),
+            "working" | "unknown" => agents["result"]["agents"][1]["agent_status"] = json!(changed),
+            "waiting" => {
+                let mut items = rig.read("state/items.json");
+                items
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":"nested","kind":"agent","host":"local",
+                    "pane":"w3:p1","owner_pane":"w2:p1","created_ms":1,"closed_ms":null}));
+                rig.put("state/items.json", &items);
+            }
+            "asking" => {
+                let session = &episode["agent_session"];
+                rig.put("state/done.json", &json!({"term_child":{
+                    "pane":"w2:p1","session":session,"marked_ms":1,
+                    "signal":{"kind":"ask","text":"Need input","event_id":"ask",
+                        "turn":episode["turn"],"session":session,"recorded_ms":1,"cleared_ms":null}
+                }}));
+            }
+            "finishing" => rig.done("term_child", "w2:p1", 1),
+            _ => unreachable!(),
+        }
+        rig.put("agents.json", &agents);
+        let out = rig.run(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--stopped-orphan",
+            &episode.to_string(),
+        ]);
+        assert!(
+            !out.status.success(),
+            "{changed}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(tree.exists(), "{changed}");
+        assert!(
+            !rig.log("herdr.log").contains("workspace close"),
+            "{changed}"
+        );
+        assert!(!rig.log("herdr.log").contains("pane close"), "{changed}");
+    }
+}
+
+#[test]
+fn remote_stopped_orphan_flag_cannot_override_host_launch_progress() {
+    for progress in ["attempted", "ambiguous"] {
+        let (rig, tree) = close_rig(&format!("sweep-remote-stopped-launch-{progress}"));
+        stopped_orphan(&rig, &tree);
+        orphan(&rig, "i1", "w9:p1", "8103");
+        rig.peer();
+        super::close::unfinished_launch(&rig, "pending", &tree, "w2:p1");
+        if progress == "ambiguous" {
+            super::close::unfinished_launch(&rig, "competing", &tree, "w2:p1");
+        }
+        let episode = rig.read("state/watchdog.json")["stopped"]["i1"].clone();
+        // Forge stopped evidence at the owner. The real peer must check its own launch facts.
+        let mut remote = rig.read("remote.json");
+        remote["probe"]["agent_panes"][0] = json!({
+            "pane":"w2:p1","agent":"pi","state":"idle","done":false,
+            "agent_session":episode["agent_session"],"completion_seq":1,"state_change_seq":1,
+            "lifecycle":"stopped"
+        });
+        remote["probe"]["panes"] = json!([{"pane_id":"w2:p1"}]);
+        rig.put("remote.json", &remote);
+        rig.script(
+            "ssh",
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+case "$*" in
+  *'host snapshot'*) cat "$RIG/remote.json" ;;
+  *'host tail agent w2:p1'*) printf '%s\n' '"Remote stopped reply"' ;;
+  *'host close w2:p1 --stopped-orphan'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    sh -c '{} host '"$remote" ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#,
+                env!("CARGO_BIN_EXE_dogsled")
+            ),
+        );
+        let journal = serve(&rig);
+        let log = rig.log("ssh.log");
+        assert!(
+            log.contains("host close w2:p1 --stopped-orphan"),
+            "{progress}: {journal}\n{log}"
+        );
+        assert!(tree.exists(), "{progress}: {journal}");
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("workspace close") && !log.contains("pane close"),
+            "{progress}: {log}"
+        );
+        assert!(
+            rig.read("state/items.json")[0]["closed_ms"].is_null(),
+            "{progress}: {journal}"
+        );
+        assert!(
+            !journal.contains("closed stopped orphan"),
+            "{progress}: {journal}"
+        );
+    }
+}
+
+#[test]
+fn sweep_keeps_stopped_looking_children_with_published_launch_progress() {
+    for (progress, state) in [("attempted", "starting"), ("ambiguous", "unknown")] {
+        let (rig, tree) = close_rig(&format!("sweep-published-launch-{progress}"));
+        stopped_orphan(&rig, &tree);
+        super::close::unfinished_launch(&rig, "pending", &tree, "w2:p1");
+        if progress == "ambiguous" {
+            super::close::unfinished_launch(&rig, "competing", &tree, "w2:p1");
+        }
+        let journal = serve(&rig);
+        let snapshot = rig.read("state/host.json");
+        let agent = snapshot["probe"]["agent_panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["pane"] == "w2:p1")
+            .unwrap();
+        assert_eq!(agent["launch_progress"], progress, "{journal}");
+        assert_eq!(agent["lifecycle"], state, "{journal}");
+        assert!(tree.exists(), "{journal}");
+        let log = rig.log("herdr.log");
+        assert!(
+            !log.contains("workspace close") && !log.contains("pane close"),
+            "{log}"
+        );
+        assert!(
+            rig.read("state/items.json")[0]["closed_ms"].is_null(),
+            "{journal}"
+        );
+    }
+}
+
+#[test]
+fn serve_closes_a_remote_stopped_orphan_with_explicit_correlated_permission() {
+    let (rig, tree) = close_rig("sweep-stopped-remote");
+    stopped_orphan(&rig, &tree);
+    orphan(&rig, "i1", "w9:p1", "8103");
+    rig.peer();
+    let mut remote = rig.read("remote.json");
+    remote["probe"]["agent_panes"][0] = json!({
+        "pane":"w2:p1","agent":"pi","state":"idle","done":false,
+        "agent_session":"remote-session","completion_seq":1,"state_change_seq":1
+    });
+    remote["probe"]["panes"] = json!([{"pane_id":"w2:p1"}]);
+    rig.put("remote.json", &remote);
+    let mut watchdog = rig.read("state/watchdog.json");
+    watchdog["stopped"]["i1"]["agent_session"] = json!("remote-session");
+    rig.put("state/watchdog.json", &watchdog);
+    rig.script("ssh", r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+case "$*" in
+  *'host snapshot'*) cat "$RIG/remote.json" ;;
+  *'host tail agent w2:p1'*) printf '%s\n' '"Remote stopped reply"' ;;
+  *'host close w2:p1 --stopped-orphan'*) printf '%s\n' '{"pane":"w2:p1","worktree":null,"pane_closed":true}' ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#);
+    let journal = serve(&rig);
+    assert!(
+        journal
+            .contains("closed stopped orphan w2:p1 on netcup; reply recorded; task not completed"),
+        "{journal}"
+    );
+    let log = rig.log("ssh.log");
+    assert!(log.contains("--stopped-orphan"), "{log}");
+    assert!(log.contains("remote-session"), "{log}");
+    assert!(log.contains("state_change_seq"), "{log}");
+    let item = &rig.read("state/items.json")[0];
+    assert!(item["closed_ms"].is_u64(), "{item}");
+    assert!(
+        item["orphan_reply"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Remote stopped reply"),
+        "{item}"
+    );
+    assert!(item["reply"].is_null(), "{item}");
 }
 
 #[test]
@@ -1346,7 +1746,24 @@ fn assert_origin_reply_held(rig: &Rig, tree: &Path, expected_status: &str) {
 fn an_open_child_reply_is_held_when_its_origin_owner_pane_runs_another_session() {
     let (rig, tree) =
         open_child_origin_session("sweep-open-origin-session-reused", Some("another-session"));
-    assert_origin_reply_held(&rig, &tree, "orphaned");
+    // The reused owner cannot receive the old reply. The clean stopped orphan releases
+    // resources, but preserves the old reply without delivering it to the new session.
+    serve(&rig);
+    serve(&rig);
+    assert!(!item_open(&rig));
+    assert!(!tree.exists());
+    let item = &rig.read("state/items.json")[0];
+    assert!(item["reply"]["reported_ms"].is_null(), "{item}");
+    assert!(item["orphan_reply"].is_object(), "{item}");
+    let (_, inbox) = rig.json(&["inbox", "list"]);
+    assert!(
+        inbox["received"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["kind"] != "reply"),
+        "{inbox}"
+    );
 }
 
 #[test]

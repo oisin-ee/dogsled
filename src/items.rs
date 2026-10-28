@@ -40,6 +40,14 @@ pub struct Item {
     /// The child's final reply, captured before the sweep closes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Reply>,
+    /// Last observed reply preserved when a stopped orphan loses its resources, not a result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphan_reply: Option<Reply>,
+    /// Resource-only closure leaves a managed unit unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_closed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_close_reason: Option<String>,
     /// A turn signal is not a final reply and never proves completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<ItemSignal>,
@@ -153,6 +161,38 @@ pub fn set_reply_with(ledger: &Ledger, id: &str, reply: Reply, native_done: bool
         item.reply = Some(reply);
         item.native_done |= native_done;
         ledger.write("items.json", &items)
+    })
+}
+
+/// Preserve stopped-orphan output without assigning result or native-done provenance.
+pub fn orphan_reply(ledger: &Ledger, id: &str, reply: Reply) -> Result<()> {
+    change(ledger, |items| {
+        if let Some(item) = items.iter_mut().find(|item| item.id == id) {
+            item.orphan_reply = Some(reply);
+        }
+    })
+}
+
+/// Record resource-only closure without resolving the unit binding.
+pub fn orphan_closed(
+    ledger: &Ledger,
+    id: &str,
+    now: u64,
+    resource_only: bool,
+    branch: Option<crate::done::Branch>,
+) -> Result<()> {
+    change(ledger, |items| {
+        if let Some(item) = items.iter_mut().find(|item| item.id == id) {
+            item.closed_ms.get_or_insert(now);
+            item.signal = None;
+            if let Some(branch) = branch {
+                item.branch = Some(branch);
+            }
+            if resource_only {
+                item.resource_closed_ms.get_or_insert(now);
+                item.resource_close_reason = Some("resource-only close; task unresolved".into());
+            }
+        }
     })
 }
 
