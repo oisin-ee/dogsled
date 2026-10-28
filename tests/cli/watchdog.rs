@@ -83,6 +83,134 @@ esac
     rig
 }
 
+fn stopped_rig(name: &str, reader: bool) -> Rig {
+    let rig = watchdog_rig(name);
+    rig.put("state/worktrees.json", &json!([]));
+    rig.put(
+        "state/items.json",
+        &json!([{"id":"child","kind":"agent","host":"local",
+        "pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null}]),
+    );
+    fs::create_dir_all(rig.dir.join("state/inbox")).unwrap();
+    if reader {
+        rig.put(
+            "state/inbox/term_child.reader.json",
+            &json!({"pane":"w2:p1","harness":"pi","registered_ms":1}),
+        );
+    }
+    rig
+}
+
+fn stopped_tick(rig: &Rig, now: u64, raw: &str, seq: u64) {
+    fs::write(rig.dir.join("clock"), now.to_string()).unwrap();
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[
+            {"pane_id":"w1:p1","agent":"pi","agent_status":"working","terminal_id":"term_owner"},
+            {"pane_id":"w2:p1","agent":"pi","agent_status":raw,"terminal_id":"term_child",
+                "agent_session":{"kind":"id","value":"child-session"},"state_change_seq":seq}
+        ]}}),
+    );
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn corrective_messages(rig: &Rig) -> Vec<Value> {
+    rig.read("state/inbox/term_child.json")
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| {
+            record["text"] == "End your turn with done, ask, or blocked, or wait for your children."
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn stopped_child_gets_exactly_one_prompt_across_five_restarts() {
+    let rig = stopped_rig("stopped-once", true);
+    for offset in 0..5 {
+        stopped_tick(&rig, NOW + offset * 1_000, "idle", 1);
+    }
+    let messages = corrective_messages(&rig);
+    assert_eq!(messages.len(), 1);
+    let saved = rig.read("state/watchdog.json");
+    assert_eq!(saved["stopped"]["child"]["pane"], "w2:p1");
+    assert_eq!(saved["stopped"]["child"]["agent_session"], "child-session");
+    assert_eq!(saved["stopped"]["child"]["turn"]["state_change_seq"], 1);
+    assert_eq!(saved["stopped"]["child"]["message_id"], messages[0]["id"]);
+    assert_eq!(saved["stopped"]["child"]["delivered"], true);
+    rig.service();
+    let out = rig.run(&["board"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("stopped; prompted 4s ago"));
+}
+
+#[test]
+fn stopped_failed_put_retries_same_id_three_times_only() {
+    let rig = stopped_rig("stopped-failed", false);
+    let mut id = Value::Null;
+    for offset in 0..5 {
+        stopped_tick(&rig, NOW + offset * 1_000, "idle", 1);
+        let saved = rig.read("state/watchdog.json");
+        let episode = &saved["stopped"]["child"];
+        if offset == 0 {
+            id = episode["message_id"].clone();
+        }
+        assert_eq!(episode["message_id"], id);
+        assert_eq!(episode["attempts"], (offset + 1).min(3));
+        assert_eq!(episode["delivered"], false);
+    }
+    rig.put(
+        "state/inbox/term_child.reader.json",
+        &json!({"pane":"w2:p1","harness":"pi","registered_ms":1}),
+    );
+    stopped_tick(&rig, NOW + 6_000, "idle", 1);
+    assert!(!rig.dir.join("state/inbox/term_child.json").exists());
+    rig.service();
+    let out = rig.run(&["board"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("stopped; prompt undelivered"));
+}
+
+#[test]
+fn stopped_prompt_does_not_loop_but_a_later_working_turn_rearms() {
+    let rig = stopped_rig("stopped-no-loop", true);
+    for (offset, raw, seq) in [
+        (0, "idle", 1),
+        (1_000, "working", 2),
+        (2_000, "idle", 3),
+        (125_000, "idle", 3),
+    ] {
+        stopped_tick(&rig, NOW + offset, raw, seq);
+    }
+    assert_eq!(corrective_messages(&rig).len(), 1);
+    stopped_tick(&rig, NOW + 130_000, "working", 4);
+    stopped_tick(&rig, NOW + 140_000, "idle", 5);
+    assert_eq!(corrective_messages(&rig).len(), 2);
+}
+
+#[test]
+fn working_blocked_and_unknown_children_get_no_corrective_prompt() {
+    for raw in ["working", "blocked", "unreadable"] {
+        let rig = stopped_rig(&format!("stopped-excluded-{raw}"), true);
+        stopped_tick(&rig, NOW, raw, 1);
+        assert!(
+            !rig.dir.join("state/inbox/term_child.json").exists(),
+            "{raw}"
+        );
+        assert!(
+            rig.read("state/watchdog.json")["stopped"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
 #[test]
 fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
     let rig = watchdog_rig("watchdog-stall");

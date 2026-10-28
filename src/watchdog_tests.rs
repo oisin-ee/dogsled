@@ -13,6 +13,7 @@ struct Commands {
     owner: Mutex<String>,
     /// The custodian agent, when the test sets one.
     custodian: Mutex<Option<serde_json::Value>>,
+    child: Mutex<Option<serde_json::Value>>,
 }
 impl Shell for Commands {
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
@@ -28,6 +29,9 @@ impl Shell for Commands {
                     listed.as_object_mut().unwrap().remove("session");
                 }
                 agents.push(listed);
+            }
+            if let Some(child) = self.child.lock().unwrap().clone() {
+                agents.push(child);
             }
             json!({"result":{"agents":agents}}).to_string()
         } else if program == "ssh" {
@@ -208,6 +212,215 @@ impl Rig {
 impl Drop for Rig {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.ledger.dir);
+    }
+}
+
+fn stopped_reports(rig: &Rig, now: u64, raw: &str, seq: u64, since: u64) -> Vec<HostReport> {
+    let mut reports = rig.reports(now, "working", raw, None);
+    let agent = reports[0]
+        .probe
+        .as_mut()
+        .unwrap()
+        .agent_panes
+        .iter_mut()
+        .find(|agent| agent.pane == "child")
+        .unwrap();
+    agent.agent_session = Some("session-child".into());
+    agent.terminal_id = Some("term_child".into());
+    agent.state_change_seq = Some(seq);
+    agent.state_since_ms = Some(since);
+    *rig.shell.child.lock().unwrap() = Some(json!({"pane_id":"child","agent":"pi",
+        "agent_status":raw,"terminal_id":"term_child","agent_session":{"kind":"id","value":"session-child"},
+        "state_change_seq":seq}));
+    rig.ledger
+        .write(
+            "host.json",
+            &Snapshot {
+                sampled_ms: now,
+                probe: reports[0].probe.clone().unwrap(),
+                jobs: vec![],
+            },
+        )
+        .unwrap();
+    reports
+}
+
+fn child_reader(rig: &Rig) {
+    crate::inbox::claim(
+        &rig.ledger,
+        "term_child",
+        &crate::inbox::Reader {
+            harness: "pi".into(),
+            pane: "child".into(),
+            registered_ms: 0,
+        },
+        0,
+    )
+    .unwrap();
+}
+
+fn stopped_messages(rig: &Rig) -> Vec<crate::inbox::Record> {
+    crate::inbox::received(&rig.ledger, "term_child")
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.text == STOPPED_PROMPT)
+        .collect()
+}
+
+#[test]
+fn stopped_child_gets_one_prompt_across_five_ticks_and_reload() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    for now in [1_000, 2_000, 3_000, 4_000, 5_000] {
+        tick(&rig.fleet(), &stopped_reports(&rig, now, "idle", 1, 1), now).unwrap();
+    }
+    let messages = stopped_messages(&rig);
+    assert_eq!(messages.len(), 1);
+    let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    let episode = &saved.stopped["child"];
+    assert_eq!(episode.pane, "child");
+    assert_eq!(episode.agent_session, "session-child");
+    assert_eq!(episode.turn.state_change_seq, Some(1));
+    assert_eq!(episode.message_id.as_deref(), Some(messages[0].id.as_str()));
+    assert!(episode.delivered);
+    let mut status = crate::commands::Status {
+        hosts: stopped_reports(&rig, 5_000, "idle", 1, 1),
+        items: crate::items::list(&rig.ledger).unwrap(),
+        queue: vec![],
+        orphans: vec![],
+        sweep: None,
+        stopped_activity: std::collections::BTreeMap::new(),
+    };
+    assert_eq!(
+        stopped_activity(&rig.ledger, &status, 5_000).unwrap()["child"],
+        "stopped; prompted 4s ago"
+    );
+    status.stopped_activity = stopped_activity(&rig.ledger, &status, 5_000).unwrap();
+    let board = crate::board::build(&status, Some("owner"), 5_000);
+    assert_eq!(board.rows[0].group, crate::board::Group::Attention);
+    assert_eq!(board.rows[0].activity, "stopped; prompted 4s ago");
+}
+
+#[test]
+fn stopped_failed_put_reuses_id_and_stops_after_three_ticks() {
+    let rig = Rig::new();
+    rig.item("agent");
+    let mut id = None;
+    for now in 1..=5 {
+        tick(&rig.fleet(), &stopped_reports(&rig, now, "idle", 1, 1), now).unwrap();
+        let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+        let episode = &saved.stopped["child"];
+        assert_eq!(episode.attempts, now.min(3) as u8);
+        if let Some(id) = &id {
+            assert_eq!(&episode.message_id, id);
+        } else {
+            id = Some(episode.message_id.clone());
+        }
+        assert!(!episode.delivered);
+    }
+    child_reader(&rig);
+    tick(&rig.fleet(), &stopped_reports(&rig, 6, "idle", 1, 1), 6).unwrap();
+    assert_eq!(stopped_messages(&rig), []);
+}
+
+#[test]
+fn stopped_retry_success_keeps_original_message_id() {
+    let rig = Rig::new();
+    rig.item("agent");
+    tick(&rig.fleet(), &stopped_reports(&rig, 1, "idle", 1, 1), 1).unwrap();
+    let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    child_reader(&rig);
+    tick(&rig.fleet(), &stopped_reports(&rig, 2, "idle", 1, 1), 2).unwrap();
+    assert_eq!(
+        stopped_messages(&rig)[0].id,
+        saved.stopped["child"].message_id.clone().unwrap()
+    );
+}
+
+#[test]
+fn stopped_prompt_turn_does_not_loop_but_later_real_turn_rearms() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    for (now, raw, seq, since) in [
+        (1_000, "idle", 1, 1),
+        (2_000, "working", 2, 2_000),
+        (3_000, "idle", 3, 3_000),
+        (125_000, "idle", 3, 3_000),
+    ] {
+        tick(
+            &rig.fleet(),
+            &stopped_reports(&rig, now, raw, seq, since),
+            now,
+        )
+        .unwrap();
+    }
+    assert_eq!(stopped_messages(&rig).len(), 1);
+    tick(
+        &rig.fleet(),
+        &stopped_reports(&rig, 130_000, "working", 4, 130_000),
+        130_000,
+    )
+    .unwrap();
+    tick(
+        &rig.fleet(),
+        &stopped_reports(&rig, 140_000, "idle", 5, 140_000),
+        140_000,
+    )
+    .unwrap();
+    assert_eq!(stopped_messages(&rig).len(), 2);
+}
+
+#[test]
+fn stopped_prompt_turn_started_in_window_stays_suppressed_after_long_activity() {
+    let rig = Rig::new();
+    rig.item("agent");
+    child_reader(&rig);
+    for (now, raw, seq, since) in [
+        (1_000, "idle", 1, 1),
+        (2_000, "working", 2, 2_000),
+        (124_000, "working", 2, 124_000),
+        (125_000, "idle", 3, 125_000),
+    ] {
+        tick(
+            &rig.fleet(),
+            &stopped_reports(&rig, now, raw, seq, since),
+            now,
+        )
+        .unwrap();
+    }
+    assert_eq!(stopped_messages(&rig).len(), 1);
+}
+
+#[test]
+fn non_stopped_children_never_get_a_corrective_prompt() {
+    for case in [
+        "working",
+        "waiting",
+        "asking",
+        "blocked",
+        "finishing",
+        "unknown",
+        "lost",
+    ] {
+        let rig = Rig::new();
+        rig.item("agent");
+        child_reader(&rig);
+        let mut reports = stopped_reports(&rig, 1_000, "idle", 1, 1);
+        let agent = &mut reports[0].probe.as_mut().unwrap().agent_panes[1];
+        match case {
+            "working" => agent.state = "working".into(),
+            "waiting" => agent.owns_open = true,
+            "asking" => agent.signal = Some("ask".into()),
+            "blocked" => agent.signal = Some("blocked".into()),
+            "finishing" => agent.finishing = true,
+            "unknown" => agent.state = "unreadable".into(),
+            "lost" => reports[0].service = "down".into(),
+            _ => unreachable!(),
+        }
+        tick(&rig.fleet(), &reports, 1_000).unwrap();
+        assert!(stopped_messages(&rig).is_empty(), "{case}");
     }
 }
 

@@ -16,6 +16,8 @@ mod tests;
 pub const MINUTE: u64 = 60_000;
 pub const IDLE_SHELL: u64 = 15 * MINUTE;
 const CHECK_IN: u64 = 30 * MINUTE;
+const STOPPED_PROMPT: &str = "End your turn with done, ask, or blocked, or wait for your children.";
+const PROMPT_WINDOW: u64 = 2 * MINUTE;
 
 fn stall_limit() -> u64 {
     // Live proof only. Never changes owner cadence or production defaults.
@@ -86,6 +88,52 @@ struct State {
     events: BTreeMap<String, Event>,
     marks: BTreeMap<String, String>,
     notified: BTreeMap<String, u64>,
+    #[serde(default)]
+    stopped: BTreeMap<String, StoppedEpisode>,
+    #[serde(default)]
+    prompted_after: BTreeMap<String, PromptHistory>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoppedEpisode {
+    pane: String,
+    agent_session: String,
+    turn: crate::done::Turn,
+    message_id: Option<String>,
+    attempts: u8,
+    delivered: bool,
+    prompted_after: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PromptHistory {
+    prompted_after: u64,
+    turn: crate::done::Turn,
+    working_turn: Option<crate::done::Turn>,
+    #[serde(default)]
+    working: bool,
+}
+
+impl PromptHistory {
+    fn observe(&mut self, agent: &crate::probe::Agent, state: crate::lifecycle::State) {
+        if state == crate::lifecycle::State::Working {
+            if !self.working && self.turn.precedes(agent) {
+                self.working_turn = Some(crate::done::Turn::of_agent(agent));
+            }
+            self.working = true;
+        } else {
+            self.working = false;
+        }
+    }
+
+    fn eligible(&self, now: u64) -> bool {
+        now.saturating_sub(self.prompted_after) >= PROMPT_WINDOW
+            && self
+                .working_turn
+                .as_ref()
+                .and_then(|turn| turn.state_since_ms)
+                .is_some_and(|since| since >= self.prompted_after.saturating_add(PROMPT_WINDOW))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -485,11 +533,213 @@ fn capture_events(state: &mut State, items: &[Item], reports: &[HostReport], now
     }
 }
 
+fn session_key(host: &str, session: &str) -> String {
+    // The host byte length keeps host and session boundaries unambiguous.
+    format!("{}:{host}{session}", host.len())
+}
+
+fn put_stopped_prompt(
+    fleet: &Fleet,
+    reports: &[HostReport],
+    host: &crate::hosts::Host,
+    agent: &crate::probe::Agent,
+    id: &str,
+    now: u64,
+) -> Result<bool> {
+    if host.is_local() {
+        return crate::inbox::notify(
+            fleet,
+            reports,
+            &agent.pane,
+            id,
+            "message",
+            STOPPED_PROMPT.into(),
+            now,
+        );
+    }
+    let Some(terminal) = &agent.terminal_id else {
+        return Ok(false);
+    };
+    let record = crate::inbox::Record {
+        id: id.into(),
+        terminal: terminal.clone(),
+        pane: agent.pane.clone(),
+        from: crate::inbox::Sender::dogsled(),
+        kind: "message".into(),
+        text: STOPPED_PROMPT.into(),
+        created_ms: now,
+        state: crate::inbox::State::Pending,
+        lease: crate::backoff::Backoff::default(),
+        reason: None,
+        done_ms: None,
+    };
+    fleet
+        .remote_setup::<crate::inbox::Record>(
+            host,
+            &[
+                "inbox-put".into(),
+                "--record".into(),
+                serde_json::to_string(&record)?,
+            ],
+        )
+        .map(|_| true)
+}
+
+fn stopped_prompts(
+    fleet: &Fleet,
+    reports: &[HostReport],
+    items: &[Item],
+    state: &mut State,
+    now: u64,
+) -> Result<()> {
+    state.stopped.retain(|id, _| {
+        items
+            .iter()
+            .any(|item| item.id == *id && item.closed_ms.is_none())
+    });
+    for item in items
+        .iter()
+        .filter(|item| item.kind == "agent" && item.closed_ms.is_none())
+    {
+        let Some(host) = reports
+            .iter()
+            .find(|host| host.host.id == item.host && host.fresh(now))
+        else {
+            state.stopped.remove(&item.id);
+            continue;
+        };
+        let Some(agent) = host.agent(&item.pane) else {
+            state.stopped.remove(&item.id);
+            continue;
+        };
+        let Some(session) = agent.agent_session.as_deref() else {
+            state.stopped.remove(&item.id);
+            continue;
+        };
+        let key = session_key(&item.host, session);
+        let lifecycle = crate::items::lifecycle(item, reports).state;
+        if let Some(previous) = state.prompted_after.get_mut(&key) {
+            previous.observe(agent, lifecycle);
+        }
+        if lifecycle != crate::lifecycle::State::Stopped {
+            state.stopped.remove(&item.id);
+            continue;
+        }
+        if state
+            .stopped
+            .get(&item.id)
+            .is_some_and(|episode| episode.pane != item.pane || episode.agent_session != session)
+        {
+            state.stopped.remove(&item.id);
+        }
+        if !state.stopped.contains_key(&item.id) {
+            let previous = state.prompted_after.get(&key);
+            let eligible = previous.is_none_or(|previous| previous.eligible(now));
+            state.stopped.insert(
+                item.id.clone(),
+                StoppedEpisode {
+                    pane: item.pane.clone(),
+                    agent_session: session.into(),
+                    turn: crate::done::Turn::of_agent(agent),
+                    message_id: eligible.then(crate::ledger::new_id),
+                    attempts: 0,
+                    delivered: false,
+                    prompted_after: previous.map(|previous| previous.prompted_after),
+                },
+            );
+        }
+        let Some(episode) = state.stopped.get_mut(&item.id) else {
+            continue;
+        };
+        let Some(id) = episode
+            .message_id
+            .clone()
+            .filter(|_| !episode.delivered && episode.attempts < 3)
+        else {
+            continue;
+        };
+        episode.attempts += 1;
+        state
+            .prompted_after
+            .entry(key.clone())
+            .or_insert_with(|| PromptHistory {
+                prompted_after: now,
+                turn: crate::done::Turn::of_agent(agent),
+                working_turn: None,
+                working: false,
+            });
+        // The durable id and attempt budget precede the put, even if it succeeds and
+        // the process dies before recording success. Inbox retries deduplicate the id.
+        fleet.ledger.write("watchdog.json", state)?;
+        let put = put_stopped_prompt(fleet, reports, &host.host, agent, &id, now);
+        if matches!(put, Ok(true))
+            && let Some(episode) = state.stopped.get_mut(&item.id)
+        {
+            episode.delivered = true;
+            episode.prompted_after = Some(now);
+            state.prompted_after.insert(
+                key,
+                PromptHistory {
+                    prompted_after: now,
+                    turn: crate::done::Turn::of_agent(agent),
+                    working_turn: None,
+                    working: false,
+                },
+            );
+        }
+        // A failed delivery is represented by the undelivered episode, not a tick
+        // failure that prevents other children or the owner view from progressing.
+        fleet.ledger.write("watchdog.json", state)?;
+    }
+    Ok(())
+}
+
+/// Activity for stopped rows, shared by every board reader through Status.
+pub fn stopped_activity(
+    ledger: &Ledger,
+    status: &crate::commands::Status,
+    now: u64,
+) -> Result<BTreeMap<String, String>> {
+    let state: State = ledger.read("watchdog.json")?.unwrap_or_default();
+    Ok(status
+        .items
+        .iter()
+        .filter_map(|item| {
+            if crate::items::lifecycle(item, &status.hosts).state
+                != crate::lifecycle::State::Stopped
+            {
+                return None;
+            }
+            let episode = state.stopped.get(&item.id)?;
+            let agent = status
+                .hosts
+                .iter()
+                .find(|host| host.host.id == item.host)?
+                .agent(&item.pane)?;
+            if episode.pane != item.pane
+                || agent.agent_session.as_deref() != Some(&episode.agent_session)
+            {
+                return None;
+            }
+            let activity = if episode.message_id.is_some() && !episode.delivered {
+                "stopped; prompt undelivered".into()
+            } else {
+                format!(
+                    "stopped; prompted {} ago",
+                    age(now.saturating_sub(episode.prompted_after?))
+                )
+            };
+            Some((item.id.clone(), activity))
+        })
+        .collect())
+}
+
 pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
     crate::items::deliver_signals(fleet, reports, now)?;
     fleet.ledger.with_lock("watchdog", || {
         let mut state: State = fleet.ledger.read("watchdog.json")?.unwrap_or_default();
         let items = crate::items::list(fleet.ledger)?;
+        stopped_prompts(fleet, reports, &items, &mut state, now)?;
         capture_events(&mut state, &items, reports, now);
         // Persist observed events before reconciliation, including between scan deadlines.
         fleet.ledger.write("watchdog.json", &state)?;
