@@ -16,7 +16,7 @@ You may edit plans, briefs, and docs that you own.
 
 Make the code or config edit in this session, with no worker, in these cases:
 
-- The cause and every edit are known, and the whole change is under about 100 changed lines.
+- You can name every edit before you start, and there are at most 3. An edit is one change to one place in one file. Tests you add count as edits.
 - No host can start a worker, and the change fits in one session. A failed spawn alone is not a blocker.
 - The user tells you to make the change. Never cite this skill to refuse.
 

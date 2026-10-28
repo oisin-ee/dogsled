@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 - `dogsled claim <item> [--revision N]` takes custody of an orphaned child on its recording host. Claims use the live caller identity and preserve the original owner. Repeated claims by the custodian are harmless.
 - `dogsled accept <item> --result <id> --evidence <text>` records a review of the exact returned result after a custody claim. The original task stays open. MCP exposes both commands. Pi records successful receipts as `dogsled.custody.v1` audit entries without changes to task state.
+- The lead skill's small-change case now counts edits, not lines. The lead edits directly when it can name every edit before it starts and there are at most 3; an added test counts as an edit. In past sessions, the number of edits predicted a change's tool calls far better than its line or file count.
 - Check-ins do not repeat orphan notices. Status lists each item once as `orphaned (unclaimed)`, `orphaned (claimed)`, or `unknown`.
 
 ## 0.26.1 - 2026-10-28
