@@ -2893,3 +2893,115 @@ fn disappearance_during_survey_keeps_identity_for_locked_reconciliation() {
     );
     assert_eq!(recorded(&ledger), [] as [crate::cleanup::Tree; 0]);
 }
+
+fn sealed_disappeared_handoff(fixture: &Landed) {
+    save_close_checkout(fixture);
+    fixture
+        .ledger
+        .write(
+            "items.json",
+            &serde_json::json!([{
+                "id":"c1-old","kind":"agent","host":"local","pane":"placed-shell",
+                "owner_pane":"parent","name":"worker","created_ms":1,"closed_ms":null
+            }]),
+        )
+        .unwrap();
+    fixture.ledger.write("done.json", &serde_json::json!({
+        "[\"c1-old\",\"placed-shell\",null]":{
+            "pane":"placed-shell","item":"c1-old","sealed":10,"marked_ms":1,"native_done":true,
+            "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}
+        }
+    })).unwrap();
+}
+
+#[test]
+fn disappeared_handoff_preserves_replacement_or_unidentified_shell_in_same_checkout() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for (current, saved) in [
+        ("c1-replacement", Some("c1-original")),
+        ("", Some("c1-original")),
+        ("c1-original", None),
+    ] {
+        let fixture = lifecycle_fixture(false);
+        let captured = recorded(&fixture.ledger)[0].clone();
+        sealed_disappeared_handoff(&fixture);
+        if saved.is_none() {
+            let receipts = fixture.ledger.child("launches");
+            let mut progress = receipts
+                .read::<serde_json::Value>("c1-old.progress.json")
+                .unwrap()
+                .unwrap();
+            progress["terminal"] = serde_json::Value::Null;
+            receipts.write("c1-old.progress.json", &progress).unwrap();
+        }
+        let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        shell.terminal = current.into();
+        crate::done::handoff(&fixture.ledger, &shell, 100).unwrap();
+        assert!(fixture.repo.tree.is_dir());
+        assert!(shell.open.load(SeqCst));
+        assert_eq!(shell.teardowns.load(SeqCst), 0);
+        assert_eq!(recorded(&fixture.ledger), [captured]);
+        assert!(
+            crate::items::list(&fixture.ledger).unwrap()[0]
+                .closed_ms
+                .is_none()
+        );
+        assert!(
+            crate::done::list(&fixture.ledger).unwrap()[0]
+                .closed_ms
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn disappeared_handoff_completes_when_original_terminal_remains() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let fixture = lifecycle_fixture(false);
+    sealed_disappeared_handoff(&fixture);
+    let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    crate::done::handoff(&fixture.ledger, &shell, 100).unwrap();
+    assert!(!fixture.repo.tree.exists());
+    assert!(!shell.open.load(SeqCst));
+    assert_eq!(shell.teardowns.load(SeqCst), 1);
+    assert_eq!(
+        crate::items::list(&fixture.ledger).unwrap()[0].closed_ms,
+        Some(100)
+    );
+    assert_eq!(
+        crate::done::list(&fixture.ledger).unwrap()[0].closed_ms,
+        Some(100)
+    );
+}
+
+#[test]
+fn disappeared_handoff_requires_verified_checkout_absence_when_pane_is_gone() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for removed in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        let captured = recorded(&fixture.ledger)[0].clone();
+        sealed_disappeared_handoff(&fixture);
+        if removed {
+            external_remove(&fixture.repo);
+        }
+        let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        shell.open.store(false, SeqCst);
+        crate::done::handoff(&fixture.ledger, &shell, 100).unwrap();
+        assert_eq!(fixture.repo.tree.exists(), !removed);
+        assert_eq!(shell.teardowns.load(SeqCst), 0);
+        let expected = removed.then_some(100);
+        assert_eq!(
+            crate::items::list(&fixture.ledger).unwrap()[0].closed_ms,
+            expected
+        );
+        assert_eq!(
+            crate::done::list(&fixture.ledger).unwrap()[0].closed_ms,
+            expected
+        );
+        if removed {
+            assert_eq!(recorded(&fixture.ledger), [] as [crate::cleanup::Tree; 0]);
+        } else {
+            assert_eq!(recorded(&fixture.ledger), [captured]);
+        }
+    }
+}
