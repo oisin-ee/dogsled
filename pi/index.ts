@@ -40,7 +40,7 @@ export default function dogsled(pi: ExtensionAPI) {
 		command: binary,
 		args: ["mcp"],
 		exposure: "direct",
-		description: "Spawn Pi, Claude, and Codex children and jobs on Herdr hosts, and message any agent through its inbox.",
+		description: "Use the native done, ask, and blocked tools for turn signals. End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Spawn Pi, Claude, and Codex children and jobs on Herdr hosts, and message any agent through its inbox.",
 	});
 
 	async function exec(args: string[]) {

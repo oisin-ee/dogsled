@@ -486,6 +486,7 @@ fn capture_events(state: &mut State, items: &[Item], reports: &[HostReport], now
 }
 
 pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
+    crate::items::deliver_signals(fleet, reports, now)?;
     fleet.ledger.with_lock("watchdog", || {
         let mut state: State = fleet.ledger.read("watchdog.json")?.unwrap_or_default();
         let items = crate::items::list(fleet.ledger)?;
