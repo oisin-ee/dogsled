@@ -794,12 +794,24 @@ fn child(rig: &Rig, status: &str, tree: &Path) {
     );
 }
 
-fn orphan(rig: &Rig, owner: &str, host: &str) {
+/// An open child with the id `id`, whose owner pane is `owner`. Every child has its own id,
+/// because the custody record of a child is written once and never changes its custodian.
+fn orphan(rig: &Rig, id: &str, owner: &str, host: &str) {
     rig.put(
         "state/items.json",
-        &json!([{"id":"i1","kind":"agent","host":host,"pane":"w2:p1","owner_pane":owner,
+        &json!([{"id":id,"kind":"agent","host":host,"pane":"w2:p1","owner_pane":owner,
             "name":"worker","created_ms":1,"closed_ms":null}]),
     );
+}
+
+/// A child whose owner pane is `owner`, and whose owner session is `session`.
+fn child_with_owner_session(rig: &Rig, owner: &str, session: Option<&str>) {
+    let mut item = json!({"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":owner,
+        "name":"worker","created_ms":1,"closed_ms":null});
+    if let Some(session) = session {
+        item["owner_session"] = json!(session);
+    }
+    rig.put("state/items.json", &json!([item]));
 }
 
 fn kept_reason(rig: &Rig) -> String {
@@ -808,6 +820,211 @@ fn kept_reason(rig: &Rig) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("{status}"))
         .to_owned()
+}
+
+#[test]
+fn the_sweep_classifies_a_child_by_its_current_custodian_not_its_origin_owner() {
+    let (rig, tree) = close_rig("sweep-custody");
+    // The origin owner is gone, but a lead claimed the child. The custodian lives and runs
+    // its session, so the child is not an orphan.
+    child_with_owner_session(&rig, "w9:p1", Some("owner-session"));
+    rig.put(
+        "state/custody.json",
+        &json!([{"item":"i1","host":"local","owner_pane":"w9:p1","owner_session":"owner-session",
+            "custodian_pane":"w1:p1","custodian_session":"claimant-session","revision":1,
+            "claims":[{"id":"claim-1","claimant_pane":"w1:p1","claimant_session":"claimant-session",
+                "claimed_ms":1,"previous_custodian":"w9:p1","revision":1}]}]),
+    );
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
+            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":"working","cwd":tree}
+        ]}}),
+    );
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[
+            {"pane_id":"w1:p1","agent":"pi","agent_status":"working",
+                "agent_session":{"kind":"id","value":"claimant-session"}},
+            {"pane_id":"w2:p1","agent":"pi","agent_status":"working","terminal_id":"term_child",
+                "completion_seq":1,"state_change_seq":1}
+        ]}}),
+    );
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    assert_eq!(status["orphans"], json!([]), "{status}");
+    assert!(
+        rig.read("state/items.json")[0]["closed_ms"].is_null(),
+        "a claimed child is not closed as an orphan"
+    );
+    // The custodian pane is gone: the child is an orphan, and the claim shows in the status.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":"working","cwd":tree}
+        ]}}),
+    );
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    assert_eq!(status["orphans"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(
+        status["orphans"][0]["status"],
+        json!("orphaned"),
+        "{status}"
+    );
+    assert_eq!(status["orphans"][0]["claimed"], json!(true), "{status}");
+    assert!(
+        status["orphans"][0]["custodian_pane"] == json!("w1:p1"),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_child_with_a_legacy_owner_session_is_never_called_session_ended() {
+    let (rig, tree) = close_rig("sweep-legacy-session");
+    // The owner pane lives, but the item records no owner session. The session-ended rule
+    // needs a recorded identity, so the child is unknown, not orphaned.
+    child_with_owner_session(&rig, "w1:p1", None);
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 1, "{status}");
+    assert_eq!(orphans[0]["status"], json!("unknown"), "{status}");
+    assert!(
+        orphans[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("custodian session"),
+        "{status}"
+    );
+    // The child is not closed as an orphan: the evidence proves nothing.
+    assert!(
+        rig.read("state/items.json")[0]["closed_ms"].is_null(),
+        "{status}"
+    );
+}
+
+/// A custody record that cannot be read proves nothing. The child stays listed as unknown
+/// instead of dropping out of the sweep, and the other children are still classified.
+#[test]
+fn a_child_with_an_unreadable_custody_record_stays_listed_as_unknown() {
+    let (rig, tree) = close_rig("sweep-custody-unreadable");
+    rig.put(
+        "state/items.json",
+        &json!([
+            {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
+                "name":"first","created_ms":1,"closed_ms":null},
+            {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+                "name":"second","created_ms":1,"closed_ms":null}
+        ]),
+    );
+    // The custody file is corrupt, so no child's record can be read.
+    fs::write(rig.dir.join("state/custody.json"), "{ this is not json").unwrap();
+    // The sweep already kept the second child, so its age does not start again.
+    rig.put(
+        "state/orphans.json",
+        &json!([{"item":"i2","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+            "name":"second","reason":"owner w9:p2 is gone; the child is working",
+            "since_ms":42}]),
+    );
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 2, "{status}");
+    for orphan in orphans {
+        assert_eq!(orphan["status"], json!("unknown"), "{status}");
+        assert!(
+            orphan["reason"]
+                .as_str()
+                .unwrap()
+                .contains("cannot read its custody"),
+            "{status}"
+        );
+    }
+    // The age of a child the sweep kept is not restarted.
+    let kept = orphans.iter().find(|o| o["item"] == json!("i2")).unwrap();
+    assert_eq!(kept["since_ms"], json!(42), "{status}");
+    // The evidence proves nothing, so no child is closed.
+    for item in rig.read("state/items.json").as_array().unwrap() {
+        assert!(item["closed_ms"].is_null(), "{item}");
+    }
+}
+
+/// A custody record that cannot be written proves nothing either. The child stays listed as
+/// unknown, and the other child of the same sweep is still classified as an orphan.
+#[test]
+fn a_child_whose_custody_cannot_be_written_stays_unknown_and_the_other_is_still_orphaned() {
+    let (rig, tree) = close_rig("sweep-custody-unwritable");
+    rig.put(
+        "state/items.json",
+        &json!([
+            {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
+                "name":"first","created_ms":1,"closed_ms":null},
+            {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+                "name":"second","created_ms":1,"closed_ms":null}
+        ]),
+    );
+    // The first child has a custody record, so it is classified: its owner is gone.
+    rig.put(
+        "state/custody.json",
+        &json!([{"item":"i1","host":"local","owner_pane":"w9:p1","custodian_pane":"w9:p1",
+            "claims":[]}]),
+    );
+    // The custody lock cannot be opened, so the record of the second child cannot be
+    // written. The record that is there still reads.
+    fs::create_dir_all(rig.dir.join("state/custody.lock")).unwrap();
+    rig.put(
+        "state/orphans.json",
+        &json!([{"item":"i2","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+            "name":"second","reason":"owner w9:p2 is gone; the child is working",
+            "since_ms":42}]),
+    );
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 2, "{status}");
+    // The other child of the same sweep is still classified.
+    let first = orphans.iter().find(|o| o["item"] == json!("i1")).unwrap();
+    assert_eq!(first["status"], json!("orphaned"), "{status}");
+    // The child whose custody cannot be written stays listed as unknown.
+    let second = orphans.iter().find(|o| o["item"] == json!("i2")).unwrap();
+    assert_eq!(second["status"], json!("unknown"), "{status}");
+    assert!(
+        second["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot read its custody"),
+        "{status}"
+    );
+    assert_eq!(second["since_ms"], json!(42), "{status}");
+    // The evidence proves nothing, so the child is not closed.
+    assert!(rig.read("state/items.json")[1]["closed_ms"].is_null());
+}
+
+#[test]
+fn the_status_lists_an_unclaimed_orphan_once() {
+    let (rig, tree) = close_rig("sweep-status-once");
+    // The owner pane is gone, so the child is an orphan the sweep keeps.
+    orphan(&rig, "i1", "w9:p1", "local");
+    child(&rig, "working", &tree);
+    serve(&rig);
+    let (_, status) = rig.json(&["status"]);
+    let orphans = status["orphans"].as_array().unwrap();
+    assert_eq!(orphans.len(), 1, "{status}");
+    assert_eq!(orphans[0]["status"], json!("orphaned"), "{status}");
+    assert_eq!(orphans[0]["claimed"], json!(false), "{status}");
+    // The human status names it once, on its own item line.
+    let human = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
+    assert!(human.contains("orphaned (unclaimed)"), "{human}");
+    assert_eq!(human.matches("orphaned (unclaimed)").count(), 1, "{human}");
+    // The brief counts the orphan once.
+    let brief = String::from_utf8_lossy(&rig.run(&["status", "--brief"]).stdout).into_owned();
+    assert!(brief.contains("1 orphaned"), "{brief}");
+    assert_eq!(brief.matches("1 orphaned").count(), 1, "{brief}");
 }
 
 #[test]
@@ -827,12 +1044,12 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
         );
     };
     // An owner that still exists closes its own children.
-    orphan(&rig, "w1:p1", "local");
+    orphan(&rig, "i1", "w1:p1", "local");
     child(&rig, "idle", &tree);
     serve(&rig);
     untouched(&rig, "owner alive");
     // The owner is gone. A working or blocked child is reported, not closed.
-    orphan(&rig, "w9:p1", "local");
+    orphan(&rig, "i2", "w9:p1", "local");
     for status in ["working", "blocked"] {
         child(&rig, status, &tree);
         let journal = serve(&rig);
@@ -893,7 +1110,7 @@ fn serve_closes_a_remote_orphan_over_ssh_with_the_pushed_check() {
     remote["probe"]["agent_panes"][0]["done"] = json!(true);
     remote["probe"]["panes"] = json!([{"pane_id":"w2:p1","workspace_id":"w2"}]);
     rig.put("remote.json", &remote);
-    orphan(&rig, "w9:p1", "8103");
+    orphan(&rig, "i1", "w9:p1", "8103");
     rig.script(
         "ssh",
         r#"#!/bin/sh
