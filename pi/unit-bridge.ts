@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult, SessionStartEvent } from "@earendil-works/pi-coding-agent";
-import { acquire, execution, prepared, record, reference, repositoryIdentity, sameExecution, sameRef, unitInput, unwrap, type Execution, type Prepared, type UnitRef } from "./unit-protocol.ts";
+import { acquire, acknowledgement, decodeDelivery, execution, prepared, record, reference, repositoryIdentity, sameExecution, sameRef, settlementExecution, settlementOrigin, unitInput, unwrap, type Execution, type Prepared, type UnitRef } from "./unit-protocol.ts";
 import { UnitWorker, type UnitExec } from "./unit-worker.ts";
 
 interface Invocation { origin: UnitRef; execution?: Execution; cwd: string; prepared?: Prepared; ended: boolean }
@@ -144,22 +144,33 @@ export class UnitBridge {
 	/** Provider settlement acknowledgements are independent of inbox text acknowledgements. */
 	drain(ctx: ExtensionContext): Promise<void> {
 		if (this.draining) return this.draining;
-		const epoch = this.epoch;
+		const epoch = this.epoch, session = ctx.sessionManager.getSessionId();
 		this.draining = (async () => {
 			if (!acquire(this.pi.events)) return;
 			const pending = await this.exec(["unit", "settlements"], ctx.cwd);
 			if (!Array.isArray(pending)) throw new Error("LAUNCH_UNRESOLVED: settlements returned no list");
 			for (const event of pending) {
 				if (epoch !== this.epoch) return;
-				if (!record(event) || typeof event.eventId !== "string") throw new Error("LAUNCH_UNRESOLVED: invalid settlement identity");
-				const owner = record(event.binding) ? event.binding.execution : event.execution;
-				if (!execution(owner)) throw new Error("LAUNCH_UNRESOLVED: missing settlement execution");
+				// The envelope and its custody reference are validated apart from the provider event.
+				const delivery = decodeDelivery(event), settlement = delivery.settlement;
+				if (typeof settlement.eventId !== "string") throw new Error("LAUNCH_UNRESOLVED: invalid settlement identity");
+				const owner = settlementExecution(settlement);
+				if (!owner) throw new Error("LAUNCH_UNRESOLVED: missing settlement execution");
+				const origin = settlementOrigin(settlement);
+				if (!origin) throw new Error("LAUNCH_UNRESOLVED: missing settlement origin");
+				if (origin.sessionId !== session) continue; // Another session owns this result.
 				const provider = acquire(this.pi.events);
 				if (!provider) return;
-				const result = provider.settle(event);
+				const inspected = provider.inspect(origin.unitId);
+				if (!inspected.ok) continue;
+				const contract = inspected.value;
+				if (!record(contract) || !reference(contract.ref) || !sameRef(contract.ref, origin)) continue; // Wrong branch or revision.
+				this.current(epoch, session, ctx);
+				const result = provider.settle(settlement);
 				if (!result.ok) continue; // Wrong branch or revision stays pending in Dogsled.
 				if (!record(result.value) || typeof result.value.applied !== "boolean") throw new Error("PROVIDER_UNAVAILABLE: invalid settlement acknowledgement");
-				await this.exec(["unit", "ack-settlement", "--input", JSON.stringify({ execution: owner, eventId: event.eventId })], ctx.cwd);
+				this.current(epoch, session, ctx);
+				await this.exec(["unit", "ack-settlement", "--input", JSON.stringify(acknowledgement(owner, settlement.eventId, delivery.custody))], ctx.cwd);
 			}
 		})().finally(() => { this.draining = undefined; });
 		return this.draining;

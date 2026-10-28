@@ -28,6 +28,39 @@ export function sameRef(a: UnitRef, b: UnitRef): boolean {
 export function sameExecution(a: Execution, b: Execution): boolean {
 	return a.executor === b.executor && a.ownerId === b.ownerId && a.requestId === b.requestId;
 }
+export interface Custody { itemId: string; claimId: string; revision: number; recipient: string }
+/** A settlement as the server delivers it: the unchanged provider event, and the custody it was delivered under. */
+export interface Delivery { custody?: Custody; settlement: Record<string, unknown> }
+export function custody(value: unknown): value is Custody {
+	return record(value) && text(value.itemId) && text(value.claimId) && Number.isSafeInteger(value.revision) && Number(value.revision) > 0 && text(value.recipient);
+}
+/** Decode a settlement delivery. The envelope and its custody reference are validated apart from the provider event.
+ * A settlement without an envelope is the older, un-enveloped form. */
+export function decodeDelivery(value: unknown): Delivery {
+	if (!record(value)) throw new Error("LAUNCH_UNRESOLVED: invalid settlement identity");
+	if (!("custody" in value) && !("settlement" in value)) return { settlement: value };
+	if (value.version !== 1) throw new Error("LAUNCH_UNRESOLVED: unknown delivery version");
+	if (!custody(value.custody)) throw new Error("LAUNCH_UNRESOLVED: malformed delivery custody");
+	if (!record(value.settlement)) throw new Error("LAUNCH_UNRESOLVED: malformed delivery settlement");
+	return { custody: value.custody, settlement: value.settlement };
+}
+/** The settlement acknowledgement: the original execution, the event, and the custody it was delivered under. */
+export interface Acknowledgement { execution: Execution; eventId: string; custody?: Custody }
+export function acknowledgement(owner: Execution, eventId: string, custody?: Custody): Acknowledgement {
+	return custody ? { execution: owner, eventId, custody } : { execution: owner, eventId };
+}
+/** The origin reference of one settlement event: the bound contract, or the refused origin. */
+export function settlementOrigin(value: Record<string, unknown>): UnitRef | undefined {
+	if (record(value.binding) && reference(value.binding.contract)) return value.binding.contract;
+	if (reference(value.origin)) return value.origin;
+	return undefined;
+}
+/** The execution that owns one settlement event: the bound execution, or the refused execution. */
+export function settlementExecution(value: Record<string, unknown>): Execution | undefined {
+	if (record(value.binding) && execution(value.binding.execution)) return value.binding.execution;
+	if (execution(value.execution)) return value.execution;
+	return undefined;
+}
 export function binding(value: unknown): value is Binding {
 	return record(value) && reference(value.contract) && execution(value.execution) && typeof value.exportDigest === "string" && /^[a-f0-9]{64}$/.test(value.exportDigest);
 }
