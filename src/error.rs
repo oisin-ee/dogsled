@@ -309,11 +309,111 @@ impl RetainedFailure {
     }
 }
 
+/// The prefix of a diagnostic error keeps the typed cause of the failure.
+///
+/// A cause that names the remote host is the transport's own text: the caller built it
+/// from its own arguments, and it carries no word from the peer. Any later clause
+/// belongs to the diagnostic, which shows it already. Every other cause can carry
+/// third-party detail, such as another user's worktree lock reason, so it stays
+/// withheld.
 fn diagnostic_prefix(source: &Error) -> String {
     match source.root() {
         Error::Ssh { .. } | Error::Deadline(_) | Error::Parse { .. } => format!("{source}; "),
+        Error::Invalid(cause) => match remote_cause(cause) {
+            Some(cause) => format!("{cause}; "),
+            None => String::new(),
+        },
         _ => String::new(),
     }
 }
 
+/// The cause the transport named for a remote failure. The transport writes
+/// `ssh <host>: <cause>` from the caller's own arguments.
+fn remote_cause(cause: &str) -> Option<&str> {
+    let first = cause.split("; ").next().unwrap_or(cause);
+    first.starts_with("ssh ").then_some(first)
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostic::{Cause, Context, Diagnostic, Operation};
+
+    fn diagnostic(cause: Cause) -> Diagnostic {
+        Diagnostic::new(Operation::Prepare, cause, Context::default())
+    }
+
+    /// A plain remote error keeps its typed cause. The cause is the transport's own text,
+    /// built from the caller's own arguments, so the printed error names the failure
+    /// instead of hiding it behind the diagnostic.
+    #[test]
+    fn a_plain_remote_error_keeps_its_typed_cause() {
+        let error = Error::Invalid("ssh netcup: unknown base origin/x".into())
+            .with_diagnostic(diagnostic(Cause::BaseUnavailable));
+        let text = error.to_string();
+        assert!(text.contains("unknown base origin/x"), "{text}");
+        assert!(text.contains("base_unavailable"), "{text}");
+    }
+
+    /// A cause that carries third-party detail stays withheld. Another user's worktree
+    /// lock reason is theirs, and the diagnostic names the cause without it.
+    #[test]
+    fn a_third_party_cause_stays_withheld() {
+        let error = Error::Invalid("/w/kept is locked (mine); it is not an agent worktree".into())
+            .with_diagnostic(diagnostic(Cause::WorkspaceOccupied));
+        let text = error.to_string();
+        assert!(!text.contains("mine"), "{text}");
+        assert!(text.contains("workspace_occupied"), "{text}");
+    }
+
+    /// The other roots keep their printed form. An `Ssh`, a `Deadline` and a `Parse` root
+    /// already show their cause, and a `Refused` root shows its own fixed message.
+    #[test]
+    fn the_other_roots_keep_their_printed_form() {
+        let ssh = Error::Ssh {
+            target: "netcup".into(),
+            failure: crate::hosts::Failure::RemoteCommandFailed,
+            refusal: None,
+        }
+        .with_diagnostic(diagnostic(Cause::Unavailable));
+        assert!(ssh.to_string().contains("ssh netcup"), "{ssh}");
+
+        let deadline = Error::Deadline("ssh netcup: remote deadline".into())
+            .with_diagnostic(diagnostic(Cause::Unavailable));
+        assert!(
+            deadline.to_string().contains("remote deadline"),
+            "{deadline}"
+        );
+
+        let parse = Error::Parse {
+            origin: "netcup host Prepare".into(),
+            detail: "response is not valid for this operation; untrusted detail withheld".into(),
+        }
+        .with_diagnostic(diagnostic(Cause::Unavailable));
+        assert!(parse.to_string().contains("unexpected output"), "{parse}");
+
+        let refused = Error::Refused {
+            code: Refusal::CloneFailed,
+            detail: "netcup: the peer could not clone the repository".into(),
+        }
+        .with_diagnostic(diagnostic(Cause::CloneFailed));
+        assert!(
+            refused
+                .to_string()
+                .contains("the peer could not clone the repository"),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains("clone_failed"), "{refused}");
+    }
+
+    /// The cause of a plain error is the caller's own text. The peer's own text never
+    /// reaches this type, so it cannot reach the printed error either.
+    #[test]
+    fn a_plain_error_shows_no_peer_text() {
+        let error = Error::Invalid("ssh netcup: unknown base origin/x".into())
+            .with_diagnostic(diagnostic(Cause::BaseUnavailable));
+        assert!(!error.to_string().contains("PRIVATE_SENTINEL"), "{error}");
+    }
+}
