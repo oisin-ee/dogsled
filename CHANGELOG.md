@@ -2,9 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.26.0 - 2026-10-28
 
+- The web portal is redesigned around agents. The left navigation lists every repository with its agents, and workers sit muted under their lead. A top-bar Inbox counts reviews, questions, owner prompts, and unseen workers. A waiting plan review, question set, or key prompt fills that agent's screen. The conversation tab shows the agent's full history as markdown. Leads show their task title. Closed rows no longer list on the board. Question forms show their images.
 - The Pi `interview` tool and `submit_plan` open the portal on the new question or plan.
+- `dogsled drop <item-id>`, and the MCP tool `drop`, delete a closed child's retained local and origin branch on its owner's request. The item leaves the board. A closed item whose done mark is gone gets its branch checked at most once an hour, and it leaves the board when the branch is gone.
+- A job item stays open until a sample taken after its launch lacks its pane. Before, a sample taken before the pane existed closed live jobs at start, so their owners never heard the job end.
+- A job refuses to run an expired request or one it cannot prove, and it runs only with a matching durable claim.
+- One owner derives the agent lifecycle state. A handoff counts as done only after the native `done` proves it.
+- Owner custody has a durable record. Check-ins go to the child's custodian, which is still its origin owner until claims ship.
+- Check-ins no longer repeat "Orphaned children the sweep keeps". `dogsled status` lists each orphan once, as orphaned or unknown.
+- A plain remote error names its typed cause. Remote preparation reports its cause in the ticket and the owner inbox, and it fetches a base that the peer's clone has not fetched.
 
 ## 0.25.3 - 2026-10-27
 
