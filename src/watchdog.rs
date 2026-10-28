@@ -357,9 +357,13 @@ pub fn item_tail(fleet: &Fleet, item: &Item, host: &crate::hosts::Host) -> Resul
 struct Holder<'a> {
     /// The pane that answers for the child.
     pane: &'a str,
-    /// The session that must be the live one. It is set for a claimed child only: the
-    /// origin owner holds its children as it always did.
+    /// The session that must be the live one. A claimed child names it; the origin owner
+    /// holds its children as it always did, with no session check.
     session: Option<&'a str>,
+    /// Whether a claim moved the custody. A claimed child is delivered to its custodian
+    /// only when the recorded session is the live one. A claim that recorded no session
+    /// proves nothing, so the note waits for the pane that holds the child.
+    claimed: bool,
 }
 
 /// The pane that holds a child now.
@@ -375,12 +379,14 @@ fn holder<'a>(item: &'a Item, records: &'a [crate::custody::Custody]) -> Holder<
             Holder {
                 pane: record.custodian_pane.as_str(),
                 session: record.custodian_session.as_deref(),
+                claimed: true,
             }
         }
         // The origin custody, or no custody at all: the origin owner holds the child.
         _ => Holder {
             pane: item.owner_pane.as_str(),
             session: None,
+            claimed: false,
         },
     }
 }
@@ -501,11 +507,14 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             let open: Vec<_> = group
                 .into_iter()
                 .filter(|i| {
-                    // A recorded custodian session must be the live one. Missing or
-                    // unreadable evidence is no match: the note waits for the pane that
-                    // holds the child, and is never sent to another session.
-                    let session = holders[i.id.as_str()].session;
-                    session.is_none_or(|s| agent.agent_session.as_deref() == Some(s))
+                    // A claimed child reaches its custodian only when the recorded
+                    // session is the live one. Missing or unreadable evidence is no
+                    // match: the note waits for the pane that holds the child, and is
+                    // never sent to another session. The origin owner holds its own
+                    // children, as it always did.
+                    let holder = &holders[i.id.as_str()];
+                    (!holder.claimed
+                        || holder.session.is_some_and(|s| agent.agent_session.as_deref() == Some(s)))
                         // A closed agent item was closed by its owner, the sweep, or the loss of
                         // its pane: nothing remains to report. An ended job still reports.
                         && (i.closed_ms.is_none()

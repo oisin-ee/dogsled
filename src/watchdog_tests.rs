@@ -531,6 +531,20 @@ fn a_custodian_running_another_session_gets_no_check_in() {
 }
 
 #[test]
+fn a_claim_that_recorded_no_session_gets_no_check_in() {
+    let rig = Rig::new();
+    rig.item("agent");
+    // The custodian pane is live and idle, but the claim recorded no session to match.
+    rig.custodian(Some("live-session"));
+    rig.custody("child", "custodian", None);
+    let reports = rig.reports(1_800_001, "idle", "working", Some(1_800_001));
+    tick(&rig.fleet(), &reports, 1_800_001).unwrap();
+    // Missing evidence is never a match: the pane id alone does not hold the child.
+    assert_eq!(rig.custodian_check_ins().len(), 0);
+    assert_eq!(rig.prompts(), 0);
+}
+
+#[test]
 fn check_ins_do_not_report_orphans_the_sweep_keeps() {
     let rig = Rig::new();
     rig.item("agent");
