@@ -927,6 +927,67 @@ fn expired_logs_end_after_one_marker() {
     }
 }
 
+/// A returning owner retains its item after retention removes the job record and log.
+fn expired_item_rig(name: &str) -> Rig {
+    let rig = Rig::new(name);
+    let ended = now();
+    put_job(&rig, "aged", &terminal("aged", ended), "old output");
+    set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
+    serve(&rig);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+    rig.put(
+        "state/items.json",
+        &json!([{
+            "id":"aged","kind":"job","host":"local","pane":"w2:p1",
+            "owner_pane":"w1:p1","created_ms":ended,"closed_ms":ended,"name":null
+        }]),
+    );
+    rig
+}
+
+#[test]
+fn expired_record_read_reports_expiry_to_the_owner() {
+    let rig = expired_item_rig("retention-gone-read");
+    let (code, read) = rig.json(&["read", "aged"]);
+    assert_eq!(code, 0, "{read}");
+    assert_eq!(read["tail"], EXPIRED, "{read}");
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+}
+
+#[test]
+fn expired_record_tail_reports_expiry_to_the_owner() {
+    let rig = expired_item_rig("retention-gone-tail");
+    let (code, tail) = rig.json(&["host", "tail", "job", "aged"]);
+    assert_eq!(code, 0, "{tail}");
+    assert_eq!(tail, EXPIRED, "{tail}");
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+}
+
+#[test]
+fn expired_record_logs_report_expiry_to_the_owner() {
+    let rig = expired_item_rig("retention-gone-logs");
+    let marker = format!("{EXPIRED}\n");
+    let (code, chunk) = rig.json(&["host", "logs", "aged"]);
+    assert_eq!(code, 0, "{chunk}");
+    assert_eq!(chunk["bytes"], json!(marker.as_bytes()), "{chunk}");
+    assert_eq!(chunk["expired"], true, "{chunk}");
+    assert_eq!(chunk["next"], marker.len(), "{chunk}");
+    let (code, end) = rig.json(&[
+        "host",
+        "logs",
+        "aged",
+        "--offset",
+        &marker.len().to_string(),
+    ]);
+    assert_eq!(code, 0, "{end}");
+    assert_eq!(end["bytes"], json!([]), "{end}");
+    assert_eq!(end["done"], true, "{end}");
+    assert_eq!(rig.json(&["host", "logs", "unknown"]).0, 2);
+    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.dir.join("state/jobs/aged.log").exists());
+}
+
 /// The expiry pass repeats safely. A second pass changes nothing.
 #[test]
 fn a_second_expiry_pass_changes_nothing() {

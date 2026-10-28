@@ -455,9 +455,12 @@ fn remove(path: &std::path::Path) -> Result<()> {
     }
 }
 
-/// Whether the record says the job's output expired.
+/// Whether output expired, including a deleted record still named by a job item.
 pub fn expired(ledger: &Ledger, id: &str) -> Result<bool> {
-    Ok(record(ledger, id)?.is_some_and(|job| job.output_expired))
+    match record(ledger, id)? {
+        Some(job) => Ok(job.output_expired),
+        None => record_expired(ledger, id),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -306,6 +306,9 @@ pub fn pane_tail(shell: &dyn crate::shell::Shell, pane: &str) -> Result<String> 
 pub fn job_tail(ledger: &Ledger, id: &str) -> Result<String> {
     use std::io::{Read, Seek, SeekFrom};
     crate::jobs::validate_id(id)?;
+    if crate::jobs::expired(ledger, id)? {
+        return Ok(crate::jobs::OUTPUT_EXPIRED.to_owned());
+    }
     let path = crate::jobs::store(ledger).dir.join(format!("{id}.log"));
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
