@@ -410,6 +410,43 @@ fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
 }
 
 #[test]
+fn prune_rechecks_job_terminal_evidence_after_selection() {
+    for reversed in [false, true] {
+        let rig = watchdog_rig(&format!("prune-job-recheck-{reversed}"));
+        let job = json!({"id":"old","cmd":["test"],"cwd":rig.dir.join("home/repo/tree"),
+            "host":"local","owner":"w1:p1","pane":"job-pane","state":"idle","exit":0,
+            "signal":null,"reason":null,"started_ms":1,"ended_ms":2,
+            "timeout_ms":null,"idle_timeout_ms":null});
+        fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
+        rig.put("state/jobs/old.json", &job);
+        fs::write(rig.dir.join("state/jobs/old.log"), "old output").unwrap();
+        let mut changed = job;
+        if reversed {
+            changed["started_ms"] = json!(3);
+        } else {
+            changed["state"] = json!("future-state");
+        }
+        rig.put("changed-job.json", &changed);
+        // Disk inspection follows job selection in the fresh apply-time survey.
+        rig.script("df", "#!/bin/sh\ncp \"$RIG/changed-job.json\" \"$RIG/state/jobs/old.json\"\nprintf 'FS 1000 950 50 95%% /\\n'\n");
+        let plan =
+            json!({"entries":[{"class":"jobs","id":"old","detail":"ended","removable":true}]});
+        let (_, applied) = rig.json(&["host", "prune", "--plan", &plan.to_string()]);
+        assert!(
+            applied["results"].as_array().unwrap().is_empty(),
+            "{applied}"
+        );
+        assert!(
+            applied.to_string().contains("job is not expired"),
+            "{applied}"
+        );
+        assert_eq!(rig.read("state/jobs/old.json"), changed);
+        assert_eq!(rig.log("state/jobs/old.log"), "old output");
+        assert!(rig.dir.join("home/repo/tree").exists());
+    }
+}
+
+#[test]
 fn doctor_finds_processes_when_a_pane_closes_after_the_list() {
     let rig = watchdog_rig("doctor-closed-pane");
     // Herdr listed "gone", then it closed before doctor asked for its processes.

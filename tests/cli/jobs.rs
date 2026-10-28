@@ -437,6 +437,54 @@ fn put_job(rig: &Rig, id: &str, job: &Value, output: &str) {
     .unwrap();
 }
 
+fn prune_old_job(state: &str, reversed: bool, kept: bool) {
+    let rig = watchdog::watchdog_rig(&format!("prune-old-job-{state}-{reversed}"));
+    let tree = rig.dir.join("home/repo/tree");
+    let mut job = terminal("old", 2);
+    job["state"] = json!(state);
+    job["cwd"] = json!(tree);
+    if reversed {
+        job["started_ms"] = json!(3);
+    }
+    put_job(&rig, "old", &job, "old output");
+    let (code, plan) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{plan}");
+    assert_eq!(
+        plan["entries"].as_array().unwrap().iter().any(|entry| {
+            entry["class"] == "jobs" && entry["id"] == "old" && entry["removable"] == true
+        }),
+        !kept,
+        "{plan}"
+    );
+    let out = rig.run(&["prune", "--yes", "jobs"]);
+    assert!(out.status.success(), "{out:?}");
+    let record = rig.dir.join("state/jobs/old.json");
+    assert_eq!(record.exists(), kept, "{out:?}");
+    assert_eq!(rig.dir.join("state/jobs/old.log").exists(), kept);
+    if kept {
+        assert_eq!(rig.read("state/jobs/old.json"), job);
+    }
+    let out = rig.run(&["prune", "--yes", "worktrees"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(tree.exists(), kept, "{out:?}");
+    assert_eq!(rig.dir.join("removed").exists(), !kept);
+}
+
+#[test]
+fn prune_old_job_with_unknown_state_keeps_record_and_checkout() {
+    prune_old_job("future-state", false, true);
+}
+
+#[test]
+fn prune_old_job_with_reversed_time_keeps_record_and_checkout() {
+    prune_old_job("idle", true, true);
+}
+
+#[test]
+fn prune_old_job_with_terminal_evidence_removes_record() {
+    prune_old_job("idle", false, false);
+}
+
 /// Set the rig's host clock.
 fn set_clock(rig: &Rig, at: u64) {
     fs::write(rig.dir.join("clock"), at.to_string()).unwrap();
