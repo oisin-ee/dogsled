@@ -531,3 +531,64 @@ fn a_reused_pane_id_never_inherits_the_custody_of_a_child() {
     let owner = rig.read("state/inbox/term_owner.json");
     assert!(replies(&owner).is_empty(), "{owner}");
 }
+
+#[test]
+#[ignore = "red until the custodian session check is fixed"]
+fn a_recorded_custodian_session_that_cannot_be_read_receives_nothing() {
+    let rig = Rig::new("inbox-unread-session");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_owner", "owner"),
+            ("w1:p3", "term_child", "child"),
+        ],
+    );
+    // The custody records a session, but no live session of the pane can be read.
+    rig.put("state/items.json", &child_item());
+    rig.put(
+        "state/custody.json",
+        &json!([custody("child", "w1:p2", Some("custodian-session"))]),
+    );
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    serve(&rig);
+    serve(&rig);
+    let owner = rig.read("state/inbox/term_owner.json");
+    assert!(replies(&owner).is_empty(), "{owner}");
+}
+
+#[test]
+#[ignore = "red until the delivery live session check is fixed"]
+fn delivery_checks_the_live_session_of_the_recipient_not_the_snapshot() {
+    let rig = Rig::new("inbox-stale-snapshot");
+    agents(
+        &rig,
+        "state",
+        &[
+            ("w1:p1", "term_lead", "lead"),
+            ("w1:p2", "term_owner", "owner"),
+            ("w1:p3", "term_child", "child"),
+        ],
+    );
+    custody_session(&rig, "w1:p2", "custodian-session");
+    rig.put("state/items.json", &child_item());
+    rig.put(
+        "state/custody.json",
+        &json!([custody("child", "w1:p2", Some("custodian-session"))]),
+    );
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    // The pane now runs another session, but the snapshot still shows the old one.
+    let mut listed: Value =
+        serde_json::from_slice(&fs::read(rig.dir.join("agents.json")).unwrap()).unwrap();
+    for agent in listed["result"]["agents"].as_array_mut().unwrap() {
+        if agent["pane_id"] == json!("w1:p2") {
+            agent["agent_session"] = json!({"kind":"path","value":"another-session"});
+        }
+    }
+    rig.put("agents.json", &listed);
+    serve(&rig);
+    serve(&rig);
+    let owner = rig.read("state/inbox/term_owner.json");
+    assert!(replies(&owner).is_empty(), "{owner}");
+}
