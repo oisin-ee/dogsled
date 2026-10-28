@@ -1295,7 +1295,8 @@ fn worktree_removed_after_listing_is_reconciled_not_failed() {
             panic!("{:?}", plan.entries);
         };
         assert!(entry.removable, "{}", entry.detail);
-        assert!(entry.tree.is_none(), "{entry:?}");
+        let captured = recorded(&ledger);
+        assert_eq!(entry.tree.as_ref(), captured.first(), "{entry:?}");
         assert!(
             entry.detail.contains("removed during the survey"),
             "{}",
@@ -2581,4 +2582,110 @@ fn git_status_error_in_an_existing_listed_worktree_still_fails() {
         entry.detail
     );
     assert_eq!(recorded(&ledger), [tree]);
+}
+
+#[test]
+fn damaged_checkout_does_not_block_healthy_sibling_cleanup() {
+    for malformed in [false, true] {
+        let repo = Repo::new();
+        let ledger = Ledger::new(repo.root.join("state"));
+        let damaged = registered(&repo, &ledger);
+        let sibling = repo.repo.join(".worktrees/healthy");
+        git(
+            &repo.repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "healthy",
+                sibling.to_str().unwrap(),
+            ],
+        );
+        let marker = damaged
+            .identity
+            .as_ref()
+            .unwrap()
+            .gitdir
+            .join("dogsled-checkout-id");
+        std::fs::write(
+            &marker,
+            if malformed {
+                "invalid generation"
+            } else {
+                "11111111111111111111111111111111"
+            },
+        )
+        .unwrap();
+        let cleanup = crate::config::Cleanup::default();
+        let node = crate::node::Node {
+            shell: &System,
+            ledger: &ledger,
+            thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+            home: repo.root.to_str().unwrap(),
+            cleanup: &cleanup,
+        };
+        let mut plan = survey(&node, Scope::Prune, 100).unwrap();
+        plan.entries.retain(|entry| {
+            entry.class == "worktrees"
+                && (crate::worktree::same(&entry.id, &damaged.path)
+                    || crate::worktree::same(&entry.id, sibling.to_str().unwrap()))
+        });
+        let refused = plan
+            .entries
+            .iter()
+            .find(|entry| entry.id == damaged.path)
+            .unwrap();
+        assert!(!refused.removable, "{refused:?}");
+        assert!(
+            refused.detail.contains(if malformed {
+                "malformed checkout generation"
+            } else {
+                "worktree identity changed"
+            }),
+            "{refused:?}"
+        );
+        let healthy = plan
+            .entries
+            .iter()
+            .find(|entry| crate::worktree::same(&entry.id, sibling.to_str().unwrap()))
+            .unwrap();
+        assert!(healthy.removable, "{healthy:?}");
+        let applied = crate::cleanup::apply(&node, &plan, 100).unwrap();
+        assert!(applied.failures.is_empty(), "{applied:?}");
+        assert!(!sibling.exists(), "{applied:?}");
+        assert!(repo.tree.is_dir());
+        assert_eq!(recorded(&ledger), [damaged]);
+    }
+}
+
+#[test]
+fn disappearance_during_survey_keeps_identity_for_locked_reconciliation() {
+    let repo = Repo::new();
+    let ledger = Ledger::new(repo.root.join("state"));
+    let captured = registered(&repo, &ledger);
+    let cleanup = crate::config::Cleanup::default();
+    let (main, path) = (repo.repo.clone(), repo.tree.clone());
+    let racing = Racing::new(&repo.tree, move || {
+        git(&main, &["worktree", "remove", path.to_str().unwrap()]);
+    });
+    let node = crate::node::Node {
+        shell: &racing,
+        ledger: &ledger,
+        thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+        home: repo.root.to_str().unwrap(),
+        cleanup: &cleanup,
+    };
+    let plan = fixture_plan(&node, Scope::Prune, &repo);
+    assert!(racing.fired.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(plan.entries.len(), 1);
+    assert_eq!(plan.entries[0].tree.as_ref(), Some(&captured));
+    let applied = crate::cleanup::apply(&node, &plan, 100).unwrap();
+    assert!(applied.failures.is_empty(), "{applied:?}");
+    assert_eq!(applied.results.len(), 1, "{applied:?}");
+    assert!(
+        applied.results[0].contains("dropped its registration"),
+        "{applied:?}"
+    );
+    assert_eq!(recorded(&ledger), [] as [crate::cleanup::Tree; 0]);
 }

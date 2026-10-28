@@ -564,13 +564,6 @@ fn porcelain(shell: &dyn Shell, repo: &str) -> Result<Vec<(Tree, bool)>> {
         } else if field == "prunable" || field.starts_with("prunable ") {
             prunable = true;
         } else if field.is_empty() && !tree.path.is_empty() {
-            // Read only: a stale request must never acquire today's generation.
-            tree.identity = if crate::worktree::same(&tree.path, repo) {
-                None
-            } else {
-                crate::worktree::linked_or_detached(shell, &tree.path)?
-                    .and_then(|linked| linked.identity)
-            };
             result.push((tree.clone(), std::mem::take(&mut prunable)));
             tree.path.clear();
             tree.branch.clear();
@@ -771,6 +764,7 @@ fn readable(
         let discovered =
             crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&repo), |guard| {
                 let mut found = porcelain(node.shell, &repo)?;
+                let mut refused = BTreeSet::new();
                 for (tree, prunable) in found.iter_mut().skip(1) {
                     if *prunable || unlinked_reason(tree, Some(false)).is_some() {
                         continue;
@@ -778,28 +772,42 @@ fn readable(
                     let saved = recorded.iter().find(|saved| {
                         crate::worktree::same(&saved.path, &tree.path) && saved.identity.is_some()
                     });
-                    let linked = if let Some(saved) = saved {
-                        let linked = guard.observe(node.shell, &tree.path)?;
-                        if linked
-                            .as_ref()
-                            .is_some_and(|now| saved.identity != now.identity)
-                        {
-                            return Err(crate::worktree::refuse("worktree identity changed"));
+                    let captured = (|| {
+                        if let Some(saved) = saved {
+                            let linked = guard.observe(node.shell, &tree.path)?;
+                            if linked
+                                .as_ref()
+                                .is_some_and(|now| saved.identity != now.identity)
+                            {
+                                return Err(crate::worktree::refuse("worktree identity changed"));
+                            }
+                            Ok(linked)
+                        } else {
+                            guard.discover(node.shell, &tree.path)
                         }
-                        linked
-                    } else {
-                        guard.discover(node.shell, &tree.path)?
-                    };
-                    if let Some(linked) = linked {
-                        *tree = linked.tree();
+                    })();
+                    match captured {
+                        Ok(Some(linked)) => *tree = linked.tree(),
+                        Ok(None) => (),
+                        Err(error) => {
+                            let mut warning = entry(
+                                "worktrees",
+                                tree.path.clone(),
+                                format!("unreadable: {error}"),
+                                false,
+                            );
+                            warning.tree = Some(tree.clone());
+                            plan.entries.push(warning);
+                            refused.insert(tree.path.clone());
+                        }
                     }
                 }
-                Ok(found)
+                Ok((found, refused))
             });
         match discovered {
-            Ok(found) => {
+            Ok((found, refused)) => {
                 for (tree, prunable) in found.iter().skip(1) {
-                    if !Path::new(&tree.path).exists() {
+                    if refused.contains(&tree.path) || !Path::new(&tree.path).exists() {
                         continue;
                     }
                     match unlinked_reason(tree, Some(*prunable)) {
@@ -1743,13 +1751,15 @@ fn vanished(node: &Node<'_>, tree: &Tree) -> Option<Entry> {
     recorded
         .into_iter()
         .find(|t| crate::worktree::same(&t.path, &tree.path))
-        .map(|t| {
-            entry(
+        .map(|_| {
+            let mut vanished = entry(
                 "worktrees",
-                t.path,
+                tree.path.clone(),
                 "removed during the survey; drops the stale registration".into(),
                 true,
-            )
+            );
+            vanished.tree = Some(tree.clone());
+            vanished
         })
 }
 
@@ -1769,7 +1779,7 @@ fn validate_tree(
     node: &Node<'_>,
     planned: &Tree,
 ) -> Result<Recheck> {
-    let current = repository_trees(node.shell, &planned.repo)?
+    let mut current = repository_trees(node.shell, &planned.repo)?
         .into_iter()
         .find(|t| t.path == planned.path);
     if gone(guard, node.shell, planned) {
@@ -1777,6 +1787,11 @@ fn validate_tree(
     }
     // Git lost it after the survey: the next survey holds it; this pass touches nothing.
     let reason = unlinked_reason(planned, current.as_ref().map(|_| false));
+    if let Some(current) = current.as_mut() {
+        current.identity = guard
+            .observe(node.shell, &current.path)?
+            .and_then(|linked| linked.identity);
+    }
     let (Some(current), None) = (current, reason) else {
         return Err(Error::Invalid(format!(
             "refuse {}: {}; directory remains",
