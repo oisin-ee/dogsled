@@ -99,6 +99,7 @@ mod tests {
             queue: Vec::new(),
             orphans: Vec::new(),
             sweep: None,
+            stopped_activity: std::collections::BTreeMap::new(),
         }
     }
 

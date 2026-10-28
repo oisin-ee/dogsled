@@ -830,6 +830,11 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
                 .map(|t| waiting(t, &status.hosts, now)),
         )
         .collect();
+    for row in &mut rows {
+        if let Some(activity) = status.stopped_activity.get(&row.id) {
+            row.activity.clone_from(activity);
+        }
+    }
     // Stable: within a group, the oldest first.
     rows.sort_by(|a, b| a.group.cmp(&b.group).then(b.age_ms.cmp(&a.age_ms)));
     Board {
@@ -1777,6 +1782,7 @@ mod tests {
             queue: Vec::new(),
             orphans: Vec::new(),
             sweep: None,
+            stopped_activity: std::collections::BTreeMap::new(),
         }
     }
 
