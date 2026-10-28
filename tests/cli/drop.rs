@@ -110,6 +110,8 @@ fn drop_refuses_open_branchless_and_foreign_owned_items() {
         let mut items = rig.read("state/items.json");
         items[0][field] = value;
         rig.put("state/items.json", &items);
+        // The foreign owner's pane is live, so the child is not an orphan.
+        live_owner(&rig, "w3:p1");
         let (code, refused) = rig.json(&["drop", "i1"]);
         assert_eq!(code, 2, "{refused}");
         assert!(
@@ -122,6 +124,42 @@ fn drop_refuses_open_branchless_and_foreign_owned_items() {
             ""
         );
     }
+}
+
+fn live_owner(rig: &Rig, pane: &str) {
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w1:p1","terminal_id":"term_owner"},
+            {"pane_id":"w2:p1","terminal_id":"term_child"},
+            {"pane_id":pane,"terminal_id":"term_foreign"}
+        ]}}),
+    );
+}
+
+#[test]
+fn any_session_drops_an_orphan_whose_owner_pane_is_gone() {
+    let (rig, repo) = rig("drop-orphan");
+    let mut items = rig.read("state/items.json");
+    items[0]["owner_pane"] = json!("w9:p9");
+    rig.put("state/items.json", &items);
+    let (code, dropped) = rig.json(&["drop", "i1"]);
+    assert_eq!(code, 0, "{dropped}");
+    assert_eq!(git(&repo, &["branch", "--list", "feat/x"]), "");
+    assert!(rig.read("state/items.json")[0]["dropped_ms"].is_u64());
+}
+
+#[test]
+fn an_unreadable_pane_list_keeps_the_owner_rule() {
+    let (rig, repo) = rig("drop-orphan-unreadable");
+    let mut items = rig.read("state/items.json");
+    items[0]["owner_pane"] = json!("w9:p9");
+    rig.put("state/items.json", &items);
+    fs::write(rig.dir.join("panes.json"), "not json").unwrap();
+    let (code, refused) = rig.json(&["drop", "i1"]);
+    assert_eq!(code, 2, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("only owner"));
+    assert_ne!(git(&repo, &["branch", "--list", "feat/x"]), "");
 }
 
 #[test]

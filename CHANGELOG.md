@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- `dogsled drop` accepts an orphan from any session when the origin proves its owner pane is gone or its session ended, by the sweep's custody rule. Unreadable evidence keeps the owner rule.
+
 ## 0.26.0 - 2026-10-28
 
 - The web portal is redesigned around agents. The left navigation lists every repository with its agents, and workers sit muted under their lead. A top-bar Inbox counts reviews, questions, owner prompts, and unseen workers. A waiting plan review, question set, or key prompt fills that agent's screen. The conversation tab shows the agent's full history as markdown. Leads show their task title. Closed rows no longer list on the board. Question forms show their images.
