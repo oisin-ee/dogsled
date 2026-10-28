@@ -27,6 +27,9 @@ pub struct Closed {
     pub worktree: Option<Worktree>,
     /// True when dogsled closed the pane itself, because no workspace close covered it.
     pub pane_closed: bool,
+    /// Retained stopped-orphan work, measured before the checkout is removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_branch: Option<crate::done::Branch>,
 }
 
 /// The caller's own pane, workspace, and directory. Over SSH all are empty.
@@ -252,6 +255,7 @@ pub fn with_local<T>(
                     anchor_closed: None,
                 }),
                 pane_closed: false,
+                retained_branch: None,
             });
         }
         let now = validate_checkout(shell, &planned)?;
@@ -368,6 +372,7 @@ fn pane_only(shell: &dyn crate::shell::Shell, pane: &str) -> Result<Closed> {
         pane: pane.into(),
         worktree: None,
         pane_closed: true,
+        retained_branch: None,
     })
 }
 
@@ -391,6 +396,7 @@ fn remove_target(
             pane: pane.into(),
             worktree: None,
             pane_closed: true,
+            retained_branch: None,
         });
     }
     // Only the explicit orphan path can replace native done with correlated stopped evidence.
@@ -431,6 +437,7 @@ fn remove_target(
     }
     outside(&tree, caller)?;
     let evidence = unsaved(shell, ledger, &tree, caller, guard)?;
+    let retained_branch = retained_branch(shell, &tree, guard)?;
     if let Some(lock) = lock
         && lock != AGENT_LOCK
     {
@@ -482,7 +489,27 @@ fn remove_target(
             anchor_closed: removed.anchor_closed,
         }),
         pane_closed,
+        retained_branch,
     })
+}
+
+/// Snapshot the branch while its checkout and repository protection still exist.
+fn retained_branch(
+    shell: &dyn crate::shell::Shell,
+    tree: &worktree::Linked,
+    guard: Guard,
+) -> Result<Option<crate::done::Branch>> {
+    if !matches!(guard, Guard::StoppedOrphan { .. }) || tree.branch.is_empty() {
+        return Ok(None);
+    }
+    let mut branch = crate::done::Branch {
+        repo: tree.checkout.display().to_string(),
+        name: tree.branch.clone(),
+        ahead: 0,
+        landed: false,
+    };
+    crate::done::refresh_branch(shell, &mut branch)?;
+    Ok(Some(branch))
 }
 
 /// A shared checkout stays, but its finished child can release its own pane.

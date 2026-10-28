@@ -174,11 +174,24 @@ pub fn orphan_reply(ledger: &Ledger, id: &str, reply: Reply) -> Result<()> {
 }
 
 /// Record resource-only closure without resolving the unit binding.
-pub fn resource_closed(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
+pub fn orphan_closed(
+    ledger: &Ledger,
+    id: &str,
+    now: u64,
+    resource_only: bool,
+    branch: Option<crate::done::Branch>,
+) -> Result<()> {
     change(ledger, |items| {
         if let Some(item) = items.iter_mut().find(|item| item.id == id) {
-            item.resource_closed_ms.get_or_insert(now);
-            item.resource_close_reason = Some("resource-only close; task unresolved".into());
+            item.closed_ms.get_or_insert(now);
+            item.signal = None;
+            if let Some(branch) = branch {
+                item.branch = Some(branch);
+            }
+            if resource_only {
+                item.resource_closed_ms.get_or_insert(now);
+                item.resource_close_reason = Some("resource-only close; task unresolved".into());
+            }
         }
     })
 }

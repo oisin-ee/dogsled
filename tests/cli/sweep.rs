@@ -1154,6 +1154,18 @@ fn a_clean_stopped_orphan_closes_and_records_output_not_a_result() {
     assert_ne!(item["native_done"], true);
     assert!(item["orphan_reply"]["result_id"].is_null());
     assert_ne!(item["orphan_reply"]["done"], true);
+    assert_eq!(item["branch"]["name"], "feat/x");
+    assert_eq!(item["branch"]["ahead"], 1);
+    assert_eq!(item["branch"]["landed"], false);
+    rig.put("agents.json", &json!({"result":{"agents":[]}}));
+    rig.put("panes.json", &json!({"result":{"panes":[]}}));
+    rig.service();
+    let (_, board) = rig.json(&["board", "--all"]);
+    assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
+    assert_eq!(
+        board["rows"][0]["activity"], "branch feat/x +1 to land",
+        "{board}"
+    );
 }
 
 #[test]
@@ -1222,8 +1234,9 @@ fn protected_orphan_lifecycles_never_close() {
                 rig.done("term_child", "w2:p1", 1);
             }
             "lost" => {
-                child(&rig, "unknown", &tree);
-                rig.put("agents.json", &json!({"result":{"agents":[]}}));
+                orphan(&rig, "i1", "w9:p1", "8103");
+                rig.peer();
+                fs::write(rig.dir.join("unreachable"), "offline").unwrap();
             }
             _ => unreachable!(),
         }
@@ -1239,19 +1252,19 @@ fn protected_orphan_lifecycles_never_close() {
 
 #[test]
 fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
-    use super::unit_requests::{commit_input, prepare};
+    let (source, execution, _) = super::unit_seeded::launched("sweep-stopped-unit-launch");
     let (rig, tree) = close_rig("sweep-stopped-unit");
     stopped_orphan(&rig, &tree);
-    rig.put(
-        "workspaces.json",
-        &json!({"result":{"workspaces":[{"workspace_id":"w1","label":"test"}]}}),
-    );
-    let execution = prepare(&rig);
     let id = execution["requestId"].as_str().unwrap();
     let path = format!("state/admissions/{id}.json");
-    let mut attempt = rig.read(&path);
-    attempt["unit"]["committed"] = commit_input(&execution, 0);
+    let attempt = source.read(&path);
+    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
     rig.put(&path, &attempt);
+    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
+    for suffix in [".json", ".progress.json", ".unit.json"] {
+        let file = format!("state/launches/{id}{suffix}");
+        rig.put(&file, &source.read(&file));
+    }
     let mut items = rig.read("state/items.json");
     items[0]["id"] = json!(id);
     rig.put("state/items.json", &items);
@@ -1276,7 +1289,119 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
         assert!(saved["unit"]["stopped"].is_null());
         assert!(saved["unit"]["not_started"].is_null());
         assert!(saved["unit"]["settlement_ack"].is_null());
+        assert!(rig.read(&format!("state/launches/{id}.progress.json"))["stopped"].is_null());
     }
+}
+
+#[test]
+fn host_stopped_orphan_close_rechecks_session_turn_and_lifecycle() {
+    for changed in [
+        "session",
+        "turn",
+        "working",
+        "unknown",
+        "waiting",
+        "asking",
+        "finishing",
+    ] {
+        let (rig, tree) = close_rig(&format!("host-stopped-{changed}"));
+        stopped_orphan(&rig, &tree);
+        let episode = rig.read("state/watchdog.json")["stopped"]["i1"].clone();
+        let mut agents = rig.read("agents.json");
+        match changed {
+            "session" => {
+                agents["result"]["agents"][1]["agent_session"] =
+                    json!({"kind":"id","value":"replacement"});
+            }
+            "turn" => agents["result"]["agents"][1]["state_change_seq"] = json!(2),
+            "working" | "unknown" => agents["result"]["agents"][1]["agent_status"] = json!(changed),
+            "waiting" => {
+                let mut items = rig.read("state/items.json");
+                items
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":"nested","kind":"agent","host":"local",
+                    "pane":"w3:p1","owner_pane":"w2:p1","created_ms":1,"closed_ms":null}));
+                rig.put("state/items.json", &items);
+            }
+            "asking" => {
+                let session = &episode["agent_session"];
+                rig.put("state/done.json", &json!({"term_child":{
+                    "pane":"w2:p1","session":session,"marked_ms":1,
+                    "signal":{"kind":"ask","text":"Need input","event_id":"ask",
+                        "turn":episode["turn"],"session":session,"recorded_ms":1,"cleared_ms":null}
+                }}));
+            }
+            "finishing" => rig.done("term_child", "w2:p1", 1),
+            _ => unreachable!(),
+        }
+        rig.put("agents.json", &agents);
+        let out = rig.run(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--stopped-orphan",
+            &episode.to_string(),
+        ]);
+        assert!(
+            !out.status.success(),
+            "{changed}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(tree.exists(), "{changed}");
+        assert!(
+            !rig.log("herdr.log").contains("workspace close"),
+            "{changed}"
+        );
+        assert!(!rig.log("herdr.log").contains("pane close"), "{changed}");
+    }
+}
+
+#[test]
+fn serve_closes_a_remote_stopped_orphan_with_explicit_correlated_permission() {
+    let (rig, tree) = close_rig("sweep-stopped-remote");
+    stopped_orphan(&rig, &tree);
+    orphan(&rig, "i1", "w9:p1", "8103");
+    rig.peer();
+    let mut remote = rig.read("remote.json");
+    remote["probe"]["agent_panes"][0] = json!({
+        "pane":"w2:p1","agent":"pi","state":"idle","done":false,
+        "agent_session":"remote-session","completion_seq":1,"state_change_seq":1
+    });
+    remote["probe"]["panes"] = json!([{"pane_id":"w2:p1"}]);
+    rig.put("remote.json", &remote);
+    let mut watchdog = rig.read("state/watchdog.json");
+    watchdog["stopped"]["i1"]["agent_session"] = json!("remote-session");
+    rig.put("state/watchdog.json", &watchdog);
+    rig.script("ssh", r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+case "$*" in
+  *'host snapshot'*) cat "$RIG/remote.json" ;;
+  *'host tail agent w2:p1'*) printf '%s\n' '"Remote stopped reply"' ;;
+  *'host close w2:p1 --stopped-orphan'*) printf '%s\n' '{"pane":"w2:p1","worktree":null,"pane_closed":true}' ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#);
+    let journal = serve(&rig);
+    assert!(
+        journal
+            .contains("closed stopped orphan w2:p1 on netcup; reply recorded; task not completed"),
+        "{journal}"
+    );
+    let log = rig.log("ssh.log");
+    assert!(log.contains("--stopped-orphan"), "{log}");
+    assert!(log.contains("remote-session"), "{log}");
+    assert!(log.contains("state_change_seq"), "{log}");
+    let item = &rig.read("state/items.json")[0];
+    assert!(item["closed_ms"].is_u64(), "{item}");
+    assert!(
+        item["orphan_reply"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Remote stopped reply"),
+        "{item}"
+    );
+    assert!(item["reply"].is_null(), "{item}");
 }
 
 #[test]
