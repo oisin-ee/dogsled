@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.26.1 - 2026-10-28
 
 - `dogsled drop` accepts an orphan from any session when the origin proves its owner pane is gone or its session ended, by the sweep's custody rule. Unreadable evidence keeps the owner rule.
 - `dogsled drop` fetches origin before it counts the discarded commits. A stale default branch counted commits that had already landed.
