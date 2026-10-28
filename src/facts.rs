@@ -494,6 +494,7 @@ mod tests {
     fn worktree_counts_commits_only_when_a_tip_moves() {
         let dir = std::env::temp_dir().join(crate::ledger::new_id());
         std::fs::create_dir_all(dir.join(".git/worktrees/t")).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
         std::fs::write(
             dir.join(".git/worktrees/t/dogsled-checkout-id"),
             "0123456789abcdef0123456789abcdef\n",

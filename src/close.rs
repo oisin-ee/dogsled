@@ -118,11 +118,11 @@ pub fn with_local<T>(
         .map(|cwd| worktree::capture_close(shell, cwd))
         .transpose()?
         .flatten();
-    let (live, directory) = match capture {
-        Some(capture) => (Some(capture.tree), capture.pin),
-        None => (None, None),
-    };
     let saved = crate::launch::checkout_for_pane(ledger, pane)?;
+    let (live, directory) = capture
+        .map(|capture| capture.bind_saved(saved.as_ref()))
+        .transpose()?
+        .unwrap_or((None, None));
     let planned = close_expectation(saved.as_ref(), live.as_ref());
     let Some(planned) = planned else {
         let target = validate_target(shell, &panes, pane, caller)?;

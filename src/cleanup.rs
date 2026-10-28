@@ -2893,7 +2893,7 @@ mod tests {
         let rig = Rig::new(json!([]));
         let repo = rig.ledger.dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let repo = repo.display().to_string();
+        let repo = std::fs::canonicalize(repo).unwrap().display().to_string();
         let tree = Tree {
             repo: repo.clone(),
             path: format!("{repo}/.worktrees/tiers-case"),

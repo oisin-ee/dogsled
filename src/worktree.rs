@@ -327,14 +327,49 @@ pub fn snapshot(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
 }
 
 /// The request observation and handles opened against the same directory tuple.
-/// Missing handles are retained as an absence candidate, never as permission to close.
-pub(crate) struct CloseCapture {
-    pub tree: Linked,
-    pub pin: Option<Pin>,
+/// Missing locations or handles are absence candidates, never permission to close.
+pub(crate) enum CloseCapture {
+    Observed {
+        tree: Linked,
+        pin: Option<Pin>,
+    },
+    Missing {
+        common: PathBuf,
+        gitdir: PathBuf,
+        path: String,
+    },
+}
+
+impl CloseCapture {
+    /// Bind missing-location evidence to saved identity before exposing the observation.
+    pub(crate) fn bind_saved(
+        self,
+        saved: Option<&crate::cleanup::Tree>,
+    ) -> Result<(Option<Linked>, Option<Pin>)> {
+        match self {
+            Self::Observed { tree, pin } => Ok((Some(tree), pin)),
+            Self::Missing {
+                common,
+                gitdir,
+                path,
+            } => {
+                if !saved.is_some_and(|saved| {
+                    same(&saved.path, &path)
+                        && saved.identity.as_ref().is_some_and(|identity| {
+                            identity.common == common && identity.gitdir == gitdir
+                        })
+                }) {
+                    return Err(refuse("checkout identity is unreadable"));
+                }
+                Ok((None, None))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 std::thread_local! {
+    pub(crate) static BEFORE_CLOSE_STAT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_CLOSE_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -381,7 +416,23 @@ pub(crate) fn capture_close(shell: &dyn Shell, cwd: &str) -> Result<Option<Close
                 directory_key(&std::fs::metadata(admin)?),
             ))
         };
-        let before = keys()?;
+        #[cfg(test)]
+        BEFORE_CLOSE_STAT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let before = match keys() {
+            Ok(keys) => keys,
+            Err(error) if missing(&error) => {
+                return Ok(Some(CloseCapture::Missing {
+                    common: resolved(Path::new(common)),
+                    gitdir: resolved(Path::new(admin)),
+                    path: resolved(Path::new(root)).display().to_string(),
+                }));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let Some(tree) = linked_or_detached(shell, cwd)? else {
             if attempt == 0 {
                 continue;
@@ -393,7 +444,9 @@ pub(crate) fn capture_close(shell: &dyn Shell, cwd: &str) -> Result<Option<Close
                 if before == after
                     && same(root, &tree.path)
                     && same(admin, &tree.gitdir.display().to_string()) => {}
-            Err(error) if missing(&error) => return Ok(Some(CloseCapture { tree, pin: None })),
+            Err(error) if missing(&error) => {
+                return Ok(Some(CloseCapture::Observed { tree, pin: None }));
+            }
             Err(error) => return Err(error.into()),
             _ if attempt == 0 => continue,
             _ => return Err(refuse("worktree identity changed during observation")),
@@ -407,7 +460,7 @@ pub(crate) fn capture_close(shell: &dyn Shell, cwd: &str) -> Result<Option<Close
         let pin = match tree.pin() {
             Ok(pin) => pin,
             Err(Error::Io(error)) if missing(&error) => {
-                return Ok(Some(CloseCapture { tree, pin: None }));
+                return Ok(Some(CloseCapture::Observed { tree, pin: None }));
             }
             Err(error) => return Err(error),
         };
@@ -421,11 +474,11 @@ pub(crate) fn capture_close(shell: &dyn Shell, cwd: &str) -> Result<Option<Close
         match pin.validate(&tree) {
             Ok(()) => (),
             Err(Error::Io(error)) if missing(&error) => {
-                return Ok(Some(CloseCapture { tree, pin: None }));
+                return Ok(Some(CloseCapture::Observed { tree, pin: None }));
             }
             Err(error) => return Err(error),
         }
-        return Ok(Some(CloseCapture {
+        return Ok(Some(CloseCapture::Observed {
             tree,
             pin: Some(pin),
         }));
