@@ -1133,6 +1133,7 @@ fn worktree_whose_git_file_is_gone_is_held_and_removal_refuses_before_unlocking(
         path: path.clone(),
         branch: "feature".into(),
         head: String::new(),
+        gitdir: PathBuf::new(),
         identity: None,
     };
     let refused = crate::worktree::with_lifecycle(&System, &ledger, &repo.repo, |guard| {
@@ -1396,6 +1397,7 @@ struct LifecycleShell {
     hook: Box<dyn Fn() + Send + Sync>,
     lock_attempt: Option<std::sync::mpsc::Sender<()>>,
     fail_listing: bool,
+    terminal: String,
 }
 
 impl std::fmt::Debug for LifecycleShell {
@@ -1415,6 +1417,7 @@ impl LifecycleShell {
             hook: Box::new(hook),
             lock_attempt: None,
             fail_listing: false,
+            terminal: "c1-original".into(),
         }
     }
 }
@@ -1434,7 +1437,7 @@ impl Shell for LifecycleShell {
         }
         let value = if program == "herdr" && args == ["pane", "list"] {
             Some(if self.open.load(SeqCst) {
-                serde_json::json!({"result":{"panes":[{"pane_id":"placed-shell","cwd":self.path}]}})
+                serde_json::json!({"result":{"panes":[{"pane_id":"placed-shell","cwd":self.path,"terminal_id":self.terminal}]}})
             } else {
                 serde_json::json!({"result":{"panes":[]}})
             })
@@ -1682,6 +1685,89 @@ fn same_path_same_head_replacement_is_preserved() {
         assert_eq!(applied.failures.len(), 1, "{applied:?}");
         assert!(fixture.repo.tree.is_dir());
         assert_eq!(recorded(&fixture.ledger), [replacement]);
+        assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn gone_checkout_does_not_reconcile_a_reused_pane_or_item() {
+    for replace_item in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        let captured = recorded(&fixture.ledger)[0].clone();
+        let progress = serde_json::json!({
+            "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
+            "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
+            "result":{"checkout":captured},"error":null
+        });
+        fixture
+            .ledger
+            .child("launches")
+            .write("c1-old.progress.json", &progress)
+            .unwrap();
+        fixture.ledger.write("items.json", &serde_json::json!([{
+            "id":if replace_item {"c1-new"} else {"c1-old"},"kind":"agent","host":"local","pane":"placed-shell","owner_pane":"parent","name":"worker","created_ms":1,"closed_ms":null
+        }])).unwrap();
+        external_remove(&fixture.repo);
+        let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        if !replace_item {
+            shell.terminal = "c1-replacement".into();
+        }
+        let reconciled = std::sync::atomic::AtomicBool::new(false);
+        let result = crate::close::with_local(
+            &shell,
+            &fixture.ledger,
+            "placed-shell",
+            &crate::close::Caller::default(),
+            crate::close::Guard::Clean,
+            |_| {
+                reconciled.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(result.is_err(), "{result:?}");
+        assert!(!reconciled.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(recorded(&fixture.ledger), [captured]);
+        assert!(
+            crate::items::list(&fixture.ledger).unwrap()[0]
+                .closed_ms
+                .is_none()
+        );
+        assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn stale_request_never_recreates_checkout_identity() {
+    for malformed in [false, true] {
+        let fixture = lifecycle_fixture(false);
+        let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        let plan = fixture.plan(&shell);
+        let marker = plan.entries[0]
+            .tree
+            .as_ref()
+            .unwrap()
+            .identity
+            .as_ref()
+            .unwrap()
+            .gitdir
+            .join("dogsled-checkout-id");
+        if malformed {
+            std::fs::write(&marker, "invalid generation").unwrap();
+        } else {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        let before = recorded(&fixture.ledger);
+        let applied = crate::cleanup::apply(&fixture.node(&shell), &plan, 100).unwrap();
+        assert_eq!(applied.failures.len(), 1, "{applied:?}");
+        if malformed {
+            assert_eq!(
+                std::fs::read_to_string(marker).unwrap(),
+                "invalid generation"
+            );
+        } else {
+            assert!(!marker.exists());
+        }
+        assert_eq!(recorded(&fixture.ledger), before);
         assert_eq!(shell.teardowns.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

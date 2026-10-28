@@ -225,6 +225,106 @@ fn repository_lock_precedes_launch_and_store_locks() {
 }
 
 #[test]
+fn incomplete_launch_keeps_saved_checkout_identity_after_preparation_retires() {
+    let (rig, repo) = place::place_rig("launch-replacement-after-retirement");
+    let ready = lifecycle_git_barrier(&rig);
+    let _ready_hold = ready.hold();
+    let (code, prepared) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "c1-recovery",
+        "--base",
+        "main",
+        "--request-id",
+        "recover-one",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    let tree = repo.join(".worktrees/c1-recovery");
+    let mut request = host_request(&rig);
+    request["cwd"] = json!(tree);
+    fs::write(rig.dir.join("start-fails"), "").unwrap();
+    assert_ne!(
+        rig.json(&["host", "launch", "--request", &request.to_string()])
+            .0,
+        0
+    );
+    let saved = rig.read("state/launches/recover-one.progress.json");
+    rig.put("state/preparations.json", &json!([]));
+    close::git(
+        &repo,
+        &["worktree", "remove", "-f", "-f", tree.to_str().unwrap()],
+    );
+    close::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            tree.to_str().unwrap(),
+            "c1-recovery",
+        ],
+    );
+    let admin = PathBuf::from(close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim());
+    fs::write(
+        admin.join("dogsled-checkout-id"),
+        "11111111111111111111111111111111\n",
+    )
+    .unwrap();
+    fs::write(tree.join("replacement"), "keep").unwrap();
+    let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_ne!(code, 0, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("identity changed"),
+        "{error}"
+    );
+    assert_eq!(rig.read("state/launches/recover-one.progress.json"), saved);
+    assert_eq!(
+        fs::read_to_string(tree.join("replacement")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
+}
+
+#[test]
+fn main_checkout_launch_recovery_preserves_the_same_captured_identity() {
+    let (rig, repo) = place::place_rig("launch-main-recovery");
+    let ready = lifecycle_git_barrier(&rig);
+    let _ready_hold = ready.hold();
+    let mut request = host_request(&rig);
+    request["cwd"] = json!(repo);
+    fs::write(rig.dir.join("start-fails"), "").unwrap();
+    assert_ne!(
+        rig.json(&["host", "launch", "--request", &request.to_string()])
+            .0,
+        0
+    );
+    let captured =
+        rig.read("state/launches/recover-one.progress.json")["result"]["checkout"].clone();
+    assert_eq!(
+        captured["identity"]["common"],
+        captured["identity"]["gitdir"]
+    );
+    assert!(captured["identity"]["generation"].is_string(), "{captured}");
+    rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w8:p1","terminal_id":"term_tree","name":"worker","agent":"pi","agent_status":"idle"}]}}));
+    let (code, recovered) = rig.json(&["host", "launch", "--request", &request.to_string()]);
+    assert_eq!(code, 0, "{recovered}");
+    assert_eq!(recovered["checkout"], captured);
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
+}
+
+#[test]
 fn setup_failure_preserves_replacement_checkout() {
     let (rig, repo) = place::place_rig("setup-replacement");
     let script = "git -C {main} worktree remove -f -f {path} && git -C {main} worktree add --lock --reason agent:worktree {path} {branch} && printf replacement > {path}/replacement; exit 1";

@@ -40,8 +40,8 @@ impl Tree {
     /// Compare `now`, a fresh listing, with this planned tree. Every recheck uses this, so a new
     /// commit is a skip and an identity change is a failure on each path.
     fn drift(&self, now: &Tree) -> Drift {
-        if self.repo != now.repo
-            || self.path != now.path
+        if !crate::worktree::same(&self.repo, &now.repo)
+            || !crate::worktree::same(&self.path, &now.path)
             || self.branch != now.branch
             || self.identity != now.identity
         {
@@ -1861,6 +1861,11 @@ fn remove_tree(guard: &crate::worktree::Guard, node: &Node<'_>, tree: &Tree) -> 
         path: tree.path.clone(),
         branch: tree.branch.clone(),
         head: tree.head.clone(),
+        gitdir: tree
+            .identity
+            .as_ref()
+            .map(|identity| identity.gitdir.clone())
+            .ok_or_else(|| Error::Invalid("missing administrative identity".into()))?,
         identity: tree.identity.clone(),
     };
     let mut holders = Vec::new();
@@ -2225,7 +2230,12 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             None => drop_registration(node, &candidate.id).map(Outcome::Done),
         },
         "branches" => match &requested.tree {
-            Some(tree) => delete_branch(node.shell, tree),
+            Some(tree) => crate::worktree::with_lifecycle(
+                node.shell,
+                node.ledger,
+                Path::new(&tree.repo),
+                |_| delete_branch(node.shell, tree),
+            ),
             None => Err(Error::Invalid("a branch entry has no branch".into())),
         },
         "workspaces" => close_workspace(node, &candidate.id, now),

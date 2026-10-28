@@ -50,17 +50,13 @@ fn generation(gitdir: &Path) -> Result<Option<String>> {
 impl Guard {
     /// Fresh discovery only. Stale validation must never create a generation marker.
     pub fn discover(&self, shell: &dyn Shell, path: &str) -> Result<Option<Linked>> {
-        let Some(mut tree) = linked_or_detached(shell, path)? else {
+        let Some(mut tree) = snapshot(shell, path)? else {
             return Ok(None);
         };
         self.check_repository(shell, &tree.checkout)?;
         if tree.identity.is_none() {
             use std::io::Write as _;
-            let gitdir = git(shell, Path::new(path), &["rev-parse", "--absolute-git-dir"])?;
-            if !gitdir.ok() {
-                return Err(refuse("cannot read checkout administrative directory"));
-            }
-            let gitdir = Path::new(gitdir.stdout.trim()).canonicalize()?;
+            let gitdir = tree.gitdir.clone();
             let mut bytes = [0u8; 16];
             getrandom::fill(&mut bytes)
                 .map_err(|error| Error::Invalid(format!("checkout generation: {error}")))?;
@@ -83,6 +79,10 @@ impl Guard {
                 gitdir,
                 generation: id,
             });
+        }
+        validate_identity(shell, &tree)?;
+        if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
+            return Err(refuse("HEAD moved during checkout discovery"));
         }
         Ok(Some(tree))
     }
@@ -117,6 +117,7 @@ pub struct Linked {
     /// Empty for a detached worktree.
     pub branch: String,
     pub head: String,
+    pub gitdir: PathBuf,
     pub identity: Option<Identity>,
 }
 
@@ -210,6 +211,15 @@ pub fn head_sha(shell: &dyn Shell, path: &str) -> Result<String> {
 /// The linked worktree that contains `cwd`. A detached one has an empty `branch`; no branch is
 /// invented for it.
 pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
+    capture(shell, cwd, true)
+}
+
+/// Read-only capture for launch validation, including the main checkout.
+pub fn snapshot(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
+    capture(shell, cwd, false)
+}
+
+fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Linked>> {
     if !Path::new(cwd).is_dir() {
         return Ok(None);
     }
@@ -237,7 +247,7 @@ pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>
             "git rev-parse in {cwd} returned unexpected output"
         )));
     };
-    if common == dir {
+    if linked_only && common == dir {
         return Ok(None);
     }
     let common = Path::new(common).canonicalize()?;
@@ -252,14 +262,15 @@ pub fn linked_or_detached(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>
     let gitdir = Path::new(dir).canonicalize()?;
     let identity = generation(&gitdir)?.map(|generation| Identity {
         common,
-        gitdir,
+        gitdir: gitdir.clone(),
         generation,
     });
     Ok(Some(Linked {
         head: head.into(),
+        gitdir,
         identity,
         checkout,
-        path: top.into(),
+        path: Path::new(top).canonicalize()?.display().to_string(),
         branch: if branch == "HEAD" {
             String::new()
         } else {
@@ -308,7 +319,7 @@ pub fn lock_reason(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Opt
 
 /// Read-only incarnation validation, including after a setup or teardown hook.
 pub fn validate_identity(shell: &dyn Shell, tree: &Linked) -> Result<()> {
-    let now = linked_or_detached(shell, &tree.path)?;
+    let now = snapshot(shell, &tree.path)?;
     if tree.identity.is_none()
         || now.as_ref().is_none_or(|now| {
             now.identity != tree.identity

@@ -827,6 +827,10 @@ pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Re
 /// Checkout absence alone never establishes completion. Reconciliation needs the saved
 /// native-done boundary, sealed reply, and original checkout identity.
 fn removed_handoff(ledger: &Ledger, mark: &Mark) -> Result<bool> {
+    if !mark.native_done || mark.item.is_none() {
+        return Ok(false);
+    }
+    crate::launch::validate_checkout_owner(ledger, &mark.pane, mark.item.as_deref(), None)?;
     Ok(mark.native_done
         && mark.sealed.is_some()
         && mark.reply.as_ref().is_some_and(|reply| reply.done)
@@ -879,7 +883,10 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
         let agent = agents.iter().find(|a| matches(&mark, a) && a.done);
         // A removal can retire the pane before host-local reconciliation. Only an already
         // sealed native reply plus saved checkout identity permits finishing that handoff.
-        if agent.is_none() && !removed_handoff(ledger, &mark)? {
+        if agent.is_none()
+            && (agents.iter().any(|agent| agent.pane == mark.pane)
+                || !removed_handoff(ledger, &mark)?)
+        {
             continue;
         }
         if !crate::launch::handoff_ready(ledger, &mark.pane)? {

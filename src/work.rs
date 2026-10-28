@@ -501,6 +501,32 @@ pub(crate) fn correlate(
     Ok(())
 }
 
+fn require_unclaimed(ledger: &Ledger, id: &str) -> Result<()> {
+    let existing = match jobs::ownership(ledger, id)? {
+        jobs::Ownership::Unclaimed => None,
+        jobs::Ownership::Uncertain(held) => {
+            return Err(Error::Invalid(format!(
+                "job {} has an unresolved claim; inspect that host before resubmitting: {}",
+                id,
+                held.reason.unwrap_or_else(|| "outcome unknown".into())
+            )));
+        }
+        jobs::Ownership::Pending(_)
+        | jobs::Ownership::Started(_)
+        | jobs::Ownership::Terminal(_) => Some(()),
+    };
+    if existing.is_some() {
+        // A claim is not a dispatch receipt. Without a saved receipt that proves
+        // this request dispatched, the claim proves only that something was
+        // claimed: this launch refuses, allocates nothing, dispatches nothing,
+        // overwrites nothing, saves no receipt, and releases no preparation.
+        return Err(Error::Invalid(format!(
+            "job {id} has a claim but no saved launch receipt; inspect that host before resubmitting"
+        )));
+    }
+    Ok(())
+}
+
 /// The launch of a job on this host. The claim is published before the pane side effect, and
 /// the wrapper that runs in that pane reads the claim before it runs anything.
 fn launch_job(
@@ -532,29 +558,7 @@ fn launch_job(
     // The job's ownership is read before any pane side effect. A job that already
     // has an owner keeps it: this launch never takes it over, never allocates a
     // second pane, and never dispatches the command again.
-    let existing = match jobs::ownership(ledger, &launch.id)? {
-        jobs::Ownership::Unclaimed => None,
-        jobs::Ownership::Uncertain(held) => {
-            return Err(Error::Invalid(format!(
-                "job {} has an unresolved claim; inspect that host before resubmitting: {}",
-                launch.id,
-                held.reason.unwrap_or_else(|| "outcome unknown".into())
-            )));
-        }
-        jobs::Ownership::Pending(_)
-        | jobs::Ownership::Started(_)
-        | jobs::Ownership::Terminal(_) => Some(()),
-    };
-    if existing.is_some() {
-        // A claim is not a dispatch receipt. Without a saved receipt that proves
-        // this request dispatched, the claim proves only that something was
-        // claimed: this launch refuses, allocates nothing, dispatches nothing,
-        // overwrites nothing, saves no receipt, and releases no preparation.
-        return Err(Error::Invalid(format!(
-            "job {} has a claim but no saved launch receipt; inspect that host before resubmitting",
-            launch.id
-        )));
-    }
+    require_unclaimed(ledger, &launch.id)?;
     // The intent is published before the pane side effect. It is not
     // executable: an allocation that stops here stays uncertain, and no other
     // allocation may take the job over.
@@ -652,18 +656,38 @@ pub fn launch(
         }
         return Ok(value);
     }
-    let saved = crate::prepare::saved_tree(ledger, &launch.cwd, Some(&launch.id))?;
+    // A stale job claim authorizes no discovery or generation creation on a replacement.
+    if matches!(launch.action, Action::Job { .. }) {
+        require_unclaimed(ledger, &launch.id)?;
+    }
+    let preparation = crate::prepare::saved_tree(ledger, &launch.cwd, Some(&launch.id))?;
+    let (recorded, captured) = crate::launch::checkout_for_request(ledger, launch)?;
+    if preparation
+        .as_ref()
+        .zip(captured.as_ref())
+        .is_some_and(|(prepared, saved)| prepared.identity != saved.identity)
+    {
+        return Err(crate::worktree::refuse(
+            "preparation and launch checkout identities differ",
+        ));
+    }
+    let saved = preparation.or(captured);
     let repo = saved.as_ref().map(|t| std::path::PathBuf::from(&t.repo));
     let common = crate::worktree::common_dir(shell, std::path::Path::new(&launch.cwd));
     if repo.is_none() && common.is_err() {
         return launch_guarded(ledger, shell, launch, None);
+    }
+    if recorded && saved.is_none() {
+        return Err(crate::worktree::refuse(
+            "recorded launch has no checkout identity",
+        ));
     }
     let root = repo
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new(&launch.cwd));
     crate::worktree::with_lifecycle(shell, ledger, root, |guard| {
         let live = if let Some(saved) = &saved {
-            let live = crate::worktree::linked_or_detached(shell, &launch.cwd)?
+            let live = crate::worktree::snapshot(shell, &launch.cwd)?
                 .ok_or_else(|| crate::worktree::refuse("prepared checkout disappeared"))?;
             crate::worktree::validate_identity(shell, &live)?;
             if saved.identity != live.identity

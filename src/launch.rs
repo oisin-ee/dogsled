@@ -402,6 +402,62 @@ pub fn replay(ledger: &Ledger, request: &Launch) -> Result<Option<Value>> {
     }
 }
 
+/// Whether a launch record exists, and the checkout identity that record captured.
+pub fn checkout_for_request(
+    ledger: &Ledger,
+    request: &Launch,
+) -> Result<(bool, Option<crate::cleanup::Tree>)> {
+    let saved = ledger
+        .child("launches")
+        .read::<Progress>(&format!("{}.progress.json", request.id))?;
+    let Some(saved) = saved else {
+        return Ok((false, None));
+    };
+    if saved.request != *request {
+        return Err(crate::worktree::refuse("launch request changed"));
+    }
+    Ok((
+        true,
+        saved
+            .result
+            .get("checkout")
+            .map(|tree| serde_json::from_value(tree.clone()).map_err(crate::error::Error::from))
+            .transpose()?,
+    ))
+}
+
+/// A reused pane or a replacement item cannot inherit a removed launch's checkout.
+pub fn validate_checkout_owner(
+    ledger: &Ledger,
+    pane: &str,
+    request: Option<&str>,
+    terminal: Option<&str>,
+) -> Result<()> {
+    let captured: Vec<_> = recovery::candidates(&ledger.child("launches"), Some(pane))?
+        .into_iter()
+        .filter(|(_, progress)| progress.result.get("checkout").is_some())
+        .collect();
+    let [(id, progress)] = captured.as_slice() else {
+        return Err(crate::worktree::refuse(
+            "checkout has no unique saved launch owner",
+        ));
+    };
+    if request.is_some_and(|request| request != id)
+        || terminal.is_some_and(|terminal| progress.terminal.as_deref() != Some(terminal))
+        || crate::items::list(ledger)?.iter().any(|item| {
+            item.host == crate::hosts::LOCAL
+                && item.pane == pane
+                && item.closed_ms.is_none()
+                && item.id != *id
+        })
+    {
+        return Err(crate::worktree::refuse(
+            "pane or item belongs to another checkout owner",
+        ));
+    }
+    Ok(())
+}
+
 /// Saved administrative identity survives checkout and preparation retirement.
 pub fn checkout_for_pane(ledger: &Ledger, pane: &str) -> Result<Option<crate::cleanup::Tree>> {
     let candidates = recovery::candidates(&ledger.child("launches"), Some(pane))?;
@@ -409,6 +465,13 @@ pub fn checkout_for_pane(ledger: &Ledger, pane: &str) -> Result<Option<crate::cl
     for (_, progress) in candidates {
         if let Some(value) = progress.result.get("checkout") {
             let tree: crate::cleanup::Tree = serde_json::from_value(value.clone())?;
+            if tree
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.common == identity.gitdir)
+            {
+                continue;
+            }
             if captured.as_ref().is_some_and(|old| old != &tree) {
                 return Err(crate::worktree::refuse(
                     "pane has conflicting checkout identities",

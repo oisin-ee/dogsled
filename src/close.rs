@@ -107,7 +107,11 @@ pub fn with_local<T>(
     mode: Guard,
     reconcile: impl FnOnce(Closed) -> Result<T>,
 ) -> Result<T> {
-    let panes = crate::cleanup::current_panes(shell)?;
+    if caller.pane.as_deref() == Some(pane) {
+        return Err(refuse("cannot close the caller pane"));
+    }
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    let owners = local_owners(ledger, pane)?;
     let target = panes.iter().find(|p| p.pane_id == pane);
     let cwd = target.and_then(|p| p.cwd.as_deref());
     let live = cwd
@@ -134,6 +138,23 @@ pub fn with_local<T>(
                 .tree();
         }
         if worktree::verified_absent(lifecycle, shell, &planned) {
+            validate_absent_target(
+                shell,
+                ledger,
+                pane,
+                caller,
+                &planned,
+                terminals.get(pane).map(String::as_str),
+                &owners,
+            )?;
+            if saved.is_some() {
+                crate::launch::validate_checkout_owner(
+                    ledger,
+                    pane,
+                    None,
+                    terminals.get(pane).map(String::as_str),
+                )?;
+            }
             crate::cleanup::forget_matching(ledger, &planned)?;
             return reconcile(Closed {
                 pane: pane.into(),
@@ -169,6 +190,45 @@ pub fn with_local<T>(
             Some((lifecycle, &planned)),
         )?)
     })
+}
+
+fn local_owners(ledger: &Ledger, pane: &str) -> Result<std::collections::BTreeSet<String>> {
+    Ok(crate::items::list(ledger)?
+        .into_iter()
+        .filter(|item| {
+            item.host == crate::hosts::LOCAL && item.pane == pane && item.closed_ms.is_none()
+        })
+        .map(|item| item.id)
+        .collect())
+}
+
+/// Absence never authorizes reconciliation of a replacement pane or another item.
+fn validate_absent_target(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &Caller,
+    tree: &crate::cleanup::Tree,
+    terminal: Option<&str>,
+    owners: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    if local_owners(ledger, pane)? != *owners {
+        return Err(refuse("checkout item ownership changed"));
+    }
+    if panes.iter().any(|target| target.pane_id == pane) {
+        let target = validate_target(shell, &panes, pane, caller)?;
+        if terminal.is_none()
+            || terminal != terminals.get(pane).map(String::as_str)
+            || target.cwd.as_deref().is_none_or(|cwd| {
+                !worktree::resolved(Path::new(cwd))
+                    .starts_with(worktree::resolved(Path::new(&tree.path)))
+            })
+        {
+            return Err(refuse("removed checkout no longer owns the pane"));
+        }
+    }
+    Ok(())
 }
 
 /// Repeat the captured-resource check before entering any close effect.
