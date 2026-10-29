@@ -114,6 +114,8 @@ pub enum Command {
     },
     /// Reserve capacity on the host with the most headroom.
     Place {
+        #[arg(long, conflicts_with_all = ["host", "branch", "base", "repo"])]
+        resume: Option<String>,
         #[arg(long)]
         host: Option<String>,
         #[arg(long)]
@@ -558,6 +560,12 @@ pub enum HostCommand {
         #[command(flatten)]
         thresholds: ThresholdArgs,
     },
+    PreparationLookup {
+        #[arg(long)]
+        input: String,
+        #[arg(long)]
+        preparation_protocol: u32,
+    },
     Prepared {
         #[arg(long)]
         input: String,
@@ -567,6 +575,8 @@ pub enum HostCommand {
     Prepare {
         #[arg(long)]
         preparation_protocol: Option<u32>,
+        #[arg(long)]
+        placement_replay: Option<String>,
         #[arg(long)]
         repo: String,
         #[arg(long)]

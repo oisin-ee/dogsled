@@ -636,6 +636,64 @@ fn print_host_reservation(
     })
 }
 
+fn dispose_preparation(
+    node: &Node<'_>,
+    request: &prepare::disposition::Request,
+) -> Result<prepare::disposition::Acknowledgement> {
+    work::launch_test_barrier("DISPOSITION_BEFORE_GATE")?;
+    prepare::disposition::dispose(node.ledger, node.shell, request)
+}
+
+fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
+    match cmd {
+        HostCommand::PreparationLookup {
+            input,
+            preparation_protocol,
+        } => {
+            prepare::require_protocol(Some(preparation_protocol))?;
+            let query = serde_json::from_str(&input)?;
+            print(
+                true,
+                &prepare::lookup_on_host(node.ledger, node.home, &query),
+                String::new,
+            )?;
+        }
+        HostCommand::Prepared {
+            input,
+            preparation_protocol,
+        } => {
+            prepare::require_protocol(Some(preparation_protocol))?;
+            let request = serde_json::from_str(&input)?;
+            print(true, &dispose_preparation(node, &request)?, String::new)?;
+        }
+        HostCommand::Prepare {
+            preparation_protocol,
+            placement_replay,
+            repo,
+            branch,
+            base,
+            request_id,
+        } => {
+            prepare::require_protocol(preparation_protocol)?;
+            let placement = placement_replay
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let prepared = prepare::on_host(
+                node,
+                &repo,
+                &branch,
+                base.as_deref(),
+                request_id.as_deref(),
+                placement.as_ref(),
+            )?;
+            print(true, &prepared, String::new)?;
+        }
+        _ => return Err(Error::Invalid("not a preparation command".into())),
+    }
+    Ok(())
+}
+
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
@@ -710,28 +768,9 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             let validity = reservation_validity(job_validity, job_created_ms)?;
             return print_host_reservation(&node, &id, placement_replay.as_deref(), validity);
         }
-        HostCommand::Prepared {
-            input,
-            preparation_protocol,
-        } => {
-            prepare::require_protocol(Some(preparation_protocol))?;
-            let request = serde_json::from_str(&input)?;
-            work::launch_test_barrier("DISPOSITION_BEFORE_GATE")?;
-            let ack = prepare::disposition::dispose(node.ledger, node.shell, &request)?;
-            print(true, &ack, String::new)?;
-        }
-        HostCommand::Prepare {
-            preparation_protocol,
-            repo,
-            branch,
-            base,
-            request_id,
-        } => {
-            prepare::require_protocol(preparation_protocol)?;
-            let prepared =
-                prepare::on_host(node, &repo, &branch, base.as_deref(), request_id.as_deref())?;
-            print(true, &prepared, String::new)?;
-        }
+        cmd @ (HostCommand::PreparationLookup { .. }
+        | HostCommand::Prepared { .. }
+        | HostCommand::Prepare { .. }) => host_preparation(cmd, node)?,
     }
     Ok(ExitCode::SUCCESS)
 }

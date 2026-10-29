@@ -1469,7 +1469,22 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
         "{id}"
     );
-    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --budget-ms 600000 --json")), "{ssh}");
+    let admission = rig.read(&format!("state/admissions/{id}.json"));
+    let grant = &admission["placement"]["saved"]["prepared"]["grant"];
+    let mut expected_replay = grant["envelope"].clone();
+    expected_replay["expected_grant"] = grant.clone();
+    let replay = prepares[0]
+        .split_once("--placement-replay '")
+        .unwrap()
+        .1
+        .split_once("' --budget-ms")
+        .unwrap()
+        .0;
+    assert_eq!(
+        serde_json::from_str::<Value>(replay).unwrap(),
+        expected_replay
+    );
+    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
     let releases: Vec<_> = ssh
         .lines()
         .filter(|line| line.contains("host prepared "))

@@ -146,6 +146,91 @@ impl Drop for Client {
 }
 
 #[test]
+fn mcp_place_resume_replays_original_request_and_rejects_overrides() {
+    let (rig, _, id) = place::interrupted_placement("placement-result-saved");
+    let original = rig.read(&format!("state/admissions/{id}.json"));
+    let mut client = Client::start(&rig);
+    for field in ["host", "branch", "base", "cwd"] {
+        let mut args = json!({"resume":id});
+        args[field] = json!("changed");
+        let (error, failed) = client.call("place", &args);
+        assert!(failed, "{field}: {error}");
+        assert!(error.as_str().unwrap().contains(&id), "{error}");
+        assert_eq!(rig.read(&format!("state/admissions/{id}.json")), original);
+    }
+    let (result, failed) = client.call("place", &json!({"resume":id}));
+    assert!(!failed, "{result}");
+    assert_eq!(result, original["placement"]["saved"]["result"]);
+    let (again, failed) = client.call("place", &json!({"resume":id}));
+    assert!(!failed, "{again}");
+    assert_eq!(again, result);
+    assert_eq!(rig.log("setup.log").lines().count(), 1);
+    assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
+    let (error, failed) = client.call("place", &json!({"resume":"unknown-mcp-placement"}));
+    assert!(failed);
+    assert!(error.as_str().unwrap().contains("unknown-mcp-placement"));
+}
+
+#[test]
+fn review_plain_preparation_error_contains_resumable_request_id() {
+    let (rig, repo) = place::place_rig("mcp-plain-error");
+    let mut client = Client::start(&rig);
+    let (error, failed) = client.call(
+        "place",
+        &json!({"host":"local","cwd":repo,"branch":"invalid..branch"}),
+    );
+    assert!(failed, "{error}");
+    let text = error.as_str().unwrap();
+    let id = text
+        .strip_prefix("placement request ")
+        .expect("plain preparation error must include request id")
+        .split(':')
+        .next()
+        .unwrap();
+    let original = rig.read(&format!("state/admissions/{id}.json"));
+    assert_eq!(original["request"]["id"], id);
+    let grant = rig.read(&format!("state/placement-grants/{id}.json"));
+    let (again, failed) = client.call("place", &json!({"resume":id}));
+    assert!(failed, "{again}");
+    assert!(again.as_str().unwrap().contains(id), "{again}");
+    assert!(
+        !again
+            .as_str()
+            .unwrap()
+            .contains("unknown placement request")
+    );
+    assert_eq!(
+        rig.read(&format!("state/placement-grants/{id}.json")),
+        grant
+    );
+    assert_eq!(
+        rig.read("state/placements.json").as_array().unwrap().len(),
+        1
+    );
+    assert!(!rig.log("herdr.log").contains("worktree open"));
+    assert!(!rig.dir.join("setup.log").exists());
+}
+
+#[test]
+fn mcp_place_initial_and_resume_share_branchless_result() {
+    let rig = Rig::short("mcp-place-resume");
+    rig.snapshot("state/host.json", rig.origin_ms, 0.0, 8);
+    let mut client = Client::start(&rig);
+    let (result, failed) = client.call("place", &json!({"host":"local"}));
+    assert!(!failed, "{result}");
+    let id = result["request_id"].as_str().unwrap();
+    let (replayed, failed) = client.call("place", &json!({"resume":id}));
+    assert!(!failed, "{replayed}");
+    assert_eq!(result, replayed);
+    assert!(result["path"].is_null());
+    assert!(result["pane_id"].is_null());
+    assert_eq!(
+        rig.read("state/placements.json").as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
 fn mcp_request_deadline_is_checked_before_each_receive() {
     // A receive with no time left can still return a queued line, so a server that keeps
     // writing without the answer would outlive the bound. The deadline is checked

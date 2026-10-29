@@ -1,5 +1,8 @@
 //! Placement-backed actions, pane creation, and caller-owned admission tickets.
 
+mod placement;
+pub(crate) use placement::{PlacementPhase, PlacementProgress, resume as resume_placement};
+
 use crate::checkout::Repository;
 use crate::commands::{self, Placement};
 use crate::error::{Error, Result};
@@ -1260,10 +1263,15 @@ pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
 /// queue it.
 pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     record_request_validity(fleet.ledger, request)?;
-    if waits_behind(fleet, request)? {
-        return Ok(None);
-    }
-    perform(fleet, request, now)
+    launch_test_barrier("PLACEMENT_BEFORE_ADMISSION")?;
+    let attempts = fleet.ledger.child("admissions");
+    attempts.with_lock(&request.id, || {
+        if !placement::reserved(&attempts, request)? && waits_behind(fleet, request)? {
+            placement::record(&attempts, request)?;
+            return Ok(None);
+        }
+        perform_locked(fleet, request, now)
+    })
 }
 
 /// The hosts a request may use: its pinned host, or every host.
@@ -1284,76 +1292,12 @@ pub(crate) fn waits_behind(fleet: &Fleet, request: &Request) -> Result<bool> {
     let wanted = candidates(fleet, request);
     Ok(queue(fleet.ledger)?
         .iter()
-        .filter(|t| t.state == "pending")
+        .filter(|t| t.state == "pending" && t.request.id != request.id)
         .any(|t| {
             candidates(fleet, &t.request)
                 .iter()
                 .any(|h| wanted.contains(h))
         }))
-}
-
-/// Placement admission captures its immutable expectation before reservation transport.
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct PlacementProgress {
-    pub version: u32,
-    #[serde(flatten)]
-    pub phase: PlacementPhase,
-    /// Definitive refusals are retained, never overwritten by another candidate.
-    pub declined: Vec<crate::node::PlacementReply>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "snake_case")]
-pub(crate) enum PlacementPhase {
-    Recorded,
-    SelectionPending {
-        envelope: crate::node::PlacementReservation,
-    },
-    HostSelected {
-        grant: crate::node::PlacementGrant,
-    },
-}
-
-impl PlacementProgress {
-    pub(crate) fn expectation(
-        &self,
-        request: &Request,
-    ) -> Result<Option<crate::node::PlacementReplay>> {
-        if self.version != crate::node::PLACEMENT_VERSION {
-            return Err(crate::unit_transport::conflict(
-                "unsupported placement progress version",
-            ));
-        }
-        let pending = match &self.phase {
-            PlacementPhase::Recorded => None,
-            PlacementPhase::SelectionPending { envelope } => Some(crate::node::PlacementReplay {
-                envelope: envelope.clone(),
-                expected_grant: None,
-            }),
-            PlacementPhase::HostSelected { grant } => Some(crate::node::PlacementReplay {
-                envelope: grant.envelope.clone(),
-                expected_grant: Some(grant.clone()),
-            }),
-        };
-        let expected = serde_json::to_value(request)?;
-        if let Some(transport) = &pending {
-            transport.validate(&request.id)?;
-            if transport.envelope.request != expected {
-                return Err(crate::unit_transport::conflict(
-                    "placement expectation changed",
-                ));
-            }
-        }
-        for declined in &self.declined {
-            declined.validate(&declined.envelope, false)?;
-            if declined.envelope.request != expected {
-                return Err(crate::unit_transport::conflict(
-                    "declined placement request changed",
-                ));
-            }
-        }
-        Ok(pending)
-    }
 }
 
 /// Caller-owned progress is durable before any preparation or launch side effect. An
@@ -1388,7 +1332,7 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
     // anything. A request that may not start new execution is refused here.
     check_request_validity(fleet.ledger, request)?;
     if matches!(request.action, Action::Place) {
-        return perform_placement(fleet, request, now);
+        return placement::perform(fleet, request, now);
     }
     let mut request = request.clone();
     if let Action::Job { validity, .. } = &mut request.action {
@@ -1473,114 +1417,6 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
         }
     }
     begin(fleet, request, &attempts, &file, now)
-}
-
-/// C4a owns admission and capacity replay only. Preparation and completion retain C3's
-/// existing policy; C4b owns their separate result journal and recovery windows.
-fn perform_placement(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
-    let attempts = fleet.ledger.child("admissions");
-    let file = format!("{}.json", request.id);
-    let expected = serde_json::to_value(request)?;
-    let mut attempt = if let Some(attempt) = attempts.read::<Attempt>(&file)? {
-        if attempt.request != expected
-            || attempt
-                .placement
-                .as_ref()
-                .is_none_or(|p| p.version != crate::node::PLACEMENT_VERSION)
-        {
-            return Err(crate::unit_transport::conflict(
-                "placement admission identity or version changed",
-            ));
-        }
-        attempt
-    } else {
-        let attempt = Attempt {
-            request: expected,
-            placement: Some(PlacementProgress {
-                version: crate::node::PLACEMENT_VERSION,
-                phase: PlacementPhase::Recorded,
-                declined: Vec::new(),
-            }),
-            host: None,
-            launch: None,
-            error: None,
-            diagnostic: None,
-            unit: None,
-            result: None,
-        };
-        attempts.write(&file, &attempt)?;
-        attempt
-    };
-    let (host, reservation, launch) = if let Some(launch) = attempt.launch.clone() {
-        let envelope = attempt
-            .placement
-            .as_ref()
-            .ok_or_else(|| crate::unit_transport::conflict("missing placement progress"))?
-            .expectation(request)?
-            .ok_or_else(|| crate::unit_transport::conflict("prepared placement has no grant"))?
-            .envelope;
-        if !matches!(
-            attempt.placement.as_ref().map(|p| &p.phase),
-            Some(PlacementPhase::HostSelected { .. })
-        ) || attempt.host.as_ref() != Some(&envelope.host)
-            || *fleet.find(&envelope.host.id)? != envelope.host
-            || launch.id != request.id
-            || launch.host != envelope.host.id
-            || launch.action != request.action
-            || request.branch.is_some() != launch.preparation.is_some()
-            || launch.preparation.as_ref().is_some_and(|binding| {
-                launch.preparation_protocol != Some(crate::prepare::disposition::VERSION)
-                    || binding.request_id != request.id
-                    || Some(&binding.request.1) != request.branch.as_ref()
-                    || binding.request.2 != request.base
-                    || binding.prepared.as_ref().is_none_or(|prepared| {
-                        prepared.path.as_deref() != Some(launch.cwd.as_str())
-                            || prepared.pane_id != launch.pane
-                    })
-            })
-        {
-            return Err(crate::unit_transport::conflict(
-                "prepared placement identity changed",
-            ));
-        }
-        // Preparation already returned its immutable binding. Replay C3 disposition
-        // directly: its fence must not be bypassed by reserving or preparing again.
-        (envelope.host, envelope.reservation, launch)
-    } else {
-        let Placement::Placed {
-            host, reservation, ..
-        } = placement(fleet, request, request.host.as_deref(), now)?
-        else {
-            return Ok(None);
-        };
-        crate::unit_request::crash_point("placement-host-selected");
-        let launch = prepare_launch(fleet, request, &host)
-            .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
-        crate::unit_request::crash_point("placement-preparation-received");
-        // Selection wrote the authoritative grant. Retain that capture unchanged.
-        attempt = attempts
-            .read::<Attempt>(&file)?
-            .ok_or_else(|| crate::unit_transport::conflict("placement admission disappeared"))?;
-        attempt.launch = Some(launch.clone());
-        attempts.write(&file, &attempt)?;
-        (host, reservation, launch)
-    };
-    if let Some(binding) = &launch.preparation {
-        crate::prepare::dispose(
-            fleet,
-            &host,
-            &crate::prepare::disposition::Request {
-                version: crate::prepare::disposition::VERSION,
-                binding: *binding.clone(),
-                policy: crate::prepare::disposition::Policy::Prohibit {
-                    basis: crate::prepare::disposition::Basis::PlacementReturned,
-                },
-                outcome: crate::prepare::disposition::Outcome::Unknown,
-            },
-        )?;
-    }
-    Ok(Some(json!({"host":host,"reservation":reservation,
-        "path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane})))
 }
 
 fn save_result(attempts: &Ledger, file: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
@@ -1683,6 +1519,16 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
     } else {
         crate::prepare::Prepared::default()
     };
+    prepared_launch(fleet, request, host, checkout, prepared)
+}
+
+fn prepared_launch(
+    fleet: &Fleet,
+    request: &Request,
+    host: &Host,
+    checkout: Option<String>,
+    prepared: crate::prepare::Prepared,
+) -> Result<Launch> {
     let cwd = if request.branch.is_some() {
         prepared
             .path
@@ -1918,15 +1764,9 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
             let recoverable = (matches!(ticket.request.action, Action::Place)
                 && saved.as_ref().is_some_and(|a| {
-                    a.placement.as_ref().is_some_and(|p| {
-                        p.version == crate::node::PLACEMENT_VERSION
-                            && matches!(
-                                p.phase,
-                                PlacementPhase::Recorded
-                                    | PlacementPhase::SelectionPending { .. }
-                                    | PlacementPhase::HostSelected { .. }
-                            )
-                    })
+                    a.placement
+                        .as_ref()
+                        .is_some_and(|p| p.version == crate::node::PLACEMENT_VERSION)
                 }))
                 || matches!(ticket.request.action, Action::Agent { .. })
                     && saved.as_ref().is_some_and(|a| {
@@ -1965,6 +1805,11 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
         let outcome = perform(fleet, &claimed.request, now);
         let no_room = matches!(&outcome, Ok(None));
         update_ticket(fleet.ledger, &ticket.id, |t| match outcome {
+            Ok(Some(result)) if result["status"] == "pending_release" => {
+                t.state = "pending".into();
+                t.result = Some(result);
+                t.error = Some("placement release pending; resume the original request".into());
+            }
             Ok(Some(result)) => {
                 t.state = "admitted".into();
                 t.result = Some(result);
@@ -2025,6 +1870,7 @@ fn transient_ssh(error: &Error) -> bool {
 
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     let reports = fleet.status(now)?;
+    launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {
         crate::unit_request::recover(fleet.ledger, now)?;
         admit(fleet, now)?;

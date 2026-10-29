@@ -17,6 +17,15 @@ fn caller() -> Result<String> {
 }
 
 pub fn request(fleet: &Fleet, args: &WorkArgs, action: Action) -> Result<Request> {
+    request_with_id(fleet, args, action, new_id())
+}
+
+pub(crate) fn request_with_id(
+    fleet: &Fleet,
+    args: &WorkArgs,
+    action: Action,
+    id: String,
+) -> Result<Request> {
     // A job request is stamped once, here, at its origin. The stamp never changes, and a
     // retry keeps it byte-identical.
     let action = match action {
@@ -59,7 +68,7 @@ pub fn request(fleet: &Fleet, args: &WorkArgs, action: Action) -> Result<Request
         )?)
     };
     Ok(Request {
-        id: new_id(),
+        id,
         action,
         host: args.host.clone(),
         branch: args.branch.clone(),
@@ -150,7 +159,9 @@ fn start_using(
     waiting: bool,
     submit: fn(&Fleet, &Request, u64) -> Result<Option<Value>>,
 ) -> Result<Value> {
-    match submit(fleet, &request, now_ms()) {
+    let placement = matches!(request.action, Action::Place);
+    let request_id = request.id.clone();
+    let result = match submit(fleet, &request, now_ms()) {
         Ok(Some(result)) => Ok(result),
         Ok(None) => {
             let ticket = work::enqueue(fleet.ledger, request, waiting, now_ms())?;
@@ -160,7 +171,14 @@ fn start_using(
             let ticket = work::enqueue_retry(fleet.ledger, request, waiting, &error, now_ms())?;
             Ok(json!({"queued":true,"ticket":ticket,"retrying":error.to_string()}))
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.correlate(Some(&request_id))),
+    }?;
+    if placement && result["queued"] == true {
+        let mut result = result;
+        result["request_id"] = json!(request_id);
+        Ok(result)
+    } else {
+        Ok(result)
     }
 }
 
@@ -341,17 +359,78 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
     }))
 }
 
+fn place(
+    fleet: &Fleet,
+    resume: Option<&str>,
+    args: &WorkArgs,
+    json_output: bool,
+) -> Result<ExitCode> {
+    let id = resume.map_or_else(new_id, str::to_owned);
+    eprintln!("placement request {id}");
+    let outcome = (|| {
+        let request = if resume.is_some() {
+            work::resume_placement(fleet.ledger, &id)?
+        } else {
+            request_with_id(fleet, args, Action::Place, id.clone())?
+        };
+        let mut result = start(fleet, request, args.wait)?;
+        if result["queued"] == true && args.wait {
+            crate::print(true, &result, String::new)?;
+            result = wait_ticket(fleet, result["ticket"].as_str().unwrap_or_default())?;
+        }
+        Ok::<_, Error>(result)
+    })();
+    match outcome {
+        Ok(result) => {
+            let pending = result["queued"] == true || result["status"] == "pending_release";
+            crate::print(true, &result, String::new)?;
+            Ok(ExitCode::from(u8::from(pending)))
+        }
+        Err(error) if args.wait && matches!(error.root(), Error::Deadline(_)) => {
+            if json_output {
+                crate::print(
+                    true,
+                    &json!({"request_id":id,"status":"waiting",
+                    "deadline":true,"error":error.to_string()}),
+                    String::new,
+                )?;
+            } else {
+                println!("still running");
+            }
+            Ok(ExitCode::from(124))
+        }
+        Err(error) => {
+            if json_output {
+                let mut result = json!({"request_id":id,"error":error.to_string(),
+                    "deadline":matches!(error.root(), Error::Deadline(_))});
+                if let Some(diagnostic) = error.diagnostic() {
+                    result["diagnostic"] = json!(diagnostic);
+                }
+                if let Error::Refused { code, .. } = error.root() {
+                    result["code"] = json!(code.code());
+                }
+                crate::print(true, &result, String::new)?;
+            } else {
+                eprintln!("placement request {id}: {error}");
+            }
+            Ok(error.exit_code())
+        }
+    }
+}
+
 pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
     match command {
         Command::Place {
+            resume,
             host,
             branch,
             base,
             repo,
             wait,
             max,
-        } => submit(
+        } => place(
             fleet,
+            resume.as_deref(),
             &WorkArgs {
                 host,
                 branch,
@@ -360,7 +439,6 @@ pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<Ex
                 wait,
                 max,
             },
-            Action::Place,
             json_output,
         ),
         Command::Run {

@@ -189,6 +189,8 @@ pub struct Id {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct PlaceArgs {
+    #[serde(default)]
+    pub resume: Option<String>,
     #[serde(flatten)]
     pub placement: Placement,
 }
@@ -496,8 +498,37 @@ impl Server {
     )]
     async fn place(&self, Parameters(args): Parameters<PlaceArgs>) -> Result<String, String> {
         self.call(move |fleet| {
-            let request = crate::runtime::request(fleet, &args.placement.args(), Action::Place)?;
-            crate::runtime::start(fleet, request, false)
+            let id = args.resume.clone().unwrap_or_else(crate::ledger::new_id);
+            let outcome = (|| {
+                let request = if args.resume.is_some() {
+                    let placement = &args.placement;
+                    if placement.host.is_some()
+                        || placement.branch.is_some()
+                        || placement.base.is_some()
+                        || placement.cwd.is_some()
+                    {
+                        return Err(Error::Invalid(
+                            "resume conflicts with host, branch, base, or cwd".into(),
+                        ));
+                    }
+                    crate::work::resume_placement(fleet.ledger, &id)?
+                } else {
+                    crate::runtime::request_with_id(
+                        fleet,
+                        &args.placement.args(),
+                        Action::Place,
+                        id.clone(),
+                    )?
+                };
+                crate::runtime::start(fleet, request, false)
+            })();
+            outcome.map_err(|error| {
+                if error.diagnostic().is_some() {
+                    error.correlate(Some(&id))
+                } else {
+                    Error::Invalid(format!("placement request {id}: {error}"))
+                }
+            })
         })
         .await
     }
