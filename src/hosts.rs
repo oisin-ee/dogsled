@@ -530,9 +530,31 @@ impl<'a> Fleet<'a> {
         id: &str,
         now: u64,
         validity: Option<crate::jobs::Validity>,
+        placement: Option<&crate::node::PlacementReplay>,
     ) -> Result<ReserveOutcome> {
+        if let Some(replay) = placement {
+            replay.validate(id)?;
+            if replay.envelope.host != *host || validity.is_some() {
+                return Err(crate::unit_transport::conflict(
+                    "placement reservation target changed",
+                ));
+            }
+        }
         if host.is_local() {
-            return self.node().reserve(id, now, validity);
+            return if let Some(envelope) = placement {
+                self.node().reserve_placement(envelope, now)
+            } else {
+                self.node().reserve(id, now, validity)
+            };
+        }
+        if placement.is_some() {
+            let capability: crate::node::SnapshotReport =
+                self.remote(host, &["snapshot".into()])?;
+            if capability.placement_replay != Some(crate::node::PLACEMENT_VERSION) {
+                return Err(crate::unit_transport::conflict(
+                    "peer does not support placement replay; no capacity or preparation authorized",
+                ));
+            }
         }
         let t = self.thresholds();
         let mut args = vec![
@@ -562,7 +584,29 @@ impl<'a> Fleet<'a> {
                 validity.created_ms.to_string(),
             ]);
         }
-        self.remote(host, &args)
+        if let Some(envelope) = placement {
+            args.extend([
+                "--placement-replay".into(),
+                serde_json::to_string(envelope)?,
+            ]);
+        }
+        let outcome: ReserveOutcome = self.remote(host, &args)?;
+        if let Some(transport) = placement {
+            let reply = outcome.placement.as_ref().ok_or_else(|| {
+                crate::unit_transport::conflict(
+                    "peer lacks placement replay evidence; no preparation authorized",
+                )
+            })?;
+            reply.validate(&transport.envelope, outcome.reserved)?;
+            if let Some(expected) = &transport.expected_grant
+                && reply.grant.as_ref() != Some(expected)
+            {
+                return Err(crate::unit_transport::conflict(
+                    "original placement grant changed",
+                ));
+            }
+        }
+        Ok(outcome)
     }
 
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {

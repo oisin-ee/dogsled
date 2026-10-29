@@ -122,6 +122,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
         };
         let attempt = Attempt {
             request: serde_json::to_value(request)?,
+            placement: None,
             host: None,
             launch: None,
             error: None,

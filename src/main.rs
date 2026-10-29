@@ -615,6 +615,27 @@ fn print_host_launch(
     )
 }
 
+fn print_host_reservation(
+    node: &Node<'_>,
+    id: &str,
+    input: Option<&str>,
+    validity: Option<jobs::Validity>,
+) -> Result<ExitCode> {
+    let out = if let Some(input) = input {
+        let envelope: node::PlacementReplay = serde_json::from_str(input)?;
+        envelope.validate(id)?;
+        node.reserve_placement(&envelope, now_ms())?
+    } else {
+        node.reserve(id, now_ms(), validity)?
+    };
+    print(true, &out, String::new)?;
+    Ok(if out.reserved {
+        ExitCode::SUCCESS
+    } else {
+        Error::Full.exit_code()
+    })
+}
+
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
@@ -675,6 +696,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         )?,
         HostCommand::Reserve {
             id,
+            placement_replay,
             preparation_protocol,
             thresholds,
             job_validity,
@@ -686,11 +708,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
                 ..*node
             };
             let validity = reservation_validity(job_validity, job_created_ms)?;
-            let out = node.reserve(&id, now_ms(), validity)?;
-            print(true, &out, String::new)?;
-            if !out.reserved {
-                return Ok(Error::Full.exit_code());
-            }
+            return print_host_reservation(&node, &id, placement_replay.as_deref(), validity);
         }
         HostCommand::Prepared {
             input,
