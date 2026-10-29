@@ -103,6 +103,9 @@ tasks:
     command: pnpm run --silent typecheck
     description: Typecheck the Pi extension.
     toolchain: node
+    # pi/index.ts imports pi/todo, whose wasm.ts imports the generated bindings.
+    deps:
+      - pi-todo:generate
     tags: [precommit]
     inputs:
       - "pi/**/*"
