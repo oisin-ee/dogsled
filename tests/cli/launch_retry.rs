@@ -1910,6 +1910,7 @@ fn queued_placement_validates_branch_under_symlinked_temp_root() {
     repository(&repo);
     assert_ne!(repo, repo.canonicalize().unwrap());
     rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     rig.put(
         "state/queue.json",
         &json!([{

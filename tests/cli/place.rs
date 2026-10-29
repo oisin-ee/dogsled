@@ -123,6 +123,7 @@ fn assert_lookup(case: &str, state: &str, outcome: Option<&str>) {
 #[test]
 fn queued_placement_accepts_symlinked_repository_root() {
     let (rig, repo) = place_rig("queued-place-alias");
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let temp_root = rig.dir.join("tmp-alias");
     std::os::unix::fs::symlink(rig.dir.join("home"), &temp_root).unwrap();
     let aliased_repo = temp_root.join(repo.file_name().unwrap());
