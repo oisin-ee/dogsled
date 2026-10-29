@@ -651,12 +651,18 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             preparation_protocol,
         } => {
             prepare::require_protocol(Some(preparation_protocol))?;
-            let query = serde_json::from_str(&input)?;
-            print(
-                true,
-                &prepare::lookup_on_host(node.ledger, node.home, &query),
-                String::new,
-            )?;
+            match serde_json::from_str(&input)? {
+                prepare::LookupQuery::Placement(query) => print(
+                    true,
+                    &prepare::lookup_on_host(node.ledger, node.home, &query),
+                    String::new,
+                )?,
+                prepare::LookupQuery::Preparation(query) => print(
+                    true,
+                    &prepare::lookup_preparation_on_host(node.ledger, node.home, &query),
+                    String::new,
+                )?,
+            }
         }
         HostCommand::Prepared {
             input,

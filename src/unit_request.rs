@@ -252,6 +252,8 @@ fn commit_using(
             attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
             crash_point("committed");
         }
+        let request: Request = serde_json::from_value(attempt.request.clone())?;
+        work::allow_admission(fleet.ledger, &request)?;
         if let Some(receipt) = receipt(fleet.ledger, &attempt)? {
             return Ok(receipt);
         }
@@ -410,7 +412,16 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
                 .is_some_and(|u| u.committed.is_some() && u.abandoned.is_none())
                 && attempt.result.is_none()
             {
-                work::enqueue(ledger, serde_json::from_value(attempt.request)?, false, now)?;
+                let request = serde_json::from_value(attempt.request)?;
+                match work::admission_prohibited(ledger, &request) {
+                    Ok(false) => {
+                        work::enqueue(ledger, request, false, now)?;
+                    }
+                    Ok(true) => (),
+                    // Unreadable prohibition is a hold, never permission to dispatch.
+                    // Admission projects its error onto this ticket without stopping peers.
+                    Err(error) => eprintln!("dogsled unit recovery {id}: {error}"),
+                }
             }
             Ok(())
         })?;
@@ -428,9 +439,8 @@ fn settlement(unit: &Prepared) -> Result<Value> {
     })
 }
 
-/// The reason a committed unit never started, when its own durable facts prove it: the ticket
-/// that carried it ended `failed` or `cancelled`, and no launch request was ever saved. A saved
-/// launch may have reached a host, so its outcome stays unknown until host evidence settles it.
+/// Filter eligible terminal units. The caller must also validate a saved no-launch witness
+/// and prohibition under admission; terminal ticket state alone proves nothing.
 fn unlaunched(attempt: &Attempt, ticket: &work::Ticket) -> Option<String> {
     let unit = attempt.unit.as_ref()?;
     if unit.committed.is_none()
@@ -460,8 +470,8 @@ fn unlaunched(attempt: &Attempt, ticket: &work::Ticket) -> Option<String> {
 
 /// Settle each committed unit whose ticket ended without a launch as `not_started`, so the
 /// owner's provider releases its claim and can retry. Failed and cancelled tickets are final:
-/// `enqueue` reuses them, `commit` returns their receipt, and admission never claims them, so
-/// no later launch can contradict this event. The admission lock orders it with commit.
+/// a saved cancellation witness prohibits future dispatch before this event is written.
+/// The admission lock orders the fresh ticket read, witness, and event with commitment.
 pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
     let resource_closed = resource_closed_items(ledger)?;
     let tickets = work::queue(ledger)?;
@@ -488,7 +498,15 @@ pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
             if resource_only(&attempt, &resource_closed) {
                 return Ok(());
             }
-            let Some(reason) = unlaunched(&attempt, ticket) else {
+            let Some(current) = work::queue(ledger)?.into_iter().find(|t| t.id == ticket.id) else {
+                return Ok(());
+            };
+            if serde_json::to_value(&current.request)? != attempt.request
+                || !work::no_launch_proof(ledger, &current)?
+            {
+                return Ok(());
+            }
+            let Some(reason) = unlaunched(&attempt, &current) else {
                 return Ok(());
             };
             let Some(unit) = attempt.unit.as_mut() else {

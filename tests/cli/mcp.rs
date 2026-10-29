@@ -567,7 +567,13 @@ fn mcp_spawn_returns_queued_at_once_when_every_host_is_full() {
         &json!({"name":"c","task":"hi","kind":"claude","profile":"general"}),
     );
     assert!(error, "{refused}");
-    let (cancelled, _) = client.call("cancel", &json!({"id":result["ticket"]}));
+    let (cancelled, error) = client.call("cancel", &json!({"id":result["ticket"]}));
+    assert!(!error, "{cancelled}");
     assert_eq!(cancelled["cancelled"], result["ticket"]);
+    assert_eq!(cancelled["future_admission"], "prohibited");
+    assert_eq!(cancelled["release"], "not_needed");
+    let (duplicate, error) = client.call("cancel", &json!({"id":result["ticket"]}));
+    assert!(!error, "{duplicate}");
+    assert_eq!(duplicate, cancelled);
     assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
 }
