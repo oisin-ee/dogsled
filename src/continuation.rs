@@ -175,11 +175,9 @@ fn with_continuation_gates<T>(
     terminal: Option<&str>,
     run: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    crate::work::launch_test_barrier("CONTINUATION_BEFORE_GATE")?;
     ledger.child("preparation-receipts").with_lock(&launch.id, || {
-        crate::prepare::validate_launch_binding(ledger, launch)?;
-        let receipt = ledger.child("preparation-receipts")
-            .read::<Value>(&format!("{}.json", launch.id))?;
-        if receipt.as_ref().is_some_and(|r| r.get("binding").is_none_or(Value::is_null)) {
+        if crate::prepare::validate_launch_binding(ledger, launch)? {
             return Err(worktree::refuse("historical preparation has no identity; continuation remains held"));
         }
         let fence = ledger.child("preparation-receipts")
@@ -194,7 +192,7 @@ fn with_continuation_gates<T>(
             {
                 return Err(worktree::refuse("preparation fence prohibits continuation; nothing was sent"));
             }
-        } else if receipt.is_some() {
+        } else if launch.preparation.is_some() {
             return Err(worktree::refuse("preparation has no transfer; continuation remains held"));
         }
         if launch.terminal.as_deref().is_some_and(|saved| Some(saved) != terminal) {

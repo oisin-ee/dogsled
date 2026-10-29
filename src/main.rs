@@ -698,6 +698,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         } => {
             prepare::require_protocol(Some(preparation_protocol))?;
             let request = serde_json::from_str(&input)?;
+            work::launch_test_barrier("DISPOSITION_BEFORE_GATE")?;
             let ack = prepare::disposition::dispose(node.ledger, node.shell, &request)?;
             print(true, &ack, String::new)?;
         }

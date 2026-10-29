@@ -10,7 +10,7 @@ pub(super) fn exported(index: usize) -> Value {
 }
 
 pub(super) fn rig(name: &str, full: bool) -> Rig {
-    let rig = Rig::new(name);
+    let rig = Rig::short(name);
     rig.snapshot("state/host.json", now(), if full { 3.0 } else { 0.0 }, 2);
     let dir = rig.dir.join("profiles/worker");
     fs::create_dir_all(&dir).unwrap();

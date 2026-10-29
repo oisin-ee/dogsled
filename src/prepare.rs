@@ -35,11 +35,11 @@ struct Pending {
 }
 
 /// Refuse changed or missing authority before ingress can publish validity or dispatch.
-/// Historical, already-published launches keep their read-only replay semantics.
+/// Return true for historical authority: only a final read-only replay may use it.
 pub fn validate_launch_binding(
     ledger: &crate::ledger::Ledger,
     launch: &crate::work::Launch,
-) -> Result<()> {
+) -> Result<bool> {
     let receipt = ledger
         .child("preparation-receipts")
         .read::<PreparationReceipt>(&format!("{}.json", launch.id))?;
@@ -51,13 +51,31 @@ pub fn validate_launch_binding(
             "preparation receipt is missing its binding; claim remains held",
         ));
     }
+    let historical = receipt
+        .as_ref()
+        .is_some_and(|r| r.version.is_none() && r.binding.is_none());
+    if let Some(receipt) = &receipt {
+        if !historical {
+            require_protocol(receipt.version)?;
+        }
+        if let Some(binding) = &receipt.binding
+            && (binding.request != receipt.request
+                || binding.prepared != receipt.prepared
+                || receipt.prepared.is_none()
+                || receipt.failure.is_some())
+        {
+            return Err(worktree::refuse(
+                "preparation binding no longer matches its immutable outcome",
+            ));
+        }
+    }
     let expected = receipt.as_ref().and_then(|r| r.binding.as_ref());
     if launch.preparation.as_deref() != expected {
         return Err(worktree::refuse(
             "preparation binding changed; ownership remains unresolved",
         ));
     }
-    Ok(())
+    Ok(historical)
 }
 
 /// Retry only this exact transaction. Transport failure never supplies execution evidence.
@@ -154,17 +172,51 @@ fn validate_transfer(
             job,
         } if **saved == *launch
             && result["pane"].as_str() == Some(pane)
-            && matches!(
-                (&launch.action, job),
-                (crate::work::Action::Agent { .. }, None)
-                    | (crate::work::Action::Job { .. }, Some(_))
-            ) =>
+            && matching_transfer_owner(launch, pane, job.as_deref(), &request.binding) =>
         {
             Ok(())
         }
         _ => Err(worktree::refuse(
             "launch disposition owner changed; execution remains unresolved",
         )),
+    }
+}
+
+/// Dynamic host evidence may vary, but the transferred owner must name this launch.
+fn matching_transfer_owner(
+    launch: &crate::work::Launch,
+    pane: &str,
+    job: Option<&crate::jobs::Job>,
+    binding: &disposition::Binding,
+) -> bool {
+    match (&launch.action, job) {
+        (crate::work::Action::Agent { .. }, None) => true,
+        (
+            crate::work::Action::Job {
+                cmd,
+                timeout_ms,
+                idle_timeout_ms,
+                validity,
+            },
+            Some(job),
+        ) => {
+            job.id == launch.id
+                && job.cwd == launch.cwd
+                && job.host == launch.host
+                && job.owner == launch.owner
+                && job.pane == pane
+                && job.cmd == *cmd
+                && job.timeout_ms == *timeout_ms
+                && job.idle_timeout_ms == *idle_timeout_ms
+                && job.validity == *validity
+                && job.startup.as_ref().is_some_and(|startup| {
+                    startup.version == 1
+                        && startup.preparation.as_ref() == Some(binding)
+                        && matches!(&startup.scope, crate::jobs::ExecutionScope::Git { checkout }
+                        if binding.claim.tree.drift(checkout) != crate::cleanup::Drift::Identity)
+                })
+        }
+        _ => false,
     }
 }
 
@@ -254,6 +306,15 @@ pub fn run(
     }
     let prepared: Prepared = fleet.remote_setup(host, &args)?;
     validate_prepared(&prepared, request_id)?;
+    let binding = prepared
+        .binding
+        .as_deref()
+        .ok_or_else(|| worktree::refuse("preparation binding disappeared"))?;
+    if binding.request.1 != branch || binding.request.2.as_deref() != base {
+        return Err(worktree::refuse(
+            "peer returned a different preparation request; ownership remains unresolved",
+        ));
+    }
     Ok(prepared)
 }
 
@@ -267,6 +328,10 @@ pub fn validate_prepared(prepared: &Prepared, id: &str) -> Result<()> {
     if binding.request_id != id
         || binding.claim.request_id != id
         || binding.claim.tree.identity.is_none()
+        || binding.request.0 != Path::new(&binding.claim.tree.repo)
+        || binding.request.1 != binding.claim.tree.branch
+        || prepared.pane_id.as_deref().is_none_or(str::is_empty)
+        || prepared.terminal_id.as_deref().is_none_or(str::is_empty)
         || binding.prepared.as_ref() != Some(&snapshot)
         || prepared.path.as_deref() != Some(&binding.claim.tree.path)
     {
@@ -1055,6 +1120,56 @@ mod tests {
     use crate::error::{Refusal, RetainedKind};
     use crate::hosts::Failure;
     use crate::shell::Fake;
+
+    #[test]
+    fn transferred_job_wire_requires_the_exact_execution_owner() {
+        use serde_json::json;
+        let tree = json!({"repo":"/repo","path":"/repo/tree","branch":"worker","head":"head",
+            "identity":{"common":"/repo/.git","gitdir":"/repo/.git/worktrees/worker","generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}});
+        let binding = json!({"request_id":"a","request":["/repo","worker",null],
+            "claim":{"tree":tree,"request_id":"a"},
+            "prepared":{"pane_id":"prepared-pane","terminal_id":"prepared-terminal","path":"/repo/tree"}});
+        let validity = json!({"version":2,"created_ms":1});
+        let launch = json!({"id":"a","preparation":binding,"action":{"type":"job","cmd":["true"],"timeout_ms":10,"idle_timeout_ms":20,"validity":validity},
+            "host":"local","cwd":"/repo/tree","pane":null,"terminal":null,"workspace":null,"workspace_name":null,"owner":"owner"});
+        let owner = json!({"id":"a","cmd":["true"],"cwd":"/repo/tree","host":"local","owner":"owner","pane":"job-pane","state":"pending",
+            "timeout_ms":10,"idle_timeout_ms":20,"validity":validity,
+            "startup":{"version":1,"preparation":binding,"scope":"git","checkout":tree}});
+        let request = json!({"version":1,"binding":binding,"policy":{"kind":"transfer","launch":launch,"pane":"job-pane","job":owner},"outcome":"possibly_executed"});
+        let launch = serde_json::from_value(launch).unwrap();
+        let result = json!({"pane":"job-pane"});
+        assert!(
+            validate_transfer(
+                &launch,
+                &result,
+                &serde_json::from_value(request.clone()).unwrap()
+            )
+            .is_ok()
+        );
+        for (field, different) in [
+            ("id", json!("other")),
+            ("cmd", json!(["false"])),
+            ("cwd", json!("/other")),
+            ("host", json!("other")),
+            ("owner", json!("other")),
+            ("pane", json!("other")),
+            ("timeout_ms", json!(11)),
+            ("idle_timeout_ms", json!(21)),
+            ("validity", json!(null)),
+            (
+                "startup",
+                json!({"version":99,"scope":"non_repository","cwd":"/repo/tree"}),
+            ),
+        ] {
+            let mut changed = request.clone();
+            changed["policy"]["job"][field] = different;
+            assert!(
+                validate_transfer(&launch, &result, &serde_json::from_value(changed).unwrap())
+                    .is_err(),
+                "{field}"
+            );
+        }
+    }
 
     /// A shell that ends the base fetch at its deadline, and runs every other command
     /// from the scripted fake.

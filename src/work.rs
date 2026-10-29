@@ -875,7 +875,7 @@ pub fn launch(
 }
 
 /// Debug CLI fixtures stop at real lock boundaries, without sleeps or production controls.
-fn launch_test_barrier(phase: &str) -> Result<()> {
+pub(crate) fn launch_test_barrier(phase: &str) -> Result<()> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(format!("DOGSLED_TEST_LAUNCH_{phase}")) {
         use std::io::BufRead as _;

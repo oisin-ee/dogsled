@@ -552,6 +552,25 @@ struct Rig {
     origin_ms: u64,
 }
 impl Rig {
+    /// Bound launch fixtures keep state paths below the macOS terminal-line budget.
+    fn short(name: &str) -> Self {
+        Self::new(name).shortened()
+    }
+
+    fn shortened(mut self) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let short = PathBuf::from("/tmp").join(format!(
+            "ds3-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        assert!(!short.exists(), "{}", short.display());
+        fs::rename(&self.dir, &short).unwrap();
+        self.dir = short.canonicalize().unwrap();
+        self
+    }
+
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("dogsled-cli-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

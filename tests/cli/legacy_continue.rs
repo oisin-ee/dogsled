@@ -4,6 +4,7 @@
 use super::unit_requests::*;
 use super::unit_seeded::*;
 use super::*;
+use std::io::Write as _;
 
 /// A saved legacy execution with C3 host-captured ownership, without changing its seed.
 fn bound_legacy(name: &str) -> (Rig, Value) {
@@ -55,12 +56,115 @@ fn bound_legacy(name: &str) -> (Rig, Value) {
 }
 
 #[test]
+fn historical_continuation_does_not_mint_checkout_identity() {
+    let (rig, execution) = bound_legacy("historical-fence");
+    let id = request_id(&execution);
+    let file = format!("state/preparation-receipts/{id}.json");
+    let mut receipt = rig.read(&file);
+    receipt.as_object_mut().unwrap().remove("version");
+    receipt.as_object_mut().unwrap().remove("binding");
+    rig.put(&file, &receipt);
+    let (file, mut progress) = owner_progress(&rig, &execution);
+    progress["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation");
+    rig.put(&file, &progress);
+    let file = format!("state/admissions/{id}.json");
+    let mut admission = rig.read(&file);
+    admission["launch"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation");
+    rig.put(&file, &admission);
+    let marker = rig.dir.join("home/.git/dogsled-checkout-id");
+    fs::remove_file(&marker).unwrap();
+    assert_continue_refused(&rig, &id, "w1:p1", "historical preparation has no identity");
+    assert!(!marker.exists());
+}
+
+fn assert_continuation_gate_order(rig: &Rig, id: &str, case: &str) {
+    let path = if case == "preparation-lock" {
+        rig.dir
+            .join(format!("state/preparation-receipts/{id}.lock"))
+    } else {
+        rig.dir.join("home/.git/dogsled-lifecycle.lock")
+    };
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    lock.lock().unwrap();
+    let before = state(rig, id);
+    let ready = Fifo::new(&rig.dir, "continue.ready");
+    let go = Fifo::new(&rig.dir, "continue.go");
+    let _ready = ready.hold();
+    let _go = go.hold();
+    let mut command = rig.cmd(&[
+        "legacy-continue",
+        "w2:p1",
+        "--message",
+        "continue",
+        "--json",
+        "--budget-ms",
+        "1000",
+    ]);
+    command.env(
+        "DOGSLED_TEST_LAUNCH_CONTINUATION_BEFORE_GATE",
+        rig.dir.join("continue"),
+    );
+    command.stdout(fs::File::create(rig.dir.join("continue-output")).unwrap());
+    command.stderr(fs::File::create(rig.dir.join("continue-error")).unwrap());
+    let mut contender = Owned::spawn(&mut command);
+    read_fifo(
+        ready.path(),
+        "continuation before preparation/repository gates",
+    );
+    let mut inner_locks = Vec::new();
+    for path in [
+        rig.dir.join("state/done.lock"),
+        rig.dir.join(format!("state/launches/{id}.lock")),
+    ] {
+        let probe = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        probe.try_lock().unwrap();
+        inner_locks.push(probe);
+    }
+    writeln!(go.hold(), "go").unwrap();
+    assert_eq!(contender.wait().code(), Some(2));
+    let refusal: Value = serde_json::from_str(&rig.log("continue-output")).unwrap();
+    assert_eq!(refusal["deadline"], true, "{refusal}");
+    let expected_gate = if case == "preparation-lock" {
+        "preparation-receipts"
+    } else {
+        "dogsled-lifecycle.lock"
+    };
+    assert!(
+        refusal["error"].as_str().unwrap().contains(expected_gate),
+        "{refusal}"
+    );
+    drop(inner_locks);
+    assert_eq!(state(rig, id), before);
+    lock.unlock().unwrap();
+    assert_eq!(continue_from(rig, "w1:p1", "continue").0, 0);
+}
+
+#[test]
 fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
     for case in [
         "transfer",
         "prohibit",
         "identity",
         "historical",
+        "unsupported",
         "preparation-lock",
         "repository-lock",
     ] {
@@ -91,51 +195,15 @@ fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
                 rig.put(&file, &receipt);
                 assert_continue_refused(&rig, &id, "w1:p1", "missing its binding");
             }
+            "unsupported" => {
+                let file = format!("state/preparation-receipts/{id}.json");
+                let mut receipt = rig.read(&file);
+                receipt["version"] = json!(99);
+                rig.put(&file, &receipt);
+                assert_continue_refused(&rig, &id, "w1:p1", "unsupported preparation");
+            }
             "preparation-lock" | "repository-lock" => {
-                let path = if case == "preparation-lock" {
-                    rig.dir
-                        .join(format!("state/preparation-receipts/{id}.lock"))
-                } else {
-                    rig.dir.join("home/.git/dogsled-lifecycle.lock")
-                };
-                let lock = fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(path)
-                    .unwrap();
-                lock.lock().unwrap();
-                let before = state(&rig, &id);
-                let out = rig.run(&[
-                    "legacy-continue",
-                    "w2:p1",
-                    "--message",
-                    "continue",
-                    "--json",
-                    "--budget-ms",
-                    "100",
-                ]);
-                assert_eq!(out.status.code(), Some(2));
-                let refusal: Value = serde_json::from_slice(&out.stdout).unwrap();
-                assert_eq!(refusal["deadline"], true, "{refusal}");
-                for path in [
-                    rig.dir.join("state/done.lock"),
-                    rig.dir.join(format!("state/launches/{id}.lock")),
-                ] {
-                    let probe = fs::OpenOptions::new()
-                        .create(true)
-                        .truncate(false)
-                        .read(true)
-                        .write(true)
-                        .open(path)
-                        .unwrap();
-                    probe.try_lock().unwrap();
-                    probe.unlock().unwrap();
-                }
-                assert_eq!(state(&rig, &id), before);
-                lock.unlock().unwrap();
-                assert_eq!(continue_from(&rig, "w1:p1", "continue").0, 0);
+                assert_continuation_gate_order(&rig, &id, case);
             }
             _ => {
                 let (code, sent) = continue_from(&rig, "w1:p1", "continue");

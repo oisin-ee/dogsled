@@ -1,6 +1,17 @@
 use super::*;
 use std::io::Write as _;
 
+fn short_disposition_rig(name: &str) -> (Rig, PathBuf) {
+    let (rig, repo) = place::place_rig(name);
+    let relative = repo
+        .strip_prefix(rig.dir.canonicalize().unwrap())
+        .unwrap()
+        .to_path_buf();
+    let rig = rig.shortened();
+    let repo = rig.dir.join(relative);
+    (rig, repo)
+}
+
 #[test]
 fn remote_preparation_release_requires_correlated_ack() {
     for (case, filter) in [
@@ -23,7 +34,7 @@ fn remote_preparation_release_requires_correlated_ack() {
         ),
         ("exact", "cat"),
     ] {
-        let rig = Rig::new(&format!("ack-{case}"));
+        let rig = Rig::short(&format!("ack-{case}"));
         let repo = rig.dir.join("home/repo");
         repository(&repo);
         rig.peer();
@@ -66,7 +77,7 @@ fn remote_preparation_release_requires_correlated_ack() {
 
 #[test]
 fn lost_disposition_ack_replays_only_the_same_release() {
-    let (rig, repo) = place::place_rig("lost-disposition");
+    let (rig, repo) = short_disposition_rig("lost-disposition");
     disposition_prepared(&rig, &repo, "release", "shared", true);
     disposition_prepared(&rig, &repo, "other", "shared", false);
     let input = rig.disposition_request("release");
@@ -97,7 +108,7 @@ fn lost_disposition_ack_replays_only_the_same_release() {
 
 #[test]
 fn old_preparation_peer_refuses_at_reserve_before_preparation() {
-    let (rig, repo) = place::place_rig("old-disposition-peer");
+    let (rig, repo) = short_disposition_rig("old-disposition-peer");
     rig.peer();
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script(
@@ -797,6 +808,111 @@ fn replace_unmarked_checkout(repo: &Path, tree: &Path, branch: &str) -> PathBuf 
     let admin = PathBuf::from(close::git(tree, &["rev-parse", "--absolute-git-dir"]).trim());
     assert!(!admin.join("dogsled-checkout-id").exists());
     admin
+}
+
+fn start_gate_disposition(rig: &Rig, input: &str, name: &str) -> Owned {
+    let mut command = rig.cmd(&[
+        "--json",
+        "--budget-ms",
+        "15000",
+        "host",
+        "prepared",
+        "--input",
+        input,
+    ]);
+    command.env(
+        "DOGSLED_TEST_LAUNCH_DISPOSITION_BEFORE_GATE",
+        rig.dir.join(name),
+    );
+    command.stdout(fs::File::create(rig.dir.join(format!("{name}-output"))).unwrap());
+    command.stderr(fs::File::create(rig.dir.join(format!("{name}-error"))).unwrap());
+    Owned::spawn(&mut command)
+}
+
+#[test]
+fn disposition_and_dispatch_obey_both_gate_orders() {
+    for release_first in [true, false] {
+        let (rig, repo) = short_disposition_rig(if release_first {
+            "release-first"
+        } else {
+            "dispatch-first"
+        });
+        let prepared = disposition_prepared(&rig, &repo, "recover-one", "ordered", true);
+        let mut launch = host_request(&rig);
+        launch["preparation"] = prepared["binding"].clone();
+        launch["cwd"] = prepared["path"].clone();
+        launch["pane"] = prepared["pane_id"].clone();
+        launch["terminal"] = prepared["terminal_id"].clone();
+        let input = rig.disposition_request("recover-one");
+        let (release_ready, release_go) = launch_gate_barriers(&rig, "release");
+        let _release_ready = release_ready.hold();
+        let _release_go = release_go.hold();
+        let (launch_ready, launch_go) = launch_gate_barriers(&rig, "dispatch");
+        let _launch_ready = launch_ready.hold();
+        let _launch_go = launch_go.hold();
+        let phase = if release_first {
+            "BEFORE_GATE"
+        } else {
+            "ENTERED_GATE"
+        };
+        let mut dispatch = start_gate_launch(&rig, &launch, "dispatch", &[(phase, "dispatch")]);
+        read_fifo(launch_ready.path(), "dispatch barrier");
+        let mut release = start_gate_disposition(&rig, &input, "release");
+        read_fifo(release_ready.path(), "disposition ingress barrier");
+        if release_first {
+            // Disposition owns the preparation gate while it waits for repository protection.
+            let git_ready = lifecycle_git_barrier(&rig);
+            let _git_ready = git_ready.hold();
+            let repository = repository_lifecycle_lock(&repo);
+            writeln!(release_go.hold(), "go").unwrap();
+            read_fifo(
+                git_ready.path(),
+                "disposition entered preparation gate before repository",
+            );
+            probe_free_lock(&rig.dir.join("state/done.lock"));
+            probe_free_lock(&rig.dir.join("state/launches/recover-one.lock"));
+            writeln!(launch_go.hold(), "go").unwrap();
+            repository.unlock().unwrap();
+            assert!(release.wait().success(), "{}", rig.log("release-error"));
+            assert!(!dispatch.wait().success(), "{}", rig.log("dispatch-output"));
+            assert_eq!(
+                rig.read("state/preparation-receipts/recover-one.disposition.json")["request"]["policy"]
+                    ["kind"],
+                "prohibit"
+            );
+            assert!(!rig.log("herdr.log").contains("agent start"));
+        } else {
+            // The already-entered dispatch gate wins; the delayed prohibition cannot replace it.
+            writeln!(release_go.hold(), "go").unwrap();
+            probe_free_lock(&rig.dir.join("state/done.lock"));
+            probe_free_lock(&rig.dir.join("state/launches/recover-one.lock"));
+            writeln!(launch_go.hold(), "go").unwrap();
+            assert!(dispatch.wait().success(), "{}", rig.log("dispatch-error"));
+            assert!(!release.wait().success(), "{}", rig.log("release-output"));
+            let saved = rig.read("state/launches/recover-one.json");
+            let fence = rig.read("state/preparation-receipts/recover-one.disposition.json");
+            assert_eq!(fence["request"]["policy"]["kind"], "transfer");
+            assert_eq!(fence["request"]["outcome"], "possibly_executed");
+            let transfer = fence["request"].to_string();
+            assert_eq!(rig.json(&["host", "prepared", "--input", &transfer]).0, 0);
+            assert_eq!(
+                rig.json(&["host", "launch", "--request", &launch.to_string()]),
+                (0, saved)
+            );
+            let mut other = launch.clone();
+            other["owner"] = json!("foreign");
+            assert_eq!(
+                rig.json(&["host", "launch", "--request", &other.to_string()])
+                    .0,
+                2
+            );
+            assert_eq!(
+                rig.log("herdr.log").matches("agent start worker ").count(),
+                1
+            );
+        }
+        assert_eq!(rig.read("state/preparations.json"), json!([]));
+    }
 }
 
 fn launch_gate_barriers(rig: &Rig, name: &str) -> (Fifo, Fifo) {
