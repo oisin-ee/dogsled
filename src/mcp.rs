@@ -130,6 +130,14 @@ pub struct SendArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetirementArgs {
+    pub request_id: String,
+    pub host: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct AskArgs {
     pub question: String,
 }
@@ -571,6 +579,25 @@ impl Server {
         self.call(move |fleet| {
             crate::runtime::stop(fleet, &args.id)?;
             Ok(json!({"stopped": args.id}))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Retire one owned historical preparation. Releases only that resource, prohibits future dispatch, and leaves the task unresolved. Cleanup override is CLI-only."
+    )]
+    async fn retire_preparation(
+        &self,
+        Parameters(args): Parameters<RetirementArgs>,
+    ) -> Result<String, String> {
+        self.call(move |fleet| {
+            crate::preparation_retirement::retire(
+                fleet,
+                &args.request_id,
+                args.host.as_deref(),
+                &args.reason,
+                false,
+            )
         })
         .await
     }

@@ -146,6 +146,57 @@ impl Drop for Client {
 }
 
 #[test]
+fn mcp_retirement_requires_live_custody_and_has_no_cleanup_override() {
+    let (rig, _) = preparation_retirement::prepared("mcp-retirement", "a");
+    let original = rig.read("state/preparations.json");
+    let mut client = Client::start(&rig);
+    let (refusal, error) = client.call(
+        "retire_preparation",
+        &json!({"request_id":"a","reason":"audit"}),
+    );
+    assert!(error, "{refusal}");
+    assert_eq!(rig.read("state/preparations.json"), original);
+    let tools = client.request("tools/list", &json!({}));
+    let tool = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "retire_preparation")
+        .unwrap();
+    assert!(tool["inputSchema"]["properties"].get("cleanup").is_none());
+    assert!(tool["inputSchema"]["properties"].get("actor").is_none());
+    assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_session":{"kind":"id","value":"owner-session"}}]}}));
+    let host = String::from_utf8(Command::new("hostname").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    rig.put("state/custody.json", &json!([{"item":"a","host":host,"owner_pane":"w1:p1","owner_session":"owner-session","custodian_pane":"w1:p1","custodian_session":"owner-session","revision":4,"claims":[]}]));
+    rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_session":{"kind":"id","value":"reused-session"}}]}}));
+    let (refused, error) = client.call(
+        "retire_preparation",
+        &json!({"request_id":"a","reason":"audit"}),
+    );
+    assert!(error, "{refused}");
+    assert_eq!(rig.read("state/preparations.json"), original);
+    rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_session":{"kind":"id","value":"owner-session"}}]}}));
+    let (result, error) = client.call(
+        "retire_preparation",
+        &json!({"request_id":"a","reason":"audit"}),
+    );
+    assert!(!error, "{result}");
+    assert_eq!(result["status"], "retired");
+    assert_eq!(result["task"], "unresolved");
+    assert_eq!(result["audit"]["authority"]["record"]["revision"], 4);
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    let (duplicate, error) = client.call(
+        "retire_preparation",
+        &json!({"request_id":"a","reason":"audit"}),
+    );
+    assert!(!error, "{duplicate}");
+    assert_eq!(duplicate, result);
+}
+#[test]
 fn p2_recovery_tools_share_the_runtime() {
     let rig = Rig::short("p2-mcp");
     let repo = rig.dir.join("repo");
@@ -306,6 +357,7 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("recovery_list", &["repo"]),
             expect("recovery_restore", &["id", "repo", "to"]),
             expect("recovery_show", &["id", "repo"]),
+            expect("retire_preparation", &["reason", "request_id"]),
             expect("run", &["cmd"]),
             expect("send", &["message", "target"]),
             expect("spawn", &[]),

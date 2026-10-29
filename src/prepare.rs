@@ -717,8 +717,70 @@ pub struct PreparationLookupReply {
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum LookupQuery {
+    Historical(HistoricalQuery),
     Placement(LookupRequest),
     Preparation(PreparationLookup),
+}
+
+/// A read-only retirement capture never prepares or allocates a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalQuery {
+    pub version: u32,
+    pub retirement: String,
+    pub host: Host,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoricalReply {
+    pub version: u32,
+    pub query: HistoricalQuery,
+    pub historical: disposition::Historical,
+}
+
+pub fn historical_on_host(
+    ledger: &crate::ledger::Ledger,
+    query: &HistoricalQuery,
+) -> Result<HistoricalReply> {
+    require_protocol(Some(query.version))?;
+    Ok(HistoricalReply {
+        version: disposition::VERSION,
+        query: query.clone(),
+        historical: disposition::historical(ledger, &query.retirement)?,
+    })
+}
+
+pub fn lookup_historical(fleet: &Fleet, host: &Host, id: &str) -> Result<disposition::Historical> {
+    if *fleet.find(&host.id)? != *host {
+        return Err(worktree::refuse("retirement host changed"));
+    }
+    let query = HistoricalQuery {
+        version: disposition::VERSION,
+        retirement: id.into(),
+        host: host.clone(),
+    };
+    let reply: HistoricalReply = if host.is_local() {
+        historical_on_host(fleet.ledger, &query)?
+    } else {
+        fleet.remote_setup(
+            host,
+            &[
+                "preparation-lookup".into(),
+                "--preparation-protocol".into(),
+                disposition::VERSION.to_string(),
+                "--input".into(),
+                serde_json::to_string(&query)?,
+            ],
+        )?
+    };
+    require_protocol(Some(reply.version))?;
+    if reply.query != query
+        || reply.historical.binding.request_id != id
+        || reply.historical.binding.claim.request_id != id
+    {
+        return Err(worktree::refuse("retirement lookup correlation changed"));
+    }
+    Ok(reply.historical)
 }
 
 pub fn lookup_preparation(fleet: &Fleet, query: &PreparationLookup) -> Result<LookupState> {

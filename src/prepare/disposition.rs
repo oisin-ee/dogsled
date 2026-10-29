@@ -41,6 +41,10 @@ pub enum Policy {
 pub enum Basis {
     PlacementReturned,
     PreparationFailed,
+    Retired {
+        audit: Box<crate::preparation_retirement::Audit>,
+        provenance: Option<serde_json::Value>,
+    },
     Cancelled {
         operation_id: String,
         request_id: String,
@@ -105,6 +109,181 @@ fn conflict() -> Error {
     crate::worktree::refuse("preparation disposition correlation or ownership changed")
 }
 
+/// Read-only, request-gated historical capture. Missing checkout identity stays missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Historical {
+    pub binding: Binding,
+    pub provenance: Option<serde_json::Value>,
+    pub disposition: Option<Receipt>,
+}
+
+pub fn historical(ledger: &Ledger, id: &str) -> Result<Historical> {
+    crate::jobs::validate_id(id)?;
+    ledger
+        .child("preparation-receipts")
+        .with_lock(id, || historical_guarded(ledger, id))
+}
+
+fn historical_guarded(ledger: &Ledger, id: &str) -> Result<Historical> {
+    let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    let claims: Vec<_> = records
+        .iter()
+        .filter(|p| p.request_id.as_deref() == Some(id))
+        .collect();
+    let receipts = ledger.child("preparation-receipts");
+    let provenance = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
+    let disposition = receipts.read::<Receipt>(&file(id))?;
+    let binding = match claims.as_slice() {
+        [claim] => {
+            let receipt = provenance
+                .clone()
+                .map(serde_json::from_value::<super::PreparationReceipt>)
+                .transpose()?;
+            if receipt
+                .as_ref()
+                .is_some_and(|r| r.version.is_some_and(|v| v != VERSION))
+            {
+                return Err(conflict());
+            }
+            let captured = if let Some(receipt) = &receipt {
+                let captured = receipt.binding.clone().unwrap_or(Binding {
+                    request_id: id.to_owned(),
+                    request: receipt.request.clone(),
+                    claim: Claim {
+                        tree: claim.tree.clone(),
+                        request_id: id.to_owned(),
+                    },
+                    prepared: receipt.prepared.clone(),
+                });
+                if captured.request != receipt.request || captured.prepared != receipt.prepared {
+                    return Err(conflict());
+                }
+                captured
+            } else {
+                // The identified legacy metadata is the whole provenance. This tuple
+                // routes the metadata operation; it supplies no checkout identity.
+                Binding {
+                    request_id: id.to_owned(),
+                    request: (
+                        claim.tree.repo.clone().into(),
+                        claim.tree.branch.clone(),
+                        None,
+                    ),
+                    claim: Claim {
+                        tree: claim.tree.clone(),
+                        request_id: id.to_owned(),
+                    },
+                    prepared: None,
+                }
+            };
+            if captured.request_id != id
+                || captured.claim.request_id != id
+                || captured.claim.tree != claim.tree
+                || !crate::worktree::same(&captured.request.0.to_string_lossy(), &claim.tree.repo)
+                || captured.request.1 != claim.tree.branch
+            {
+                return Err(conflict());
+            }
+            captured
+        }
+        [] => {
+            let saved = disposition.as_ref().ok_or_else(conflict)?;
+            if !matches!(
+                saved.request.policy,
+                Policy::Prohibit {
+                    basis: Basis::Retired { .. }
+                }
+            ) || !matches_binding(ledger, &saved.request)?
+            {
+                return Err(conflict());
+            }
+            saved.request.binding.clone()
+        }
+        _ => return Err(conflict()),
+    };
+    if let Some(saved) = &disposition
+        && (saved.request.version != VERSION || saved.request.binding != binding)
+    {
+        return Err(conflict());
+    }
+    Ok(Historical {
+        binding,
+        provenance,
+        disposition,
+    })
+}
+
+fn matches_binding(ledger: &Ledger, request: &Request) -> Result<bool> {
+    if let Policy::Prohibit {
+        basis: Basis::Retired { provenance, audit },
+    } = &request.policy
+    {
+        let id = &request.binding.request_id;
+        crate::jobs::validate_id(id)?;
+        if audit.request_id != *id || request.binding.claim.request_id != *id {
+            return Ok(false);
+        }
+        let current = ledger
+            .child("preparation-receipts")
+            .read::<serde_json::Value>(&format!("{id}.json"))?;
+        return Ok(current == *provenance);
+    }
+    Ok(binding(ledger, &request.binding.request_id)?.as_ref() == Some(&request.binding))
+}
+
+fn retirement_guarded(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    request: &Request,
+    fresh: bool,
+) -> Result<Acknowledgement> {
+    let operation = || {
+        ledger
+            .child("launches")
+            .with_lock(&request.binding.request_id, || {
+                if fresh {
+                    let captured = historical_guarded(ledger, &request.binding.request_id)?;
+                    if captured.binding != request.binding {
+                        return Err(conflict());
+                    }
+                    validate_policy(ledger, shell, request)?;
+                }
+                apply(ledger, request)
+            })
+    };
+    if let Some(identity) = &request.binding.claim.tree.identity {
+        let path = std::path::Path::new(&identity.common).join("dogsled-lifecycle.lock");
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(lock) => {
+                let end =
+                    std::time::Instant::now() + ledger.budget.remaining("retirement lifecycle")?;
+                loop {
+                    match lock.try_lock() {
+                        Ok(()) => break,
+                        Err(std::fs::TryLockError::WouldBlock) => {
+                            if std::time::Instant::now() >= end {
+                                return Err(Error::Deadline("retirement lifecycle".into()));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+                    }
+                }
+                let result = operation();
+                lock.unlock()?;
+                return result;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    operation()
+}
+
 fn file(id: &str) -> String {
     format!("{id}.disposition.json")
 }
@@ -161,11 +340,38 @@ fn read(ledger: &Ledger, id: &str) -> Result<Option<Receipt>> {
     if let Some(receipt) = &receipt
         && (receipt.request.version != VERSION
             || receipt.request.binding.request_id != id
-            || binding(ledger, id)?.as_ref() != Some(&receipt.request.binding))
+            || !matches_binding(ledger, &receipt.request)?)
     {
         return Err(conflict());
     }
     Ok(receipt)
+}
+
+/// Read-only retirement evidence is a resource fence, never a no-launch witness.
+pub fn retired(ledger: &Ledger, id: &str) -> Result<bool> {
+    let raw = ledger
+        .child("preparation-receipts")
+        .read::<serde_json::Value>(&file(id))?;
+    // Historical non-retirement dispositions keep their existing evidence rules.
+    // Only this new basis adds a resource-only exclusion to settlement.
+    if raw
+        .as_ref()
+        .and_then(|value| value.pointer("/request/policy/basis/retired"))
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let receipt = read(ledger, id)?.ok_or_else(conflict)?;
+    crate::preparation_retirement::validate(
+        match &receipt.request.policy {
+            Policy::Prohibit {
+                basis: Basis::Retired { audit, .. },
+            } => audit,
+            _ => return Err(conflict()),
+        },
+        &receipt.request,
+    )?;
+    Ok(true)
 }
 
 /// Called under the request's preparation lock, before any discovery or side effect.
@@ -241,7 +447,7 @@ fn validate_tree(
 /// only when this same receipt proves a prior attempt persisted that fence.
 fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
     let id = &request.binding.request_id;
-    if request.version != VERSION || binding(ledger, id)?.as_ref() != Some(&request.binding) {
+    if request.version != VERSION || !matches_binding(ledger, request)? {
         return Err(conflict());
     }
     let receipts = ledger.child("preparation-receipts");
@@ -347,7 +553,7 @@ fn dispose_guarded(
 ) -> Result<Acknowledgement> {
     let id = &request.binding.request_id;
     let saved = read(ledger, id)?;
-    if binding(ledger, id)?.as_ref() != Some(&request.binding)
+    if !matches_binding(ledger, request)?
         || saved
             .as_ref()
             .is_some_and(|saved| saved.request != *request)
@@ -367,6 +573,17 @@ fn dispose_guarded(
         if saved.progress == Progress::Released || !held {
             return apply(ledger, request);
         }
+    }
+    if matches!(
+        request.policy,
+        Policy::Prohibit {
+            basis: Basis::Retired { .. }
+        }
+    ) {
+        // Metadata retirement never observes or repairs the current checkout. Lock the
+        // historical lifecycle mutex only if it still exists; do not create a replacement.
+        crate::work::launch_test_barrier("RETIREMENT_ENTERED_GATE")?;
+        return retirement_guarded(ledger, shell, request, saved.is_none());
     }
     crate::worktree::with_lifecycle(shell, ledger, &request.binding.request.0, |guard| {
         validate_tree(shell, guard, &request.binding)?;
@@ -480,9 +697,19 @@ fn validate_policy(
                 }
             }
         }
-        cancelled @ Policy::Prohibit { .. } => validate_cancelled(cancelled, binding)?,
+        prohibited @ Policy::Prohibit { .. } => validate_prohibition(prohibited, request)?,
     }
     Ok(())
+}
+
+fn validate_prohibition(policy: &Policy, request: &Request) -> Result<()> {
+    if let Policy::Prohibit {
+        basis: Basis::Retired { audit, .. },
+    } = policy
+    {
+        return crate::preparation_retirement::validate(audit, request);
+    }
+    validate_cancelled(policy, &request.binding)
 }
 
 fn validate_cancelled(policy: &Policy, binding: &Binding) -> Result<()> {

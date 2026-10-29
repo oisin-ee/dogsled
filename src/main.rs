@@ -36,6 +36,7 @@ mod machines;
 mod mcp;
 mod node;
 mod plan;
+mod preparation_retirement;
 mod prepare;
 #[cfg_attr(not(test), expect(dead_code, reason = "wired by P2/P3"))]
 mod preservation;
@@ -673,6 +674,11 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
         } => {
             prepare::require_protocol(Some(preparation_protocol))?;
             match serde_json::from_str(&input)? {
+                prepare::LookupQuery::Historical(query) => print(
+                    true,
+                    &prepare::historical_on_host(node.ledger, &query)?,
+                    String::new,
+                )?,
                 prepare::LookupQuery::Placement(query) => print(
                     true,
                     &prepare::lookup_on_host(node.ledger, node.home, &query),
