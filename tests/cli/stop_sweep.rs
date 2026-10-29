@@ -567,11 +567,11 @@ fn landed_dirty_reaches_only_the_agent_that_created_the_worktree() {
         "feat/x",
         "commits are already in the default branch",
         "notes.txt",
-        "Read the dirty files",
-        "commit them on a branch and land them",
-        "ask the user before you discard",
+        "For abandoned work",
         "dogsled close <pane>",
-        "dogsled prune worktrees",
+        "save a verified recovery",
+        "not merges or task completion",
+        "Unsupported content remains",
         "Never use `git worktree remove --force`, `git clean`, or `rm -rf`",
     ] {
         assert!(message.contains(expected), "{expected}: {message}");

@@ -33,6 +33,22 @@ fn done(rig: &Rig) -> Output {
 }
 
 #[test]
+fn p3_dirty_done_still_refuses() {
+    let (rig, tree) = close_rig("p3-dirty-done");
+    worker(&rig, &tree, "working");
+    fs::write(tree.join("draft"), b"unfinished\n").unwrap();
+    let before = git(&tree, &["status", "--porcelain"]);
+    let out = done(&rig);
+    assert!(!out.status.success());
+    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(!rig.dir.join("state/preservation-operations").exists());
+    assert_eq!(git(&tree, &["for-each-ref", "refs/dogsled/recovery/"]), "");
+    assert_eq!(before, git(&tree, &["status", "--porcelain"]));
+    assert!(rig.read("state/items.json")[0]["reply"].is_null());
+    assert!(tree.exists());
+}
+
+#[test]
 fn done_refuses_uncommitted_untracked_deleted_and_unheld_work_without_a_mark() {
     let (rig, tree) = close_rig("done-dirt");
     worker(&rig, &tree, "working");

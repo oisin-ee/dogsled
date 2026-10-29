@@ -152,8 +152,14 @@ pub(crate) fn request_with_id(
                 .ok_or_else(|| Error::Invalid("HERDR_WORKSPACE_ID is required".into()))?,
         )?)
     };
+    let validity = if matches!(action, Action::Job { .. }) {
+        None
+    } else {
+        Some(jobs::issue_request_validity(fleet.ledger, &id)?)
+    };
     Ok(Request {
         id,
+        validity,
         action,
         host: args.host.clone(),
         branch: args.branch.clone(),
@@ -344,28 +350,55 @@ pub fn close(
         Some(host) => fleet.find(host)?,
         None => close_host(fleet, pane)?,
     };
-    let closed: crate::close::Closed = if host.is_local() {
-        crate::close::with_local(
-            fleet.shell,
-            fleet.ledger,
-            pane,
-            &crate::close::Caller::from_env(),
-            crate::close::Guard::Clean,
-            |closed| {
-                items::close(fleet.ledger, &host.id, pane, now_ms())?;
-                Ok(closed)
-            },
-        )?
-    } else {
-        let closed = fleet.remote_setup(host, &["close".into(), pane.into()])?;
-        items::close(fleet.ledger, &host.id, pane, now_ms())?;
-        closed
+    let request = items::list(fleet.ledger)?
+        .iter()
+        .rev()
+        .find(|item| item.host == host.id && item.pane == pane)
+        .map(crate::preservation::CloseRequest::of);
+    let outcome = (|| -> Result<crate::close::Closed> {
+        let closed: crate::close::Closed = if host.is_local() {
+            crate::close::with_request(
+                fleet.shell,
+                fleet.ledger,
+                pane,
+                &crate::close::Caller::from_env(),
+                crate::close::Options {
+                    guard: crate::close::Guard::Clean,
+                    request: request.as_ref(),
+                },
+                |closed| {
+                    items::close_result(fleet.ledger, &host.id, &closed, now_ms())?;
+                    Ok(closed)
+                },
+            )?
+        } else {
+            let mut args = vec!["close".into(), pane.into()];
+            if let Some(request) = &request {
+                args.extend([
+                    "--preservation-request".into(),
+                    serde_json::to_string(request)?,
+                ]);
+            }
+            let closed = fleet.remote_setup(host, &args)?;
+            items::close_result(fleet.ledger, &host.id, &closed, now_ms())?;
+            closed
+        };
+        Ok(closed)
+    })();
+    let closed = match outcome {
+        Ok(closed) => closed,
+        Err(error) => {
+            if let Some(request) = &request {
+                items::close_blocker(fleet.ledger, &request.item, &error.to_string())?;
+            }
+            return Err(error);
+        }
     };
     Ok((closed, host.label.clone()))
 }
 
 pub fn closed_line(closed: &crate::close::Closed, label: &str) -> String {
-    closed.worktree.as_ref().map_or_else(
+    let mut line = closed.worktree.as_ref().map_or_else(
         || format!("closed pane {} on {label}\n", closed.pane),
         |tree| {
             format!(
@@ -373,7 +406,11 @@ pub fn closed_line(closed: &crate::close::Closed, label: &str) -> String {
                 closed.pane, tree.path, tree.branch
             )
         },
-    )
+    );
+    if let Some(recovery) = &closed.recovery {
+        line = format!("{}; {}\n", line.trim_end(), recovery.summary());
+    }
+    line
 }
 
 pub fn stop(fleet: &Fleet, id: &str) -> Result<()> {
@@ -441,6 +478,9 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
         "pane": item.pane,
         "closed": item.closed_ms.is_some(),
         "reply": item.reply.map(|r| r.text),
+        "orphan_reply": item.orphan_reply.map(|r| r.text),
+        "recovery": item.recovery,
+        "close_blocker": item.resource_close_reason,
         "tail": tail,
     }))
 }
@@ -697,6 +737,20 @@ pub fn read_text(read: &Value) -> String {
         out.push_str(reply);
         out.push_str("\n--- end final reply ---\n");
     }
+    if let Some(reason) = read["close_blocker"].as_str() {
+        out.push_str(reason);
+        out.push('\n');
+    }
+    if let Some(id) = read["recovery"]["id"].as_str() {
+        out.push_str("saved (recovery ");
+        out.push_str(id);
+        out.push_str(")\n");
+    }
+    if let Some(reply) = read["orphan_reply"].as_str() {
+        out.push_str("--- stopped orphan reply (not task completion) ---\n");
+        out.push_str(reply);
+        out.push('\n');
+    }
     out.push_str(&text("tail"));
     out.push('\n');
     out
@@ -706,7 +760,7 @@ pub fn read_text(read: &Value) -> String {
 fn close_host<'a>(fleet: &'a Fleet, pane: &str) -> Result<&'a crate::hosts::Host> {
     let hosts: std::collections::BTreeSet<_> = items::list(fleet.ledger)?
         .into_iter()
-        .filter(|i| i.closed_ms.is_none() && i.pane == pane)
+        .filter(|i| i.pane == pane)
         .map(|i| i.host)
         .collect();
     match hosts.len() {

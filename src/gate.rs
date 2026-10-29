@@ -122,7 +122,7 @@ pub fn notices(
         notices.push(Notice {
             key: "landed-dirty",
             signature: landed_dirty.iter().map(|s| (s.clone(), None, true)).collect(),
-            text: format!("Landed worktrees still have dirty files:\n{}\nRead the dirty files. If they are wanted, commit them on a branch and land them. If the work is abandoned, ask the user before you discard it. Then run `dogsled close <pane>` or `dogsled prune worktrees`. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on the checkout.", landed_dirty.into_iter().collect::<Vec<_>>().join("\n")),
+            text: format!("Landed worktrees still have dirty files:\n{}\nFor abandoned work, run `dogsled close <pane>` to save a verified recovery before removing its managed checkout. Recovery snapshots are not merges or task completion. Unsupported content remains with its specific hold reason. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on the checkout.", landed_dirty.into_iter().collect::<Vec<_>>().join("\n")),
         });
     }
     Ok(notices)

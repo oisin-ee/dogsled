@@ -164,7 +164,7 @@ Acceptance: `moon run :check :lint :test :clippy :format` passes. `pi/unit-contr
 
 ## Step 3: Fold pi-todo into the Dogsled extension
 
-Status: 3a merged as `9bc2fca` (#224). 3b specified. 3b facts checked at `9bc2fca`.
+Status: done. 3a merged as `9bc2fca` (#224). 3b merged as `497f133` (#229).
 
 Step 3 has two parts. Each part is one writer session.
 

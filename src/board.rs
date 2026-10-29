@@ -631,6 +631,8 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         .filter(|s| agent.is_some_and(|a| a.signal.as_deref() == Some(s.kind.as_str())));
     let activity = if let Some(signal) = signal {
         signal.text.clone()
+    } else if let Some(reason) = &item.resource_close_reason {
+        reason.clone()
     } else {
         match (group, agent) {
             (Group::ToLand, _) => [
@@ -653,12 +655,13 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
             }
         }
     };
-    let group =
-        if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && quiet_eligible {
-            Group::Attention
-        } else {
-            group
-        };
+    let group = if item.resource_close_reason.is_some()
+        || (group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && quiet_eligible)
+    {
+        Group::Attention
+    } else {
+        group
+    };
     Row {
         holds: Vec::new(),
         group,
@@ -1880,6 +1883,39 @@ mod tests {
     }
 
     #[test]
+    fn saved_recovery_is_not_ready_to_merge_but_a_retained_branch_is() {
+        let recovery = crate::preservation::Recovery {
+            host: "8103".into(),
+            repository: "/repo".into(),
+            id: "saved".into(),
+            pinned_oid: "oid".into(),
+            predecessors: Vec::new(),
+            operation: "close".into(),
+            item: Some("saved-only".into()),
+        };
+        let saved = Item {
+            closed_ms: Some(NOW),
+            recovery: Some(recovery.clone()),
+            ..item("saved-only", "8103", "gone")
+        };
+        let retained = Item {
+            closed_ms: Some(NOW),
+            recovery: Some(recovery),
+            branch: Some(crate::done::Branch {
+                repo: "/repo".into(),
+                name: "feature".into(),
+                ahead: 1,
+                landed: false,
+            }),
+            ..item("retained", "8103", "also-gone")
+        };
+        let board = build(&status(Vec::new(), vec![saved, retained]), None, NOW);
+        assert_eq!(board.rows.len(), 1);
+        assert_eq!(board.rows[0].id, "retained");
+        assert_eq!(board.rows[0].group, Group::ToLand);
+    }
+
+    #[test]
     fn portal_metadata_maps_owner_title_and_latest_inbox_state() -> Result<()> {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let status = status(
@@ -2512,8 +2548,10 @@ mod tests {
     #[test]
     fn a_queued_row_carries_the_repository_of_its_request() {
         let ticket = crate::work::Ticket {
+            finished_ms: None,
             id: "t1".into(),
             request: crate::work::Request {
+                validity: None,
                 id: "t1".into(),
                 action: crate::work::Action::Job {
                     cmd: vec!["cargo".into(), "test".into()],

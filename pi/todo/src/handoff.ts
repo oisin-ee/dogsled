@@ -5,21 +5,25 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { TaskProvider } from "./provider.ts";
 import { ownsTodo } from "./lifecycle.ts";
-import { seedPath } from "./seed-transport.ts";
 import { seedSource } from "./source.ts";
 
-type ImportHost = Readonly<Pick<ExtensionAPI, "exec" | "getAllTools">> & {
-  readonly events: Readonly<ExtensionAPI["events"]>;
-};
+type ImportHost = Readonly<Pick<ExtensionAPI, "exec" | "getAllTools">>;
 
 /** Startup transport is read once; branch progress always wins on resume. */
 class WorkerImport {
   readonly #pi: ImportHost;
   readonly #provider: Readonly<TaskProvider>;
 
-  public constructor(pi: ImportHost, provider: Readonly<TaskProvider>) {
+  readonly #seedPath: () => unknown;
+
+  public constructor(
+    pi: ImportHost,
+    provider: Readonly<TaskProvider>,
+    seedPath: () => unknown = (): undefined => undefined,
+  ) {
     this.#pi = pi;
     this.#provider = provider;
+    this.#seedPath = seedPath;
   }
 
   /**
@@ -32,7 +36,10 @@ class WorkerImport {
       return;
     }
     try {
-      const file = seedPath(this.#pi.events);
+      const file = this.#seedPath();
+      if (file !== undefined && (typeof file !== "string" || file.trim() === "")) {
+        throw new Error("invalid seed path");
+      }
       if (file !== undefined && this.#requiresImport(event, ctx)) {
         await this.#load(file, ctx);
       }

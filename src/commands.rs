@@ -95,15 +95,36 @@ pub fn place_with(
     crate::jobs::validate_id(id)?;
     let selections = fleet.ledger.child("placement-attempts");
     selections.with_lock(id, || {
-        if let Some(request) = placement {
+        if let Some(request) = placement
+            && matches!(request.action, crate::work::Action::Place)
+        {
             return place_recorded(fleet, request, now);
         }
-        place_locked(fleet, host, id, now, &selections, validity)
+        let nonjob = placement
+            .is_some_and(|request| !matches!(request.action, crate::work::Action::Job { .. }));
+        crate::jobs::check_validity(fleet.ledger, validity.as_ref())?;
+        place_locked(fleet, host, id, now, &selections, validity, nonjob)
     })
 }
 
 /// The caller holds admission before entering selection. Only a correlated definitive
 /// refusal permits another candidate; an ambiguous reply retains the pending envelope.
+fn reserve_recorded(
+    fleet: &Fleet,
+    request: &crate::work::Request,
+    transport: &crate::node::PlacementReplay,
+    now: u64,
+) -> Result<crate::node::ReserveOutcome> {
+    fleet.reserve(
+        &transport.envelope.host,
+        &request.id,
+        now,
+        None,
+        Some(transport),
+        true,
+    )
+}
+
 fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Result<Placement> {
     use crate::work::{Attempt, PlacementPhase};
     let attempts = fleet.ledger.child("admissions");
@@ -170,7 +191,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
             }
         };
         let envelope = &transport.envelope;
-        let outcome = fleet.reserve(&envelope.host, &request.id, now, None, Some(&transport))?;
+        let outcome = reserve_recorded(fleet, request, &transport, now)?;
         let reply = outcome.placement.ok_or_else(|| {
             crate::unit_transport::conflict(
                 "peer lacks placement replay evidence; no preparation authorized",
@@ -210,6 +231,7 @@ fn place_locked(
     now: u64,
     selections: &crate::ledger::Ledger,
     validity: Option<crate::jobs::Validity>,
+    nonjob: bool,
 ) -> Result<Placement> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
     let file = format!("{id}.json");
@@ -238,7 +260,9 @@ fn place_locked(
     // refusal comes before any reservation, so no capacity is held for it.
     if validity.is_some() {
         let speaks = |r: &HostReport| {
-            r.host.is_local() || r.job_validity == Some(crate::jobs::VALIDITY_PROTOCOL_VERSION)
+            nonjob
+                || r.host.is_local()
+                || r.job_validity == Some(crate::jobs::VALIDITY_PROTOCOL_VERSION)
         };
         // A request pinned to a peer without the protocol is refused there and then. It
         // never moves to another host.
@@ -283,7 +307,7 @@ fn place_locked(
                 host: host.id.clone(),
             }),
         )?;
-        let outcome = fleet.reserve(host, id, now, validity, None)?;
+        let outcome = fleet.reserve(host, id, now, validity, None, nonjob)?;
         if outcome.reserved {
             let prepared = Prepared::default();
             return Ok(Placement::Placed {

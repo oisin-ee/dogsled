@@ -2,18 +2,16 @@ import type { TodoContext, TodoHost } from "./lifecycle.ts";
 import { ownsTodo, show } from "./lifecycle.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { TODO_SHORTCUT } from "./widget.ts";
+import type { TodoDisplay } from "./display.ts";
 import type { TodoPresentation } from "./presentation.ts";
 import { display } from "./display.ts";
 import { latestSnapshot } from "./state.ts";
 import { parse } from "./wasm.ts";
 
-interface WorkHost extends TodoHost {
-  readonly events: Readonly<ExtensionAPI["events"]>;
-}
+type WorkHost = TodoHost;
 
 type WorkCommands = Readonly<Pick<ExtensionAPI, "registerCommand" | "registerShortcut">>;
-const protocolVersion = 3,
-  initialRevision = 0;
+const initialRevision = 0;
 
 interface WorkContext extends TodoContext {
   readonly sessionManager: TodoContext["sessionManager"] & {
@@ -22,42 +20,29 @@ interface WorkContext extends TodoContext {
   };
 }
 
-/** The identity of one work presenter requesting this provider's snapshot. */
-interface Presenter {
-  readonly presenter: string;
-  readonly request: string;
-  readonly version: typeof protocolVersion;
+interface TodoPresenter {
+  readonly show: (snapshot: {
+    readonly session: string;
+    readonly branch: string | null;
+    readonly revision: number;
+    readonly display: TodoDisplay;
+  }) => boolean;
+  readonly open: () => void;
+  readonly stop: () => void;
 }
-
-/**
- * Checks a presentation request without trusting an extension's event payload.
- * @param {unknown} value Event payload.
- * @returns {boolean} Whether the envelope uses the supported protocol.
- */
-const isPresenter = (value: unknown): value is Presenter =>
-  typeof value === "object" &&
-  value !== null &&
-  "version" in value &&
-  value.version === protocolVersion &&
-  "presenter" in value &&
-  typeof value.presenter === "string" &&
-  "request" in value &&
-  typeof value.request === "string";
 
 /** Publishes validated branch data; presentation claims never write task state. */
 class TodoWork {
   readonly #host: WorkHost;
   readonly #presentation: Readonly<TodoPresentation>;
   #context: WorkContext | undefined;
-  #publisher = "";
   #revision = initialRevision;
-  #presenter: Presenter | undefined;
+  #presenter: TodoPresenter | undefined;
   #claimed = false;
-  #subscriptions: (() => void)[] = [];
 
   /**
-   * Keeps the event bus and the existing standalone presentation owner.
-   * @param {WorkHost} host Pi event bus and tool ownership.
+   * Keeps tool ownership and the existing standalone presentation owner.
+   * @param {WorkHost} host Pi tool ownership.
    * @param {Readonly<TodoPresentation>} presentation Standalone display owner.
    */
   public constructor(host: WorkHost, presentation: Readonly<TodoPresentation>) {
@@ -101,39 +86,40 @@ class TodoWork {
   }
 
   /**
-   * Subscribes only when this extension owns the terminal todo tool.
+   * Starts only when this extension owns the terminal todo tool.
    * @param {WorkContext} ctx Current Pi session.
    */
   public start(ctx: WorkContext): void {
-    this.stop();
     if (ctx.mode !== "tui" || !ownsTodo(this.#host)) {
+      this.stop();
       return;
     }
+    if (this.#claimed) {
+      this.#release();
+    }
     this.#context = ctx;
-    this.#publisher = crypto.randomUUID();
-    this.#revision = initialRevision;
-    this.#subscriptions = [
-      this.#host.events.on("oisin.work.request", (value: unknown): void => {
-        if (isPresenter(value)) {
-          this.#presenter = value;
-          if (this.#context !== undefined) {
-            this.publish(this.#context);
-          }
-        }
-      }),
-      this.#host.events.on("oisin.work.claim", (value: unknown): void => {
-        this.#claim(value);
-      }),
-      this.#host.events.on("oisin.work.release", (value: unknown): void => {
-        if (this.#matches(value)) {
-          this.#release();
-        }
-      }),
-    ];
-    this.#host.events.emit("oisin.todo.ready", {
-      publisher: this.#publisher,
-      version: protocolVersion,
-    });
+    this.publish(ctx);
+  }
+
+  /**
+   * Attaches the shared presenter and publishes an already started session.
+   * @param {TodoPresenter} presenter Shared work display owner.
+   * @returns {Function} Releases this attachment.
+   */
+  public attach(presenter: TodoPresenter): () => void {
+    if (this.#presenter !== undefined) {
+      this.#release();
+    }
+    this.#presenter = presenter;
+    if (this.#context !== undefined) {
+      this.publish(this.#context);
+    }
+    return (): void => {
+      if (this.#presenter === presenter) {
+        this.#presenter = undefined;
+        this.#release();
+      }
+    };
   }
 
   /**
@@ -146,17 +132,19 @@ class TodoWork {
     }
     this.#context = ctx;
     this.#revision += 1;
-    const list = parse(latestSnapshot(ctx.sessionManager.getBranch()));
-    this.#host.events.emit("oisin.todo.snapshot", {
-      branch: ctx.sessionManager.getLeafId(),
-      display: display(list),
-      presenter: this.#presenter.presenter,
-      publisher: this.#publisher,
-      request: this.#presenter.request,
-      revision: this.#revision,
-      session: ctx.sessionManager.getSessionId(),
-      version: protocolVersion,
-    });
+    const list = parse(latestSnapshot(ctx.sessionManager.getBranch())),
+      claimed = this.#presenter.show({
+        branch: ctx.sessionManager.getLeafId(),
+        display: display(list),
+        revision: this.#revision,
+        session: ctx.sessionManager.getSessionId(),
+      });
+    if (claimed) {
+      this.#claimed = true;
+      this.#presentation.claim(ctx);
+    } else if (this.#claimed) {
+      this.#release();
+    }
   }
 
   /**
@@ -167,66 +155,21 @@ class TodoWork {
     if (!this.#claimed || this.#presenter === undefined) {
       return false;
     }
-    this.#host.events.emit("oisin.work.open", {
-      presenter: this.#presenter.presenter,
-      request: this.#presenter.request,
-      version: protocolVersion,
-      view: "todos",
-    });
+    this.#presenter.open();
     return true;
   }
 
-  /** Releases subscriptions and tells the presenter to discard this provider. */
+  /** Stops shared presentation and restores the standalone display. */
   public stop(): void {
-    for (const unsubscribe of this.#subscriptions) {
-      unsubscribe();
-    }
-    this.#subscriptions = [];
-    if (this.#context !== undefined) {
-      this.#host.events.emit("oisin.todo.stop", {
-        publisher: this.#publisher,
-        version: protocolVersion,
-      });
-    }
+    this.#presenter?.stop();
+    this.#presenter = undefined;
     this.#release();
     this.#context = undefined;
-  }
-
-  /**
-   * Accepts only an acknowledgement of the latest published snapshot.
-   * @param {unknown} value Claim envelope.
-   */
-  #claim(value: unknown): void {
-    if (
-      this.#matches(value) &&
-      "publisher" in value &&
-      value.publisher === this.#publisher &&
-      "revision" in value &&
-      value.revision === this.#revision &&
-      this.#context !== undefined
-    ) {
-      this.#claimed = true;
-      this.#presentation.claim(this.#context);
-    }
-  }
-
-  /**
-   * Matches a live presenter, excluding delayed messages from replaced sessions.
-   * @param {unknown} value Event envelope.
-   * @returns {boolean} Whether the envelope belongs to the current presenter.
-   */
-  #matches(value: unknown): value is Presenter {
-    return (
-      isPresenter(value) &&
-      value.presenter === this.#presenter?.presenter &&
-      value.request === this.#presenter.request
-    );
   }
 
   /** Restores the standalone display when shared presentation ends. */
   #release(): void {
     this.#claimed = false;
-    this.#presenter = undefined;
     if (this.#context !== undefined) {
       this.#presentation.release(this.#context);
     }
@@ -234,4 +177,4 @@ class TodoWork {
 }
 
 export { TodoWork };
-export type { WorkContext, WorkHost };
+export type { TodoPresenter, WorkContext, WorkHost };

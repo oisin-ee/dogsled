@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -10,18 +9,20 @@ import { TodoPresentation } from "./todo/src/presentation.ts";
 
 test("real pi-todo and Dogsled exchange snapshots in either load order", () => {
 	for (const providerFirst of [true, false]) {
-		const emitter = new EventEmitter();
-		const bus = { emit: (name: string, value: unknown) => { emitter.emit(name, value); }, on: (name: string, fn: (value: unknown) => void) => { emitter.on(name, fn); return () => { emitter.off(name, fn); }; } };
 		let leaf = "a";
 		let tasks: { content: string; status: string; subtasks?: { content: string; status: string }[] }[] = [{ content: "one", status: "in_progress" }];
 		const widgets: unknown[][] = [];
 		const ctx = { mode: "tui", sessionManager: { getSessionId: () => "session", getLeafId: () => leaf,
 			getBranch: () => [{ type: "custom", customType: "todo-state", data: { tasks } }] },
 			ui: { theme: { fg: (_: string, text: string) => text, bold: (text: string) => text }, notify() {}, setWidget: (...args: unknown[]) => widgets.push(args) } } as unknown as ExtensionContext;
-		const host = { events: bus, getAllTools: () => [{ name: "todo", sourceInfo: { path: fileURLToPath(new URL("./index.ts", import.meta.url)) } }] };
+		const host = { getAllTools: () => [{ name: "todo", sourceInfo: { path: fileURLToPath(new URL("./index.ts", import.meta.url)) } }] };
 		const provider = new TodoWork(host, new TodoPresentation());
 		let opens = 0;
-		const consumer = new WorkTodo(bus, () => {}, () => { opens++; });
+		const consumer = new WorkTodo(provider, () => {}, () => { opens++; });
+		if (providerFirst) { provider.start(ctx); consumer.start(ctx); }
+		else { consumer.start(ctx); provider.start(ctx); }
+		assert.equal(consumer.current?.display.current, "one");
+		// Session replacement retains either startup order without losing the attachment.
 		if (providerFirst) { provider.start(ctx); consumer.start(ctx); }
 		else { consumer.start(ctx); provider.start(ctx); }
 		assert.equal(consumer.current?.display.current, "one");

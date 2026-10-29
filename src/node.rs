@@ -52,6 +52,8 @@ pub struct SnapshotReport {
     /// The job validity protocol this host speaks. A peer without it cannot run a job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_validity: Option<u32>,
+    #[serde(default)]
+    pub request_validity: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_replay: Option<u32>,
     /// Read-only ownership reports from this host's stores.
@@ -73,7 +75,7 @@ pub struct ReserveOutcome {
     pub placement: Option<PlacementReply>,
 }
 
-pub const PLACEMENT_VERSION: u32 = 2;
+pub const PLACEMENT_VERSION: u32 = 3;
 
 /// Acknowledged replay carries the origin's immutable grant, not a fresh capacity request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +97,20 @@ impl PlacementReplay {
         }
         Ok(())
     }
+}
+
+/// Durable origin-terminal proof for one exact grant; never part of grant identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GrantCompletion {
+    pub version: u32,
+    pub grant: PlacementGrant,
+    pub admission: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GrantLifecycle {
+    proof: GrantCompletion,
+    finished_ms: Option<u64>,
 }
 
 /// One complete origin expectation. Neither transport nor recovery may reconstruct it.
@@ -163,6 +179,20 @@ impl PlacementReply {
     }
 }
 
+fn validate_expected_grant(replay: &PlacementReplay, saved: Option<&PlacementGrant>) -> Result<()> {
+    if let Some(expected) = &replay.expected_grant {
+        let grant = saved.ok_or_else(|| {
+            crate::unit_transport::conflict("placement grant missing; no new capacity")
+        })?;
+        if grant != expected {
+            return Err(crate::unit_transport::conflict(
+                "placement grant identity changed",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Busy fraction between two Linux `/proc/stat` readings. `None` without a
 /// previous reading, or when no tick passed (same reading twice).
 #[must_use]
@@ -197,6 +227,7 @@ impl Node<'_> {
             running: Some(self.ledger.locked("service")?),
             handoffs: crate::done::list(self.ledger)?,
             job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
+            request_validity: Some(crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION),
             placement_replay: Some(PLACEMENT_VERSION),
             holds: crate::holds::local(
                 self.ledger,
@@ -259,6 +290,69 @@ impl Node<'_> {
 
     /// Preparation fencing precedes the short capacity transaction. No lifecycle work
     /// runs while capacity is locked, and a retired request cannot repair a delayed grant.
+    pub fn grant_completion(&self, id: &str) -> Result<Option<u64>> {
+        crate::jobs::validate_id(id)?;
+        let grants = self.ledger.child("placement-grants");
+        let Some(lifecycle) = grants.read::<GrantLifecycle>(&format!("{id}.lifecycle.json"))?
+        else {
+            return Ok(None);
+        };
+        if grants
+            .read::<PlacementGrant>(&format!("{id}.json"))?
+            .as_ref()
+            != Some(&lifecycle.proof.grant)
+        {
+            return Err(crate::unit_transport::conflict(
+                "grant completion identity changed",
+            ));
+        }
+        crate::work::validate_placement_completion(&lifecycle.proof)?;
+        crate::jobs::completion_time(self.ledger, lifecycle.finished_ms, None, true)
+    }
+
+    /// Only exact durable origin-terminal proof permits lifecycle completion.
+    pub fn finish_placement(&self, proof: &GrantCompletion) -> Result<bool> {
+        let id = &proof.grant.envelope.reservation;
+        crate::jobs::validate_id(id)?;
+        if proof.version != 1 {
+            return Err(crate::unit_transport::conflict(
+                "unsupported grant completion",
+            ));
+        }
+        crate::work::validate_placement_completion(proof)?;
+        self.ledger.child("preparation-receipts").with_lock(id, || {
+            self.ledger.with_lock("host", || {
+                let grants = self.ledger.child("placement-grants");
+                let saved = grants.read::<PlacementGrant>(&format!("{id}.json"))?;
+                if saved.as_ref() != Some(&proof.grant) {
+                    return Err(crate::unit_transport::conflict(
+                        "grant completion identity changed",
+                    ));
+                }
+                let file = format!("{id}.lifecycle.json");
+                if let Some(saved) = grants.read::<GrantLifecycle>(&file)? {
+                    if saved.proof != *proof || saved.finished_ms.is_none() {
+                        return Err(crate::unit_transport::conflict(
+                            "grant completion provenance changed",
+                        ));
+                    }
+                    self.grant_completion(id)?;
+                } else {
+                    let mut finished_ms = None;
+                    crate::jobs::finish_once(self.ledger, &mut finished_ms, None)?;
+                    grants.write(
+                        &file,
+                        &GrantLifecycle {
+                            proof: proof.clone(),
+                            finished_ms,
+                        },
+                    )?;
+                }
+                Ok(true)
+            })
+        })
+    }
+
     pub fn reserve_placement(&self, replay: &PlacementReplay, now: u64) -> Result<ReserveOutcome> {
         let envelope = &replay.envelope;
         replay.validate(&envelope.reservation)?;
@@ -268,6 +362,9 @@ impl Node<'_> {
             .with_lock(&envelope.reservation, || {
                 crate::prepare::disposition::allow_preparation(self.ledger, &envelope.reservation)?;
                 crate::work::launch_test_barrier("PLACEMENT_ENTERED_GATE")?;
+                let request: crate::work::Request =
+                    serde_json::from_value(envelope.request.clone())?;
+                crate::jobs::receive_request_validity(self.ledger, &request.id, request.validity)?;
                 self.ledger
                     .with_lock("host", || self.placement_locked(replay, now))
             })
@@ -275,19 +372,12 @@ impl Node<'_> {
 
     fn placement_locked(&self, replay: &PlacementReplay, now: u64) -> Result<ReserveOutcome> {
         let envelope = &replay.envelope;
+        let request: crate::work::Request = serde_json::from_value(envelope.request.clone())?;
+        crate::work::check_request_validity(self.ledger, &request)?;
         let grants = self.ledger.child("placement-grants");
         let file = format!("{}.json", envelope.reservation);
         let saved = grants.read::<PlacementGrant>(&file)?;
-        if let Some(expected) = &replay.expected_grant {
-            let grant = saved.as_ref().ok_or_else(|| {
-                crate::unit_transport::conflict("placement grant missing; no new capacity")
-            })?;
-            if grant != expected {
-                return Err(crate::unit_transport::conflict(
-                    "placement grant identity changed",
-                ));
-            }
-        }
+        validate_expected_grant(replay, saved.as_ref())?;
         let raw: Vec<Reservation> = self.ledger.read("placements.json")?.unwrap_or_default();
         let mut grant = if let Some(grant) = saved {
             if grant.version != PLACEMENT_VERSION
@@ -384,9 +474,13 @@ impl Node<'_> {
         id: &str,
         now: u64,
         job_validity: Option<crate::jobs::Validity>,
+        nonjob: bool,
     ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
         self.ledger.with_lock("host", || {
+            if nonjob {
+                crate::jobs::receive_request_validity(self.ledger, id, job_validity)?;
+            }
             if self
                 .ledger
                 .child("placement-grants")
@@ -400,9 +494,7 @@ impl Node<'_> {
             // The host checks the request's age before it reads or rewrites any capacity
             // record, and before it replays a hold. A request that may not start new
             // execution never takes, keeps, or confirms a reservation.
-            if let Some(validity) = &job_validity {
-                crate::jobs::check_validity(self.ledger, Some(validity))?;
-            }
+            crate::jobs::check_validity(self.ledger, job_validity.as_ref())?;
             let reservations = self.live_reservations(now)?;
             // The caller may have lost a successful SSH reply. Replaying a live hold is
             // not new admission: do not append it, refresh its TTL, or require a fresh probe.
@@ -517,7 +609,16 @@ mod tests {
             .unwrap();
         std::thread::scope(|scope| {
             let calls: Vec<_> = (0..4)
-                .map(|_| scope.spawn(|| node.reserve("same", 100, None)))
+                .map(|_| {
+                    scope.spawn(|| {
+                        node.reserve(
+                            "same",
+                            100,
+                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                            false,
+                        )
+                    })
+                })
                 .collect();
             for call in calls {
                 assert!(call.join().unwrap().unwrap().reserved);
@@ -529,22 +630,37 @@ mod tests {
         assert_eq!(holds[0].created_ms, 100);
         // An existing hold is not new admission and does not need a fresh probe.
         assert!(
-            node.reserve("same", 100 + STALE_MS + 1, None)
-                .unwrap()
-                .reserved
+            node.reserve(
+                "same",
+                100 + STALE_MS + 1,
+                Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                false
+            )
+            .unwrap()
+            .reserved
         );
         let holds: Vec<Reservation> = ledger.read("placements.json").unwrap().unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].created_ms, 100);
         assert!(
             !node
-                .reserve("another", 100 + STALE_MS + 1, None)
+                .reserve(
+                    "another",
+                    100 + STALE_MS + 1,
+                    Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                    false
+                )
                 .unwrap()
                 .reserved
         );
         assert!(
             !node
-                .reserve("same", 100 + policy.reservation_ttl_ms, None)
+                .reserve(
+                    "same",
+                    100 + policy.reservation_ttl_ms,
+                    Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                    false
+                )
                 .unwrap()
                 .reserved
         );

@@ -8,6 +8,10 @@ const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a
 
 /// One `serve --once` pass. It must succeed; its stderr is the journal.
 fn serve(rig: &Rig) -> String {
+    rig.config("free_core_fraction_min = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    if !rig.dir.join("state/host.json").exists() {
+        rig.snapshot("state/host.json", NOW, 0.0, 1);
+    }
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     let journal = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "{journal}");
@@ -780,7 +784,7 @@ fn child(rig: &Rig, status: &str, tree: &Path) {
         "panes.json",
         &json!({"result":{"panes":[
             {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
-            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":status,"cwd":tree},
+            {"pane_id":"w2:p1","terminal_id":"term_child","workspace_id":"w2","agent":"pi","agent_status":status,"cwd":tree},
             {"pane_id":"w2:p2","workspace_id":"w2","agent":null,"cwd":tree}
         ]}}),
     );
@@ -1169,18 +1173,24 @@ fn a_clean_stopped_orphan_closes_and_records_output_not_a_result() {
 }
 
 #[test]
-fn a_dirty_stopped_orphan_stays_until_p3_preservation() {
+fn p3_dirty_stopped_orphan_is_saved_without_task_completion() {
     let (rig, tree) = close_rig("sweep-stopped-dirty");
     stopped_orphan(&rig, &tree);
     fs::write(tree.join("dirty"), "unsaved\n").unwrap();
     serve(&rig);
-    assert_eq!(
-        kept_reason(&rig),
-        "stopped orphan has unsaved work; kept until preservation (P3)"
+    assert!(!tree.exists());
+    let item = &rig.read("state/items.json")[0];
+    assert!(item["recovery"]["id"].is_string(), "{item}");
+    assert!(
+        item["orphan_reply"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Stopped last reply")
     );
-    assert!(tree.exists());
-    assert!(!rig.log("herdr.log").contains("close"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(item["reply"].is_null());
+    assert_ne!(item["native_done"], true);
+    assert!(item["closed_ms"].is_u64());
+    assert!(!rig.dir.join("state/done.json").exists());
 }
 
 #[test]
@@ -1255,6 +1265,7 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
     let (source, execution, _) = super::unit_seeded::launched("sweep-stopped-unit-launch");
     let (rig, tree) = close_rig("sweep-stopped-unit");
     stopped_orphan(&rig, &tree);
+    fs::write(tree.join("dirty"), b"unsettled work\n").unwrap();
     let id = execution["requestId"].as_str().unwrap();
     let path = format!("state/admissions/{id}.json");
     let attempt = source.read(&path);
@@ -1276,6 +1287,8 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
     assert!(!tree.exists());
     let item = &rig.read("state/items.json")[0];
     assert!(item["resource_closed_ms"].is_u64(), "{item}");
+    assert!(item["recovery"]["id"].is_string(), "{item}");
+    assert_ne!(item["native_done"], true);
     assert_eq!(
         item["resource_close_reason"],
         "resource-only close; task unresolved"

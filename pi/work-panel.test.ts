@@ -12,7 +12,7 @@ function data(): WorkData {
 		{ id: "agent", host: "netcup", pane: "w2:p1", name: "reviewer", kind: "agent", what: "pi", group: "attention", state: "blocked", age_ms: 0, activity: "needs input" },
 		{ id: "job", host: "local", name: "tests", kind: "job", what: "job", group: "running", state: "running", age_ms: 0, activity: "tests" },
 		{ id: "ticket", host: "any", name: "queued", kind: "job", what: "job", group: "waiting", state: "queued", age_ms: 0, activity: "waiting" },
-	] }, todo: { version: 3, presenter: "p", request: "r", publisher: "t", revision: 1, session: "s", branch: null, display: todoDisplay() }, error: undefined, history: { jobs: [{ id: "done", host: "local", owner: "w1:p1", cmd: ["test"], state: "exited", ended_ms: 1, exit: 0 }] } };
+	] }, todo: { revision: 1, session: "s", branch: null, display: todoDisplay() }, error: undefined, history: { jobs: [{ id: "done", host: "local", owner: "w1:p1", cmd: ["test"], state: "exited", ended_ms: 1, exit: 0 }] } };
 }
 
 test("history joins both recorded host and job id and rejects unrelated owners", async () => {

@@ -59,6 +59,8 @@ pub struct Item {
     /// Retained branch on the child's host, observed without a live pane or checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<crate::done::Branch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::preservation::Recovery>,
 }
 
 /// The owner-side projection of a child-host turn signal.
@@ -224,6 +226,64 @@ pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// Persist the saved resource reference before setting any item closure timestamp.
+pub fn saved_close(ledger: &Ledger, host: &str, closed: &crate::close::Closed) -> Result<()> {
+    change(ledger, |items| {
+        for item in items.iter_mut().filter(|item| {
+            item.host == host
+                && item.pane == closed.pane
+                && closed
+                    .recovery
+                    .as_ref()
+                    .and_then(|recovery| recovery.item.as_ref())
+                    .map_or(item.closed_ms.is_none(), |id| item.id == *id)
+        }) {
+            if let Some(recovery) = &closed.recovery {
+                item.recovery = Some(recovery.clone());
+            }
+            item.resource_close_reason = None;
+            if let Some(branch) = &closed.retained_branch {
+                item.branch = Some(branch.clone());
+            }
+        }
+    })
+}
+
+pub fn close_blocker(ledger: &Ledger, id: &str, reason: &str) -> Result<()> {
+    change(ledger, |items| {
+        if let Some(item) = items
+            .iter_mut()
+            .find(|item| item.id == id && item.closed_ms.is_none())
+        {
+            item.resource_close_reason = Some(reason.into());
+        }
+    })
+}
+
+/// A replayed preservation result closes only its captured item, never a replacement.
+pub fn close_result(
+    ledger: &Ledger,
+    host: &str,
+    closed: &crate::close::Closed,
+    now: u64,
+) -> Result<()> {
+    saved_close(ledger, host, closed)?;
+    if let Some(recovery) = &closed.recovery {
+        change(ledger, |items| {
+            for item in items.iter_mut().filter(|item| {
+                item.host == host
+                    && item.pane == closed.pane
+                    && recovery.item.as_deref() == Some(item.id.as_str())
+            }) {
+                item.closed_ms.get_or_insert(now);
+                item.signal = None;
+            }
+        })
+    } else {
+        close(ledger, host, &closed.pane, now).map(|_| ())
+    }
 }
 
 /// End every open item on `host`'s `pane`, after `dogsled close` removed it.
