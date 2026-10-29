@@ -1318,7 +1318,7 @@ impl PlacementProgress {
     pub(crate) fn expectation(
         &self,
         request: &Request,
-    ) -> Result<Option<crate::node::PlacementReservation>> {
+    ) -> Result<Option<crate::node::PlacementReplay>> {
         if self.version != crate::node::PLACEMENT_VERSION {
             return Err(crate::unit_transport::conflict(
                 "unsupported placement progress version",
@@ -1326,20 +1326,19 @@ impl PlacementProgress {
         }
         let pending = match &self.phase {
             PlacementPhase::Recorded => None,
-            PlacementPhase::SelectionPending { envelope } => Some(envelope.clone()),
-            PlacementPhase::HostSelected { grant } => {
-                crate::node::PlacementReply {
-                    envelope: grant.envelope.clone(),
-                    grant: Some(grant.clone()),
-                }
-                .validate(&grant.envelope, true)?;
-                Some(grant.envelope.clone())
-            }
+            PlacementPhase::SelectionPending { envelope } => Some(crate::node::PlacementReplay {
+                envelope: envelope.clone(),
+                expected_grant: None,
+            }),
+            PlacementPhase::HostSelected { grant } => Some(crate::node::PlacementReplay {
+                envelope: grant.envelope.clone(),
+                expected_grant: Some(grant.clone()),
+            }),
         };
         let expected = serde_json::to_value(request)?;
-        if let Some(envelope) = &pending {
-            envelope.validate(&request.id)?;
-            if envelope.request != expected {
+        if let Some(transport) = &pending {
+            transport.validate(&request.id)?;
+            if transport.envelope.request != expected {
                 return Err(crate::unit_transport::conflict(
                     "placement expectation changed",
                 ));
@@ -1482,7 +1481,7 @@ fn perform_placement(fleet: &Fleet, request: &Request, now: u64) -> Result<Optio
     let attempts = fleet.ledger.child("admissions");
     let file = format!("{}.json", request.id);
     let expected = serde_json::to_value(request)?;
-    if let Some(attempt) = attempts.read::<Attempt>(&file)? {
+    let mut attempt = if let Some(attempt) = attempts.read::<Attempt>(&file)? {
         if attempt.request != expected
             || attempt
                 .placement
@@ -1493,33 +1492,79 @@ fn perform_placement(fleet: &Fleet, request: &Request, now: u64) -> Result<Optio
                 "placement admission identity or version changed",
             ));
         }
+        attempt
     } else {
-        attempts.write(
-            &file,
-            &Attempt {
-                request: expected,
-                placement: Some(PlacementProgress {
-                    version: crate::node::PLACEMENT_VERSION,
-                    phase: PlacementPhase::Recorded,
-                    declined: Vec::new(),
-                }),
-                host: None,
-                launch: None,
-                error: None,
-                diagnostic: None,
-                unit: None,
-                result: None,
-            },
-        )?;
-    }
-    let Placement::Placed {
-        host, reservation, ..
-    } = placement(fleet, request, request.host.as_deref(), now)?
-    else {
-        return Ok(None);
+        let attempt = Attempt {
+            request: expected,
+            placement: Some(PlacementProgress {
+                version: crate::node::PLACEMENT_VERSION,
+                phase: PlacementPhase::Recorded,
+                declined: Vec::new(),
+            }),
+            host: None,
+            launch: None,
+            error: None,
+            diagnostic: None,
+            unit: None,
+            result: None,
+        };
+        attempts.write(&file, &attempt)?;
+        attempt
     };
-    let launch = prepare_launch(fleet, request, &host)
-        .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
+    let (host, reservation, launch) = if let Some(launch) = attempt.launch.clone() {
+        let envelope = attempt
+            .placement
+            .as_ref()
+            .ok_or_else(|| crate::unit_transport::conflict("missing placement progress"))?
+            .expectation(request)?
+            .ok_or_else(|| crate::unit_transport::conflict("prepared placement has no grant"))?
+            .envelope;
+        if !matches!(
+            attempt.placement.as_ref().map(|p| &p.phase),
+            Some(PlacementPhase::HostSelected { .. })
+        ) || attempt.host.as_ref() != Some(&envelope.host)
+            || *fleet.find(&envelope.host.id)? != envelope.host
+            || launch.id != request.id
+            || launch.host != envelope.host.id
+            || launch.action != request.action
+            || request.branch.is_some() != launch.preparation.is_some()
+            || launch.preparation.as_ref().is_some_and(|binding| {
+                launch.preparation_protocol != Some(crate::prepare::disposition::VERSION)
+                    || binding.request_id != request.id
+                    || Some(&binding.request.1) != request.branch.as_ref()
+                    || binding.request.2 != request.base
+                    || binding.prepared.as_ref().is_none_or(|prepared| {
+                        prepared.path.as_deref() != Some(launch.cwd.as_str())
+                            || prepared.pane_id != launch.pane
+                    })
+            })
+        {
+            return Err(crate::unit_transport::conflict(
+                "prepared placement identity changed",
+            ));
+        }
+        // Preparation already returned its immutable binding. Replay C3 disposition
+        // directly: its fence must not be bypassed by reserving or preparing again.
+        (envelope.host, envelope.reservation, launch)
+    } else {
+        let Placement::Placed {
+            host, reservation, ..
+        } = placement(fleet, request, request.host.as_deref(), now)?
+        else {
+            return Ok(None);
+        };
+        crate::unit_request::crash_point("placement-host-selected");
+        let launch = prepare_launch(fleet, request, &host)
+            .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
+        crate::unit_request::crash_point("placement-preparation-received");
+        // Selection wrote the authoritative grant. Retain that capture unchanged.
+        attempt = attempts
+            .read::<Attempt>(&file)?
+            .ok_or_else(|| crate::unit_transport::conflict("placement admission disappeared"))?;
+        attempt.launch = Some(launch.clone());
+        attempts.write(&file, &attempt)?;
+        (host, reservation, launch)
+    };
     if let Some(binding) = &launch.preparation {
         crate::prepare::dispose(
             fleet,
@@ -1877,7 +1922,9 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                         p.version == crate::node::PLACEMENT_VERSION
                             && matches!(
                                 p.phase,
-                                PlacementPhase::Recorded | PlacementPhase::SelectionPending { .. }
+                                PlacementPhase::Recorded
+                                    | PlacementPhase::SelectionPending { .. }
+                                    | PlacementPhase::HostSelected { .. }
                             )
                     })
                 }))

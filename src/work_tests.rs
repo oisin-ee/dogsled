@@ -581,7 +581,7 @@ fn placement_admission_never_downgrades_missing_or_newer_progress() {
     let admissions = ledger.child("admissions");
     for progress in [
         json!(null),
-        json!({"version":2,"phase":"recorded","declined":[]}),
+        json!({"version":3,"phase":"recorded","declined":[]}),
     ] {
         let record =
             json!({"request":request,"host":null,"launch":null,"error":null,"placement":progress});

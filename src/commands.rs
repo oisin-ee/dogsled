@@ -99,13 +99,13 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
             "historical selection has no placement replay evidence",
         ));
     }
-    let progress = attempt
+    let mut pending = attempt
         .placement
         .as_ref()
-        .ok_or_else(|| crate::unit_transport::conflict("placement progress is missing"))?;
-    let mut pending = progress.expectation(request)?;
-    if let Some(envelope) = &pending
-        && *fleet.find(&envelope.host.id)? != envelope.host
+        .ok_or_else(|| crate::unit_transport::conflict("placement progress is missing"))?
+        .expectation(request)?;
+    if let Some(transport) = &pending
+        && *fleet.find(&transport.envelope.host.id)? != transport.envelope.host
     {
         return Err(crate::unit_transport::conflict(
             "selected placement host or target changed",
@@ -119,8 +119,8 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
         .filter_map(|r| r.headroom.clone())
         .collect();
     loop {
-        let envelope = if let Some(envelope) = pending.take() {
-            envelope
+        let transport = if let Some(transport) = pending.take() {
+            transport
         } else {
             let Some(selected) = plan::choose(&candidates) else {
                 break;
@@ -139,9 +139,13 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
                 envelope: envelope.clone(),
             };
             attempts.write(&file, &attempt)?;
-            envelope
+            crate::node::PlacementReplay {
+                envelope,
+                expected_grant: None,
+            }
         };
-        let outcome = fleet.reserve(&envelope.host, &request.id, now, None, Some(&envelope))?;
+        let envelope = &transport.envelope;
+        let outcome = fleet.reserve(&envelope.host, &request.id, now, None, Some(&transport))?;
         let reply = outcome.placement.ok_or_else(|| {
             crate::unit_transport::conflict(
                 "peer lacks placement replay evidence; no preparation authorized",
@@ -151,20 +155,13 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
             .placement
             .as_mut()
             .ok_or_else(|| crate::unit_transport::conflict("missing placement progress"))?;
-        if let PlacementPhase::HostSelected { grant } = &progress.phase
-            && reply.grant.as_ref() != Some(grant)
-        {
-            return Err(crate::unit_transport::conflict(
-                "original placement grant changed",
-            ));
-        }
         if let Some(grant) = reply.grant {
             progress.phase = PlacementPhase::HostSelected { grant };
             attempt.host = Some(envelope.host.clone());
             attempts.write(&file, &attempt)?;
             return Ok(Placement::Placed {
-                host: envelope.host,
-                reservation: envelope.reservation,
+                host: envelope.host.clone(),
+                reservation: envelope.reservation.clone(),
                 prepared: Prepared::default(),
             });
         }

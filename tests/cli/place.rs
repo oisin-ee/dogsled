@@ -30,7 +30,7 @@ esac
 }
 
 fn placement_envelope(rig: &Rig, id: &str) -> Value {
-    json!({"version":1,"reservation":id,"host":{"id":"local","label":"local"},
+    json!({"version":2,"expected_grant":null,"reservation":id,"host":{"id":"local","label":"local"},
         "request":{"id":id,"action":{"type":"place"},"host":null,"branch":null,"base":null,
             "cwd":rig.dir.join("home"),"repository":null,"workspace":null,"workspace_name":null,
             "owner":"w1:p1","owner_host":null}})
@@ -214,6 +214,124 @@ fn acknowledged_placement_grant_replays_after_real_ttl_without_readmission() {
 }
 
 #[test]
+fn acknowledged_placement_missing_grant_never_allocates_after_ttl() {
+    let (rig, id) = acknowledged_remote_placement("placement-missing-grant");
+    let grant_path = format!("peer-state/placement-grants/{id}.json");
+    let grant = rig.read(&grant_path);
+    let later = grant["reservation"]["created_ms"].as_u64().unwrap() + 100_000;
+    fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
+    rig.snapshot("peer-state/host.json", later, 0.0, 16);
+    rig.put("peer-state/placements.json", &json!([]));
+    fs::remove_file(rig.dir.join(&grant_path)).unwrap();
+    let before = rig.read("peer-state/placements.json");
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    let ticket = rig.read("state/queue.json")[0].clone();
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    let refusal = rig.read("reserve-response");
+    assert!(
+        refusal
+            .to_string()
+            .contains("placement grant missing; no new capacity"),
+        "{refusal}"
+    );
+    assert!(!rig.dir.join(&grant_path).exists());
+    assert_eq!(rig.read("peer-state/placements.json"), before);
+    assert_eq!(
+        rig.read(&format!("state/admissions/{id}.json"))["placement"]["grant"],
+        grant
+    );
+    let log = rig.log("ssh.log");
+    assert_eq!(log.matches("host checkout").count(), 1, "{log}");
+    assert!(!log.contains("host prepare "), "{log}");
+}
+
+#[test]
+fn queued_host_selected_recovers_the_acknowledged_grant() {
+    let (rig, id) = acknowledged_remote_placement("placement-selected-recovery");
+    let grant = rig.read(&format!("peer-state/placement-grants/{id}.json"));
+    let mut queue = rig.read("state/queue.json");
+    queue[0]["state"] = json!("admitting");
+    let next = queue[0]["retry"]["next_ms"].as_u64().unwrap();
+    rig.put("state/queue.json", &queue);
+    fs::write(rig.dir.join("clock"), (next - 1).to_string()).unwrap();
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    let ticket = rig.read("state/queue.json")[0].clone();
+    assert_eq!(ticket["state"], "admitted", "{ticket}");
+    assert_eq!(
+        rig.read(&format!("state/admissions/{id}.json"))["placement"]["grant"],
+        grant
+    );
+    assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
+}
+
+#[test]
+fn queued_placement_recovers_after_preparation_receipt_without_preparing_again() {
+    for boundary in [
+        "placement-host-selected",
+        "placement-preparation-received",
+        "preparation-fenced",
+        "preparation-claim-released",
+    ] {
+        let (rig, repo) = place_rig(boundary);
+        let request = json!({"id":"queued-placement", "action":{"type":"place"}, "host":"local",
+        "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1",
+        "repository":{"path":repo,"working_root":repo,"relative":"repo space",
+            "origin":"https://example.invalid/repo.git"}});
+        rig.put(
+            "state/queue.json",
+            &json!([{"id":"placement-ticket", "request":request,
+        "created_ms":rig.origin_ms, "state":"pending", "waiting":false, "notified":false,
+        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]),
+        );
+        rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+        let out = rig
+            .cmd(&["serve", "--once"])
+            .env("DOGSLED_TEST_UNIT_CRASH", boundary)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(86), "{out:?}");
+        assert_eq!(rig.read("state/queue.json")[0]["state"], "admitting");
+        let receipt = if boundary == "placement-host-selected" {
+            assert!(
+                !rig.dir
+                    .join("state/preparation-receipts/queued-placement.json")
+                    .exists()
+            );
+            assert!(!rig.dir.join("setup.log").exists());
+            None
+        } else {
+            let receipt = rig.read("state/preparation-receipts/queued-placement.json");
+            assert!(!receipt["prepared"].is_null());
+            assert_eq!(rig.log("setup.log").lines().count(), 1);
+            Some(receipt)
+        };
+        let grant = rig.read("state/placement-grants/queued-placement.json");
+        assert!(rig.run(&["serve", "--once"]).status.success());
+        let ticket = rig.read("state/queue.json")[0].clone();
+        assert_eq!(ticket["state"], "admitted", "{ticket}");
+        if let Some(receipt) = receipt {
+            assert_eq!(
+                rig.read("state/preparation-receipts/queued-placement.json"),
+                receipt
+            );
+        }
+        assert_eq!(
+            rig.read("state/placement-grants/queued-placement.json"),
+            grant
+        );
+        assert_eq!(
+            rig.read("state/preparation-receipts/queued-placement.disposition.json")["progress"],
+            "released"
+        );
+        assert_eq!(rig.log("setup.log").lines().count(), 1);
+        assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
+    }
+}
+
+#[test]
 fn acknowledged_placement_rejects_mutated_grant_or_hold_identity() {
     for changed in ["grant", "hold", "both"] {
         let (rig, id) = acknowledged_remote_placement(changed);
@@ -239,11 +357,7 @@ fn acknowledged_placement_rejects_mutated_grant_or_hold_identity() {
         assert_eq!(ticket["state"], "failed", "{changed}: {ticket}");
         assert_eq!(rig.read(&admission_path), admission);
         assert_eq!(rig.read(&grant_path), grant);
-        if changed == "both" {
-            assert_eq!(rig.read("peer-state/placements.json"), json!([]));
-        } else {
-            assert_eq!(rig.read("peer-state/placements.json"), holds);
-        }
+        assert_eq!(rig.read("peer-state/placements.json"), holds);
         let log = rig.log("ssh.log");
         assert_eq!(log.matches("host checkout").count(), 1, "{log}");
         assert!(!log.contains("host prepare "), "{log}");
@@ -342,7 +456,7 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
         match change {
             "request" => changed["request"]["cwd"] = json!("/different"),
             "target" => changed["host"]["target"] = json!("other-target"),
-            "version" => changed["version"] = json!(2),
+            "version" => changed["version"] = json!(3),
             "missing" => {
                 changed.as_object_mut().unwrap().remove("request");
             }

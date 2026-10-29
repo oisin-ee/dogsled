@@ -622,7 +622,7 @@ fn print_host_reservation(
     validity: Option<jobs::Validity>,
 ) -> Result<ExitCode> {
     let out = if let Some(input) = input {
-        let envelope: node::PlacementReservation = serde_json::from_str(input)?;
+        let envelope: node::PlacementReplay = serde_json::from_str(input)?;
         envelope.validate(id)?;
         node.reserve_placement(&envelope, now_ms())?
     } else {

@@ -692,11 +692,11 @@ with open(sys.argv[2]) as f:
     reply = json.load(f)
 grant = None
 if reply['reserved']:
-    grant = {'version': 1, 'envelope': request,
+    grant = {'version': 2, 'envelope': {k: v for k, v in request.items() if k != 'expected_grant'},
              'reservation': {'id': request['reservation'], 'created_ms': 1},
              'headroom': {'host': request['host']['id'], 'headroom': 1.0, 'eligible': True,
                           'live_agents': 0, 'reasons': []}, 'materialized': True}
-reply['placement'] = {'envelope': request, 'grant': grant}
+reply['placement'] = {'envelope': {k: v for k, v in request.items() if k != 'expected_grant'}, 'grant': grant}
 print(json.dumps(reply))
 PY
     ;;
@@ -892,7 +892,7 @@ esac
         // Busy fraction that reproduces the old load rule's verdict for this load. The zero
         // tick counters let a Linux `serve --once` derive a busy sample from one real reading.
         let busy = (load / (1.5 * f64::from(cores))).min(1.0);
-        self.put(path, &json!({"placement_replay":1,"sampled_ms":sampled,"probe":{
+        self.put(path, &json!({"placement_replay":2,"sampled_ms":sampled,"probe":{
             "host":"local","label":"local","load1":load,"cores":cores,"busy":busy,
             "cpu_ticks":{"busy":0,"total":0},
             "memory":{"used_bytes":1_073_741_824_u64,"total_bytes":8_589_934_592_u64},

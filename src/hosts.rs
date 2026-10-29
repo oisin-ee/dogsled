@@ -530,11 +530,11 @@ impl<'a> Fleet<'a> {
         id: &str,
         now: u64,
         validity: Option<crate::jobs::Validity>,
-        placement: Option<&crate::node::PlacementReservation>,
+        placement: Option<&crate::node::PlacementReplay>,
     ) -> Result<ReserveOutcome> {
-        if let Some(envelope) = placement {
-            envelope.validate(id)?;
-            if envelope.host != *host || validity.is_some() {
+        if let Some(replay) = placement {
+            replay.validate(id)?;
+            if replay.envelope.host != *host || validity.is_some() {
                 return Err(crate::unit_transport::conflict(
                     "placement reservation target changed",
                 ));
@@ -591,16 +591,20 @@ impl<'a> Fleet<'a> {
             ]);
         }
         let outcome: ReserveOutcome = self.remote(host, &args)?;
-        if let Some(envelope) = placement {
-            outcome
-                .placement
-                .as_ref()
-                .ok_or_else(|| {
-                    crate::unit_transport::conflict(
-                        "peer lacks placement replay evidence; no preparation authorized",
-                    )
-                })?
-                .validate(envelope, outcome.reserved)?;
+        if let Some(transport) = placement {
+            let reply = outcome.placement.as_ref().ok_or_else(|| {
+                crate::unit_transport::conflict(
+                    "peer lacks placement replay evidence; no preparation authorized",
+                )
+            })?;
+            reply.validate(&transport.envelope, outcome.reserved)?;
+            if let Some(expected) = &transport.expected_grant
+                && reply.grant.as_ref() != Some(expected)
+            {
+                return Err(crate::unit_transport::conflict(
+                    "original placement grant changed",
+                ));
+            }
         }
         Ok(outcome)
     }

@@ -70,7 +70,29 @@ pub struct ReserveOutcome {
     pub placement: Option<PlacementReply>,
 }
 
-pub const PLACEMENT_VERSION: u32 = 1;
+pub const PLACEMENT_VERSION: u32 = 2;
+
+/// Acknowledged replay carries the origin's immutable grant, not a fresh capacity request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlacementReplay {
+    #[serde(flatten)]
+    pub envelope: PlacementReservation,
+    pub expected_grant: Option<PlacementGrant>,
+}
+
+impl PlacementReplay {
+    pub fn validate(&self, id: &str) -> Result<()> {
+        self.envelope.validate(id)?;
+        if let Some(grant) = &self.expected_grant {
+            PlacementReply {
+                envelope: self.envelope.clone(),
+                grant: Some(grant.clone()),
+            }
+            .validate(&self.envelope, true)?;
+        }
+        Ok(())
+    }
+}
 
 /// One complete origin expectation. Neither transport nor recovery may reconstruct it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,12 +243,9 @@ impl Node<'_> {
 
     /// Preparation fencing precedes the short capacity transaction. No lifecycle work
     /// runs while capacity is locked, and a retired request cannot repair a delayed grant.
-    pub fn reserve_placement(
-        &self,
-        envelope: &PlacementReservation,
-        now: u64,
-    ) -> Result<ReserveOutcome> {
-        envelope.validate(&envelope.reservation)?;
+    pub fn reserve_placement(&self, replay: &PlacementReplay, now: u64) -> Result<ReserveOutcome> {
+        let envelope = &replay.envelope;
+        replay.validate(&envelope.reservation)?;
         crate::work::launch_test_barrier("PLACEMENT_BEFORE_GATE")?;
         self.ledger
             .child("preparation-receipts")
@@ -234,19 +253,27 @@ impl Node<'_> {
                 crate::prepare::disposition::allow_preparation(self.ledger, &envelope.reservation)?;
                 crate::work::launch_test_barrier("PLACEMENT_ENTERED_GATE")?;
                 self.ledger
-                    .with_lock("host", || self.placement_locked(envelope, now))
+                    .with_lock("host", || self.placement_locked(replay, now))
             })
     }
 
-    fn placement_locked(
-        &self,
-        envelope: &PlacementReservation,
-        now: u64,
-    ) -> Result<ReserveOutcome> {
+    fn placement_locked(&self, replay: &PlacementReplay, now: u64) -> Result<ReserveOutcome> {
+        let envelope = &replay.envelope;
         let grants = self.ledger.child("placement-grants");
         let file = format!("{}.json", envelope.reservation);
+        let saved = grants.read::<PlacementGrant>(&file)?;
+        if let Some(expected) = &replay.expected_grant {
+            let grant = saved.as_ref().ok_or_else(|| {
+                crate::unit_transport::conflict("placement grant missing; no new capacity")
+            })?;
+            if grant != expected {
+                return Err(crate::unit_transport::conflict(
+                    "placement grant identity changed",
+                ));
+            }
+        }
         let raw: Vec<Reservation> = self.ledger.read("placements.json")?.unwrap_or_default();
-        let mut grant = if let Some(grant) = grants.read::<PlacementGrant>(&file)? {
+        let mut grant = if let Some(grant) = saved {
             if grant.version != PLACEMENT_VERSION
                 || grant.envelope != *envelope
                 || grant.reservation.id != envelope.reservation
