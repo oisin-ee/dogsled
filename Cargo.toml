@@ -124,7 +124,7 @@ wildcard_enum_match_arm = "deny"
 
 [package]
 name = "dogsled"
-version = "0.28.0"
+version = "0.28.1"
 edition = "2024"
 rust-version = "1.99"
 description = "Host status and placement for coding agents across Herdr hosts"
