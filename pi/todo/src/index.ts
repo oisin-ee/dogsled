@@ -1,7 +1,9 @@
+import type { ApprovedPlan, PlanContext } from "./plan-approved.ts";
 import { ownsTodo, settle } from "./lifecycle.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { PlanApprovedHandoff } from "./plan-approved.ts";
 import { TaskProvider } from "./provider.ts";
+import type { TaskProviderV1 } from "./provider.ts";
 import { TodoPresentation } from "./presentation.ts";
 import { TodoWork } from "./work.ts";
 import type { WorkHost } from "./work.ts";
@@ -10,8 +12,7 @@ import { parameters } from "./schema.ts";
 import { registerGate } from "./gate.ts";
 import { workUnitGuidance } from "./guidance.ts";
 
-type TodoAPI = WorkHost &
-  Readonly<
+type TodoAPI = WorkHost & { readonly events: Readonly<ExtensionAPI["events"]> } & Readonly<
     Pick<
       ExtensionAPI,
       | "appendEntry"
@@ -25,16 +26,27 @@ type TodoAPI = WorkHost &
     >
   >;
 
+interface TodoParts {
+  readonly tasks: () => TaskProviderV1 | undefined;
+  readonly approve: (plan: ApprovedPlan, ctx: PlanContext) => void;
+  readonly work: TodoWork;
+}
+
 /**
- * Registers the branch-backed `todo` tool and its completion reminder.
+ * Registers the branch-backed todo tool and exposes its in-process capabilities.
  * @param {TodoAPI} pi The extension API methods used here.
+ * @param {object} options Executor-owned startup transport.
+ * @returns {TodoParts} Direct task and presentation capabilities.
  */
-export default function piTodo(pi: TodoAPI): void {
+const createTodo = (
+  pi: TodoAPI,
+  options: { readonly seedPath?: () => string | undefined } = {},
+): TodoParts => {
   const handoff = new PlanApprovedHandoff(pi),
     presentation = new TodoPresentation(),
     work = new TodoWork(pi, presentation),
     provider = new TaskProvider(pi),
-    workerImport = new WorkerImport(pi, provider);
+    workerImport = new WorkerImport(pi, provider, options.seedPath);
   work.register(pi);
   provider.register();
   registerGate(pi, provider);
@@ -56,11 +68,9 @@ export default function piTodo(pi: TodoAPI): void {
     await workerImport.start(event, ctx);
     presentation.start(pi, ctx);
     work.start(ctx);
-    handoff.start(ctx);
   });
   pi.on("session_shutdown", () => {
     provider.stop();
-    handoff.stop();
     work.stop();
   });
   pi.on("session_tree", (_event, ctx) => {
@@ -71,4 +81,20 @@ export default function piTodo(pi: TodoAPI): void {
     }
   });
   pi.on("agent_before_settle", (event, ctx) => settle(pi, event, ctx));
+  return {
+    approve: handoff.approve.bind(handoff),
+    tasks: (): TaskProviderV1 | undefined => (ownsTodo(pi) ? provider.capability() : undefined),
+    work,
+  };
+};
+
+/**
+ * Registers the standalone extension entry point.
+ * @param {TodoAPI} pi The extension API methods used here.
+ */
+export default function piTodo(pi: TodoAPI): void {
+  createTodo(pi);
 }
+
+export { createTodo };
+export type { TodoParts };

@@ -216,7 +216,8 @@ The bridge requires Pi SDK and TUI 1.3.0-compatible peers and Node 22.19.0 or ne
 Real-runtime tests on the former Pi 1.0.4 dependency showed that aborting in `before_agent_start` did not prevent the initial model request.
 The bridge does not patch that runtime or weaken the guard assertion.
 
-The existing spawn hook acquires `oisin.tasks.acquire.v1`, inspects the unit, validates checkout identity, and prepares before claiming. The MCP handler alone commits.
+The spawn hook calls the direct task-provider handle, inspects the unit, validates checkout identity, and prepares before claiming. The MCP handler alone commits.
+Only separate extensions, such as pi-prewalk, use `oisin.tasks.acquire.v1`.
 The checkout origin uses canonical lowercase host and case-preserved repository path, without `.git`. SSH and HTTPS clones identify the same repository.
 The bridge supplies the current session cwd to preparation. It does not repeat the brief, profile, or acceptance requirement.
 A pasted `preparedUnit` cannot bypass preparation: the exact envelope must belong to the current runtime invocation.
@@ -230,9 +231,9 @@ Recovery uses the existing refresh lifecycle and also runs before the first task
 Commit and abandonment retain their request lock: a concurrent committed request cannot be abandoned. Unknown outcomes remain pending.
 
 Dogsled alone registers `--todo-unit-file`, including when pi-todo is missing. Pi scopes `getFlag()` to its registering extension and rejects duplicate flag registration.
-During extension loading, Dogsled registers `oisin.tasks.seed-source.v1`. Pi-todo queries it synchronously at startup with `{version:1,reply}`.
-The response is `{version:1,path}`, where a null path means no managed launch. Pi-todo rejects malformed or ambiguous responses and owns file parsing and import validation.
-All extension factories finish before startup handlers run, so the query works in either extension order. The capability transports no task mutation or dispatch operation.
+Dogsled passes a function that reads its flag to `createTodo`. Pi-todo calls this function at startup.
+An undefined path means no managed launch. Pi-todo rejects empty or invalid paths and owns file parsing and import validation.
+The function transports no task mutation or dispatch operation.
 The loaded worker guard validates the import even if pi-todo is missing. It validates `imported()` synchronously in `before_agent_start` and calls `ctx.abort()` on failure.
 Fresh receipts must match the launch execution, origin, digest, and current request/session ID. On resume or reload, pi-todo’s recorded receipt owns progress.
 A recorded import does not require the original seed artifact or launch flag. Sealed workers cannot begin another model task.

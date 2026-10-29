@@ -30,10 +30,12 @@ pub struct Closed {
     /// Retained stopped-orphan work, measured before the checkout is removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_branch: Option<crate::done::Branch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::preservation::Recovery>,
 }
 
 /// The caller's own pane, workspace, and directory. Over SSH all are empty.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Caller {
     pub pane: Option<String>,
     pub workspace: Option<String>,
@@ -68,6 +70,18 @@ pub enum Guard<'a> {
 }
 
 impl Guard<'_> {
+    fn preservation(self) -> Option<crate::preservation::CloseMode> {
+        match self {
+            Self::Clean => Some(crate::preservation::CloseMode::Owner),
+            Self::StoppedOrphan { episode } => {
+                Some(crate::preservation::CloseMode::StoppedOrphan {
+                    episode: episode.clone(),
+                })
+            }
+            Self::Pushed | Self::Reader | Self::Writer => None,
+        }
+    }
+
     /// The flags of `host close` for this guard.
     pub fn flags(self) -> &'static [&'static str] {
         match self {
@@ -151,24 +165,6 @@ impl StoppedOrphan {
     }
 }
 
-/// Close stopped orphan resources without creating a native handoff or a unit result.
-pub fn stopped_orphan(
-    shell: &dyn crate::shell::Shell,
-    ledger: &Ledger,
-    pane: &str,
-    caller: &Caller,
-    stopped: &StoppedOrphan,
-) -> Result<Closed> {
-    with_local(
-        shell,
-        ledger,
-        pane,
-        caller,
-        Guard::StoppedOrphan { episode: stopped },
-        Ok,
-    )
-}
-
 /// Every refusal happens before anything changes. A child tab in the caller's workspace is
 /// closed; the caller's own pane, and a worktree the caller works in or shows, are refused.
 /// Only an agent worktree (locked `agent:worktree`) is removed; a child in any other checkout
@@ -193,9 +189,105 @@ pub fn with_local<T>(
     mode: Guard,
     reconcile: impl FnOnce(Closed) -> Result<T>,
 ) -> Result<T> {
+    with_request(
+        shell,
+        ledger,
+        pane,
+        caller,
+        Options {
+            guard: mode,
+            request: None,
+        },
+        reconcile,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Options<'a> {
+    pub guard: Guard<'a>,
+    pub request: Option<&'a crate::preservation::CloseRequest>,
+}
+
+#[derive(Clone, Copy)]
+struct CloseContext<'a> {
+    mode: Guard<'a>,
+    request: Option<&'a crate::preservation::CloseRequest>,
+    existing: Option<&'a crate::preservation::Operation>,
+    terminal: Option<&'a str>,
+    directory: Option<&'a worktree::Pin>,
+}
+
+/// A stable origin item identity makes host result replay independent of the old path.
+pub fn with_request<T>(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &Caller,
+    options: Options<'_>,
+    reconcile: impl FnOnce(Closed) -> Result<T>,
+) -> Result<T> {
+    let Options {
+        guard: mode,
+        request,
+    } = options;
     if caller.pane.as_deref() == Some(pane) {
         return Err(refuse("cannot close the caller pane"));
     }
+    let existing = if let Some(mode) = mode.preservation() {
+        let existing = crate::preservation::operation(ledger, pane, request)?;
+        if let Some(operation) = &existing {
+            if operation.expectation.mode != mode {
+                return Err(operation.refusal("close mode or stopped episode changed"));
+            }
+            if matches!(
+                operation.stage,
+                crate::preservation::Stage::Removed | crate::preservation::Stage::Finished
+            ) {
+                validate_replay(shell, ledger, operation)?;
+                let closed = operation
+                    .result
+                    .clone()
+                    .ok_or_else(|| operation.refusal("removed checkout has no saved result"))?;
+                let repo = &operation.expectation.tree.repo;
+                return worktree::with_lifecycle(shell, ledger, Path::new(repo), |_| {
+                    let mut operation = crate::preservation::operation(ledger, pane, request)?
+                        .ok_or_else(|| refuse("preservation operation disappeared"))?;
+                    validate_replay(shell, ledger, &operation)?;
+                    operation.finish(ledger, &closed)?;
+                    reconcile(closed)
+                });
+            }
+        }
+        existing
+    } else {
+        None
+    };
+    with_expected(
+        shell,
+        ledger,
+        pane,
+        caller,
+        options,
+        existing.as_ref(),
+        reconcile,
+    )
+}
+
+struct CapturedClose {
+    panes: Vec<crate::probe::Pane>,
+    terminals: std::collections::BTreeMap<String, String>,
+    owners: Vec<crate::items::Item>,
+    saved: Option<crate::cleanup::Tree>,
+    observation: Option<worktree::CloseObservation>,
+    planned: Option<crate::cleanup::Tree>,
+}
+
+fn capture_expected(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    existing: Option<&crate::preservation::Operation>,
+) -> Result<CapturedClose> {
     let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
     let owners = local_owners(ledger, pane)?;
     let target = panes.iter().find(|p| p.pane_id == pane);
@@ -208,19 +300,86 @@ pub fn with_local<T>(
     let observation = capture
         .map(|capture| capture.bind_saved(saved.as_ref()))
         .transpose()?;
+    let live = match &observation {
+        Some(worktree::CloseObservation::Live { tree, .. }) => Some(tree),
+        Some(worktree::CloseObservation::Missing) | None => None,
+    };
+    let planned = if let Some(operation) = existing {
+        if operation.expectation.terminal != terminals.get(pane).cloned()
+            || operation.expectation.owners
+                != owners
+                    .iter()
+                    .map(crate::preservation::CloseRequest::of)
+                    .collect::<Vec<_>>()
+        {
+            return Err(operation.refusal("pane terminal or item changed"));
+        }
+        Some(operation.expectation.tree.clone())
+    } else {
+        close_expectation(saved.as_ref(), live)
+    };
+    Ok(CapturedClose {
+        panes,
+        terminals,
+        owners,
+        saved,
+        observation,
+        planned,
+    })
+}
+
+fn with_expected<T>(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    caller: &Caller,
+    options: Options<'_>,
+    existing: Option<&crate::preservation::Operation>,
+    reconcile: impl FnOnce(Closed) -> Result<T>,
+) -> Result<T> {
+    let Options {
+        guard: mode,
+        request,
+    } = options;
+    let CapturedClose {
+        panes,
+        terminals,
+        owners,
+        saved,
+        observation,
+        planned,
+    } = capture_expected(shell, ledger, pane, existing)?;
     let (live, directory) = match &observation {
         Some(worktree::CloseObservation::Live { tree, pin }) => (Some(tree), pin.as_ref()),
         Some(worktree::CloseObservation::Missing) | None => (None, None),
     };
-    let planned = close_expectation(saved.as_ref(), live);
     let Some(planned) = planned else {
         let target = validate_target(shell, &panes, pane, caller)?;
         return reconcile(remove_target(
-            shell, ledger, target, &panes, caller, mode, None,
+            shell,
+            ledger,
+            target,
+            &panes,
+            caller,
+            None,
+            CloseContext {
+                mode,
+                request,
+                existing,
+                terminal: terminals.get(pane).map(String::as_str),
+                directory: None,
+            },
         )?);
     };
     let repo = planned.repo.clone();
     worktree::with_lifecycle(shell, ledger, Path::new(&repo), |lifecycle| {
+        if let Some(closed) = locked_replay(shell, ledger, pane, options)? {
+            return reconcile(closed);
+        }
+        let current_owners = local_owners(ledger, pane)?;
+        if owner_identities(&current_owners) != owner_identities(&owners) {
+            return Err(refuse("checkout item ownership changed"));
+        }
         if let (Some(saved), Some(live)) = (&saved, live)
             && !live.matches_checkout(saved)
         {
@@ -240,36 +399,18 @@ pub fn with_local<T>(
             establish_close_identity(lifecycle, shell, planned, live, directory, saved.is_none())?
         };
         if absent || worktree::verified_absent(lifecycle, shell, &planned) {
-            validate_absent_target(
+            return reconcile(close_absent(
                 shell,
                 ledger,
-                pane,
-                caller,
-                &planned,
-                terminals.get(pane).map(String::as_str),
-                &owners,
-            )?;
-            if saved.is_some() {
-                crate::launch::validate_checkout_owner(
-                    ledger,
+                AbsentClose {
                     pane,
-                    None,
-                    terminals.get(pane).map(String::as_str),
-                )?;
-            }
-            crate::cleanup::forget_matching(ledger, &planned)?;
-            return reconcile(Closed {
-                pane: pane.into(),
-                worktree: Some(Worktree {
-                    path: planned.path,
-                    branch: planned.branch,
-                    workspace: None,
-                    branch_deleted: false,
-                    anchor_closed: None,
-                }),
-                pane_closed: false,
-                retained_branch: None,
-            });
+                    caller,
+                    planned,
+                    terminal: terminals.get(pane).map(String::as_str),
+                    owners: &owners,
+                    saved: saved.is_some(),
+                },
+            )?);
         }
         // Every removal needs an observation and its original directory handles.
         let live = live.ok_or_else(|| refuse("checkout identity is unreadable"))?;
@@ -284,10 +425,145 @@ pub fn with_local<T>(
             target,
             &panes,
             caller,
-            mode,
             Some((lifecycle, &planned)),
+            CloseContext {
+                mode,
+                request,
+                existing,
+                terminal: terminals.get(pane).map(String::as_str),
+                directory: Some(directory),
+            },
         )?)
     })
+}
+
+fn owner_identities(owners: &[crate::items::Item]) -> Vec<crate::preservation::CloseRequest> {
+    owners
+        .iter()
+        .map(crate::preservation::CloseRequest::of)
+        .collect()
+}
+
+fn locked_replay(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    options: Options<'_>,
+) -> Result<Option<Closed>> {
+    let Some(mode) = options.guard.preservation() else {
+        return Ok(None);
+    };
+    let Some(mut operation) = crate::preservation::operation(ledger, pane, options.request)? else {
+        return Ok(None);
+    };
+    operation.check_retry(&mode)?;
+    if !matches!(
+        operation.stage,
+        crate::preservation::Stage::Removed | crate::preservation::Stage::Finished
+    ) {
+        return Ok(None);
+    }
+    validate_replay(shell, ledger, &operation)?;
+    let closed = operation
+        .result
+        .clone()
+        .ok_or_else(|| operation.refusal("missing saved close result"))?;
+    operation.finish(ledger, &closed)?;
+    Ok(Some(closed))
+}
+
+struct AbsentClose<'a> {
+    pane: &'a str,
+    caller: &'a Caller,
+    planned: crate::cleanup::Tree,
+    terminal: Option<&'a str>,
+    owners: &'a [crate::items::Item],
+    saved: bool,
+}
+
+fn close_absent(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    close: AbsentClose<'_>,
+) -> Result<Closed> {
+    let AbsentClose {
+        pane,
+        caller,
+        planned,
+        terminal,
+        owners,
+        saved,
+    } = close;
+    validate_absent_target(shell, ledger, pane, caller, &planned, terminal, owners)?;
+    if saved {
+        crate::launch::validate_checkout_owner(ledger, pane, None, terminal)?;
+    }
+    crate::cleanup::forget_matching(ledger, &planned)?;
+    Ok(Closed {
+        pane: pane.into(),
+        worktree: Some(Worktree {
+            path: planned.path,
+            branch: planned.branch,
+            workspace: None,
+            branch_deleted: false,
+            anchor_closed: None,
+        }),
+        pane_closed: false,
+        retained_branch: None,
+        recovery: None,
+    })
+}
+
+/// Recheck the original terminal, ownership, lifecycle, and all external holds before clearing content.
+pub(crate) fn validate_preservation(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    operation: &crate::preservation::Operation,
+    tree: &worktree::Linked,
+) -> Result<()> {
+    validate_replay(shell, ledger, operation)?;
+    let expected = &operation.expectation;
+    let (panes, _) = crate::cleanup::pane_snapshot(shell)?;
+    let target = validate_target(shell, &panes, &expected.pane, &expected.caller)?;
+    let mode = match &expected.mode {
+        crate::preservation::CloseMode::Owner => Guard::Clean,
+        crate::preservation::CloseMode::StoppedOrphan { episode } => {
+            Guard::StoppedOrphan { episode }
+        }
+    };
+    validate_completion(shell, ledger, target, mode)?;
+    let evidence = crate::loss::Evidence::default_only(&expected.tree.repo);
+    let loss = evidence.assess(shell, &tree.head, None)?;
+    crate::cleanup::close_holds(shell, ledger, tree, &expected.caller, mode, &loss)
+}
+
+fn validate_replay(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    operation: &crate::preservation::Operation,
+) -> Result<()> {
+    let expected = &operation.expectation;
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    if panes.iter().any(|p| p.pane_id == expected.pane)
+        && (expected.terminal.is_none()
+            || terminals.get(&expected.pane) != expected.terminal.as_ref())
+    {
+        return Err(operation.refusal("pane terminal changed; saved result only"));
+    }
+    if local_owners(ledger, &expected.pane)?.iter().any(|item| {
+        !expected
+            .owners
+            .contains(&crate::preservation::CloseRequest::of(item))
+    }) {
+        return Err(operation.refusal("item ownership changed; saved result only"));
+    }
+    let recovery = operation.recovery()?;
+    let saved = crate::preservation::show(shell, Path::new(&recovery.repository), &recovery.id)
+        .map_err(|e| operation.refusal(e))?;
+    if saved.commit != recovery.pinned_oid {
+        return Err(operation.refusal("pinned recovery changed"));
+    }
+    Ok(())
 }
 
 /// Add only an unmarked checkout's generation; never replace the request's HEAD.
@@ -445,6 +721,7 @@ fn pane_only(shell: &dyn crate::shell::Shell, pane: &str) -> Result<Closed> {
         worktree: None,
         pane_closed: true,
         retained_branch: None,
+        recovery: None,
     })
 }
 
@@ -454,9 +731,10 @@ fn remove_target(
     target: &crate::probe::Pane,
     panes: &[crate::probe::Pane],
     caller: &Caller,
-    guard: Guard,
     lifecycle: Option<(&worktree::Guard, &crate::cleanup::Tree)>,
+    context: CloseContext<'_>,
 ) -> Result<Closed> {
+    let guard = context.mode;
     let pane = target.pane_id.as_str();
     let validated = lifecycle
         .map(|(_, expected)| validate_checkout(shell, target, expected))
@@ -469,6 +747,7 @@ fn remove_target(
             worktree: None,
             pane_closed: true,
             retained_branch: None,
+            recovery: None,
         });
     }
     validate_completion(shell, ledger, target, guard)?;
@@ -501,10 +780,17 @@ fn remove_target(
     // Another agent, open item, or busy pane still uses the checkout. Even an explicit close
     // releases only its own pane: closing the others would close agents nobody asked to close.
     if shared(shell, ledger, pane, &holders)? {
+        if guard.preservation().is_some()
+            && !crate::loss::dirty_paths(shell, &tree.path, false)?.is_empty()
+        {
+            return Err(refuse(
+                "shared checkout ownership; preservation cannot release another holder",
+            ));
+        }
         return pane_only(shell, pane);
     }
     outside(&tree, caller)?;
-    let evidence = unsaved(shell, ledger, &tree, caller, guard)?;
+    let evidence = close_evidence(shell, ledger, &tree, caller, guard)?;
     let retained_branch = retained_branch(shell, &tree, guard)?;
     if let Some(lock) = lock
         && lock != AGENT_LOCK
@@ -533,21 +819,121 @@ fn remove_target(
     }
     // The target is a holder through its cwd, so removal closes it unless its workspace does.
     let pane_closed = workspace.is_none() || target.workspace_id != workspace;
-    let removed = worktree::remove(
-        shell,
-        ledger,
-        &tree,
-        worktree::Removal {
-            guard: lifecycle
-                .ok_or_else(|| refuse("repository protection missing"))?
-                .0,
-            workspace: workspace.as_deref(),
-            holders: &holders,
-            caller_workspace: caller.workspace.as_deref(),
-            evidence: &evidence,
-        },
-    )?;
-    Ok(Closed {
+    let plan = RemovalPlan {
+        tree,
+        workspace,
+        holders,
+        pane: pane.into(),
+        pane_closed,
+        retained_branch,
+        evidence,
+        lifecycle: lifecycle
+            .ok_or_else(|| refuse("repository protection missing"))?
+            .0,
+    };
+    execute_removal(shell, ledger, caller, context, plan)
+}
+
+fn close_evidence(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    tree: &worktree::Linked,
+    caller: &Caller,
+    guard: Guard<'_>,
+) -> Result<crate::loss::Evidence> {
+    if guard.preservation().is_none() {
+        return unsaved(shell, ledger, tree, caller, guard);
+    }
+    let evidence = if guard == Guard::Clean || tree.branch.is_empty() {
+        crate::loss::Evidence::fetch(shell, &tree.checkout.display().to_string())
+    } else {
+        crate::loss::Evidence::keeping_branch(&tree.checkout.display().to_string(), &tree.branch)
+    };
+    let loss = evidence.assess(shell, &tree.head, None)?;
+    crate::cleanup::close_holds(shell, ledger, tree, caller, guard, &loss)?;
+    Ok(evidence)
+}
+
+struct RemovalPlan<'a> {
+    tree: worktree::Linked,
+    workspace: Option<String>,
+    holders: Vec<&'a crate::probe::Pane>,
+    pane: String,
+    pane_closed: bool,
+    retained_branch: Option<crate::done::Branch>,
+    evidence: crate::loss::Evidence,
+    lifecycle: &'a worktree::Guard,
+}
+
+fn execute_removal(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    caller: &Caller,
+    context: CloseContext<'_>,
+    plan: RemovalPlan<'_>,
+) -> Result<Closed> {
+    let RemovalPlan {
+        tree,
+        workspace,
+        holders,
+        pane,
+        pane_closed,
+        retained_branch,
+        evidence,
+        lifecycle,
+    } = plan;
+    let pane = pane.as_str();
+    let mut operation = begin_preservation(shell, ledger, &tree, pane, caller, context)?;
+    if let Some(operation) = &mut operation {
+        operation.capture_initial(shell, ledger)?;
+        operation.result = Some(Closed {
+            pane: pane.into(),
+            worktree: Some(Worktree {
+                path: tree.path.clone(),
+                branch: tree.branch.clone(),
+                workspace: workspace.clone(),
+                branch_deleted: false,
+                anchor_closed: None,
+            }),
+            pane_closed,
+            retained_branch: retained_branch.clone(),
+            recovery: Some(operation.recovery()?),
+        });
+        operation.save(ledger)?;
+    }
+    let evidence = if tree.branch.is_empty() {
+        operation
+            .as_ref()
+            .and_then(|o| o.initial.as_ref())
+            .map_or(evidence, |s| {
+                crate::loss::Evidence::keeping_recovery(&tree.checkout.display().to_string(), s)
+            })
+    } else {
+        evidence
+    };
+    let removal = worktree::Removal {
+        guard: lifecycle,
+        workspace: workspace.as_deref(),
+        holders: &holders,
+        caller_workspace: caller.workspace.as_deref(),
+        evidence: &evidence,
+    };
+    let removed = if let Some(operation) = &mut operation {
+        worktree::remove_preserved(
+            shell,
+            ledger,
+            &tree,
+            removal,
+            operation,
+            context
+                .directory
+                .ok_or_else(|| refuse("original directory protection missing"))?,
+        )
+        .map_err(|e| operation.refusal(e))?
+    } else {
+        worktree::remove(shell, ledger, &tree, removal)?
+    };
+    let closed = Closed {
         pane: pane.into(),
         worktree: Some(Worktree {
             path: tree.path,
@@ -557,7 +943,64 @@ fn remove_target(
             anchor_closed: removed.anchor_closed,
         }),
         pane_closed,
-        retained_branch,
+        retained_branch: operation.as_ref().map_or(retained_branch, |o| {
+            o.result.as_ref().and_then(|r| r.retained_branch.clone())
+        }),
+        recovery: operation
+            .as_ref()
+            .map(crate::preservation::Operation::recovery)
+            .transpose()?,
+    };
+    if let Some(operation) = &mut operation {
+        operation.finish(ledger, &closed)?;
+    }
+    Ok(closed)
+}
+
+fn begin_preservation(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    tree: &worktree::Linked,
+    pane: &str,
+    caller: &Caller,
+    context: CloseContext<'_>,
+) -> Result<Option<crate::preservation::Operation>> {
+    let CloseContext {
+        mode: guard,
+        request,
+        existing,
+        terminal,
+        ..
+    } = context;
+    Ok(if let Some(mode) = guard.preservation() {
+        let (_, terminals) = crate::cleanup::pane_snapshot(shell)?;
+        if terminal.is_none() || terminal != terminals.get(pane).map(String::as_str) {
+            return Err(refuse(
+                "pane terminal is unreadable or changed before preservation",
+            ));
+        }
+        let owners = local_owners(ledger, pane)?
+            .iter()
+            .map(crate::preservation::CloseRequest::of)
+            .collect();
+        let expectation = crate::preservation::CloseExpectation {
+            pane: pane.into(),
+            terminal: terminals.get(pane).cloned(),
+            request: request.cloned(),
+            launch: crate::launch::identity(ledger, pane)?,
+            owners,
+            tree: tree.tree(),
+            mode,
+            caller: caller.clone(),
+        };
+        if let Some(existing) = existing
+            && existing.expectation != expectation
+        {
+            return Err(existing.refusal("preservation close expectation changed"));
+        }
+        Some(crate::preservation::Operation::begin(ledger, expectation)?)
+    } else {
+        None
     })
 }
 
@@ -588,7 +1031,7 @@ fn retained_branch(
     tree: &worktree::Linked,
     guard: Guard,
 ) -> Result<Option<crate::done::Branch>> {
-    if !matches!(guard, Guard::StoppedOrphan { .. }) || tree.branch.is_empty() {
+    if !matches!(guard, Guard::Clean | Guard::StoppedOrphan { .. }) || tree.branch.is_empty() {
         return Ok(None);
     }
     let mut branch = crate::done::Branch {
@@ -598,7 +1041,7 @@ fn retained_branch(
         landed: false,
     };
     crate::done::refresh_branch(shell, &mut branch)?;
-    Ok(Some(branch))
+    Ok((!branch.landed).then_some(branch))
 }
 
 /// A shared checkout stays, but its finished child can release its own pane.

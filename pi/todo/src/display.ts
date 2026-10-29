@@ -1,4 +1,4 @@
-import type { Subtask, TodoList, TodoSection } from "./wasm.ts";
+import type { SectionChild, SectionItem, Subtask, TodoList, TodoSection } from "./wasm.ts";
 import { sections, view } from "./wasm.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { TodoView } from "./embedded.ts";
@@ -19,6 +19,13 @@ interface HostedView {
   readonly dispose: () => void;
 }
 
+/** Read-only core projections exposed to a presenter. */
+interface DisplaySection extends Readonly<Omit<TodoSection, "items">> {
+  readonly items: readonly (Readonly<Omit<SectionItem, "children">> & {
+    readonly children: readonly Readonly<SectionChild>[];
+  })[];
+}
+
 /** Transient presentation data, never persisted in a session entry. */
 interface TodoDisplay {
   readonly empty: boolean;
@@ -26,7 +33,7 @@ interface TodoDisplay {
   readonly current: string;
   readonly text: string;
   /** Status groups owned by the core: in_progress, pending, completed, abandoned. */
-  readonly sections: readonly TodoSection[];
+  readonly sections: readonly DisplaySection[];
   readonly state: unknown;
   readonly createView: (host: ViewHost) => HostedView;
 }

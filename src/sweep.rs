@@ -509,22 +509,28 @@ fn settle_stopped(
     if let Err(error) = crate::items::orphan_reply(fleet.ledger, &item.id, reply) {
         return Some(format!("cannot record stopped orphan reply: {error}"));
     }
+    let request = crate::preservation::CloseRequest::of(item);
     let reconcile = |closed: crate::close::Closed| {
+        crate::items::saved_close(fleet.ledger, &item.host, &closed)?;
         crate::items::orphan_closed(
             fleet.ledger,
             &item.id,
             now,
             resource_only,
             closed.retained_branch,
-        )
+        )?;
+        Ok(closed.recovery)
     };
     let closed = if report.host.is_local() {
-        crate::close::with_local(
+        crate::close::with_request(
             fleet.shell,
             fleet.ledger,
             &item.pane,
             &crate::close::Caller::from_env(),
-            Guard::StoppedOrphan { episode: &episode },
+            crate::close::Options {
+                guard: Guard::StoppedOrphan { episode: &episode },
+                request: Some(&request),
+            },
             reconcile,
         )
     } else {
@@ -539,21 +545,23 @@ fn settle_stopped(
                             item.pane.clone(),
                             "--stopped-orphan".into(),
                             episode,
+                            "--preservation-request".into(),
+                            serde_json::to_string(&request)?,
                         ],
                     )
                     .and_then(reconcile)
             })
     };
-    if let Err(error) = closed {
-        let detail = reason(&error);
-        return Some(if detail.contains("uncommitted changes") {
-            "stopped orphan has unsaved work; kept until preservation (P3)".into()
-        } else {
-            detail
-        });
-    }
+    let recovery = match closed {
+        Ok(recovery) => recovery,
+        Err(error) => return Some(reason(&error)),
+    };
+    let saved = recovery
+        .as_ref()
+        .map(|recovery| format!("; {}", recovery.summary()))
+        .unwrap_or_default();
     eprintln!(
-        "dogsled sweep: closed stopped orphan {} on {}; reply recorded; task not completed",
+        "dogsled sweep: closed stopped orphan {} on {}; reply recorded; task not completed{saved}",
         item.pane, report.host.label,
     );
     None
@@ -842,7 +850,17 @@ mod liveness_tests {
                 assert_eq!(reports[0].sampled_ms, Some(1000));
                 assert!(!reports[0].headroom.as_ref().unwrap().eligible);
                 assert!(!reports[0].fresh(61_000));
-                assert!(!fleet.node().reserve("new", 61_000, None)?.reserved);
+                assert!(
+                    !fleet
+                        .node()
+                        .reserve(
+                            "new",
+                            61_000,
+                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                            false
+                        )?
+                        .reserved
+                );
                 assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
                 assert!(crate::items::list(&ledger)?[0].closed_ms.is_some());
                 // The same old observation cannot close an agent after its done mark disappears.

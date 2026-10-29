@@ -36,7 +36,7 @@ export interface Decision {
 	plan_content: string;
 }
 
-/** The payload the plan-approved event carries, as pi-todo consumes it. */
+/** The approved document and reviewer feedback passed to pi-todo. */
 export interface PlanApproved {
 	cwd: string;
 	planFilePath: string;
@@ -46,7 +46,6 @@ export interface PlanApproved {
 
 /** The parts of the extension API that plan mode uses. */
 export interface PlanHost {
-	events: ExtensionAPI["events"];
 	sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
 	sendMessage(message: { customType: string; content: string; display: boolean }, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" }): void;
 	getActiveTools(): string[];
@@ -118,6 +117,7 @@ export class PlanMode {
 	private readonly pi: PlanHost;
 	private readonly client: PortalClient;
 	private readonly open: (url: string) => void;
+	private readonly approved: (plan: PlanApproved, ctx: ExtensionContext) => void;
 	private planning = false;
 	private framed = false;
 	private watching: AbortController | undefined;
@@ -127,8 +127,9 @@ export class PlanMode {
 	/** The reviews the portal acknowledged. A review that was delivered but not acked is acked again, not delivered again. */
 	private readonly acked = new Set<string>();
 
-	constructor(pi: PlanHost, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser) {
+	constructor(pi: PlanHost, approved: (plan: PlanApproved, ctx: ExtensionContext) => void, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser) {
 		this.pi = pi;
+		this.approved = approved;
 		this.client = client;
 		this.open = open;
 	}
@@ -279,7 +280,7 @@ export class PlanMode {
 					planContent: typeof decision.plan_content === "string" ? decision.plan_content : "",
 					...(message ? { feedback: message } : {}),
 				};
-				this.pi.events.emit("dogsled:plan-approved", approved);
+				this.approved(approved, ctx);
 				this.stop();
 			}
 		}
@@ -303,15 +304,14 @@ export class PlanMode {
 }
 
 /** Register the plan mode: the submit tool, the command, and the shortcut. */
-export function registerPlanMode(pi: ExtensionAPI, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser): PlanMode {
+export function registerPlanMode(pi: ExtensionAPI, approved: (plan: PlanApproved, ctx: ExtensionContext) => void, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser): PlanMode {
 	const host: PlanHost = {
-		events: pi.events,
 		sendUserMessage: (content, options) => { pi.sendUserMessage(content, options); },
 		sendMessage: (message, options) => { pi.sendMessage(message, options); },
 		getActiveTools: () => pi.getActiveTools(),
 		setActiveTools: names => { pi.setActiveTools(names); },
 	};
-	const mode = new PlanMode(host, client, open);
+	const mode = new PlanMode(host, approved, client, open);
 	pi.registerTool({
 		name: SUBMIT_PLAN,
 		label: "Submit plan",

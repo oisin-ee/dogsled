@@ -25,8 +25,7 @@ async function runtime(factories: ExtensionFactory[]) {
 for (const nested of [false, true]) for (const abort of [false, true]) test(`actual ${nested ? "nested codemode" : "direct"} ${abort ? "aborted" : "blocked"} invocation recovers without tool_result`, async () => {
 	const r = rig(); let bridge: UnitBridge | undefined; let executed = 0; const ends: string[] = [], results: string[] = [];
 	const extension: ExtensionFactory = pi => {
-		pi.events.on("oisin.tasks.acquire.v1", (value: any) => value.reply(r.provider));
-		bridge = new UnitBridge({ events: pi.events, exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled");
+		bridge = new UnitBridge({ exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled", r.tasks);
 		pi.on("session_start", () => bridge!.start());
 		pi.on("tool_call", (event, ctx) => bridge!.call(event, ctx));
 		pi.on("tool_execution_end", async (event, ctx) => { ends.push(event.toolCallId); await bridge!.ended(event.toolCallId, ctx); });
@@ -57,8 +56,7 @@ for (const nested of [false, true]) for (const abort of [false, true]) test(`act
 test("reload recovery uses the real session boundary without a model request", async () => {
 	const r = rig();
 	const extension: ExtensionFactory = pi => {
-		pi.events.on("oisin.tasks.acquire.v1", (value: any) => value.reply(r.provider));
-		const bridge = new UnitBridge({ events: pi.events, exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled");
+		const bridge = new UnitBridge({ exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled", r.tasks);
 		pi.on("session_start", async (event, ctx) => { bridge.start(event.reason); await bridge.ready(ctx); });
 	};
 	const rt = await runtime([extension]);
@@ -76,8 +74,7 @@ test("a settlement delivered through the real runtime boundary is acknowledged w
 	const r = rig();
 	let bridge!: UnitBridge, context: any;
 	const extension: ExtensionFactory = pi => {
-		pi.events.on("oisin.tasks.acquire.v1", (value: any) => value.reply(r.provider));
-		bridge = new UnitBridge({ events: pi.events, exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled");
+		bridge = new UnitBridge({ exec: r.api.exec, getFlag: pi.getFlag, registerFlag: pi.registerFlag }, "dogsled", r.tasks);
 		pi.on("session_start", (event, ctx) => { context = ctx; bridge.start(event.reason); });
 	};
 	const rt = await runtime([extension]);
@@ -96,18 +93,19 @@ test("a settlement delivered through the real runtime boundary is acknowledged w
 for (const mode of ["missing", "invalid", "valid", "sealed"] as const) test(`fresh loaded worker guard: ${mode} acknowledgement`, async () => {
 	const data = fixture(), dir = await mkdtemp(join(tmpdir(), "dogsled-guard-")), path = join(dir, "seed.json");
 	const acknowledgements: string[][] = [];
+	let tasks: ReturnType<typeof rig>["provider"] | undefined;
 	const guard: ExtensionFactory = pi => {
-		const worker = new UnitWorker(pi, async args => { acknowledgements.push(args); return {}; });
+		const worker = new UnitWorker(pi, async args => { acknowledgements.push(args); return {}; }, () => tasks);
 		pi.on("session_start", () => worker.start());
 		pi.on("before_agent_start", (_event, ctx) => { worker.guard(ctx); });
 	};
 	// Provider registers after the guard. Initial-request validation must not depend on load order.
-	const provider: ExtensionFactory = pi => {
+	const provider: ExtensionFactory = () => {
 		if (mode === "missing") return;
-		pi.events.on("oisin.tasks.acquire.v1", (request: any) => request.reply({ inspect() {}, claim() {}, settle() {}, imported: () => ({ ok: true, value: {
+		tasks = { ...rig().provider, imported: () => ({ ok: true, value: {
 			version: 1, execution: data.execution, unitRef: data.ref, digest: mode === "invalid" ? "b".repeat(64) : data.prepared.exported.digest,
 			localSessionId: data.execution.requestId, seal: mode === "sealed" ? { entryId: "seal", disposition: "completed" } : null,
-		} }) }));
+		} }) };
 	};
 	const r = await runtime([guard, provider]);
 	data.execution.requestId = r.manager.getSessionId();

@@ -64,6 +64,204 @@ fn failed_pass(rig: &Rig, failed: &[(&Path, &str)]) {
 }
 
 #[test]
+fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() {
+    let rig = Rig::new("holds");
+    let claims = json!([
+        {"repo":"/tmp/repo","path":"/tmp/held","branch":"feat/x","request_id":"request-held"},
+        {"repo":"/tmp/repo","path":"/tmp/legacy","branch":"feat/legacy"}
+    ]);
+    rig.put("state/preparations.json", &claims);
+    let (code, status) = rig.json(&["status"]);
+    assert_eq!(code, 0, "{status}");
+    let holds = status["holds"].as_array().unwrap();
+    let held = holds
+        .iter()
+        .find(|h| h["code"] == "preparation_claim")
+        .unwrap();
+    assert!(held["resource"].as_str().unwrap().contains("/tmp/held"));
+    assert_eq!(held["owner"], "request-held");
+    assert!(
+        held["reason"]
+            .as_str()
+            .unwrap()
+            .contains("disposition missing")
+    );
+    assert_eq!(
+        held["next_command"],
+        "dogsled retire-preparation request-held --host local --reason 'release reported historical preparation claim'"
+    );
+    let legacy = holds
+        .iter()
+        .find(|h| h["code"] == "legacy_preparation")
+        .unwrap();
+    assert_eq!(legacy["next_command"], "dogsled doctor --host local");
+    let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
+    assert!(human.contains("Resource holds:"), "{human}");
+    assert!(
+        human.contains(held["next_command"].as_str().unwrap()),
+        "{human}"
+    );
+    let (code, board) = rig.json(&["board", "--all"]);
+    assert_eq!(code, 0, "{board}");
+    let rows = board["rows"].as_array().unwrap();
+    assert!(
+        rows.iter().any(|row| row["kind"] == "hold"
+            && row["activity"]
+                .as_str()
+                .unwrap()
+                .contains(held["next_command"].as_str().unwrap())),
+        "{board}"
+    );
+    let mut mcp = super::mcp::Client::start(&rig);
+    let (reply, error) = mcp.call("status", &json!({"all":true}));
+    assert!(!error, "{reply}");
+    assert_eq!(reply["rows"], board["rows"]);
+    assert_eq!(rig.read("state/preparations.json"), claims);
+    assert!(!rig.dir.join("state/preparation-receipts").exists());
+}
+
+#[test]
+fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
+    let rig = Rig::new("hold-stores");
+    for directory in [
+        "admissions",
+        "placement-grants",
+        "job-validity",
+        "cancellations",
+    ] {
+        fs::create_dir_all(rig.dir.join("state").join(directory)).unwrap();
+    }
+    let request = json!({"id":"place-held","owner":"w1:p1","owner_host":"origin"});
+    rig.put(
+        "state/admissions/place-held.json",
+        &json!({"request":request,"placement":{"phase":"result_saved"}}),
+    );
+    rig.put(
+        "state/placement-grants/place-held.json",
+        &json!({"envelope":{"request":request}}),
+    );
+    rig.put(
+        "state/job-validity/place-held.json",
+        &json!({"version":1,"created_ms":1}),
+    );
+    rig.put(
+        "state/placements.json",
+        &json!([
+            {"id":"live-capacity","created_ms":now()},
+            {"id":"expired-capacity","created_ms":0}
+        ]),
+    );
+    rig.put("state/admissions/release-held.json", &json!({"request":{"owner":"w1:p1","owner_host":"origin"},"result":{},"unit":{"reference_release":{"acknowledgement":null}}}));
+    rig.put(
+        "state/cancellations/cancel-held.json",
+        &json!({"release":"pending","ticket":{"id":"ticket-held","request":{"owner":"w1:p1"}}}),
+    );
+    rig.put("state/items.json", &json!([{"id":"branch-held","kind":"agent","host":"local","pane":"gone","owner_pane":"w1:p1","created_ms":1,"closed_ms":2,"branch":{"repo":"/tmp/repo","name":"feat/kept","ahead":1,"landed":false}}]));
+    let (code, status) = rig.json(&["status"]);
+    assert_eq!(code, 0, "{status}");
+    let holds = status["holds"].as_array().unwrap();
+    for code in [
+        "placement",
+        "placement_grant",
+        "validity",
+        "capacity",
+        "reference_release",
+        "cancellation",
+        "retained_branch",
+    ] {
+        assert!(
+            holds.iter().any(|hold| hold["code"] == code),
+            "missing {code}: {status}"
+        );
+    }
+    assert!(
+        !holds
+            .iter()
+            .any(|h| h["resource"].as_str().unwrap().contains("expired-capacity"))
+    );
+    let placement = holds.iter().find(|h| h["code"] == "placement").unwrap();
+    assert_eq!(
+        placement["next_command"],
+        "dogsled place --resume place-held"
+    );
+    assert_eq!(placement["command_host"], "origin");
+    assert_eq!(placement["owner"], "w1:p1");
+    let release = holds
+        .iter()
+        .find(|h| h["code"] == "reference_release")
+        .unwrap();
+    assert_eq!(
+        release["next_command"],
+        "dogsled unit retry-reference-releases"
+    );
+    let branch = holds
+        .iter()
+        .find(|h| h["code"] == "retained_branch")
+        .unwrap();
+    assert_eq!(
+        branch["next_command"],
+        "dogsled drop branch-held --host local"
+    );
+    assert_eq!(
+        rig.read("state/admissions/place-held.json")["placement"]["phase"],
+        "result_saved"
+    );
+    let (_, board) = rig.json(&["board", "--owner", "w1:p1"]);
+    assert!(
+        board["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "hold"
+                && r["activity"]
+                    .as_str()
+                    .unwrap()
+                    .contains("place --resume place-held")),
+        "{board}"
+    );
+}
+
+#[test]
+fn peer_holds_are_routed_to_their_host_and_cached_when_it_is_unreachable() {
+    let rig = Rig::new("hold-peer");
+    rig.peer();
+    let mut remote = rig.read("remote.json");
+    remote["holds"] = json!([{
+        "host":"local","resource":"checkout /tmp/peer-held","owner":"request-held",
+        "code":"preparation_claim","reason":"matching preparation disposition missing",
+        "next_command":"dogsled doctor --host local","command_host":"local",
+        "command_argv":["dogsled","doctor","--host","local"]
+    }]);
+    rig.put("remote.json", &remote);
+    let (code, status) = rig.json(&["status"]);
+    assert_eq!(code, 0, "{status}");
+    let hold = status["holds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["resource"] == "checkout /tmp/peer-held")
+        .unwrap();
+    assert_eq!(hold["host"], "8103");
+    assert_eq!(hold["next_command"], "dogsled doctor --host 8103");
+    rig.expire_cache();
+    rig.script("ssh", "#!/bin/sh\nexit 255\n");
+    let (_, status) = rig.json(&["status"]);
+    let hold = status["holds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["resource"] == "checkout /tmp/peer-held")
+        .unwrap();
+    assert!(
+        hold["reason"]
+            .as_str()
+            .unwrap()
+            .contains("release unproven")
+    );
+    assert_eq!(hold["next_command"], "dogsled doctor --host 8103");
+}
+
+#[test]
 fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
     let (rig, tree) = close_rig("stop-request");
     rig.put(
@@ -369,11 +567,11 @@ fn landed_dirty_reaches_only_the_agent_that_created_the_worktree() {
         "feat/x",
         "commits are already in the default branch",
         "notes.txt",
-        "Read the dirty files",
-        "commit them on a branch and land them",
-        "ask the user before you discard",
+        "For abandoned work",
         "dogsled close <pane>",
-        "dogsled prune worktrees",
+        "save a verified recovery",
+        "not merges or task completion",
+        "Unsupported content remains",
         "Never use `git worktree remove --force`, `git clean`, or `rm -rf`",
     ] {
         assert!(message.contains(expected), "{expected}: {message}");

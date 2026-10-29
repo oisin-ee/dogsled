@@ -87,7 +87,16 @@ pub fn discover(
     }))
 }
 
-pub fn ensure(fleet: &Fleet, host: &Host, repo: &Repository) -> Result<String> {
+pub fn ensure(
+    fleet: &Fleet,
+    host: &Host,
+    repo: &Repository,
+    request: &crate::work::Request,
+) -> Result<String> {
+    let validity = crate::work::request_validity(fleet.ledger, request)?;
+    crate::jobs::check_validity(fleet.ledger, validity.as_ref())?;
+    let validity =
+        validity.ok_or_else(|| Error::Invalid("request validity is unprovable".into()))?;
     if host.is_local() {
         return local(
             fleet.shell,
@@ -95,12 +104,20 @@ pub fn ensure(fleet: &Fleet, host: &Host, repo: &Repository) -> Result<String> {
             &host.label,
             &repo.path,
             &repo.origin,
+            fleet.ledger,
+            Some((&request.id, validity)),
         );
     }
     fleet.remote_setup(
         host,
         &[
             "checkout".into(),
+            "--request-validity".into(),
+            crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION.to_string(),
+            "--request-id".into(),
+            request.id.clone(),
+            "--request-created-ms".into(),
+            validity.created_ms.to_string(),
             "--path".into(),
             repo.relative.clone(),
             "--origin".into(),
@@ -166,7 +183,23 @@ pub fn local(
     host: &str,
     path: &str,
     origin: &str,
+    ledger: &crate::ledger::Ledger,
+    authority: Option<(&str, crate::jobs::Validity)>,
 ) -> Result<String> {
+    let (id, validity) = authority.ok_or_else(|| {
+        Error::Invalid(
+            "request validity is unprovable; provisioning requires its original request".into(),
+        )
+    })?;
+    crate::jobs::receive_request_validity(ledger, id, Some(validity))?;
+    let check = || {
+        crate::jobs::match_request_validity(
+            crate::jobs::request_validity(ledger, id)?,
+            Some(validity),
+        )?;
+        crate::jobs::check_validity(ledger, Some(&validity))
+    };
+    check()?;
     let path = Path::new(home).join(path);
     let display = path.display().to_string();
     if path.exists() {
@@ -203,6 +236,7 @@ pub fn local(
             );
         }
     } else {
+        check()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -229,6 +263,7 @@ pub fn local(
                 Context::new(None, None, Some(&display)),
             )));
         }
+        check()?;
         trust_new_checkout(shell, &path).map_err(|error| {
             error.with_diagnostic(Diagnostic::new(
                 Operation::Checkout,
