@@ -5,15 +5,15 @@ The two extensions communicate through `pi.events`. Neither imports the other pa
 
 ## Version 3 events
 
-| Event | Sender | Data |
-| --- | --- | --- |
-| `oisin.todo.ready` | pi-todo | `version`, `publisher` |
-| `oisin.work.request` | Dogsled | `version`, `presenter`, `request` |
+| Event                 | Sender  | Data                                                                      |
+| --------------------- | ------- | ------------------------------------------------------------------------- |
+| `oisin.todo.ready`    | pi-todo | `version`, `publisher`                                                    |
+| `oisin.work.request`  | Dogsled | `version`, `presenter`, `request`                                         |
 | `oisin.todo.snapshot` | pi-todo | Request identity, `publisher`, `revision`, `session`, `branch`, `display` |
-| `oisin.work.claim` | Dogsled | Request identity, `publisher`, `revision` |
-| `oisin.work.release` | Dogsled | Request identity |
-| `oisin.todo.stop` | pi-todo | `version`, `publisher` |
-| `oisin.work.open` | pi-todo | Request identity and `view: "todos"` |
+| `oisin.work.claim`    | Dogsled | Request identity, `publisher`, `revision`                                 |
+| `oisin.work.release`  | Dogsled | Request identity                                                          |
+| `oisin.todo.stop`     | pi-todo | `version`, `publisher`                                                    |
+| `oisin.work.open`     | pi-todo | Request identity and `view: "todos"`                                      |
 
 `version` is `3`. Request identity contains `version`, `presenter`, and `request`.
 Each presenter and publisher has a new identifier for each session lifecycle.
@@ -48,8 +48,13 @@ The display does not create a new job database or imply that a new Pi session re
 ## Inline work widget
 
 The widget above the editor is the dogsled board: a header with counts and a load meter for each host,
-then the current task, then agents, jobs, and queued work grouped TO LAND, ATTENTION, RUNNING, and WAITING.
+then the current task, then agents, jobs, and queued work under READY TO MERGE, NEEDS YOU, WORKING, and QUEUED.
 Each row shows the harness and model, host, activity, and age in aligned columns.
+Agent rows use the shared [lifecycle states](lifecycle.md#agent-states), not raw Herdr terminal states.
+`waiting` means that a turn ended with owned child work. QUEUED means that a ticket waits for admission.
+`finishing` means that native `done` was accepted, but the final handoff evidence remains pending.
+READY TO MERGE describes a retained branch, not an agent state.
+Questions, blockers, stopped agents, and evidence gaps appear under NEEDS YOU.
 Alt+W and `/work` expand or collapse the same widget. Neither opens a popup or replaces the editor.
 The expanded widget keeps the board's header, groups, and columns, and adds a view line, a selection marker, and key hints.
 The expanded widget uses at most half the terminal height, except on terminals shorter than eight rows.
@@ -60,6 +65,7 @@ Alt+I shows details in the same widget, or returns to the list. Alt+J/K scrolls 
 In Todos, pi-todo handles Alt+J/K scrolling and Alt+I expansion. Full task text wraps within that viewport.
 Alt+S stops a job, Alt+C cancels queued work, and Alt+M sends an agent message.
 Alt+R refreshes the work data. Stop and cancel still require confirmation.
+Cancellation never stops a process. After admission, it returns `too_late` with the saved result.
 Todos are read-only. `/todos` and Alt+T expand the Todos view when the provider is claimed.
 
 Job history uses the existing refresh coordinator while the widget is expanded.
