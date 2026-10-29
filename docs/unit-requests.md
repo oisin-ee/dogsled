@@ -54,9 +54,9 @@ The approved correction makes `not_started` independent of a binding digest:
 {
   "version": 1,
   "eventId": "<requestId>-not-started",
-  "origin": {"sessionId":"s","unitId":"u","revision":1,"contractEntryId":"e"},
-  "execution": {"executor":"dogsled","ownerId":"owner","requestId":"request"},
-  "result": {"kind":"not_started","reason":"prepared request abandoned before commitment"}
+  "origin": { "sessionId": "s", "unitId": "u", "revision": 1, "contractEntryId": "e" },
+  "execution": { "executor": "dogsled", "ownerId": "owner", "requestId": "request" },
+  "result": { "kind": "not_started", "reason": "prepared request abandoned before commitment" }
 }
 ```
 
@@ -67,6 +67,38 @@ The provider must match execution and the complete origin before releasing a hel
 ## Launch that never happened
 
 A committed unit whose ticket ended `failed` or `cancelled` settles as `not_started`, with the ticket and its error as the reason. This needs the saved admission to hold no launch request and no result, so no worker can have started. The event is written under the admission lock by refresh, `unit observe`, and `unit settlements`. Delivery and acknowledgement follow the abandonment events above. A pending ticket, or a failure after a launch request was saved, stays `unresolved` until host evidence settles it. Such a unit cannot be committed again.
+
+## Origin reference release
+
+Settlement delivery does not release the execution binding or its recovery references.
+The provider must explicitly release the exact binding through a versioned certificate.
+The origin records the certificate before host transport.
+
+```text
+dogsled unit release-references --input '<ReferenceRelease JSON>'
+dogsled unit retry-reference-releases
+```
+
+The certificate includes `version`, `origin_host`, `execution`, `binding`, `launch`, `terminal_evidence`, `custody_revision`, and `released_references`.
+`released_references` must contain `execution`, `recovery`, `task_binding`, and `custody`.
+Protocol recovery references do not mean the pinned Git recovery refs.
+The origin compares the binding, custody revision, and terminal evidence with its admission record.
+The execution host compares the certificate with its retained launch and terminal evidence under the launch lock.
+An identical retry returns the saved acknowledgement. A changed certificate refuses.
+
+A lost host reply leaves the release intent pending.
+`unit retry-reference-releases` retries saved intents without a new certificate or reopened reference.
+The internal `host reference-release-status --input '<ExecutionRef JSON>'` operation only reads release status.
+Without proof, it reports `awaiting origin reference release` and a retry action.
+An inbox acknowledgement, settlement acknowledgement, silent owner, or offline origin does not prove reference release.
+The certificate does not itself remove records or complete the original task.
+
+Child-event delivery also rechecks the captured item identity and custody through the inbox write.
+An event ID removes duplicates. It does not grant pane-only delivery authority.
+A missing item or changed custody produces a diagnostic, not delivery to a replacement session.
+
+General expiry of finished records remains in progress.
+See [In progress](lifecycle.md#in-progress) for the unreleased validity, preservation, and retention work.
 
 ## Canonical export encoding
 
@@ -112,7 +144,12 @@ Dogsled validates the seal entry's identity and ordering, not task state. The pr
 
 ### `done` before the unit returns
 
-A seeded worker can call `dogsled done` before its unit is sealed. The worker host does not treat that mark as finished until the launch has a terminal receipt. Until then, the pane stays open, `done` is false in the host snapshot, and the board shows the worker as waiting.
+A seeded worker can call native `done` before its unit is sealed.
+The worker host does not treat that mark as finished until the launch has a terminal receipt.
+Until then, the pane stays open, `done` is false in the host snapshot, and the board shows `finishing`.
+Managed workers use the native tool for the final handoff, not shell `dogsled done`.
+Questions and blockers use native `ask` and `blocked`. Neither signal releases the task binding.
+See [Agent lifecycle and recovery](lifecycle.md) for turn signals and resource closure.
 
 Only the execution owner can continue such a worker. The owner is the originating pane ID (`execution.ownerId`) on the originating host. The launch record stores both, and the host compares the full sender (pane and hostname) before it changes anything, because a pane ID is unique only on its own host. A launch record from an earlier release has no owner host, so it refuses every sender. The owner sends a message or a task to the same pane. The worker host then removes the mark, and the same execution continues in the same session, worktree, and branch. The host refuses input from any other sender, and the worker's own inbox claim, and changes nothing. A mark sealed by an earlier release without a receipt follows the same rule.
 

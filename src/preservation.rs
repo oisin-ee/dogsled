@@ -59,7 +59,7 @@ pub enum Head {
 }
 
 impl Head {
-    fn commit(&self) -> Option<&str> {
+    pub(crate) fn commit(&self) -> Option<&str> {
         match self {
             Self::Branch { commit, .. } | Self::Detached { commit } => Some(commit),
             Self::Unborn { .. } => None,
@@ -80,6 +80,438 @@ pub struct Snapshot {
     pub created_ms: u64,
     /// Ignored files stay in the live checkout and are explicitly excluded.
     pub ignored_files_captured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<RecoveryContext>,
+}
+
+/// Recovery meaning lives in the pinned commit, independently of item retention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryContext {
+    pub operation: String,
+    pub pane: String,
+    pub terminal: Option<String>,
+    pub item: Option<String>,
+    pub request: Option<String>,
+    pub checkout: crate::cleanup::Tree,
+    pub mode: CloseMode,
+    pub predecessors: Vec<String>,
+    pub owner: Option<CloseRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloseMode {
+    Owner,
+    StoppedOrphan {
+        episode: crate::close::StoppedOrphan,
+    },
+}
+
+/// The host's saved resource result. This never constitutes a task result or merge proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recovery {
+    pub host: String,
+    pub repository: String,
+    pub id: String,
+    pub pinned_oid: String,
+    pub predecessors: Vec<String>,
+    pub operation: String,
+    pub item: Option<String>,
+}
+
+impl Recovery {
+    pub fn summary(&self) -> String {
+        format!("saved (recovery {})", self.id)
+    }
+}
+
+/// Stable origin identity used to replay a host close after a lost reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseRequest {
+    pub item: String,
+    pub created_ms: u64,
+    pub owner_pane: String,
+    pub owner_session: Option<String>,
+    pub host: String,
+}
+
+impl CloseRequest {
+    pub fn of(item: &crate::items::Item) -> Self {
+        Self {
+            item: item.id.clone(),
+            created_ms: item.created_ms,
+            owner_pane: item.owner_pane.clone(),
+            owner_session: item.owner_session.clone(),
+            host: item.host.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseExpectation {
+    pub pane: String,
+    pub terminal: Option<String>,
+    pub request: Option<CloseRequest>,
+    pub launch: Option<String>,
+    pub owners: Vec<CloseRequest>,
+    pub tree: crate::cleanup::Tree,
+    pub mode: CloseMode,
+    pub caller: crate::close::Caller,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Intent,
+    Captured,
+    TeardownEntered,
+    TeardownComplete,
+    FinalCaptured,
+    Normalizing,
+    Normalized,
+    Removed,
+    Finished,
+}
+
+/// Kept by this store, not item retention. Incomplete operations must never expire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Operation {
+    pub id: String,
+    pub expectation: CloseExpectation,
+    pub initial_id: String,
+    pub successor_id: Option<String>,
+    pub initial: Option<Snapshot>,
+    pub latest: Option<Snapshot>,
+    pub stage: Stage,
+    pub blocker: Option<String>,
+    pub result: Option<crate::close::Closed>,
+}
+
+fn operation_file(pane: &str, request: Option<&CloseRequest>) -> Result<String> {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(serde_json::to_vec(&(pane, request))?);
+    let key = digest.iter().fold(String::new(), |mut key, byte| {
+        let _ = write!(key, "{byte:02x}");
+        key
+    });
+    Ok(format!("{key}.json"))
+}
+
+pub fn operation(
+    ledger: &crate::ledger::Ledger,
+    pane: &str,
+    request: Option<&CloseRequest>,
+) -> crate::error::Result<Option<Operation>> {
+    let name = operation_file(pane, request).map_err(close_error)?;
+    ledger.child("preservation-operations").read(&name)
+}
+
+pub fn operations(ledger: &crate::ledger::Ledger) -> crate::error::Result<Vec<Operation>> {
+    let store = ledger.child("preservation-operations");
+    let entries = match fs::read_dir(&store.dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut operations = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| crate::worktree::refuse("unreadable preservation record name"))?;
+            let operation = store
+                .read(name)?
+                .ok_or_else(|| crate::worktree::refuse("preservation operation disappeared"))?;
+            operations.push(operation);
+        }
+    }
+    Ok(operations)
+}
+
+pub fn pending_for(
+    ledger: &crate::ledger::Ledger,
+    tree: &crate::cleanup::Tree,
+) -> crate::error::Result<Vec<Operation>> {
+    Ok(operations(ledger)?
+        .into_iter()
+        .filter(|operation| {
+            !matches!(operation.stage, Stage::Removed | Stage::Finished)
+                && crate::worktree::same(&operation.expectation.tree.path, &tree.path)
+        })
+        .collect())
+}
+
+pub fn hold(
+    ledger: &crate::ledger::Ledger,
+    tree: &crate::cleanup::Tree,
+) -> crate::error::Result<Option<String>> {
+    Ok(pending_for(ledger, tree)?.first().map(|operation| {
+        operation
+            .refusal("unfinished preservation operation; checkout retained")
+            .to_string()
+    }))
+}
+
+fn close_error(error: Error) -> crate::error::Error {
+    match error {
+        Error::Git(error) => error,
+        other => crate::error::Error::Invalid(other.to_string()),
+    }
+}
+
+impl Operation {
+    pub fn begin(
+        ledger: &crate::ledger::Ledger,
+        expectation: CloseExpectation,
+    ) -> crate::error::Result<Self> {
+        if pending_for(ledger, &expectation.tree)?
+            .iter()
+            .any(|operation| operation.expectation != expectation)
+        {
+            return Err(crate::worktree::refuse(
+                "another unfinished preservation operation owns this checkout; inspect its recovery before retrying",
+            ));
+        }
+        if let Some(saved) = operation(ledger, &expectation.pane, expectation.request.as_ref())? {
+            if saved.expectation != expectation {
+                return Err(crate::worktree::refuse(
+                    "preservation close expectation changed",
+                ));
+            }
+            return Ok(saved);
+        }
+        let operation = Self {
+            id: random_id().map_err(close_error)?,
+            expectation,
+            initial_id: random_id().map_err(close_error)?,
+            successor_id: None,
+            initial: None,
+            latest: None,
+            stage: Stage::Intent,
+            blocker: None,
+            result: None,
+        };
+        operation.save(ledger)?;
+        Ok(operation)
+    }
+
+    pub fn save(&self, ledger: &crate::ledger::Ledger) -> crate::error::Result<()> {
+        let name = operation_file(&self.expectation.pane, self.expectation.request.as_ref())
+            .map_err(close_error)?;
+        ledger.child("preservation-operations").write(&name, self)
+    }
+
+    pub fn advance(
+        &mut self,
+        ledger: &crate::ledger::Ledger,
+        stage: Stage,
+    ) -> crate::error::Result<()> {
+        self.stage = stage;
+        self.save(ledger)
+    }
+
+    pub fn refusal(&self, reason: impl std::fmt::Display) -> crate::error::Error {
+        let id = self
+            .latest
+            .as_ref()
+            .or(self.initial.as_ref())
+            .map_or(self.initial_id.as_str(), |s| s.id.as_str());
+        crate::error::Error::Invalid(format!(
+            "{reason}; recovery {id}; operation {}; live content {}; inspect the checkout before retrying",
+            self.id,
+            self.live_content()
+        ))
+    }
+
+    fn live_content(&self) -> &'static str {
+        match self.stage {
+            Stage::Intent | Stage::Captured => "original",
+            Stage::TeardownEntered => "unknown after entering teardown",
+            Stage::TeardownComplete | Stage::FinalCaptured => "post-teardown, not normalized",
+            Stage::Normalizing => "possibly partially normalized",
+            Stage::Normalized => "normalized; recovery pinned",
+            Stage::Removed | Stage::Finished => "removed",
+        }
+    }
+
+    pub fn check_retry(&self, mode: &CloseMode) -> crate::error::Result<()> {
+        if &self.expectation.mode != mode {
+            return Err(self.refusal("close mode or stopped episode changed"));
+        }
+        if self.stage == Stage::TeardownEntered {
+            return Err(self.refusal(
+                self.blocker
+                    .as_deref()
+                    .unwrap_or("unknown teardown outcome; hook will not be rerun automatically"),
+            ));
+        }
+        if self.stage == Stage::Normalizing {
+            return Err(
+                self.refusal("normalization was interrupted; checkout may be partially normalized")
+            );
+        }
+        if !matches!(
+            self.stage,
+            Stage::Intent | Stage::Captured | Stage::Removed | Stage::Finished
+        ) {
+            return Err(self.refusal(
+                "close interrupted after teardown; hook will not be rerun automatically",
+            ));
+        }
+        Ok(())
+    }
+
+    fn context(&self, predecessors: Vec<String>) -> RecoveryContext {
+        RecoveryContext {
+            operation: self.id.clone(),
+            pane: self.expectation.pane.clone(),
+            terminal: self.expectation.terminal.clone(),
+            item: self
+                .expectation
+                .request
+                .as_ref()
+                .map(|r| r.item.clone())
+                .or_else(|| self.expectation.owners.first().map(|r| r.item.clone())),
+            request: self.expectation.launch.clone(),
+            checkout: self.expectation.tree.clone(),
+            mode: self.expectation.mode.clone(),
+            predecessors,
+            owner: self
+                .expectation
+                .request
+                .clone()
+                .or_else(|| self.expectation.owners.first().cloned()),
+        }
+    }
+
+    /// A crash after pin is recovered by reading that exact reserved ref, never rewriting it.
+    fn capture_reserved(
+        &self,
+        shell: &dyn Shell,
+        checkout: &Path,
+        id: &str,
+        predecessors: Vec<String>,
+    ) -> Result<Snapshot> {
+        let name = reference(id)?;
+        let context = self.context(predecessors);
+        let exists = git(
+            shell,
+            checkout,
+            None,
+            &["show-ref", "--verify", "--quiet", &name],
+        )?;
+        if exists.ok() {
+            let saved = show(shell, checkout, id)?;
+            if saved.context.as_ref() != Some(&context) {
+                return Err(Refusal::VerificationFailed.into());
+            }
+            verify(shell, checkout, &saved)?;
+            Ok(saved)
+        } else if exists.status == 1 {
+            capture(shell, checkout, id, Some(context))
+        } else {
+            Err(Refusal::VerificationFailed.into())
+        }
+    }
+
+    pub fn capture_initial(
+        &mut self,
+        shell: &dyn Shell,
+        ledger: &crate::ledger::Ledger,
+    ) -> crate::error::Result<()> {
+        crate::work::launch_test_barrier("PRESERVATION_INTENT")?;
+        if self.stage != Stage::Intent {
+            return Ok(());
+        }
+        let saved = self
+            .capture_reserved(
+                shell,
+                Path::new(&self.expectation.tree.path),
+                &self.initial_id,
+                Vec::new(),
+            )
+            .map_err(|e| self.refusal(e))?;
+        self.initial = Some(saved.clone());
+        self.latest = Some(saved);
+        self.advance(ledger, Stage::Captured)
+    }
+
+    pub fn capture_final(
+        &mut self,
+        shell: &dyn Shell,
+        ledger: &crate::ledger::Ledger,
+    ) -> crate::error::Result<()> {
+        if self.stage != Stage::TeardownComplete {
+            return Ok(());
+        }
+        let checkout = Path::new(&self.expectation.tree.path);
+        let previous = self
+            .initial
+            .as_ref()
+            .ok_or_else(|| self.refusal("missing initial snapshot"))?;
+        match verify(shell, checkout, previous) {
+            Ok(()) => (),
+            Err(Error::Refused(Refusal::VerificationFailed | Refusal::CheckoutChanged)) => {
+                if self.successor_id.is_none() {
+                    self.successor_id = Some(random_id().map_err(close_error)?);
+                    self.save(ledger)?;
+                }
+                let id = self
+                    .successor_id
+                    .as_deref()
+                    .ok_or_else(|| self.refusal("missing successor identity"))?;
+                self.latest = Some(
+                    self.capture_reserved(shell, checkout, id, vec![self.initial_id.clone()])
+                        .map_err(|e| self.refusal(e))?,
+                );
+            }
+            Err(error) => return Err(self.refusal(error)),
+        }
+        self.advance(ledger, Stage::FinalCaptured)
+    }
+
+    pub fn recovery(&self) -> crate::error::Result<Recovery> {
+        let saved = self
+            .latest
+            .as_ref()
+            .ok_or_else(|| self.refusal("missing verified recovery"))?;
+        Ok(Recovery {
+            host: self
+                .expectation
+                .request
+                .as_ref()
+                .map_or(crate::hosts::LOCAL, |r| r.host.as_str())
+                .into(),
+            repository: self.expectation.tree.repo.clone(),
+            id: saved.id.clone(),
+            pinned_oid: saved.commit.clone(),
+            predecessors: (saved.id != self.initial_id)
+                .then(|| self.initial_id.clone())
+                .into_iter()
+                .collect(),
+            operation: self.id.clone(),
+            item: self
+                .expectation
+                .request
+                .as_ref()
+                .map(|r| r.item.clone())
+                .or_else(|| self.expectation.owners.first().map(|r| r.item.clone())),
+        })
+    }
+
+    pub fn finish(
+        &mut self,
+        ledger: &crate::ledger::Ledger,
+        closed: &crate::close::Closed,
+    ) -> crate::error::Result<()> {
+        self.result = Some(closed.clone());
+        self.advance(ledger, Stage::Finished)
+    }
 }
 
 /// The commit message is the durable record; both trees are reachable through parents.
@@ -93,6 +525,8 @@ struct Record {
     raw_worktree_bytes: bool,
     created_ms: u64,
     ignored_files_captured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<RecoveryContext>,
 }
 
 impl Snapshot {
@@ -106,6 +540,7 @@ impl Snapshot {
             raw_worktree_bytes: self.raw_worktree_bytes,
             created_ms: self.created_ms,
             ignored_files_captured: self.ignored_files_captured,
+            context: self.context.clone(),
         }
     }
 }
@@ -685,15 +1120,44 @@ fn pin(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<()> {
 /// Restore must write the captured bytes directly, without Git smudge filters.
 /// Failures leave all live content intact.
 pub fn snapshot(shell: &dyn Shell, checkout: &Path) -> Result<Snapshot> {
+    capture(shell, checkout, &random_id()?, None)
+}
+
+/// Capture only the reserved identity. A pinned ref is immutable, including on retry.
+fn capture(
+    shell: &dyn Shell,
+    checkout: &Path,
+    id: &str,
+    context: Option<RecoveryContext>,
+) -> Result<Snapshot> {
+    let ref_name = reference(id)?;
     preflight(shell, checkout)?;
+    let protected = context
+        .as_ref()
+        .map(|context| -> Result<_> {
+            let tree = crate::worktree::snapshot(
+                shell,
+                checkout.to_str().ok_or(Refusal::VerificationFailed)?,
+            )?
+            .ok_or(Refusal::CheckoutChanged)?;
+            if tree.identity != context.checkout.identity
+                || !crate::worktree::same(&tree.path, &context.checkout.path)
+                || tree.branch != context.checkout.branch
+                || (context.predecessors.is_empty() && tree.head != context.checkout.head)
+            {
+                return Err(Refusal::CheckoutChanged.into());
+            }
+            let directory = tree.pin()?;
+            Ok((tree, directory))
+        })
+        .transpose()?;
     let before = observe(shell, checkout)?;
     let scratch = Scratch::new()?;
     let staged = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
     let working = worktree_tree(shell, checkout, &scratch, &staged)?;
-    let id = random_id()?;
     let mut snapshot = Snapshot {
-        ref_name: format!("refs/dogsled/recovery/{id}"),
-        id,
+        ref_name,
+        id: id.into(),
         commit: String::new(),
         head: before.head.clone(),
         index_tree: staged,
@@ -701,6 +1165,7 @@ pub fn snapshot(shell: &dyn Shell, checkout: &Path) -> Result<Snapshot> {
         raw_worktree_bytes: true,
         created_ms: crate::ledger::now_ms(),
         ignored_files_captured: false,
+        context,
     };
     let parents: Vec<_> = snapshot.head.commit().into_iter().collect();
     let index_commit = commit_tree(
@@ -719,7 +1184,15 @@ pub fn snapshot(shell: &dyn Shell, checkout: &Path) -> Result<Snapshot> {
         &parents,
         &serde_json::to_string(&snapshot.record())?,
     )?;
+    if let Some((tree, directory)) = &protected {
+        directory.validate(tree)?;
+        crate::worktree::validate_identity(shell, tree)?;
+    }
+    if before != observe(shell, checkout)? {
+        return Err(Refusal::CheckoutChanged.into());
+    }
     pin(shell, checkout, &snapshot)?;
+    crate::work::launch_test_barrier("PRESERVATION_AFTER_PIN")?;
     verify(shell, checkout, &snapshot)?;
     if before != observe(shell, checkout)? {
         return Err(Refusal::CheckoutChanged.into());
@@ -745,6 +1218,183 @@ pub fn verify(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result
         return Err(Refusal::CheckoutChanged.into());
     }
     recheck_ref(shell, checkout, snapshot)?;
+    Ok(())
+}
+
+/// Exact recovery proof, constructed only by checking the pinned ref and live content.
+/// It never alters ordinary branch integration evidence.
+#[derive(Debug)]
+pub struct VerifiedRemoval {
+    tree: crate::cleanup::Tree,
+    snapshot: Snapshot,
+}
+
+impl VerifiedRemoval {
+    pub fn capture(
+        shell: &dyn Shell,
+        tree: &crate::worktree::Linked,
+        saved: &Snapshot,
+    ) -> crate::error::Result<Self> {
+        crate::worktree::validate_identity(shell, tree)?;
+        if saved.head.commit() != Some(tree.head.as_str())
+            || crate::worktree::head_sha(shell, &tree.path)? != tree.head
+        {
+            return Err(close_error(Refusal::CheckoutChanged.into()));
+        }
+        verify(shell, Path::new(&tree.path), saved).map_err(close_error)?;
+        Ok(Self {
+            tree: tree.tree(),
+            snapshot: saved.clone(),
+        })
+    }
+
+    /// Clear only byte-exact captured files. Leave ignored files and unknown content alone.
+    /// Rebuild HEAD without filters, hooks, forced removal, or recursive directory deletion.
+    pub fn normalize(
+        &self,
+        shell: &dyn Shell,
+        tree: &crate::worktree::Linked,
+    ) -> crate::error::Result<()> {
+        let normalize = || -> Result<()> {
+            if tree.tree() != self.tree {
+                return Err(Refusal::CheckoutChanged.into());
+            }
+            crate::worktree::validate_identity(shell, tree)?;
+            let pin = tree.pin()?;
+            let checkout = Path::new(&tree.path);
+            let saved = &self.snapshot;
+            let captured = manifest(shell, checkout, &saved.worktree_tree)?;
+            let target = manifest(
+                shell,
+                checkout,
+                saved.head.commit().ok_or(Refusal::VerificationFailed)?,
+            )?;
+            // Gitlinks cannot be normalized without their own ownership and recovery proof.
+            if captured
+                .iter()
+                .chain(&target)
+                .any(|file| file.mode == "160000")
+            {
+                return Err(Refusal::UnsupportedFileType(checkout.into()).into());
+            }
+            verify(shell, checkout, saved)?;
+            pin.validate(tree)?;
+            clear_captured(tree, &pin, &captured)?;
+            pin.validate(tree)?;
+            recheck_ref(shell, checkout, saved)?;
+            checked(
+                shell,
+                checkout,
+                None,
+                &[
+                    "read-tree",
+                    saved.head.commit().ok_or(Refusal::VerificationFailed)?,
+                ],
+            )?;
+            materialize_head(tree, &pin, target)?;
+            pin.validate(tree)?;
+            recheck_ref(shell, checkout, saved)?;
+            if head(shell, checkout)? != saved.head {
+                return Err(Refusal::CheckoutChanged.into());
+            }
+            if !crate::loss::dirty_paths(shell, &tree.path, false)?.is_empty() {
+                return Err(Refusal::VerificationFailed.into());
+            }
+            Ok(())
+        };
+        normalize().map_err(close_error)
+    }
+}
+
+fn clear_captured(
+    tree: &crate::worktree::Linked,
+    pin: &crate::worktree::Pin,
+    captured: &[FileEntry],
+) -> Result<()> {
+    let checkout = Path::new(&tree.path);
+    let mut directories = std::collections::BTreeSet::new();
+    for file in captured {
+        pin.validate(tree)?;
+        let path = checkout.join(&file.path);
+        let metadata = worktree_metadata(checkout, &file.path)?.ok_or(Refusal::CheckoutChanged)?;
+        let same = if file.mode == "120000" {
+            metadata.is_symlink() && fs::read_link(&path)?.as_os_str().as_bytes() == file.bytes
+        } else {
+            metadata.is_file()
+                && fs::read(&path)? == file.bytes
+                && (metadata.permissions().mode() & 0o111 != 0) == (file.mode == "100755")
+        };
+        if !same {
+            return Err(Refusal::CheckoutChanged.into());
+        }
+        fs::remove_file(&path)?;
+        let mut parent = file.path.parent();
+        while let Some(path) = parent.filter(|p| !p.as_os_str().is_empty()) {
+            directories.insert(path.to_path_buf());
+            parent = path.parent();
+        }
+    }
+    for dir in directories.iter().rev() {
+        pin.validate(tree)?;
+        match fs::remove_dir(checkout.join(dir)) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => (),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+fn materialize_head(
+    tree: &crate::worktree::Linked,
+    pin: &crate::worktree::Pin,
+    target: Vec<FileEntry>,
+) -> Result<()> {
+    let checkout = Path::new(&tree.path);
+    let root = DirectoryPin::capture(checkout)?;
+    let mut parents = std::collections::BTreeMap::new();
+    for file in target {
+        pin.validate(tree)?;
+        root.validate()?;
+        for parent in parents.values() {
+            DirectoryPin::validate(parent)?;
+        }
+        let mut parent = checkout.to_path_buf();
+        if let Some(relative) = file.path.parent() {
+            for component in relative.components() {
+                parent.push(component);
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    parents.entry(parent.clone())
+                {
+                    match fs::create_dir(&parent) {
+                        Ok(()) => (),
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+                        Err(e) => return Err(e.into()),
+                    }
+                    entry.insert(DirectoryPin::capture(&parent)?);
+                }
+            }
+        }
+        for parent in parents.values() {
+            parent.validate()?;
+        }
+        let path = checkout.join(&file.path);
+        if file.mode == "120000" {
+            std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&file.bytes), path)?;
+        } else {
+            use std::io::Write as _;
+            let mut out = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            out.write_all(&file.bytes)?;
+            out.set_permissions(fs::Permissions::from_mode(if file.mode == "100755" {
+                0o755
+            } else {
+                0o644
+            }))?;
+        }
+    }
     Ok(())
 }
 
@@ -826,6 +1476,7 @@ fn read_archived(shell: &dyn Shell, repo: &Path, id: &str, oid: &str) -> Result<
         raw_worktree_bytes: record.raw_worktree_bytes,
         created_ms: record.created_ms,
         ignored_files_captured: record.ignored_files_captured,
+        context: record.context.clone(),
     };
     if snapshot.record() != record {
         return Err(Refusal::VerificationFailed.into());
@@ -1468,6 +2119,19 @@ mod tests {
         let mut out = std::collections::BTreeMap::new();
         collect(root, root, &mut out);
         out
+    }
+
+    #[test]
+    fn reserved_capture_never_rewrites_a_pinned_recovery() {
+        let repo = Repo::new(true);
+        fs::write(repo.path.join("file"), b"saved\n").unwrap();
+        let id = "1234567890abcdef1234567890abcdef";
+        let saved = capture(&System::default(), &repo.path, id, None).unwrap();
+        assert_eq!(saved.id, id);
+        fs::write(repo.path.join("file"), b"replacement\n").unwrap();
+        assert!(capture(&System::default(), &repo.path, id, None).is_err());
+        assert_eq!(show(&System::default(), &repo.path, id).unwrap(), saved);
+        assert_eq!(fs::read(repo.path.join("file")).unwrap(), b"replacement\n");
     }
 
     #[test]

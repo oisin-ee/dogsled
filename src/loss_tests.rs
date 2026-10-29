@@ -135,6 +135,33 @@ impl Drop for Repo {
 }
 
 #[test]
+fn recovery_holds_a_detached_tip_but_never_proves_a_merge() {
+    let repo = Repo::new();
+    git(&repo.tree, &["checkout", "--detach"]);
+    repo.commit();
+    let head = git(&repo.tree, &["rev-parse", "HEAD"]);
+    let saved =
+        crate::preservation::snapshot(&crate::shell::System::default(), &repo.tree).unwrap();
+    let evidence = Evidence::keeping_recovery(repo.repo.to_str().unwrap(), &saved);
+    let assessed = evidence
+        .assess(&System, head.trim(), Some(repo.tree.to_str().unwrap()))
+        .unwrap();
+    assert_eq!(assessed.held, Some(Held::Recovery));
+    assert!(assessed.loses_nothing());
+    assert!(!assessed.landed());
+    let ordinary = repo.evidence().assess(&System, head.trim(), None).unwrap();
+    assert!(ordinary.held.is_none());
+    git(&repo.repo, &["update-ref", &saved.ref_name, "HEAD"]);
+    assert!(
+        evidence
+            .assess(&System, head.trim(), None)
+            .unwrap()
+            .held
+            .is_none()
+    );
+}
+
+#[test]
 fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
     let mut repo = Repo::new();
     let nested = repo.repo.join(".worktrees/feature");
@@ -875,6 +902,25 @@ struct ShellIn {
 }
 
 impl Shell for ShellIn {
+    fn run_input_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        crate::shell::System::default().run_input_bounded(program, args, input, timeout)
+    }
+
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<crate::shell::BytesOutput> {
+        crate::shell::System::default().run_bytes_bounded(program, args, timeout)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         let value = if program == "herdr" && args == ["pane", "list"] {
             Some(serde_json::json!({"result":{"panes":[
@@ -1430,6 +1476,25 @@ impl LifecycleShell {
 }
 
 impl Shell for LifecycleShell {
+    fn run_input_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        crate::shell::System::default().run_input_bounded(program, args, input, timeout)
+    }
+
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<crate::shell::BytesOutput> {
+        crate::shell::System::default().run_bytes_bounded(program, args, timeout)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         use std::sync::atomic::Ordering::SeqCst;
         if program == "git"
@@ -1939,16 +2004,14 @@ fn close_reconciles_removal_before_initial_stat() {
     use std::sync::atomic::Ordering::SeqCst;
     let fixture = lifecycle_fixture(false);
     save_close_checkout(&fixture);
-    fixture
-        .ledger
-        .write(
-            "items.json",
-            &serde_json::json!([{
-                "id":"c1-old","kind":"agent","host":"local","pane":"placed-shell",
-                "owner_pane":"parent","created_ms":1,"closed_ms":null
-            }]),
-        )
-        .unwrap();
+    crate::store::put_items(
+        &fixture.ledger,
+        &serde_json::json!([{
+            "id":"c1-old","kind":"agent","host":"local","pane":"placed-shell",
+            "owner_pane":"parent","created_ms":1,"closed_ms":null
+        }]),
+    )
+    .unwrap();
     let repo = fixture.repo.repo.clone();
     let path = fixture.repo.tree.clone();
     crate::worktree::BEFORE_CLOSE_STAT.with(|hook| {
@@ -2424,20 +2487,18 @@ fn concurrent_closes_reconcile_an_item_closed_by_the_winner() {
     use std::sync::{Arc, Barrier, atomic::Ordering::SeqCst};
     let fixture = lifecycle_fixture(false);
     save_close_checkout(&fixture);
-    fixture
-        .ledger
-        .write(
-            "items.json",
-            &vec![crate::items::Item {
-                id: "c1-old".into(),
-                kind: "agent".into(),
-                host: crate::hosts::LOCAL.into(),
-                pane: "placed-shell".into(),
-                owner_pane: "parent".into(),
-                ..Default::default()
-            }],
-        )
-        .unwrap();
+    crate::store::put_items(
+        &fixture.ledger,
+        &vec![crate::items::Item {
+            id: "c1-old".into(),
+            kind: "agent".into(),
+            host: crate::hosts::LOCAL.into(),
+            pane: "placed-shell".into(),
+            owner_pane: "parent".into(),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
     let (ready, finish) = (entered.clone(), release.clone());
@@ -2495,10 +2556,7 @@ fn absent_close_refuses_deleted_or_reassigned_captured_items() {
             owner_pane: "parent".into(),
             ..Default::default()
         };
-        fixture
-            .ledger
-            .write("items.json", &vec![item.clone()])
-            .unwrap();
+        crate::store::put_items(&fixture.ledger, &vec![item.clone()]).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
         shell.lock_attempt = Some(tx);
@@ -2530,7 +2588,7 @@ fn absent_close_refuses_deleted_or_reassigned_captured_items() {
                         "owner" => current[0].owner_pane = "another-owner".into(),
                         _ => unreachable!(),
                     }
-                    fixture.ledger.write("items.json", &current)?;
+                    crate::store::put_items(&fixture.ledger, &current)?;
                     Ok(close)
                 },
             )
@@ -2726,7 +2784,7 @@ fn gone_checkout_does_not_reconcile_a_reused_pane_or_item() {
             .child("launches")
             .write("c1-old.progress.json", &progress)
             .unwrap();
-        fixture.ledger.write("items.json", &serde_json::json!([{
+        crate::store::put_items(&fixture.ledger, &serde_json::json!([{
             "id":if replace_item {"c1-new"} else {"c1-old"},"kind":"agent","host":"local","pane":"placed-shell","owner_pane":"parent","name":"worker","created_ms":1,"closed_ms":null
         }])).unwrap();
         external_remove(&fixture.repo);
@@ -2767,7 +2825,7 @@ fn handoff_skips_unproven_owner_and_closes_the_next_mark() {
         "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
         "result":{"checkout":captured},"error":null
     })).unwrap();
-    fixture.ledger.write("items.json", &serde_json::json!([
+    crate::store::put_items(&fixture.ledger, &serde_json::json!([
         {"id":"a-missing","kind":"agent","host":"local","pane":"gone-child","owner_pane":"parent","created_ms":1,"closed_ms":null},
         {"id":"c1-old","kind":"agent","host":"local","pane":"placed-shell","owner_pane":"parent","created_ms":1,"closed_ms":null}
     ])).unwrap();
@@ -3107,16 +3165,14 @@ fn disappearance_during_survey_keeps_identity_for_locked_reconciliation() {
 
 fn sealed_disappeared_handoff(fixture: &Landed) {
     save_close_checkout(fixture);
-    fixture
-        .ledger
-        .write(
-            "items.json",
-            &serde_json::json!([{
-                "id":"c1-old","kind":"agent","host":"local","pane":"placed-shell",
-                "owner_pane":"parent","name":"worker","created_ms":1,"closed_ms":null
-            }]),
-        )
-        .unwrap();
+    crate::store::put_items(
+        &fixture.ledger,
+        &serde_json::json!([{
+            "id":"c1-old","kind":"agent","host":"local","pane":"placed-shell",
+            "owner_pane":"parent","name":"worker","created_ms":1,"closed_ms":null
+        }]),
+    )
+    .unwrap();
     fixture.ledger.write("done.json", &serde_json::json!({
         "[\"c1-old\",\"placed-shell\",null]":{
             "pane":"placed-shell","item":"c1-old","sealed":10,"marked_ms":1,"native_done":true,

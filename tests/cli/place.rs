@@ -44,12 +44,9 @@ pub(super) fn interrupted_placement(boundary: &str) -> (Rig, PathBuf, String) {
 
 fn queue_interrupted(rig: &Rig, id: &str) {
     let request = rig.read(&format!("state/admissions/{id}.json"))["request"].clone();
-    rig.put(
-        "state/queue.json",
-        &json!([{"id":"cancel-ticket","request":request,
+    rig.put_tickets(&json!([{"id":"cancel-ticket","request":request,
         "created_ms":rig.origin_ms,"state":"pending","waiting":false,"notified":false,
-        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]),
-    );
+        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
 }
 
@@ -71,7 +68,7 @@ fn cancellation_rejects_another_requests_saved_disposition() {
     assert_eq!(rig.read("state/preparations.json"), claims);
     assert_eq!(other.read("state/preparations.json"), other_claims);
     assert!(
-        rig.read("state/queue.json")[0]["error"]
+        rig.tickets()[0]["error"]
             .as_str()
             .unwrap()
             .contains("disposition")
@@ -90,7 +87,7 @@ fn cancellation_after_resume_completion_is_too_late_with_pending_ticket() {
     queue_interrupted(&rig, &id);
     let (code, result) = rig.json(&["place", "--resume", &id]);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    assert_eq!(rig.tickets()[0]["state"], "pending");
     let (code, cancelled) = rig.json(&["cancel", "cancel-ticket"]);
     assert_eq!(code, 2, "{cancelled}");
     assert_eq!(cancelled["status"], "too_late");
@@ -104,7 +101,7 @@ fn cancellation_after_placement_result_saved_is_too_late() {
     let (code, cancelled) = rig.json(&["cancel", "cancel-ticket"]);
     assert_eq!(code, 2, "{cancelled}");
     assert_eq!(cancelled["status"], "too_late");
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    assert_eq!(rig.tickets()[0]["state"], "pending");
     let file = format!("state/admissions/{id}.json");
     let result = rig.read(&file)["placement"]["saved"]["result"].clone();
     assert_eq!(
@@ -115,7 +112,7 @@ fn cancellation_after_placement_result_saved_is_too_late() {
         1
     );
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
+    assert_eq!(rig.tickets()[0]["state"], "admitted");
     assert_eq!(rig.read("state/preparations.json"), json!([]));
     assert_eq!(rig.read(&file)["placement"]["phase"], "completed");
     let receipt_file = format!("state/preparation-receipts/{id}.disposition.json");
@@ -290,10 +287,8 @@ fn queued_placement_accepts_symlinked_repository_root() {
     std::os::unix::fs::symlink(rig.dir.join("home"), &temp_root).unwrap();
     let aliased_repo = temp_root.join(repo.file_name().unwrap());
     assert_ne!(aliased_repo, repo);
-    rig.put(
-        "state/queue.json",
-        &json!([{
-            "id":"alias-ticket","request":{"id":"alias-request","action":{"type":"place"},
+    rig.put_tickets(&json!([{
+            "id":"alias-ticket","request":{"id":"alias-request","validity":request_authority(&rig,"alias-request"),"action":{"type":"place"},
                 "host":"local","branch":"alias-branch","base":"main","cwd":aliased_repo,
                 "repository":{"path":aliased_repo,"origin":"https://example.invalid/repo.git","relative":"repo space","working_root":aliased_repo},
                 "workspace":null,"workspace_name":null,"owner":"w1:p1"},
@@ -303,7 +298,7 @@ fn queued_placement_accepts_symlinked_repository_root() {
     );
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(out.status.success(), "{out:?}");
-    let ticket = &rig.read("state/queue.json")[0];
+    let ticket = &rig.tickets()[0];
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(ticket["retry"]["attempts"], 0, "{ticket}");
     let returned = ticket["result"].clone();
@@ -515,8 +510,8 @@ fn lost_placement_reply(marker: &str) {
         assert_eq!(resumed, result);
     }
     assert_eq!(
-        rig.read(&format!("peer-state/preparation-receipts/{id}.json")),
-        original
+        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        outcome_identity(original)
     );
     assert_eq!(
         rig.read(&format!("peer-state/placement-grants/{id}.json")),
@@ -638,8 +633,8 @@ fn review_failed_preparation_finishes_matching_failure_disposition() {
     );
     assert_eq!(disposition["progress"], "released");
     assert_eq!(
-        rig.read(&format!("state/preparation-receipts/{id}.json")),
-        original
+        outcome_identity(rig.read(&format!("state/preparation-receipts/{id}.json"))),
+        outcome_identity(original)
     );
     assert_eq!(rig.json(&["place", "--resume", id]), (2, failure));
     assert_eq!(
@@ -686,8 +681,8 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
     assert_eq!(rig.log("ssh.log").matches("host reserve ").count(), 1);
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
     assert_eq!(
-        rig.read(&format!("peer-state/preparation-receipts/{id}.json")),
-        original
+        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        outcome_identity(original)
     );
     assert_eq!(
         rig.read(&format!("peer-state/placement-grants/{id}.json")),
@@ -711,12 +706,9 @@ fn concurrent_cli_resume_and_service_replay_once() {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let original = rig.read(&format!("state/admissions/{id}.json"));
     let grant = rig.read(&format!("state/placement-grants/{id}.json"));
-    rig.put(
-        "state/queue.json",
-        &json!([{"id":"resume-ticket","request":original["request"],
+    rig.put_tickets(&json!([{"id":"resume-ticket","request":original["request"],
         "created_ms":rig.origin_ms,"state":"pending","waiting":false,"notified":false,
-        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]),
-    );
+        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
     let admission = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -761,7 +753,7 @@ fn concurrent_cli_resume_and_service_replay_once() {
         assert!(child.wait().success());
     }
     let returned: Value = serde_json::from_str(&rig.log("cli-output")).unwrap();
-    let queue = rig.read("state/queue.json");
+    let queue = rig.tickets();
     assert_eq!(queue.as_array().unwrap().len(), 1);
     assert_eq!(queue[0]["state"], "admitted", "{queue}");
     assert_eq!(queue[0]["result"], returned);
@@ -912,9 +904,16 @@ esac
     assert!(!log.contains("host launch"), "{log}");
 }
 
+fn request_authority(rig: &Rig, id: &str) -> Value {
+    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
+    let stamp = json!({"version":1,"created_ms":rig.now_ms()});
+    rig.put(&format!("state/job-validity/{id}.json"), &stamp);
+    stamp
+}
+
 fn placement_envelope(rig: &Rig, id: &str) -> Value {
-    json!({"version":2,"expected_grant":null,"reservation":id,"host":{"id":"local","label":"local"},
-        "request":{"id":id,"action":{"type":"place"},"host":null,"branch":null,"base":null,
+    json!({"version":3,"expected_grant":null,"reservation":id,"host":{"id":"local","label":"local"},
+        "request":{"id":id,"validity":request_authority(rig,id),"action":{"type":"place"},"host":null,"branch":null,"base":null,
             "cwd":rig.dir.join("home"),"repository":null,"workspace":null,"workspace_name":null,
             "owner":"w1:p1","owner_host":null}})
 }
@@ -1006,7 +1005,7 @@ fn lost_reply_replay(after_ttl: bool) {
     fs::write(rig.dir.join("lose-reply"), "").unwrap();
     let (code, queued) = rig.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 1, "{queued}");
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     let id = ticket["request"]["id"].as_str().unwrap();
     let grant_path = format!("peer-state/placement-grants/{id}.json");
     let original = rig.read(&grant_path);
@@ -1022,7 +1021,7 @@ fn lost_reply_replay(after_ttl: bool) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(rig.read(&grant_path), original);
     let holds = rig.read("peer-state/placements.json");
@@ -1064,7 +1063,7 @@ fn acknowledged_remote_placement(name: &str) -> (Rig, String) {
         "main",
     ]);
     assert_eq!(code, 1, "{queued}");
-    let id = rig.read("state/queue.json")[0]["request"]["id"]
+    let id = rig.tickets()[0]["request"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -1088,7 +1087,7 @@ fn acknowledged_placement_grant_replays_after_real_ttl_without_readmission() {
     fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
     rig.snapshot("peer-state/host.json", later, 1000.0, 16);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(rig.read(&grant_path), grant);
     assert_eq!(
@@ -1114,7 +1113,7 @@ fn acknowledged_placement_missing_grant_never_allocates_after_ttl() {
     fs::remove_file(rig.dir.join(&grant_path)).unwrap();
     let before = rig.read("peer-state/placements.json");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "failed", "{ticket}");
     assert!(
         ticket["error"].as_str().unwrap().contains("changed"),
@@ -1136,16 +1135,16 @@ fn acknowledged_placement_missing_grant_never_allocates_after_ttl() {
 fn queued_preparation_pending_recovers_the_acknowledged_grant() {
     let (rig, id) = acknowledged_remote_placement("placement-selected-recovery");
     let grant = rig.read(&format!("peer-state/placement-grants/{id}.json"));
-    let mut queue = rig.read("state/queue.json");
+    let mut queue = rig.tickets();
     queue[0]["state"] = json!("admitting");
     let next = queue[0]["retry"]["next_ms"].as_u64().unwrap();
-    rig.put("state/queue.json", &queue);
+    rig.put_tickets(&queue);
     fs::write(rig.dir.join("clock"), (next - 1).to_string()).unwrap();
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    assert_eq!(rig.tickets()[0]["state"], "pending");
     fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(
         saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
@@ -1173,16 +1172,13 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     assert_eq!(code, 1, "{result}");
     assert_eq!(result["status"], "pending_release");
     let id = result["request_id"].as_str().unwrap();
-    let ticket = rig.read("state/queue.json")[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let ticket = rig.tickets()[0]["id"].as_str().unwrap().to_owned();
     let (code, cancellation) = rig.json(&["cancel", &ticket]);
     assert_eq!(code, 2, "{cancellation}");
     assert_eq!(cancellation["status"], "too_late");
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
+    assert_eq!(rig.tickets()[0]["state"], "admitted");
     assert!(
         !rig.dir
             .join(format!("state/cancellations/{id}.json"))
@@ -1204,16 +1200,13 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
 #[test]
 fn result_is_durable_before_host_release() {
     let (rig, repo) = place_rig("result-before-release");
-    let request = json!({"id":"durable-placement","action":{"type":"place"},"host":"local",
+    let request = json!({"id":"durable-placement","validity":request_authority(&rig,"durable-placement"),"action":{"type":"place"},"host":"local",
         "branch":"durable","base":"main","cwd":repo,"owner":"w1:p1",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
-    rig.put(
-        "state/queue.json",
-        &json!([{"id":"durable-ticket","request":request,
+    rig.put_tickets(&json!([{"id":"durable-ticket","request":request,
         "created_ms":rig.origin_ms,"state":"pending","waiting":false,"notified":false,
-        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]),
-    );
+        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let out = rig
         .cmd(&["serve", "--once"])
@@ -1256,16 +1249,13 @@ fn placement_crash_boundaries_replay_one_result() {
         "preparation-claim-released",
     ] {
         let (rig, repo) = place_rig(boundary);
-        let request = json!({"id":"queued-placement", "action":{"type":"place"}, "host":"local",
+        let request = json!({"id":"queued-placement", "validity":request_authority(&rig,"queued-placement"), "action":{"type":"place"}, "host":"local",
         "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
-        rig.put(
-            "state/queue.json",
-            &json!([{"id":"placement-ticket", "request":request,
+        rig.put_tickets(&json!([{"id":"placement-ticket", "request":request,
         "created_ms":rig.origin_ms, "state":"pending", "waiting":false, "notified":false,
-        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]),
-        );
+        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
         let out = rig
             .cmd(&["serve", "--once"])
@@ -1288,7 +1278,7 @@ fn placement_crash_boundaries_replay_one_result() {
                 .unwrap();
             assert_eq!(out.status.code(), Some(86), "{out:?}");
         }
-        assert_eq!(rig.read("state/queue.json")[0]["state"], "admitting");
+        assert_eq!(rig.tickets()[0]["state"], "admitting");
         let receipt = if boundary == "placement-host-selected" {
             assert!(
                 !rig.dir
@@ -1305,7 +1295,7 @@ fn placement_crash_boundaries_replay_one_result() {
         };
         let grant = rig.read("state/placement-grants/queued-placement.json");
         assert!(rig.run(&["serve", "--once"]).status.success());
-        let ticket = rig.read("state/queue.json")[0].clone();
+        let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["state"], "admitted", "{ticket}");
         let final_attempt = rig.read("state/admissions/queued-placement.json");
         assert_eq!(final_attempt["placement"]["phase"], "completed");
@@ -1317,11 +1307,12 @@ fn placement_crash_boundaries_replay_one_result() {
             rig.json(&["place", "--resume", "queued-placement"]),
             (0, ticket["result"].clone())
         );
-        if let Some(receipt) = receipt {
-            assert_eq!(
-                rig.read("state/preparation-receipts/queued-placement.json"),
-                receipt
-            );
+        if let Some(mut receipt) = receipt {
+            let mut completed = rig.read("state/preparation-receipts/queued-placement.json");
+            assert!(completed["finished_ms"].is_u64());
+            completed.as_object_mut().unwrap().remove("finished_ms");
+            receipt.as_object_mut().unwrap().remove("finished_ms");
+            assert_eq!(completed, receipt);
         }
         assert_eq!(
             rig.read("state/placement-grants/queued-placement.json"),
@@ -1353,12 +1344,10 @@ fn acknowledged_placement_rejects_mutated_grant_or_hold_identity() {
             holds[0]["created_ms"] = json!(1);
             rig.put("peer-state/placements.json", &holds);
         }
-        let next = rig.read("state/queue.json")[0]["retry"]["next_ms"]
-            .as_u64()
-            .unwrap();
+        let next = rig.tickets()[0]["retry"]["next_ms"].as_u64().unwrap();
         fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
         assert!(rig.run(&["serve", "--once"]).status.success());
-        let ticket = rig.read("state/queue.json")[0].clone();
+        let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["state"], "failed", "{changed}: {ticket}");
         assert_eq!(rig.read(&admission_path), admission);
         assert_eq!(rig.read(&grant_path), grant);
@@ -1461,7 +1450,7 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
         match change {
             "request" => changed["request"]["cwd"] = json!("/different"),
             "target" => changed["host"]["target"] = json!("other-target"),
-            "version" => changed["version"] = json!(3),
+            "version" => changed["version"] = json!(4),
             "missing" => {
                 changed.as_object_mut().unwrap().remove("request");
             }

@@ -830,14 +830,11 @@ mod tests {
             }
         });
         admissions.write("child.json", &unit).unwrap();
-        let items_before = std::fs::read(ledger.dir.join("items.json")).unwrap();
+        let items_before = crate::store::items(&ledger).unwrap();
         let unit_before = std::fs::read(admissions.dir.join("child.json")).unwrap();
         let shell = shell_without_owner();
         claim(&ledger, &request(&host(), 0), &shell).unwrap();
-        assert_eq!(
-            std::fs::read(ledger.dir.join("items.json")).unwrap(),
-            items_before
-        );
+        assert_eq!(crate::store::items(&ledger).unwrap(), items_before);
         assert_eq!(
             std::fs::read(admissions.dir.join("child.json")).unwrap(),
             unit_before

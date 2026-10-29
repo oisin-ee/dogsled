@@ -438,6 +438,8 @@ impl Group {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Row {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<crate::holds::Hold>,
     pub group: Group,
     pub kind: String,
     pub id: String,
@@ -561,6 +563,7 @@ fn closed_branch_row(
     now: u64,
 ) -> Row {
     Row {
+        holds: Vec::new(),
         group: Group::ToLand,
         kind: "agent".into(),
         id: item.id.clone(),
@@ -628,6 +631,8 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         .filter(|s| agent.is_some_and(|a| a.signal.as_deref() == Some(s.kind.as_str())));
     let activity = if let Some(signal) = signal {
         signal.text.clone()
+    } else if let Some(reason) = &item.resource_close_reason {
+        reason.clone()
     } else {
         match (group, agent) {
             (Group::ToLand, _) => [
@@ -650,13 +655,15 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
             }
         }
     };
-    let group =
-        if group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && quiet_eligible {
-            Group::Attention
-        } else {
-            group
-        };
+    let group = if item.resource_close_reason.is_some()
+        || (group == Group::Running && quiet_ms.is_some_and(|q| q >= QUIET_MS) && quiet_eligible)
+    {
+        Group::Attention
+    } else {
+        group
+    };
     Row {
+        holds: Vec::new(),
         group,
         kind: "agent".into(),
         id: item.id.clone(),
@@ -722,6 +729,7 @@ fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     );
     let failed = state.starts_with("exit ") || state == "blocked";
     Row {
+        holds: Vec::new(),
         group: if failed {
             Group::Attention
         } else {
@@ -776,6 +784,7 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
             .next()
     });
     Row {
+        holds: Vec::new(),
         group: Group::Waiting,
         kind: kind.into(),
         id: ticket.id.clone(),
@@ -835,6 +844,7 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
             row.activity.clone_from(activity);
         }
     }
+    resource_rows(status, &mut rows, owner);
     // Stable: within a group, the oldest first.
     rows.sort_by(|a, b| a.group.cmp(&b.group).then(b.age_ms.cmp(&a.age_ms)));
     Board {
@@ -861,6 +871,63 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
             .collect(),
         rows,
     }
+}
+
+fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
+    let mine = |pane: &str| owner.is_none_or(|owner| owner == pane);
+    let mut request_ids = std::collections::BTreeSet::new();
+    for row in rows.iter_mut() {
+        // Queue rows expose the ticket ID; retained resources belong to its request.
+        let request_id = status
+            .queue
+            .iter()
+            .find(|ticket| ticket.id == row.id)
+            .map_or_else(|| row.id.clone(), |ticket| ticket.request.id.clone());
+        for hold in status
+            .holds
+            .iter()
+            .filter(|hold| hold.request_id.as_deref() == Some(request_id.as_str()))
+        {
+            row.holds.push(hold.clone());
+        }
+        request_ids.insert(request_id);
+    }
+    rows.extend(
+        status
+            .holds
+            .iter()
+            .filter(|hold| {
+                !hold
+                    .request_id
+                    .as_ref()
+                    .is_some_and(|id| request_ids.contains(id))
+            })
+            .filter(|hold| hold.owner_pane.as_deref().is_none_or(mine))
+            .map(|hold| Row {
+                holds: Vec::new(),
+                group: Group::Attention,
+                kind: "hold".into(),
+                id: format!("hold:{}:{}:{}", hold.host, hold.code, hold.resource),
+                name: hold.resource.clone(),
+                what: "resource hold".into(),
+                host: label(&status.hosts, &hold.host),
+                pane: None,
+                owner_pane: Some(hold.owner.clone()),
+                title: None,
+                cleanup: None,
+                unseen: false,
+                state: "held".into(),
+                activity: format!(
+                    "owner: {}; {}; next (on {}): {}",
+                    hold.owner, hold.reason, hold.command_host, hold.next_command
+                ),
+                age_ms: 0,
+                quiet_ms: None,
+                ahead: None,
+                dirty: false,
+                repository: None,
+            }),
+    );
 }
 
 /// Add portal metadata on the blocking board reader, never on an HTTP request.
@@ -1153,6 +1220,9 @@ impl Board {
                 },
                 age(row.age_ms)
             );
+            for hold in &row.holds {
+                let _ = writeln!(out, "    {}", hold.display());
+            }
         }
         out
     }
@@ -1750,6 +1820,7 @@ mod tests {
             failure: None,
             jobs: Vec::new(),
             handoffs: Vec::new(),
+            holds: Vec::new(),
             retry_ms: None,
             job_validity: None,
         }
@@ -1783,6 +1854,7 @@ mod tests {
             orphans: Vec::new(),
             sweep: None,
             stopped_activity: std::collections::BTreeMap::new(),
+            holds: Vec::new(),
         }
     }
 
@@ -1815,6 +1887,39 @@ mod tests {
         let board = build(&status, Some("w1:p1"), NOW);
         let names: Vec<_> = board.rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["retained", "open"]);
+    }
+
+    #[test]
+    fn saved_recovery_is_not_ready_to_merge_but_a_retained_branch_is() {
+        let recovery = crate::preservation::Recovery {
+            host: "8103".into(),
+            repository: "/repo".into(),
+            id: "saved".into(),
+            pinned_oid: "oid".into(),
+            predecessors: Vec::new(),
+            operation: "close".into(),
+            item: Some("saved-only".into()),
+        };
+        let saved = Item {
+            closed_ms: Some(NOW),
+            recovery: Some(recovery.clone()),
+            ..item("saved-only", "8103", "gone")
+        };
+        let retained = Item {
+            closed_ms: Some(NOW),
+            recovery: Some(recovery),
+            branch: Some(crate::done::Branch {
+                repo: "/repo".into(),
+                name: "feature".into(),
+                ahead: 1,
+                landed: false,
+            }),
+            ..item("retained", "8103", "also-gone")
+        };
+        let board = build(&status(Vec::new(), vec![saved, retained]), None, NOW);
+        assert_eq!(board.rows.len(), 1);
+        assert_eq!(board.rows[0].id, "retained");
+        assert_eq!(board.rows[0].group, Group::ToLand);
     }
 
     #[test]
@@ -2450,8 +2555,10 @@ mod tests {
     #[test]
     fn a_queued_row_carries_the_repository_of_its_request() {
         let ticket = crate::work::Ticket {
+            finished_ms: None,
             id: "t1".into(),
             request: crate::work::Request {
+                validity: None,
                 id: "t1".into(),
                 action: crate::work::Action::Job {
                     cmd: vec!["cargo".into(), "test".into()],

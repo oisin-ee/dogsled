@@ -24,13 +24,10 @@ fn agents(rig: &Rig, state: &str, seq: u64, session: &str, owner_session: &str) 
 fn setup(name: &str) -> Rig {
     let rig = Rig::new(name);
     agents(&rig, "working", 10, "child-session", "owner-session");
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
-            "owner_session":"owner-session","name":"worker","created_ms":1,"closed_ms":null
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
+        "owner_session":"owner-session","name":"worker","created_ms":1,"closed_ms":null
+    }]));
     rig.snapshot("state/host.json", now(), 0.0, 8);
     let out = rig.run(&["inbox", "claim", "--harness", "pi"]);
     assert!(
@@ -97,7 +94,7 @@ fn ask_reaches_owner_item_and_inbox_once_and_next_turn_clears_it() {
     agents(&rig, "idle", 11, "child-session", "owner-session");
     serve(&rig);
     serve(&rig);
-    let item = &rig.read("state/items.json")[0];
+    let item = &rig.items()[0];
     assert_eq!(item["signal"]["event_id"], event["event_id"]);
     assert!(item["signal"]["reported_ms"].is_u64(), "{item}");
     assert!(
@@ -111,7 +108,7 @@ fn ask_reaches_owner_item_and_inbox_once_and_next_turn_clears_it() {
     assert_eq!(row(&rig)["activity"], "Which branch should I use?");
     agents(&rig, "working", 12, "child-session", "owner-session");
     serve(&rig);
-    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert!(rig.items()[0]["signal"].is_null());
     assert_ne!(row(&rig)["activity"], "Which branch should I use?");
     let mark = rig.read("state/done.json");
     let mark = mark.as_object().unwrap().values().next().unwrap();
@@ -135,7 +132,7 @@ fn blocked_reason_shows_under_needs_you_and_next_turn_clears_it() {
     assert_eq!(notes(&rig, "blocked").len(), 1);
     agents(&rig, "working", 12, "child-session", "owner-session");
     serve(&rig);
-    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert!(rig.items()[0]["signal"].is_null());
     assert_eq!(row(&rig)["state"], "working");
 }
 
@@ -147,7 +144,7 @@ fn replacement_owner_session_never_receives_the_old_question() {
     agents(&rig, "idle", 11, "child-session", "replacement-session");
     serve(&rig);
     assert_eq!(notes(&rig, "ask"), Vec::<Value>::new());
-    assert!(rig.read("state/items.json")[0]["signal"]["reported_ms"].is_null());
+    assert!(rig.items()[0]["signal"]["reported_ms"].is_null());
 }
 
 #[test]
@@ -156,7 +153,7 @@ fn replacement_child_session_never_sees_or_clears_an_old_signal() {
     assert_eq!(signal(&rig, "ask", "Old child question").0, 0);
     agents(&rig, "working", 30, "replacement-child", "owner-session");
     serve(&rig);
-    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert!(rig.items()[0]["signal"].is_null());
     assert_eq!(notes(&rig, "ask"), Vec::<Value>::new());
     let marks = rig.read("state/done.json");
     let mark = marks.as_object().unwrap().values().next().unwrap();
@@ -171,7 +168,7 @@ fn ask_works_with_dirty_work_and_open_children_and_does_not_close_input() {
     listed["result"]["agents"][1]["cwd"] = json!(tree);
     rig.put("agents.json", &listed);
     fs::write(tree.join("scratch"), "uncommitted work").unwrap();
-    rig.put("state/items.json", &json!([
+    rig.put_items(&json!([
         {"id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null},
         {"id":"grandchild","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"w2:p1","owner_session":"child-session","created_ms":1,"closed_ms":null}
     ]));
@@ -256,10 +253,10 @@ fn remote_snapshot_imports_and_clears_the_signal() {
         .unwrap()
         .retain(|a| a["pane_id"] != "w2:p1");
     rig.put("agents.json", &listed);
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["host"] = json!("8103");
     items[0]["pane"] = json!("w9:p1");
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     rig.peer();
     let mut remote = rig.read("remote.json");
     remote["probe"]["agent_panes"] = json!([{
@@ -271,10 +268,7 @@ fn remote_snapshot_imports_and_clears_the_signal() {
         &json!({"snapshot":remote,"running":true,"handoffs":[mark]}),
     );
     serve(&rig);
-    assert_eq!(
-        rig.read("state/items.json")[0]["signal"]["event_id"],
-        event["event_id"]
-    );
+    assert_eq!(rig.items()[0]["signal"]["event_id"], event["event_id"]);
     assert_eq!(notes(&rig, "ask").len(), 1);
     let mut report = rig.read("remote.json");
     report["handoffs"][0]["signal"]["cleared_ms"] = json!(now());
@@ -288,7 +282,7 @@ fn remote_snapshot_imports_and_clears_the_signal() {
         String::from_utf8_lossy(&out.stderr)
     );
     serve(&rig);
-    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert!(rig.items()[0]["signal"].is_null());
     assert_eq!(notes(&rig, "ask").len(), 1);
 }
 
@@ -305,10 +299,10 @@ fn remote_signal(name: &str) -> (Rig, Value) {
         .unwrap()
         .retain(|a| a["pane_id"] != "w2:p1");
     rig.put("agents.json", &listed);
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["host"] = json!("8103");
     items[0]["pane"] = json!("w9:p1");
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     rig.peer();
     let mut remote = rig.read("remote.json");
     remote["probe"]["agent_panes"] = json!([{
@@ -320,7 +314,7 @@ fn remote_signal(name: &str) -> (Rig, Value) {
     remote["handoffs"] = json!([mark]);
     rig.put("remote.json", &remote);
     serve(&rig);
-    let saved = rig.read("state/items.json")[0]["signal"].clone();
+    let saved = rig.items()[0]["signal"].clone();
     assert!(saved["reported_ms"].is_u64(), "{saved}");
     assert_eq!(notes(&rig, "ask").len(), 1);
     (rig, saved)
@@ -346,7 +340,7 @@ fn remote_outage(rig: &Rig, saved: &Value) {
         cache["snapshot"]["probe"]["agent_panes"][0]["agent_session"],
         "child-session"
     );
-    assert_eq!(rig.read("state/items.json")[0]["signal"], *saved);
+    assert_eq!(rig.items()[0]["signal"], *saved);
 }
 
 #[test]
@@ -355,10 +349,10 @@ fn failed_remote_read_keeps_cached_signal_and_delivery_stamp_after_recovery() {
     remote_outage(&rig, &saved);
     // A cached failure is no more evidence than the original failed read.
     serve(&rig);
-    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    assert_eq!(rig.items()[0]["signal"], saved);
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
     refresh_remote(&rig);
-    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    assert_eq!(rig.items()[0]["signal"], saved);
     assert_eq!(notes(&rig, "ask").len(), 1);
 }
 
@@ -371,7 +365,7 @@ fn successful_remote_clear_after_outage_clears_the_retained_signal() {
     report["handoffs"][0]["signal"]["cleared_ms"] = json!(now());
     rig.put("remote.json", &report);
     refresh_remote(&rig);
-    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert!(rig.items()[0]["signal"].is_null());
     assert_eq!(notes(&rig, "ask").len(), 1);
 }
 
@@ -383,11 +377,11 @@ fn replacement_remote_session_clears_a_signal_without_a_matching_mark() {
     rig.put("remote.json", &report);
     refresh_remote(&rig);
     // A successful but mark-less read of the same session also proves no clearance.
-    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    assert_eq!(rig.items()[0]["signal"], saved);
     report["probe"]["agent_panes"][0]["agent_session"] = json!("replacement");
     rig.put("remote.json", &report);
     refresh_remote(&rig);
-    assert!(rig.read("state/items.json")[0]["signal"].is_null());
+    assert!(rig.items()[0]["signal"].is_null());
     assert_eq!(notes(&rig, "ask").len(), 1);
 }
 
@@ -418,7 +412,7 @@ fn outage_during_custody_move_does_not_deliver_the_same_event_twice() {
     serve(&rig);
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
     refresh_remote(&rig);
-    assert_eq!(rig.read("state/items.json")[0]["signal"], saved);
+    assert_eq!(rig.items()[0]["signal"], saved);
     assert_eq!(notes(&rig, "ask").len(), 1);
     if rig.dir.join("state/inbox/term_grandchild.json").exists() {
         let records = rig.read("state/inbox/term_grandchild.json");
@@ -438,16 +432,16 @@ fn outage_during_custody_move_does_not_deliver_the_same_event_twice() {
 #[test]
 fn open_children_without_a_signal_show_waiting() {
     let rig = setup("signal-waiting");
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items.as_array_mut().unwrap().push(json!({
         "id":"grandchild","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"w2:p1",
         "owner_session":"child-session","created_ms":1,"closed_ms":null
     }));
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     agents(&rig, "idle", 11, "child-session", "owner-session");
     for pass in 1..=2 {
         serve(&rig);
-        let items = rig.read("state/items.json");
+        let items = rig.items();
         let grandchild = items
             .as_array()
             .unwrap()

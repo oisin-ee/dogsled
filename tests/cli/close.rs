@@ -14,7 +14,7 @@ teardown = [
 /// A real repository with a `dogsled.toml` teardown and a locked linked worktree on `feat/x`.
 /// Fake Herdr serves `panes.json` and `worktrees.json`, which shows the worktree in workspace w2.
 pub(super) fn close_rig(name: &str) -> (Rig, PathBuf) {
-    let rig = Rig::new(name);
+    let rig = Rig::short(name);
     let repo = rig.dir.join("home/repo");
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -98,15 +98,14 @@ fn panes(rig: &Rig, status: &str, cwd: &Path) {
         "panes.json",
         &json!({"result":{"panes":[
             {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
-            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":status,"cwd":cwd},
+            {"pane_id":"w2:p1","terminal_id":"term_child","workspace_id":"w2","agent":"pi","agent_status":status,"cwd":cwd},
             {"pane_id":"w2:p2","workspace_id":"w2","agent":null,"agent_status":"unknown","cwd":cwd}
         ]}}),
     );
 }
 
 fn item(rig: &Rig, host: &str) {
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":"i1","kind":"agent","host":host,"pane":"w2:p1","owner_pane":"w1:p1",
             "name":"worker","created_ms":1,"closed_ms":null}]),
     );
@@ -163,7 +162,7 @@ fn close_runs_teardown_removes_the_worktree_and_deletes_an_integrated_branch() {
     assert!(herdr.contains("workspace close w2"));
     assert!(!herdr.contains("pane close"));
     assert!(!tree.exists());
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
     // Close forgets the removed worktree's registration, like prune.
     assert_eq!(registered(&rig), [other["path"].clone()]);
 }
@@ -194,7 +193,7 @@ fn close_finishes_a_child_tab_in_the_callers_workspace_but_not_the_callers_workt
         "panes.json",
         &json!({"result":{"panes":[
             {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
-            {"pane_id":"w1:p2","workspace_id":"w1","agent":"pi","agent_status":"done","cwd":tree}
+            {"pane_id":"w1:p2","terminal_id":"term_tab","workspace_id":"w1","agent":"pi","agent_status":"done","cwd":tree}
         ]}}),
     );
     let (code, closed) = rig.json(&["close", "w1:p2"]);
@@ -233,7 +232,7 @@ fn a_child_in_an_unlocked_worktree_loses_its_pane_and_never_the_checkout() {
 }
 
 #[test]
-fn close_refuses_active_dirty_foreign_locked_or_own_work_without_changes() {
+fn close_refuses_active_unsupported_foreign_locked_or_own_work_without_changes() {
     let (rig, tree) = close_rig("close-refuse");
     item(&rig, "local");
     for status in ["working", "blocked", "unknown"] {
@@ -244,10 +243,12 @@ fn close_refuses_active_dirty_foreign_locked_or_own_work_without_changes() {
     }
     panes(&rig, "idle", &tree);
     assert!(!rig.run(&["close", "w1:p1"]).status.success());
-    fs::write(tree.join("note"), "x").unwrap();
+    let nested = tree.join("nested");
+    fs::create_dir(&nested).unwrap();
+    git(&nested, &["init", "-q", "-b", "main"]);
     let out = rig.run(&["close", "w2:p1"]);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("uncommitted"));
-    fs::remove_file(tree.join("note")).unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nested repository"));
+    fs::remove_dir_all(nested).unwrap();
     let repo = rig.dir.join("home/repo");
     git(&repo, &["worktree", "unlock", tree.to_str().unwrap()]);
     git(
@@ -266,7 +267,7 @@ fn close_refuses_active_dirty_foreign_locked_or_own_work_without_changes() {
     let herdr = rig.log("herdr.log");
     assert!(!herdr.contains("pane close") && !herdr.contains("workspace close"));
     assert!(tree.exists());
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 #[test]
@@ -290,7 +291,7 @@ fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
     );
     let repo = rig.dir.join("home/repo");
     assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 /// The teardown ran after the loss check and left a commit that no ref holds. The checkout,
@@ -302,7 +303,11 @@ fn a_teardown_commit_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
     panes(&rig, "idle", &tree);
     item(&rig, "local");
     fs::write(rig.dir.join("hook-commit"), "").unwrap();
-    let out = rig.run(&["close", "w2:p1"]);
+    git(&tree, &["checkout", "--detach"]);
+    let mut p = rig.read("panes.json");
+    p["result"]["panes"][1]["agent"] = Value::Null;
+    rig.put("panes.json", &p);
+    let out = rig.run(&["host", "close", "w2:p1", "--landed", "--writer"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -318,7 +323,7 @@ fn a_teardown_commit_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
     );
     let repo = rig.dir.join("home/repo");
     assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 /// The teardown ran after the loss check and left a file that no ref holds. The checkout,
@@ -330,7 +335,10 @@ fn a_teardown_file_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
     panes(&rig, "idle", &tree);
     item(&rig, "local");
     fs::write(rig.dir.join("hook-dirt"), "").unwrap();
-    let out = rig.run(&["close", "w2:p1"]);
+    let mut p = rig.read("panes.json");
+    p["result"]["panes"][1]["agent"] = Value::Null;
+    rig.put("panes.json", &p);
+    let out = rig.run(&["host", "close", "w2:p1", "--landed", "--writer"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -346,7 +354,7 @@ fn a_teardown_file_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
     );
     let repo = rig.dir.join("home/repo");
     assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 /// A launch receipt with no result, as an interrupted or failed launch leaves it.
@@ -615,19 +623,16 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
     let before = rig.read("state/launches/own.progress.json");
     let holds = json!([{"repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x","head":""}]);
     rig.put("state/preparations.json", &holds);
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"remote-item","kind":"agent","host":"remote","pane":"w2:p2",
-            "owner_pane":"w1:p1","created_ms":1
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"remote-item","kind":"agent","host":"remote","pane":"w2:p2",
+        "owner_pane":"w1:p1","created_ms":1
+    }]));
     let (code, result) = rig.json(&["close", "w2:p2", "--host", "local"]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["pane_closed"], true);
     assert!(result["worktree"].is_null());
     assert_eq!(rig.read("state/preparations.json"), holds);
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
     assert!(tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
     assert!(!rig.dir.join("hook.log").exists());
@@ -695,7 +700,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
                 pane["agent"] = json!("pi");
                 pane["agent_status"] = json!("idle");
             }
-            "item" => rig.put("state/items.json", &json!([{
+            "item" => rig.put_items(&json!([{
                 "id":"different","kind":"agent","host":"local","pane":"w2:p2",
                 "owner_pane":"w1:p1","created_ms":1
             }])),
@@ -761,11 +766,13 @@ fn close_keeps_local_only_work_and_deletes_a_branch_at_the_default_tip() {
     git(&tree, &["add", "work"]);
     git(&tree, &["commit", "-q", "-m", "unmerged work"]);
     panes(&rig, "idle", &tree);
-    let out = rig.run(&["close", "w2:p1"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("commits are not held"));
-    assert!(tree.exists());
+    let (code, closed) = rig.json(&["close", "w2:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    assert!(closed["recovery"]["id"].is_string());
+    assert!(!tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
+    assert_eq!(closed["retained_branch"]["name"], "feat/x");
+    assert_eq!(closed["retained_branch"]["landed"], false);
     // A branch at the default tip loses nothing without a preparation hold.
     let (rig, tree) = close_rig("close-new-branch");
     panes(&rig, "idle", &tree);
@@ -792,7 +799,7 @@ fn close_shuts_the_anchor_after_its_last_child_only_when_idle() {
     anchored(&rig);
     let workspace = |agent: Value| {
         json!({"result":{"panes":[
-            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":"done","cwd":tree},
+            {"pane_id":"w2:p1","terminal_id":"term_child","workspace_id":"w2","agent":"pi","agent_status":"done","cwd":tree},
             {"pane_id":"w5:p1","workspace_id":"w5","agent":agent,"cwd":repo}
         ]}})
     };
@@ -825,6 +832,7 @@ fn close_shuts_the_anchor_after_its_last_child_only_when_idle() {
         ],
     );
     anchored(&rig);
+    item(&rig, "local");
     rig.put("panes.json", &workspace(Value::Null));
     rig.put("panes-after.json", &after(Value::Null));
     let (code, closed) = rig.json(&["close", "w2:p1"]);
@@ -1012,7 +1020,7 @@ esac
     let (code, closed) = rig.json(&["close", "w2:p1"]);
     assert_eq!(code, 0, "{closed}");
     assert!(rig.log("ssh.log").contains("netcup-dev"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
 }
 
 #[test]
@@ -1221,7 +1229,7 @@ fn detached_panes(rig: &Rig, tree: &Path) {
         "panes.json",
         &json!({"result":{"panes":[
             {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
-            {"pane_id":"w3:p1","workspace_id":"w3","agent":"pi","agent_status":"idle","cwd":tree}
+            {"pane_id":"w3:p1","terminal_id":"term_detached","workspace_id":"w3","agent":"pi","agent_status":"idle","cwd":tree}
         ]}}),
     );
 }
@@ -1288,7 +1296,7 @@ fn close_removes_a_detached_checkout_a_remote_holds_once_its_owner_is_gone() {
 }
 
 #[test]
-fn close_refuses_a_detached_checkout_whose_commits_no_ref_holds() {
+fn close_saves_a_detached_checkout_whose_commits_no_other_ref_holds() {
     let (rig, tree) = detached_rig("close-detached-unheld");
     // A commit no ref holds: its work would be lost with the checkout.
     fs::write(tree.join("more"), "more work").unwrap();
@@ -1296,32 +1304,38 @@ fn close_refuses_a_detached_checkout_whose_commits_no_ref_holds() {
     git(&tree, &["commit", "-q", "-m", "more work"]);
     detached_panes(&rig, &tree);
     item(&rig, "local");
-    let out = rig.run(&["close", "w3:p1"]);
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("commits are not held"), "{stderr}");
-    assert!(tree.exists());
-    assert!(!rig.log("herdr.log").contains("workspace close"));
-    assert!(!rig.log("herdr.log").contains("pane close"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
-    // The checkout is untouched: its commit is still there.
-    assert!(tree.join("more").exists());
+    let head = git(&tree, &["rev-parse", "HEAD"]);
+    let (code, closed) = rig.json(&["close", "w3:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    assert!(!tree.exists());
+    assert!(closed["recovery"]["id"].is_string());
+    let reference = format!(
+        "refs/dogsled/recovery/{}^",
+        closed["recovery"]["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        git(&rig.dir.join("home/repo"), &["rev-parse", &reference]),
+        head
+    );
 }
 
 #[test]
-fn close_refuses_a_dirty_detached_checkout_before_it_removes_anything() {
+fn close_saves_a_dirty_detached_checkout_before_removal() {
     let (rig, tree) = detached_rig("close-detached-dirty");
     detached_panes(&rig, &tree);
     item(&rig, "local");
     fs::write(tree.join("scratch"), "untracked").unwrap();
-    let out = rig.run(&["close", "w3:p1"]);
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("uncommitted"), "{stderr}");
-    assert!(tree.exists());
-    assert!(tree.join("scratch").exists());
-    assert!(!rig.log("herdr.log").contains("workspace close"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    let (code, closed) = rig.json(&["close", "w3:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    assert!(!tree.exists());
+    let reference = format!(
+        "refs/dogsled/recovery/{}:scratch",
+        closed["recovery"]["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        git(&rig.dir.join("home/repo"), &["show", &reference]),
+        "untracked"
+    );
 }
 
 #[test]

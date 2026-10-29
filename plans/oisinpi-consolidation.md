@@ -1,6 +1,6 @@
 # Consolidate oisinpi into Dogsled
 
-Status: approved direction, not started. Facts checked at `origin/main` of each repository: Dogsled `cafbb25` (0.27.0), oisinpi `1c9169d` (0.12.1).
+Status: steps 1 to 3 done; step 4 released as 0.28.1, retirement in progress (see Step 4). Facts first checked at `origin/main` of each repository: Dogsled `cafbb25` (0.27.0), oisinpi `1c9169d` (0.12.1).
 
 ## Goal
 
@@ -220,6 +220,16 @@ Acceptance:
 - `rg -n 'oisin\.(todo|work)\.|seed-source|dogsled:plan-approved' pi docs` has no match.
 - In `pi/`, only `pi/todo/src/provider.ts` and its tests name `oisin.tasks.acquire.v1`.
 - `pi-prewalk:test` passes without change.
+
+## Step 4: Release and retire
+
+Status: released. Retirement and local adoption in progress.
+
+- 0.28.0 (#235, tag at `a34963f`): the binaries and the GitHub release published. The npm job failed before it published anything. `actions/setup-node` v5 turns on pnpm caching when `package.json` has `packageManager`, and proto installs pnpm later in that job. 0.28.0 is not on npm.
+- 0.28.1 (#239, tag at `0098f69`): `package-manager-cache: false` in `publish-npm.yml`. Release run 40901102354 published all five packages at 0.28.1 with SLSA provenance.
+- Retirement: `scripts/npm-retire.sh` deprecates `@oisin-ee/pi-todo` and `@oisin-ee/oisinpi`. The npm owner runs it once, with 2FA. It refuses until all five 0.28.1 packages are on npm.
+- Local adoption: a dotfiles PR replaces `oisinpi@0.12.0` and `pi-dogsled@0.27.0` in the Pi settings with `pi-dogsled`, `pi-prewalk`, `pi-tiers`, and `pi-guardrails` at 0.28.1, and moves the dogsled tag and the `pi-guardrails` tool pin to 0.28.1.
+- Then archive the oisinpi GitHub repository, with a README that points here.
 
 ## Constraints for steps 3 and 4
 

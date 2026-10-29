@@ -8,6 +8,10 @@ const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a
 
 /// One `serve --once` pass. It must succeed; its stderr is the journal.
 fn serve(rig: &Rig) -> String {
+    rig.config("free_core_fraction_min = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    if !rig.dir.join("state/host.json").exists() {
+        rig.snapshot("state/host.json", NOW, 0.0, 1);
+    }
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     let journal = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "{journal}");
@@ -240,7 +244,7 @@ fn fifteen_minute_shells(launch: Option<&str>) {
         {"pane_id":"parent","agent":"pi","agent_status":"idle","terminal_id":"term_parent","completion_seq":1}
     ]}}));
     rig.done("term_parent", "parent", 1);
-    rig.put("state/items.json", &json!([{"id":"child","kind":"agent","host":"remote","pane":"remote-child","owner_pane":"parent","created_ms":1}]));
+    rig.put_items(&json!([{"id":"child","kind":"agent","host":"remote","pane":"remote-child","owner_pane":"parent","created_ms":1}]));
     fs::write(rig.dir.join("busy"), "busy\n").unwrap();
     rig.snapshot("state/host.json", NOW, 0.0, 1);
     let mut snapshot = rig.read("state/host.json");
@@ -780,7 +784,7 @@ fn child(rig: &Rig, status: &str, tree: &Path) {
         "panes.json",
         &json!({"result":{"panes":[
             {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
-            {"pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":status,"cwd":tree},
+            {"pane_id":"w2:p1","terminal_id":"term_child","workspace_id":"w2","agent":"pi","agent_status":status,"cwd":tree},
             {"pane_id":"w2:p2","workspace_id":"w2","agent":null,"cwd":tree}
         ]}}),
     );
@@ -797,8 +801,7 @@ fn child(rig: &Rig, status: &str, tree: &Path) {
 /// An open child with the id `id`, whose owner pane is `owner`. Every child has its own id,
 /// because the custody record of a child is written once and never changes its custodian.
 fn orphan(rig: &Rig, id: &str, owner: &str, host: &str) {
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":id,"kind":"agent","host":host,"pane":"w2:p1","owner_pane":owner,
             "name":"worker","created_ms":1,"closed_ms":null}]),
     );
@@ -811,7 +814,7 @@ fn child_with_owner_session(rig: &Rig, owner: &str, session: Option<&str>) {
     if let Some(session) = session {
         item["owner_session"] = json!(session);
     }
-    rig.put("state/items.json", &json!([item]));
+    rig.put_items(&json!([item]));
 }
 
 fn kept_reason(rig: &Rig) -> String {
@@ -855,7 +858,7 @@ fn the_sweep_classifies_a_child_by_its_current_custodian_not_its_origin_owner() 
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["orphans"], json!([]), "{status}");
     assert!(
-        rig.read("state/items.json")[0]["closed_ms"].is_null(),
+        rig.items()[0]["closed_ms"].is_null(),
         "a claimed child is not closed as an orphan"
     );
     // The custodian pane is gone: the child is an orphan, and the claim shows in the status.
@@ -900,10 +903,7 @@ fn a_child_with_a_legacy_owner_session_is_never_called_session_ended() {
         "{status}"
     );
     // The child is not closed as an orphan: the evidence proves nothing.
-    assert!(
-        rig.read("state/items.json")[0]["closed_ms"].is_null(),
-        "{status}"
-    );
+    assert!(rig.items()[0]["closed_ms"].is_null(), "{status}");
 }
 
 /// A custody record that cannot be read proves nothing. The child stays listed as unknown
@@ -911,15 +911,12 @@ fn a_child_with_a_legacy_owner_session_is_never_called_session_ended() {
 #[test]
 fn a_child_with_an_unreadable_custody_record_stays_listed_as_unknown() {
     let (rig, tree) = close_rig("sweep-custody-unreadable");
-    rig.put(
-        "state/items.json",
-        &json!([
-            {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
-                "name":"first","created_ms":1,"closed_ms":null},
-            {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
-                "name":"second","created_ms":1,"closed_ms":null}
-        ]),
-    );
+    rig.put_items(&json!([
+        {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
+            "name":"first","created_ms":1,"closed_ms":null},
+        {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+            "name":"second","created_ms":1,"closed_ms":null}
+    ]));
     // The custody file is corrupt, so no child's record can be read.
     fs::write(rig.dir.join("state/custody.json"), "{ this is not json").unwrap();
     // The sweep already kept the second child, so its age does not start again.
@@ -948,7 +945,7 @@ fn a_child_with_an_unreadable_custody_record_stays_listed_as_unknown() {
     let kept = orphans.iter().find(|o| o["item"] == json!("i2")).unwrap();
     assert_eq!(kept["since_ms"], json!(42), "{status}");
     // The evidence proves nothing, so no child is closed.
-    for item in rig.read("state/items.json").as_array().unwrap() {
+    for item in rig.items().as_array().unwrap() {
         assert!(item["closed_ms"].is_null(), "{item}");
     }
 }
@@ -958,15 +955,12 @@ fn a_child_with_an_unreadable_custody_record_stays_listed_as_unknown() {
 #[test]
 fn a_child_whose_custody_cannot_be_written_stays_unknown_and_the_other_is_still_orphaned() {
     let (rig, tree) = close_rig("sweep-custody-unwritable");
-    rig.put(
-        "state/items.json",
-        &json!([
-            {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
-                "name":"first","created_ms":1,"closed_ms":null},
-            {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
-                "name":"second","created_ms":1,"closed_ms":null}
-        ]),
-    );
+    rig.put_items(&json!([
+        {"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w9:p1",
+            "name":"first","created_ms":1,"closed_ms":null},
+        {"id":"i2","kind":"agent","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
+            "name":"second","created_ms":1,"closed_ms":null}
+    ]));
     // The first child has a custody record, so it is classified: its owner is gone.
     rig.put(
         "state/custody.json",
@@ -1002,7 +996,7 @@ fn a_child_whose_custody_cannot_be_written_stays_unknown_and_the_other_is_still_
     );
     assert_eq!(second["since_ms"], json!(42), "{status}");
     // The evidence proves nothing, so the child is not closed.
-    assert!(rig.read("state/items.json")[1]["closed_ms"].is_null());
+    assert!(rig.items()[1]["closed_ms"].is_null());
 }
 
 #[test]
@@ -1038,10 +1032,7 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     let untouched = |rig: &Rig, why: &str| {
         assert!(!rig.log("herdr.log").contains("close"), "{why}");
         assert!(tree.exists(), "{why}");
-        assert!(
-            rig.read("state/items.json")[0]["closed_ms"].is_null(),
-            "{why}"
-        );
+        assert!(rig.items()[0]["closed_ms"].is_null(), "{why}");
     };
     // An owner that still exists closes its own children.
     orphan(&rig, "i1", "w1:p1", "local");
@@ -1095,7 +1086,7 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     assert_eq!(rig.log("hook.log"), hook_log(&rig, &tree));
     assert!(!tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["orphans"], json!([]));
 }
@@ -1141,7 +1132,7 @@ fn a_clean_stopped_orphan_closes_and_records_output_not_a_result() {
     assert!(journal.contains("dogsled sweep: closed stopped orphan w2:p1 on local; reply recorded; task not completed"), "{journal}");
     assert!(!tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
-    let item = &rig.read("state/items.json")[0];
+    let item = &rig.items()[0];
     assert!(item["closed_ms"].is_u64(), "{item}");
     assert!(
         item["orphan_reply"]["text"]
@@ -1169,18 +1160,24 @@ fn a_clean_stopped_orphan_closes_and_records_output_not_a_result() {
 }
 
 #[test]
-fn a_dirty_stopped_orphan_stays_until_p3_preservation() {
+fn p3_dirty_stopped_orphan_is_saved_without_task_completion() {
     let (rig, tree) = close_rig("sweep-stopped-dirty");
     stopped_orphan(&rig, &tree);
     fs::write(tree.join("dirty"), "unsaved\n").unwrap();
     serve(&rig);
-    assert_eq!(
-        kept_reason(&rig),
-        "stopped orphan has unsaved work; kept until preservation (P3)"
+    assert!(!tree.exists());
+    let item = &rig.items()[0];
+    assert!(item["recovery"]["id"].is_string(), "{item}");
+    assert!(
+        item["orphan_reply"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Stopped last reply")
     );
-    assert!(tree.exists());
-    assert!(!rig.log("herdr.log").contains("close"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(item["reply"].is_null());
+    assert_ne!(item["native_done"], true);
+    assert!(item["closed_ms"].is_u64());
+    assert!(!rig.dir.join("state/done.json").exists());
 }
 
 #[test]
@@ -1191,7 +1188,7 @@ fn a_stopped_child_with_a_live_owner_stays() {
     serve(&rig);
     assert!(tree.exists());
     assert!(!rig.log("herdr.log").contains("close"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 #[test]
@@ -1212,13 +1209,13 @@ fn protected_orphan_lifecycles_never_close() {
                 child(&rig, state, &tree);
             }
             "waiting" => {
-                let mut items = rig.read("state/items.json");
+                let mut items = rig.items();
                 items
                     .as_array_mut()
                     .unwrap()
                     .push(json!({"id":"nested","kind":"job","host":"local",
                     "pane":"w3:p1","owner_pane":"w2:p1","created_ms":1,"closed_ms":null}));
-                rig.put("state/items.json", &items);
+                rig.put_items(&items);
             }
             "asking" => {
                 let agents = rig.read("agents.json");
@@ -1243,10 +1240,7 @@ fn protected_orphan_lifecycles_never_close() {
         serve(&rig);
         assert!(tree.exists(), "{state}");
         assert!(!rig.log("herdr.log").contains("close"), "{state}");
-        assert!(
-            rig.read("state/items.json")[0]["closed_ms"].is_null(),
-            "{state}"
-        );
+        assert!(rig.items()[0]["closed_ms"].is_null(), "{state}");
     }
 }
 
@@ -1255,6 +1249,7 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
     let (source, execution, _) = super::unit_seeded::launched("sweep-stopped-unit-launch");
     let (rig, tree) = close_rig("sweep-stopped-unit");
     stopped_orphan(&rig, &tree);
+    fs::write(tree.join("dirty"), b"unsettled work\n").unwrap();
     let id = execution["requestId"].as_str().unwrap();
     let path = format!("state/admissions/{id}.json");
     let attempt = source.read(&path);
@@ -1265,17 +1260,19 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
         let file = format!("state/launches/{id}{suffix}");
         rig.put(&file, &source.read(&file));
     }
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["id"] = json!(id);
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let mut watchdog = rig.read("state/watchdog.json");
     let episode = watchdog["stopped"]["i1"].clone();
     watchdog["stopped"] = json!({id:episode});
     rig.put("state/watchdog.json", &watchdog);
     serve(&rig);
     assert!(!tree.exists());
-    let item = &rig.read("state/items.json")[0];
+    let item = &rig.items()[0];
     assert!(item["resource_closed_ms"].is_u64(), "{item}");
+    assert!(item["recovery"]["id"].is_string(), "{item}");
+    assert_ne!(item["native_done"], true);
     assert_eq!(
         item["resource_close_reason"],
         "resource-only close; task unresolved"
@@ -1316,13 +1313,13 @@ fn host_stopped_orphan_close_rechecks_session_turn_and_lifecycle() {
             "turn" => agents["result"]["agents"][1]["state_change_seq"] = json!(2),
             "working" | "unknown" => agents["result"]["agents"][1]["agent_status"] = json!(changed),
             "waiting" => {
-                let mut items = rig.read("state/items.json");
+                let mut items = rig.items();
                 items
                     .as_array_mut()
                     .unwrap()
                     .push(json!({"id":"nested","kind":"agent","host":"local",
                     "pane":"w3:p1","owner_pane":"w2:p1","created_ms":1,"closed_ms":null}));
-                rig.put("state/items.json", &items);
+                rig.put_items(&items);
             }
             "asking" => {
                 let session = &episode["agent_session"];
@@ -1409,7 +1406,7 @@ esac
             "{progress}: {log}"
         );
         assert!(
-            rig.read("state/items.json")[0]["closed_ms"].is_null(),
+            rig.items()[0]["closed_ms"].is_null(),
             "{progress}: {journal}"
         );
         assert!(
@@ -1444,10 +1441,7 @@ fn sweep_keeps_stopped_looking_children_with_published_launch_progress() {
             !log.contains("workspace close") && !log.contains("pane close"),
             "{log}"
         );
-        assert!(
-            rig.read("state/items.json")[0]["closed_ms"].is_null(),
-            "{journal}"
-        );
+        assert!(rig.items()[0]["closed_ms"].is_null(), "{journal}");
     }
 }
 
@@ -1486,7 +1480,7 @@ esac
     assert!(log.contains("--stopped-orphan"), "{log}");
     assert!(log.contains("remote-session"), "{log}");
     assert!(log.contains("state_change_seq"), "{log}");
-    let item = &rig.read("state/items.json")[0];
+    let item = &rig.items()[0];
     assert!(item["closed_ms"].is_u64(), "{item}");
     assert!(
         item["orphan_reply"]["text"]
@@ -1531,7 +1525,7 @@ esac
         journal.contains("closed orphan w2:p1 on netcup"),
         "{journal}"
     );
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
 }
 
 #[test]
@@ -1621,8 +1615,7 @@ fn owned_child(rig: &Rig, status: &str, tree: &Path, seq: Option<u64>, role: &st
                 "agent_session":{"agent":"pi","kind":"path","source":"herdr:pi","value":transcript}}
         ]}}),
     );
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
             "name":"worker","created_ms":1,"closed_ms":null,"role":role}]),
     );
@@ -1633,14 +1626,14 @@ fn owned_child(rig: &Rig, status: &str, tree: &Path, seq: Option<u64>, role: &st
 fn open_child_origin_session(name: &str, live_session: Option<&str>) -> (Rig, PathBuf) {
     let (rig, tree) = close_rig(name);
     owned_child(&rig, "idle", &tree, Some(4), "writer");
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["owner_session"] = json!("origin-session");
     // The host already captured the reply, as in the inbox custody fixtures. This tests
     // delivery even when the owner no longer holds custody and landing cannot capture it.
     items[0]["reply"] = json!({"seq":4,"result_id":null,
         "text":"Found 3 bugs; notes in review.md.","captured_ms":2,
         "reported_ms":null,"done":false});
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let mut agents = rig.read("agents.json");
     agents["result"]["agents"][0]["terminal_id"] = json!("term_lead");
     if let Some(session) = live_session {
@@ -1679,7 +1672,7 @@ fn an_open_child_reply_reaches_its_matching_origin_owner_session() {
             .ends_with("Found 3 bugs; notes in review.md."),
         "{inbox}"
     );
-    assert!(rig.read("state/items.json")[0]["reply"]["reported_ms"].is_u64());
+    assert!(rig.items()[0]["reply"]["reported_ms"].is_u64());
     let (code, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert_eq!(code, 0, "{claimed}");
     assert_eq!(claimed[0]["kind"], "reply", "{claimed}");
@@ -1715,7 +1708,7 @@ fn assert_origin_reply_held(rig: &Rig, tree: &Path, expected_status: &str) {
             .all(|record| record["kind"] != "reply"),
         "{claimed}"
     );
-    let items = rig.read("state/items.json");
+    let items = rig.items();
     assert_eq!(items[0]["owner_session"], "origin-session", "{items}");
     let reply = &items[0]["reply"];
     assert_eq!(
@@ -1752,7 +1745,7 @@ fn an_open_child_reply_is_held_when_its_origin_owner_pane_runs_another_session()
     serve(&rig);
     assert!(!item_open(&rig));
     assert!(!tree.exists());
-    let item = &rig.read("state/items.json")[0];
+    let item = &rig.items()[0];
     assert!(item["reply"]["reported_ms"].is_null(), "{item}");
     assert!(item["orphan_reply"].is_object(), "{item}");
     let (_, inbox) = rig.json(&["inbox", "list"]);
@@ -1773,7 +1766,7 @@ fn an_open_child_reply_is_held_when_its_origin_owner_session_is_unreadable() {
 }
 
 fn item_open(rig: &Rig) -> bool {
-    rig.read("state/items.json")[0]["closed_ms"].is_null()
+    rig.items()[0]["closed_ms"].is_null()
 }
 
 #[test]
@@ -1784,10 +1777,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
         owned_child(&rig, status, &tree, seq, "reader");
         serve(&rig);
         assert!(item_open(&rig), "{status}");
-        assert!(
-            rig.read("state/items.json")[0]["reply"].is_null(),
-            "{status}"
-        );
+        assert!(rig.items()[0]["reply"].is_null(), "{status}");
         assert!(!rig.log("herdr.log").contains("close"), "{status}");
     }
     // A completed turn without `done` waits for input: the reply is captured, and it stays.
@@ -1795,7 +1785,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     let journal = serve(&rig);
     assert!(item_open(&rig), "{journal}");
     assert!(!rig.log("herdr.log").contains("close"));
-    let reply = &rig.read("state/items.json")[0]["reply"];
+    let reply = &rig.items()[0]["reply"];
     assert_eq!((&reply["seq"], &reply["done"]), (&json!(1), &Value::Null));
     // The next turn calls `dogsled done`, and ends dirty: captured, and it stays.
     owned_child(&rig, "working", &tree, Some(2), "reader");
@@ -1814,7 +1804,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     let journal = serve(&rig);
     assert!(item_open(&rig));
     assert!(journal.contains("uncommitted changes"), "{journal}");
-    let reply = &rig.read("state/items.json")[0]["reply"];
+    let reply = &rig.items()[0]["reply"];
     assert_eq!((&reply["seq"], &reply["done"]), (&json!(3), &json!(true)));
     assert_eq!(reply["text"], "Found 3 bugs; notes in review.md.");
     // The reason is journaled once, not on every pass.
@@ -1831,7 +1821,7 @@ fn serve_closes_a_finished_reader_with_nothing_to_land_after_capturing_its_reply
     assert_eq!(rig.log("hook.log"), hook_log(&rig, &tree));
     assert!(!tree.exists());
     assert_eq!(
-        rig.read("state/items.json")[0]["reply"]["text"],
+        rig.items()[0]["reply"]["text"],
         "Found 3 bugs; notes in review.md."
     );
 }
@@ -1864,7 +1854,7 @@ fn serve_hands_off_unlanded_writer_and_keeps_branch_on_board_without_a_pane() {
     assert!(!tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
     assert_eq!(
-        rig.read("state/items.json")[0]["reply"]["text"],
+        rig.items()[0]["reply"]["text"],
         "Found 3 bugs; notes in review.md."
     );
     rig.put("agents.json", &json!({"result":{"agents":[]}}));
@@ -1925,7 +1915,7 @@ fn a_finished_childs_reply_reaches_its_owners_inbox_once() {
         text.ends_with("Found 3 bugs; notes in review.md."),
         "{text}"
     );
-    assert!(rig.read("state/items.json")[0]["reply"]["reported_ms"].is_u64());
+    assert!(rig.items()[0]["reply"]["reported_ms"].is_u64());
     // The claim delivers it; nothing was typed into the owner's pane.
     let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert_eq!(claimed[0]["kind"], "reply");
@@ -1969,13 +1959,13 @@ fn a_child_that_waits_for_input_stays_open_and_its_owner_hears_its_question() {
     assert!(!out.status.success());
     // An orchestrator with an open child cannot call it either.
     owned_child(&rig, "working", &tree, Some(5), "writer");
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items
         .as_array_mut()
         .unwrap()
         .push(json!({"id":"i2","kind":"agent","host":"local",
         "pane":"w3:p1","owner_pane":"w2:p1","name":"grandchild","created_ms":2,"closed_ms":null}));
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let out = rig
         .cmd(&["done"])
         .env("HERDR_PANE_ID", "w2:p1")

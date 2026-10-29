@@ -306,6 +306,7 @@ fn stopped_child_gets_one_prompt_across_five_ticks_and_reload() {
         orphans: vec![],
         sweep: None,
         stopped_activity: std::collections::BTreeMap::new(),
+        holds: Vec::new(),
     };
     assert_eq!(
         stopped_activity(&rig.ledger, &status, 5_000).unwrap()["child"],

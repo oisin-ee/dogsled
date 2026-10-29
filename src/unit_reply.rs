@@ -249,6 +249,7 @@ mod tests {
 
     fn launch() -> Launch {
         Launch {
+            validity: None,
             preparation_protocol: None,
             preparation: None,
             id: "r-1".into(),

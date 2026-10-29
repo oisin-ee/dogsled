@@ -92,6 +92,7 @@ mod tests {
                 failure: None,
                 jobs: Vec::new(),
                 handoffs: Vec::new(),
+                holds: Vec::new(),
                 retry_ms: None,
                 job_validity: None,
             }],
@@ -100,6 +101,7 @@ mod tests {
             orphans: Vec::new(),
             sweep: None,
             stopped_activity: std::collections::BTreeMap::new(),
+            holds: Vec::new(),
         }
     }
 

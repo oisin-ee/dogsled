@@ -127,7 +127,7 @@ fn command_deadline_bounds_local_git_and_remote_report() {
 
     let rig = Rig::new("remote-deadline-report");
     rig.peer();
-    rig.put("state/items.json", &json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
+    rig.put_items(&json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
     rig.script("ssh", "#!/bin/sh\nprintf '%s\\n' '{\"deadline\":true,\"error\":\"deadline reached: git clone\"}'; exit 2\n");
     let out = rig.run(&["wait", "remote", "--max", "1s"]);
     assert_eq!(out.status.code(), Some(124));
@@ -208,7 +208,7 @@ esac
     for pair in records.windows(2) {
         assert!(pair[1]["sampled_ms"].as_u64().unwrap() > pair[0]["sampled_ms"].as_u64().unwrap());
     }
-    let queue = rig.read("state/queue.json");
+    let queue = rig.tickets();
     assert_eq!(queue[0]["id"], ticket["ticket"]);
     assert_eq!(queue[0]["state"], "failed");
     assert!(

@@ -52,7 +52,7 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
     assert_eq!(fs::read_to_string(task).unwrap(), "Review the diff.");
     assert_eq!(fs::read_to_string(contract).unwrap(), CONTRACT);
     assert!(!log.contains("agent prompt"), "{log}");
-    let item = &rig.read("state/items.json")[0];
+    let item = &rig.items()[0];
     assert_eq!(
         (
             &item["harness"],
@@ -124,25 +124,23 @@ fn an_ambiguous_launch_is_reconciled_with_backoff_without_repeating_the_task() {
     );
     // Its request owns this terminal across retries; never close or allocate another.
     assert!(!rig.log("herdr.log").contains("pane close w2:p1"));
-    let ticket = &rig.read("state/queue.json")[0];
+    let ticket = &rig.tickets()[0];
     assert_eq!(ticket["state"], "pending");
     assert_eq!(ticket["retry"]["attempts"], 1);
     // Before the backoff ends, admission leaves it.
     rig.run(&["serve", "--once", "--interval", "1"]);
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    assert_eq!(rig.tickets()[0]["state"], "pending");
     // Admission is independent of the CI runner's real load and disk.
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    let next = rig.read("state/queue.json")[0]["retry"]["next_ms"]
-        .as_u64()
-        .unwrap();
+    let next = rig.tickets()[0]["retry"]["next_ms"].as_u64().unwrap();
     fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
     rig.run(&["serve", "--once", "--interval", "1"]);
-    let ticket = &rig.read("state/queue.json")[0];
+    let ticket = &rig.tickets()[0];
     assert_eq!(ticket["state"], "pending", "{ticket}");
     let next = ticket["retry"]["next_ms"].as_u64().unwrap();
     fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
     rig.run(&["serve", "--once", "--interval", "1"]);
-    let ticket = &rig.read("state/queue.json")[0];
+    let ticket = &rig.tickets()[0];
     assert_eq!(ticket["state"], "failed", "{ticket}");
     let error = ticket["error"].as_str().unwrap();
     assert!(error.contains("startup outcome is unknown"), "{error}");
@@ -267,11 +265,11 @@ fn a_peer_launch_is_not_refused_for_a_long_caller_path() {
     let rig = Rig::new("long-caller-path");
     rig.peer();
     rig.snapshot("state/host.json", now(), 0.0, 8);
-    let deep = rig
-        .dir
-        .join("d".repeat(200))
-        .join("e".repeat(200))
-        .join("f".repeat(200));
+    let prefix = rig.dir.join("d".repeat(200));
+    let deep = prefix.join("e".repeat(485 - prefix.as_os_str().len() - 1));
+    assert_eq!(deep.as_os_str().len(), 485);
+    // work::LINE_BUDGET is 960. Files::at puts task and contract paths on the line.
+    assert!(2 * deep.as_os_str().len() > 960);
     fs::create_dir_all(&deep).unwrap();
     let copy = Command::new("cp")
         .arg("-R")

@@ -911,12 +911,50 @@ pub fn remove(
     tree: &Linked,
     removal: Removal<'_>,
 ) -> Result<Removed> {
+    remove_inner(shell, ledger, tree, removal, None, None)
+}
+
+/// Only explicit owner/stopped-orphan close supplies a durable preservation operation.
+/// Ordinary cleanup and native handoff retain the original clean-only contract.
+pub fn remove_preserved(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    tree: &Linked,
+    removal: Removal<'_>,
+    operation: &mut crate::preservation::Operation,
+    original: &Pin,
+) -> Result<Removed> {
+    original.validate(tree)?;
+    remove_inner(
+        shell,
+        ledger,
+        tree,
+        removal,
+        Some(operation),
+        Some(original),
+    )
+}
+
+fn remove_inner(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    tree: &Linked,
+    removal: Removal<'_>,
+    mut operation: Option<&mut crate::preservation::Operation>,
+    original: Option<&Pin>,
+) -> Result<Removed> {
+    use crate::preservation::Stage;
+    if operation.is_none()
+        && let Some(reason) = crate::preservation::hold(ledger, &tree.tree())?
+    {
+        return Err(refuse(&reason));
+    }
     let Removal {
         guard,
         workspace,
         holders,
-        caller_workspace,
         evidence,
+        ..
     } = removal;
     // Git cannot remove it, and its content is unknown: close nothing, unlock nothing.
     if let Some(reason) = unlinked(shell, &tree.checkout, &tree.path)? {
@@ -928,22 +966,63 @@ pub fn remove(
     guard.check_repository(shell, &tree.checkout)?;
     validate_identity(shell, tree)?;
     validate_holder_checkouts(shell, tree, holders)?;
-    let settings = crate::repository::load(&tree.checkout)?;
-    teardown(shell, &settings, tree)?;
+    let pin = tree.pin()?;
+    if let Some(original) = original {
+        original.validate(tree)?;
+    }
+    run_teardown(shell, ledger, tree, operation.as_deref_mut())?;
     if verified_absent(guard, shell, &tree.tree()) {
+        if let Some(operation) = operation.as_deref_mut() {
+            operation.advance(ledger, Stage::Removed)?;
+        }
         crate::cleanup::forget_matching(ledger, &tree.tree())?;
         return Ok(Removed::default());
     }
+    pin.validate(tree)?;
+    if let Some(original) = original {
+        original.validate(tree)?;
+    }
     validate_identity(shell, tree)?;
-    if Path::new(&tree.path).is_dir() {
-        // The teardown ran after the callers' loss check and can leave a commit or content
-        // that no ref holds. Check the current HEAD and content again before anything closes
-        // or is removed.
+    if let Some(operation) = operation.as_deref_mut() {
+        normalize_preserved(shell, ledger, tree, &pin, operation)?;
+    } else if Path::new(&tree.path).is_dir() {
+        // Native handoff and ordinary cleanup must still refuse teardown-generated dirt.
         recheck_loss(shell, tree, evidence)?;
         evidence.restore_deletions(shell, &tree.path)?;
     }
+    pin.validate(tree)?;
     validate_holder_checkouts(shell, tree, holders)?;
+    if let Some(operation) = operation.as_deref_mut() {
+        let saved = operation
+            .latest
+            .as_ref()
+            .ok_or_else(|| operation.refusal("missing final snapshot"))?;
+        if head_sha(shell, &tree.path)? != saved.head.commit().unwrap_or_default()
+            || !crate::loss::dirty_paths(shell, &tree.path, false)?.is_empty()
+        {
+            return Err(operation.refusal("normalized checkout changed before removal"));
+        }
+    }
     close_holders(shell, ledger, workspace, holders)?;
+    remove_git(shell, ledger, tree, removal, operation, original)
+}
+
+fn remove_git(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    tree: &Linked,
+    removal: Removal<'_>,
+    mut operation: Option<&mut crate::preservation::Operation>,
+    original: Option<&Pin>,
+) -> Result<Removed> {
+    use crate::preservation::Stage;
+    let Removal {
+        guard,
+        caller_workspace,
+        evidence,
+        ..
+    } = removal;
+    let pin = tree.pin()?;
     let lock = lock_reason(shell, &tree.checkout, &tree.path)?;
     match lock.as_deref() {
         None => (),
@@ -956,6 +1035,22 @@ pub fn remove(
                 tree.path
             )));
         }
+    }
+    if let Some(operation) = operation.as_deref_mut() {
+        pin.validate(tree)?;
+        validate_identity(shell, tree)?;
+        let saved = operation
+            .latest
+            .as_ref()
+            .ok_or_else(|| operation.refusal("missing final snapshot"))?;
+        if head_sha(shell, &tree.path)? != saved.head.commit().unwrap_or_default()
+            || !crate::loss::dirty_paths(shell, &tree.path, false)?.is_empty()
+        {
+            return Err(operation.refusal("checkout changed after panes closed; removal refused"));
+        }
+    }
+    if let Some(original) = original {
+        original.validate(tree)?;
     }
     // Removing ignored build output can take as long as creating the checkout.
     let out = shell.run_setup(
@@ -987,6 +1082,10 @@ pub fn remove(
             tree.path
         )));
     }
+    if let Some(operation) = operation {
+        operation.advance(ledger, Stage::Removed)?;
+        crate::work::launch_test_barrier("PRESERVATION_AFTER_REMOVE")?;
+    }
     crate::cleanup::forget_matching(ledger, &tree.tree())?;
     let branch_deleted =
         !evidence.keeps_branch() && !tree.branch.is_empty() && delete_held(shell, tree, evidence)?;
@@ -995,6 +1094,83 @@ pub fn remove(
         branch_deleted,
         anchor_closed,
     })
+}
+
+fn run_teardown(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    tree: &Linked,
+    mut operation: Option<&mut crate::preservation::Operation>,
+) -> Result<()> {
+    use crate::preservation::Stage;
+    let settings = crate::repository::load(&tree.checkout)?;
+    if let Some(operation) = operation.as_deref_mut() {
+        let saved = operation
+            .initial
+            .as_ref()
+            .ok_or_else(|| operation.refusal("missing initial capture"))?;
+        crate::preservation::VerifiedRemoval::capture(shell, tree, saved)?;
+        crate::close::validate_preservation(shell, ledger, operation, tree)?;
+        operation.advance(ledger, Stage::TeardownEntered)?;
+        crate::work::launch_test_barrier("PRESERVATION_TEARDOWN_ENTERED")?;
+    }
+    if let Err(error) = teardown(shell, &settings, tree) {
+        return Err(if let Some(operation) = operation.as_deref_mut() {
+            operation.blocker = Some(format!(
+                "failed teardown: {error}; hook will not be rerun automatically"
+            ));
+            operation.save(ledger)?;
+            operation.refusal(error)
+        } else {
+            error
+        });
+    }
+    if let Some(operation) = operation {
+        operation.advance(ledger, Stage::TeardownComplete)?;
+    }
+    Ok(())
+}
+
+fn normalize_preserved(
+    shell: &dyn Shell,
+    ledger: &Ledger,
+    tree: &Linked,
+    pin: &Pin,
+    operation: &mut crate::preservation::Operation,
+) -> Result<()> {
+    use crate::preservation::Stage;
+    operation.capture_final(shell, ledger)?;
+    let saved = operation
+        .latest
+        .as_ref()
+        .ok_or_else(|| operation.refusal("missing final capture"))?;
+    let now =
+        snapshot(shell, &tree.path)?.ok_or_else(|| operation.refusal("checkout disappeared"))?;
+    let proof = crate::preservation::VerifiedRemoval::capture(shell, &now, saved)?;
+    let recovery = operation.recovery()?;
+    if let Some(result) = &mut operation.result {
+        result.recovery = Some(recovery);
+        if !now.branch.is_empty() {
+            let mut branch = crate::done::Branch {
+                repo: now.checkout.display().to_string(),
+                name: now.branch.clone(),
+                ahead: 0,
+                landed: false,
+            };
+            crate::done::refresh_branch(shell, &mut branch)?;
+            result.retained_branch = (!branch.landed).then_some(branch);
+        }
+    }
+    operation.save(ledger)?;
+    crate::work::launch_test_barrier("PRESERVATION_BEFORE_NORMALIZE")?;
+    crate::close::validate_preservation(shell, ledger, operation, &now)?;
+    pin.validate(tree)?;
+    operation.advance(ledger, Stage::Normalizing)?;
+    proof
+        .normalize(shell, &now)
+        .map_err(|e| operation.refusal(e))?;
+    operation.advance(ledger, Stage::Normalized)?;
+    Ok(())
 }
 
 /// Pane and launch recovery effects begin only after teardown and incarnation validation.

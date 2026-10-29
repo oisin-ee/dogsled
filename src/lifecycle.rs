@@ -940,6 +940,7 @@ mod tests {
             failure: None,
             jobs: Vec::new(),
             handoffs: Vec::new(),
+            holds: Vec::new(),
             retry_ms: None,
             job_validity: None,
         };

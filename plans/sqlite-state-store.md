@@ -1,6 +1,6 @@
 # Move items and the queue to a per-host SQLite store
 
-Status: proposed. Not approved for dispatch. Facts checked on 2026-10-29 at Dogsled `origin/main` `f208ce3`. Line numbers refer to that revision.
+Status: approved 2026-10-29. One writer unit, brief at `plans/briefs/sqlite-state-store.md`. Facts checked at Dogsled `origin/main` `8e9b3f9`. Line numbers refer to that revision.
 
 ## Goal
 
@@ -30,7 +30,7 @@ The store starts empty. Nothing reads `items.json`, `queue.json`, or `queue-form
 - Open one connection per store operation. Apply these settings on each open: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, and a busy timeout equal to the remaining `Budget` (`src/budget.rs`), so a busy database gives the same `Error::Deadline` as a busy kernel lock.
 - Writes use `BEGIN IMMEDIATE` ([SQLite transactions](https://sqlite.org/lang_transaction.html)). Reads use plain read transactions. Under WAL, readers do not block the writer.
 - The state directory must be on a local disk. WAL does not work over a network filesystem ([WAL](https://sqlite.org/wal.html)).
-- `PRAGMA user_version` holds the schema version: 1 after step 1 (items), 2 after step 2 (tickets). A binary that finds a newer version than it knows refuses every store operation and changes nothing.
+- `PRAGMA user_version` holds the schema version, 1 for both tables. A binary that finds a newer version than it knows refuses every store operation and changes nothing.
 
 ### Schema v1
 
@@ -73,7 +73,7 @@ Reads still decode the whole collection, as now. Indexed point reads are a later
 
 ## Steps
 
-Each step is one writer unit. Step 2 starts after step 1 merges.
+All three steps are one writer unit, because they change the same test files.
 
 1. **Store and items.** Add `rusqlite` with `bundled`; add `src/store.rs`; move `src/items.rs` onto it. Move the direct `items.json` test writes onto a test helper in the store owner: `src/inbox.rs:1520–1524`, `src/sweep.rs:826`, `src/custody.rs:833–838`, the `loss_tests.rs` sites, and the `items.json` entry in `tests/cli/legacy_continue.rs:249–256`.
 2. **Queue.** Move the queue functions in `src/work.rs` onto the store; delete the old queue format code listed under Store API. Move the direct `queue.json` writes in `src/work_tests.rs`, `src/done/tests.rs:1068`, and `tests/cli/legacy_continue.rs`.

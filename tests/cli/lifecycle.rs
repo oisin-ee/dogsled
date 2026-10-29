@@ -48,7 +48,7 @@ fn wrapper_termination_kills_command_group_and_records_result() {
 fn remote_wait_deadline_bounds_a_silent_ssh_process() {
     let rig = Rig::new("bounded-ssh");
     rig.peer();
-    rig.put("state/items.json", &json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
+    rig.put_items(&json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
     rig.script("ssh", "#!/bin/sh\nsleep 30\n");
     let output = rig.run(&["wait", "remote", "--max", "20ms"]);
     assert_eq!(output.status.code(), Some(124));
@@ -106,8 +106,8 @@ fn waiting_queue_caller_observes_service_admission_without_sleep() {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(child.wait().code(), Some(3));
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
-    assert_eq!(rig.read("state/queue.json")[0]["waiting"], true);
+    assert_eq!(rig.tickets()[0]["state"], "admitted");
+    assert_eq!(rig.tickets()[0]["waiting"], true);
     assert!(!rig.log("herdr.log").contains("dogsled: ticket"));
 }
 
@@ -158,7 +158,7 @@ esac
 #[test]
 fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
     let rig = Rig::new("workspace-name");
-    let request = json!({"id":"launch-one","action":{"type":"agent","kind":"claude","name":"worker","message":"hello"},
+    let request = json!({"id":"launch-one","validity":rig.job_validity(),"action":{"type":"agent","kind":"claude","name":"worker","message":"hello"},
         "host":"remote","cwd":rig.dir.join("home"),"pane":null,"workspace":null,"workspace_name":"caller","owner":"parent"});
     assert_eq!(
         rig.json(&[

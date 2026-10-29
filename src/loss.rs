@@ -20,6 +20,7 @@ pub struct Evidence {
     proofs: crate::integration::Proofs,
     /// A local branch retained by this operation. Never authorizes deleting that branch.
     kept_branch: Option<String>,
+    recovery: Option<Box<(String, String)>>,
     pub warning: Option<String>,
 }
 
@@ -40,6 +41,7 @@ impl Evidence {
             repo: repo.into(),
             refreshed: warning.is_none(),
             kept_branch: None,
+            recovery: None,
             proofs: crate::integration::Proofs::default(),
             warning,
         }
@@ -51,6 +53,7 @@ impl Evidence {
             repo: repo.into(),
             refreshed: false,
             kept_branch: None,
+            recovery: None,
             proofs: crate::integration::Proofs::default(),
             warning: None,
         }
@@ -60,6 +63,14 @@ impl Evidence {
     pub fn keeping_branch(repo: &str, branch: &str) -> Self {
         Self {
             kept_branch: Some(format!("refs/heads/{branch}")),
+            ..Self::default_only(repo)
+        }
+    }
+
+    /// A verified recovery holds a detached tip, but never proves branch integration.
+    pub fn keeping_recovery(repo: &str, saved: &crate::preservation::Snapshot) -> Self {
+        Self {
+            recovery: Some(Box::new((saved.ref_name.clone(), saved.commit.clone()))),
             ..Self::default_only(repo)
         }
     }
@@ -92,10 +103,29 @@ impl Evidence {
             })
             .transpose()?
             .unwrap_or(false);
+        let recovered = if let Some((reference, oid)) = self.recovery.as_deref() {
+            let pinned = git(
+                shell,
+                &self.repo,
+                &["show-ref", "--verify", "--hash", reference],
+            )?;
+            pinned.ok()
+                && pinned.stdout.trim() == oid
+                && git(
+                    shell,
+                    &self.repo,
+                    &["merge-base", "--is-ancestor", tip, oid],
+                )?
+                .ok()
+        } else {
+            false
+        };
         let held = if let Some(integrated) = integrated {
             Some(Held::Default { integrated })
         } else if retained {
             Some(Held::Branch)
+        } else if recovered {
+            Some(Held::Recovery)
         } else if self.refreshed {
             let out = git(
                 shell,
@@ -160,6 +190,7 @@ pub enum Held {
     Remote,
     /// This operation keeps the local branch containing the tip.
     Branch,
+    Recovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +213,7 @@ impl Assessment {
             Some(Held::Default { integrated }) => integrated.to_string(),
             Some(Held::Remote) => "every commit is on a refreshed remote ref".into(),
             Some(Held::Branch) => "every commit is on the retained local branch".into(),
+            Some(Held::Recovery) => "every commit is held by the verified recovery ref".into(),
             None => "commits are not held by the default branch or a refreshed remote ref".into(),
         };
         if self.dirty.is_empty() {

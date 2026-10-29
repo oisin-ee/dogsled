@@ -38,7 +38,7 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
         {"id":"theirs","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w9:p9",
          "name":"other","created_ms":1,"closed_ms":null}
     ]);
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let gate = || {
         let mut cmd = rig.cmd(&["hook", "gate"]);
         cmd.env("HERDR_ENV", "1");
@@ -66,10 +66,10 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
     assert_eq!(gate(), "");
     // Closed children, working writers and clean landed writers do not block.
     items[0]["closed_ms"] = json!(2);
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     assert_eq!(gate(), "");
     items[0]["closed_ms"] = Value::Null;
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     for state in ["working", "blocked", "unknown"] {
         host["probe"]["agent_panes"][0]["state"] = json!(state);
         rig.put("state/host.json", &host);
@@ -201,15 +201,12 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     });
     host["probe"]["agent_panes"][0]["done"] = json!(true);
     rig.put("state/host.json", &host);
-    rig.put(
-        "state/items.json",
-        &json!([
-            {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
-             "name":"worker","created_ms":1,"closed_ms":null},
-            {"id":"theirs","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w9:p9",
-             "name":"other","created_ms":1,"closed_ms":null}
-        ]),
-    );
+    rig.put_items(&json!([
+        {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
+         "name":"worker","created_ms":1,"closed_ms":null},
+        {"id":"theirs","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w9:p9",
+         "name":"other","created_ms":1,"closed_ms":null}
+    ]));
     let status = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     assert!(status.contains("(2 finished)"), "{status}");
     assert!(!status.contains("dogsled close"), "{status}");
@@ -276,8 +273,7 @@ fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
         "pane":"w1:p1","agent":"pi","state":"unknown","name":null
     }]);
     rig.put("state/host.json", &host);
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),
     );
@@ -296,8 +292,7 @@ fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
 fn an_unobserved_child_is_unknown_and_never_claims_a_landed_result() {
     let rig = Rig::new("context-starting");
     rig.snapshot("state/host.json", now(), 1.0, 8);
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p2","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),
     );
