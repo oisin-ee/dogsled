@@ -23,17 +23,24 @@ mapfile -t packages < <(
 
 npm whoami >/dev/null || { echo "Run npm login first." >&2; exit 1; }
 
+# Every trust command, `list` included, needs 2FA. A captured call cannot show the
+# prompt, so authenticate once on the terminal first.
+echo "Authenticating with npm. Select 'skip two-factor authentication for 5 minutes'."
+npm trust list "${packages[0]}" >/dev/null
+
 # `npm trust list --json` prints one object or an array; normalize to lines of
-# "<id> <repository> <file>".
+# "<id> <repository> <file>". A failed list stops the script: it must never read as
+# "no configuration".
 configs() {
-  npm trust list "$1" --json 2>/dev/null |
-    jq -r 'if type == "array" then .[] else . end
-           | select(.id != null)
-           | "\(.id) \(.repository // "-") \(.file // "-")"'
+  local json
+  json=$(npm trust list "$1" --json) || { echo "$1: npm trust list failed" >&2; exit 1; }
+  jq -r 'if type == "array" then .[] else . end
+         | select(.id != null)
+         | "\(.id) \(.repository // "-") \(.file // "-")"' <<<"$json"
 }
 
 for package in "${packages[@]}"; do
-  current=$(configs "$package" || true)
+  current=$(configs "$package")
   if grep -qx "[^ ]* $repo $file" <<<"$current"; then
     echo "$package: already trusts $repo $file"
     continue
