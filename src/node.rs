@@ -211,6 +211,13 @@ pub struct Node<'a> {
 }
 
 impl Node<'_> {
+    pub fn release_references(
+        &self,
+        certificate: &crate::launch::ReferenceRelease,
+    ) -> Result<crate::launch::ReferenceReleaseAck> {
+        crate::launch::release_references(self.ledger, self.shell, certificate)
+    }
+
     pub fn snapshot(&self) -> Result<SnapshotReport> {
         Ok(SnapshotReport {
             snapshot: self.ledger.read("host.json")?,

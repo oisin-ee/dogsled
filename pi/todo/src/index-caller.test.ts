@@ -7,7 +7,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { contract, first, firstId, third } from "./contract-fixture.ts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { TaskProvider } from "./provider.ts";
+import { WorkerImport } from "./handoff.ts";
 import { branchSnapshot } from "./state.ts";
 import piTodo from "./index.ts";
 import { registration } from "./registration-fixture.ts";
@@ -20,6 +22,7 @@ const caller = async (): Promise<{
   session: SessionManager;
   call: ReturnType<typeof registration>["tools"][number]["execute"];
   runner: ExtensionRunner;
+  api: ReturnType<typeof registration>["api"];
 }> => {
   const session = SessionManager.inMemory(),
     registered = registration(session),
@@ -41,8 +44,44 @@ const caller = async (): Promise<{
   if (tool === undefined) {
     throw new Error("Expected registered todo tool");
   }
-  return { call: tool.execute, runner, session };
+  return { api: registered.api, call: tool.execute, runner, session };
 };
+
+describe("worker seed path", () => {
+  it("does not import an ordinary launch", { timeout: 10_000 }, async () => {
+    expect.hasAssertions();
+    const test = await caller(),
+      ctx = test.runner.createToolContext("startup", new AbortController().signal),
+      abort = vi.fn<() => void>(),
+      notify = vi.fn<() => void>(),
+      importer = new WorkerImport(test.api, new TaskProvider(test.api));
+    ctx.abort = abort;
+    ctx.ui.notify = notify;
+    await importer.start({ reason: "startup", type: "session_start" }, ctx);
+    expect(abort).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+    expect(test.session.getBranch()).toStrictEqual([]);
+  });
+
+  it.each([null, false, Number.NaN, "", " "])(
+    "rejects an invalid seed path: %j",
+    { timeout: 10_000 },
+    async (path) => {
+      expect.hasAssertions();
+      const test = await caller(),
+        ctx = test.runner.createToolContext("startup", new AbortController().signal),
+        abort = vi.fn<() => void>(),
+        notify = vi.fn<() => void>(),
+        importer = new WorkerImport(test.api, new TaskProvider(test.api), (): unknown => path);
+      ctx.abort = abort;
+      ctx.ui.notify = notify;
+      await importer.start({ reason: "startup", type: "session_start" }, ctx);
+      expect(abort).toHaveBeenCalledExactlyOnceWith();
+      expect(notify).toHaveBeenCalledExactlyOnceWith("IMPORT_FAILED: invalid seed path", "error");
+      expect(test.session.getBranch()).toStrictEqual([]);
+    },
+  );
+});
 
 describe("registered todo execution", () => {
   it(

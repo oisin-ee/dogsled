@@ -385,19 +385,20 @@ fn real_remote_preparation_causes_are_safe_through_transport() {
         ("occupied", "main", "workspace_occupied"),
         ("setup", "main", "setup_failed"),
     ] {
-        let (rig, repo) = place::place_rig(&format!("diagnostic-real-{case}"));
+        let name = format!("diagnostic-real-{case}");
+        let (rig, repo) = if case == "setup" {
+            place::place_rig_with(
+                &name,
+                "[worktree]\nsetup = [\"echo SCRIPT_SECRET >&2; exit 1\"]\n",
+            )
+        } else {
+            place::place_rig(&name)
+        };
         rig.peer();
         real_peer_prepare(&rig);
         let branch = if case == "exists" { "main" } else { "worker" };
         if case == "occupied" {
             fs::create_dir_all(repo.join(".worktrees/worker")).unwrap();
-        }
-        if case == "setup" {
-            fs::write(
-                repo.join("dogsled.toml"),
-                "[worktree]\nsetup = [\"echo SCRIPT_SECRET >&2; exit 1\"]\n",
-            )
-            .unwrap();
         }
         let (code, error) = rig.json(&[
             "agent",
@@ -485,17 +486,15 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
 /// without any of the peer's own text.
 #[test]
 fn real_remote_unrecorded_failure_preserves_warning_and_correlation() {
-    let (rig, repo) = place::place_rig("diagnostic-real-unrecorded");
-    rig.peer();
-    real_peer_prepare(&rig);
     // The peer's private setup fails, and its receipt store cannot hold an outcome.
-    fs::write(
-        repo.join("dogsled.toml"),
+    let (rig, repo) = place::place_rig_with(
+        "diagnostic-real-unrecorded",
         r#"[worktree]
 setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; chmod 555 \"$DOGSLED_STATE/preparation-receipts\"; exit 1"]
 "#,
-    )
-    .unwrap();
+    );
+    rig.peer();
+    real_peer_prepare(&rig);
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -998,16 +997,10 @@ fn a_contradictory_receipt_is_refused() {
 /// withholds its detail. The secret in the failing command never reaches the receipt.
 #[test]
 fn a_failure_without_a_diagnostic_keeps_only_safe_information() {
-    let (rig, repo) = place::place_rig("diagnostic-untyped-failure");
-    let config = fs::read_to_string(repo.join("dogsled.toml")).unwrap();
-    fs::write(
-        repo.join("dogsled.toml"),
-        config.replace(
-            "setup = [",
-            "setup = [\n  \"printf 'SETUP_SECRET' >&2; exit 1\",",
-        ),
-    )
-    .unwrap();
+    let (rig, repo) = place::place_rig_with(
+        "diagnostic-untyped-failure",
+        "[worktree]\nsetup = [\"printf 'SETUP_SECRET' >&2; exit 1\"]\n",
+    );
     let args = [
         "host",
         "prepare",
@@ -1042,16 +1035,12 @@ fn a_failure_without_a_diagnostic_keeps_only_safe_information() {
 /// claim that the original cause is retained.
 #[test]
 fn a_failure_whose_outcome_cannot_be_written_is_reported_as_unrecorded() {
-    let (rig, repo) = place::place_rig("diagnostic-unrecorded");
-    let config = fs::read_to_string(repo.join("dogsled.toml")).unwrap();
-    fs::write(
-        repo.join("dogsled.toml"),
-        config.replace(
-            "setup = [",
-            "setup = [\n  \"rm -f \\\"$RIG/state/preparation-receipts/unrecorded.json\\\"; mkdir -p \\\"$RIG/state/preparation-receipts/unrecorded.json\\\"; exit 1\",",
-        ),
-    )
-    .unwrap();
+    let (rig, repo) = place::place_rig_with(
+        "diagnostic-unrecorded",
+        r#"[worktree]
+setup = ['rm -f "$RIG/state/preparation-receipts/unrecorded.json"; mkdir -p "$RIG/state/preparation-receipts/unrecorded.json"; exit 1']
+"#,
+    );
     let (code, error) = rig.json(&[
         "host",
         "prepare",

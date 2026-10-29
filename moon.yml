@@ -2,13 +2,15 @@ $schema: https://moonrepo.dev/schemas/project.json
 tasks:
   # Limit Oxfmt to the moved paths. Dogsled keeps its existing format checks.
   format:
-    command: oxfmt --check packages crates .config docs/todo-workflows.md plans/todo-workflows.md plans/PLAN-todo-work-units.md plans/PLAN-unified-work-panel.md plans/PLAN-work-sidebar.md .oxlintrc.json tsconfig.base.json pnpm-workspace.yaml
+    command: oxfmt --check packages pi/todo crates .config docs/todo-workflows.md plans/todo-workflows.md plans/PLAN-todo-work-units.md plans/PLAN-unified-work-panel.md plans/PLAN-work-sidebar.md .oxlintrc.json tsconfig.base.json pnpm-workspace.yaml
     toolchain: javascript
     inputs:
       - "packages/**/*"
       - "!packages/*/node_modules/**/*"
       - "!packages/*/src/generated/**/*"
       - "!packages/pi-guardrails/dist/**/*"
+      - "pi/todo/**/*"
+      - "!pi/todo/src/generated/**/*"
       - "crates/**/*"
       - ".config/**/*"
       - "docs/todo-workflows.md"
@@ -21,7 +23,7 @@ tasks:
       - "pnpm-workspace.yaml"
     tags: [precommit]
   fix:
-    command: oxfmt packages crates .config docs/todo-workflows.md plans/todo-workflows.md plans/PLAN-todo-work-units.md plans/PLAN-unified-work-panel.md plans/PLAN-work-sidebar.md .oxlintrc.json tsconfig.base.json pnpm-workspace.yaml
+    command: oxfmt packages pi/todo crates .config docs/todo-workflows.md plans/todo-workflows.md plans/PLAN-todo-work-units.md plans/PLAN-unified-work-panel.md plans/PLAN-work-sidebar.md .oxlintrc.json tsconfig.base.json pnpm-workspace.yaml
     toolchain: javascript
     options:
       cache: false
@@ -101,6 +103,9 @@ tasks:
     command: pnpm run --silent typecheck
     description: Typecheck the Pi extension.
     toolchain: node
+    # pi/index.ts imports pi/todo, whose wasm.ts imports the generated bindings.
+    deps:
+      - pi-todo:generate
     tags: [precommit]
     inputs:
       - "pi/**/*"
@@ -112,8 +117,6 @@ tasks:
     command: pnpm run --silent test
     description: Run the Pi extension tests.
     toolchain: node
-    env:
-      PI_TODO_SOURCE: $workspaceRoot/packages/pi-todo/src
     deps:
       - pi-todo:generate
     tags: [precommit]

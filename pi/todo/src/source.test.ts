@@ -19,6 +19,11 @@ describe("source", () => {
     }
   });
 
+  it("matches the merged extension entry", { timeout: 5000 }, () => {
+    expect.hasAssertions();
+    expect(isOwnSource(new URL("../../index.ts", import.meta.url).pathname)).toBe(true);
+  });
+
   it("rejects another file and a path that does not exist", { timeout: 5000 }, () => {
     expect.hasAssertions();
     expect(isOwnSource(path.join(SOURCE, "tool.ts"))).toBe(false);

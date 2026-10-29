@@ -17,9 +17,9 @@ Pi-todo implements contracts, local execution gates, provider handoff, worker im
         "deliverable": "Validated contracts through the todo tool",
         "scope": {
           "repositoryId": "github.com/oisin-ee/oisinpi",
-          "owns": ["crates/todo-core/", "packages/pi-todo/src/"],
+          "owns": ["crates/todo-core/", "pi/todo/src/"],
           "reads": ["plans/todo-workflows.md"],
-          "generates": ["packages/pi-todo/src/generated/"]
+          "generates": ["pi/todo/src/generated/"]
         },
         "acceptance": {
           "kind": "command",
@@ -55,7 +55,7 @@ An acceptance requirement can instead use `{kind:"review", artifact, criterion}`
 
 `update` replaces the draft object rather than merging individual fields. `update` may instead, or also, send `description` to set it on open work; a blank value clears it. A description-only update never bumps the revision, and no description change alters `content`-based selection. A domain change increments the revision. A status-only change preserves the revision and its origin.
 
-A locally active unit prevents replacement with `init`. Its contract cannot change. Another local leaf cannot start, even with disjoint ownership. A worker assignment uses `{kind:"worker", profile:"general"}`. `start` rejects worker assignments without launching anything.
+A locally active unit prevents replacement with `init`. Its contract cannot change. Another local leaf cannot start: `LOCAL_UNIT_ACTIVE` applies to both overlapping and disjoint paths. A worker assignment uses `{kind:"worker", profile:"general"}`. `start` rejects worker assignments without launching anything.
 
 Executable completion requires a complete contract, completed prerequisites, prior local activation, and nonempty acceptance evidence. Worker acceptance requires released provider evidence. A worker exit does not establish acceptance.
 
@@ -67,7 +67,7 @@ Appending children to a completed or dropped root fails without changing its sna
 
 Scope paths are repository-relative files or directory prefixes. Absolute paths, parent traversal, glob patterns, and duplicate paths are invalid. Empty ownership permits read-only work. Read paths do not claim ownership.
 
-Unknown prerequisite IDs and cycles reject the whole mutation. Completed prerequisites satisfy dependencies. Dropped prerequisites do not. Owned and generated paths participate in overlap validation. Scope declarations are not filesystem permissions.
+Unknown prerequisite IDs and cycles reject the whole mutation. Completed prerequisites satisfy dependencies. Dropped prerequisites do not. Concurrent worker units and one local unit may declare overlapping owned or generated paths. Scope declarations are not filesystem permissions.
 
 ## Local execution gate and extension capability
 
@@ -77,7 +77,7 @@ A running call protects its revision from completion or replacement until its ma
 An abort request does not release a call that still executes. Shutdown clears runtime-only leases.
 Other guardrails retain their own blocking decisions.
 
-Extensions acquire the synchronous capability through `oisin.tasks.acquire.v1` with `{version: 1, reply}`.
+Dogsled calls `createTodo(...).tasks()` directly. Only separate extensions, such as pi-prewalk, acquire the capability through `oisin.tasks.acquire.v1` with `{version: 1, reply}`.
 Only the winning `todo` owner responds. Consumers must reject multiple responses.
 Methods are `inspect`, `claim`, `settle`, `active`, and `imported`. They return `{ok, value}` or `{ok:false, error}`.
 `imported()` returns the validated worker receipt, including its immutable completion seal, or `null` for an ordinary session.
@@ -97,9 +97,9 @@ This is trusted extension coordination, not operating-system isolation. Pi-todo 
 
 Dogsled alone registers `--todo-unit-file`. Pi scopes flag reads to the registering extension; duplicate registration prevents both extensions from loading.
 
-Pi-todo queries `oisin.tasks.seed-source.v1` during startup. Dogsled registers this synchronous listener during extension loading and returns `{version:1,path}`.
-The path is null for an ordinary launch. Missing sources do not import; malformed or multiple sources reject import. The loaded guard rejects missing acknowledgement.
-Pi-todo owns seed parsing and validation. This transport capability cannot dispatch, claim, or accept work.
+Dogsled passes a `seedPath` function to `createTodo`. During startup, pi-todo reads the path through that function.
+An undefined path means an ordinary launch. An empty or invalid path rejects import. The loaded guard rejects missing acknowledgement.
+Pi-todo owns seed parsing and validation. The path function cannot dispatch, claim, or accept work.
 
 Dogsled supplies `--todo-unit-file` with `{version:1, execution, binding, exported}`. Pi-todo validates the digest, correlation, contract, and prerequisite evidence.
 The checkout origin must match `scope.repositoryId`: canonical lowercase host plus case-preserved repository path, without `.git`. SSH and HTTPS origins identify the same repository.

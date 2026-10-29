@@ -12,6 +12,7 @@ import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor,
 import { registerInterview } from "./interview.ts";
 import { registerPlanMode } from "./plan-mode.ts";
 import { PortalClient } from "./portal-client.ts";
+import { createTodo } from "./todo/src/index.ts";
 
 const REFRESH_MS = 10_000;
 
@@ -26,6 +27,10 @@ export function versionMismatch(output: string): string | undefined {
 }
 
 export default function dogsled(pi: ExtensionAPI) {
+	const todo = createTodo(pi, { seedPath: () => {
+		const value = pi.getFlag("todo-unit-file");
+		return typeof value === "string" ? value : undefined;
+	} });
 	const binary = process.env["DOGSLED_BIN"] ?? "dogsled";
 	const owner = process.env["HERDR_PANE_ID"];
 	let timer: ReturnType<typeof setInterval> | undefined;
@@ -50,10 +55,10 @@ export default function dogsled(pi: ExtensionAPI) {
 	}
 
 	const inbox = new InboxReader(pi, exec);
-	const units = new UnitBridge(pi, binary);
+	const units = new UnitBridge(pi, binary, todo.tasks);
 	// The portal owns the interactive parts of Pi: the interview form and the plan review.
 	const portal = new PortalClient();
-	const planMode = registerPlanMode(pi, portal);
+	const planMode = registerPlanMode(pi, todo.approve, portal);
 	const interviews = registerInterview(pi, portal);
 	// One handler owns the tool call: the unit bridge first, then the plan-mode gate.
 	pi.on("tool_call", async (event, ctx) => {
@@ -111,7 +116,7 @@ export default function dogsled(pi: ExtensionAPI) {
 	let sideDisplay = false;
 	let publicationFailure: string | undefined;
 	const publisher = new TodoPublisher(owner ?? "", error => context?.ui.notify(`Todo publication failed: ${String(error)}`, "error"));
-	const todos = new WorkTodo(pi.events, () => {
+	const todos = new WorkTodo(todo.work, () => {
 		if (context) { publishTodos(context); draw(context); }
 	}, () => {
 		if (context) void openWork(context, "todos").catch(error => context?.ui.notify(String(error), "error"));

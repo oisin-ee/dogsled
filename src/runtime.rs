@@ -12,6 +12,91 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::Duration;
 
+/// One owner for CLI, MCP and explicit-host recovery operations.
+pub fn recovery_local(
+    shell: &dyn crate::shell::Shell,
+    ledger: &crate::ledger::Ledger,
+    command: &crate::cli::RecoveryCommand,
+) -> Result<Value> {
+    use crate::cli::RecoveryCommand;
+    use crate::preservation;
+    let value = match command {
+        RecoveryCommand::List { repo } => serde_json::to_value(
+            preservation::list(shell, std::path::Path::new(repo))
+                .map_err(|e| Error::Invalid(e.to_string()))?,
+        )?,
+        RecoveryCommand::Show { id, repo } => serde_json::to_value(
+            preservation::show(shell, std::path::Path::new(repo), id)
+                .map_err(|e| Error::Invalid(e.to_string()))?,
+        )?,
+        RecoveryCommand::Restore {
+            id,
+            repo,
+            to,
+            branch,
+        } => serde_json::to_value(preservation::restore(
+            shell,
+            ledger,
+            std::path::Path::new(repo),
+            id,
+            std::path::Path::new(to),
+            branch.as_deref(),
+        )?)?,
+    };
+    Ok(value)
+}
+
+pub fn recovery(
+    shell: &dyn crate::shell::Shell,
+    ledger: &crate::ledger::Ledger,
+    policy: &crate::config::Policy,
+    home: &str,
+    host: Option<&str>,
+    command: &crate::cli::RecoveryCommand,
+) -> Result<Value> {
+    use crate::cli::RecoveryCommand;
+    let Some(host) = host.filter(|host| *host != crate::hosts::LOCAL) else {
+        return recovery_local(shell, ledger, command);
+    };
+    let fleet = Fleet::discover(shell, ledger, policy, home.into())?;
+    let host = fleet.find(host)?;
+    if host.is_local() {
+        return recovery_local(shell, ledger, command);
+    }
+    let mut args = vec!["recovery".into()];
+    match command {
+        RecoveryCommand::List { repo } => {
+            args.extend(["list".into(), "--repo".into(), repo.clone()]);
+        }
+        RecoveryCommand::Show { id, repo } => {
+            args.extend(["show".into(), id.clone(), "--repo".into(), repo.clone()]);
+        }
+        RecoveryCommand::Restore {
+            id,
+            repo,
+            to,
+            branch,
+        } => {
+            args.extend([
+                "restore".into(),
+                id.clone(),
+                "--repo".into(),
+                repo.clone(),
+                "--to".into(),
+                to.clone(),
+            ]);
+            if let Some(branch) = branch {
+                args.extend(["--branch".into(), branch.clone()]);
+            }
+        }
+    }
+    fleet.remote(host, &args).map_err(|error| {
+        if matches!(error.root(), Error::Parse { .. } | Error::Ssh { failure: crate::hosts::Failure::RemoteCommandFailed | crate::hosts::Failure::UnexpectedOutput, .. }) {
+            Error::Invalid(format!("recovery on selected host {} failed: {error}; no local or fleet fallback; ensure the peer supports host recovery", host.label))
+        } else { error }
+    })
+}
+
 fn caller() -> Result<String> {
     std::env::var("HERDR_PANE_ID").map_err(|_| Error::Invalid("HERDR_PANE_ID is required".into()))
 }
@@ -427,6 +512,26 @@ fn place(
 
 pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
     match command {
+        Command::RetirePreparation {
+            request_id,
+            host,
+            reason,
+            cleanup,
+        } => {
+            let result = crate::preparation_retirement::retire(
+                fleet,
+                &request_id,
+                host.as_deref(),
+                &reason,
+                cleanup,
+            )?;
+            crate::print(true, &result, String::new)?;
+            Ok(if result["status"] == "retired" {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         Command::Place {
             resume,
             host,

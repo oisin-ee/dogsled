@@ -164,7 +164,7 @@ Acceptance: `moon run :check :lint :test :clippy :format` passes. `pi/unit-contr
 
 ## Step 3: Fold pi-todo into the Dogsled extension
 
-Status: 3a specified. Facts checked at `41312d3`.
+Status: done. 3a merged as `9bc2fca` (#224). 3b merged as `497f133` (#229).
 
 Step 3 has two parts. Each part is one writer session.
 
@@ -192,12 +192,34 @@ Acceptance:
 - `pnpm pack` of `packages/oisinpi` contains no pi-todo files.
 - A test loads `pi/index.ts` with a fake Pi API. It shows that `todo` is registered once and that `oisin.tasks.acquire.v1` gets one provider reply.
 
-### 3b outline
+### 3b decisions
 
-- `pi/work-todo.ts`, `pi/unit-bridge.ts`, and `pi/unit-worker.ts` take pi-todo's presentation, provider, and seed path as objects. The `oisin.todo.*`, `oisin.work.*`, `oisin.tasks.seed-source.v1`, and `dogsled:plan-approved` events go away.
-- `oisin.tasks.acquire.v1` stays for pi-prewalk.
-- The runtime checks in `pi/unit-protocol.ts` and `pi/work-todo.ts` that exist only because the provider was untrusted go away. `docs/pi-work.md` loses the event table.
-- `ownsTodo` and `isOwnSource` go away if nothing else needs them. Pi rejects a second `todo` registration anyway.
+At `9bc2fca`, `pi/` and `pi/todo/src/` talk through four event channels:
+
+| Channel | Events | Sender | Receiver |
+| --- | --- | --- | --- |
+| Task provider | `oisin.tasks.acquire.v1` | `pi/unit-protocol.ts` `acquire` (used by `unit-bridge.ts`, `unit-worker.ts`) | `pi/todo/src/provider.ts` |
+| Seed path | `oisin.tasks.seed-source.v1` | `pi/todo/src/seed-transport.ts` (used by `handoff.ts`) | `pi/unit-worker.ts` |
+| Plan approval | `dogsled:plan-approved` | `pi/plan-mode.ts` | `pi/todo/src/plan-approved.ts` |
+| Work display | `oisin.todo.ready`, `.snapshot`, `.stop`; `oisin.work.request`, `.claim`, `.release`, `.open` | `pi/todo/src/work.ts` and `pi/work-todo.ts` | each other |
+
+Decisions:
+
+- **One handle.** `pi/todo/src/index.ts` exports `createTodo(pi, options)`, which registers everything and returns a `TodoParts` handle. The default export stays a thin wrapper, so the standalone entry still loads in tests. `pi/index.ts` calls `createTodo` and passes the handle to the Dogsled parts.
+- **Task provider.** Dogsled calls the handle. `acquire()` and its shape check in `pi/unit-protocol.ts` go away. The `oisin.tasks.acquire.v1` listener stays, because pi-prewalk (`packages/pi-prewalk/src/tasks.ts`) is a separate extension and uses it.
+- **Seed path.** `createTodo` takes a `seedPath` function. Dogsled passes one that reads the `todo-unit-file` flag. `seed-transport.ts` and the `seed-source` listener go away.
+- **Plan approval.** `PlanMode` takes an `approved(plan, ctx)` callback. Dogsled passes the handle's `approve`. The cwd check and the `ownsTodo` check stay.
+- **Work display.** `TodoWork` gets `attach(presenter)`, which returns a detach function. The presenter has `show(snapshot): boolean`, `open()`, and `stop()`. The request, presenter, publisher, and version fields and their checks go away. The session, branch, and revision fields stay, because `TodoPublisher` writes them to the sidebar ledger.
+- **Checks that stay.** Checks of data from outside the process stay: the seed file, executor output, and settlements. The render guards in `pi/work-todo.ts` (`preflight`, `HostedTodo`) stay, because they catch exceptions, not wrong types.
+- **Ownership check.** `ownsTodo` and `isOwnSource` stay in 3b. The plan has no evidence that Pi rejects a second `todo` registration, so removing them needs its own check.
+- **Docs.** `docs/pi-work.md` loses the event table. `docs/todo-workflows.md` and `docs/unit-requests.md` lose the `seed-source` text. Their `oisin.tasks.acquire.v1` text says that only separate extensions use it.
+
+Acceptance:
+
+- `moon run :check :lint :test :clippy :format` passes, and the shim tests report `skipped 0`.
+- `rg -n 'oisin\.(todo|work)\.|seed-source|dogsled:plan-approved' pi docs` has no match.
+- In `pi/`, only `pi/todo/src/provider.ts` and its tests name `oisin.tasks.acquire.v1`.
+- `pi-prewalk:test` passes without change.
 
 ## Constraints for steps 3 and 4
 

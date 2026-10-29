@@ -5,14 +5,16 @@ import { createServer } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { realpathSync } from "node:fs";
 import dogsled, { VERSION, versionMismatch } from "./index.ts";
 
 type Handler = (event: any, ctx: any) => Promise<any> | void;
 const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 
 function rig() {
-	const handlers = new Map<string, Handler>();
+	const handlers = new Map<string, Handler[]>();
+	const manager = SessionManager.inMemory(process.cwd(), { id: "session" });
 	const calls: string[][] = [];
 	const widgets: any[] = [];
 	const notices: unknown[] = [];
@@ -35,14 +37,19 @@ function rig() {
 	const events = new EventEmitter();
 	const api = {
 		events: { emit: (name: string, data: unknown) => { events.emit(name, data); }, on: (name: string, fn: (data: unknown) => void) => { events.on(name, fn); return () => { events.off(name, fn); }; } },
-		on(event: string, fn: Handler) { handlers.set(event, fn); },
+		on(event: string, fn: Handler) {
+			const registered = handlers.get(event) ?? [];
+			registered.push(fn);
+			handlers.set(event, registered);
+		},
 		registerFlag() {},
 		getFlag() { return undefined; },
 		registerMcpServer(name: string, config: unknown) { servers.push([name, config]); },
 		registerCommand(name: string, options: unknown) { commands.set(name, options); },
 		registerShortcut(key: string, options: unknown) { shortcuts.set(key, options); },
 		registerMessageRenderer(type: string, fn: unknown) { renderers.set(type, fn); },
-		appendEntry(customType: string, data: unknown) { receipts.push({ customType, data }); },
+		appendEntry(customType: string, data: unknown) { receipts.push({ customType, data }); manager.appendCustomEntry(customType, data); },
+		getAllTools() { return [...tools.keys()].map(name => ({ name, sourceInfo: { path: realpathSync(new URL("./index.ts", import.meta.url)) } })); },
 		registerTool(tool: unknown) { tools.set((tool as { name: string }).name, tool); },
 		getActiveTools() { return [...active]; },
 		setActiveTools(names: string[]) { active = [...names]; },
@@ -58,6 +65,7 @@ function rig() {
 				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
 				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-dogsled-inbox", file: "t.json" })
+				: args[0] === "unit" && ["prepared", "settlements"].includes(args[1] ?? "") ? "[]"
 				: args[0] === "items" ? '{"items":[]}'
 				: args[0] === "ps" || args[0] === "machine" ? '[]'
 				: args[0] === "--version" ? version
@@ -67,23 +75,35 @@ function rig() {
 	};
 	dogsled(api as unknown as ExtensionAPI);
 	let drawn: () => void = () => {};
-	let component: any;
-	const ctx = { mode: "tui", hasUI: true, cwd: process.cwd(), sessionManager: { getSessionId: () => "session", getLeafId: () => null }, isIdle: () => true, ui: { theme: plain,
+	const components = new Map<string, any>();
+	const ctx = { mode: "tui", hasUI: true, cwd: process.cwd(), sessionManager: manager, isIdle: () => true, ui: { theme: plain,
 		setWidget: (...args: any[]) => {
-			component?.dispose?.();
+			components.get(args[0])?.dispose?.();
 			widgets.push(args);
-			component = typeof args[1] === "function" ? args[1]({ terminal: { rows: 24 }, requestRender() { drawn(); } }, plain) : undefined;
-				component?.render(100);
+			const component = typeof args[1] === "function" ? args[1]({ terminal: { rows: 24 }, requestRender() { drawn(); } }, plain) : undefined;
+			components.set(args[0], component);
+			component?.render(100);
 			drawn();
 		}, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
 	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, receipts, userMessages, active: () => [...active], ctx, next,
-		widget() { return component; },
+		widget() { return components.get("dogsled"); },
 		gate: (text: string) => { gate = text; },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
-		async invoke(name: string, event: unknown = {}) {
-			const handler = handlers.get(name); assert.ok(handler, name); return handler(event, ctx);
+		async invoke(name: string, event: any = {}) {
+			const registered = handlers.get(name); assert.ok(registered, name);
+			let current = name === "agent_before_settle" ? { entries: [], continue: false, ...event } : event;
+			let result: any;
+			for (const handler of registered) {
+				const next = await handler(current, ctx);
+				if (next && Object.keys(next).length) {
+					result = next;
+					if (name === "tool_call" && next.block) return next;
+					if (name === "agent_before_settle") current = { ...current, ...next };
+				}
+			}
+			return result;
 		} };
 }
 
@@ -144,12 +164,12 @@ test("Herdr owns the display: requests the side split and never sets a widget", 
 	const r = rig();
 	await r.invoke("session_start");
 	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "board --open --owner w1:p1 --json"));
-	assert.equal(r.widgets.length, 0);
+	assert.equal(r.widgets.filter(([key]) => key === "dogsled").length, 0);
 	assert.ok(r.commands.has("dogsled"));
 	await r.commands.get("work").handler("", r.ctx);
-	assert.equal(r.widgets.length, 0);
+	assert.equal(r.widgets.filter(([key]) => key === "dogsled").length, 0);
 	await r.invoke("session_shutdown");
-	assert.equal(r.widgets.length, 0);
+	assert.equal(r.widgets.filter(([key]) => key === "dogsled").length, 0);
 });
 
 test("a Dogsled-launched child under Herdr keeps the widget: the board belongs to its parent", async t => {
@@ -210,9 +230,10 @@ test("registers the dogsled tools, the panel command, and the message renderer",
 
 test("uses the shared context hook and leaves prompts unchanged when unavailable", async () => {
 	const r = rig();
+	await r.tools.get("todo").execute("setup", { op: "view" }, undefined, undefined, r.ctx);
 	assert.equal(r.calls.length, 0);
 	assert.deepEqual(await r.invoke("before_agent_start", { systemPrompt: "base" }), { systemPrompt: "base\n\n## Your work and fleet status\nlocal 3/8\n" });
-	assert.deepEqual(r.calls[0]?.slice(1), ["hook", "context", "--harness", "pi"]);
+	assert.deepEqual(r.calls.map(call => call.slice(1)), [["unit", "prepared"], ["unit", "settlements"], ["hook", "context", "--harness", "pi"]]);
 	r.context("");
 	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
 	r.fail();
@@ -447,17 +468,21 @@ test("the extension registers the interview and submit_plan tools, the plan comm
 
 test("plan mode blocks a write until the plan command turns it on", async () => {
 	const r = rig();
+	await r.tools.get("todo").execute("setup", { op: "init", start: "fixture", items: [{ key: "fixture", content: "Test plan-mode writes", contract: {
+		deliverable: "Exercise plan-mode gating with an active unit", scope: { repositoryId: "github.com/oisin-ee/dogsled", owns: ["plans/", "src/"], reads: [], generates: [] },
+		acceptance: { kind: "review", artifact: "fixture", criterion: "write gating asserted" }, dependsOn: [], assignment: { kind: "self" },
+	} }] }, undefined, undefined, r.ctx);
 	const write = { type: "tool_call", toolName: "write", toolCallId: "c1", input: { path: "src/x.rs" } };
-	assert.equal(await r.invoke("tool_call", write), undefined);
+	assert.deepEqual(await r.invoke("tool_call", write), { block: false });
 	await r.commands.get("plan").handler("", r.ctx);
 	const blocked = await r.invoke("tool_call", write);
 	assert.equal(blocked?.block, true);
 	assert.match(String(blocked?.reason), /markdown file/);
 	const allowed = await r.invoke("tool_call", { type: "tool_call", toolName: "write", toolCallId: "c2", input: { path: "plans/x.md" } });
-	assert.equal(allowed, undefined);
+	assert.deepEqual(allowed, { block: false });
 	assert.ok(r.active().includes("submit_plan"));
 	await r.commands.get("plan").handler("", r.ctx);
-	assert.equal(await r.invoke("tool_call", write), undefined);
+	assert.deepEqual(await r.invoke("tool_call", write), { block: false });
 	assert.ok(!r.active().includes("submit_plan"));
 });
 

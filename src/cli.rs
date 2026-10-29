@@ -25,6 +25,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect and restore local, pinned recovery snapshots.
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommand,
+        #[arg(long, global = true)]
+        host: Option<String>,
+    },
     /// Read quota windows from the collector or the local snapshot.
     Quota(QuotaArgs),
     /// Publish local measurements, reconcile owned work, and admit queued actions.
@@ -97,6 +104,17 @@ pub enum Command {
         session: String,
         #[arg(long)]
         cwd: String,
+    },
+    /// Retire one historical preparation claim without settling its task.
+    RetirePreparation {
+        request_id: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        reason: String,
+        /// Explicit operator authority for historical claims without owner provenance.
+        #[arg(long)]
+        cleanup: bool,
     },
     /// List cleanup candidates without changing them.
     Doctor {
@@ -359,6 +377,13 @@ pub enum UnitCommand {
     },
     /// Pending task settlements for this owner; never consumes transcript delivery.
     Settlements,
+    /// Explicit provider release of the exact execution binding and recovery references.
+    ReleaseReferences {
+        #[arg(long)]
+        input: String,
+    },
+    /// Retry durable release intents without recapturing or reopening references.
+    RetryReferenceReleases,
     /// Record provider success or confirmed duplicate application.
     AckSettlement {
         #[arg(long)]
@@ -424,6 +449,28 @@ pub enum InboxCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum RecoveryCommand {
+    List {
+        #[arg(long)]
+        repo: String,
+    },
+    Show {
+        id: String,
+        #[arg(long)]
+        repo: String,
+    },
+    Restore {
+        id: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        branch: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Subcommand)]
 pub enum HookCommand {
     /// Remind the owner once about finished children with work to land (plain text for Pi).
@@ -449,6 +496,11 @@ pub enum HookCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
+    /// Explicit-host recovery transport; never enters placement.
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommand,
+    },
     Snapshot,
     /// Delete an owner-authorized closed item's branch on this host.
     Drop {
@@ -480,6 +532,16 @@ pub enum HostCommand {
     Tail {
         kind: String,
         id: String,
+    },
+    /// Accept a versioned origin reference-release certificate.
+    ReleaseReferences {
+        #[arg(long)]
+        input: String,
+    },
+    /// Read origin release status without inferring it from host or origin silence.
+    ReferenceReleaseStatus {
+        #[arg(long)]
+        input: String,
     },
     /// Read immutable seeded terminal evidence on its execution host.
     UnitReceipt {

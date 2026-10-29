@@ -1,87 +1,95 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { WorkTodo, snapshot, type TodoSnapshot } from "./work-todo.ts";
+import { WorkTodo, type TodoSnapshot } from "./work-todo.ts";
 import { workBoard } from "./work.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { todoDisplay } from "./todo-fixture.test.ts";
+import type { TodoPresenter } from "./todo/src/work.ts";
 
 const plain = { fg: (_: string, text: string) => text, bold: (text: string) => text };
 const task = { content: "Verify changes", status: "in_progress" as const };
 function rig() {
-	const emitter = new EventEmitter();
-	const bus = { emit(name: string, value: unknown) { emitter.emit(name, value); }, on(name: string, fn: (value: unknown) => void) { emitter.on(name, fn); return () => { emitter.off(name, fn); }; } };
+	let presenter: TodoPresenter | undefined;
+	let started = false;
 	let leaf: string | null = "branch";
 	const ctx = { mode: "tui", sessionManager: { getSessionId: () => "session", getLeafId: () => leaf }, ui: { notify() {}, theme: plain } } as unknown as ExtensionContext;
-	const requests: any[] = [], claims: any[] = [], releases: any[] = [];
+	const claims: TodoSnapshot[] = [], releases: boolean[] = [];
 	let draws = 0, opens = 0;
-	bus.on("oisin.work.request", value => requests.push(value));
-	bus.on("oisin.work.claim", value => claims.push(value));
-	bus.on("oisin.work.release", value => releases.push(value));
-	const consumer = new WorkTodo(bus, () => { draws++; }, () => { opens++; });
-	const data = (extra = {}): TodoSnapshot => ({ ...requests.at(-1), publisher: "provider", session: "session", branch: leaf, revision: 1, display: todoDisplay(), ...extra });
-	return { bus, consumer, ctx, requests, claims, releases, data, branch: (next: string) => { leaf = next; }, draws: () => draws, opens: () => opens };
+	const data = (extra: Partial<TodoSnapshot> = {}): TodoSnapshot => ({ session: "session", branch: leaf, revision: 1, display: todoDisplay(), ...extra });
+	const send = (next = data()) => {
+		if (!presenter || !consumer.show(next)) return false;
+		assert.ok(draws > 0, "draw completes before claiming");
+		claims.push(next);
+		return true;
+	};
+	const consumer = new WorkTodo({ attach(next) {
+		presenter = next;
+		if (started) send();
+		return () => { presenter = undefined; releases.push(true); };
+	} }, () => { draws++; }, () => { opens++; });
+	return { consumer, ctx, claims, releases, data, send,
+		start: () => { started = true; send(); }, open: () => presenter?.open(), stop: () => presenter?.stop(),
+		branch: (next: string) => { leaf = next; }, draws: () => draws, opens: () => opens };
 }
 
-test("todo data is validated at the integration boundary", () => {
-	const r = rig(); r.consumer.start(r.ctx);
-	assert.equal(snapshot(r.data())?.display.current, task.content);
-	for (const bad of [null, {}, r.data({ version: 1 }), r.data({ revision: -1 }), r.data({ display: { createView: false } })]) assert.equal(snapshot(bad), undefined);
-	r.consumer.stop();
-});
-
-test("consumer requests an already started provider and acknowledges only after rendering", () => {
+test("consumer attaches an already started provider and acknowledges only after rendering", () => {
 	const r = rig();
-	r.bus.on("oisin.work.request", () => r.bus.emit("oisin.todo.snapshot", r.data()));
-	r.bus.on("oisin.work.claim", () => assert.equal(r.draws(), 1));
+	r.start();
 	r.consumer.start(r.ctx);
 	assert.equal(r.consumer.current?.display.current, task.content);
 	assert.equal(r.claims.length, 1);
 	r.consumer.stop(); assert.equal(r.releases.length, 1);
 });
 
-test("provider starting later requests a fresh handshake and can open the todo view", () => {
+test("provider starting later publishes and can open the todo view", () => {
 	const r = rig(); r.consumer.start(r.ctx);
-	const first = r.requests.at(-1);
-	r.bus.emit("oisin.todo.ready", { publisher: "provider", version: 3 });
-	assert.notEqual(r.requests.at(-1).request, first.request);
-	r.bus.emit("oisin.todo.snapshot", r.data());
-	r.bus.emit("oisin.work.open", { ...r.requests.at(-1), view: "todos" });
-	assert.equal(r.opens(), 1);
-	r.bus.emit("oisin.work.open", { ...first, view: "todos" });
+	r.start();
+	r.open();
 	assert.equal(r.opens(), 1);
 	r.consumer.stop();
+	r.open();
+	assert.equal(r.opens(), 1);
 });
 
-test("delayed contexts, duplicate revisions and retired publishers cannot replace current data", () => {
+test("invalid revisions release presentation", () => {
+	for (const revision of [Number.NaN, -1, 0, 1.5]) {
+		const r = rig(); r.consumer.start(r.ctx);
+		assert.equal(r.send(r.data({ revision })), false);
+		assert.equal(r.consumer.current, undefined);
+		assert.match(r.consumer.error ?? "", /unavailable/);
+		assert.equal(r.releases.length, 1);
+		r.consumer.stop();
+	}
+});
+
+test("delayed contexts and duplicate revisions cannot replace current data", () => {
 	const r = rig(); r.consumer.start(r.ctx);
-	r.bus.emit("oisin.todo.snapshot", r.data());
-	r.bus.emit("oisin.todo.snapshot", r.data({ display: todoDisplay({ empty: true }) }));
+	r.send(r.data());
+	r.send(r.data({ display: todoDisplay({ empty: true }) }));
 	assert.equal(r.consumer.current?.display.empty, false);
 	r.branch("other");
-	r.bus.emit("oisin.todo.snapshot", r.data({ branch: "branch", revision: 2 }));
+	r.send(r.data({ branch: "branch", revision: 2 }));
 	assert.equal(r.consumer.current?.revision, 1);
-	r.bus.emit("oisin.todo.snapshot", r.data({ revision: 3, display: todoDisplay({ empty: true }) }));
+	r.send(r.data({ revision: 3, display: todoDisplay({ empty: true }) }));
 	assert.equal(r.consumer.current?.branch, "other");
-	r.bus.emit("oisin.todo.snapshot", r.data({ publisher: "new-provider" }));
-	r.bus.emit("oisin.todo.snapshot", r.data({ revision: 99 }));
-	assert.equal(r.consumer.current?.publisher, "new-provider");
-	r.bus.emit("oisin.todo.stop", { version: 3, publisher: "new-provider" });
+	assert.equal(r.send(r.data({ session: "another", revision: 99 })), false);
+	assert.equal(r.consumer.current?.revision, 3);
+	r.stop();
 	assert.equal(r.consumer.current, undefined);
 	r.consumer.stop();
 });
 
-test("malformed payload releases presentation; shutdown unsubscribes and non-TUI does not claim", () => {
+test("render failure releases presentation; shutdown detaches and non-TUI does not claim", () => {
 	const r = rig(); r.consumer.start(r.ctx);
-	r.bus.emit("oisin.todo.snapshot", r.data());
-	r.bus.emit("oisin.todo.snapshot", r.data({ display: false }));
+	r.send();
+	r.send(r.data({ revision: 2, display: todoDisplay({ createView() { throw new Error("render failed"); } }) }));
 	assert.equal(r.consumer.current, undefined);
 	assert.match(r.consumer.error ?? "", /unavailable/);
 	assert.equal(r.releases.length, 1);
 	r.consumer.stop();
 	const before = r.draws();
-	r.bus.emit("oisin.todo.snapshot", r.data());
+	r.send(r.data());
 	assert.equal(r.draws(), before);
 	r.consumer.start({ ...r.ctx, mode: "rpc" });
 	assert.equal(r.claims.length, 1);
@@ -115,22 +123,13 @@ test("hosted render failure restores standalone ownership after a successful cla
 		return { render: () => { if (!preflight) throw new Error("live render"); return []; },
 			update() {}, invalidate() {}, handleInput() {}, dispose() { disposed++; } };
 	} });
-	r.bus.emit("oisin.todo.snapshot", r.data({ display }));
+	r.send(r.data({ display }));
 	const component = r.consumer.createView({ theme: plain, height: () => 10, requestRender() {} });
 	assert.equal(r.claims.length, 1);
 	assert.deepEqual(component?.render(80), []);
 	assert.equal(r.consumer.current, undefined);
 	assert.equal(r.releases.length, 1);
 	assert.equal(disposed, 2);
-	r.consumer.stop();
-});
-
-test("incompatible providers keep the host unclaimed", () => {
-	const r = rig(); r.consumer.start(r.ctx);
-	r.bus.emit("oisin.todo.ready", { version: 1, publisher: "old" });
-	assert.equal(r.consumer.current, undefined);
-	assert.equal(r.claims.length, 0);
-	assert.match(r.consumer.error ?? "", /unavailable/);
 	r.consumer.stop();
 });
 
@@ -143,7 +142,7 @@ test("provider failures release ownership and dispose hosted components once", (
 			return { render: () => { if (failure === "render") throw new Error("render failed"); return []; },
 				update() {}, invalidate() {}, handleInput() {}, dispose() { disposed++; } };
 		} });
-		r.bus.emit("oisin.todo.snapshot", r.data({ display }));
+		r.send(r.data({ display }));
 		if (failure === "create" || failure === "render") {
 			assert.equal(r.claims.length, 0);
 			assert.equal(r.consumer.current, undefined);

@@ -1603,6 +1603,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// A real repository with a `dogsled.toml` setup, and a fake Herdr whose `worktree open`
 /// opens the main checkout's workspace w7 as the anchor on first use.
 pub(super) fn place_rig(name: &str) -> (Rig, PathBuf) {
+    place_rig_with(name, SETUP)
+}
+
+pub(super) fn place_rig_with(name: &str, config: &str) -> (Rig, PathBuf) {
     let rig = Rig::short(name);
     let repo = rig.dir.join("home/repo space");
     fs::create_dir_all(&repo).unwrap();
@@ -1616,7 +1620,7 @@ pub(super) fn place_rig(name: &str) -> (Rig, PathBuf) {
             "https://example.invalid/repo.git",
         ],
     );
-    fs::write(repo.join("dogsled.toml"), SETUP).unwrap();
+    fs::write(repo.join("dogsled.toml"), config).unwrap();
     git(&repo, &["add", "dogsled.toml"]);
     git(&repo, &["commit", "-q", "-m", "init"]);
     rig.snapshot("state/host.json", now(), 0.0, 8);
@@ -1718,6 +1722,46 @@ fn place_creates_a_locked_worktree_runs_setup_opens_it_and_records_the_anchor() 
         fs::read_to_string(repo.join(".git/agent-worktree-anchor")).unwrap(),
         "kept\n"
     );
+}
+
+#[test]
+fn place_runs_setup_from_the_base_revision_instead_of_the_main_checkout() {
+    let (rig, repo) = place_rig_with("place-base-setup", "[worktree]\nsetup = [\"false\"]\n");
+    git(&repo, &["checkout", "-q", "-b", "setup-base"]);
+    fs::write(
+        repo.join("dogsled.toml"),
+        "[worktree]\nsetup = [\"printf ready > setup-marker\"]\n",
+    )
+    .unwrap();
+    git(&repo, &["commit", "-q", "-am", "new setup"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "-q", "main"]);
+
+    let (code, placed) = place(&rig, &repo, "from-new-setup", Some(base.trim()));
+    assert_eq!(code, 0, "{placed}");
+    let tree = repo.join(".worktrees/from-new-setup");
+    assert_eq!(placed["path"], json!(tree));
+    assert_eq!(
+        fs::read_to_string(tree.join("setup-marker")).unwrap(),
+        "ready"
+    );
+}
+
+#[test]
+fn place_skips_setup_when_the_base_revision_has_no_repository_config() {
+    let (rig, repo) = place_rig_with("place-base-no-config", "[worktree]\nsetup = [\"false\"]\n");
+    git(&repo, &["checkout", "-q", "-b", "no-config-base"]);
+    git(&repo, &["rm", "-q", "dogsled.toml"]);
+    git(&repo, &["commit", "-q", "-m", "remove repository config"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "-q", "main"]);
+
+    let (code, placed) = place(&rig, &repo, "from-no-config", Some(base.trim()));
+    assert_eq!(code, 0, "{placed}");
+    let tree = repo.join(".worktrees/from-no-config");
+    assert_eq!(placed["path"], json!(tree));
+    assert!(!tree.join("dogsled.toml").exists());
+    assert_eq!(rig.log("setup.log"), "");
 }
 
 #[test]
@@ -1826,6 +1870,26 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert_eq!(place(&rig, &repo, "kept", None).0, 2);
     assert!(!repo.join(".worktrees/kept").exists());
     assert_ne!(git(&repo, &["branch", "--list", "kept"]), "");
+    // An invalid config in the new worktree follows the same cleanup path.
+    git(&repo, &["checkout", "-q", "-b", "invalid-config-base"]);
+    fs::write(repo.join("dogsled.toml"), "[worktree]\nhooks = []\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "invalid repository config"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    let setup = rig.log("setup.log");
+    let (code, error) = place(&rig, &repo, "invalid-config", Some(base.trim()));
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["diagnostic"]["cause"], "setup_failed");
+    assert_eq!(error["diagnostic"]["context"]["new_worktree_removed"], true);
+    assert!(!repo.join(".worktrees/invalid-config").exists());
+    assert!(!locks(&repo).contains("branch refs/heads/invalid-config\n"));
+    assert_eq!(git(&repo, &["branch", "--list", "invalid-config"]), "");
+    assert_eq!(rig.log("setup.log"), setup);
+    assert!(!rig.log("herdr.log").contains("worktree open"));
+    assert_eq!(
+        rig.read("state/placements.json").as_array().unwrap().len(),
+        1
+    );
 }
 
 #[test]

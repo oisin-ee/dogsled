@@ -1,6 +1,6 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, SessionStartEvent } from "@earendil-works/pi-coding-agent";
-import { acquire, prepared, receipt, record, sameExecution, sameRef, unwrap, type Prepared, type Receipt } from "./unit-protocol.ts";
+import { type TaskProvider, prepared, receipt, record, sameExecution, sameRef, unwrap, type Prepared, type Receipt } from "./unit-protocol.ts";
 
 /** Read transport correlation, not task semantics; pi-todo validates the actual contract. */
 function seedFile(path: string): Prepared {
@@ -24,18 +24,14 @@ export class UnitWorker {
 	private failure: string | undefined;
 	private managed = false;
 	private reason: SessionStartEvent["reason"] = "startup";
-	private readonly pi: Pick<ExtensionAPI, "events" | "getFlag" | "registerFlag">;
+	private readonly pi: Pick<ExtensionAPI, "getFlag" | "registerFlag">;
+	private readonly tasks: () => TaskProvider | undefined;
 	private readonly exec: UnitExec;
-	constructor(pi: Pick<ExtensionAPI, "events" | "getFlag" | "registerFlag">, exec: UnitExec) {
-		this.pi = pi; this.exec = exec;
-		// Dogsled alone owns the launch flag and supplies its path over the event bus.
+	constructor(pi: Pick<ExtensionAPI, "getFlag" | "registerFlag">, exec: UnitExec, tasks: () => TaskProvider | undefined) {
+		this.pi = pi; this.exec = exec; this.tasks = tasks;
+		// Dogsled alone owns the launch flag and supplies its path to pi-todo.
 		// Register it even without pi-todo so the loaded guard can reject missing import.
 		pi.registerFlag("todo-unit-file", { type: "string", description: "Executor-owned worker task seed" });
-		// Register during extension loading, before any session_start import handler.
-		pi.events.on("oisin.tasks.seed-source.v1", input => {
-			if (!record(input) || input.version !== 1 || typeof input.reply !== "function") return;
-			input.reply({ version: 1, path: pi.getFlag("todo-unit-file") ?? null });
-		});
 	}
 	start(reason: SessionStartEvent["reason"] = "startup"): void {
 		this.reason = reason;
@@ -50,7 +46,7 @@ export class UnitWorker {
 		} catch (error) { this.failure = String(error); }
 	}
 	private imported(ctx: ExtensionContext): Receipt | null {
-		const provider = acquire(this.pi.events);
+		const provider = this.tasks();
 		if (!provider) {
 			if (this.managed) throw new Error("task provider unavailable");
 			return null;

@@ -3,13 +3,17 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, createAgentSession, createEventBus, type ExtensionAPI, type ExtensionContext, type ExtensionFactory, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { UnitBridge } from "./unit-bridge.ts";
-import { acquire, prepared, receipt, unwrap, type Prepared } from "./unit-protocol.ts";
+import { prepared, receipt, unwrap, type Prepared } from "./unit-protocol.ts";
+import { worker as makeWorker } from "./todo/src/provider-fixture.ts";
+import { createTodo, type TodoParts } from "./todo/src/index.ts";
+import { imported as importedUnit } from "./todo/src/wasm.ts";
+import { branchSnapshot } from "./todo/src/state.ts";
 
 test("native turn guidance agrees across launch, MCP, and Pi without changing todo", async () => {
 	const guidance = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children.";
@@ -22,7 +26,6 @@ test("native turn guidance agrees across launch, MCP, and Pi without changing to
 	for (const name of ["done", "ask", "blocked"]) assert.ok(mcp.includes(`async fn ${name}(`), name);
 });
 
-const source = process.env["PI_TODO_SOURCE"];
 // Git hooks export repository selectors; fixture subprocesses must address only their own checkouts.
 const gitEnvironment = Object.entries(process.env).filter(([key]) => key.startsWith("GIT_"));
 before(() => { for (const [key] of gitEnvironment) delete process.env[key]; });
@@ -35,10 +38,11 @@ type Executor = ExtensionAPI["exec"];
 async function runtime(cwd: string, providerFirst: boolean, execute: Executor, options: { id?: string; seed?: string; manager?: SessionManager; spawn?: (input: unknown) => Promise<void> } = {}) {
 	const events = createEventBus(), manager = options.manager ?? SessionManager.inMemory(cwd, options.id ? { id: options.id } : undefined);
 	const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
-	let bridge!: UnitBridge, context!: ExtensionContext;
+	let bridge!: UnitBridge, context!: ExtensionContext, todo!: TodoParts;
+	const todoExtension: ExtensionFactory = pi => { todo = createTodo(pi, { seedPath: () => options.seed }); };
 	const adapter: ExtensionFactory = pi => {
-		bridge = new UnitBridge({ events: pi.events, registerFlag: pi.registerFlag, getFlag: pi.getFlag,
-			exec: (binary, args, execOptions) => binary === "git" ? pi.exec(binary, args, execOptions) : execute(binary, args, execOptions) }, "fixture-executor");
+		bridge = new UnitBridge({ registerFlag: pi.registerFlag, getFlag: pi.getFlag,
+			exec: (binary, args, execOptions) => binary === "git" ? pi.exec(binary, args, execOptions) : execute(binary, args, execOptions) }, "fixture-executor", () => todo?.tasks());
 		pi.on("session_start", (event, ctx) => { context = ctx; bridge.start(event.reason); });
 		pi.on("before_agent_start", async (_event, ctx) => { if (bridge.guard(ctx)) await bridge.ready(ctx); });
 		pi.on("tool_call", (event, ctx) => bridge.call(event, ctx));
@@ -53,11 +57,13 @@ async function runtime(cwd: string, providerFirst: boolean, execute: Executor, o
 		} });
 	};
 	const loader = new DefaultResourceLoader({ cwd, agentDir: "/nonexistent/unit-contract-test", eventBus: events, settingsManager: settings,
-		additionalExtensionPaths: [`${source}/index.ts`], extensionFactories: [adapter],
-		extensionsOverride: loaded => ({ ...loaded, extensions: loaded.extensions.toSorted((a, b) => {
-			const left = a.tools.has("todo"), right = b.tools.has("todo");
-			return left === right ? 0 : left === providerFirst ? -1 : 1;
-		}) }),
+		extensionFactories: providerFirst ? [todoExtension, adapter] : [adapter, todoExtension],
+		extensionsOverride: loaded => {
+			for (const extension of loaded.extensions) if (extension.tools.has("todo")) {
+				extension.path = fileURLToPath(new URL("./todo/src/index.ts", import.meta.url));
+			}
+			return loaded;
+		},
 		noContextFiles: true, noExtensions: true, noPromptTemplates: true, noSkills: true, noThemes: true });
 	const models = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(), modelsPath: null, refreshOnCreate: false });
 	const faux = fauxProvider({ tokensPerSecond: 0 }); models.registerNativeProvider(faux.provider);
@@ -66,8 +72,8 @@ async function runtime(cwd: string, providerFirst: boolean, execute: Executor, o
 	const { session } = await createAgentSession({ cwd, modelRuntime: models, model: faux.getModel(), sessionManager: manager, settingsManager: settings, resourceLoader: loader, thinkingLevel: "off" });
 	if (options.seed) session.extensionRunner.setFlagValue("todo-unit-file", options.seed);
 	await session.bindExtensions({});
-	assert.ok(acquire(events), "real pi-todo must own its tool and expose the capability");
-	return { session, manager, faux, provider: () => acquire(events)!, bridge, context };
+	assert.ok(todo.tasks(), "real pi-todo must own its tool and expose the capability");
+	return { session, manager, faux, provider: () => todo.tasks()!, bridge, context };
 }
 
 async function todo(session: Session, input: any): Promise<any> {
@@ -79,11 +85,9 @@ function snapshot(manager: SessionManager): any {
 	assert.ok(entry && entry.type === "custom"); return entry.data;
 }
 
-for (const order of ["todo-first", "dogsled-first", "dogsled-only"] as const) test(`actual extension loader and startup guard: ${order}`, { skip: !source }, async () => {
+test("actual extension loader and startup guard: merged extension", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "unit-loader-")), seed = join(cwd, "seed.json"), executor = join(cwd, "executor");
 	const previousBinary = process.env["DOGSLED_BIN"], previousOwner = process.env["HERDR_PANE_ID"];
-	// A real canonical export is needed only when the actual importer is present.
-	const { worker: makeWorker } = await import(pathToFileURL(`${source}/provider-fixture.ts`).href);
 	const origin = await makeWorker("github.com/fixture/work");
 	const execution = origin.claimed.binding.execution;
 	await writeFile(seed, JSON.stringify({ version: 1, execution, ...origin.claimed }));
@@ -92,27 +96,28 @@ for (const order of ["todo-first", "dogsled-first", "dogsled-only"] as const) te
 	process.env["DOGSLED_BIN"] = executor; delete process.env["HERDR_PANE_ID"];
 	let session: Session | undefined;
 	try {
-		const dogsled = fileURLToPath(new URL("./index.ts", import.meta.url)), todoPath = `${source}/index.ts`;
-		const paths = order === "dogsled-only" ? [dogsled] : order === "todo-first" ? [todoPath, dogsled] : [dogsled, todoPath];
+		const paths = [fileURLToPath(new URL("./index.ts", import.meta.url))];
 		const manager = SessionManager.inMemory(cwd, { id: execution.requestId }), settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }), events = createEventBus();
 		const loader = new DefaultResourceLoader({ cwd, agentDir: "/nonexistent/unit-loader-test", eventBus: events, settingsManager: settings, additionalExtensionPaths: paths,
 			noContextFiles: true, noExtensions: true, noPromptTemplates: true, noSkills: true, noThemes: true });
 		await loader.reload();
 		assert.deepEqual(loader.getExtensions().errors, []);
-		assert.equal(loader.getExtensions().extensions.filter(extension => extension.flags.has("todo-unit-file")).length, 1);
+		const extensions = loader.getExtensions().extensions;
+		assert.equal(extensions.length, 1);
+		assert.ok(extensions[0]!.tools.has("todo"));
+		assert.ok(extensions[0]!.flags.has("todo-unit-file"));
 		assert.deepEqual(loader.getExtensions().extensions.map(extension => extension.path), paths);
 		const models = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(), modelsPath: null, refreshOnCreate: false });
 		const faux = fauxProvider({ tokensPerSecond: 0 }); models.registerNativeProvider(faux.provider);
 		({ session } = await createAgentSession({ cwd, modelRuntime: models, model: faux.getModel(), sessionManager: manager, settingsManager: settings, resourceLoader: loader, thinkingLevel: "off" }));
 		session.extensionRunner.setFlagValue("todo-unit-file", seed);
 		await session.bindExtensions({});
-		if (order !== "dogsled-only") {
-			const provider = acquire(events); assert.ok(provider);
-			const imported = unwrap(provider.imported()); assert.ok(receipt(imported)); assert.equal(imported.digest, origin.claimed.exported.digest);
-		}
+		const persisted = importedUnit(branchSnapshot(manager.getBranch()), manager.getSessionId()); assert.ok(persisted);
+		const imported = { ...persisted, seal: persisted.seal ?? null };
+		assert.ok(receipt(imported)); assert.equal(imported.digest, origin.claimed.exported.digest);
 		faux.setResponses([fauxAssistantMessage("Imported task ready."), fauxAssistantMessage("Awaiting implementation.")]);
 		await session.prompt("Check the loaded import.");
-		assert.equal(faux.state.callCount, order === "dogsled-only" ? 0 : 2);
+		assert.equal(faux.state.callCount, 2);
 	} finally {
 		session?.dispose(); origin.test.session.dispose();
 		if (previousBinary === undefined) delete process.env["DOGSLED_BIN"]; else process.env["DOGSLED_BIN"] = previousBinary;
@@ -121,7 +126,7 @@ for (const order of ["todo-first", "dogsled-first", "dogsled-only"] as const) te
 	}
 });
 
-test("a resumed original session settles the unchanged delivery and completes only with native done", { skip: !source }, async () => {
+test("a resumed original session settles the unchanged delivery and completes only with native done", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "unit-recovery-"));
 	execFileSync("git", ["init", "--quiet", cwd]);
 	execFileSync("git", ["-C", cwd, "remote", "add", "origin", "git@github.com:owner/repo.git"]);
@@ -171,7 +176,7 @@ test("a resumed original session settles the unchanged delivery and completes on
 	} finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
-for (const providerFirst of [true, false]) test(`real unit export/import/result/acceptance (providerFirst=${providerFirst})`, { skip: !source }, async () => {
+for (const providerFirst of [true, false]) test(`real unit export/import/result/acceptance (providerFirst=${providerFirst})`, async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "unit-contract-"));
 	execFileSync("git", ["init", "--quiet", cwd]);
 	execFileSync("git", ["-C", cwd, "remote", "add", "origin", "git@github.com:fixture/work.git"]);

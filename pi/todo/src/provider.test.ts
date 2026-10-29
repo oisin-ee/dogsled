@@ -1,4 +1,4 @@
-import { contract, first } from "./contract-fixture.ts";
+import { contract, first, second } from "./contract-fixture.ts";
 import { describe, expect, it } from "vitest";
 import { value, worker } from "./provider-fixture.ts";
 import { branchSnapshot } from "./state.ts";
@@ -78,19 +78,22 @@ describe("provider acceptance", () => {
 });
 
 describe("provider scope and origin", () => {
-  it("holds conflicting scope and rejects inactive origin", { timeout: 20_000 }, async () => {
+  it("allows overlapping local work and rejects inactive origin", { timeout: 20_000 }, async () => {
     expect.hasAssertions();
     const fixture = await worker(),
-      origin = structuredClone(fixture.inspected.ref);
-    origin.contractEntryId = "other-branch";
+      origin = Object.assign(structuredClone(fixture.inspected.ref), {
+        contractEntryId: "other-branch",
+      });
     try {
-      await expect(
-        fixture.test.todo({
-          items: [{ content: "Local", contract: contract(), key: "local" }],
-          op: "append",
-          start: "local",
-        }),
-      ).rejects.toThrow("SCOPE_CONFLICT");
+      await fixture.test.todo({
+        items: [{ content: "Local", contract: contract(), key: "local" }],
+        op: "append",
+        start: "local",
+      });
+      expect(branchSnapshot(fixture.test.manager.getBranch()).tasks.at(second)?.status).toBe(
+        "in_progress",
+      );
+      const count = fixture.test.manager.getBranch().length;
       expect(
         fixture.test.provider().settle({
           eventId: "not-started",
@@ -100,6 +103,7 @@ describe("provider scope and origin", () => {
           version: 1,
         }),
       ).toMatchObject({ error: { code: "STALE_ORIGIN" }, ok: false });
+      expect(fixture.test.manager.getBranch()).toHaveLength(count);
       expect(
         branchSnapshot(fixture.test.manager.getBranch()).tasks.at(first)?.unit?.binding,
       ).toStrictEqual(fixture.claimed.binding);

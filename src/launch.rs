@@ -44,6 +44,9 @@ struct Progress {
     /// by `unit_receipt` under the launch lock; `terminal_ack` refuses after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stopped: Option<crate::unit_reply::Stopped>,
+    /// Explicit origin proof, independent of terminal/settlement delivery. No deletion yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_release: Option<ReferenceReleaseAck>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -179,6 +182,181 @@ pub(crate) fn execution_closed(ledger: &Ledger, item: &crate::items::Item) -> Re
             receipts.write(&file, &progress)?;
         }
         Ok(())
+    })
+}
+
+/// The versioned assertion made by the origin after its provider explicitly releases
+/// this exact binding. Full immutable identities avoid interpreting delivery as release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceRelease {
+    pub version: u32,
+    pub origin_host: String,
+    pub execution: crate::unit_transport::ExecutionRef,
+    pub binding: crate::unit_transport::Binding,
+    pub launch: Launch,
+    pub terminal_evidence: crate::unit_reply::HostEvidence,
+    pub custody_revision: u64,
+    pub released_references: std::collections::BTreeSet<ReleasedReference>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleasedReference {
+    Execution,
+    Recovery,
+    TaskBinding,
+    Custody,
+}
+
+impl ReferenceRelease {
+    pub fn validate(&self) -> Result<()> {
+        use ReleasedReference::{Custody, Execution, Recovery, TaskBinding};
+        let seed = self
+            .launch
+            .unit
+            .as_ref()
+            .ok_or_else(|| crate::unit_transport::conflict("release has no launch seed"))?;
+        crate::unit_transport::validate_seed(seed, &self.launch.id, &self.launch.owner)?;
+        if self.version != 1
+            || self.origin_host.is_empty()
+            || self.launch.owner_host.as_deref() != Some(self.origin_host.as_str())
+            || self.execution != seed.execution
+            || self.binding != seed.binding
+            || self.released_references
+                != [Execution, Recovery, TaskBinding, Custody]
+                    .into_iter()
+                    .collect()
+        {
+            return Err(crate::unit_transport::conflict(
+                "origin reference release identity mismatch",
+            ));
+        }
+        let terminal_matches = match &self.terminal_evidence {
+            crate::unit_reply::HostEvidence::Returned(receipt) => {
+                receipt.ack.execution == self.execution
+                    && receipt.ack.unit_ref == self.binding.contract
+                    && receipt.ack.digest == self.binding.export_digest
+                    && receipt.session_id == self.launch.id
+                    && !receipt.ack.seal_entry_id.is_empty()
+                    && !receipt.ack.session_leaf_id.is_empty()
+                    && !receipt.reply_entry_id.is_empty()
+            }
+            crate::unit_reply::HostEvidence::Stopped(stopped) => {
+                stopped.launch == self.launch && !stopped.reason.is_empty()
+            }
+            crate::unit_reply::HostEvidence::Refused(refusal) => {
+                refusal.launch == self.launch && !refusal.failed.is_empty()
+            }
+        };
+        if !terminal_matches {
+            return Err(crate::unit_transport::conflict(
+                "release terminal identity does not match execution",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceReleaseAck {
+    pub certificate: ReferenceRelease,
+    pub accepted_ms: u64,
+}
+
+/// Accept under the launch lock, before any dependent evidence can be removed. The
+/// origin's task/settlement acknowledgement is deliberately not read here.
+pub fn release_references(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    certificate: &ReferenceRelease,
+) -> Result<ReferenceReleaseAck> {
+    certificate.validate()?;
+    crate::jobs::validate_id(&certificate.execution.request_id)?;
+    let launches = ledger.child("launches");
+    launches.with_lock(&certificate.execution.request_id, || {
+        let file = format!("{}.progress.json", certificate.execution.request_id);
+        let mut progress = launches
+            .read::<Progress>(&file)?
+            .ok_or_else(|| crate::unit_transport::conflict("unknown host launch"))?;
+        if progress.request != certificate.launch {
+            return Err(crate::unit_transport::conflict(
+                "release does not match retained launch",
+            ));
+        }
+        if let Some(saved) = &progress.origin_release {
+            if saved.certificate != *certificate {
+                return Err(crate::unit_transport::conflict(
+                    "origin reference release changed",
+                ));
+            }
+            return Ok(saved.clone());
+        }
+        let final_receipt: Option<Value> =
+            launches.read(&format!("{}.json", certificate.execution.request_id))?;
+        let refused = final_receipt
+            .as_ref()
+            .is_some_and(|value| value.get("failed").is_some());
+        if usize::from(progress.terminal_receipt.is_some())
+            + usize::from(progress.stopped.is_some())
+            + usize::from(refused)
+            != 1
+        {
+            return Err(crate::unit_transport::conflict(
+                "missing or contradictory terminal evidence",
+            ));
+        }
+        let evidence = if let Some(receipt) = &progress.terminal_receipt {
+            if !progress.attempted || progress.preflight_refusal.is_some() {
+                return Err(crate::unit_transport::conflict(
+                    "inconsistent returned launch",
+                ));
+            }
+            crate::unit_reply::HostEvidence::Returned(Box::new(receipt.clone()))
+        } else if let Some(stopped) = &progress.stopped {
+            if !progress.attempted || !progress.confirmed || stopped.launch != progress.request {
+                return Err(crate::unit_transport::conflict(
+                    "inconsistent stopped launch",
+                ));
+            }
+            crate::unit_reply::HostEvidence::Stopped(Box::new(stopped.clone()))
+        } else {
+            // A retained refusal answers without probing or creating a new terminal fact.
+            unit_receipt_locked(ledger, shell, &certificate.execution)?
+                .ok_or_else(|| crate::unit_transport::conflict("awaiting terminal evidence"))?
+        };
+        if evidence != certificate.terminal_evidence {
+            return Err(crate::unit_transport::conflict(
+                "release terminal evidence mismatch",
+            ));
+        }
+        let acknowledgement = ReferenceReleaseAck {
+            certificate: certificate.clone(),
+            accepted_ms: crate::ledger::now_ms(),
+        };
+        progress.origin_release = Some(acknowledgement.clone());
+        launches.write(&file, &progress)?;
+        Ok(acknowledgement)
+    })
+}
+
+/// A read-only synchronization status. Absence is never treated as origin release.
+pub fn reference_release_status(
+    ledger: &Ledger,
+    execution: &crate::unit_transport::ExecutionRef,
+) -> Result<Value> {
+    crate::jobs::validate_id(&execution.request_id)?;
+    ledger.child("launches").with_lock(&execution.request_id, || {
+        let progress = ledger.child("launches").read::<Progress>(&format!("{}.progress.json", execution.request_id))?
+            .ok_or_else(|| crate::unit_transport::conflict("unknown host launch"))?;
+        if progress.request.unit.as_ref().map(|seed| &seed.execution) != Some(execution) {
+            return Err(crate::unit_transport::conflict("host execution mismatch"));
+        }
+        Ok(match progress.origin_release {
+            Some(acknowledgement) => json!({"acknowledgement":acknowledgement}),
+            None => json!({"reason":"awaiting origin reference release", "retryable":true, "action":"retry unit release-references at the origin"}),
+        })
     })
 }
 
@@ -907,6 +1085,7 @@ fn allocate(
         preflight_refusal: None,
         terminal_receipt: None,
         stopped: None,
+        origin_release: None,
     };
     let bytes = work::line_len(kind, &argv);
     if bytes > work::LINE_BUDGET {
