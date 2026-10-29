@@ -1553,7 +1553,7 @@ fn prepared_launch(
         .read::<Attempt>(&format!("{}.json", request.id))?
         .and_then(|a| a.unit)
         .and_then(|u| u.committed)
-        .map(crate::unit_transport::Seed::from);
+        .map(crate::unit_transport::seed_from_commit);
     let mut action = request.action.clone();
     if let Action::Job { validity, .. } = &mut action {
         *validity = jobs::request_validity(fleet.ledger, &request.id)?;

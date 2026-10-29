@@ -9,6 +9,7 @@ rust-version = "1.99"
 repository = "https://github.com/oisin-ee/dogsled"
 
 [workspace.dependencies]
+schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # `js` converts through serde-wasm-bindgen instead of JSON strings.
@@ -165,6 +166,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 tokio-stream = { version = "0.1.19", default-features = false, features = ["sync"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["rt"] }
 toml = "1.1.6"
+todo-core = { workspace = true, features = ["schema"] }
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }

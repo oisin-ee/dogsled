@@ -9,10 +9,12 @@ rust-version.workspace = true
 repository.workspace = true
 
 [features]
+schema = ["dep:schemars"]
 # TypeScript declarations and wasm-bindgen conversions for `todo-wasm`.
 wasm = ["dep:tsify", "dep:wasm-bindgen"]
 
 [dependencies]
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.1"

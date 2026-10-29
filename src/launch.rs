@@ -329,7 +329,7 @@ pub fn execution(
         .unit
         .as_ref()
         .ok_or_else(|| crate::unit_transport::conflict("host seed missing"))?;
-    seed.validate(id, &progress.request.owner)?;
+    crate::unit_transport::validate_seed(seed, id, &progress.request.owner)?;
     let Action::Agent { name, .. } = &progress.request.action else {
         return Err(crate::unit_transport::conflict("not an agent launch"));
     };
@@ -951,7 +951,7 @@ fn validate_seed<'a>(
     seed: &'a crate::unit_transport::Seed,
     profile: Option<&crate::profiles::Profile>,
 ) -> Result<&'a str> {
-    let expected = seed.validate(&request.id, &request.owner)?;
+    let expected = crate::unit_transport::validate_seed(seed, &request.id, &request.owner)?;
     let Action::Agent {
         kind,
         profile: selected,
@@ -1221,7 +1221,7 @@ pub(crate) fn unit_receipt_locked(
             .unit
             .as_ref()
             .ok_or_else(|| crate::unit_transport::conflict("host seed missing"))?;
-        seed.validate(&progress.request.id, &progress.request.owner)?;
+        crate::unit_transport::validate_seed(seed, &progress.request.id, &progress.request.owner)?;
         if seed.execution != *execution {
             return Err(crate::unit_transport::conflict("host execution mismatch"));
         }
