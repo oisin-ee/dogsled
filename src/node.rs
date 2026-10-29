@@ -54,6 +54,9 @@ pub struct SnapshotReport {
     pub job_validity: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_replay: Option<u32>,
+    /// Read-only ownership reports from this host's stores.
+    #[serde(default)]
+    pub holds: Vec<crate::holds::Hold>,
 }
 
 impl Snapshot {
@@ -195,6 +198,12 @@ impl Node<'_> {
             handoffs: crate::done::list(self.ledger)?,
             job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
             placement_replay: Some(PLACEMENT_VERSION),
+            holds: crate::holds::local(
+                self.ledger,
+                crate::hosts::LOCAL,
+                crate::ledger::now_ms(),
+                self.thresholds.reservation_ttl_ms,
+            )?,
         })
     }
 

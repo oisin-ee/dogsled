@@ -438,6 +438,8 @@ impl Group {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Row {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<crate::holds::Hold>,
     pub group: Group,
     pub kind: String,
     pub id: String,
@@ -561,6 +563,7 @@ fn closed_branch_row(
     now: u64,
 ) -> Row {
     Row {
+        holds: Vec::new(),
         group: Group::ToLand,
         kind: "agent".into(),
         id: item.id.clone(),
@@ -657,6 +660,7 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
             group
         };
     Row {
+        holds: Vec::new(),
         group,
         kind: "agent".into(),
         id: item.id.clone(),
@@ -722,6 +726,7 @@ fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
     );
     let failed = state.starts_with("exit ") || state == "blocked";
     Row {
+        holds: Vec::new(),
         group: if failed {
             Group::Attention
         } else {
@@ -776,6 +781,7 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
             .next()
     });
     Row {
+        holds: Vec::new(),
         group: Group::Waiting,
         kind: kind.into(),
         id: ticket.id.clone(),
@@ -835,6 +841,7 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
             row.activity.clone_from(activity);
         }
     }
+    resource_rows(status, &mut rows, owner);
     // Stable: within a group, the oldest first.
     rows.sort_by(|a, b| a.group.cmp(&b.group).then(b.age_ms.cmp(&a.age_ms)));
     Board {
@@ -861,6 +868,56 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
             .collect(),
         rows,
     }
+}
+
+fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
+    let mine = |pane: &str| owner.is_none_or(|owner| owner == pane);
+    for row in rows.iter_mut() {
+        for hold in status
+            .holds
+            .iter()
+            .filter(|hold| hold.request_id.as_deref() == Some(row.id.as_str()))
+        {
+            row.holds.push(hold.clone());
+        }
+    }
+    let item_ids: std::collections::BTreeSet<_> = rows.iter().map(|row| row.id.clone()).collect();
+    rows.extend(
+        status
+            .holds
+            .iter()
+            .filter(|hold| {
+                !hold
+                    .request_id
+                    .as_ref()
+                    .is_some_and(|id| item_ids.contains(id))
+            })
+            .filter(|hold| hold.owner_pane.as_deref().is_none_or(mine))
+            .map(|hold| Row {
+                holds: Vec::new(),
+                group: Group::Attention,
+                kind: "hold".into(),
+                id: format!("hold:{}:{}:{}", hold.host, hold.code, hold.resource),
+                name: hold.resource.clone(),
+                what: "resource hold".into(),
+                host: label(&status.hosts, &hold.host),
+                pane: None,
+                owner_pane: Some(hold.owner.clone()),
+                title: None,
+                cleanup: None,
+                unseen: false,
+                state: "held".into(),
+                activity: format!(
+                    "owner: {}; {}; next (on {}): {}",
+                    hold.owner, hold.reason, hold.command_host, hold.next_command
+                ),
+                age_ms: 0,
+                quiet_ms: None,
+                ahead: None,
+                dirty: false,
+                repository: None,
+            }),
+    );
 }
 
 /// Add portal metadata on the blocking board reader, never on an HTTP request.
@@ -1153,6 +1210,9 @@ impl Board {
                 },
                 age(row.age_ms)
             );
+            for hold in &row.holds {
+                let _ = writeln!(out, "    {}", hold.display());
+            }
         }
         out
     }
@@ -1750,6 +1810,7 @@ mod tests {
             failure: None,
             jobs: Vec::new(),
             handoffs: Vec::new(),
+            holds: Vec::new(),
             retry_ms: None,
             job_validity: None,
         }
@@ -1783,6 +1844,7 @@ mod tests {
             orphans: Vec::new(),
             sweep: None,
             stopped_activity: std::collections::BTreeMap::new(),
+            holds: Vec::new(),
         }
     }
 

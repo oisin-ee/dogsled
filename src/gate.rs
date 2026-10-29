@@ -284,6 +284,7 @@ mod tests {
 
     fn row(id: &str, group: Group, ahead: Option<u64>, dirty: bool) -> Row {
         Row {
+            holds: Vec::new(),
             group,
             kind: "agent".into(),
             id: id.into(),

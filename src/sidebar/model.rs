@@ -632,6 +632,7 @@ pub mod tests {
 
     pub fn row(id: &str, group: Group, state: &str, age_ms: u64) -> Row {
         Row {
+            holds: Vec::new(),
             group,
             kind: if state == "running" || state.starts_with("exit") {
                 "job"
