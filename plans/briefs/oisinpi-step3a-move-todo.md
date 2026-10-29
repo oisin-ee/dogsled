@@ -13,7 +13,7 @@
 1. Move `packages/pi-todo/{src,moon.yml,tsconfig.json,README.md,CHANGELOG.md}` to `pi/todo/` with `git mv`. Delete `packages/pi-todo/package.json`.
 2. `.moon/workspace.yml`: set `pi-todo: pi/todo`. `pi/todo/moon.yml`: fix the relative paths of the `generate` task (`../../target` becomes `../../../target`). `pi/todo/tsconfig.json`: extend `../../tsconfig.base.json`.
 3. `.gitignore` and `.oxlintrc.json` `ignorePatterns`: add `pi/todo/src/generated/`. Root `moon.yml`: add `pi/todo` to the `oxfmt` paths of the `format` and `fix` tasks.
-4. `pi/todo/src/source.ts`: `OWN` names `pi/index.ts`, the extension entry, not pi-todo's `index.ts`. Change the tests that depend on it.
+4. `pi/todo/src/source.ts`: `OWN` is the set of realpaths of `pi/index.ts` and `pi/todo/src/index.ts`. Add a `source.test.ts` case for `pi/index.ts`.
 5. `pi/index.ts`: import pi-todo's default export from `./todo/src/index.ts`, and call it as the first statement of `dogsled()`.
 6. Root `package.json`:
    - `test` runs `node --test "pi/*.test.ts"`.
@@ -21,7 +21,7 @@
    - Add peer dependencies `"@earendil-works/pi-ai": "*"` and `"typebox": "*"`, and dev dependency `"typebox": "catalog:"`.
 7. Root `tsconfig.json`: add `"exclude": ["pi/todo/**"]`.
 8. Root `moon.yml` `test-shim`: delete the `PI_TODO_SOURCE` env. Keep `deps: [pi-todo:generate]`. Add `pi/todo/**/*` to the `typecheck` and `test-shim` inputs only if a test in `pi/` imports from it.
-9. `pi/unit-contract.test.ts` and `pi/work-contract.test.ts`: import from `./todo/src/` directly. Delete the `PI_TODO_SOURCE` lookup and its skip.
+9. `pi/unit-contract.test.ts` and `pi/work-contract.test.ts`: import from `./todo/src/` directly. Delete the `PI_TODO_SOURCE` lookup and its skip. Replace the three loader orders in `unit-contract.test.ts` with one case that loads only `pi/index.ts`. Cover the missing-provider guard with a direct `UnitWorker` test. Never load `pi/todo/src/index.ts` next to `pi/index.ts`.
 10. New `pi/todo-registration.test.ts` (`node --test`): load `pi/index.ts` with a fake Pi API. Assert that `todo` is registered exactly once, and that one `oisin.tasks.acquire.v1` emit gets exactly one provider reply.
 11. `packages/oisinpi/package.json`: remove `@oisin-ee/pi-todo` from `dependencies`, `bundleDependencies`, and `pi.extensions`. `packages/oisinpi/README.md`: say the `todo` tool now ships in `@oisin-ee/pi-dogsled`.
 12. `.github/workflows/publish-npm.yml`: remove `packages/pi-todo` from the package loop. Delete the `PI_TODO_SOURCE` env.
