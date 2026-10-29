@@ -55,7 +55,7 @@ An acceptance requirement can instead use `{kind:"review", artifact, criterion}`
 
 `update` replaces the draft object rather than merging individual fields. `update` may instead, or also, send `description` to set it on open work; a blank value clears it. A description-only update never bumps the revision, and no description change alters `content`-based selection. A domain change increments the revision. A status-only change preserves the revision and its origin.
 
-A locally active unit prevents replacement with `init`. Its contract cannot change. Another local leaf cannot start, even with disjoint ownership. A worker assignment uses `{kind:"worker", profile:"general"}`. `start` rejects worker assignments without launching anything.
+A locally active unit prevents replacement with `init`. Its contract cannot change. Another local leaf cannot start: `LOCAL_UNIT_ACTIVE` applies to both overlapping and disjoint paths. A worker assignment uses `{kind:"worker", profile:"general"}`. `start` rejects worker assignments without launching anything.
 
 Executable completion requires a complete contract, completed prerequisites, prior local activation, and nonempty acceptance evidence. Worker acceptance requires released provider evidence. A worker exit does not establish acceptance.
 
@@ -67,7 +67,7 @@ Appending children to a completed or dropped root fails without changing its sna
 
 Scope paths are repository-relative files or directory prefixes. Absolute paths, parent traversal, glob patterns, and duplicate paths are invalid. Empty ownership permits read-only work. Read paths do not claim ownership.
 
-Unknown prerequisite IDs and cycles reject the whole mutation. Completed prerequisites satisfy dependencies. Dropped prerequisites do not. Owned and generated paths participate in overlap validation. Scope declarations are not filesystem permissions.
+Unknown prerequisite IDs and cycles reject the whole mutation. Completed prerequisites satisfy dependencies. Dropped prerequisites do not. Concurrent worker units and one local unit may declare overlapping owned or generated paths. Scope declarations are not filesystem permissions.
 
 ## Local execution gate and extension capability
 
