@@ -782,7 +782,9 @@ fn completed_admission(request: &Request, admission: Option<&Value>) -> Result<O
 
 /// An admission-locked witness, saved before the existing provider settlement event.
 pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> {
-    if crate::preparation_retirement::prohibited(ledger, &ticket.request)? {
+    if crate::preparation_retirement::prohibited(ledger, &ticket.request)?
+        || crate::prepare::disposition::retired(ledger, &ticket.request.id)?
+    {
         return Ok(false);
     }
     let saved = if let Some(saved) = cancellation(ledger, &ticket.request)? {

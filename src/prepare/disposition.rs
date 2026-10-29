@@ -347,6 +347,18 @@ fn read(ledger: &Ledger, id: &str) -> Result<Option<Receipt>> {
     Ok(receipt)
 }
 
+/// Read-only retirement evidence is a resource fence, never a no-launch witness.
+pub fn retired(ledger: &Ledger, id: &str) -> Result<bool> {
+    Ok(read(ledger, id)?.is_some_and(|receipt| {
+        matches!(
+            receipt.request.policy,
+            Policy::Prohibit {
+                basis: Basis::Retired { .. }
+            }
+        )
+    }))
+}
+
 /// Called under the request's preparation lock, before any discovery or side effect.
 pub fn allow_preparation(ledger: &Ledger, id: &str) -> Result<()> {
     if read(ledger, id)?.is_some() {
@@ -555,6 +567,7 @@ fn dispose_guarded(
     ) {
         // Metadata retirement never observes or repairs the current checkout. Lock the
         // historical lifecycle mutex only if it still exists; do not create a replacement.
+        crate::work::launch_test_barrier("RETIREMENT_ENTERED_GATE")?;
         return retirement_guarded(ledger, shell, request, saved.is_none());
     }
     crate::worktree::with_lifecycle(shell, ledger, &request.binding.request.0, |guard| {

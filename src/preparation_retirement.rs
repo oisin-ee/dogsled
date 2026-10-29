@@ -180,7 +180,6 @@ pub fn retire(
     if reason.trim().is_empty() {
         return Err(conflict("retirement requires a nonempty reason"));
     }
-    let actor = actor(fleet);
     fleet.ledger.child("admissions").with_lock(id, || {
         let store = fleet.ledger.child("preparation-retirements");
         let file = format!("{id}.json");
@@ -199,13 +198,17 @@ pub fn retire(
             let admission = fleet.ledger.child("admissions").read::<Value>(&file)?;
             let expected_request = admission.as_ref().and_then(|a| a.get("request")).cloned();
             let host = select_host(fleet, admission.as_ref(), selected)?;
-            let captured_authority = crate::custody::locked(fleet.ledger, id, |custody| {
-                authority(fleet.ledger, id, &actor, cleanup, custody)
-            })?;
+            let (actor, captured_authority) =
+                crate::custody::locked(fleet.ledger, id, |custody| {
+                    let actor = actor(fleet);
+                    let authority = authority(fleet.ledger, id, &actor, cleanup, custody)?;
+                    Ok((actor, authority))
+                })?;
             // Custody is never held over host RPC. Compare the original authority again
             // when saving the intent; never replace it with newly observed custody.
             crate::work::launch_test_barrier("RETIREMENT_CAPTURED")?;
             let historical = crate::prepare::lookup_historical(fleet, &host, id)?;
+            validate_origin(fleet, admission.as_ref(), &host, &historical.binding)?;
             let disposition = if let Some(existing) = historical.disposition {
                 if !cleanup
                     || !matches!(
@@ -218,6 +221,15 @@ pub fn retire(
                     return Err(conflict(
                         "historical preparation already has a conflicting disposition",
                     ));
+                }
+                let Policy::Prohibit {
+                    basis: Basis::Retired { audit, .. },
+                } = &existing.request.policy
+                else {
+                    return Err(conflict("not a retirement disposition"));
+                };
+                if audit.host != host || audit.reason != reason {
+                    return Err(conflict("saved retirement host or reason changed"));
                 }
                 existing.request
             } else {
@@ -249,7 +261,9 @@ pub fn retire(
                 error: None,
             };
             crate::custody::locked(fleet.ledger, id, |custody| {
-                if authority(fleet.ledger, id, &actor, cleanup, custody)? != captured_authority {
+                if self::actor(fleet) != actor
+                    || authority(fleet.ledger, id, &actor, cleanup, custody)? != captured_authority
+                {
                     return Err(conflict("retirement custody changed during capture"));
                 }
                 store.write(&file, &saved)
@@ -264,12 +278,25 @@ pub fn retire(
 }
 
 fn select_host(fleet: &Fleet, admission: Option<&Value>, selected: Option<&str>) -> Result<Host> {
-    let recorded = admission
-        .and_then(|a| a.get("host"))
-        .filter(|h| !h.is_null())
+    let attempt = admission
         .cloned()
-        .map(serde_json::from_value::<Host>)
+        .map(serde_json::from_value::<crate::work::Attempt>)
         .transpose()?;
+    let mut recorded = attempt.as_ref().and_then(|a| a.host.clone());
+    if let Some(attempt) = &attempt
+        && let Some(progress) = &attempt.placement
+    {
+        let request = serde_json::from_value(attempt.request.clone())?;
+        if let Some(placement) = progress.expectation(&request)? {
+            if recorded
+                .as_ref()
+                .is_some_and(|host| *host != placement.envelope.host)
+            {
+                return Err(conflict("placement retirement host changed"));
+            }
+            recorded = Some(placement.envelope.host);
+        }
+    }
     let host = if let Some(selected) = selected {
         fleet.find(selected)?.clone()
     } else {
@@ -280,6 +307,48 @@ fn select_host(fleet: &Fleet, admission: Option<&Value>, selected: Option<&str>)
         return Err(conflict("retirement selected host changed"));
     }
     Ok(host)
+}
+
+fn validate_origin(
+    fleet: &Fleet,
+    admission: Option<&Value>,
+    host: &Host,
+    binding: &disposition::Binding,
+) -> Result<()> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let attempt: crate::work::Attempt = serde_json::from_value(admission.clone())?;
+    let request: crate::work::Request = serde_json::from_value(attempt.request)?;
+    if request.id != binding.request_id
+        || request.branch.as_ref() != Some(&binding.request.1)
+        || request.base != binding.request.2
+        || request.repository.as_ref().is_some_and(|repo| {
+            host.is_local()
+                && !crate::worktree::same(&repo.path, &binding.request.0.to_string_lossy())
+        })
+        || attempt
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.preparation.as_deref())
+            .is_some_and(|saved| saved != binding)
+    {
+        return Err(conflict(
+            "retirement historical preparation does not match its origin",
+        ));
+    }
+    if let Some(query) =
+        fleet
+            .ledger
+            .child("preparation-expectations")
+            .read::<crate::prepare::PreparationLookup>(&format!("{}.json", request.id))?
+        && (serde_json::to_value(query.request)? != serde_json::to_value(request)?
+            || query.host != *host
+            || query.binding.as_ref().is_some_and(|saved| saved != binding))
+    {
+        return Err(conflict("retirement preparation expectation changed"));
+    }
+    Ok(())
 }
 
 fn finish(fleet: &Fleet, intent: &mut Intent) -> Result<()> {

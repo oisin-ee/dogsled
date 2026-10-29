@@ -107,12 +107,21 @@ fn retired(result: &Value) {
 
 #[test]
 fn two_requests_on_one_path_retire_independently() {
-    let (rig, _) = prepared("retire-shared", "a");
-    let mut claims = rig.read("state/preparations.json");
-    let mut b = claims[0].clone();
-    b["request_id"] = json!("b");
-    claims.as_array_mut().unwrap().push(b.clone());
-    rig.put("state/preparations.json", &claims);
+    let (rig, repo) = prepared("retire-shared", "a");
+    let (code, second) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "retire",
+        "--request-id",
+        "b",
+    ]);
+    assert_eq!(code, 0, "{second}");
+    let claims = rig.read("state/preparations.json");
+    let b = claims[1].clone();
+    let b_receipt = fs::read(rig.dir.join("state/preparation-receipts/b.json")).unwrap();
     let path = PathBuf::from(claims[0]["path"].as_str().unwrap());
     let before = rig.log("herdr.log");
     let original = rig.read("state/preparation-receipts/a.json");
@@ -120,6 +129,10 @@ fn two_requests_on_one_path_retire_independently() {
     assert_eq!(code, 0, "{result}");
     retired(&result);
     assert_eq!(rig.read("state/preparations.json"), json!([b]));
+    assert_eq!(
+        fs::read(rig.dir.join("state/preparation-receipts/b.json")).unwrap(),
+        b_receipt
+    );
     assert!(path.exists());
     for effect in ["worktree open", "pane close", "agent start", "pane run"] {
         assert_eq!(
@@ -128,6 +141,12 @@ fn two_requests_on_one_path_retire_independently() {
         );
     }
     assert_eq!(rig.read("state/preparation-receipts/a.json"), original);
+    let (code, doctor) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{doctor}");
+    assert!(
+        doctor.to_string().contains("pending preparation"),
+        "{doctor}"
+    );
     assert_eq!(retire(&rig, "a"), (0, result));
 }
 
@@ -287,7 +306,13 @@ fn job_ownership_survives_preparation_retirement() {
         let file = "state/jobs/a.json";
         let mut job = rig.read(file);
         job["state"] = json!(state);
-        job["cwd"] = rig.read("state/preparations.json")[0]["path"].clone();
+        let mut tree = rig.read("state/preparations.json")[0].clone();
+        tree.as_object_mut().unwrap().remove("request_id");
+        job["cwd"] = tree["path"].clone();
+        job["startup"] = json!({"version":1,"scope":"git","checkout":tree,"preparation":rig.read("state/preparation-receipts/a.json")["binding"]});
+        if state == "running" {
+            job["started_ms"] = json!(rig.origin_ms);
+        }
         rig.put(file, &job);
         let before = fs::read(rig.dir.join(file)).unwrap();
         let (code, result) = retire(&rig, "a");
@@ -296,7 +321,13 @@ fn job_ownership_survives_preparation_retirement() {
         assert_eq!(fs::read(rig.dir.join(file)).unwrap(), before);
         let (code, doctor) = rig.json(&["doctor"]);
         assert_eq!(code, 0, "{doctor}");
-        assert!(doctor.to_string().contains("job"), "{doctor}");
+        assert!(
+            doctor.to_string().contains("job a owns this checkout"),
+            "{doctor}"
+        );
+        let output = rig.run(&["exec", "a", "--job-validity", "2", "--", "true"]);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(rig.dir.join(file)).unwrap(), before);
     }
 }
 
@@ -313,14 +344,131 @@ fn retired_resource_leaves_unit_unresolved() {
     let (code, result) = retire(&rig, "a");
     assert_eq!(code, 0, "{result}");
     retired(&result);
-    for _ in 0..2 {
+    for host_only in [false, true] {
+        if host_only {
+            fs::remove_file(rig.dir.join("state/preparation-retirements/a.json")).unwrap();
+        }
         service(&rig);
         assert_eq!(rig.read("state/admissions/a.json"), before);
         assert_eq!(
             rig.read("state/admissions/a.json")["unit"]["abandoned"],
             Value::Null
         );
+        let (code, observed) =
+            unit_requests::operation(&rig, "observe", &unit_requests::execution_input(&execution));
+        assert_eq!(code, 0, "{observed}");
+        assert!(observed["settlement"].is_null(), "{observed}");
+        let (code, settlements) = rig.json(&["unit", "settlements"]);
+        assert_eq!(code, 0, "{settlements}");
+        assert_eq!(settlements, json!([]));
     }
+}
+
+#[test]
+fn retirement_and_dispatch_share_the_request_gate() {
+    for retire_first in [true, false] {
+        let (rig, _) = prepared(&format!("retire-dispatch-{retire_first}"), "a");
+        let prepared = rig.read("state/preparation-receipts/a.json")["prepared"].clone();
+        let binding = rig.read("state/preparation-receipts/a.json")["binding"].clone();
+        let launch = json!({"id":"a","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":prepared["path"],"pane":prepared["pane_id"],"terminal":prepared["terminal_id"],"workspace":"w1","workspace_name":"caller","owner":"parent","preparation":binding,"preparation_protocol":1});
+        let (mut retirement, retire_go) = barrier(
+            &rig,
+            if retire_first {
+                "RETIREMENT_ENTERED_GATE"
+            } else {
+                "RETIREMENT_BEFORE_DISPOSE"
+            },
+            true,
+        );
+        let ready = Fifo::new(&rig.dir, "dispatch.ready");
+        let go = Fifo::new(&rig.dir, "dispatch.go");
+        let _ready = ready.hold();
+        let _go = go.hold();
+        let mut command = rig.cmd(&["host", "launch", "--request", &launch.to_string()]);
+        command
+            .env(
+                if retire_first {
+                    "DOGSLED_TEST_LAUNCH_BEFORE_GATE"
+                } else {
+                    "DOGSLED_TEST_LAUNCH_ENTERED_GATE"
+                },
+                rig.dir.join("dispatch"),
+            )
+            .stdout(fs::File::create(rig.dir.join("dispatch-out")).unwrap())
+            .stderr(fs::File::create(rig.dir.join("dispatch-err")).unwrap());
+        let mut dispatch = Owned::spawn(&mut command);
+        read_fifo(ready.path(), "dispatch gate");
+        // The winning operation owns the same kernel preparation gate.
+        let gate = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(rig.dir.join("state/preparation-receipts/a.lock"))
+            .unwrap();
+        assert!(matches!(gate.try_lock(), Err(fs::TryLockError::WouldBlock)));
+        writeln!(retire_go.hold(), "go").unwrap();
+        writeln!(go.hold(), "go").unwrap();
+        let retired_status = retirement.wait();
+        let dispatched_status = dispatch.wait();
+        let fence = rig.read("state/preparation-receipts/a.disposition.json");
+        if retire_first {
+            assert!(retired_status.success(), "{}", rig.log("retirement-out"));
+            assert!(!dispatched_status.success(), "{}", rig.log("dispatch-out"));
+            assert_eq!(fence["request"]["outcome"], "unknown");
+            assert!(!rig.log("herdr.log").contains("agent start"));
+            assert!(!rig.dir.join("state/launches/a.json").exists());
+        } else {
+            assert!(
+                dispatched_status.success(),
+                "{} {}",
+                rig.log("dispatch-out"),
+                rig.log("dispatch-err")
+            );
+            assert!(!retired_status.success(), "{}", rig.log("retirement-out"));
+            assert_eq!(fence["request"]["policy"]["kind"], "transfer");
+            assert_eq!(fence["request"]["outcome"], "possibly_executed");
+            let saved = rig.read("state/launches/a.json");
+            assert_eq!(
+                rig.json(&["host", "launch", "--request", &launch.to_string()]),
+                (0, saved)
+            );
+            assert_eq!(
+                rig.log("herdr.log").matches("agent start worker ").count(),
+                1
+            );
+        }
+        assert_eq!(rig.read("state/preparations.json"), json!([]));
+        assert_ne!(fence["request"]["outcome"], "not_started");
+    }
+}
+
+#[test]
+fn identified_legacy_metadata_retires_without_discovering_identity() {
+    let (rig, _) = prepared("retire-legacy", "a");
+    let mut claims = rig.read("state/preparations.json");
+    claims[0].as_object_mut().unwrap().remove("identity");
+    rig.put("state/preparations.json", &claims);
+    fs::remove_file(rig.dir.join("state/preparation-receipts/a.json")).unwrap();
+    let (code, result) = retire(&rig, "a");
+    assert_eq!(code, 0, "{result}");
+    retired(&result);
+    let fence = rig.read("state/preparation-receipts/a.disposition.json");
+    assert!(fence["request"]["binding"]["claim"]["tree"]["identity"].is_null());
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(retire(&rig, "a"), (0, result));
+    let repo = claims[0]["repo"].as_str().unwrap();
+    let output = rig.run(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo,
+        "--branch",
+        "retire",
+        "--request-id",
+        "a",
+    ]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert!(!rig.dir.join("state/preparation-receipts/a.json").exists());
 }
 
 #[test]
