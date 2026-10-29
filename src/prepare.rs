@@ -1,5 +1,7 @@
 //! Prepare work in the repository checkout, never in the caller's worktree.
 
+pub mod disposition;
+
 use crate::diagnostic::{Cause, Context, Diagnostic, Occupancy, Operation};
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
@@ -21,7 +23,7 @@ pub struct Prepared {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Pending {
     #[serde(flatten)]
     tree: crate::cleanup::Tree,
@@ -132,8 +134,9 @@ pub fn local(
                     "preparation request changed",
                 ));
             }
-            return replay(id, &receipt);
+            return replay_guarded(shell, ledger, id, &receipt);
         }
+        disposition::allow_fresh(ledger, id)?;
         // Persist intent before setup, worktree creation, or Herdr can change host state.
         // Without a completed receipt, a later call cannot prove those effects finished.
         receipts.write(
@@ -142,43 +145,82 @@ pub fn local(
                 request: request.clone(),
                 prepared: None,
                 failure: None,
+                binding: None,
             },
         )?;
-        match local_once(shell, ledger, repo, branch, base, Some(id)) {
-            Ok(prepared) => {
-                receipts.write(
-                    &file,
-                    &PreparationReceipt {
-                        request,
-                        prepared: Some(prepared.clone()),
-                        failure: None,
+        let repository = request.0.clone();
+        worktree::with_lifecycle(shell, ledger, &repository, |guard| {
+            let mut captured = Capture::default();
+            let result = (|| {
+                let settings = crate::repository::load(&repository)?;
+                local_guarded(
+                    &mut Preparation {
+                        guard,
+                        shell,
+                        ledger,
+                        checkout: &repository,
+                        settings: &settings,
+                        request_id: Some(id),
+                        captured: &mut captured,
                     },
-                )?;
-                Ok(prepared)
-            }
-            Err(error) => {
-                // A returned failure is a final outcome. Record it, so a later call replays
-                // the original cause instead of preparing the branch again.
-                let error = error.correlate(Some(id));
-                let failure = error.retained(Operation::Prepare, Some(id));
-                if receipts
-                    .write(
+                    branch,
+                    base,
+                )
+            })();
+            let binding = captured
+                .checkout
+                .or(captured.intended)
+                .map(|pending: Pending| disposition::Binding {
+                    request_id: id.into(),
+                    request: request.clone(),
+                    claim: disposition::Claim {
+                        tree: pending.tree,
+                        request_id: id.into(),
+                    },
+                    prepared: result.as_ref().ok().cloned(),
+                });
+            match result {
+                Ok(prepared) => {
+                    receipts.write(
                         &file,
                         &PreparationReceipt {
                             request,
-                            prepared: None,
-                            failure: Some(failure),
+                            prepared: Some(prepared.clone()),
+                            failure: None,
+                            binding,
                         },
-                    )
-                    .is_err()
-                {
-                    // The outcome is not retained. The intent stays uncertain, and the report
-                    // says so instead of claiming a durable cause.
-                    return Err(unretained(branch, base, id));
+                    )?;
+                    Ok(prepared)
                 }
-                Err(error)
+                Err(error) => {
+                    // A returned failure is a final outcome. Record it, so a later call replays
+                    // the original cause instead of preparing the branch again.
+                    let error = error.correlate(Some(id));
+                    let failure = error.retained(Operation::Prepare, Some(id));
+                    if receipts
+                        .write(
+                            &file,
+                            &PreparationReceipt {
+                                request,
+                                prepared: None,
+                                failure: Some(failure),
+                                binding: binding.clone(),
+                            },
+                        )
+                        .is_err()
+                    {
+                        // The outcome is not retained. The intent stays uncertain, and the report
+                        // says so instead of claiming a durable cause.
+                        return Err(unretained(branch, base, id));
+                    }
+                    crate::unit_request::crash_point("preparation-failure-recorded");
+                    if let Some(binding) = binding.filter(|b| b.claim.tree.identity.is_some()) {
+                        disposition::failure_guarded(ledger, shell, guard, binding)?;
+                    }
+                    Err(error)
+                }
             }
-        }
+        })
     })
 }
 
@@ -187,6 +229,8 @@ pub fn local(
 /// interruption, and stays uncertain.
 #[derive(Debug, Serialize, Deserialize)]
 struct PreparationReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding: Option<disposition::Binding>,
     request: (PathBuf, String, Option<String>),
     prepared: Option<Prepared>,
     /// The safe record of a returned failure. Absent in receipts written before failures
@@ -198,6 +242,34 @@ struct PreparationReceipt {
 /// Replay a recorded outcome for the same request. A recorded failure returns its original
 /// safe cause without preparing again. An old receipt without an outcome proves nothing,
 /// so it stays uncertain.
+fn replay_guarded(
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    id: &str,
+    receipt: &PreparationReceipt,
+) -> Result<Prepared> {
+    if receipt.failure.is_some() && receipt.prepared.is_some() {
+        return replay(id, receipt);
+    }
+    if receipt.failure.is_some() && receipt.prepared.is_none() {
+        if let Some(binding) = receipt
+            .binding
+            .clone()
+            .filter(|binding| binding.claim.tree.identity.is_some())
+        {
+            worktree::with_lifecycle(shell, ledger, &receipt.request.0, |guard| {
+                disposition::failure_guarded(ledger, shell, guard, binding)
+            })?;
+        }
+    } else {
+        disposition::allow_preparation(ledger, id)?;
+        if receipt.prepared.is_some() {
+            disposition::require_binding(ledger, id)?;
+        }
+    }
+    replay(id, receipt)
+}
+
 fn replay(id: &str, receipt: &PreparationReceipt) -> Result<Prepared> {
     match (&receipt.prepared, &receipt.failure) {
         (Some(_), Some(_)) => Err(Error::Invalid(format!(
@@ -240,7 +312,20 @@ fn local_once(
 ) -> Result<Prepared> {
     let checkout = main_checkout(shell, repo)?;
     worktree::with_lifecycle(shell, ledger, &checkout, |guard| {
-        local_guarded(guard, shell, ledger, repo, branch, base, request_id)
+        let settings = crate::repository::load(&checkout)?;
+        local_guarded(
+            &mut Preparation {
+                guard,
+                shell,
+                ledger,
+                checkout: &checkout,
+                settings: &settings,
+                request_id,
+                captured: &mut Capture::default(),
+            },
+            branch,
+            base,
+        )
     })
 }
 
@@ -261,27 +346,38 @@ fn validate_branch(shell: &dyn Shell, branch: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct Capture {
+    intended: Option<Pending>,
+    checkout: Option<Pending>,
+}
+
 fn local_guarded(
-    guard: &worktree::Guard,
-    shell: &dyn Shell,
-    ledger: &crate::ledger::Ledger,
-    repo: &str,
+    preparation: &mut Preparation<'_>,
     branch: &str,
     base: Option<&str>,
-    request_id: Option<&str>,
 ) -> Result<Prepared> {
+    let Preparation {
+        shell,
+        ledger,
+        checkout,
+        settings,
+        request_id,
+        captured,
+        ..
+    } = preparation;
+    let (shell, ledger, checkout, settings, request_id) =
+        (*shell, *ledger, *checkout, *settings, *request_id);
     validate_branch(shell, branch)?;
     shell
         .run_ok("herdr", &["workspace".into(), "list".into()])
         .map_err(|e| Error::Invalid(format!("no Herdr server is reachable on this host: {e}")))?;
-    let checkout = main_checkout(shell, repo)?;
-    let settings = crate::repository::load(&checkout)?;
-    let existing = worktree::list(shell, &checkout)?
+    let existing = worktree::list(shell, checkout)?
         .into_iter()
         .find(|w| w.branch.as_deref() == Some(branch));
     let has_branch = existing.is_some()
         || git(
-            &checkout,
+            checkout,
             &[
                 "show-ref",
                 "--verify",
@@ -307,7 +403,7 @@ fn local_guarded(
     // branch. A base this clone has not fetched is fetched once, so a branch pushed after
     // the clone resolves. Nothing else moves: no other ref, and no local branch.
     if !has_branch && let Some(base) = base {
-        let mut resolved = resolve_base(shell, &checkout, base)?;
+        let mut resolved = resolve_base(shell, checkout, base)?;
         if !resolved && let Some(remote) = remote_branch(base) {
             // One bounded fetch of that one remote branch, into its own remote-tracking ref
             // whatever the clone's configured refspec. The destination is named, so a
@@ -317,11 +413,11 @@ fn local_guarded(
             // leaves the base unresolved, and the refusal below names it.
             let refspec = format!("+refs/heads/{remote}:refs/remotes/origin/{remote}");
             git(
-                &checkout,
+                checkout,
                 &["fetch", "--no-tags", "--", "origin", refspec.as_str()],
             )
             .run(shell)?;
-            resolved = resolve_base(shell, &checkout, base)?;
+            resolved = resolve_base(shell, checkout, base)?;
         }
         if !resolved {
             return Err(
@@ -354,28 +450,12 @@ fn local_guarded(
         head: String::new(),
         identity: None,
     };
-    let held = pending.path.clone();
-    record(ledger, pending, request_id)?;
-    // A failed preparation is final: its admission never resumes it, so it holds nothing.
-    // Only an interrupted preparation leaves its hold for inspection.
-    make(
-        &Preparation {
-            guard,
-            shell,
-            ledger,
-            checkout: &checkout,
-            settings: &settings,
-            request_id,
-        },
-        existing,
-        branch,
-        base,
-        has_branch,
-    )
-    .or_else(|error| {
-        used(ledger, &held, request_id)?;
-        Err(error)
-    })
+    record(ledger, pending.clone(), request_id)?;
+    captured.intended = Some(Pending {
+        tree: pending,
+        request_id: request_id.map(str::to_owned),
+    });
+    make(preparation, existing, branch, base, has_branch)
 }
 
 struct Preparation<'a> {
@@ -385,11 +465,12 @@ struct Preparation<'a> {
     checkout: &'a Path,
     settings: &'a crate::repository::Settings,
     request_id: Option<&'a str>,
+    captured: &'a mut Capture,
 }
 
 /// Create or reuse the worktree, run setup in a new one, and open it in Herdr.
 fn make(
-    preparation: &Preparation<'_>,
+    preparation: &mut Preparation<'_>,
     existing: Option<worktree::Listed>,
     branch: &str,
     base: Option<&str>,
@@ -402,7 +483,10 @@ fn make(
         checkout,
         settings,
         request_id,
-    } = *preparation;
+        captured,
+    } = preparation;
+    let (guard, shell, ledger, checkout, settings, request_id) =
+        (*guard, *shell, *ledger, *checkout, *settings, *request_id);
     let (path, created) = if let Some(found) = existing {
         (reuse(shell, checkout, found)?, false)
     } else {
@@ -445,7 +529,12 @@ fn make(
     let linked = guard
         .discover(shell, &path)?
         .ok_or_else(|| worktree::refuse("prepared checkout disappeared"))?;
-    record(ledger, linked.tree(), request_id)?;
+    let pending = Pending {
+        tree: linked.tree(),
+        request_id: request_id.map(str::to_owned),
+    };
+    record(ledger, pending.tree.clone(), request_id)?;
+    captured.checkout = Some(pending);
     crate::cleanup::remember(ledger, linked.tree())?;
     if created {
         let values = Values {
@@ -509,25 +598,14 @@ pub fn on_host(
     Ok(prepared)
 }
 
-/// Preparations stay pending until the host has confirmed the launch or returned a placement.
-/// A record whose launch is final, or whose local preparation failed, has settled and holds
-/// nothing, even when the release that should have followed never ran. Interrupted and
-/// unresolved preparations keep their hold.
+/// Only an exact disposition transaction removes a preparation hold. Admission failures,
+/// final-launch surveys, and disappeared panes are not persisted release authority.
 pub fn pending_trees(
     ledger: &crate::ledger::Ledger,
-    launches: &crate::launch::Survey,
+    _launches: &crate::launch::Survey,
 ) -> Result<Vec<crate::cleanup::Tree>> {
     let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-    let mut pending = Vec::new();
-    for record in records {
-        let id = record.request_id.as_deref();
-        let settled = launches.consumed(id, &record.tree.path)
-            || id.map_or(Ok(false), |id| crate::work::preparation_failed(ledger, id))?;
-        if !settled {
-            pending.push(record.tree);
-        }
-    }
-    Ok(pending)
+    Ok(records.into_iter().map(|record| record.tree).collect())
 }
 
 /// The captured checkout of a preparation, never rebound from a stale path.
@@ -546,17 +624,24 @@ pub fn saved_tree(
         .map(|p| p.tree))
 }
 
-/// Release only this preparation owner. Legacy path-only callers cannot clear identified holds.
-pub fn used(ledger: &crate::ledger::Ledger, path: &str, request_id: Option<&str>) -> Result<()> {
-    if let Some(id) = request_id {
-        crate::jobs::validate_id(id)?;
-    }
+/// Exact-match leaf. The caller owns the outer gates and a persisted disposition fence.
+fn used(ledger: &crate::ledger::Ledger, claim: &disposition::Claim, resume: bool) -> Result<()> {
     ledger.with_lock("preparations", || {
-        let mut preparations: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        preparations.retain(|record| {
-            !worktree::same(&record.tree.path, path) || record.request_id.as_deref() != request_id
-        });
-        ledger.write("preparations.json", &preparations)
+        let mut records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+        let matches: Vec<_> = records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.request_id.as_deref() == Some(&claim.request_id))
+            .collect();
+        match matches.as_slice() {
+            [(index, record)] if record.tree == claim.tree => {
+                let index = *index;
+                records.remove(index);
+            }
+            [] if resume => return Ok(()),
+            _ => return Err(worktree::refuse("preparation claim changed or disappeared")),
+        }
+        ledger.write("preparations.json", &records)
     })
 }
 
@@ -927,6 +1012,7 @@ mod tests {
             path: Some("/repo/.worktrees/worker".into()),
         };
         let success = PreparationReceipt {
+            binding: None,
             request: request.clone(),
             prepared: Some(prepared.clone()),
             failure: None,
@@ -942,6 +1028,7 @@ mod tests {
             detail_withheld: true,
         };
         let recorded = PreparationReceipt {
+            binding: None,
             request: request.clone(),
             prepared: None,
             failure: Some(failure.clone()),
@@ -949,6 +1036,7 @@ mod tests {
         let error = replay("r", &recorded).unwrap_err();
         assert!(error.to_string().contains("withheld"), "{error}");
         let contradictory = PreparationReceipt {
+            binding: None,
             request,
             prepared: Some(prepared),
             failure: Some(failure),
@@ -960,6 +1048,7 @@ mod tests {
                 .contains("contradictory preparation receipt")
         );
         let uncertain = PreparationReceipt {
+            binding: None,
             request: (PathBuf::from("/repo"), "worker".to_owned(), None),
             prepared: None,
             failure: None,

@@ -704,7 +704,9 @@ fn launch_job(
         timeout_ms,
         idle_timeout_ms,
         validity: launch_validity(ledger, launch)?,
-        startup: Some(jobs::Startup::captured(&launch.cwd, checkout)),
+        startup: Some(crate::prepare::disposition::startup_claim(
+            ledger, launch, checkout,
+        )?),
         output_expired: false,
     };
     // The job's ownership is read before any pane side effect. A job that already
@@ -831,13 +833,34 @@ pub fn launch(
     if matches!(launch.action, Action::Job { .. }) {
         require_unclaimed(ledger, &launch.id)?;
     }
-    if matches!(launch.action, Action::Job { .. }) {
-        ledger
-            .child("preparation-receipts")
-            .with_lock(&launch.id, || launch_owned(ledger, shell, launch))
-    } else {
-        launch_owned(ledger, shell, launch)
+    launch_test_barrier("BEFORE_GATE")?;
+    ledger
+        .child("preparation-receipts")
+        .with_lock(&launch.id, || {
+            launch_test_barrier("ENTERED_GATE")?;
+            // The preparation gate can wait behind a completed dispatch. Replay stays read-only.
+            if let Some(result) = replay_launch(ledger, launch)? {
+                return Ok(result);
+            }
+            crate::prepare::disposition::allow_launch(ledger, launch)?;
+            let result = launch_owned(ledger, shell, launch);
+            launch_test_barrier("COMPLETED_GATE")?;
+            result
+        })
+}
+
+/// Debug CLI fixtures stop at real lock boundaries, without sleeps or production controls.
+fn launch_test_barrier(phase: &str) -> Result<()> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os(format!("DOGSLED_TEST_LAUNCH_{phase}")) {
+        use std::io::BufRead as _;
+        let path = std::path::PathBuf::from(path);
+        std::fs::write(path.with_extension("ready"), b"ready\n")?;
+        let mut go = std::io::BufReader::new(std::fs::File::open(path.with_extension("go"))?);
+        go.read_line(&mut String::new())?;
     }
+    let _ = phase;
+    Ok(())
 }
 
 fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<Value> {
@@ -872,7 +895,13 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
         if matches!(launch.action, Action::Job { .. }) {
             require_unclaimed(ledger, &launch.id)?;
         }
-        let (recorded, saved) = launch_checkout(ledger, launch)?;
+        crate::prepare::disposition::allow_launch(ledger, launch)?;
+        let (recorded, current) = launch_checkout(ledger, launch)?;
+        if current != saved {
+            return Err(crate::worktree::refuse(
+                "launch checkout changed while waiting",
+            ));
+        }
         if recorded && saved.is_none() {
             return Err(crate::worktree::refuse(
                 "recorded launch has no checkout identity",
@@ -974,7 +1003,9 @@ fn launch_guarded(
 ) -> Result<Value> {
     if matches!(launch.action, Action::Agent { .. }) {
         let result = crate::launch::agent_guarded(ledger, shell, launch, checkout)?;
-        crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
+        ledger.child("launches").with_lock(&launch.id, || {
+            crate::prepare::disposition::transfer_guarded(ledger, launch, &result)
+        })?;
         return Ok(result);
     }
     let receipts = ledger.child("launches");
@@ -1027,7 +1058,7 @@ fn launch_guarded(
             result["checkout"] = serde_json::to_value(checkout)?;
         }
         receipts.write(&file, &result)?;
-        crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
+        crate::prepare::disposition::transfer_guarded(ledger, launch, &result)?;
         Ok(result)
     })
 }
@@ -1204,20 +1235,6 @@ pub(crate) struct Attempt {
     pub result: Option<Value>,
 }
 
-/// A local preparation that returned an error never launches: `perform_locked` refuses to resume
-/// an attempt that stopped during preparation, so its hold has no owner left.
-pub(crate) fn preparation_failed(ledger: &Ledger, request_id: &str) -> Result<bool> {
-    jobs::validate_id(request_id)?;
-    Ok(ledger
-        .child("admissions")
-        .read::<Attempt>(&format!("{request_id}.json"))?
-        .is_some_and(|attempt| {
-            attempt.host.as_ref().is_some_and(Host::is_local)
-                && attempt.launch.is_none()
-                && attempt.error.is_some()
-        }))
-}
-
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
     if matches!(request.action, Action::Place) {
@@ -1229,19 +1246,26 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         };
         let launch = prepare_launch(fleet, request, &host)
             .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
-        if host.is_local() {
-            crate::prepare::used(fleet.ledger, &launch.cwd, Some(&launch.id))?;
-        } else {
-            let _: Value = fleet.remote_setup(
-                &host,
-                &[
-                    "prepared".into(),
-                    "--path".into(),
-                    launch.cwd.clone(),
-                    "--request-id".into(),
-                    launch.id.clone(),
-                ],
-            )?;
+        if request.branch.is_some() {
+            if host.is_local() {
+                crate::prepare::disposition::release(
+                    fleet.ledger,
+                    fleet.shell,
+                    &launch.cwd,
+                    Some(&launch.id),
+                )?;
+            } else {
+                let _: Value = fleet.remote_setup(
+                    &host,
+                    &[
+                        "prepared".into(),
+                        "--path".into(),
+                        launch.cwd.clone(),
+                        "--request-id".into(),
+                        launch.id.clone(),
+                    ],
+                )?;
+            }
         }
         return Ok(Some(
             json!({"host":host,"reservation":reservation,"path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane}),

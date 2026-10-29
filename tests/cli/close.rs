@@ -479,6 +479,61 @@ fn an_unfinished_launch_holds_its_checkout_only_with_the_matching_agent() {
 
 #[test]
 fn a_settled_preparation_no_longer_holds_its_landed_checkout() {
+    let (rig, tree) = close_rig("close-disposed-preparation");
+    let repo = rig.dir.join("home/repo");
+    rig.put("prepared-workspace.json", &json!({"result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"},"worktree":{"path":tree}}}));
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script(
+        "herdr",
+        &script.replace(
+            "case \"$*\" in",
+            "case \"$*\" in\n  'worktree open'*) cat \"$RIG/prepared-workspace.json\" ;;",
+        ),
+    );
+    let (code, prepared) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "feat/x",
+        "--request-id",
+        "settled",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    assert_eq!(
+        rig.read("state/preparations.json")
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let (code, ack) = rig.json(&[
+        "host",
+        "prepared",
+        "--path",
+        tree.to_str().unwrap(),
+        "--request-id",
+        "settled",
+    ]);
+    assert_eq!(code, 0, "{ack}");
+    assert_eq!(ack["released"], true);
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(
+        rig.read("state/preparation-receipts/settled.disposition.json")["progress"],
+        "released"
+    );
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    let (code, closed) = rig.json(&["close", "w2:p1"]);
+    assert_eq!(code, 0, "{closed}");
+    assert_eq!(closed["worktree"]["branch_deleted"], true);
+    assert!(!tree.exists());
+}
+
+#[test]
+fn inference_only_preparation_settlement_keeps_its_checkout_held() {
     let (rig, tree) = close_rig("close-settled-preparation");
     advance_main(&rig);
     panes(&rig, "idle", &tree);
@@ -530,16 +585,21 @@ fn a_settled_preparation_no_longer_holds_its_landed_checkout() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("pending preparation or launch"), "{stderr}");
     assert!(tree.exists());
-    // Once that launch is final too, nothing holds the landed checkout. Settled records are
-    // ignored as evidence, never edited.
+    // Even a final launch cannot replace the missing preparation disposition.
     rig.put(
         "state/launches/live.json",
         &json!({"host":"local","name":"worker","pane":"w9:p3"}),
     );
-    let (code, closed) = rig.json(&["close", "w2:p1"]);
-    assert_eq!(code, 0, "{closed}");
-    assert_eq!(closed["worktree"]["branch_deleted"], true);
-    assert!(!tree.exists());
+    let (code, error) = rig.json(&["close", "w2:p1"]);
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("matching preparation disposition missing"),
+        "{error}"
+    );
+    assert!(tree.exists());
     assert_eq!(rig.read("state/preparations.json"), holds);
 }
 

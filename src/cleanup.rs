@@ -1605,11 +1605,14 @@ fn held(
     if crate::prepare::pending_trees(node.ledger, &seen.launches)?
         .iter()
         .any(|pending| crate::worktree::same(&pending.path, &tree.path))
-        || seen
-            .launches
-            .pending_paths
-            .iter()
-            .any(|path| crate::worktree::same(path, &tree.path))
+    {
+        held.push("about to be used by a pending preparation or launch; matching preparation disposition missing".into());
+    }
+    if seen
+        .launches
+        .pending_paths
+        .iter()
+        .any(|path| crate::worktree::same(path, &tree.path))
     {
         held.push("about to be used by a pending preparation or launch".into());
     }

@@ -172,14 +172,62 @@ fn refusal_requires_final_consistent_host_provenance() {
     }
 }
 
+fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
+    let rig = rig(name, false);
+    let repo = rig.dir.join("home");
+    close::git(&repo, &["init", "-q", "-b", "main"]);
+    close::git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+    );
+    close::git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let tree = repo.join(".worktrees/proof");
+    rig.put("worktrees.json", &json!({"result":{"worktrees":[{"path":repo,"open_workspace_id":"w1","is_linked_worktree":false}]}}));
+    rig.put("prepared-workspace.json", &json!({"result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"},"worktree":{"path":tree}}}));
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'worktree open'*) cat \"$RIG/prepared-workspace.json\" ;;").replace("  'agent start'*|", "  'agent start'*) echo '{\"error\":{\"code\":\"invalid_agent_name\",\"message\":\"native refusal\"}}' >&2; exit 1 ;;\n  "));
+    let prepare_input =
+        json!({"origin":exported(0)["contract"]["ref"],"placement":{"branch":"proof"}});
+    let (code, execution) = rig.json(&[
+        "unit",
+        "prepare",
+        "--input",
+        &prepare_input.to_string(),
+        "--tool-call-id",
+        "call-1",
+    ]);
+    assert_eq!(code, 0, "{execution}");
+    let input = commit_input(&execution, 0);
+    let (code, error) = operation(&rig, "commit", &input);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(
+        rig.read("state/preparations.json")
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    (rig, execution, input)
+}
+
 #[test]
 fn refusal_release_and_settlement_recover_after_each_durable_boundary() {
-    for point in ["refusal-hold-released", "refusal-settlement-persisted"] {
-        let (rig, execution, _) = refused_unit(point);
+    for point in [
+        "preparation-fenced",
+        "preparation-claim-released",
+        "refusal-hold-released",
+        "refusal-settlement-persisted",
+    ] {
+        let (rig, execution, _) = refused_prepared_unit(point);
         let id = execution["requestId"].as_str().unwrap();
-        let cwd = admission(&rig, &execution)["launch"]["cwd"].clone();
-        let own = json!({"repo":rig.dir.join("home"),"path":cwd,"branch":"proof","head":"","request_id":id});
-        let legacy = json!({"repo":rig.dir.join("home"),"path":cwd,"branch":"proof","head":""});
+        let own = rig.read("state/preparations.json")[0].clone();
+        let mut legacy = own.clone();
+        legacy.as_object_mut().unwrap().remove("request_id");
         let mut other = own.clone();
         other["request_id"] = json!("later-request");
         rig.put("state/preparations.json", &json!([own, legacy, other]));
@@ -188,12 +236,27 @@ fn refusal_release_and_settlement_recover_after_each_durable_boundary() {
             .env("DOGSLED_TEST_UNIT_CRASH", point)
             .output()
             .unwrap();
-        assert_eq!(result.status.code(), Some(86));
-        assert_eq!(rig.read("state/preparations.json"), json!([legacy, other]));
+        assert_eq!(
+            result.status.code(),
+            Some(86),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if point == "preparation-fenced" {
+            assert_eq!(
+                rig.read("state/preparations.json"),
+                json!([own, legacy, other])
+            );
+        } else {
+            assert_eq!(rig.read("state/preparations.json"), json!([legacy, other]));
+        }
         let (code, events) = rig.json(&["unit", "settlements"]);
         assert_eq!(code, 0, "{events}");
         assert_eq!(events.as_array().unwrap().len(), 1);
         assert_eq!(events[0]["result"]["kind"], "not_started");
+        let disposition = rig.read(&format!("state/preparation-receipts/{id}.disposition.json"));
+        assert_eq!(disposition["request"]["binding"]["request_id"], id);
+        assert_eq!(disposition["progress"], "released");
         assert_eq!(rig.read("state/preparations.json"), json!([legacy, other]));
         assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
     }
@@ -540,9 +603,9 @@ fn preparation_owners_coexist_and_release_only_their_records() {
     assert_eq!(
         rig.json(&["host", "prepared", "--path", path.to_str().unwrap()])
             .0,
-        0
+        2
     );
-    assert_eq!(rig.read("state/preparations.json"), json!([remaining[0]]));
+    assert_eq!(rig.read("state/preparations.json"), remaining);
     let before = rig.log("herdr.log");
     assert_eq!(
         rig.json(&[
@@ -559,7 +622,7 @@ fn preparation_owners_coexist_and_release_only_their_records() {
         2
     );
     assert_eq!(rig.log("herdr.log"), before);
-    assert_eq!(rig.read("state/preparations.json"), json!([remaining[0]]));
+    assert_eq!(rig.read("state/preparations.json"), remaining);
 }
 
 #[test]

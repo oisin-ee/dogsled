@@ -1077,10 +1077,26 @@ pub fn unit_receipt(
     shell: &dyn Shell,
     execution: &crate::unit_transport::ExecutionRef,
 ) -> Result<Option<crate::unit_reply::HostEvidence>> {
-    use crate::unit_reply::{HostEvidence, Refusal, RefusalKind, Stopped, StoppedKind};
     crate::jobs::validate_id(&execution.request_id)?;
+    let evidence = ledger
+        .child("launches")
+        .with_lock(&execution.request_id, || {
+            unit_receipt_locked(ledger, shell, execution)
+        })?;
+    if let Some(crate::unit_reply::HostEvidence::Refused(refusal)) = &evidence {
+        crate::prepare::disposition::refused(ledger, shell, execution, &refusal.launch)?;
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn unit_receipt_locked(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    execution: &crate::unit_transport::ExecutionRef,
+) -> Result<Option<crate::unit_reply::HostEvidence>> {
+    use crate::unit_reply::{HostEvidence, Refusal, RefusalKind, Stopped, StoppedKind};
     let receipts = ledger.child("launches");
-    receipts.with_lock(&execution.request_id, || {
+    (|| {
         let Some(progress) =
             receipts.read::<Progress>(&format!("{}.progress.json", execution.request_id))?
         else {
@@ -1131,8 +1147,6 @@ pub fn unit_receipt(
                 launch: progress.request.clone(),
                 failed: failed.to_owned(),
             };
-            crate::prepare::used(ledger, &progress.request.cwd, Some(&execution.request_id))?;
-            crate::unit_request::crash_point("refusal-hold-released");
             return Ok(Some(HostEvidence::Refused(Box::new(evidence))));
         }
         if let Some(receipt) = &progress.terminal_receipt {
@@ -1164,7 +1178,7 @@ pub fn unit_receipt(
             &progress,
         )?;
         Ok(Some(HostEvidence::Stopped(Box::new(stopped))))
-    })
+    })()
 }
 
 /// One pane snapshot for the stop proof. Output that does not parse is a parse error from

@@ -255,6 +255,8 @@ pub fn origin_validity(ledger: &Ledger) -> Result<Validity> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Startup {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<crate::prepare::disposition::Binding>,
     #[serde(flatten)]
     pub scope: ExecutionScope,
 }
@@ -276,6 +278,7 @@ impl Startup {
     pub fn captured(cwd: &str, checkout: Option<&crate::cleanup::Tree>) -> Self {
         Self {
             version: 1,
+            preparation: None,
             scope: checkout.map_or_else(
                 || ExecutionScope::NonRepository { cwd: cwd.into() },
                 |checkout| ExecutionScope::Git {
@@ -427,6 +430,7 @@ pub(crate) fn holds(job: &Job, tree: &crate::cleanup::Tree) -> bool {
     if let Some(Startup {
         version: 1,
         scope: ExecutionScope::Git { checkout },
+        ..
     }) = &job.startup
         && let Some(identity) = &checkout.identity
     {
@@ -1046,7 +1050,10 @@ fn validate_startup(
     job: &Job,
     guard: Option<&crate::worktree::Guard>,
 ) -> Result<()> {
-    let Some(Startup { version: 1, scope }) = &job.startup else {
+    let Some(Startup {
+        version: 1, scope, ..
+    }) = &job.startup
+    else {
         return Err(Error::Invalid(format!(
             "job {} has no supported startup ownership",
             job.id
@@ -1099,6 +1106,7 @@ fn startup(
     let execution = store(ledger)
         .try_lock(&format!("{id}-exec"))?
         .ok_or_else(|| Error::Invalid(format!("job {id} already has an execution wrapper")))?;
+    crate::prepare::disposition::allow_startup(ledger, initial)?;
     validate_startup(shell, initial, guard)?;
     let job = start(ledger, id, initial)?;
     if let Err(error) = report(shell, &job, WORKING, None) {
@@ -1113,6 +1121,7 @@ fn startup(
             )));
         }
         check_validity(ledger, job.validity.as_ref())?;
+        crate::prepare::disposition::allow_startup(ledger, &job)?;
         validate_startup(shell, &job, guard)?;
         Ok(spawn(ledger, &job))
     })?;
@@ -1139,6 +1148,7 @@ pub fn exec(ledger: &Ledger, shell: &dyn Shell, id: &str, initial: &Job) -> Resu
                 Some(Startup {
                     version: 1,
                     scope: ExecutionScope::Git { checkout },
+                    ..
                 }) => {
                     if checkout.identity.is_none() {
                         return Err(crate::worktree::refuse("job checkout has no identity"));

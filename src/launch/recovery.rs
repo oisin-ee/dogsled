@@ -96,16 +96,6 @@ fn owned_candidates(
     Ok(owned)
 }
 
-/// A started launch consumed its preparation. A refusal is final too, except for a seeded unit:
-/// its peer settles the refusal first and then releases the preparation itself.
-fn consumed(progress: &Progress, receipt: Option<&Receipt>) -> bool {
-    match receipt {
-        Some(Receipt::Started(_)) => true,
-        Some(Receipt::Refused { .. }) => progress.request.unit.is_none(),
-        None => false,
-    }
-}
-
 /// The launch's recorded terminal no longer runs in its pane: the pane is gone or another
 /// terminal replaced it. Start and recovery refuse such a pane, so the launch can never start
 /// or use its checkout. A missing saved identity proves nothing.
@@ -136,9 +126,6 @@ pub enum PaneLaunch {
 pub struct Survey {
     states: std::collections::BTreeMap<String, PaneLaunch>,
     pub pending_paths: Vec<String>,
-    /// Requests whose launch ended in an immutable final receipt, or can never use its checkout
-    /// again because its pane is gone, with their checkout.
-    settled: Vec<(String, String)>,
 }
 
 impl Survey {
@@ -153,25 +140,11 @@ impl Survey {
         let mut survey = Self {
             states: std::collections::BTreeMap::new(),
             pending_paths: Vec::new(),
-            settled: Vec::new(),
         };
         for (id, progress) in candidates(&receipts, None)? {
-            // Read the lock first: a launch that ends after this check leaves its receipt.
-            let running = receipts.locked(&id)?;
             let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
             if receipt.is_none() && super::pending(&progress, agents) {
                 survey.pending_paths.push(progress.request.cwd.clone());
-            }
-            if progress.request.id == id
-                && (consumed(&progress, receipt.as_ref())
-                    || (receipt.is_none()
-                        && !super::pending(&progress, agents)
-                        && !running
-                        && lost_pane(&progress, panes, terminals)))
-            {
-                survey
-                    .settled
-                    .push((id.clone(), progress.request.cwd.clone()));
             }
             let Some(pane) = progress.pane.as_ref() else {
                 continue;
@@ -217,15 +190,6 @@ impl Survey {
                 .or_insert(state);
         }
         Ok(survey)
-    }
-
-    /// A preparation is consumed once its launch is final or has lost its pane. An identified preparation needs its
-    /// own request; a legacy path-only one has no owner, so any final launch of its checkout
-    /// ends it.
-    pub fn consumed(&self, request_id: Option<&str>, path: &str) -> bool {
-        self.settled.iter().any(|(id, cwd)| {
-            request_id.is_none_or(|request| request == id) && crate::worktree::same(cwd, path)
-        })
     }
 
     pub fn pane(&self, pane: &str) -> PaneLaunch {

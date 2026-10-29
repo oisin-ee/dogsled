@@ -1,6 +1,235 @@
 use super::*;
 use std::io::Write as _;
 
+fn disposition_prepared(rig: &Rig, repo: &Path, id: &str, branch: &str, base: bool) -> Value {
+    let mut args = vec![
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        branch,
+        "--request-id",
+        id,
+    ];
+    if base {
+        args.extend(["--base", "main"]);
+    }
+    let (code, prepared) = rig.json(&args);
+    assert_eq!(code, 0, "{prepared}");
+    prepared
+}
+
+#[test]
+fn historical_preparation_without_outcome_cannot_rebind_to_todays_checkout() {
+    let (rig, repo) = place::place_rig("historical-preparation-rebind");
+    let tree = repo.join(".worktrees/historical");
+    close::git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "historical",
+            tree.to_str().unwrap(),
+        ],
+    );
+    let admin = PathBuf::from(close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim());
+    rig.put("state/preparations.json", &json!([{ "repo":repo, "path":tree, "branch":"historical", "head":"old-head", "request_id":"historical" }]));
+    let original = fs::read(rig.dir.join("state/preparations.json")).unwrap();
+    let herdr = rig.log("herdr.log");
+    let (code, error) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "historical",
+        "--request-id",
+        "historical",
+    ]);
+    assert_ne!(code, 0, "{error}");
+    assert_eq!(
+        fs::read(rig.dir.join("state/preparations.json")).unwrap(),
+        original
+    );
+    assert_eq!(rig.log("herdr.log"), herdr);
+    assert!(
+        !rig.dir
+            .join("state/preparation-receipts/historical.json")
+            .exists()
+    );
+    assert!(!admin.join("dogsled-checkout-id").exists());
+}
+
+#[test]
+fn prohibited_preparation_cannot_replay_into_new_startup() {
+    let (rig, repo) = place::place_rig("disposition-prohibited");
+    let prepared = disposition_prepared(&rig, &repo, "recover-one", "fenced", true);
+    let path = prepared["path"].as_str().unwrap();
+    let receipt = fs::read(rig.dir.join("state/preparation-receipts/recover-one.json")).unwrap();
+    let (code, ack) = rig.json(&[
+        "host",
+        "prepared",
+        "--path",
+        path,
+        "--request-id",
+        "recover-one",
+    ]);
+    assert_eq!(code, 0, "{ack}");
+    assert_eq!(ack["released"], true);
+    assert_eq!(ack["policy"]["kind"], "prohibit");
+    let calls = rig.log("herdr.log");
+    let setup = rig.log("setup.log");
+    let (code, error) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "fenced",
+        "--base",
+        "main",
+        "--request-id",
+        "recover-one",
+    ]);
+    assert_ne!(code, 0, "{error}");
+    // A replacement with no marker cannot acquire a generation through the old request.
+    close::git(&repo, &["worktree", "remove", "-f", "-f", path]);
+    close::git(&repo, &["worktree", "add", path, "fenced"]);
+    let admin =
+        PathBuf::from(close::git(Path::new(path), &["rev-parse", "--absolute-git-dir"]).trim());
+    assert!(!admin.join("dogsled-checkout-id").exists());
+    let mut launch = host_request(&rig);
+    launch["cwd"] = prepared["path"].clone();
+    launch["pane"] = prepared["pane_id"].clone();
+    launch["terminal"] = prepared["terminal_id"].clone();
+    let (code, error) = rig.json(&["host", "launch", "--request", &launch.to_string()]);
+    assert_ne!(code, 0, "{error}");
+    assert!(!admin.join("dogsled-checkout-id").exists());
+    assert_eq!(rig.log("herdr.log"), calls);
+    assert_eq!(rig.log("setup.log"), setup);
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(
+        fs::read(rig.dir.join("state/preparation-receipts/recover-one.json")).unwrap(),
+        receipt
+    );
+    assert!(
+        !rig.dir
+            .join("state/launches/recover-one.progress.json")
+            .exists()
+    );
+}
+
+#[test]
+fn disposition_recovers_fence_before_release_and_release_before_ack() {
+    for point in ["preparation-fenced", "preparation-claim-released"] {
+        let (rig, repo) = place::place_rig(point);
+        let prepared = disposition_prepared(&rig, &repo, "a", "shared", true);
+        disposition_prepared(&rig, &repo, "b", "shared", false);
+        let claims = rig.read("state/preparations.json");
+        let other = claims
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["request_id"] == "b")
+            .unwrap()
+            .clone();
+        let outcome = fs::read(rig.dir.join("state/preparation-receipts/a.json")).unwrap();
+        let args = [
+            "host",
+            "prepared",
+            "--path",
+            prepared["path"].as_str().unwrap(),
+            "--request-id",
+            "a",
+        ];
+        let out = rig
+            .cmd(&args)
+            .env("DOGSLED_TEST_UNIT_CRASH", point)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(86),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let fence = rig.read("state/preparation-receipts/a.disposition.json");
+        assert_eq!(fence["progress"], "fenced");
+        if point == "preparation-fenced" {
+            assert_eq!(rig.read("state/preparations.json"), claims);
+        } else {
+            assert_eq!(rig.read("state/preparations.json"), json!([other.clone()]));
+        }
+        let (code, ack) = rig.json(&args);
+        assert_eq!(code, 0, "{ack}");
+        assert_eq!(ack["released"], true);
+        assert_eq!(ack["binding"], fence["request"]["binding"]);
+        assert_eq!(rig.json(&args), (0, ack));
+        let released = rig.read("state/preparation-receipts/a.disposition.json");
+        assert_eq!(released["request"], fence["request"]);
+        assert_eq!(released["progress"], "released");
+        assert_eq!(rig.read("state/preparations.json"), json!([other]));
+        assert_eq!(
+            fs::read(rig.dir.join("state/preparation-receipts/a.json")).unwrap(),
+            outcome
+        );
+    }
+}
+
+#[test]
+fn preparation_failure_is_durable_before_ownership_release() {
+    let (rig, repo) = place::place_rig("disposition-failure");
+    fs::write(rig.dir.join("setup-fails"), "").unwrap();
+    let args = [
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "failed",
+        "--base",
+        "main",
+        "--request-id",
+        "failed",
+    ];
+    let out = rig
+        .cmd(&args)
+        .env("DOGSLED_TEST_UNIT_CRASH", "preparation-failure-recorded")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(86),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.read("state/preparation-receipts/failed.json")["failure"].is_null());
+    assert_eq!(
+        rig.read("state/preparations.json")
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !rig.dir
+            .join("state/preparation-receipts/failed.disposition.json")
+            .exists()
+    );
+    let setup = rig.log("setup.log");
+    let (code, error) = rig.json(&args);
+    assert_ne!(code, 0, "{error}");
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(
+        rig.read("state/preparation-receipts/failed.disposition.json")["progress"],
+        "released"
+    );
+    assert_eq!(rig.log("setup.log"), setup);
+}
+
 /// The test process holds the same kernel mutex that separate host processes must acquire.
 fn repository_lifecycle_lock(repo: &Path) -> fs::File {
     let lock = fs::OpenOptions::new()
@@ -118,41 +347,54 @@ fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
     }
 }
 
-fn same_request_git_barrier(rig: &Rig) -> (Fifo, Fifo) {
-    let ready = lifecycle_git_barrier(rig);
-    let release = Fifo::new(&rig.dir, "launch-lookup-release");
-    let actual = isolated("sh")
-        .args(["-c", "command -v git"])
-        .output()
-        .unwrap();
-    assert!(actual.status.success());
-    let actual = String::from_utf8(actual.stdout).unwrap();
-    rig.script(
-        "git",
-        &format!(
-            r#"#!/bin/sh
-case "$*" in
-  *'rev-parse --path-format=absolute --git-common-dir')
-    if mkdir "$RIG/first-launch-lookup" 2>/dev/null; then
-      printf 'ready\n' > "$RIG/lifecycle-git-ready"
-      read released < "$RIG/launch-lookup-release"
-    fi ;;
-esac
-exec '{}' "$@"
-"#,
-            actual.trim()
-        ),
+fn replace_unmarked_checkout(repo: &Path, tree: &Path, branch: &str) -> PathBuf {
+    close::git(
+        repo,
+        &["worktree", "remove", "-f", "-f", tree.to_str().unwrap()],
     );
-    (ready, release)
+    close::git(
+        repo,
+        &["worktree", "add", "-q", tree.to_str().unwrap(), branch],
+    );
+    let admin = PathBuf::from(close::git(tree, &["rev-parse", "--absolute-git-dir"]).trim());
+    assert!(!admin.join("dogsled-checkout-id").exists());
+    admin
+}
+
+fn launch_gate_barriers(rig: &Rig, name: &str) -> (Fifo, Fifo) {
+    (
+        Fifo::new(&rig.dir, &format!("{name}.ready")),
+        Fifo::new(&rig.dir, &format!("{name}.go")),
+    )
+}
+
+fn start_gate_launch(rig: &Rig, request: &Value, name: &str, barriers: &[(&str, &str)]) -> Owned {
+    let mut command = rig.cmd(&[
+        "--json",
+        "--budget-ms",
+        "15000",
+        "host",
+        "launch",
+        "--request",
+        &request.to_string(),
+    ]);
+    for (phase, barrier) in barriers {
+        command.env(
+            format!("DOGSLED_TEST_LAUNCH_{phase}"),
+            rig.dir.join(barrier),
+        );
+    }
+    command.stdout(fs::File::create(rig.dir.join(format!("{name}-output"))).unwrap());
+    command.stderr(fs::File::create(rig.dir.join(format!("{name}-error"))).unwrap());
+    Owned::spawn(&mut command)
 }
 
 #[test]
-fn launch_rechecks_same_request_after_waiting_before_discovery() {
+fn launch_rechecks_final_ownership_after_waiting_for_preparation_gate() {
     for complete in [false, true] {
-        let (rig, repo) = place::place_rig(&format!("same-request-wait-{complete}"));
-        let (ready, release) = same_request_git_barrier(&rig);
-        let _ready_hold = ready.hold();
-        let _release_hold = release.hold();
+        let (rig, repo) = place::place_rig(&format!("same-request-gate-{complete}"));
+        let git_ready = lifecycle_git_barrier(&rig);
+        let _git_ready_hold = git_ready.hold();
         let tree = repo.join(".worktrees/same-request");
         close::git(
             &repo,
@@ -167,69 +409,128 @@ fn launch_rechecks_same_request_after_waiting_before_discovery() {
         );
         let mut request = host_request(&rig);
         request["cwd"] = json!(tree);
-        let text = request.to_string();
-        let args = [
-            "--json",
-            "--budget-ms",
-            "15000",
-            "host",
-            "launch",
-            "--request",
-            &text,
-        ];
-        let lock = repository_lifecycle_lock(&repo);
-        let mut waiter = rig.start(&args);
-        read_fifo(ready.path(), "first launch before repository protection");
+        let (entered, enter_go) = launch_gate_barriers(&rig, "first");
+        let (completed, complete_go) = launch_gate_barriers(&rig, "completed");
+        let (second_ready, second_go) = launch_gate_barriers(&rig, "second");
+        let _entered_hold = entered.hold();
+        let _completed_hold = completed.hold();
+        let _second_hold = second_ready.hold();
+        let _enter_go_hold = enter_go.hold();
+        let _complete_go_hold = complete_go.hold();
+        let _second_go_hold = second_go.hold();
+        let mut first = start_gate_launch(
+            &rig,
+            &request,
+            "first",
+            &[("ENTERED_GATE", "first"), ("COMPLETED_GATE", "completed")],
+        );
+        read_fifo(entered.path(), "first launch owns preparation gate");
+        let prep = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(rig.dir.join("state/preparation-receipts/recover-one.lock"))
+            .unwrap();
+        assert!(matches!(prep.try_lock(), Err(fs::TryLockError::WouldBlock)));
+        // An outer preparation wait never holds done, repository, or launch protection.
         probe_free_lock(&rig.dir.join("state/launches/recover-one.lock"));
         probe_free_lock(&rig.dir.join("state/done.lock"));
-        lock.unlock().unwrap();
+        let repository = repository_lifecycle_lock(&repo);
+        repository.unlock().unwrap();
+        let mut second = start_gate_launch(&rig, &request, "second", &[("BEFORE_GATE", "second")]);
+        read_fifo(
+            second_ready.path(),
+            "second launch observed no final receipt before gate",
+        );
+        writeln!(second_go.hold(), "go").unwrap();
         if !complete {
             fs::write(rig.dir.join("start-fails"), "").unwrap();
         }
-        let (code, first) = rig.json(&["host", "launch", "--request", &text]);
-        assert_eq!(code == 0, complete, "{first}");
-        let captured =
-            rig.read("state/launches/recover-one.progress.json")["result"]["checkout"].clone();
-        assert!(captured["identity"].is_object(), "{captured}");
-        let lock = repository_lifecycle_lock(&repo);
-        close::git(
-            &repo,
-            &["worktree", "remove", "-f", "-f", tree.to_str().unwrap()],
+        writeln!(enter_go.hold(), "go").unwrap();
+        read_fifo(
+            completed.path(),
+            "first launch saved its outcome while retaining preparation gate",
         );
-        close::git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                tree.to_str().unwrap(),
-                "same-request",
-            ],
+        assert!(matches!(prep.try_lock(), Err(fs::TryLockError::WouldBlock)));
+        let admin = replace_unmarked_checkout(&repo, &tree, "same-request");
+        fs::write(tree.join("replacement"), "keep").unwrap();
+        assert!(!admin.join("dogsled-checkout-id").exists());
+        writeln!(complete_go.hold(), "go").unwrap();
+        assert_eq!(
+            first.wait().success(),
+            complete,
+            "{}",
+            rig.log("first-error")
         );
-        let admin = PathBuf::from(close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim());
-        let marker = admin.join("dogsled-checkout-id");
-        assert!(!marker.exists());
-        let mut release_file = release.hold();
-        writeln!(release_file, "continue").unwrap();
-        lock.unlock().unwrap();
-        let status = waiter.wait();
-        let (stdout, stderr) = waiter.output();
-        assert_eq!(status.success(), complete, "{stdout} {stderr}");
+        assert_eq!(
+            second.wait().success(),
+            complete,
+            "{}",
+            rig.log("second-error")
+        );
         if complete {
-            let replay: Value = serde_json::from_str(&stdout).unwrap();
-            assert_eq!(replay, first);
+            let first: Value = serde_json::from_str(&rig.log("first-output")).unwrap();
+            let second: Value = serde_json::from_str(&rig.log("second-output")).unwrap();
+            assert_eq!(second, first);
         } else {
-            assert!(stdout.contains("identity changed"), "{stdout} {stderr}");
+            assert!(rig.log("second-output").contains("identity changed"));
         }
-        assert!(
-            !marker.exists(),
-            "waiter minted an identity for the replacement"
+        assert!(!admin.join("dogsled-checkout-id").exists());
+        assert_eq!(
+            fs::read_to_string(tree.join("replacement")).unwrap(),
+            "keep"
         );
         assert_eq!(
             rig.log("herdr.log").matches("agent start worker ").count(),
             1
         );
     }
+}
+
+#[test]
+fn preparation_gate_budget_refuses_second_launch_without_inner_locks_or_side_effects() {
+    let (rig, repo) = place::place_rig("preparation-gate-budget");
+    let git_ready = lifecycle_git_barrier(&rig);
+    let _git_ready_hold = git_ready.hold();
+    let mut request = host_request(&rig);
+    request["cwd"] = json!(repo);
+    let (ready, go) = launch_gate_barriers(&rig, "first");
+    let _ready_hold = ready.hold();
+    let _go_hold = go.hold();
+    let mut first = start_gate_launch(&rig, &request, "first", &[("ENTERED_GATE", "first")]);
+    read_fifo(ready.path(), "first launch preparation gate");
+    let (code, error) = rig.json(&[
+        "--budget-ms",
+        "500",
+        "host",
+        "launch",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["deadline"], true);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("preparation-receipts/recover-one.lock"),
+        "{error}"
+    );
+    probe_free_lock(&rig.dir.join("state/launches/recover-one.lock"));
+    probe_free_lock(&rig.dir.join("state/done.lock"));
+    let repository = repository_lifecycle_lock(&repo);
+    repository.unlock().unwrap();
+    assert!(
+        !rig.dir
+            .join("state/launches/recover-one.progress.json")
+            .exists()
+    );
+    assert!(!rig.log("herdr.log").contains("agent start"));
+    writeln!(go.hold(), "go").unwrap();
+    assert!(first.wait().success(), "{}", rig.log("first-error"));
+    assert_eq!(
+        rig.log("herdr.log").matches("agent start worker ").count(),
+        1
+    );
 }
 
 #[test]
@@ -360,6 +661,8 @@ fn incomplete_launch_keeps_saved_checkout_identity_after_preparation_retires() {
     let tree = repo.join(".worktrees/c1-recovery");
     let mut request = host_request(&rig);
     request["cwd"] = json!(tree);
+    request["pane"] = prepared["pane_id"].clone();
+    request["terminal"] = prepared["terminal_id"].clone();
     fs::write(rig.dir.join("start-fails"), "").unwrap();
     assert_ne!(
         rig.json(&["host", "launch", "--request", &request.to_string()])

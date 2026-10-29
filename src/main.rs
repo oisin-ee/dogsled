@@ -598,6 +598,15 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     Ok(())
 }
 
+fn print_preparation_disposition(
+    node: &Node<'_>,
+    path: &str,
+    request_id: Option<&str>,
+) -> Result<()> {
+    let ack = prepare::disposition::release(node.ledger, node.shell, path, request_id)?;
+    print(true, &ack, String::new)
+}
+
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
@@ -683,8 +692,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             }
         }
         HostCommand::Prepared { path, request_id } => {
-            prepare::used(node.ledger, &path, request_id.as_deref())?;
-            print(true, &serde_json::json!({"prepared": true}), String::new)?;
+            print_preparation_disposition(node, &path, request_id.as_deref())?;
         }
         HostCommand::Prepare {
             repo,
