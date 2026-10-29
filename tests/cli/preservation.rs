@@ -72,23 +72,59 @@ pub(super) fn saved(repo: &Path, unborn: bool) -> Value {
     snapshot
 }
 
+fn protected_state(rig: &Rig) -> Vec<(PathBuf, Vec<u8>)> {
+    [
+        "preparations.json",
+        "preparation-receipts/original.json",
+        "preparation-receipts/original.disposition.json",
+        "admissions/original.json",
+        "placement-grants/original.json",
+        "launches/original.json",
+        "tasks/original.json",
+    ]
+    .into_iter()
+    .map(|name| {
+        let path = rig.dir.join("state").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = format!("{{\"original\":\"{name}\"}}\n").into_bytes();
+        fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    })
+    .collect()
+}
+fn assert_protected(state: &[(PathBuf, Vec<u8>)]) {
+    for (path, bytes) in state {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+}
+
 #[test]
 fn p2_list_and_show_survive_original_checkout_removal() {
     let rig = Rig::short("p2-archive");
     let repo = rig.dir.join("repo");
     let snapshot = saved(&repo, false);
-    let original = rig.dir.join("original");
+    let archive = rig.dir.join("archive.git");
+    assert!(
+        isolated("git")
+            .args(["clone", "--bare", "--no-hardlinks"])
+            .arg(&repo)
+            .arg(&archive)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     git(
-        &repo,
+        &archive,
         &[
-            "worktree",
-            "add",
-            "--detach",
-            original.to_str().unwrap(),
-            "HEAD",
+            "update-ref",
+            snapshot["ref_name"].as_str().unwrap(),
+            snapshot["commit"].as_str().unwrap(),
         ],
     );
-    git(&repo, &["worktree", "remove", original.to_str().unwrap()]);
+    fs::remove_dir_all(&repo).unwrap();
+    let repo = archive;
+    let state = protected_state(&rig);
     let before = rig.log("herdr.log");
     let (code, entries) = rig.json(&["recovery", "list", "--repo", repo.to_str().unwrap()]);
     assert_eq!(code, 0, "{entries}");
@@ -103,6 +139,11 @@ fn p2_list_and_show_survive_original_checkout_removal() {
     assert_eq!(code, 0, "{shown}");
     assert_eq!(shown, snapshot);
     assert_eq!(before, rig.log("herdr.log"));
+    let restored = rig.dir.join("restored-from-archive");
+    let (code, result) = restore(&rig, &repo, &snapshot, &restored, &[]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(fs::read(restored.join("file")).unwrap(), b"raw\0\xff\n");
+    assert_protected(&state);
 }
 
 fn restore(rig: &Rig, repo: &Path, snapshot: &Value, to: &Path, extra: &[&str]) -> (i32, Value) {
@@ -125,6 +166,7 @@ fn p2_restore_preserves_index_worktree_and_raw_bytes() {
     let repo = rig.dir.join("repo");
     let snapshot = saved(&repo, false);
     let before = git(&repo, &["status", "--porcelain=v1"]);
+    let state = protected_state(&rig);
     let to = rig.dir.join("restored");
     let (code, result) = restore(&rig, &repo, &snapshot, &to, &[]);
     assert_eq!(code, 0, "{result}");
@@ -147,6 +189,7 @@ fn p2_restore_preserves_index_worktree_and_raw_bytes() {
     assert_eq!(before, git(&repo, &["status", "--porcelain=v1"]));
     assert_eq!(fs::read(repo.join("file")).unwrap(), b"raw\0\xff\n");
     assert_eq!(git(&to, &["rev-parse", "HEAD"]), snapshot["head"]["commit"]);
+    assert_protected(&state);
 }
 
 #[test]
@@ -155,6 +198,8 @@ fn p2_restore_does_not_run_filters_or_setup() {
     let repo = rig.dir.join("repo");
     let snapshot = saved(&repo, false);
     let counter = rig.dir.join("filter-counter");
+    let setup_counter = rig.dir.join("setup-counter");
+    let checkout_counter = rig.dir.join("checkout-counter");
     git(
         &repo,
         &[
@@ -164,10 +209,24 @@ fn p2_restore_does_not_run_filters_or_setup() {
         ],
     );
     fs::write(repo.join(".git/info/attributes"), b"* filter=observable\n").unwrap();
+    git(&repo, &["cat-file", "--filters", "HEAD:file"]);
+    assert!(
+        counter.exists(),
+        "negative control must execute the configured filter"
+    );
+    fs::remove_file(&counter).unwrap();
+    git(
+        &repo,
+        &[
+            "config",
+            "filter.observable.clean",
+            &format!("touch {}; cat", counter.display()),
+        ],
+    );
     let hooks = repo.join(".git/hooks");
     fs::write(
         hooks.join("post-checkout"),
-        format!("#!/bin/sh\ntouch {}\n", counter.display()),
+        format!("#!/bin/sh\ntouch {}\n", checkout_counter.display()),
     )
     .unwrap();
     fs::set_permissions(
@@ -176,8 +235,31 @@ fn p2_restore_does_not_run_filters_or_setup() {
     )
     .unwrap();
     fs::write(
+        hooks.join("reference-transaction"),
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ntouch {}\n",
+            checkout_counter.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        hooks.join("reference-transaction"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    git(&repo, &["update-ref", "refs/heads/hook-control", "HEAD"]);
+    assert!(
+        checkout_counter.exists(),
+        "reference-transaction hook negative control"
+    );
+    git(&repo, &["update-ref", "-d", "refs/heads/hook-control"]);
+    fs::remove_file(&checkout_counter).unwrap();
+    fs::write(
         repo.join("dogsled.toml"),
-        format!("[worktree]\nsetup = ['touch {}']\n", counter.display()),
+        format!(
+            "[worktree]\nsetup = ['touch {}']\n",
+            setup_counter.display()
+        ),
     )
     .unwrap();
     let to = rig.dir.join("restored");
@@ -185,6 +267,8 @@ fn p2_restore_does_not_run_filters_or_setup() {
     assert_eq!(code, 0, "{result}");
     assert_eq!(fs::read(to.join("file")).unwrap(), b"raw\0\xff\n");
     assert!(!counter.exists());
+    assert!(!setup_counter.exists());
+    assert!(!checkout_counter.exists());
 }
 
 #[test]
@@ -213,8 +297,18 @@ fn p2_restore_never_reuses_an_existing_destination() {
             git(&repo, &["worktree", "list", "--porcelain"])
         );
         match kind {
-            "file" | "symlink" => fs::remove_file(&to).unwrap(),
-            "directory" => fs::remove_dir(&to).unwrap(),
+            "file" => {
+                assert_eq!(fs::read(&to).unwrap(), b"keep");
+                fs::remove_file(&to).unwrap();
+            }
+            "symlink" => {
+                assert_eq!(fs::read_link(&to).unwrap(), PathBuf::from("missing"));
+                fs::remove_file(&to).unwrap();
+            }
+            "directory" => {
+                assert!(fs::read_dir(&to).unwrap().next().is_none());
+                fs::remove_dir(&to).unwrap();
+            }
             _ => {}
         }
     }
@@ -244,6 +338,13 @@ fn p2_restore_handles_detached_and_unborn_heads_explicitly() {
         let repo = rig.dir.join("repo");
         let snapshot = saved(&repo, unborn);
         let to = rig.dir.join("restored");
+        if !unborn {
+            assert_ne!(
+                restore(&rig, &repo, &snapshot, &to, &["--branch", "main"]).0,
+                0
+            );
+            assert!(!to.exists());
+        }
         if unborn {
             assert_ne!(restore(&rig, &repo, &snapshot, &to, &[]).0, 0);
             assert!(!to.exists());
@@ -299,8 +400,62 @@ fn p2_corrupt_or_changed_recovery_ref_refuses_before_materialization() {
     let snapshot = saved(&repo, false);
     let id = snapshot["id"].as_str().unwrap();
     let reference = snapshot["ref_name"].as_str().unwrap();
-    git(&repo, &["update-ref", reference, "HEAD"]);
+    let mut record = snapshot.clone();
+    record.as_object_mut().unwrap().remove("commit");
+    let head = snapshot["head"]["commit"].as_str().unwrap();
+    let working = snapshot["worktree_tree"].as_str().unwrap();
+    let staged = git(
+        &repo,
+        &[
+            "rev-parse",
+            &format!("{}^2", snapshot["commit"].as_str().unwrap()),
+        ],
+    );
     let to = rig.dir.join("refused");
+    for corruption in ["metadata", "parents", "tree", "raw_format", "missing"] {
+        let mut metadata = record.clone();
+        if corruption == "metadata" {
+            metadata["id"] = "wrong".into();
+        }
+        if corruption == "raw_format" {
+            metadata["raw_worktree_bytes"] = false.into();
+        }
+        let message = metadata.to_string();
+        let tree = if corruption == "tree" {
+            snapshot["index_tree"].as_str().unwrap()
+        } else {
+            working
+        };
+        let mut args = vec!["commit-tree", tree, "-p", head, "-m", message.as_str()];
+        if corruption != "parents" {
+            args.extend(["-p", &staged]);
+        }
+        let corrupt = git(&repo, &args);
+        git(&repo, &["update-ref", reference, &corrupt]);
+        if corruption == "missing" {
+            fs::write(
+                repo.join(".git").join(reference),
+                format!("{}\n", "1".repeat(40)),
+            )
+            .unwrap();
+        }
+        let (code, error) = restore(&rig, &repo, &snapshot, &to, &[]);
+        assert_ne!(code, 0, "{corruption}: {error}");
+        assert!(!to.exists(), "{corruption}");
+        let (code, entries) = rig.json(&["recovery", "list", "--repo", repo.to_str().unwrap()]);
+        assert_eq!(code, 0, "{corruption}: {entries}");
+        assert!(
+            entries[0]["error"].as_str().is_some(),
+            "{corruption}: {entries}"
+        );
+        // Restore the exact original ref before the next independent corruption.
+        fs::write(
+            repo.join(".git").join(reference),
+            format!("{}\n", snapshot["commit"].as_str().unwrap()),
+        )
+        .unwrap();
+    }
+    git(&repo, &["update-ref", reference, "HEAD"]);
     assert_ne!(restore(&rig, &repo, &snapshot, &to, &[]).0, 0);
     assert!(!to.exists());
     let (code, entries) = rig.json(&["recovery", "list", "--repo", repo.to_str().unwrap()]);
@@ -347,6 +502,12 @@ DOGSLED_STATE="$RIG/peer-state" sh -c "$remote"
     assert!(to.exists());
     assert!(rig.log("ssh.log").contains("host recovery restore"));
     assert_eq!(
+        rig.log("ssh.log").lines().count(),
+        1,
+        "no fleet search or other peer"
+    );
+    assert!(rig.log("ssh.log").contains("netcup"));
+    assert_eq!(
         git(
             &repo,
             &["rev-parse", snapshot["ref_name"].as_str().unwrap()]
@@ -355,9 +516,14 @@ DOGSLED_STATE="$RIG/peer-state" sh -c "$remote"
     );
     fs::write(rig.dir.join("unsupported"), b"yes").unwrap();
     let other = rig.dir.join("unsupported-destination");
-    assert_ne!(
-        restore(&rig, &repo, &snapshot, &other, &["--host", "netcup"]).0,
-        0
+    let (code, error) = restore(&rig, &repo, &snapshot, &other, &["--host", "netcup"]);
+    assert_ne!(code, 0);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("ensure the peer supports host recovery"),
+        "{error}"
     );
     assert!(!other.exists());
 }

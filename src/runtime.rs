@@ -90,7 +90,11 @@ pub fn recovery(
             }
         }
     }
-    fleet.remote(host, &args)
+    fleet.remote(host, &args).map_err(|error| {
+        if matches!(error.root(), Error::Parse { .. } | Error::Ssh { failure: crate::hosts::Failure::RemoteCommandFailed | crate::hosts::Failure::UnexpectedOutput, .. }) {
+            Error::Invalid(format!("recovery on selected host {} failed: {error}; no local or fleet fallback; ensure the peer supports host recovery", host.label))
+        } else { error }
+    })
 }
 
 fn caller() -> Result<String> {

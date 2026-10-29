@@ -372,6 +372,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn byte_output_preserves_non_utf8_and_obeys_deadlines() {
+        let shell = System::default();
+        let output = shell
+            .run_bytes_bounded(
+                "sh",
+                &["-c".into(), "printf '\\000\\377'".into()],
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(output.stdout, [0, 255]);
+        let error = shell
+            .run_bytes_bounded(
+                "sh",
+                &["-c".into(), "sleep 1".into()],
+                std::time::Duration::from_millis(10),
+            )
+            .unwrap_err();
+        assert!(matches!(error.root(), Error::Deadline(_)));
+    }
+
+    #[test]
     fn deadline_never_formats_scripts_credentials_or_launch_json() {
         let shell = System::default();
         let error = shell
