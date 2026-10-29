@@ -99,7 +99,7 @@ fn main() -> ExitCode {
     let budget = max.map_or_else(budget::Budget::default, |ms| {
         budget::Budget::until(started + std::time::Duration::from_millis(ms))
     });
-    match run(cli, budget) {
+    match run_recovery_or_command(cli, budget) {
         Ok(code) => code,
         // Prompt context is optional: unavailable state must not block a turn.
         Err(_) if hook => ExitCode::SUCCESS,
@@ -472,6 +472,27 @@ fn hook(
     }
 }
 
+/// Recovery needs no Herdr discovery for local operations.
+fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    let Command::Recovery {
+        ref command,
+        ref host,
+    } = cli.command
+    else {
+        return run(cli, budget);
+    };
+    let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
+    let shell = System { budget };
+    let ledger = Ledger {
+        budget,
+        ..Ledger::new(ledger::default_dir())
+    };
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let value = runtime::recovery(&shell, &ledger, &policy, &home, host.as_deref(), command)?;
+    print(cli.json, &value, || format!("{value}\n"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn owner_board(
     ledger: &Ledger,
     shell: &System,
@@ -711,6 +732,13 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             preparation_protocol,
         } => print_host_launch(node, &request, job_validity, preparation_protocol)?,
         HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
+        HostCommand::Recovery { command } => {
+            print(
+                true,
+                &runtime::recovery_local(node.shell, node.ledger, &command)?,
+                String::new,
+            )?;
+        }
         HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
         HostCommand::Logs { id, offset } => {
             print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;

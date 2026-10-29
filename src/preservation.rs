@@ -46,6 +46,8 @@ pub enum Refusal {
     VerificationFailed,
     #[error("Git is redirected outside the requested checkout")]
     Redirected,
+    #[error("destination exists or its identity changed: {0}")]
+    Destination(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +149,15 @@ fn git_input(
     args: &[&str],
     input: Option<&[u8]>,
 ) -> Result<Output> {
+    let words = git_words(checkout, index, args)?;
+    Ok(if let Some(input) = input {
+        shell.run_input_bounded("env", &words, input, shell.budget().remaining("git")?)?
+    } else {
+        shell.run("env", &words)?
+    })
+}
+
+fn git_words(checkout: &Path, index: Option<&Path>, args: &[&str]) -> Result<Vec<String>> {
     // Hooks export repository-local routing. The explicit checkout, not the caller's
     // repository or index, owns every Git operation in this module.
     let mut words = Vec::new();
@@ -174,6 +185,7 @@ fn git_input(
         }
     }
     words.push("GIT_OPTIONAL_LOCKS=0".into());
+    words.push("GIT_NO_REPLACE_OBJECTS=1".into());
     if let Some(index) = index {
         let index = index
             .to_str()
@@ -191,11 +203,25 @@ fn git_input(
         "core.fsmonitor=false".into(),
     ]);
     words.extend(args.iter().map(ToString::to_string));
-    Ok(if let Some(input) = input {
-        shell.run_input_bounded("env", &words, input, shell.budget().remaining("git")?)?
-    } else {
-        shell.run("env", &words)?
-    })
+    Ok(words)
+}
+
+fn raw(shell: &dyn Shell, repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = shell.run_bytes_bounded(
+        "env",
+        &git_words(repo, None, args)?,
+        shell.budget().remaining("git")?,
+    )?;
+    if out.status != 0 {
+        return Err(crate::error::Error::Command {
+            program: "git".into(),
+            args: args.join(" "),
+            status: out.status.to_string(),
+            stderr: out.stderr,
+        }
+        .into());
+    }
+    Ok(out.stdout)
 }
 
 fn checked(
@@ -705,50 +731,11 @@ pub fn snapshot(shell: &dyn Shell, checkout: &Path) -> Result<Snapshot> {
 pub fn verify(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<()> {
     preflight(shell, checkout)?;
     let before = observe(shell, checkout)?;
-    let pinned = checked(
-        shell,
-        checkout,
-        None,
-        &["rev-parse", "--verify", &snapshot.ref_name],
-    )?;
-    if pinned.trim() != snapshot.commit {
-        return Err(Refusal::VerificationFailed.into());
-    }
-    let message = checked(
-        shell,
-        checkout,
-        None,
-        &["show", "-s", "--format=%B", &snapshot.commit],
-    )?;
-    let record: Record = serde_json::from_str(message.trim())?;
-    let tree = checked(
-        shell,
-        checkout,
-        None,
-        &["rev-parse", &format!("{}^{{tree}}", snapshot.commit)],
-    )?;
-    let staged_parent = if snapshot.head.commit().is_some() {
-        "^2"
-    } else {
-        "^1"
-    };
-    let staged = checked(
-        shell,
-        checkout,
-        None,
-        &[
-            "rev-parse",
-            &format!("{}{staged_parent}^{{tree}}", snapshot.commit),
-        ],
-    )?;
+    verify_archived(shell, checkout, snapshot)?;
     let scratch = Scratch::new()?;
     let current_index = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
     let current_working = worktree_tree(shell, checkout, &scratch, &current_index)?;
-    if record != snapshot.record()
-        || !snapshot.raw_worktree_bytes
-        || before.head != snapshot.head
-        || tree.trim() != snapshot.worktree_tree
-        || staged.trim() != snapshot.index_tree
+    if before.head != snapshot.head
         || current_index != snapshot.index_tree
         || current_working != snapshot.worktree_tree
     {
@@ -757,7 +744,616 @@ pub fn verify(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result
     if before != observe(shell, checkout)? {
         return Err(Refusal::CheckoutChanged.into());
     }
+    recheck_ref(shell, checkout, snapshot)?;
     Ok(())
+}
+
+/// Invalid entries remain visible rather than disappearing from inspection.
+#[derive(Debug, Serialize)]
+pub struct Entry {
+    pub id: String,
+    pub commit: String,
+    pub snapshot: Option<Snapshot>,
+    pub error: Option<String>,
+}
+
+fn reference(id: &str) -> Result<String> {
+    if id.len() != 32
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(crate::error::Error::Invalid(
+            "invalid recovery ID: expected 32 lowercase hexadecimal characters".into(),
+        )
+        .into());
+    }
+    Ok(format!("refs/dogsled/recovery/{id}"))
+}
+
+pub fn list(shell: &dyn Shell, repo: &Path) -> Result<Vec<Entry>> {
+    let refs = checked(
+        shell,
+        repo,
+        None,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/dogsled/recovery/",
+        ],
+    )?;
+    refs.lines()
+        .map(|line| {
+            let (name, oid) = line.split_once(' ').ok_or(Refusal::VerificationFailed)?;
+            let id = name
+                .strip_prefix("refs/dogsled/recovery/")
+                .ok_or(Refusal::VerificationFailed)?;
+            let result = read_archived(shell, repo, id, oid);
+            Ok(Entry {
+                id: id.into(),
+                commit: oid.into(),
+                snapshot: result.as_ref().ok().cloned(),
+                error: result.err().map(|e| e.to_string()),
+            })
+        })
+        .collect()
+}
+
+pub fn show(shell: &dyn Shell, repo: &Path, id: &str) -> Result<Snapshot> {
+    let name = reference(id)?;
+    let oid = checked(
+        shell,
+        repo,
+        None,
+        &["show-ref", "--verify", "--hash", &name],
+    )?;
+    let snapshot = read_archived(shell, repo, id, oid.trim())?;
+    recheck_ref(shell, repo, &snapshot)?;
+    Ok(snapshot)
+}
+
+fn read_archived(shell: &dyn Shell, repo: &Path, id: &str, oid: &str) -> Result<Snapshot> {
+    let ref_name = reference(id)?;
+    let (_, _, message) = commit_parts(shell, repo, oid)?;
+    let record: Record = serde_json::from_str(&message)?;
+    let snapshot = Snapshot {
+        id: id.into(),
+        ref_name,
+        commit: oid.into(),
+        head: record.head.clone(),
+        index_tree: record.index_tree.clone(),
+        worktree_tree: record.worktree_tree.clone(),
+        raw_worktree_bytes: record.raw_worktree_bytes,
+        created_ms: record.created_ms,
+        ignored_files_captured: record.ignored_files_captured,
+    };
+    if snapshot.record() != record {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    verify_archived(shell, repo, &snapshot)?;
+    Ok(snapshot)
+}
+
+fn commit_parts(
+    shell: &dyn Shell,
+    repo: &Path,
+    oid: &str,
+) -> Result<(String, Vec<String>, String)> {
+    if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    let bytes = raw(shell, repo, &["cat-file", "commit", oid])?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| Refusal::VerificationFailed)?;
+    let (headers, message) = text.split_once("\n\n").ok_or(Refusal::VerificationFailed)?;
+    let mut trees = headers.lines().filter_map(|s| s.strip_prefix("tree "));
+    let tree = trees.next().ok_or(Refusal::VerificationFailed)?.into();
+    if trees.next().is_some() {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    let parents = headers
+        .lines()
+        .filter_map(|s| s.strip_prefix("parent ").map(str::to_owned))
+        .collect();
+    Ok((tree, parents, message.trim().into()))
+}
+
+fn recheck_ref(shell: &dyn Shell, repo: &Path, snapshot: &Snapshot) -> Result<()> {
+    let symbolic = git(
+        shell,
+        repo,
+        None,
+        &["symbolic-ref", "-q", &snapshot.ref_name],
+    )?;
+    if symbolic.status != 1 {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    let oid = checked(
+        shell,
+        repo,
+        None,
+        &["show-ref", "--verify", "--hash", &snapshot.ref_name],
+    )?;
+    if oid.trim() != snapshot.commit {
+        return Err(Refusal::RefConflict(snapshot.ref_name.clone()).into());
+    }
+    Ok(())
+}
+
+fn verify_archived(shell: &dyn Shell, repo: &Path, snapshot: &Snapshot) -> Result<()> {
+    if reference(&snapshot.id)? != snapshot.ref_name
+        || !snapshot.raw_worktree_bytes
+        || snapshot.ignored_files_captured
+    {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    match &snapshot.head {
+        Head::Branch { name, .. } | Head::Unborn { branch: name } => {
+            if !name.starts_with("refs/heads/") {
+                return Err(Refusal::VerificationFailed.into());
+            }
+            checked(shell, repo, None, &["check-ref-format", name])?;
+        }
+        Head::Detached { .. } => {}
+    }
+    recheck_ref(shell, repo, snapshot)?;
+    let (working, parents, message) = commit_parts(shell, repo, &snapshot.commit)?;
+    let record: Record = serde_json::from_str(&message)?;
+    let expected_head: Vec<String> = snapshot
+        .head
+        .commit()
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    if parents.len() != expected_head.len() + 1
+        || !parents.starts_with(&expected_head)
+        || record != snapshot.record()
+        || working != snapshot.worktree_tree
+    {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    let staged_parent = parents.last().ok_or(Refusal::VerificationFailed)?;
+    let (staged, staged_parents, message) = commit_parts(shell, repo, staged_parent)?;
+    if staged != snapshot.index_tree
+        || staged_parents != expected_head
+        || message != "Dogsled recovery staged index"
+    {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    if let Some(head) = snapshot.head.commit() {
+        commit_parts(shell, repo, head)?;
+    }
+    for tree in [&snapshot.index_tree, &snapshot.worktree_tree] {
+        manifest(shell, repo, tree)?;
+    }
+    Ok(())
+}
+
+struct FileEntry {
+    path: PathBuf,
+    mode: String,
+    bytes: Vec<u8>,
+}
+
+fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>> {
+    let listing = raw(shell, repo, &["ls-tree", "-r", "-z", tree])?;
+    let mut files = Vec::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for entry in listing.split(|b| *b == 0).filter(|s| !s.is_empty()) {
+        let tab = entry
+            .iter()
+            .position(|b| *b == b'\t')
+            .ok_or(Refusal::VerificationFailed)?;
+        let (info, name) = entry.split_at(tab);
+        let name = name.get(1..).ok_or(Refusal::VerificationFailed)?;
+        if name.is_empty()
+            || name
+                .split(|b| *b == b'/')
+                .any(|p| p.is_empty() || p == b"." || p == b".." || p.eq_ignore_ascii_case(b".git"))
+        {
+            return Err(Refusal::UnsupportedPath(name.into()).into());
+        }
+        let info = std::str::from_utf8(info).map_err(|_| Refusal::VerificationFailed)?;
+        let mut words = info.split_whitespace();
+        let mode = words.next().ok_or(Refusal::VerificationFailed)?;
+        let kind = words.next().ok_or(Refusal::VerificationFailed)?;
+        let oid = words.next().ok_or(Refusal::VerificationFailed)?;
+        let bytes = match (mode, kind) {
+            ("100644" | "100755" | "120000", "blob") => {
+                raw(shell, repo, &["cat-file", "blob", oid])?
+            }
+            ("160000", "commit") => Vec::new(),
+            _ => return Err(Refusal::VerificationFailed.into()),
+        };
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(name));
+        if !paths.insert(path.clone()) {
+            return Err(Refusal::VerificationFailed.into());
+        }
+        files.push(FileEntry {
+            path,
+            mode: mode.into(),
+            bytes,
+        });
+    }
+    for path in &paths {
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|parent| paths.contains(parent))
+        {
+            return Err(Refusal::VerificationFailed.into());
+        }
+    }
+    Ok(files)
+}
+
+#[derive(Debug, Serialize)]
+pub struct Restored {
+    pub snapshot: Snapshot,
+    pub destination: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// Restore owns no preparation, admission, task, pane, or setup state.
+pub fn restore(
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    repo: &Path,
+    id: &str,
+    to: &Path,
+    branch: Option<&str>,
+) -> crate::error::Result<Restored> {
+    let fail = |error: Error| {
+        crate::error::Error::Invalid(format!(
+            "{error}; recovery retained; destination {}",
+            to.display()
+        ))
+    };
+    let saved = show(shell, repo, id).map_err(fail)?;
+    let destination = Destination::capture(to).map_err(fail)?;
+    let common = PathBuf::from(
+        checked(
+            shell,
+            repo,
+            None,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .map_err(fail)?
+        .trim(),
+    )
+    .canonicalize()?;
+    if crate::worktree::common_dir(shell, repo)?.canonicalize()? != common {
+        return Err(fail(Refusal::Redirected.into()));
+    }
+    let repository = DirectoryPin::capture(&common).map_err(fail)?;
+    crate::worktree::with_lifecycle(shell, ledger, repo, |guard| {
+        guard.check_repository(shell, repo)?;
+        let operation = || -> Result<Restored> {
+            repository.validate()?;
+            destination.validate()?;
+            recheck_ref(shell, repo, &saved)?;
+            validate_branch(shell, repo, &saved, branch)?;
+            let files = manifest(shell, repo, &saved.worktree_tree)?;
+            let registered = raw(shell, repo, &["worktree", "list", "--porcelain", "-z"])?;
+            for path in registered
+                .split(|b| *b == 0)
+                .filter_map(|line| line.strip_prefix(b"worktree "))
+                .filter_map(|path| std::str::from_utf8(path).ok())
+            {
+                if crate::worktree::same(
+                    path,
+                    destination
+                        .path
+                        .to_str()
+                        .ok_or(Refusal::VerificationFailed)?,
+                ) {
+                    return Err(Refusal::Destination(destination.path.clone()).into());
+                }
+            }
+            destination.validate()?;
+            recheck_ref(shell, repo, &saved)?;
+            let root = create_checkout(shell, repo, &destination, &saved)?;
+            let target = &destination.path;
+            let tree = guard
+                .discover(shell, target.to_str().ok_or(Refusal::VerificationFailed)?)?
+                .ok_or(Refusal::VerificationFailed)?;
+            let checkout_pin = tree.pin()?;
+            checkout_pin.validate(&tree)?;
+            if let Some(commit) = saved.head.commit() {
+                restore_git(shell, target, &["update-ref", "--no-deref", "HEAD", commit])?;
+            }
+            if let Some(branch) = branch {
+                let name = format!("refs/heads/{branch}");
+                if let Some(commit) = saved.head.commit() {
+                    restore_git(
+                        shell,
+                        target,
+                        &["update-ref", &name, commit, &"0".repeat(commit.len())],
+                    )?;
+                }
+                restore_git(shell, target, &["symbolic-ref", "HEAD", &name])?;
+            }
+            checkout_pin.validate(&tree)?;
+            restore_git(shell, target, &["read-tree", &saved.index_tree])?;
+            materialize(&destination, &root, files)?;
+            root.validate()?;
+            destination.validate_parent()?;
+            checkout_pin.validate(&tree)?;
+            repository.validate()?;
+            guard.check_repository(shell, target)?;
+            let observed = guard
+                .observe(shell, target.to_str().ok_or(Refusal::VerificationFailed)?)?
+                .ok_or(Refusal::VerificationFailed)?;
+            if observed.identity != tree.identity {
+                return Err(Refusal::Destination(target.clone()).into());
+            }
+            verify_restored(shell, target, &saved, branch)?;
+            root.validate()?;
+            checkout_pin.validate(&tree)?;
+            recheck_ref(shell, repo, &saved)?;
+            Ok(Restored {
+                snapshot: saved.clone(),
+                destination: target.clone(),
+                branch: branch.map(str::to_owned),
+            })
+        };
+        operation().map_err(fail)
+    })
+}
+
+fn create_checkout(
+    shell: &dyn Shell,
+    repo: &Path,
+    destination: &Destination,
+    saved: &Snapshot,
+) -> Result<DirectoryPin> {
+    destination.validate()?;
+    fs::create_dir(&destination.path)?;
+    let root = DirectoryPin::capture(&destination.path)?;
+    destination.validate_parent()?;
+    root.validate()?;
+    restore_git(
+        shell,
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--detach",
+            destination
+                .path
+                .to_str()
+                .ok_or(Refusal::VerificationFailed)?,
+            &saved.commit,
+        ],
+    )?;
+    root.validate()?;
+    destination.validate_parent()?;
+    Ok(root)
+}
+
+fn restore_git(shell: &dyn Shell, target: &Path, args: &[&str]) -> Result<String> {
+    let mut words = vec!["-c", "core.hooksPath=/dev/null"];
+    words.extend_from_slice(args);
+    checked(shell, target, None, &words)
+}
+
+fn verify_restored(
+    shell: &dyn Shell,
+    target: &Path,
+    saved: &Snapshot,
+    branch: Option<&str>,
+) -> Result<()> {
+    let expected_head = match (saved.head.commit(), branch) {
+        (Some(commit), None) => Head::Detached {
+            commit: commit.into(),
+        },
+        (Some(commit), Some(branch)) => Head::Branch {
+            name: format!("refs/heads/{branch}"),
+            commit: commit.into(),
+        },
+        (None, Some(branch)) => Head::Unborn {
+            branch: format!("refs/heads/{branch}"),
+        },
+        (None, None) => return Err(Refusal::VerificationFailed.into()),
+    };
+    let index_path = checked(
+        shell,
+        target,
+        None,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    )?;
+    let bytes = fs::read(index_path.trim())?;
+    let scratch = Scratch::new()?;
+    let index = index_tree(shell, target, &scratch, Some(&bytes))?;
+    if head(shell, target)? != expected_head || index != saved.index_tree {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    let expected = manifest(shell, target, &saved.worktree_tree)?;
+    for file in expected {
+        let path = target.join(file.path);
+        let metadata = fs::symlink_metadata(&path)?;
+        let valid = match file.mode.as_str() {
+            "120000" => {
+                metadata.is_symlink() && fs::read_link(&path)?.as_os_str().as_bytes() == file.bytes
+            }
+            "160000" => metadata.is_dir() && fs::read_dir(&path)?.next().is_none(),
+            _ => {
+                metadata.is_file()
+                    && fs::read(&path)? == file.bytes
+                    && (metadata.permissions().mode() & 0o111 != 0) == (file.mode == "100755")
+            }
+        };
+        if !valid {
+            return Err(Refusal::VerificationFailed.into());
+        }
+    }
+    if fs::read(index_path.trim())? != bytes || head(shell, target)? != expected_head {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    Ok(())
+}
+
+fn materialize(
+    destination: &Destination,
+    root: &DirectoryPin,
+    files: Vec<FileEntry>,
+) -> Result<()> {
+    let mut directories: std::collections::BTreeMap<PathBuf, DirectoryPin> =
+        std::collections::BTreeMap::new();
+    for file in files {
+        root.validate()?;
+        destination.validate_parent()?;
+        let path = destination.path.join(&file.path);
+        let mut parent = destination.path.clone();
+        if let Some(relative) = file.path.parent() {
+            for component in relative.components() {
+                root.validate()?;
+                destination.validate_parent()?;
+                for directory in directories.values() {
+                    directory.validate()?;
+                }
+                parent.push(component);
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    directories.entry(parent.clone())
+                {
+                    fs::create_dir(&parent)?;
+                    entry.insert(DirectoryPin::capture(&parent)?);
+                }
+            }
+        }
+        for directory in directories.values() {
+            directory.validate()?;
+        }
+        match file.mode.as_str() {
+            "120000" => {
+                std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&file.bytes), &path)?;
+            }
+            "160000" => fs::create_dir(&path)?,
+            _ => {
+                use std::io::Write as _;
+                let mut out = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)?;
+                out.write_all(&file.bytes)?;
+                out.set_permissions(fs::Permissions::from_mode(if file.mode == "100755" {
+                    0o755
+                } else {
+                    0o644
+                }))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_branch(
+    shell: &dyn Shell,
+    repo: &Path,
+    snapshot: &Snapshot,
+    branch: Option<&str>,
+) -> Result<()> {
+    if snapshot.head.commit().is_none() && branch.is_none() {
+        return Err(crate::error::Error::Invalid(
+            "unborn recovery requires an explicit unused --branch".into(),
+        )
+        .into());
+    }
+    if let Some(branch) = branch {
+        let name = format!("refs/heads/{branch}");
+        checked(shell, repo, None, &["check-ref-format", &name])?;
+        let trees = checked(shell, repo, None, &["worktree", "list", "--porcelain"])?;
+        if trees
+            .lines()
+            .any(|line| line.strip_prefix("branch ") == Some(name.as_str()))
+        {
+            return Err(Refusal::RefConflict(name).into());
+        }
+        if git(
+            shell,
+            repo,
+            None,
+            &["show-ref", "--verify", "--quiet", &name],
+        )?
+        .status
+            != 1
+        {
+            return Err(Refusal::RefConflict(name).into());
+        }
+    }
+    Ok(())
+}
+
+struct DirectoryPin {
+    path: PathBuf,
+    file: fs::File,
+}
+impl DirectoryPin {
+    fn capture(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let pin = Self {
+            path: path.into(),
+            file: fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+                .open(path)?,
+        };
+        pin.validate()?;
+        Ok(pin)
+    }
+    fn validate(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let expected = self.file.metadata()?;
+        let actual = fs::symlink_metadata(&self.path)?;
+        if !actual.is_dir() || expected.dev() != actual.dev() || expected.ino() != actual.ino() {
+            return Err(Refusal::Destination(self.path.clone()).into());
+        }
+        Ok(())
+    }
+}
+struct Destination {
+    path: PathBuf,
+    parent: DirectoryPin,
+    requested_parent: PathBuf,
+}
+impl Destination {
+    fn validate_parent(&self) -> Result<()> {
+        self.parent.validate()?;
+        if self.requested_parent.canonicalize()? != self.parent.path {
+            return Err(Refusal::Destination(self.path.clone()).into());
+        }
+        Ok(())
+    }
+    fn capture(to: &Path) -> Result<Self> {
+        let absolute = if to.is_absolute() {
+            to.into()
+        } else {
+            std::env::current_dir()?.join(to)
+        };
+        let name = absolute
+            .file_name()
+            .ok_or_else(|| Refusal::Destination(absolute.clone()))?;
+        let requested_parent = absolute
+            .parent()
+            .ok_or_else(|| Refusal::Destination(absolute.clone()))?
+            .to_path_buf();
+        let parent = requested_parent.canonicalize()?;
+        let destination = Self {
+            path: parent.join(name),
+            parent: DirectoryPin::capture(&parent)?,
+            requested_parent,
+        };
+        destination.validate()?;
+        Ok(destination)
+    }
+    fn validate(&self) -> Result<()> {
+        self.validate_parent()?;
+        match fs::symlink_metadata(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(Refusal::Destination(self.path.clone()).into()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -804,45 +1400,16 @@ mod tests {
             assert_eq!(before, observe(&shell, &self.path).unwrap());
             verify(&shell, &self.path, &saved).unwrap();
             let restored = self.scratch.0.join("restored");
-            self.git(&[
-                "worktree",
-                "add",
-                "--detach",
-                restored.to_str().unwrap(),
-                &saved.commit,
-            ]);
-            // P2 must restore raw blobs without checkout's smudge/EOL conversion.
-            for entry in self
-                .git(&["ls-tree", "-r", "-z", &saved.commit])
-                .split('\0')
-                .filter(|entry| !entry.is_empty())
-            {
-                let (info, path) = entry.split_once('\t').unwrap();
-                if info.starts_with("100") {
-                    let oid = info.split_whitespace().nth(2).unwrap();
-                    let bytes = self.git(&["cat-file", "blob", oid]);
-                    fs::write(restored.join(path), bytes.as_bytes()).unwrap();
-                }
-            }
-            // Restore only inside the NEW checkout: original HEAD, working tree, then staged tree.
-            if let Some(head) = saved.head.commit() {
-                checked(
-                    &shell,
-                    &restored,
-                    None,
-                    &["update-ref", "--no-deref", "HEAD", head],
-                )
-                .unwrap();
-            } else if let Head::Unborn { branch } = &saved.head {
-                checked(
-                    &shell,
-                    &restored,
-                    None,
-                    &["symbolic-ref", "HEAD", &format!("{branch}-restored")],
-                )
-                .unwrap();
-            }
-            checked(&shell, &restored, None, &["read-tree", &saved.index_tree]).unwrap();
+            let ledger = crate::ledger::Ledger::new(self.scratch.0.join("state"));
+            restore(
+                &shell,
+                &ledger,
+                &self.path,
+                &saved.id,
+                &restored,
+                matches!(saved.head, Head::Unborn { .. }).then_some("restored-unborn"),
+            )
+            .unwrap();
             let scratch = Scratch::new().unwrap();
             let restored_observation = observe(&shell, &restored).unwrap();
             assert_eq!(before.status, restored_observation.status);
@@ -932,6 +1499,157 @@ mod tests {
                 Err(Error::Refused(Refusal::UnsupportedPath(_)))
             ));
         }
+    }
+
+    #[derive(Debug)]
+    enum Replacement {
+        Destination(PathBuf),
+        Ref(PathBuf, String),
+        Parent(PathBuf),
+        Created(PathBuf),
+    }
+
+    #[derive(Debug)]
+    struct Interleaved {
+        change: std::sync::Mutex<Option<Replacement>>,
+        trigger: &'static str,
+    }
+
+    impl Interleaved {
+        fn replace(&self, args: &[String]) -> crate::error::Result<()> {
+            if args
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == self.trigger)
+                && let Some(change) = self.change.lock().unwrap().take()
+            {
+                match change {
+                    Replacement::Destination(to) => {
+                        fs::create_dir(&to)?;
+                        fs::write(to.join("keep"), b"replacement")?;
+                    }
+                    Replacement::Ref(repo, reference) => {
+                        checked(
+                            &System::default(),
+                            &repo,
+                            None,
+                            &["update-ref", &reference, "HEAD"],
+                        )
+                        .unwrap();
+                    }
+                    Replacement::Parent(parent) => {
+                        fs::rename(&parent, parent.with_extension("old"))?;
+                        fs::create_dir(&parent)?;
+                        fs::write(parent.join("keep"), b"replacement")?;
+                    }
+                    Replacement::Created(to) => {
+                        fs::rename(&to, to.with_extension("old"))?;
+                        fs::create_dir(&to)?;
+                        fs::write(to.join("keep"), b"replacement")?;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+    impl Shell for Interleaved {
+        fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {
+            let output = System::default().run(program, args)?;
+            self.replace(args)?;
+            Ok(output)
+        }
+        fn run_bytes_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            timeout: std::time::Duration,
+        ) -> crate::error::Result<crate::shell::BytesOutput> {
+            let output = System::default().run_bytes_bounded(program, args, timeout)?;
+            self.replace(args)?;
+            Ok(output)
+        }
+    }
+
+    #[test]
+    fn restore_rechecks_destination_identity() {
+        for phase in ["list", "add"] {
+            let repo = Repo::new(true);
+            let saved = snapshot(&System::default(), &repo.path).unwrap();
+            let to = repo.scratch.0.join("restored");
+            let change = if phase == "list" {
+                Replacement::Destination(to.clone())
+            } else {
+                Replacement::Created(to.clone())
+            };
+            let shell = Interleaved {
+                change: std::sync::Mutex::new(Some(change)),
+                trigger: phase,
+            };
+            let ledger = crate::ledger::Ledger::new(repo.scratch.0.join("state"));
+            let error = restore(&shell, &ledger, &repo.path, &saved.id, &to, None).unwrap_err();
+            assert!(error.to_string().contains("destination"), "{error}");
+            assert_eq!(fs::read(to.join("keep")).unwrap(), b"replacement");
+            assert!(!to.join("file").exists());
+            assert_eq!(
+                repo.git(&["rev-parse", &saved.ref_name]).trim(),
+                saved.commit
+            );
+        }
+    }
+
+    #[test]
+    fn restore_rechecks_ref_before_destination_creation() {
+        let repo = Repo::new(true);
+        let saved = snapshot(&System::default(), &repo.path).unwrap();
+        let to = repo.scratch.0.join("restored");
+        let shell = Interleaved {
+            change: std::sync::Mutex::new(Some(Replacement::Ref(
+                repo.path.clone(),
+                saved.ref_name.clone(),
+            ))),
+            trigger: "list",
+        };
+        let ledger = crate::ledger::Ledger::new(repo.scratch.0.join("state"));
+        let error = restore(&shell, &ledger, &repo.path, &saved.id, &to, None).unwrap_err();
+        assert!(error.to_string().contains("ref already exists"), "{error}");
+        assert!(!to.exists());
+    }
+
+    #[test]
+    fn restore_rechecks_parent_before_destination_creation() {
+        let repo = Repo::new(true);
+        let saved = snapshot(&System::default(), &repo.path).unwrap();
+        let parent = repo.scratch.0.join("parent");
+        fs::create_dir(&parent).unwrap();
+        let to = parent.join("restored");
+        let shell = Interleaved {
+            change: std::sync::Mutex::new(Some(Replacement::Parent(parent.clone()))),
+            trigger: "list",
+        };
+        let ledger = crate::ledger::Ledger::new(repo.scratch.0.join("state"));
+        assert!(restore(&shell, &ledger, &repo.path, &saved.id, &to, None).is_err());
+        assert_eq!(fs::read(parent.join("keep")).unwrap(), b"replacement");
+        assert!(!to.exists());
+    }
+
+    #[test]
+    fn destination_parent_identity_is_pinned() {
+        let scratch = Scratch::new().unwrap();
+        let to = scratch.0.join("restored");
+        let captured = Destination::capture(&to).unwrap();
+        fs::create_dir(&to).unwrap();
+        fs::write(to.join("keep"), b"replacement").unwrap();
+        assert!(captured.validate().is_err());
+        assert_eq!(fs::read(to.join("keep")).unwrap(), b"replacement");
+        fs::remove_file(to.join("keep")).unwrap();
+        fs::remove_dir(&to).unwrap();
+        let captured = Destination::capture(&to).unwrap();
+        let moved = scratch.0.with_extension("moved");
+        fs::rename(&scratch.0, &moved).unwrap();
+        fs::create_dir(&scratch.0).unwrap();
+        fs::write(scratch.0.join("keep"), b"new parent").unwrap();
+        assert!(captured.validate().is_err());
+        assert_eq!(fs::read(scratch.0.join("keep")).unwrap(), b"new parent");
+        fs::remove_dir_all(moved).unwrap();
     }
 
     #[test]
@@ -1130,6 +1848,15 @@ mod tests {
     }
 
     impl Shell for ConfigInjected {
+        fn run_bytes_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            timeout: std::time::Duration,
+        ) -> crate::error::Result<crate::shell::BytesOutput> {
+            System::default().run_bytes_bounded("env", &self.args(program, args), timeout)
+        }
+
         fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {
             System::default().run("env", &self.args(program, args))
         }
