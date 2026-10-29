@@ -17,10 +17,10 @@ import {
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { TaskProviderV1 } from "./provider.ts";
 import type { TodoParams } from "./tool.ts";
+import type { TodoParts } from "./index.ts";
 import { Type } from "typebox";
 import { contract } from "./contract-fixture.ts";
-import piTodo from "./index.ts";
-import { registerSeedSource } from "./seed-fixture.ts";
+import { createTodo } from "./index.ts";
 
 type Session = Awaited<ReturnType<typeof createAgentSession>>["session"];
 interface Startup {
@@ -57,14 +57,16 @@ interface FixtureRequest {
  * @param {Readonly<FixtureRequest>} request Fixture description.
  * @returns {object} Local resource owners.
  */
-const resources = (
+const resources = async (
     request: Readonly<FixtureRequest>,
-  ): {
+  ): Promise<{
     events: ReturnType<typeof createEventBus>;
     manager: SessionManager;
     settings: SettingsManager;
     loader: DefaultResourceLoader;
-  } => {
+    parts: () => TodoParts | undefined;
+  }> => {
+    let todo: TodoParts | undefined = undefined;
     const { collision, later, startup } = request,
       events = createEventBus(),
       manager = SessionManager.inMemory(),
@@ -73,14 +75,16 @@ const resources = (
         retry: { enabled: false },
       }),
       loader = new DefaultResourceLoader({
-        additionalExtensionPaths: collision ? [] : [new URL("index.ts", import.meta.url).pathname],
+        additionalExtensionPaths: [],
         agentDir: "/nonexistent/pi-todo-test",
         cwd: startup?.cwd ?? "/tmp",
         eventBus: events,
         extensionFactories: [
           createCodemodeExtension(),
           ...(later === undefined ? [] : [later]),
-          ...(collision ? [piTodo] : []),
+          (pi): void => {
+            todo = createTodo(pi, { seedPath: (): string | undefined => startup?.seedPath });
+          },
         ],
         noContextFiles: true,
         noExtensions: true,
@@ -89,30 +93,16 @@ const resources = (
         noThemes: true,
         settingsManager: settings,
       });
-    if (startup !== undefined) {
-      registerSeedSource(events, { path: startup.seedPath, version: 1 });
+    await loader.reload();
+    // Attribute the injected entry to its real source, as the file loader does.
+    if (!collision) {
+      for (const extension of loader.getExtensions().extensions) {
+        if (extension.tools.has("todo")) {
+          extension.sourceInfo.path = new URL("index.ts", import.meta.url).pathname;
+        }
+      }
     }
-    return { events, loader, manager, settings };
-  },
-  /**
-   * Requires one synchronous response from the real event bus.
-   * @param {Readonly<object>} events Runtime event bus.
-   * @returns {TaskProviderV1} Acquired extension capability.
-   */
-  acquire = (events: Readonly<ReturnType<typeof createEventBus>>): TaskProviderV1 => {
-    const replies: TaskProviderV1[] = [],
-      version = 1;
-    events.emit("oisin.tasks.acquire.v1", {
-      reply: (value: TaskProviderV1): void => {
-        replies.push(value);
-      },
-      version,
-    });
-    const [provider] = replies;
-    if (provider === undefined || replies.length !== version) {
-      throw new Error("Expected exactly one synchronous provider");
-    }
-    return provider;
+    return { events, loader, manager, parts: (): TodoParts | undefined => todo, settings };
   },
   /**
    * Executes the registered todo entry point, including its persistence checks.
@@ -185,18 +175,17 @@ const resources = (
    * @returns {Promise<RuntimeFixture>} Isolated runtime and callers.
    */
   buildFixture = async (request: Readonly<FixtureRequest>): Promise<RuntimeFixture> => {
-    const setup = resources(request),
-      { faux, modelRuntime } = await catalog(request);
-    await setup.loader.reload();
-    const { session } = await createAgentSession({
-      cwd: request.startup?.cwd ?? "/tmp",
-      model: faux.getModel(),
-      modelRuntime,
-      resourceLoader: setup.loader,
-      sessionManager: setup.manager,
-      settingsManager: setup.settings,
-      thinkingLevel: "off",
-    });
+    const setup = await resources(request),
+      { faux, modelRuntime } = await catalog(request),
+      { session } = await createAgentSession({
+        cwd: request.startup?.cwd ?? "/tmp",
+        model: faux.getModel(),
+        modelRuntime,
+        resourceLoader: setup.loader,
+        sessionManager: setup.manager,
+        settingsManager: setup.settings,
+        thinkingLevel: "off",
+      });
     await session.bindExtensions({});
     session.setActiveToolsByName([...session.getActiveToolNames(), "codemode"]);
     return {
@@ -215,7 +204,13 @@ const resources = (
         });
       },
       manager: setup.manager,
-      provider: () => acquire(setup.events),
+      provider: (): TaskProviderV1 => {
+        const provider = setup.parts()?.tasks();
+        if (provider === undefined) {
+          throw new Error("Expected exactly one synchronous provider");
+        }
+        return provider;
+      },
       select: async (provider, id): Promise<void> => {
         const model = modelRuntime.getModel(provider, id);
         if (model === undefined) {
