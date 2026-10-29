@@ -77,7 +77,7 @@ Session shutdown cancels open interactions and prevents late dialog responses fr
 From the Dogsled source checkout, run the real provider/consumer integration test:
 
 ```sh
-PI_TODO_SOURCE=/path/to/oisinpi/packages/pi-todo/src node --test pi/work-contract.test.ts
+node --test pi/work-contract.test.ts
 ```
 
 Build pi-todo's existing WASM bindings before this test. The normal shim suite exercises protocol rejection and rendering without that checkout.

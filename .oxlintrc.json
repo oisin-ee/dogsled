@@ -25,7 +25,7 @@
     "denyWarnings": true,
     "reportUnusedDisableDirectives": "error"
   },
-  "ignorePatterns": ["packages/*/src/generated/**"],
+  "ignorePatterns": ["packages/*/src/generated/**", "pi/todo/src/generated/**"],
   "rules": {
     // Contradicts import/no-default-export, which stays on.
     "import/no-named-export": "off",
@@ -129,27 +129,37 @@
   "overrides": [
     {
       // Node open flags require bitwise composition to avoid blocking on a seed FIFO.
-      "files": ["packages/pi-todo/src/source.ts"],
+      "files": ["pi/todo/src/source.ts"],
       "rules": { "eslint/no-bitwise": ["error", { "allow": ["|"] }] }
     },
     {
       // pi loads an extension through its default export (docs/extensions.md),
       // and a tool's `execute` has five parameters, the last being the context.
-      "files": ["packages/*/src/index.ts", "packages/pi-guardrails/src/pi/index.ts"],
+      "files": [
+        "packages/*/src/index.ts",
+        "packages/pi-guardrails/src/pi/index.ts",
+        "pi/todo/src/index.ts"
+      ],
       "rules": { "import/no-default-export": "off", "eslint/max-params": "off" }
     },
     {
       // The only modules that read files: the WASM bytes, the config, and the
       // real path of a tool's source. The extension factory is synchronous, so
       // the core loads synchronously.
-      "files": ["packages/*/src/wasm.ts", "packages/*/src/config.ts", "packages/*/src/source.ts"],
+      "files": [
+        "packages/*/src/wasm.ts",
+        "packages/*/src/config.ts",
+        "packages/*/src/source.ts",
+        "pi/todo/src/wasm.ts",
+        "pi/todo/src/source.ts"
+      ],
       "rules": { "import/no-nodejs-modules": "off", "node/no-sync": "off" }
     },
     {
       // The test makes a real symlink, the case `source.ts` exists for.
       "files": [
-        "packages/pi-todo/src/source.test.ts",
-        "packages/pi-todo/src/import-fixture.ts",
+        "pi/todo/src/source.test.ts",
+        "pi/todo/src/import-fixture.ts",
         "packages/pi-tiers/src/source.test.ts"
       ],
       "rules": { "import/no-nodejs-modules": "off" }

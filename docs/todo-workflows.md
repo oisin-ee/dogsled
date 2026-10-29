@@ -17,9 +17,9 @@ Pi-todo implements contracts, local execution gates, provider handoff, worker im
         "deliverable": "Validated contracts through the todo tool",
         "scope": {
           "repositoryId": "github.com/oisin-ee/oisinpi",
-          "owns": ["crates/todo-core/", "packages/pi-todo/src/"],
+          "owns": ["crates/todo-core/", "pi/todo/src/"],
           "reads": ["plans/todo-workflows.md"],
-          "generates": ["packages/pi-todo/src/generated/"]
+          "generates": ["pi/todo/src/generated/"]
         },
         "acceptance": {
           "kind": "command",

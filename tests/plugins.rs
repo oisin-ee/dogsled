@@ -37,7 +37,6 @@ fn all_package_versions_match_cargo_without_a_release_bump() {
         "packages/pi-guardrails/package.json",
         "packages/pi-prewalk/package.json",
         "packages/pi-tiers/package.json",
-        "packages/pi-todo/package.json",
         "plugins/dogsled/.claude-plugin/plugin.json",
         "plugins/dogsled/.codex-plugin/plugin.json",
     ] {

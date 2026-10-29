@@ -12,6 +12,7 @@ import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor,
 import { registerInterview } from "./interview.ts";
 import { registerPlanMode } from "./plan-mode.ts";
 import { PortalClient } from "./portal-client.ts";
+import piTodo from "./todo/src/index.ts";
 
 const REFRESH_MS = 10_000;
 
@@ -26,6 +27,7 @@ export function versionMismatch(output: string): string | undefined {
 }
 
 export default function dogsled(pi: ExtensionAPI) {
+	piTodo(pi);
 	const binary = process.env["DOGSLED_BIN"] ?? "dogsled";
 	const owner = process.env["HERDR_PANE_ID"];
 	let timer: ReturnType<typeof setInterval> | undefined;
