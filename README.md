@@ -165,7 +165,8 @@ The child gets `--model`, `--thinking`, `--append-system-prompt <prompt>`, then 
 
 ### Items and closing
 
-The owner's host stores locked `items.json` and `queue.json` files.
+The owner's host stores items and queue tickets in the SQLite database `state.db`.
+Kernel locks still guard item and queue operations.
 An item records its host, pane, owner pane, creation time, closure time, and for an agent its harness, profile, model, role, and captured final reply.
 `items --json` returns `{items,queue}`. `--owner` filters both collections.
 The service closes a job item after job completion, and any item after pane removal.
@@ -656,7 +657,9 @@ Progress text can precede a final JSON line.
 State defaults to `$XDG_STATE_HOME/dogsled`, or `~/.local/state/dogsled`.
 `$DOGSLED_STATE` selects a complete state-directory path.
 Host snapshots use `host.json`. New placement reservations use `placements.json`.
-Jobs use `jobs/`, owner items use `items.json`, and FIFO tickets use `queue.json`.
+Jobs use `jobs/`. Owner items and FIFO tickets use `state.db`.
+The state directory must use a local disk.
+Its full path must stay under about 500 bytes because of SQLite's path limit.
 The removed lead ledger and event log are not read or migrated.
 
 ## Prompt context and integrations

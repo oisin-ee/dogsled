@@ -130,63 +130,16 @@ pub struct Ticket {
     pub retry: crate::backoff::Backoff,
 }
 
-const QUEUE_VERSION: u64 = 1;
-
-#[derive(Deserialize)]
-struct QueueEnvelope {
-    version: u64,
-    #[serde(default)]
-    tickets: Value,
-}
-
-#[derive(Deserialize, Serialize)]
-struct QueueFormat {
-    version: u64,
-}
-
-/// Keep arrays readable by older servers. Check the format sidecar before decoding
-/// tickets, and tolerate envelopes written before the sidecar was introduced.
 pub(crate) fn queue_records(ledger: &Ledger) -> Result<Vec<Value>> {
-    if let Some(format) = ledger.read::<QueueFormat>("queue-format.json")?
-        && format.version > QUEUE_VERSION
-    {
-        return Err(Error::Refused {
-            code: crate::error::Refusal::QueueVersionUnsupported,
-            detail: format!(
-                "queue format version {} is newer than supported version {QUEUE_VERSION}; write refused",
-                format.version
-            ),
-        });
-    }
-    let Some(value) = ledger.read::<Value>("queue.json")? else {
-        return Ok(Vec::new());
-    };
-    if value.is_array() {
-        return Ok(serde_json::from_value(value)?);
-    }
-    let envelope: QueueEnvelope = serde_json::from_value(value)?;
-    if envelope.version > QUEUE_VERSION {
-        return Err(Error::Refused {
-            code: crate::error::Refusal::QueueVersionUnsupported,
-            detail: format!(
-                "queue format version {} is newer than supported version {QUEUE_VERSION}; write refused",
-                envelope.version
-            ),
-        });
-    }
-    Ok(serde_json::from_value(envelope.tickets)?)
+    crate::store::read(ledger, |tx| {
+        crate::store::rows(tx, crate::store::Table::Tickets)
+    })
 }
 
 fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
-    // Every caller holds the queue lock. Recheck at the write boundary as well.
-    queue_records(ledger)?;
-    ledger.write(
-        "queue-format.json",
-        &QueueFormat {
-            version: QUEUE_VERSION,
-        },
-    )?;
-    ledger.write("queue.json", &tickets)
+    crate::store::write(ledger, |tx| {
+        crate::store::sync(tx, crate::store::Table::Tickets, tickets)
+    })
 }
 
 /// Job tickets expire only with a conclusively terminal local job record. Missing

@@ -103,11 +103,8 @@ esac
 fn stopped_rig(name: &str, reader: bool) -> Rig {
     let rig = watchdog_rig(name);
     rig.put("state/worktrees.json", &json!([]));
-    rig.put(
-        "state/items.json",
-        &json!([{"id":"child","kind":"agent","host":"local",
-        "pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null}]),
-    );
+    rig.put_items(&json!([{"id":"child","kind":"agent","host":"local",
+        "pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null}]));
     fs::create_dir_all(rig.dir.join("state/inbox")).unwrap();
     if reader {
         rig.put(
@@ -298,8 +295,7 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
     // The owner's own item is open, and the sweep keeps an orphan on this host.
     // The orphan has an open item whose owner pane is gone, so the sweep keeps it, and
     // the check-in used to name it on every turn.
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
             "name":"worker","created_ms":1,"closed_ms":null},
             {"id":"orphan","kind":"agent","host":"local","pane":"w3:p1","owner_pane":"gone",
@@ -354,7 +350,7 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
     let orphans = rig.read("state/orphans.json");
     assert_eq!(orphans[0]["item"], json!("orphan"), "{orphans}");
     assert_eq!(orphans[0]["name"], json!("lost-child"), "{orphans}");
-    let items = rig.read("state/items.json");
+    let items = rig.items();
     let orphan = items
         .as_array()
         .unwrap()
@@ -552,8 +548,7 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
         ]}}),
     );
     // An open item holds its checkout: its owner closes it, keeping the reply.
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":"i1","kind":"agent","host":"local","pane":"child","owner_pane":"owner",
             "name":"worker","created_ms":1,"closed_ms":null}]),
     );
@@ -573,7 +568,7 @@ fn doctor_reports_held_integrated_worktrees_and_prune_leaves_them() {
     assert!(rig.run(&["prune", "--yes", "worktrees"]).status.success());
     assert!(!rig.log("git.log").contains("worktree remove"));
     // Without an open item, an idle agent that has not called `done` still holds it.
-    rig.put("state/items.json", &json!([]));
+    rig.put_items(&json!([]));
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{"pane_id":"child","agent":"pi","agent_status":"done",

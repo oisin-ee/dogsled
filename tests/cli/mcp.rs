@@ -399,7 +399,7 @@ fn p3_close_and_read_keep_the_same_recovery_without_task_completion() {
     let (read, failed) = client.call("read", &json!({"target":"p3-child"}));
     assert!(!failed, "{read}");
     assert_eq!(read["recovery"], closed["recovery"]);
-    let item = &rig.read("state/items.json")[0];
+    let item = &rig.items()[0];
     assert_ne!(item["native_done"], true);
     assert!(item["reply"].is_null());
     assert!(!rig.dir.join("state/done.json").exists());
@@ -409,7 +409,7 @@ fn p3_close_and_read_keep_the_same_recovery_without_task_completion() {
 fn mcp_custody_tools_claim_and_accept_without_completing_the_item() {
     let rig = super::claim::rig("mcp-custody", "w9:p9");
     super::claim::returned(&rig);
-    let before = fs::read(rig.dir.join("state/items.json")).unwrap();
+    let before = rig.items();
     let mut client = Client::start(&rig);
     let (claim, failed) = client.call("claim", &json!({"item":super::claim::ID,"revision":0}));
     assert!(!failed, "{claim}");
@@ -424,7 +424,7 @@ fn mcp_custody_tools_claim_and_accept_without_completing_the_item() {
     assert_eq!(receipt["claimId"], claim["claimId"]);
     assert_eq!(receipt["resultId"], "res-1");
     assert_eq!(receipt["reviewer"], "w1:p1");
-    assert_eq!(fs::read(rig.dir.join("state/items.json")).unwrap(), before);
+    assert_eq!(rig.items(), before);
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn mcp_spawn_accepts_only_unit_prepared_or_legacy_and_handler_commits() {
         client.call("spawn", &json!({"preparedUnit":input})).0,
         receipt
     );
-    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
+    assert_eq!(rig.tickets().as_array().unwrap().len(), 1);
     assert!(!rig.log("herdr.log").contains("agent start"));
 }
 
@@ -549,7 +549,7 @@ fn mcp_spawn_with_capacity_hands_startup_to_the_service() {
         let (result, error) = client.call("spawn", &json!({"name":"worker","task":"go"}));
         assert!(!error, "{result}");
         assert_eq!(result["queued"], true, "{result}");
-        let ticket = rig.read("state/queue.json")[0].clone();
+        let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["id"], result["ticket"]);
         assert_eq!(ticket["state"], "pending");
         assert!(!rig.log("herdr.log").contains("agent start"));
@@ -560,7 +560,7 @@ fn mcp_spawn_with_capacity_hands_startup_to_the_service() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let ticket = rig.read("state/queue.json")[0].clone();
+        let ticket = rig.tickets()[0].clone();
         assert_eq!(
             rig.log("herdr.log").matches("agent start worker ").count(),
             1
@@ -610,7 +610,7 @@ fn mcp_prepared_spawn_with_capacity_queues_idempotently_before_startup() {
         client.call("spawn", &json!({"preparedUnit":input})).0,
         receipt
     );
-    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
+    assert_eq!(rig.tickets().as_array().unwrap().len(), 1);
     assert!(!rig.log("herdr.log").contains("agent start"));
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
@@ -618,7 +618,7 @@ fn mcp_prepared_spawn_with_capacity_queues_idempotently_before_startup() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     let (launched, failed) = client.call("spawn", &json!({"preparedUnit":input}));
     assert!(!failed, "{launched}");
@@ -646,7 +646,7 @@ fn mcp_spawn_returns_queued_at_once_when_every_host_is_full() {
     );
     assert!(!error, "{result}");
     assert_eq!(result["queued"], true, "{result}");
-    let ticket = &rig.read("state/queue.json")[0];
+    let ticket = &rig.tickets()[0];
     assert_eq!(ticket["id"], result["ticket"]);
     assert_eq!(ticket["request"]["owner"], "w1:p1");
     assert_eq!(
@@ -669,5 +669,5 @@ fn mcp_spawn_returns_queued_at_once_when_every_host_is_full() {
     let (duplicate, error) = client.call("cancel", &json!({"id":result["ticket"]}));
     assert!(!error, "{duplicate}");
     assert_eq!(duplicate, cancelled);
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(rig.tickets()[0]["state"], "cancelled");
 }

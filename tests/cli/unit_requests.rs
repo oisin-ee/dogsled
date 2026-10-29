@@ -88,7 +88,7 @@ pub(super) fn admission(rig: &Rig, execution: &Value) -> Value {
 
 fn no_launch(rig: &Rig) {
     assert!(!rig.dir.join("state/placements.json").exists());
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
     let log = rig.log("herdr.log");
     for forbidden in ["tab create", "worktree open", "agent start", "pane close"] {
         assert!(!log.contains(forbidden), "{log}");
@@ -209,7 +209,7 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
     assert!(receipts.iter().all(|r| r == &receipts[0]), "{receipts:?}");
     assert_eq!(receipts[0].0, 0);
     assert_eq!(receipts[0].1["disposition"], "queued");
-    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
+    assert_eq!(rig.tickets().as_array().unwrap().len(), 1);
     assert_eq!(
         operation(&rig, "commit", &commit_input(&executions[0], 1)).1["error"]["code"],
         "REQUEST_CONFLICT"
@@ -247,7 +247,7 @@ fn cancel_before_admission_fences_every_replay() {
     );
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(rig.tickets()[0]["state"], "cancelled");
     assert_eq!(
         operation(&rig, "observe", &execution_input(&execution)).1["settlement"],
         first
@@ -282,7 +282,7 @@ fn terminal_ticket_without_no_launch_proof_stays_unresolved() {
         }
         if case == "ack" {
             fs::create_dir_all(rig.dir.join("state/cancellations")).unwrap();
-            let ticket = rig.read("state/queue.json")[0].clone();
+            let ticket = rig.tickets()[0].clone();
             let binding = json!({"request_id":execution["requestId"],"request":["/repo","worker",null],
                 "claim":{"request_id":execution["requestId"],"tree":{"repo":"/repo","path":"/repo/tree","branch":"worker","head":"head"}},"prepared":null});
             let policy = json!({"kind":"prohibit","basis":{"cancelled":{"operation_id":"cancel-ack","request_id":execution["requestId"]}}});
@@ -317,12 +317,12 @@ fn cancellation_intent_crash_repairs_queue_without_readmission() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(86), "{out:?}");
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    assert_eq!(rig.tickets()[0]["state"], "pending");
     let id = execution["requestId"].as_str().unwrap();
     let intent = rig.read(&format!("state/cancellations/{id}.json"));
     admission_service(&rig);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(rig.tickets()[0]["state"], "cancelled");
     assert_eq!(rig.read(&format!("state/cancellations/{id}.json")), intent);
     assert_eq!(
         operation(&rig, "observe", &execution_input(&execution)).1["settlement"]["result"]["kind"],
@@ -341,14 +341,14 @@ fn cancellation_after_saved_result_repairs_projection_as_too_late() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(86), "{out:?}");
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitting");
+    assert_eq!(rig.tickets()[0]["state"], "admitting");
     let result = admission(&rig, &execution)["result"].clone();
     let (code, reply) = rig.json(&["cancel", &ticket]);
     assert_eq!(code, 2, "{reply}");
     assert_eq!(reply["status"], "too_late");
     assert_eq!(reply["result"], result);
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
-    assert_eq!(rig.read("state/queue.json")[0]["result"], result);
+    assert_eq!(rig.tickets()[0]["state"], "admitted");
+    assert_eq!(rig.tickets()[0]["result"], result);
     assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
     assert!(!rig.dir.join("state/cancellations").exists());
 }
@@ -378,12 +378,12 @@ fn cancel_during_admitting_orders_before_finalization() {
     ));
     read_fifo(cancel_ready.path(), "cancel before admission gate");
     cancel_go.write_all(b"go\n").unwrap();
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitting");
+    assert_eq!(rig.tickets()[0]["state"], "admitting");
     go.write_all(b"go\n").unwrap();
     assert!(service.wait().success());
     assert_eq!(cancel.wait().code(), Some(2));
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
-    assert_eq!(rig.read("state/queue.json")[0]["result"], result);
+    assert_eq!(rig.tickets()[0]["state"], "admitted");
+    assert_eq!(rig.tickets()[0]["result"], result);
     assert_eq!(admission(&rig, &execution)["result"], result);
     assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
 }
@@ -499,7 +499,7 @@ fn cancellation_wins_admission_before_service_and_commit_replay() {
     assert!(cancel.wait().success());
     assert!(service.wait().success());
     assert_eq!(replay.wait().code(), Some(2));
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(rig.tickets()[0]["state"], "cancelled");
     assert_eq!(
         operation(&rig, "observe", &execution_input(&execution)).1["phase"],
         "not_started"
@@ -545,7 +545,7 @@ fn remotely_prepared_queued(name: &str) -> (Rig, Value, String) {
         out.status.code(),
         Some(86),
         "{out:?} queue={} ssh={}",
-        rig.read("state/queue.json"),
+        rig.tickets(),
         rig.log("ssh.log")
     );
     assert!(admission(&rig, &execution)["launch"].is_null());
@@ -595,7 +595,7 @@ fn cancellation_adopts_transfer_after_lost_launch_reply() {
             ))
             .exists(),
         "queue={} admission={} ssh={} herdr={}",
-        rig.read("state/queue.json"),
+        rig.tickets(),
         admission(&rig, &execution),
         rig.log("ssh.log"),
         rig.log("herdr.log")
@@ -713,7 +713,7 @@ fn unreachable_host_keeps_cancel_release_pending() {
         let saved = rig.read(&format!("state/cancellations/{id}.json"));
         assert_eq!(saved["release"], "pending", "{saved}");
         assert_eq!(saved["outcome"], "not_started");
-        assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+        assert_eq!(rig.tickets()[0]["state"], "cancelled");
     }
     assert_eq!(rig.read("peer-state/preparations.json"), claims);
     fs::remove_file(rig.dir.join("disposition-offline")).unwrap();
@@ -775,7 +775,7 @@ fn corrupt_cancellation_holds_only_its_committed_unit() {
     for unsupported in [true, false] {
         let (rig, execution, ticket) = committed_queued("cancel-corrupt-isolation");
         let id = execution["requestId"].as_str().unwrap();
-        let mut queue = rig.read("state/queue.json");
+        let mut queue = rig.tickets();
         assert!(rig.run(&["cancel", &ticket]).status.success());
         let file = format!("state/cancellations/{id}.json");
         let corrupt = if unsupported {
@@ -796,12 +796,12 @@ fn corrupt_cancellation_holds_only_its_committed_unit() {
         unrelated["request"] = json!({"id":"unrelated-place","validity":rig.job_validity(),"action":{"type":"place"},
             "host":"local","cwd":rig.dir.join("home"),"owner":"w1:p1"});
         queue.as_array_mut().unwrap().push(unrelated);
-        rig.put("state/queue.json", &queue);
+        rig.put_tickets(&queue);
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
         rig.snapshot("state/host.json", now(), 0.0, 2);
         let out = rig.run(&["serve", "--once"]);
         assert!(out.status.success(), "{out:?}");
-        let queue = rig.read("state/queue.json");
+        let queue = rig.tickets();
         assert_eq!(queue[0]["id"], ticket);
         assert_eq!(queue[0]["state"], "pending", "{queue}");
         let reason = queue[0]["error"].as_str().unwrap();
@@ -821,10 +821,10 @@ fn corrupt_cancellation_holds_only_its_committed_unit() {
 }
 
 fn set_ticket(rig: &Rig, state: &str, error: Value) {
-    let mut queue = rig.read("state/queue.json");
+    let mut queue = rig.tickets();
     queue[0]["state"] = json!(state);
     queue[0]["error"] = error;
-    rig.put("state/queue.json", &queue);
+    rig.put_tickets(&queue);
 }
 
 #[test]
@@ -976,7 +976,7 @@ fn abandon_and_commit_are_serialized_before_any_launch() {
     } else {
         assert_eq!(committed.0, 0);
         assert_eq!(abandoned.1["error"]["code"], "REQUEST_CONFLICT");
-        assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
+        assert_eq!(rig.tickets().as_array().unwrap().len(), 1);
     }
 }
 
@@ -1011,7 +1011,7 @@ fn service_recovers_commit_before_enqueue_once_without_abandoning_prepared() {
     let input = commit_input(&execution, 0);
     crash(&rig, &input, "committed");
     assert!(admission(&rig, &execution)["unit"]["committed"].is_object());
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
     assert_eq!(
         operation(&rig, "abandon-prepared", &execution_input(&execution)).0,
         2
@@ -1020,7 +1020,7 @@ fn service_recovers_commit_before_enqueue_once_without_abandoning_prepared() {
     rig.config("memory_reserve_bytes = 18446744073709551615\n");
     serve(&rig);
     serve(&rig);
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets.as_array().unwrap().len(), 1);
     assert_eq!(tickets[0]["request"]["id"], execution["requestId"]);
     assert_eq!(
@@ -1030,11 +1030,11 @@ fn service_recovers_commit_before_enqueue_once_without_abandoning_prepared() {
     // Crash after the queue claim but before perform can select a host.
     let mut interrupted = tickets;
     interrupted[0]["state"] = json!("admitting");
-    rig.put("state/queue.json", &interrupted);
+    rig.put_tickets(&interrupted);
     assert!(!rig.log("herdr.log").contains("agent start"));
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     serve(&rig);
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
+    assert_eq!(rig.tickets()[0]["state"], "admitted");
     assert_eq!(
         operation(&rig, "commit", &input).1["disposition"],
         "launched"
@@ -1075,7 +1075,7 @@ fn lost_commit_response_reuses_launched_receipt_and_exact_profile() {
         rig.log("herdr.log")
             .contains("--model alias/sol --thinking medium")
     );
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
     assert_eq!(
         operation(&rig, "observe", &execution_input(&execution)).1["phase"],
         "running"
@@ -1092,19 +1092,19 @@ fn captured_reply_without_terminal_evidence_never_projects_returned() {
     let input = execution_input(&execution);
     assert_eq!(operation(&rig, "observe", &input).1["phase"], "running");
 
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     assert_eq!(items[0]["id"], execution["requestId"]);
     items[0]["reply"] = json!({"seq":1,"text":"Work complete.","captured_ms":now()});
     for closed in [Value::Null, json!(now())] {
         items[0]["closed_ms"] = closed;
-        rig.put("state/items.json", &items);
+        rig.put_items(&items);
         let (code, state) = operation(&rig, "observe", &input);
         assert_eq!(code, 0, "{state}");
         assert_eq!(state["phase"], "unresolved");
         assert!(state["settlement"].is_null());
         assert_eq!(state["receipt"], receipt);
     }
-    rig.put("state/items.json", &json!([]));
+    rig.put_items(&json!([]));
     let (_, state) = operation(&rig, "observe", &input);
     assert_eq!(state["phase"], "unresolved");
     assert!(state["settlement"].is_null());
@@ -1210,7 +1210,7 @@ fn uuid_unit_names_fit_native_limits_and_native_collisions_stay_final() {
                     .unwrap()
                     .contains("agent_name_taken")
             );
-            assert!(!rig.dir.join("state/queue.json").exists());
+            assert_eq!(rig.tickets(), json!([]));
         } else {
             assert_eq!(code, 0, "{response}");
             assert_eq!(operation(&rig, "commit", &input).0, 0);
@@ -1288,7 +1288,7 @@ fn service_never_expires_prepared_invocations() {
     assert!(state["settlement"].is_null());
     // Node::refresh writes the pruned reservation list even when it is empty.
     assert_eq!(rig.read("state/placements.json"), json!([]));
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
     assert!(!rig.log("herdr.log").contains("agent start"));
     assert!(!rig.log("herdr.log").contains("tab create"));
 }

@@ -1517,12 +1517,10 @@ mod tests {
                 owner_session: Some("original-owner".into()),
                 ..Default::default()
             };
-            rig.ledger.write("items.json", &vec![item.clone()]).unwrap();
+            crate::store::put_items(&rig.ledger, &vec![item.clone()]).unwrap();
             let child = ChildIdentity::capture(&rig.ledger, &item).unwrap();
             // Sweep captured the subject; retention removes it before the inbox boundary.
-            rig.ledger
-                .write("items.json", &Vec::<crate::items::Item>::new())
-                .unwrap();
+            crate::store::put_items(&rig.ledger, &Vec::<crate::items::Item>::new()).unwrap();
             assert!(
                 !notify_child(&fleet, &[], &child, event, "reply", "old child".into(), 1).unwrap()
             );

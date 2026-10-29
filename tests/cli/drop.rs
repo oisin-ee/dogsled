@@ -30,20 +30,17 @@ fn rig(name: &str) -> (Rig, PathBuf) {
     );
     git(&repo, &["push", "-q", "origin", "main", "feat/x"]);
     git(&repo, &["remote", "set-head", "origin", "main"]);
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"i1","kind":"agent","host":"local","pane":"w2:p1",
-            "owner_pane":"w1:p1","name":"child","created_ms":1,"closed_ms":2,
-            "branch":{"repo":repo,"name":"feat/x","ahead":1,"landed":false}
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"i1","kind":"agent","host":"local","pane":"w2:p1",
+        "owner_pane":"w1:p1","name":"child","created_ms":1,"closed_ms":2,
+        "branch":{"repo":repo,"name":"feat/x","ahead":1,"landed":false}
+    }]));
     rig.snapshot("state/host.json", now(), 0.0, 8);
     (rig, repo)
 }
 
 fn mark(rig: &Rig) {
-    let item = rig.read("state/items.json")[0].clone();
+    let item = rig.items()[0].clone();
     rig.put(
         "state/done.json",
         &json!({"term_child":{
@@ -80,7 +77,7 @@ fn local_drop_deletes_local_and_origin_branches_and_settles_mark_and_board() {
         ""
     );
     assert_eq!(rows(&rig), [] as [Value; 0]);
-    assert!(rig.read("state/items.json")[0]["dropped_ms"].is_u64());
+    assert!(rig.items()[0]["dropped_ms"].is_u64());
     assert!(rig.read("state/done.json")["term_child"]["dropped_ms"].is_u64());
     assert_eq!(rig.json(&["drop", "i1"]).0, 0, "repeated drop is harmless");
 }
@@ -127,7 +124,7 @@ fn drop_refuses_checked_out_branch_without_deleting_origin() {
         git(&repo, &["ls-remote", "origin", "refs/heads/feat/x"]),
         ""
     );
-    assert!(rig.read("state/items.json")[0]["dropped_ms"].is_null());
+    assert!(rig.items()[0]["dropped_ms"].is_null());
 }
 
 #[test]
@@ -139,9 +136,9 @@ fn drop_refuses_open_branchless_and_foreign_owned_items() {
         ("job", "kind", json!("job"), "closed agent"),
     ] {
         let (rig, repo) = rig(&format!("drop-{name}"));
-        let mut items = rig.read("state/items.json");
+        let mut items = rig.items();
         items[0][field] = value;
-        rig.put("state/items.json", &items);
+        rig.put_items(&items);
         // The foreign owner's pane is live, so the child is not an orphan.
         live_owner(&rig, "w3:p1");
         let (code, refused) = rig.json(&["drop", "i1"]);
@@ -172,21 +169,21 @@ fn live_owner(rig: &Rig, pane: &str) {
 #[test]
 fn any_session_drops_an_orphan_whose_owner_pane_is_gone() {
     let (rig, repo) = rig("drop-orphan");
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["owner_pane"] = json!("w9:p9");
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let (code, dropped) = rig.json(&["drop", "i1"]);
     assert_eq!(code, 0, "{dropped}");
     assert_eq!(git(&repo, &["branch", "--list", "feat/x"]), "");
-    assert!(rig.read("state/items.json")[0]["dropped_ms"].is_u64());
+    assert!(rig.items()[0]["dropped_ms"].is_u64());
 }
 
 #[test]
 fn an_unreadable_pane_list_keeps_the_owner_rule() {
     let (rig, repo) = rig("drop-orphan-unreadable");
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["owner_pane"] = json!("w9:p9");
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     fs::write(rig.dir.join("panes.json"), "not json").unwrap();
     let (code, refused) = rig.json(&["drop", "i1"]);
     assert_eq!(code, 2, "{refused}");
@@ -203,7 +200,7 @@ fn missing_mark_and_missing_branch_leave_board_but_existing_branch_stays() {
             git(&repo, &["push", "origin", "--delete", "feat/x"]);
         }
         assert_eq!(rows(&rig).is_empty(), gone);
-        let item = &rig.read("state/items.json")[0];
+        let item = &rig.items()[0];
         assert_eq!(item["branch"]["landed"], gone);
         assert!(item["branch_checked_ms"].is_u64());
     }
@@ -211,9 +208,9 @@ fn missing_mark_and_missing_branch_leave_board_but_existing_branch_stays() {
 
 fn remote(rig: &Rig) {
     rig.peer();
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["host"] = json!("8103");
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     // Exercise host subcommands in a separate ledger, through the real SSH dispatch path.
     fs::create_dir_all(rig.dir.join("remote-state")).unwrap();
     rig.script(
@@ -255,28 +252,28 @@ fn remote_drop_uses_ssh_and_settles_origin_item() {
 fn missing_mark_checks_batch_once_per_host_per_hour() {
     let (rig, _) = rig("drop-hourly");
     remote(&rig);
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     let mut second = items[0].clone();
     second["id"] = json!("i2");
     second["pane"] = json!("w2:p2");
     items.as_array_mut().unwrap().push(second);
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
         rig.log("ssh.log").matches("host refresh-branches").count(),
         1
     );
-    assert!(rig.read("state/items.json")[1]["branch_checked_ms"].is_u64());
+    assert!(rig.items()[1]["branch_checked_ms"].is_u64());
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
         rig.log("ssh.log").matches("host refresh-branches").count(),
         1
     );
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     for item in items.as_array_mut().unwrap() {
         item["branch_checked_ms"] = json!(now() - 3_600_001);
     }
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
         rig.log("ssh.log").matches("host refresh-branches").count(),
@@ -302,7 +299,7 @@ fn concurrent_status_reads_share_the_hourly_check() {
 fn failed_branch_check_keeps_item_unchanged_and_only_logs() {
     let (rig, _) = rig("drop-refresh-failure");
     remote(&rig);
-    let before = rig.read("state/items.json");
+    let before = rig.items();
     rig.script(
         "ssh",
         r#"#!/bin/sh
@@ -315,20 +312,20 @@ esac
     let out = rig.run(&["board", "--all", "--json"]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("dogsled branches: netcup:"));
-    assert_eq!(rig.read("state/items.json"), before);
+    assert_eq!(rig.items(), before);
 }
 
 #[test]
 fn dropped_or_landed_item_is_hidden_even_with_a_stale_mark() {
     for dropped in [true, false] {
         let (rig, _) = rig(&format!("drop-hidden-{dropped}"));
-        let mut items = rig.read("state/items.json");
+        let mut items = rig.items();
         if dropped {
             items[0]["dropped_ms"] = json!(3);
         } else {
             items[0]["branch"]["landed"] = json!(true);
         }
-        rig.put("state/items.json", &items);
+        rig.put_items(&items);
         mark(&rig);
         assert_eq!(rows(&rig), [] as [Value; 0]);
     }
@@ -339,9 +336,9 @@ fn stale_host_or_existing_mark_does_not_trigger_missing_mark_check() {
     let (rig, _) = rig("drop-no-check");
     rig.snapshot("state/host.json", now() - 31_000, 0.0, 8);
     assert_eq!(rows(&rig).len(), 1);
-    assert!(rig.read("state/items.json")[0]["branch_checked_ms"].is_null());
+    assert!(rig.items()[0]["branch_checked_ms"].is_null());
     rig.snapshot("state/host.json", now(), 0.0, 8);
     mark(&rig);
     assert_eq!(rows(&rig).len(), 1);
-    assert!(rig.read("state/items.json")[0]["branch_checked_ms"].is_null());
+    assert!(rig.items()[0]["branch_checked_ms"].is_null());
 }

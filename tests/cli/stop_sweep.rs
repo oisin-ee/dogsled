@@ -156,7 +156,7 @@ fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
         "state/cancellations/cancel-held.json",
         &json!({"release":"pending","ticket":{"id":"ticket-held","request":{"owner":"w1:p1"}}}),
     );
-    rig.put("state/items.json", &json!([{"id":"branch-held","kind":"agent","host":"local","pane":"gone","owner_pane":"w1:p1","created_ms":1,"closed_ms":2,"branch":{"repo":"/tmp/repo","name":"feat/kept","ahead":1,"landed":false}}]));
+    rig.put_items(&json!([{"id":"branch-held","kind":"agent","host":"local","pane":"gone","owner_pane":"w1:p1","created_ms":1,"closed_ms":2,"branch":{"repo":"/tmp/repo","name":"feat/kept","ahead":1,"landed":false}}]));
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0, "{status}");
     let holds = status["holds"].as_array().unwrap();
@@ -476,13 +476,10 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
     launched_into(&rig, "unrelated", "w1:p1", &elsewhere);
     launched_into(&rig, "owner", "w1:p1", &elsewhere);
     launched_into(&rig, "worker", "w3:p1", &checkout);
-    rig.put(
-        "state/items.json",
-        &json!([
-            {"id":"worker","kind":"agent","host":"local","pane":"w4:p1","owner_pane":"w3:p1",
-                "name":"worker","created_ms":1,"closed_ms":null}
-        ]),
-    );
+    rig.put_items(&json!([
+        {"id":"worker","kind":"agent","host":"local","pane":"w4:p1","owner_pane":"w3:p1",
+            "name":"worker","created_ms":1,"closed_ms":null}
+    ]));
     let entry = json!({"class":"worktrees","id":checkout,"detail":"teardown refused","removable":true,
         "tree":{"repo":rig.dir.join("home/repo"),"path":checkout,"branch":"feat/child"}});
     rig.put(

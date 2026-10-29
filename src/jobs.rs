@@ -229,9 +229,10 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
     for value in json_files(&ledger.child("job-validity").dir)? {
         note(&value, "/created_ms");
     }
-    for ticket in crate::work::queue_records(ledger)
-        .map_err(|_| refuse(crate::error::Refusal::JobClockUnavailable))?
-    {
+    for ticket in crate::work::queue_records(ledger).map_err(|error| match error {
+        Error::Deadline(_) => error,
+        _ => refuse(crate::error::Refusal::JobClockUnavailable),
+    })? {
         note(&ticket, "/created_ms");
         note(&ticket, "/request/action/validity/created_ms");
         note(&ticket, "/request/validity/created_ms");

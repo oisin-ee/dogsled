@@ -79,11 +79,8 @@ pub(super) fn p3_rig(name: &str) -> (Rig, PathBuf) {
         {"pane_id":"w1:p1","workspace_id":"w1","agent":"pi","agent_status":"working"},
         {"pane_id":"w2:p1","terminal_id":"term_child","workspace_id":"w2","agent":"pi","agent_status":"idle","cwd":tree}
     ]}}));
-    rig.put(
-        "state/items.json",
-        &json!([{"id":"p3-child","kind":"agent","host":"local",
-        "pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null}]),
-    );
+    rig.put_items(&json!([{"id":"p3-child","kind":"agent","host":"local",
+        "pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null}]));
     (rig, tree)
 }
 
@@ -175,7 +172,7 @@ fn p3_owner_close_saves_before_removal() {
     let recovery = &closed["recovery"];
     assert!(recovery["id"].is_string(), "{closed}");
     assert!(!tree.exists());
-    assert_eq!(rig.read("state/items.json")[0]["recovery"], *recovery);
+    assert_eq!(rig.items()[0]["recovery"], *recovery);
     assert_eq!(
         git(
             &repo,
@@ -214,11 +211,7 @@ fn p3_owner_close_saves_before_removal() {
         "saved (recovery {})",
         recovery["id"].as_str().unwrap()
     )));
-    assert!(
-        !rig.read("state/items.json")[0]["native_done"]
-            .as_bool()
-            .unwrap_or(false)
-    );
+    assert!(!rig.items()[0]["native_done"].as_bool().unwrap_or(false));
 }
 
 #[test]
@@ -268,7 +261,7 @@ fn assert_p3_kept(rig: &Rig, tree: &Path) {
     assert_eq!(fs::read(tree.join("draft")).unwrap(), b"live work\n");
     assert!(!rig.log("herdr.log").contains("workspace close"));
     assert!(!rig.log("herdr.log").contains("pane close"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 #[test]
@@ -532,9 +525,9 @@ fn p3_unsupported_content_reports_a_hold() {
 fn p3_remote_lost_close_reply_replays_saved_recovery() {
     let (rig, tree) = p3_rig("p3-lost-reply");
     rig.peer();
-    let mut item = rig.read("state/items.json");
+    let mut item = rig.items();
     item[0]["host"] = json!("8103");
-    rig.put("state/items.json", &item);
+    rig.put_items(&item);
     fs::write(tree.join("draft"), b"live work\n").unwrap();
     fs::write(rig.dir.join("lose-reply"), b"").unwrap();
     rig.script(
@@ -561,7 +554,7 @@ esac
     assert!(!tree.exists(), "{}", String::from_utf8_lossy(&out.stderr));
     let original: Value = rig.read("peer-close.json");
     assert!(original["recovery"]["id"].is_string(), "{original}");
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
     fs::create_dir(&tree).unwrap();
     super::close::git(&tree, &["init", "-q", "-b", "main"]);
     fs::write(tree.join("replacement"), b"new owner\n").unwrap();
@@ -569,10 +562,7 @@ esac
     let (code, replay) = rig.json(&["close", "w2:p1", "--host", "8103"]);
     assert_eq!(code, 0, "{replay}");
     assert_eq!(replay, original);
-    assert_eq!(
-        rig.read("state/items.json")[0]["recovery"],
-        original["recovery"]
-    );
+    assert_eq!(rig.items()[0]["recovery"], original["recovery"]);
     assert_eq!(fs::read(tree.join("replacement")).unwrap(), b"new owner\n");
     assert_eq!(fs::read(tree.join(".git/HEAD")).unwrap(), replacement);
     assert_eq!(rig.log("hook.log").lines().count(), 1);
@@ -607,7 +597,7 @@ fn p3_replacement_or_head_drift_never_adopts_new_work() {
         assert!(!out.status.success(), "{drift}");
         assert!(!rig.log("herdr.log").contains("workspace close"));
         assert!(!rig.log("herdr.log").contains("pane close"));
-        assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+        assert!(rig.items()[0]["closed_ms"].is_null());
         if drift == "checkout" {
             assert_eq!(
                 fs::read(tree.join("replacement")).unwrap(),

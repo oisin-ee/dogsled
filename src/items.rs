@@ -128,7 +128,9 @@ fn change(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>)) -> Result<()> {
     ledger.with_lock("items", || {
         let mut items = list(ledger)?;
         f(&mut items);
-        ledger.write("items.json", &items)
+        crate::store::write(ledger, |tx| {
+            crate::store::sync(tx, crate::store::Table::Items, &items)
+        })
     })
 }
 
@@ -158,11 +160,15 @@ pub fn set_reply_with(ledger: &Ledger, id: &str, reply: Reply, native_done: bool
                 return Ok(());
             }
             item.native_done = true;
-            return ledger.write("items.json", &items);
+            return crate::store::write(ledger, |tx| {
+                crate::store::sync(tx, crate::store::Table::Items, &items)
+            });
         }
         item.reply = Some(reply);
         item.native_done |= native_done;
-        ledger.write("items.json", &items)
+        crate::store::write(ledger, |tx| {
+            crate::store::sync(tx, crate::store::Table::Items, &items)
+        })
     })
 }
 
@@ -212,7 +218,9 @@ pub fn told(ledger: &Ledger, ids: &[String], now: u64) -> Result<()> {
 }
 
 pub fn list(ledger: &Ledger) -> Result<Vec<Item>> {
-    Ok(ledger.read("items.json")?.unwrap_or_default())
+    crate::store::read(ledger, |tx| {
+        crate::store::rows(tx, crate::store::Table::Items)
+    })
 }
 
 pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
@@ -222,7 +230,9 @@ pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
             i.id == item.id || (i.closed_ms.is_none() && i.host == item.host && i.pane == item.pane)
         }) {
             items.push(item);
-            ledger.write("items.json", &items)?;
+            crate::store::write(ledger, |tx| {
+                crate::store::sync(tx, crate::store::Table::Items, &items)
+            })?;
         }
         Ok(())
     })
@@ -299,7 +309,9 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
             item.signal = None;
             count += 1;
         }
-        ledger.write("items.json", &items)?;
+        crate::store::write(ledger, |tx| {
+            crate::store::sync(tx, crate::store::Table::Items, &items)
+        })?;
         Ok(count)
     })
 }
@@ -526,7 +538,9 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
                 item.signal = None;
             }
         }
-        ledger.write("items.json", &items)
+        crate::store::write(ledger, |tx| {
+            crate::store::sync(tx, crate::store::Table::Items, &items)
+        })
     })
 }
 
@@ -561,27 +575,6 @@ mod tests {
         merge_handoffs(std::slice::from_mut(&mut item), &[host]);
         assert_eq!(item.reply.unwrap().reported_ms, Some(3));
         assert!(item.branch.unwrap().landed);
-    }
-
-    #[test]
-    fn records_from_before_the_request_fields_still_load() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        std::fs::create_dir_all(&ledger.dir).unwrap();
-        std::fs::write(
-            ledger.dir.join("items.json"),
-            r#"[{"id":"a","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p2","name":null,"created_ms":1,"closed_ms":null}]"#,
-        )
-        .unwrap();
-        let items = list(&ledger).unwrap();
-        assert_eq!(items[0].pane, "w1:p1");
-        assert_eq!(items[0].harness, None);
-        assert_eq!(items[0].role, None);
-        assert_eq!(items[0].launch_confirmed_ms, None);
-        assert_eq!(items[0].owner_session, None);
-        let text = serde_json::to_string(&items[0]).unwrap();
-        assert!(!text.contains("harness"), "{text}");
-        assert!(!text.contains("owner_session"), "{text}");
-        std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
     /// A record from before the owner session existed has none. The session-ended rule

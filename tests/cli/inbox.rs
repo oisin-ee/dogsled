@@ -303,7 +303,7 @@ fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
         host["probe"]["agent_panes"][2]["worktree"] = json!({"path":"/t","branch":"feat/x","ahead":0,"dirty":true,"landed":false,"head":"h","base":"b"});
         host["probe"]["agent_panes"][2]["done"] = json!(true);
         rig.put("state/host.json", &host);
-        rig.put("state/items.json", &json!([{"id":"child","kind":"agent","host":"local","pane":"w1:p3","owner_pane":"w1:p2","name":"child","created_ms":1,"closed_ms":null}]));
+        rig.put_items(&json!([{"id":"child","kind":"agent","host":"local","pane":"w1:p3","owner_pane":"w1:p2","name":"child","created_ms":1,"closed_ms":null}]));
         assert_eq!(
             rig.json(&["send", "owner", "--message", "please review"]).0,
             0
@@ -467,7 +467,7 @@ fn a_childs_reply_reaches_its_custodian_and_not_its_origin_owner() {
         ],
     );
     custody_session(&rig, "w1:p4", "claimant-session");
-    rig.put("state/items.json", &child_item());
+    rig.put_items(&child_item());
     // The custody moved to the claimant: it holds the child now.
     rig.put(
         "state/custody.json",
@@ -505,7 +505,7 @@ fn a_childs_reply_without_a_custody_record_reaches_its_origin_owner() {
     // Open children acquire origin custody during the sweep before delivery.
     let mut items = child_item();
     items[0]["closed_ms"] = json!(3);
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
     serve(&rig);
     serve(&rig);
@@ -531,7 +531,7 @@ fn a_reused_pane_id_never_inherits_the_custody_of_a_child() {
     );
     // The custodian pane is the owner's pane, but it runs another session now.
     custody_session(&rig, "w1:p2", "another-session");
-    rig.put("state/items.json", &child_item());
+    rig.put_items(&child_item());
     rig.put(
         "state/custody.json",
         &json!([custody("child", "w1:p2", Some("custodian-session"))]),
@@ -557,7 +557,7 @@ fn a_recorded_custodian_session_that_cannot_be_read_receives_nothing() {
         ],
     );
     // The custody records a session, but no live session of the pane can be read.
-    rig.put("state/items.json", &child_item());
+    rig.put_items(&child_item());
     rig.put(
         "state/custody.json",
         &json!([custody("child", "w1:p2", Some("custodian-session"))]),
@@ -582,7 +582,7 @@ fn delivery_checks_the_live_session_of_the_recipient_not_the_snapshot() {
         ],
     );
     custody_session(&rig, "w1:p2", "custodian-session");
-    rig.put("state/items.json", &child_item());
+    rig.put_items(&child_item());
     rig.put(
         "state/custody.json",
         &json!([custody("child", "w1:p2", Some("custodian-session"))]),

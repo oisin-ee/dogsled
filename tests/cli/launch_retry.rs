@@ -1639,7 +1639,7 @@ fn handoff_reconciles_removal_before_closed_mark_save() {
     assert_eq!(code, 0, "{launched}");
     assert!(launched["checkout"]["identity"].is_object(), "{launched}");
     let reply = json!({"seq":10,"text":"sealed native reply","captured_ms":2,"done":true});
-    rig.put("state/items.json", &json!([{"id":"c1-handoff","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1","name":"worker","created_ms":1,"closed_ms":null}]));
+    rig.put_items(&json!([{"id":"c1-handoff","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1","name":"worker","created_ms":1,"closed_ms":null}]));
     let mark_key = json!(["c1-handoff", "w2:p1", null]).to_string();
     rig.put(
         "state/done.json",
@@ -1652,7 +1652,7 @@ fn handoff_reconciles_removal_before_closed_mark_save() {
     let (code, removed) = rig.json(&["host", "close", "w2:p1"]);
     assert_eq!(code, 0, "{removed}");
     assert!(!tree.exists());
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -1665,7 +1665,7 @@ fn handoff_reconciles_removal_before_closed_mark_save() {
     assert_eq!(mark["reply"], reply);
     assert_eq!(mark["sealed"], 10);
     assert_eq!(mark["native_done"], true);
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
     assert_eq!(rig.log("hook.log").lines().count(), 1);
 }
 
@@ -1706,7 +1706,7 @@ fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() 
     );
     let (code, result) = remote_agent(&rig, None);
     assert_eq!(code, 1, "{result}");
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(
         ticket["wait_reason"],
         "netcup: reservation raced with another request"
@@ -1746,7 +1746,7 @@ fn unpinned_refusal_keeps_one_line_per_host() {
     }}));
     let (code, queued) = rig.json(&["agent", "--name", "worker", "--message", "go"]);
     assert_eq!(code, 1, "{queued}");
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     let lines: Vec<_> = ticket["wait_reason"].as_str().unwrap().lines().collect();
     assert_eq!(lines.len(), 2, "{ticket}");
     assert!(lines[0].starts_with("local: "), "{ticket}");
@@ -1760,9 +1760,9 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     rig.snapshot("state/host.json", now(), 20.0, 8);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     assert_eq!(remote_agent(&rig, None).0, 1);
-    let mut queue = rig.read("state/queue.json");
+    let mut queue = rig.tickets();
     queue[0].as_object_mut().unwrap().remove("wait_reason");
-    rig.put("state/queue.json", &queue);
+    rig.put_tickets(&queue);
     let (_, board) = rig.json(&["board", "--all"]);
     assert_eq!(
         board["rows"][0]["activity"], "for a host with room",
@@ -1791,7 +1791,7 @@ fn ssh_failure_before_launch_retries_reservation_checkout_and_preparation() {
         ));
         let (code, result) = remote_agent(&rig, Some(&repo));
         assert_eq!(code, 1, "{step}: {result}");
-        let ticket = rig.read("state/queue.json")[0].clone();
+        let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["state"], "pending", "{step}: {ticket}");
         assert_eq!(ticket["retry"]["attempts"], 1, "{step}: {ticket}");
         let ticket = advance(&rig);
@@ -1886,7 +1886,7 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
         );
         let (code, result) = remote_agent(&rig, None);
         assert_eq!(code, 2, "{case}: {result}");
-        assert!(!rig.dir.join("state/queue.json").exists(), "{case}");
+        assert_eq!(rig.tickets(), json!([]), "{case}");
     }
     let rig = Rig::new("queued-invalid");
     rig.snapshot("state/host.json", now(), 0.0, 8);
@@ -1897,9 +1897,7 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
         "state/job-validity/invalid-request.json",
         &rig.job_validity(),
     );
-    rig.put(
-        "state/queue.json",
-        &json!([{
+    rig.put_tickets(&json!([{
             "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
@@ -1934,9 +1932,7 @@ fn queued_placement_validates_branch_under_symlinked_temp_root() {
         "state/job-validity/invalid-request.json",
         &rig.job_validity(),
     );
-    rig.put(
-        "state/queue.json",
-        &json!([{
+    rig.put_tickets(&json!([{
             "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
@@ -1996,7 +1992,10 @@ fn terminal_ssh_categories_never_enter_the_retry_queue() {
             );
             let (code, error) = remote_agent(&rig, Some(&repo));
             assert_eq!(code, 2, "{step}/{case}: {error}");
-            assert!(!rig.dir.join("state/queue.json").exists(), "{step}/{case}");
+            assert!(
+                rig.tickets().as_array().unwrap().is_empty(),
+                "{step}/{case}"
+            );
             assert!(!error.to_string().contains("private"), "{error}");
             assert_eq!(
                 rig.log("ssh.log").matches(&format!("host {step}")).count(),
@@ -2163,7 +2162,7 @@ fn lost_successful_reservation_reply_reuses_one_hold_on_the_selected_host() {
     );
     let (code, queued) = remote_agent(&rig, None);
     assert_eq!(code, 1, "{queued}");
-    assert_eq!(rig.read("state/queue.json")[0]["retry"]["attempts"], 1);
+    assert_eq!(rig.tickets()[0]["retry"]["attempts"], 1);
     let before = rig.read("peer-state/placements.json");
     assert_eq!(before.as_array().unwrap().len(), 1);
     // Replay must not be new admission, even when a fresh status has no headroom.
@@ -2252,7 +2251,7 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
     rig.script("ssh", &script);
     let (code, queued) = remote_agent(&rig, Some(&repo));
     assert_eq!(code, 1, "{queued}");
-    assert_eq!(rig.read("state/queue.json")[0]["retry"]["attempts"], 1);
+    assert_eq!(rig.tickets()[0]["retry"]["attempts"], 1);
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(rig.log("setup.log").lines().count(), 1);
@@ -2267,9 +2266,7 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
 
 fn advance(rig: &Rig) -> Value {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    let next = rig.read("state/queue.json")[0]["retry"]["next_ms"]
-        .as_u64()
-        .unwrap();
+    let next = rig.tickets()[0]["retry"]["next_ms"].as_u64().unwrap();
     fs::write(rig.dir.join("clock"), next.max(rig.origin_ms).to_string()).unwrap();
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
@@ -2277,7 +2274,7 @@ fn advance(rig: &Rig) -> Value {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    rig.read("state/queue.json")[0].clone()
+    rig.tickets()[0].clone()
 }
 
 #[test]
@@ -2309,9 +2306,9 @@ fn branch_retry_keeps_preparation_host_and_terminal_across_service_restart() {
     // A repeated preparation would now refuse an already-open workspace.
     fs::write(rig.dir.join("already-open"), "").unwrap();
     // A service restart during admission resumes only the saved launch.
-    let mut queue = rig.read("state/queue.json");
+    let mut queue = rig.tickets();
     queue[0]["state"] = json!("admitting");
-    rig.put("state/queue.json", &queue);
+    rig.put_tickets(&queue);
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     let log = rig.log("herdr.log");
@@ -2323,7 +2320,7 @@ fn branch_retry_keeps_preparation_host_and_terminal_across_service_restart() {
         rig.read("state/placements.json").as_array().unwrap().len(),
         1
     );
-    assert_eq!(rig.read("state/items.json").as_array().unwrap().len(), 1);
+    assert_eq!(rig.items().as_array().unwrap().len(), 1);
 }
 
 fn host_request(rig: &Rig) -> Value {
@@ -2410,7 +2407,7 @@ fn cli_spawn_error_and_progress_include_the_child_startup_failure() {
         queued["retrying"].as_str().unwrap().contains(NPM_FAILURE),
         "{queued}"
     );
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     let id = ticket["request"]["id"].as_str().unwrap();
     let progress = rig.read(&format!("state/launches/{id}.progress.json"));
     assert!(
@@ -2779,7 +2776,7 @@ fn a_refused_start_is_not_retried_by_the_service() {
             .contains("agent_name_taken")
     );
     // No ticket waits to retry it.
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
     assert_eq!(rig.log("herdr.log").matches("agent start w ").count(), 1);
 }
 
@@ -2969,7 +2966,7 @@ fn interrupted_job_admission_preserves_running_record_without_relaunch() {
         "pane":"w2:p1","state":"running","exit":null,"signal":null,"reason":null,"started_ms":123,"ended_ms":null,
         "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/interrupted-job.json", &job);
-    rig.put("state/queue.json", &json!([{"id":"interrupted-ticket","request":request,"created_ms":100,"state":"admitting",
+    rig.put_tickets(&json!([{"id":"interrupted-ticket","request":request,"created_ms":100,"state":"admitting",
         "waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":100}}]));
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "failed", "{ticket}");

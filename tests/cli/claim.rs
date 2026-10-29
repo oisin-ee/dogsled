@@ -4,13 +4,10 @@ pub(super) const ID: &str = "r-1793174082524-94752-0";
 
 pub(super) fn rig(name: &str, owner: &str) -> Rig {
     let rig = Rig::new(name);
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":ID,"kind":"agent","host":"local","pane":"w2:p1",
-            "owner_pane":owner,"owner_session":"child-session","created_ms":1,"closed_ms":null
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":ID,"kind":"agent","host":"local","pane":"w2:p1",
+        "owner_pane":owner,"owner_session":"child-session","created_ms":1,"closed_ms":null
+    }]));
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[
@@ -47,7 +44,7 @@ fn claiming_an_orphan_succeeds() {
     assert_eq!(receipt["revision"], 1);
     assert_eq!(receipt["custodianPane"], "w1:p1");
     assert_eq!(receipt["custodianSession"], "lead-session");
-    assert_eq!(rig.read("state/items.json")[0]["owner_pane"], "w9:p9");
+    assert_eq!(rig.items()[0]["owner_pane"], "w9:p9");
 }
 
 #[test]
@@ -139,7 +136,7 @@ fn repeat_claim_by_custodian_is_idempotent() {
 fn accept_after_claim_writes_receipt_and_leaves_item_open() {
     let rig = rig("accept-claimed", "w9:p9");
     let execution = returned(&rig);
-    let items = fs::read(rig.dir.join("state/items.json")).unwrap();
+    let items = rig.items();
     let (code, claim) = rig.json(&["claim", ID]);
     assert_eq!(code, 0, "{claim}");
     let args = [
@@ -159,7 +156,7 @@ fn accept_after_claim_writes_receipt_and_leaves_item_open() {
     assert_eq!(receipt["applied"], true);
     let saved = rig.read(&format!("state/admissions/{ID}.json"));
     assert_eq!(saved["unit"]["reviews"][0]["reviewId"], receipt["reviewId"]);
-    assert_eq!(fs::read(rig.dir.join("state/items.json")).unwrap(), items);
+    assert_eq!(rig.items(), items);
     let (code, replay) = rig.json(&args);
     assert_eq!(code, 0, "{replay}");
     assert_eq!(replay["applied"], false);

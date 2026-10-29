@@ -49,6 +49,7 @@ mod runtime;
 mod service;
 mod shell;
 mod sidebar;
+mod store;
 mod sweep;
 mod transcript;
 mod unit_reply;
