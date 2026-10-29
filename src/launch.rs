@@ -31,12 +31,49 @@ struct Progress {
     confirmed: bool,
     result: Value,
     error: Option<String>,
+    /// Definitive local rejection, persisted before allocation or any dispatch attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preflight_refusal: Option<PreflightRefusal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal_receipt: Option<crate::unit_reply::Receipt>,
     /// The host's proof that the confirmed worker ended without a sealed reply. Written once
     /// by `unit_receipt` under the launch lock; `terminal_ack` refuses after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stopped: Option<crate::unit_reply::Stopped>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PreflightRefusal {
+    LineBudget { bytes: usize },
+}
+
+impl Progress {
+    fn preflight_failure(&self) -> Result<Option<&str>> {
+        let Some(PreflightRefusal::LineBudget { bytes }) = self.preflight_refusal else {
+            return Ok(None);
+        };
+        let Action::Agent { kind, .. } = &self.request.action else {
+            return Err(crate::worktree::refuse(
+                "preflight refusal is not an agent launch",
+            ));
+        };
+        let expected = work::line_budget_error(kind, bytes).to_string();
+        if bytes <= work::LINE_BUDGET
+            || self.attempted
+            || self.confirmed
+            || self.terminal_receipt.is_some()
+            || self.stopped.is_some()
+            || self.pane != self.request.pane
+            || self.terminal != self.request.terminal
+            || self.error.as_deref() != Some(expected.as_str())
+        {
+            return Err(crate::worktree::refuse(
+                "inconsistent preflight refusal provenance",
+            ));
+        }
+        Ok(self.error.as_deref())
+    }
 }
 
 /// The reason a unit settles `stopped`.
@@ -398,7 +435,14 @@ pub fn replay(ledger: &Ledger, request: &Launch) -> Result<Option<Value>> {
     match receipts.read::<Receipt>(&format!("{}.json", request.id))? {
         Some(Receipt::Started(result)) => Ok(Some(result)),
         Some(Receipt::Refused { failed }) => Err(Error::Invalid(failed)),
-        None => Ok(None),
+        None => {
+            if let Some(progress) = saved
+                && let Some(failed) = progress.preflight_failure()?
+            {
+                return Err(Error::Invalid(failed.into()));
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -528,6 +572,17 @@ pub fn agent_guarded(
             Some(Receipt::Refused { failed }) => return Err(Error::Invalid(failed)),
             None => (),
         }
+        if let Some(progress) = &saved
+            && let Some(failed) = progress.preflight_failure()?
+        {
+            receipts.write(
+                &file,
+                &Receipt::Refused {
+                    failed: failed.into(),
+                },
+            )?;
+            return Err(Error::Invalid(failed.into()));
+        }
         let mut progress = match saved {
             Some(progress) => progress,
             None => allocate(&receipts, shell, request, &progress_file, checkout)?,
@@ -600,6 +655,41 @@ fn refused(
     }))
 }
 
+/// Typed local preflight and final native refusals prove that no agent was started.
+/// The caller holds preparation protection, and the final check holds the launch lock.
+pub(crate) fn refused_before_start(ledger: &Ledger, request: &Launch) -> Result<bool> {
+    let receipts = ledger.child("launches");
+    let receipt = receipts.read::<Receipt>(&format!("{}.json", request.id))?;
+    let Some(progress) = receipts.read::<Progress>(&format!("{}.progress.json", request.id))?
+    else {
+        return if matches!(receipt, Some(Receipt::Refused { .. })) {
+            Err(crate::worktree::refuse("refusal has no launch provenance"))
+        } else {
+            Ok(false)
+        };
+    };
+    let preflight = progress.preflight_failure()?;
+    let failed = match &receipt {
+        Some(Receipt::Refused { failed }) => failed.as_str(),
+        None if preflight.is_some() => preflight.unwrap_or_default(),
+        _ => return Ok(false),
+    };
+    let preflight = preflight.is_some();
+    if progress.request != *request
+        || (!preflight && !progress.attempted)
+        || progress.confirmed
+        || progress.terminal_receipt.is_some()
+        || progress.error.as_deref() != Some(failed)
+        || (!preflight && progress.pane.as_deref().is_none_or(str::is_empty))
+        || (!preflight && progress.terminal.as_deref().is_none_or(str::is_empty))
+    {
+        return Err(crate::worktree::refuse(
+            "refusal has inconsistent launch provenance",
+        ));
+    }
+    Ok(true)
+}
+
 fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
     if std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
         || crate::cleanup::current_panes(shell)?
@@ -653,9 +743,8 @@ fn allocate(
     // Validate profile/argv before creating a pane. An allocating state without a
     // pane is deliberately not retried after a crash: its ownership is uncertain.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
-    // Refuse a launch line over Herdr's limit here, on the host whose paths it holds, before
-    // any pane exists.
-    work::agent_args(
+    // Encode first so a budget refusal has typed, durable proof of no dispatch.
+    let argv = work::agent_argv(
         kind,
         name,
         &seed_args(request, receipts),
@@ -691,9 +780,26 @@ fn allocate(
         confirmed: false,
         result,
         error: None,
+        preflight_refusal: None,
         terminal_receipt: None,
         stopped: None,
     };
+    let bytes = work::line_len(kind, &argv);
+    if bytes > work::LINE_BUDGET {
+        let error = work::line_budget_error(kind, bytes);
+        progress.pane.clone_from(&request.pane);
+        progress.error = Some(error.to_string());
+        progress.preflight_refusal = Some(PreflightRefusal::LineBudget { bytes });
+        receipts.write(file, &progress)?;
+        crate::unit_request::crash_point("preflight-refusal-persisted");
+        receipts.write(
+            &format!("{}.json", request.id),
+            &Receipt::Refused {
+                failed: error.to_string(),
+            },
+        )?;
+        return Err(error);
+    }
     receipts.write(file, &progress)?;
     let (pane, terminal) = work::pane(shell, request)?;
     progress.pane = Some(pane.clone());
@@ -1077,13 +1183,37 @@ pub fn unit_receipt(
     shell: &dyn Shell,
     execution: &crate::unit_transport::ExecutionRef,
 ) -> Result<Option<crate::unit_reply::HostEvidence>> {
-    use crate::unit_reply::{HostEvidence, Refusal, RefusalKind, Stopped, StoppedKind};
     crate::jobs::validate_id(&execution.request_id)?;
+    let evidence = ledger
+        .child("launches")
+        .with_lock(&execution.request_id, || {
+            unit_receipt_locked(ledger, shell, execution)
+        })?;
+    if let Some(crate::unit_reply::HostEvidence::Refused(refusal)) = &evidence {
+        crate::prepare::disposition::refused(ledger, shell, execution, &refusal.launch)?;
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn unit_receipt_locked(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    execution: &crate::unit_transport::ExecutionRef,
+) -> Result<Option<crate::unit_reply::HostEvidence>> {
+    use crate::unit_reply::{HostEvidence, Refusal, RefusalKind, Stopped, StoppedKind};
     let receipts = ledger.child("launches");
-    receipts.with_lock(&execution.request_id, || {
+    (|| {
         let Some(progress) =
             receipts.read::<Progress>(&format!("{}.progress.json", execution.request_id))?
         else {
+            if receipts
+                .read::<Value>(&format!("{}.json", execution.request_id))?
+                .is_some_and(|value| value.get("failed").is_some())
+            {
+                return Err(crate::unit_transport::conflict(
+                    "host refusal has no launch provenance",
+                ));
+            }
             return Ok(None);
         };
         let seed = progress
@@ -1095,7 +1225,16 @@ pub fn unit_receipt(
         if seed.execution != *execution {
             return Err(crate::unit_transport::conflict("host execution mismatch"));
         }
-        let final_receipt = receipts.read::<Value>(&format!("{}.json", execution.request_id))?;
+        let preflight = progress.preflight_failure()?;
+        let receipt_file = format!("{}.json", execution.request_id);
+        let mut final_receipt = receipts.read::<Value>(&receipt_file)?;
+        if final_receipt.is_none()
+            && let Some(failed) = preflight
+        {
+            let value = json!({"failed": failed});
+            receipts.write(&receipt_file, &value)?;
+            final_receipt = Some(value);
+        }
         if let Some(value) = final_receipt
             .as_ref()
             .filter(|value| value.get("failed").is_some())
@@ -1106,19 +1245,20 @@ pub fn unit_receipt(
                 .filter(|text| !text.is_empty())
                 .ok_or_else(|| crate::unit_transport::conflict("malformed host refusal"))?;
             if value.as_object().is_none_or(|object| object.len() != 1)
-                || !progress.attempted
+                || (preflight.is_none() && !progress.attempted)
                 || progress.confirmed
                 || progress.terminal_receipt.is_some()
                 || progress.error.as_deref() != Some(failed)
-                || progress.pane.as_deref().is_none_or(str::is_empty)
-                || progress.terminal.as_deref().is_none_or(str::is_empty)
-                || receipts
-                    .read::<crate::unit_transport::Seed>(&format!(
-                        "{}.unit.json",
-                        execution.request_id
-                    ))?
-                    .as_ref()
-                    != Some(seed)
+                || (preflight.is_none() && progress.pane.as_deref().is_none_or(str::is_empty))
+                || (preflight.is_none() && progress.terminal.as_deref().is_none_or(str::is_empty))
+                || (preflight.is_none()
+                    && receipts
+                        .read::<crate::unit_transport::Seed>(&format!(
+                            "{}.unit.json",
+                            execution.request_id
+                        ))?
+                        .as_ref()
+                        != Some(seed))
             {
                 return Err(crate::unit_transport::conflict(
                     "host refusal lacks consistent launch provenance",
@@ -1131,8 +1271,6 @@ pub fn unit_receipt(
                 launch: progress.request.clone(),
                 failed: failed.to_owned(),
             };
-            crate::prepare::used(ledger, &progress.request.cwd, Some(&execution.request_id))?;
-            crate::unit_request::crash_point("refusal-hold-released");
             return Ok(Some(HostEvidence::Refused(Box::new(evidence))));
         }
         if let Some(receipt) = &progress.terminal_receipt {
@@ -1164,7 +1302,7 @@ pub fn unit_receipt(
             &progress,
         )?;
         Ok(Some(HostEvidence::Stopped(Box::new(stopped))))
-    })
+    })()
 }
 
 /// One pane snapshot for the stop proof. Output that does not parse is a parse error from

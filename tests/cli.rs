@@ -677,6 +677,18 @@ esac
         )
         .unwrap();
     }
+    /// An immutable host outcome for identity-bearing preparation fixtures.
+    fn preparation_outcome(&self, id: &str, tree: &Value, prepared: &Value) {
+        assert!(tree["identity"].is_object());
+        let request = json!([tree["repo"], tree["branch"], null]);
+        let binding = json!({"request_id":id,"request":request,"claim":{"tree":tree,"request_id":id},"prepared":prepared});
+        fs::create_dir_all(self.dir.join("state/preparation-receipts")).unwrap();
+        self.put(
+            &format!("state/preparation-receipts/{id}.json"),
+            &json!({"request":request,"prepared":prepared,"failure":null,"binding":binding}),
+        );
+    }
+
     fn script(&self, name: &str, text: &str) {
         let path = self.dir.join("bin").join(name);
         fs::write(&path, text).unwrap();

@@ -809,6 +809,13 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
             "  'tab create'*|'workspace create'*) cp \"$RIG/later\" \"$DOGSLED_STATE/job-validity-clock.json\"; printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\"}}}' ;;",
         ),
     );
+    let mut captured = rig.read("state/preparations.json")[0].clone();
+    captured.as_object_mut().unwrap().remove("request_id");
+    rig.preparation_outcome(
+        "job-1",
+        &captured,
+        &json!({"pane_id":"w2:p1","terminal_id":"term_child","path":tree}),
+    );
     // The host's effective time moves past the validity window while the pane is
     // allocated.
     rig.put(

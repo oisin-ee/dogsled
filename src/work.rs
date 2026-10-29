@@ -704,7 +704,9 @@ fn launch_job(
         timeout_ms,
         idle_timeout_ms,
         validity: launch_validity(ledger, launch)?,
-        startup: Some(jobs::Startup::captured(&launch.cwd, checkout)),
+        startup: Some(crate::prepare::disposition::startup_claim(
+            ledger, launch, checkout,
+        )?),
         output_expired: false,
     };
     // The job's ownership is read before any pane side effect. A job that already
@@ -778,23 +780,36 @@ pub fn receive_launch(
             .iter()
             .any(|t| t["request"]["id"] == launch.id)
     {
-        match jobs::request_validity(ledger, &launch.id)? {
-            Some(saved) if validity.is_some_and(|incoming| saved != incoming) => {
-                return Err(Error::Invalid(format!(
-                    "job {} request validity changed",
-                    launch.id
-                )));
-            }
-            None if ledger
-                .child("launches")
-                .read::<Value>(&format!("{}.json", launch.id))?
-                .is_none() =>
-            {
-                jobs::check_validity(ledger, validity.as_ref())?;
-                jobs::record_request_validity(ledger, &launch.id, *validity)?;
-            }
-            _ => (),
-        }
+        jobs::validate_id(&launch.id)?;
+        ledger
+            .child("preparation-receipts")
+            .with_lock(&launch.id, || {
+                // Ingress can publish validity. Validate the disposition before that first write;
+                // a final correlated receipt remains a read-only replay instead.
+                crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
+                if replay_launch(ledger, launch)?.is_some() {
+                    return Ok(());
+                }
+                crate::prepare::disposition::allow_launch(ledger, launch)?;
+                match jobs::request_validity(ledger, &launch.id)? {
+                    Some(saved) if validity.is_some_and(|incoming| saved != incoming) => {
+                        return Err(Error::Invalid(format!(
+                            "job {} request validity changed",
+                            launch.id
+                        )));
+                    }
+                    None if ledger
+                        .child("launches")
+                        .read::<Value>(&format!("{}.json", launch.id))?
+                        .is_none() =>
+                    {
+                        jobs::check_validity(ledger, validity.as_ref())?;
+                        jobs::record_request_validity(ledger, &launch.id, *validity)?;
+                    }
+                    _ => (),
+                }
+                Ok(())
+            })?;
     }
     self::launch(ledger, shell, launch, now, peer_validity)
 }
@@ -824,20 +839,48 @@ pub fn launch(
                 .to_owned(),
         });
     }
-    // Final receipts replay without a repository lock, allocation, or store writes.
-    if let Some(result) = replay_launch(ledger, launch)? {
-        return Ok(result);
+    // Complete ownership separately; the final launch receipt itself remains read-only.
+    let replay = replay_launch(ledger, launch);
+    if !matches!(replay, Ok(None)) {
+        ledger
+            .child("preparation-receipts")
+            .with_lock(&launch.id, || {
+                crate::prepare::disposition::replay_guarded(ledger, shell, launch)
+            })?;
+        return replay?.ok_or_else(|| Error::Invalid("final launch receipt disappeared".into()));
     }
     if matches!(launch.action, Action::Job { .. }) {
         require_unclaimed(ledger, &launch.id)?;
     }
-    if matches!(launch.action, Action::Job { .. }) {
-        ledger
-            .child("preparation-receipts")
-            .with_lock(&launch.id, || launch_owned(ledger, shell, launch))
-    } else {
-        launch_owned(ledger, shell, launch)
+    launch_test_barrier("BEFORE_GATE")?;
+    ledger
+        .child("preparation-receipts")
+        .with_lock(&launch.id, || {
+            launch_test_barrier("ENTERED_GATE")?;
+            // The preparation gate can wait behind a completed dispatch.
+            crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
+            if let Some(result) = replay_launch(ledger, launch)? {
+                return Ok(result);
+            }
+            crate::prepare::disposition::allow_launch(ledger, launch)?;
+            let result = launch_owned(ledger, shell, launch);
+            launch_test_barrier("COMPLETED_GATE")?;
+            result
+        })
+}
+
+/// Debug CLI fixtures stop at real lock boundaries, without sleeps or production controls.
+fn launch_test_barrier(phase: &str) -> Result<()> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os(format!("DOGSLED_TEST_LAUNCH_{phase}")) {
+        use std::io::BufRead as _;
+        let path = std::path::PathBuf::from(path);
+        std::fs::write(path.with_extension("ready"), b"ready\n")?;
+        let mut go = std::io::BufReader::new(std::fs::File::open(path.with_extension("go"))?);
+        go.read_line(&mut String::new())?;
     }
+    let _ = phase;
+    Ok(())
 }
 
 fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<Value> {
@@ -867,12 +910,23 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
         // Another invocation may have completed or captured this request while we waited.
         // Re-read every owner before fresh discovery can create a generation marker.
         if let Some(result) = replay_launch(ledger, launch)? {
+            ledger.with_lock("done", || {
+                ledger.child("launches").with_lock(&launch.id, || {
+                    crate::prepare::disposition::transfer_guarded(ledger, launch, &result)
+                })
+            })?;
             return Ok(result);
         }
         if matches!(launch.action, Action::Job { .. }) {
             require_unclaimed(ledger, &launch.id)?;
         }
-        let (recorded, saved) = launch_checkout(ledger, launch)?;
+        crate::prepare::disposition::allow_launch(ledger, launch)?;
+        let (recorded, current) = launch_checkout(ledger, launch)?;
+        if current != saved {
+            return Err(crate::worktree::refuse(
+                "launch checkout changed while waiting",
+            ));
+        }
         if recorded && saved.is_none() {
             return Err(crate::worktree::refuse(
                 "recorded launch has no checkout identity",
@@ -973,62 +1027,74 @@ fn launch_guarded(
     checkout: Option<&crate::cleanup::Tree>,
 ) -> Result<Value> {
     if matches!(launch.action, Action::Agent { .. }) {
-        let result = crate::launch::agent_guarded(ledger, shell, launch, checkout)?;
-        crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
-        return Ok(result);
+        let result = crate::launch::agent_guarded(ledger, shell, launch, checkout);
+        ledger.with_lock("done", || {
+            ledger
+                .child("launches")
+                .with_lock(&launch.id, || match &result {
+                    Ok(value) => {
+                        crate::prepare::disposition::transfer_guarded(ledger, launch, value)
+                    }
+                    Err(_) => crate::prepare::disposition::agent_refused_guarded(ledger, launch),
+                })
+        })?;
+        return result;
     }
     let receipts = ledger.child("launches");
-    receipts.with_lock(&launch.id, || {
-        let file = format!("{}.json", launch.id);
-        if let Some(value) = receipts.read::<Value>(&file)? {
-            // A saved receipt is the only evidence that this request dispatched. It
-            // replays only when it correlates to this request and to the recorded job.
-            if let Action::Job {
-                cmd,
-                timeout_ms,
-                idle_timeout_ms,
-                ..
-            } = &launch.action
-            {
-                // A correlated receipt replays after expiry. It is read-only: it returns
-                // the saved result and dispatches nothing.
-                correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
+    ledger.with_lock("done", || {
+        receipts.with_lock(&launch.id, || {
+            let file = format!("{}.json", launch.id);
+            if let Some(value) = receipts.read::<Value>(&file)? {
+                // A saved receipt is the only evidence that this request dispatched. It
+                // replays only when it correlates to this request and to the recorded job.
+                if let Action::Job {
+                    cmd,
+                    timeout_ms,
+                    idle_timeout_ms,
+                    ..
+                } = &launch.action
+                {
+                    // A correlated receipt replays after expiry. It is read-only: it returns
+                    // the saved result and dispatches nothing.
+                    correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &value)?;
+                }
+                crate::prepare::disposition::transfer_guarded(ledger, launch, &value)?;
+                return Ok(value);
             }
-            return Ok(value);
-        }
-        // New execution checks the request's age before it claims anything, allocates a
-        // pane, or dispatches the command.
-        if matches!(launch.action, Action::Job { .. }) {
-            jobs::check_validity(ledger, launch_validity(ledger, launch)?.as_ref())?;
-        }
-        let mut result = match &launch.action {
-            Action::Job {
-                cmd,
-                timeout_ms,
-                idle_timeout_ms,
-                ..
-            } => launch_job(
-                ledger,
-                shell,
-                launch,
-                cmd,
-                *timeout_ms,
-                *idle_timeout_ms,
-                checkout,
-            )?,
-            Action::Agent { .. } => {
-                return Err(Error::Invalid(
-                    "agent launch must use its receipt owner".into(),
-                ));
+            // New execution checks the request's age before it claims anything, allocates a
+            // pane, or dispatches the command.
+            if matches!(launch.action, Action::Job { .. }) {
+                jobs::check_validity(ledger, launch_validity(ledger, launch)?.as_ref())?;
             }
-            Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
-        };
-        if let Some(checkout) = checkout {
-            result["checkout"] = serde_json::to_value(checkout)?;
-        }
-        receipts.write(&file, &result)?;
-        crate::prepare::used(ledger, &launch.cwd, Some(&launch.id))?;
-        Ok(result)
+            let mut result = match &launch.action {
+                Action::Job {
+                    cmd,
+                    timeout_ms,
+                    idle_timeout_ms,
+                    ..
+                } => launch_job(
+                    ledger,
+                    shell,
+                    launch,
+                    cmd,
+                    *timeout_ms,
+                    *idle_timeout_ms,
+                    checkout,
+                )?,
+                Action::Agent { .. } => {
+                    return Err(Error::Invalid(
+                        "agent launch must use its receipt owner".into(),
+                    ));
+                }
+                Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
+            };
+            if let Some(checkout) = checkout {
+                result["checkout"] = serde_json::to_value(checkout)?;
+            }
+            receipts.write(&file, &result)?;
+            crate::prepare::disposition::transfer_guarded(ledger, launch, &result)?;
+            Ok(result)
+        })
     })
 }
 
@@ -1093,6 +1159,23 @@ pub fn agent_args(
     files: &Files,
     profile: Option<&crate::profiles::Profile>,
 ) -> Result<Vec<String>> {
+    let args = agent_argv(kind, name, lead, files, profile)?;
+    let len = line_len(kind, &args);
+    if len > LINE_BUDGET {
+        return Err(line_budget_error(kind, len));
+    }
+    Ok(args)
+}
+
+/// Encode argv without dispatch. The launch owner records a typed budget refusal before
+/// allocation; every dispatch still uses `agent_args` to enforce the limit.
+pub(crate) fn agent_argv(
+    kind: &str,
+    name: &str,
+    lead: &[String],
+    files: &Files,
+    profile: Option<&crate::profiles::Profile>,
+) -> Result<Vec<String>> {
     let mut args = lead.to_vec();
     let task = match kind {
         "pi" => {
@@ -1139,15 +1222,15 @@ pub fn agent_args(
         }
     };
     args.push(task);
-    let len = line_len(kind, &args);
-    if len > LINE_BUDGET {
-        return Err(Error::Invalid(format!(
-            "the {kind} launch line is {len} bytes, over the {LINE_BUDGET}-byte budget: Herdr \
-             types it as one terminal line, which holds at most 1024 bytes; the task is not on \
-             it, so shorten the name, the profile's flags or the state directory's path"
-        )));
-    }
     Ok(args)
+}
+
+pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
+    Error::Invalid(format!(
+        "the {kind} launch line is {len} bytes, over the {LINE_BUDGET}-byte budget: Herdr \
+         types it as one terminal line, which holds at most 1024 bytes; the task is not on \
+         it, so shorten the name, the profile's flags or the state directory's path"
+    ))
 }
 
 /// A new request runs now only when no ticket that could take one of its hosts waits ahead of
@@ -1204,20 +1287,6 @@ pub(crate) struct Attempt {
     pub result: Option<Value>,
 }
 
-/// A local preparation that returned an error never launches: `perform_locked` refuses to resume
-/// an attempt that stopped during preparation, so its hold has no owner left.
-pub(crate) fn preparation_failed(ledger: &Ledger, request_id: &str) -> Result<bool> {
-    jobs::validate_id(request_id)?;
-    Ok(ledger
-        .child("admissions")
-        .read::<Attempt>(&format!("{request_id}.json"))?
-        .is_some_and(|attempt| {
-            attempt.host.as_ref().is_some_and(Host::is_local)
-                && attempt.launch.is_none()
-                && attempt.error.is_some()
-        }))
-}
-
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
     if matches!(request.action, Action::Place) {
@@ -1229,19 +1298,26 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         };
         let launch = prepare_launch(fleet, request, &host)
             .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
-        if host.is_local() {
-            crate::prepare::used(fleet.ledger, &launch.cwd, Some(&launch.id))?;
-        } else {
-            let _: Value = fleet.remote_setup(
-                &host,
-                &[
-                    "prepared".into(),
-                    "--path".into(),
-                    launch.cwd.clone(),
-                    "--request-id".into(),
-                    launch.id.clone(),
-                ],
-            )?;
+        if request.branch.is_some() {
+            if host.is_local() {
+                crate::prepare::disposition::release(
+                    fleet.ledger,
+                    fleet.shell,
+                    &launch.cwd,
+                    Some(&launch.id),
+                )?;
+            } else {
+                let _: Value = fleet.remote_setup(
+                    &host,
+                    &[
+                        "prepared".into(),
+                        "--path".into(),
+                        launch.cwd.clone(),
+                        "--request-id".into(),
+                        launch.id.clone(),
+                    ],
+                )?;
+            }
         }
         return Ok(Some(
             json!({"host":host,"reservation":reservation,"path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane}),

@@ -1,6 +1,171 @@
 use super::*;
 use std::io::Write as _;
 
+fn transferred_job(variant: &str) -> (Rig, Value) {
+    let (rig, repo) = place::place_rig(&format!("disposition-wrapper-{variant}"));
+    let (code, prepared) = rig.json(&[
+        "host",
+        "prepare",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "wrapper",
+        "--base",
+        "main",
+        "--request-id",
+        "startup",
+    ]);
+    assert_eq!(code, 0, "{prepared}");
+    startup_herdr(&rig);
+    let tree = PathBuf::from(prepared["path"].as_str().unwrap());
+    let mut request = startup_request(&rig, &tree);
+    request["action"]["cmd"] = json!(["sh", "-c", "echo once >> \"$RIG/command-marker\""]);
+    let args = [
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &request.to_string(),
+    ];
+    if variant == "fenced" || variant == "before-fence" {
+        let out = rig
+            .cmd(&args)
+            .env(
+                "DOGSLED_TEST_UNIT_CRASH",
+                if variant == "fenced" {
+                    "preparation-fenced"
+                } else {
+                    "preparation-before-fence"
+                },
+            )
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(86));
+    } else {
+        let (code, result) = rig.json(&args);
+        assert_eq!(code, 0, "{result}");
+    }
+    (rig, request)
+}
+
+#[test]
+fn transferred_preparation_allows_only_its_existing_job_owner() {
+    for variant in [
+        "matching",
+        "fenced",
+        "before-fence",
+        "owner",
+        "identity",
+        "unrelated",
+        "missing-transfer",
+    ] {
+        let (rig, request) = transferred_job(variant);
+        let text = request.to_string();
+        let args = ["host", "launch", "--job-validity", "2", "--request", &text];
+        if variant == "before-fence" {
+            assert!(
+                !rig.dir
+                    .join("state/preparation-receipts/startup.disposition.json")
+                    .exists()
+            );
+            let (code, result) = rig.json(&args);
+            assert_eq!(code, 0, "{result}");
+            assert_eq!(rig.read("state/preparations.json"), json!([]));
+        }
+        let transfer = rig.read("state/preparation-receipts/startup.disposition.json");
+        assert_eq!(transfer["request"]["policy"]["kind"], "transfer");
+        let mut job = rig.read("state/jobs/startup.json");
+        assert_eq!(job["state"], "pending");
+        assert_eq!(transfer["request"]["policy"]["job"], job);
+        match variant {
+            "owner" => {
+                job["owner"] = json!("replacement");
+                rig.put("state/jobs/startup.json", &job);
+            }
+            "identity" => {
+                job["startup"]["checkout"]["identity"]["generation"] = json!("0".repeat(32));
+                rig.put("state/jobs/startup.json", &job);
+            }
+            "unrelated" => {
+                job["id"] = json!("unrelated");
+                rig.put("state/jobs/unrelated.json", &job);
+            }
+            "missing-transfer" => fs::remove_file(
+                rig.dir
+                    .join("state/preparation-receipts/startup.disposition.json"),
+            )
+            .unwrap(),
+            _ => (),
+        }
+        let mut wrapper = if variant == "unrelated" {
+            rig.start(&[
+                "exec",
+                "unrelated",
+                "--",
+                "sh",
+                "-c",
+                "echo once >> \"$RIG/command-marker\"",
+            ])
+        } else {
+            // Herdr saved a real pending wrapper; only its process start is delayed.
+            let mut wrapper =
+                rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "transferred wrapper");
+            let status = wrapper.wait();
+            if variant == "matching" || variant == "fenced" || variant == "before-fence" {
+                assert!(status.success(), "{}", rig.log("wrapper-error"));
+                assert_eq!(rig.log("command-marker"), "once\n");
+                assert_transferred_job_replay(&rig, &request, &transfer);
+                let disposition = fs::read(
+                    rig.dir
+                        .join("state/preparation-receipts/startup.disposition.json"),
+                )
+                .unwrap();
+                let receipt = fs::read(rig.dir.join("state/launches/startup.json")).unwrap();
+                let (code, result) = rig.json(&args);
+                assert_eq!(code, 0, "{result}");
+                assert_eq!(
+                    fs::read(
+                        rig.dir
+                            .join("state/preparation-receipts/startup.disposition.json")
+                    )
+                    .unwrap(),
+                    disposition
+                );
+                assert_eq!(
+                    fs::read(rig.dir.join("state/launches/startup.json")).unwrap(),
+                    receipt
+                );
+                let mut duplicate = rig.spawn_recorded(
+                    &rig.dir.join("startup-wrapper"),
+                    "duplicate transferred wrapper",
+                );
+                assert!(!duplicate.wait().success());
+                assert_eq!(rig.log("command-marker"), "once\n");
+            } else {
+                assert!(!status.success(), "{variant}");
+                assert!(!rig.dir.join("command-marker").exists(), "{variant}");
+                assert_eq!(rig.read("state/jobs/startup.json"), job);
+            }
+            continue;
+        };
+        assert!(!wrapper.wait().success());
+        assert!(!rig.dir.join("command-marker").exists());
+    }
+}
+
+fn assert_transferred_job_replay(rig: &Rig, request: &Value, transfer: &Value) {
+    let calls = rig.log("herdr.log");
+    let text = request.to_string();
+    let (code, result) = rig.json(&["host", "launch", "--job-validity", "2", "--request", &text]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    let completed = rig.read("state/preparation-receipts/startup.disposition.json");
+    assert_eq!(completed["progress"], "released");
+    assert_eq!(completed["request"], transfer["request"]);
+    assert_eq!(rig.log("herdr.log"), calls);
+}
+
 fn startup_herdr(rig: &Rig) {
     let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
     rig.script("herdr", &script.replace("case \"$*\" in", r#"case "$*" in

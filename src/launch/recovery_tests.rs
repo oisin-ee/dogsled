@@ -450,22 +450,38 @@ fn recovery_rereads_a_changed_candidate_after_the_request_lock() {
 }
 
 #[test]
-fn a_launch_whose_pane_is_gone_or_replaced_no_longer_holds_its_preparation() {
+fn launch_survey_never_substitutes_for_a_preparation_disposition() {
     let ledger = fixture();
     let receipts = ledger.child("launches");
+    ledger
+        .write(
+            "preparations.json",
+            &json!([{ "repo":"/repo", "path":"/checkout", "branch":"worker", "request_id":"own" }]),
+        )
+        .unwrap();
+    let original = std::fs::read(ledger.dir.join("preparations.json")).unwrap();
     let shell_pane = |pane: &str| crate::probe::Pane {
         pane_id: pane.into(),
         cwd: Some("/checkout".into()),
         ..Default::default()
     };
-    let consumed = |panes: &[crate::probe::Pane], terminals: &[(&str, &str)], agents: &[_]| {
+    let held = |panes: &[crate::probe::Pane], terminals: &[(&str, &str)], agents: &[_]| {
         let terminals = terminals
             .iter()
             .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
             .collect();
-        Survey::load(&ledger, panes, &terminals, agents)
+        let survey = Survey::load(&ledger, panes, &terminals, agents).unwrap();
+        let trees = crate::prepare::pending_trees(&ledger, &survey).unwrap();
+        let progress = receipts
+            .read::<Progress>("own.progress.json")
             .unwrap()
-            .consumed(Some("own"), "/checkout")
+            .unwrap();
+        assert!(crate::prepare::disposition::allow_launch(&ledger, &progress.request).is_err());
+        assert_eq!(
+            std::fs::read(ledger.dir.join("preparations.json")).unwrap(),
+            original
+        );
+        trees.len() == 1
     };
     let agent = crate::probe::Agent {
         pane: "w2:p2".into(),
@@ -476,16 +492,16 @@ fn a_launch_whose_pane_is_gone_or_replaced_no_longer_holds_its_preparation() {
     };
     // Its own terminal still runs in the pane: the outcome is unknown and the hold stays.
     let live = [shell_pane("w2:p2")];
-    assert!(!consumed(&live, &[("w2:p2", "term_shell")], &[]));
-    // Gone, or replaced by another terminal: start and recovery refuse it, so it is over.
-    assert!(consumed(&[], &[], &[]));
-    assert!(consumed(&live, &[("w2:p2", "term_new")], &[]));
+    assert!(held(&live, &[("w2:p2", "term_shell")], &[]));
+    // Gone or replaced is not a persisted fence: its preparation stays held.
+    assert!(held(&[], &[], &[]));
+    assert!(held(&live, &[("w2:p2", "term_new")], &[]));
     // A matching agent still running holds, whatever the snapshot says.
-    assert!(!consumed(&[], &[], std::slice::from_ref(&agent)));
+    assert!(held(&[], &[], std::slice::from_ref(&agent)));
     // A launch that holds its request lock may be writing its receipt now.
     receipts
         .with_lock("own", || {
-            assert!(!consumed(&[], &[], &[]));
+            assert!(held(&[], &[], &[]));
             Ok(())
         })
         .unwrap();
@@ -496,11 +512,11 @@ fn a_launch_whose_pane_is_gone_or_replaced_no_longer_holds_its_preparation() {
         .unwrap();
     progress.terminal = None;
     receipts.write("own.progress.json", &progress).unwrap();
-    assert!(!consumed(&[], &[], &[]));
+    assert!(held(&[], &[], &[]));
     // An allocating launch has no pane yet.
     progress.terminal = Some("term_shell".into());
     progress.pane = None;
     receipts.write("own.progress.json", &progress).unwrap();
-    assert!(!consumed(&[], &[], &[]));
+    assert!(held(&[], &[], &[]));
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
