@@ -576,6 +576,8 @@ pub enum HostCommand {
         #[arg(long)]
         preparation_protocol: Option<u32>,
         #[arg(long)]
+        placement_replay: Option<String>,
+        #[arg(long)]
         repo: String,
         #[arg(long)]
         branch: String,

@@ -668,14 +668,25 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
         }
         HostCommand::Prepare {
             preparation_protocol,
+            placement_replay,
             repo,
             branch,
             base,
             request_id,
         } => {
             prepare::require_protocol(preparation_protocol)?;
-            let prepared =
-                prepare::on_host(node, &repo, &branch, base.as_deref(), request_id.as_deref())?;
+            let placement = placement_replay
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let prepared = prepare::on_host(
+                node,
+                &repo,
+                &branch,
+                base.as_deref(),
+                request_id.as_deref(),
+                placement.as_ref(),
+            )?;
             print(true, &prepared, String::new)?;
         }
         _ => return Err(Error::Invalid("not a preparation command".into())),

@@ -432,16 +432,40 @@ pub fn envelope(
 }
 
 pub fn deliver(fleet: &Fleet, host: &Host, envelope: &Envelope) -> Result<Prepared> {
+    deliver_with(fleet, host, envelope, None)
+}
+
+pub fn deliver_placement(
+    fleet: &Fleet,
+    host: &Host,
+    envelope: &Envelope,
+    placement: &crate::node::PlacementReplay,
+) -> Result<Prepared> {
+    if placement.envelope.host != *host {
+        return Err(crate::unit_transport::conflict(
+            "preparation delivery host changed",
+        ));
+    }
+    deliver_with(fleet, host, envelope, Some(placement))
+}
+
+fn deliver_with(
+    fleet: &Fleet,
+    host: &Host,
+    envelope: &Envelope,
+    placement: Option<&crate::node::PlacementReplay>,
+) -> Result<Prepared> {
     require_protocol(Some(envelope.version))?;
     crate::jobs::validate_id(&envelope.request_id)?;
     if host.is_local() {
-        return local(
+        return local_with(
             fleet.shell,
             fleet.ledger,
             &envelope.repo,
             &envelope.branch,
             envelope.base.as_deref(),
             Some(&envelope.request_id),
+            placement.map(|p| (p, envelope.repo.as_str())),
         );
     }
     let mut args = vec![
@@ -457,6 +481,12 @@ pub fn deliver(fleet: &Fleet, host: &Host, envelope: &Envelope) -> Result<Prepar
     ];
     if let Some(base) = &envelope.base {
         args.extend(["--base".into(), base.clone()]);
+    }
+    if let Some(placement) = placement {
+        args.extend([
+            "--placement-replay".into(),
+            serde_json::to_string(placement)?,
+        ]);
     }
     let prepared: Prepared = fleet.remote_setup(host, &args)?;
     validate_prepared(&prepared, &envelope.request_id)?;
@@ -506,6 +536,7 @@ pub enum LookupOutcome {
     },
     Failed {
         failure: crate::error::RetainedFailure,
+        binding: Option<Box<disposition::Binding>>,
     },
 }
 
@@ -552,9 +583,17 @@ pub fn lookup_on_host(
     home: &str,
     query: &LookupRequest,
 ) -> LookupReply {
-    let result = match lookup_records(ledger, home, query) {
-        Ok(result) => result,
-        Err(_) => LookupState::Unresolved,
+    let id = &query.preparation.request_id;
+    let result = if crate::jobs::validate_id(id).is_err() {
+        LookupState::Mismatch
+    } else if query.version != disposition::VERSION
+        || query.preparation.version != disposition::VERSION
+    {
+        LookupState::UnsupportedVersion
+    } else if query.placement.validate(id).is_err() {
+        LookupState::Mismatch
+    } else {
+        lookup_guarded(ledger, home, query).unwrap_or(LookupState::Unresolved)
     };
     LookupReply {
         version: disposition::VERSION,
@@ -563,26 +602,111 @@ pub fn lookup_on_host(
     }
 }
 
+fn lookup_guarded(
+    ledger: &crate::ledger::Ledger,
+    home: &str,
+    query: &LookupRequest,
+) -> Result<LookupState> {
+    // Reserve created this gate. Opening read-only cannot create or repair it.
+    let gate = std::fs::File::open(
+        ledger
+            .child("preparation-receipts")
+            .dir
+            .join(format!("{}.lock", query.preparation.request_id)),
+    )?;
+    if gate.try_lock().is_err() {
+        return Ok(LookupState::Unresolved);
+    }
+    lookup_records(ledger, home, query)
+}
+
+fn validate_placement_delivery(
+    ledger: &crate::ledger::Ledger,
+    id: &str,
+    request: &(PathBuf, String, Option<String>),
+    delivery: (&crate::node::PlacementReplay, &str),
+) -> Result<()> {
+    let (placement, repo) = delivery;
+    let envelope = Envelope {
+        version: disposition::VERSION,
+        request_id: id.into(),
+        repo: repo.into(),
+        branch: request.1.clone(),
+        base: request.2.clone(),
+    };
+    placement.validate(&envelope.request_id)?;
+    let request: crate::work::Request = serde_json::from_value(placement.envelope.request.clone())?;
+    let grant = ledger
+        .child("placement-grants")
+        .read::<crate::node::PlacementGrant>(&format!("{}.json", envelope.request_id))?;
+    let query = LookupRequest {
+        version: disposition::VERSION,
+        placement: placement.clone(),
+        preparation: envelope.clone(),
+        binding: None,
+    };
+    if !matching_lookup(&query, &request, grant.as_ref()) {
+        return Err(crate::unit_transport::conflict(
+            "preparation delivery grant changed; no new capacity",
+        ));
+    }
+    Ok(())
+}
+
+fn matching_lookup(
+    query: &LookupRequest,
+    request: &crate::work::Request,
+    grant: Option<&crate::node::PlacementGrant>,
+) -> bool {
+    query.placement.expected_grant.is_some()
+        && grant == query.placement.expected_grant.as_ref()
+        && request.branch.as_deref() == Some(query.preparation.branch.as_str())
+        && request.base == query.preparation.base
+        && request.repository.as_ref().is_some_and(|repo| {
+            let expected = if query.placement.envelope.host.is_local() {
+                &repo.path
+            } else {
+                &repo.relative
+            };
+            *expected == query.preparation.repo
+        })
+}
+
+fn lookup_outcome(receipt: &PreparationReceipt, id: &str) -> Result<LookupOutcome> {
+    let outcome = match (receipt.prepared.clone(), receipt.failure.clone()) {
+        (Some(mut prepared), None) => {
+            prepared.binding = receipt.binding.clone().map(Box::new);
+            validate_prepared(&prepared, id)?;
+            LookupOutcome::Prepared { prepared }
+        }
+        (None, Some(failure)) if failure.request_id.as_deref() == Some(id) => {
+            LookupOutcome::Failed {
+                failure,
+                binding: receipt.binding.clone().map(Box::new),
+            }
+        }
+        (None, None) => LookupOutcome::Incomplete,
+        _ => {
+            return Err(crate::unit_transport::conflict(
+                "unresolved preparation outcome",
+            ));
+        }
+    };
+    Ok(outcome)
+}
+
 fn lookup_records(
     ledger: &crate::ledger::Ledger,
     home: &str,
     query: &LookupRequest,
 ) -> Result<LookupState> {
-    if query.version != disposition::VERSION || query.preparation.version != disposition::VERSION {
-        return Ok(LookupState::UnsupportedVersion);
-    }
     let id = &query.preparation.request_id;
-    query.placement.validate(id)?;
     let request: crate::work::Request =
         serde_json::from_value(query.placement.envelope.request.clone())?;
     let grant = ledger
         .child("placement-grants")
         .read::<crate::node::PlacementGrant>(&format!("{id}.json"))?;
-    if query.placement.expected_grant.is_none()
-        || grant != query.placement.expected_grant
-        || request.branch.as_deref() != Some(query.preparation.branch.as_str())
-        || request.base != query.preparation.base
-    {
+    if !matching_lookup(query, &request, grant.as_ref()) {
         return Ok(LookupState::Mismatch);
     }
     let holds: Vec<crate::ledger::Reservation> =
@@ -611,10 +735,10 @@ fn lookup_records(
             },
         );
     };
-    if raw.get("version").and_then(serde_json::Value::as_u64)
-        != Some(u64::from(disposition::VERSION))
-    {
-        return Ok(LookupState::UnsupportedVersion);
+    match raw.get("version").and_then(serde_json::Value::as_u64) {
+        Some(version) if version == u64::from(disposition::VERSION) => {}
+        Some(_) => return Ok(LookupState::UnsupportedVersion),
+        None => return Ok(LookupState::Unresolved),
     }
     let receipt: PreparationReceipt = serde_json::from_value(raw)?;
     let expected = (
@@ -622,7 +746,12 @@ fn lookup_records(
         query.preparation.branch.clone(),
         query.preparation.base.clone(),
     );
-    if receipt.request != expected {
+    if !worktree::same(
+        &receipt.request.0.display().to_string(),
+        &expected.0.display().to_string(),
+    ) || receipt.request.1 != expected.1
+        || receipt.request.2 != expected.2
+    {
         return Ok(LookupState::Mismatch);
     }
     if let Some(binding) = &receipt.binding {
@@ -636,26 +765,25 @@ fn lookup_records(
         {
             return Ok(LookupState::Mismatch);
         }
-    } else if receipt.prepared.is_some() || query.binding.is_some() {
+    } else if receipt.prepared.is_some()
+        || query.binding.is_some()
+        || (!held.is_empty() && receipt.failure.is_some())
+    {
         return Ok(LookupState::Unresolved);
     }
-    let outcome = match (receipt.prepared, receipt.failure) {
-        (Some(mut prepared), None) => {
-            prepared.binding = receipt.binding.clone().map(Box::new);
-            validate_prepared(&prepared, id)?;
-            LookupOutcome::Prepared { prepared }
-        }
-        (None, Some(failure)) => LookupOutcome::Failed { failure },
-        (None, None) => LookupOutcome::Incomplete,
-        _ => return Ok(LookupState::Unresolved),
-    };
+    if held.len() > 1 || (raw_disposition.is_none() && receipt.binding.is_some() && held.is_empty())
+    {
+        return Ok(LookupState::Unresolved);
+    }
+    let outcome = lookup_outcome(&receipt, id)?;
     if let Some(raw) = raw_disposition {
-        if raw
+        match raw
             .pointer("/request/version")
             .and_then(serde_json::Value::as_u64)
-            != Some(u64::from(disposition::VERSION))
         {
-            return Ok(LookupState::UnsupportedVersion);
+            Some(version) if version == u64::from(disposition::VERSION) => {}
+            Some(_) => return Ok(LookupState::UnsupportedVersion),
+            None => return Ok(LookupState::Unresolved),
         }
         let saved: disposition::Receipt = serde_json::from_value(raw)?;
         if receipt.binding.as_ref() != Some(&saved.request.binding) {
@@ -734,7 +862,24 @@ pub fn local(
     base: Option<&str>,
     request_id: Option<&str>,
 ) -> Result<Prepared> {
+    local_with(shell, ledger, repo, branch, base, request_id, None)
+}
+
+fn local_with(
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    repo: &str,
+    branch: &str,
+    base: Option<&str>,
+    request_id: Option<&str>,
+    placement: Option<(&crate::node::PlacementReplay, &str)>,
+) -> Result<Prepared> {
     let Some(id) = request_id else {
+        if placement.is_some() {
+            return Err(crate::unit_transport::conflict(
+                "placement preparation requires its original request id",
+            ));
+        }
         return local_once(shell, ledger, repo, branch, base, None);
     };
     crate::jobs::validate_id(id)?;
@@ -746,6 +891,9 @@ pub fn local(
             branch.to_owned(),
             base.map(str::to_owned),
         );
+        if let Some(placement) = placement {
+            validate_placement_delivery(ledger, id, &request, placement)?;
+        }
         if let Some(receipt) = receipts.read::<PreparationReceipt>(&file)? {
             if receipt.request != request {
                 return Err(crate::unit_transport::conflict(
@@ -777,18 +925,7 @@ pub fn local(
                     base,
                 )
             })();
-            let binding = captured
-                .checkout
-                .or(captured.intended)
-                .map(|pending: Pending| disposition::Binding {
-                    request_id: id.into(),
-                    request: request.clone(),
-                    claim: disposition::Claim {
-                        tree: pending.tree,
-                        request_id: id.into(),
-                    },
-                    prepared: result.as_ref().ok().cloned(),
-                });
+            let binding = preparation_binding(id, &request, captured, &result);
             match result {
                 Ok(prepared) => {
                     let mut wire = prepared.clone();
@@ -837,6 +974,26 @@ pub fn local(
             }
         })
     })
+}
+
+fn preparation_binding(
+    id: &str,
+    request: &(PathBuf, String, Option<String>),
+    captured: Capture,
+    result: &Result<Prepared>,
+) -> Option<disposition::Binding> {
+    captured
+        .checkout
+        .or(captured.intended)
+        .map(|pending| disposition::Binding {
+            request_id: id.into(),
+            request: request.clone(),
+            claim: disposition::Claim {
+                tree: pending.tree,
+                request_id: id.into(),
+            },
+            prepared: result.as_ref().ok().cloned(),
+        })
 }
 
 /// A preparation receipt holds the outcome of one request. `prepared` and `failure` are
@@ -1235,10 +1392,24 @@ pub fn on_host(
     branch: &str,
     base: Option<&str>,
     request_id: Option<&str>,
+    placement: Option<&crate::node::PlacementReplay>,
 ) -> Result<Prepared> {
+    let transport_repo = repo;
     let repo = Path::new(node.home).join(repo).display().to_string();
-    let prepared = local(node.shell, node.ledger, &repo, branch, base, request_id)
-        .map_err(|error| error.correlate(request_id))?;
+    let prepared = if placement.is_some() {
+        local_with(
+            node.shell,
+            node.ledger,
+            &repo,
+            branch,
+            base,
+            request_id,
+            placement.map(|p| (p, transport_repo)),
+        )
+    } else {
+        local(node.shell, node.ledger, &repo, branch, base, request_id)
+    }
+    .map_err(|error| error.correlate(request_id))?;
     Ok(prepared)
 }
 

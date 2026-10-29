@@ -28,6 +28,9 @@ pub(crate) enum PlacementPhase {
         grant: crate::node::PlacementGrant,
         preparation: Envelope,
     },
+    PreparationFailed {
+        failed: Box<FailedPlacement>,
+    },
     Prepared {
         prepared: Box<PreparedPlacement>,
     },
@@ -42,6 +45,15 @@ pub(crate) enum PlacementPhase {
         saved: Box<SavedPlacement>,
         acknowledgement: Option<disposition::Acknowledgement>,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct FailedPlacement {
+    grant: crate::node::PlacementGrant,
+    preparation: Envelope,
+    failure: crate::error::RetainedFailure,
+    disposition: Option<disposition::Request>,
+    acknowledgement: Option<disposition::Acknowledgement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +82,13 @@ impl PlacementProgress {
         if self.version != crate::node::PLACEMENT_VERSION {
             return Err(conflict("unsupported placement progress version"));
         }
+        let expected = serde_json::to_value(request)?;
+        for declined in &self.declined {
+            declined.validate(&declined.envelope, false)?;
+            if declined.envelope.request != expected {
+                return Err(conflict("declined placement request changed"));
+            }
+        }
         let grant = match &self.phase {
             PlacementPhase::Recorded => None,
             PlacementPhase::SelectionPending { envelope } => {
@@ -85,18 +104,12 @@ impl PlacementProgress {
             }
             PlacementPhase::HostSelected { grant }
             | PlacementPhase::PreparationPending { grant, .. } => Some(grant),
+            PlacementPhase::PreparationFailed { failed } => Some(&failed.grant),
             PlacementPhase::Prepared { prepared } => Some(&prepared.grant),
             PlacementPhase::ResultSaved { saved }
             | PlacementPhase::ReleaseAcknowledged { saved, .. }
             | PlacementPhase::Completed { saved, .. } => Some(&saved.prepared.grant),
         };
-        let expected = serde_json::to_value(request)?;
-        for declined in &self.declined {
-            declined.validate(&declined.envelope, false)?;
-            if declined.envelope.request != expected {
-                return Err(conflict("declined placement request changed"));
-            }
-        }
         let transport = grant.map(|grant| crate::node::PlacementReplay {
             envelope: grant.envelope.clone(),
             expected_grant: Some(grant.clone()),
@@ -164,13 +177,26 @@ pub(crate) fn resume(ledger: &Ledger, id: &str) -> Result<Request> {
         .ok_or_else(|| conflict(&format!("unknown placement request {id}")))?;
     let request: Request = serde_json::from_value(attempt.request)?;
     if request.id != id || !matches!(request.action, Action::Place) {
-        return Err(conflict("not the original placement request"));
+        return Err(conflict(&format!(
+            "not the original placement request {id}"
+        )));
     }
     attempt
         .placement
         .ok_or_else(|| conflict("missing placement progress"))?
         .expectation(&request)?;
     Ok(request)
+}
+
+fn saved_phase(request: &Request, prepared: &PreparedPlacement) -> Result<PlacementPhase> {
+    validate_prepared(request, prepared)?;
+    Ok(PlacementPhase::ResultSaved {
+        saved: Box::new(SavedPlacement {
+            prepared: prepared.clone(),
+            result: public_result(request, prepared),
+            disposition: intent(prepared),
+        }),
+    })
 }
 
 fn public_result(request: &Request, prepared: &PreparedPlacement) -> Value {
@@ -186,6 +212,18 @@ fn validate_prepared(request: &Request, prepared: &PreparedPlacement) -> Result<
         || launch.host != prepared.grant.envelope.host.id
         || request.branch.is_some() != launch.preparation.is_some()
         || launch.unit.is_some()
+        || launch.owner != request.owner
+        || launch.owner_host != request.owner_host
+        || launch.workspace_name != request.workspace_name
+        || launch.terminal.is_some()
+        || launch.workspace
+            != prepared
+                .grant
+                .envelope
+                .host
+                .is_local()
+                .then(|| request.workspace.clone())
+                .flatten()
     {
         return Err(conflict("prepared placement identity changed"));
     }
@@ -196,6 +234,14 @@ fn validate_prepared(request: &Request, prepared: &PreparedPlacement) -> Result<
                 || envelope.request_id != request.id
                 || Some(&envelope.branch) != request.branch.as_ref()
                 || envelope.base != request.base
+                || request.repository.as_ref().is_none_or(|repo| {
+                    envelope.repo
+                        != if prepared.grant.envelope.host.is_local() {
+                            repo.path.clone()
+                        } else {
+                            repo.relative.clone()
+                        }
+                })
                 || binding.request_id != request.id
                 || binding.claim.request_id != request.id
                 || binding.request.1 != envelope.branch
@@ -216,7 +262,8 @@ fn validate_prepared(request: &Request, prepared: &PreparedPlacement) -> Result<
         (None, None)
             if request.branch.is_none()
                 && launch.pane.is_none()
-                && launch.preparation_protocol.is_none() => {}
+                && launch.preparation_protocol.is_none()
+                && (request.repository.is_some() || launch.cwd == request.cwd) => {}
         _ => return Err(conflict("impossible placement preparation state")),
     }
     Ok(())
@@ -265,7 +312,7 @@ fn prepare_selected(
     request: &Request,
     attempt: &mut Attempt,
     grant: &crate::node::PlacementGrant,
-    transport: Option<crate::node::PlacementReplay>,
+    transport: Option<&crate::node::PlacementReplay>,
     selected_now: bool,
 ) -> Result<PlacementPhase> {
     let attempts = fleet.ledger.child("admissions");
@@ -294,7 +341,9 @@ fn prepare_selected(
             if !selected_now {
                 let query = LookupRequest {
                     version: disposition::VERSION,
-                    placement: transport.ok_or_else(|| conflict("missing placement grant"))?,
+                    placement: transport
+                        .cloned()
+                        .ok_or_else(|| conflict("missing placement grant"))?,
                     preparation: preparation.clone(),
                     binding: None,
                 };
@@ -304,7 +353,6 @@ fn prepare_selected(
                     ));
                 }
             }
-            crate::checkout::ensure(fleet, host, repo).map_err(prelaunch_error)?;
             let grant = grant.clone();
             attempt
                 .placement
@@ -315,8 +363,11 @@ fn prepare_selected(
                 preparation: preparation.clone(),
             };
             attempts.write(&file, attempt)?;
-            // Only the first delivery may create. Recovery below is lookup-only.
-            let prepared = prepare::deliver(fleet, host, &preparation).map_err(prelaunch_error)?;
+            crate::checkout::ensure(fleet, host, repo).map_err(prelaunch_error)?;
+            // A replay carries the same acknowledged grant, never a capacity request.
+            let replay = transport.ok_or_else(|| conflict("missing acknowledged grant"))?;
+            let prepared = prepare::deliver_placement(fleet, host, &preparation, replay)
+                .map_err(prelaunch_error)?;
             crate::unit_request::crash_point("placement-preparation-received");
             let launch = prepared_launch(fleet, request, host, None, prepared)?;
             PlacementPhase::Prepared {
@@ -356,9 +407,38 @@ fn recover_prepared(
         LookupState::ReceiptOnly {
             outcome: LookupOutcome::Prepared { prepared },
         } => prepared,
+        LookupState::Absent => {
+            let repo = request
+                .repository
+                .as_ref()
+                .ok_or_else(|| conflict("missing original checkout envelope"))?;
+            crate::checkout::ensure(fleet, &grant.envelope.host, repo).map_err(prelaunch_error)?;
+            prepare::deliver_placement(fleet, &grant.envelope.host, preparation, &query.placement)
+                .map_err(prelaunch_error)?
+        }
         LookupState::ReceiptOnly {
-            outcome: LookupOutcome::Failed { failure },
-        } => return Err(failure.restore()),
+            outcome: LookupOutcome::Failed { failure, binding },
+        } => {
+            return failed_phase(grant, preparation, failure, binding, None);
+        }
+        LookupState::Disposition {
+            outcome: LookupOutcome::Failed { failure, binding },
+            receipt,
+        } => {
+            return failed_phase(grant, preparation, failure, binding, Some(&receipt.request));
+        }
+        LookupState::Mismatch => {
+            return Err(conflict(&format!(
+                "request {} placement grant or preparation binding changed; no dispatch",
+                request.id
+            )));
+        }
+        LookupState::UnsupportedVersion => {
+            return Err(conflict(&format!(
+                "request {} has unsupported preparation evidence; no dispatch",
+                request.id
+            )));
+        }
         _ => {
             return Err(conflict(&format!(
                 "request {} preparation remains unresolved on {}; inspect the saved host receipt",
@@ -377,12 +457,99 @@ fn recover_prepared(
     })
 }
 
+fn failed_phase(
+    grant: &crate::node::PlacementGrant,
+    preparation: &Envelope,
+    failure: crate::error::RetainedFailure,
+    binding: Option<Box<disposition::Binding>>,
+    saved: Option<&disposition::Request>,
+) -> Result<PlacementPhase> {
+    let disposition = binding.map(|binding| disposition::Request {
+        version: disposition::VERSION,
+        binding: *binding,
+        policy: disposition::Policy::Prohibit {
+            basis: disposition::Basis::PreparationFailed,
+        },
+        outcome: disposition::Outcome::NotStarted,
+    });
+    if saved.is_some_and(|saved| Some(saved) != disposition.as_ref()) {
+        return Err(conflict("preparation failure disposition changed"));
+    }
+    Ok(PlacementPhase::PreparationFailed {
+        failed: Box::new(FailedPlacement {
+            grant: grant.clone(),
+            preparation: preparation.clone(),
+            failure,
+            disposition,
+            acknowledgement: None,
+        }),
+    })
+}
+
+fn finish_failure(fleet: &Fleet, request: &Request, mut attempt: Attempt) -> Result<Option<Value>> {
+    let PlacementPhase::PreparationFailed { failed } = &mut attempt
+        .placement
+        .as_mut()
+        .ok_or_else(|| conflict("missing placement progress"))?
+        .phase
+    else {
+        return Err(conflict("missing preparation failure"));
+    };
+    let envelope = &failed.preparation;
+    if envelope.version != disposition::VERSION
+        || envelope.request_id != request.id
+        || Some(&envelope.branch) != request.branch.as_ref()
+        || envelope.base != request.base
+        || failed.failure.request_id.as_deref() != Some(request.id.as_str())
+    {
+        return Err(conflict("preparation failure identity changed"));
+    }
+    if let Some(intent) = &failed.disposition {
+        if intent.version != disposition::VERSION
+            || intent.binding.request_id != request.id
+            || intent.binding.claim.request_id != request.id
+            || intent.binding.claim.tree.identity.is_none()
+            || intent.binding.prepared.is_some()
+            || intent.binding.request.1 != envelope.branch
+            || intent.binding.request.2 != envelope.base
+            || intent.policy
+                != (disposition::Policy::Prohibit {
+                    basis: disposition::Basis::PreparationFailed,
+                })
+            || intent.outcome != disposition::Outcome::NotStarted
+        {
+            return Err(conflict("failure disposition identity changed"));
+        }
+        if let Some(ack) = &failed.acknowledgement {
+            prepare::validate_ack(intent, ack)?;
+        } else {
+            failed.acknowledgement = Some(prepare::dispose(
+                fleet,
+                &failed.grant.envelope.host,
+                intent,
+            )?);
+        }
+    } else if failed.acknowledgement.is_some() {
+        return Err(conflict("unbound failure acknowledgement"));
+    }
+    let error = failed.failure.restore();
+    fleet
+        .ledger
+        .child("admissions")
+        .write(&format!("{}.json", request.id), &attempt)?;
+    Err(error)
+}
+
 fn observe(
     fleet: &Fleet,
     request: &Request,
     attempt: &Attempt,
 ) -> Result<Option<crate::node::PlacementReplay>> {
-    if attempt.request != serde_json::to_value(request)? || attempt.unit.is_some() {
+    if attempt.request != serde_json::to_value(request)?
+        || attempt.unit.is_some()
+        || attempt.launch.is_some()
+        || attempt.result.is_some()
+    {
         return Err(conflict("placement admission changed"));
     }
     let progress = attempt
@@ -390,11 +557,19 @@ fn observe(
         .as_ref()
         .ok_or_else(|| conflict("missing placement progress"))?;
     let transport = progress.expectation(request)?;
+    if transport
+        .as_ref()
+        .is_none_or(|t| t.expected_grant.is_none())
+        && attempt.host.is_some()
+    {
+        return Err(conflict("unselected placement has a host"));
+    }
     if let Some(transport) = &transport
-        && (attempt
-            .host
-            .as_ref()
-            .is_some_and(|h| *h != transport.envelope.host)
+        && ((transport.expected_grant.is_some()
+            && attempt
+                .host
+                .as_ref()
+                .is_none_or(|h| *h != transport.envelope.host))
             || *fleet.find(&transport.envelope.host.id)? != transport.envelope.host)
     {
         return Err(conflict("selected placement host or target changed"));
@@ -434,7 +609,7 @@ pub(super) fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Opti
                     request,
                     &mut attempt,
                     &grant,
-                    transport,
+                    transport.as_ref(),
                     selected_now,
                 )?
             }
@@ -442,17 +617,10 @@ pub(super) fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Opti
                 ref grant,
                 ref preparation,
             } => recover_prepared(fleet, request, grant, preparation, transport)?,
-            PlacementPhase::Prepared { ref prepared } => {
-                validate_prepared(request, prepared)?;
-                let saved = SavedPlacement {
-                    prepared: *prepared.clone(),
-                    result: public_result(request, prepared),
-                    disposition: intent(prepared),
-                };
-                PlacementPhase::ResultSaved {
-                    saved: Box::new(saved),
-                }
+            PlacementPhase::PreparationFailed { .. } => {
+                return finish_failure(fleet, request, attempt);
             }
+            PlacementPhase::Prepared { ref prepared } => saved_phase(request, prepared)?,
             PlacementPhase::ResultSaved { ref saved } => {
                 validate_saved(request, saved)?;
                 let ack = if let Some(intent) = &saved.disposition {

@@ -1263,6 +1263,7 @@ pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
 /// queue it.
 pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     record_request_validity(fleet.ledger, request)?;
+    launch_test_barrier("PLACEMENT_BEFORE_ADMISSION")?;
     let attempts = fleet.ledger.child("admissions");
     attempts.with_lock(&request.id, || {
         if !placement::reserved(&attempts, request)? && waits_behind(fleet, request)? {
@@ -1869,6 +1870,7 @@ fn transient_ssh(error: &Error) -> bool {
 
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     let reports = fleet.status(now)?;
+    launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {
         crate::unit_request::recover(fleet.ledger, now)?;
         admit(fleet, now)?;

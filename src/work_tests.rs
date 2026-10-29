@@ -570,6 +570,47 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
 }
 
 #[test]
+fn placement_resume_skips_its_own_ticket_but_unreserved_work_waits() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
+    let shell = Fake::new();
+    let policy = Policy {
+        memory_reserve_bytes: 0,
+        ..Policy::default()
+    };
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local()],
+    };
+    ledger.write("host.json", &snapshot(100)).unwrap();
+    let request = place_request("resume-own-ticket");
+    work::enqueue(&ledger, request.clone(), false, 100).unwrap();
+    assert!(!work::waits_behind(&fleet, &request).unwrap());
+    let result = work::submit(&fleet, &request, 100).unwrap().unwrap();
+    let other = place_request("other-pending");
+    work::enqueue(&ledger, other.clone(), false, 101).unwrap();
+    assert!(work::waits_behind(&fleet, &request).unwrap());
+    assert_eq!(work::submit(&fleet, &request, 101).unwrap(), Some(result));
+    let newcomer = place_request("unreserved-newcomer");
+    let before = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    assert!(work::submit(&fleet, &newcomer, 101).unwrap().is_none());
+    assert_eq!(
+        std::fs::read(ledger.dir.join("placements.json")).unwrap(),
+        before
+    );
+    let resumed = work::resume_placement(&ledger, &newcomer.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(resumed).unwrap(),
+        serde_json::to_value(newcomer).unwrap()
+    );
+    assert_eq!(work::queue(&ledger).unwrap().len(), 2);
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
 fn placement_admission_never_downgrades_missing_or_newer_progress() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     let shell = Fake::new();

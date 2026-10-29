@@ -188,12 +188,14 @@ fn remote_preparation_accepts_owning_hosts_symlink_equivalence() {
     use std::os::unix::fs::symlink;
     let (rig, repo) = short_disposition_rig("remote-symlink");
     rig.peer();
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    rig.snapshot("peer-state/host.json", rig.origin_ms, 0.0, 16);
     let storage = rig.dir.join("trees");
     fs::create_dir_all(&storage).unwrap();
     symlink(&storage, repo.join(".worktrees")).unwrap();
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     let handler = format!(
-        r#"  *'host prepare '*|*'host prepared '*)
+        r#"  *'host reserve '*|*'host prepare '*|*'host prepared '*)
     for remote do :; done
     remote=${{remote#* host }}
     DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" > "$RIG/peer-output" 2> "$RIG/peer-error"
