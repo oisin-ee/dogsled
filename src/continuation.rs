@@ -26,7 +26,7 @@ use crate::error::{Error, Result};
 use crate::inbox::{Record, Sender, Sent, State};
 use crate::ledger::Ledger;
 use crate::probe::Agent;
-use crate::unit_transport::{ExecutionRef, Seed, conflict, digest_hex};
+use crate::unit_transport::{ExecutionRef, conflict, digest_hex};
 use crate::work::{Attempt, Launch, Request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -490,9 +490,12 @@ fn admission(ledger: &Ledger, id: &str, owner: &str, pane: &str, launch: &Value)
     if committed.execution != execution {
         return Err(invalid("the committed execution changed"));
     }
-    committed
-        .exported
-        .validate(&committed.binding, &unit.origin, &unit.execution)?;
+    crate::unit_transport::validate_export(
+        &committed.exported,
+        &committed.binding,
+        &unit.origin,
+        &unit.execution,
+    )?;
     if !attempt
         .host
         .as_ref()
@@ -513,7 +516,7 @@ fn admission(ledger: &Ledger, id: &str, owner: &str, pane: &str, launch: &Value)
         return Err(invalid("the saved launch does not equal the host launch"));
     }
     let saved: Launch = serde_json::from_value(launch.clone())?;
-    if saved.unit != Some(Seed::from(committed.clone())) {
+    if saved.unit != Some(crate::unit_transport::seed_from_commit(committed.clone())) {
         return Err(invalid(
             "the committed envelope does not equal the launch seed",
         ));

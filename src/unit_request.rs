@@ -70,7 +70,7 @@ fn records(ledger: &Ledger) -> Result<Vec<String>> {
 }
 
 pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Result<ExecutionRef> {
-    input.origin.validate()?;
+    crate::unit_transport::validate_origin(&input.origin)?;
     if tool_call_id.is_empty() {
         return Err(conflict("tool-call-id must be nonempty"));
     }
@@ -231,9 +231,12 @@ fn commit_using(
                 return Err(conflict("committed payload changed"));
             }
         } else {
-            let profile = input
-                .exported
-                .validate(&input.binding, &unit.origin, &unit.execution)?;
+            let profile = crate::unit_transport::validate_export(
+                &input.exported,
+                &input.binding,
+                &unit.origin,
+                &unit.execution,
+            )?;
             let mut request: Request = serde_json::from_value(attempt.request.clone())?;
             request.action = crate::runtime::agent_action(
                 fleet,
@@ -753,8 +756,8 @@ fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refus
             .unit
             .as_ref()
             .ok_or_else(|| conflict("refusal seed missing"))?;
-        seed.validate(&receipt.launch.id, &receipt.launch.owner)?;
-        if seed != &crate::unit_transport::Seed::from(committed.clone())
+        crate::unit_transport::validate_seed(seed, &receipt.launch.id, &receipt.launch.owner)?;
+        if seed != &crate::unit_transport::seed_from_commit(committed.clone())
             || seed.execution != unit.execution
             || seed.binding.contract != unit.origin
             || unit.returned.is_some()
@@ -820,8 +823,8 @@ fn import_stopped(ledger: &Ledger, file: &str, stopped: crate::unit_reply::Stopp
             .unit
             .as_ref()
             .ok_or_else(|| conflict("stop seed missing"))?;
-        seed.validate(&stopped.launch.id, &stopped.launch.owner)?;
-        if seed != &crate::unit_transport::Seed::from(committed.clone())
+        crate::unit_transport::validate_seed(seed, &stopped.launch.id, &stopped.launch.owner)?;
+        if seed != &crate::unit_transport::seed_from_commit(committed.clone())
             || seed.execution != unit.execution
             || seed.binding.contract != unit.origin
             || unit.abandoned.is_some()
@@ -835,6 +838,7 @@ fn import_stopped(ledger: &Ledger, file: &str, stopped: crate::unit_reply::Stopp
             event_id: format!("{}-stopped", unit.execution.request_id),
             binding: committed.binding.clone(),
             result: crate::unit_transport::ReturnedResult::Stopped {
+                evidence: None,
                 reason: stopped.reason,
             },
         };
@@ -1203,8 +1207,10 @@ mod stopped_tests {
     const ID: &str = "r-1792657889925-39225-0";
 
     fn export() -> Value {
-        let fixtures: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/unit-exports.json")).unwrap();
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../crates/todo-core/tests/fixtures/unit-exports.json"
+        ))
+        .unwrap();
         let mut export: Value =
             serde_json::from_str(fixtures[0]["canonical"].as_str().unwrap()).unwrap();
         export["digest"] = fixtures[0]["digest"].clone();

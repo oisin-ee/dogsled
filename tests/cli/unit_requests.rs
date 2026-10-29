@@ -1,8 +1,10 @@
 use super::*;
 
 pub(super) fn exported(index: usize) -> Value {
-    let fixtures: Value =
-        serde_json::from_str(include_str!("../fixtures/unit-exports.json")).unwrap();
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../crates/todo-core/tests/fixtures/unit-exports.json"
+    ))
+    .unwrap();
     let mut value: Value =
         serde_json::from_str(fixtures[index]["canonical"].as_str().unwrap()).unwrap();
     value["digest"] = fixtures[index]["digest"].clone();
@@ -569,8 +571,10 @@ fn uuid_unit_names_fit_native_limits_and_native_collisions_stay_final() {
     use std::fmt::Write as _;
     for collision in [false, true] {
         let rig = rig(&format!("unit-native-name-{collision}"), false);
-        let fixtures: Value =
-            serde_json::from_str(include_str!("../fixtures/unit-exports.json")).unwrap();
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../crates/todo-core/tests/fixtures/unit-exports.json"
+        ))
+        .unwrap();
         let canonical = fixtures[0]["canonical"]
             .as_str()
             .unwrap()
@@ -646,8 +650,10 @@ fn task_domain_policy_is_not_validated_by_dogsled() {
 
     let rig = rig("unit-policy-boundary", true);
     let execution = prepare(&rig);
-    let fixtures: Value =
-        serde_json::from_str(include_str!("../fixtures/unit-exports.json")).unwrap();
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../../crates/todo-core/tests/fixtures/unit-exports.json"
+    ))
+    .unwrap();
     let canonical = fixtures[0]["canonical"]
         .as_str()
         .unwrap()

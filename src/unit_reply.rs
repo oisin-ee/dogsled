@@ -70,7 +70,7 @@ pub fn capture(
     ack: &TerminalAck,
     path: &str,
 ) -> Result<Receipt> {
-    seed.validate(&launch.id, &launch.owner)?;
+    crate::unit_transport::validate_seed(seed, &launch.id, &launch.owner)?;
     if ack.execution != seed.execution
         || ack.unit_ref != seed.binding.contract
         || ack.digest != seed.exported.digest

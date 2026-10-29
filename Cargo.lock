@@ -1369,6 +1369,7 @@ dependencies = [
  "signal-hook 0.4.5",
  "similar",
  "thiserror 2.0.21",
+ "todo-core",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -4117,6 +4118,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 name = "todo-core"
 version = "0.0.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.1",

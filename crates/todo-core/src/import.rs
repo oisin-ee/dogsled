@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Executor-owned transport; task semantics are validated here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "wasm", derive(tsify::Tsify))]
 #[serde(deny_unknown_fields)]
 pub struct Seed {

@@ -8,30 +8,10 @@ use std::fmt::Write as _;
 
 use crate::error::{Error, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct UnitRef {
-    pub session_id: String,
-    pub unit_id: String,
-    pub revision: u64,
-    pub contract_entry_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ExecutionRef {
-    pub executor: String,
-    pub owner_id: String,
-    pub request_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Binding {
-    pub contract: UnitRef,
-    pub execution: ExecutionRef,
-    pub export_digest: String,
-}
+pub use todo_core::{
+    Assignment, BoundResult as ReturnedResult, EvidenceRef as Evidence, ExecutionRef, Seed,
+    TaskBinding as Binding, TaskExport as Export, UnitRef, UnstartedResult as NotStartedResult,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -44,140 +24,67 @@ pub struct Placement {
     pub base: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Assignment {
-    #[serde(rename = "self")]
-    Self_,
-    Worker {
-        profile: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Scope {
-    pub repository_id: String,
-    pub owns: Vec<String>,
-    pub reads: Vec<String>,
-    pub generates: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Acceptance {
-    Command {
-        cwd: String,
-        argv: Vec<String>,
-        expected: String,
-    },
-    Review {
-        artifact: String,
-        criterion: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Contract {
-    #[serde(rename = "ref")]
-    pub reference: UnitRef,
-    pub title: String,
-    pub deliverable: String,
-    pub scope: Scope,
-    pub acceptance: Acceptance,
-    pub depends_on: Vec<String>,
-    pub assignment: Assignment,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Prerequisite {
-    pub unit_id: String,
-    pub completed_revision: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Export {
-    pub version: u64,
-    pub provider: String,
-    pub contract: Contract,
-    pub prerequisites: Vec<Prerequisite>,
-    pub brief: String,
-    pub digest: String,
-}
-
-impl Export {
-    /// Struct declaration order is the v1 canonical projection, recursively. Never hash a
-    /// Value map: its sorted keys differ from the provider's declared projection order.
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
-        #[derive(Serialize)]
-        struct Projection<'a> {
-            version: u64,
-            provider: &'a str,
-            contract: &'a Contract,
-            prerequisites: &'a [Prerequisite],
-            brief: &'a str,
-        }
-        Ok(serde_json::to_vec(&Projection {
-            version: self.version,
-            provider: &self.provider,
-            contract: &self.contract,
-            prerequisites: &self.prerequisites,
-            brief: &self.brief,
-        })?)
+/// Struct declaration order is the v1 canonical projection, recursively. Never hash a
+/// Value map: its sorted keys differ from the provider's declared projection order.
+pub fn canonical_export(export: &Export) -> Result<String> {
+    todo_core::ExportData {
+        version: export.version,
+        provider: export.provider.clone(),
+        contract: export.contract.clone(),
+        prerequisites: export.prerequisites.clone(),
+        brief: export.brief.clone(),
     }
+    .canonical()
+    .map_err(|error| Error::Invalid(error.to_string()))
+}
 
-    pub fn validate(
-        &self,
-        binding: &Binding,
-        origin: &UnitRef,
-        execution: &ExecutionRef,
-    ) -> Result<&str> {
-        origin.validate()?;
-        if self.version != 1 || self.provider != "pi-todo" {
-            return Err(conflict("unsupported task export envelope"));
+pub fn validate_export<'a>(
+    export: &'a Export,
+    binding: &Binding,
+    origin: &UnitRef,
+    execution: &ExecutionRef,
+) -> Result<&'a str> {
+    validate_origin(origin)?;
+    if export.version != 1 || export.provider != "pi-todo" {
+        return Err(conflict("unsupported task export envelope"));
+    }
+    if binding.contract != *origin
+        || export.contract.r#ref != *origin
+        || binding.execution != *execution
+    {
+        return Err(conflict(
+            "export, binding, and prepared request do not match",
+        ));
+    }
+    let digest = todo_core::export_digest(&canonical_export(export)?)
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+    if export.digest != digest || binding.export_digest != digest {
+        return Err(conflict("export digest does not match"));
+    }
+    for prerequisite in &export.prerequisites {
+        if prerequisite.unit_id.is_empty() || prerequisite.completed_revision == 0 {
+            return Err(conflict("invalid prerequisite correlation"));
         }
-        if binding.contract != *origin
-            || self.contract.reference != *origin
-            || binding.execution != *execution
-        {
-            return Err(conflict(
-                "export, binding, and prepared request do not match",
-            ));
-        }
-        let digest = digest_hex(&self.canonical_bytes()?);
-        if self.digest != digest || binding.export_digest != digest {
-            return Err(conflict("export digest does not match"));
-        }
-        for prerequisite in &self.prerequisites {
-            if prerequisite.unit_id.is_empty() || prerequisite.completed_revision == 0 {
-                return Err(conflict("invalid prerequisite correlation"));
-            }
-        }
-        match &self.contract.assignment {
-            Assignment::Worker { profile } if !profile.is_empty() => Ok(profile),
-            _ => Err(Error::Invalid(
-                "PROFILE_INVALID: a worker profile is required".into(),
-            )),
-        }
+    }
+    match &export.contract.assignment {
+        Assignment::Worker { profile } if !profile.is_empty() => Ok(profile),
+        _ => Err(Error::Invalid(
+            "PROFILE_INVALID: a worker profile is required".into(),
+        )),
     }
 }
 
-impl UnitRef {
-    pub fn validate(&self) -> Result<()> {
-        if self.session_id.is_empty()
-            || self.unit_id.is_empty()
-            || self.contract_entry_id.is_empty()
-            || self.revision == 0
-        {
-            return Err(conflict(
-                "unit reference IDs must be nonempty and revision positive",
-            ));
-        }
-        Ok(())
+pub fn validate_origin(origin: &UnitRef) -> Result<()> {
+    if origin.session_id.is_empty()
+        || origin.unit_id.is_empty()
+        || origin.contract_entry_id.is_empty()
+        || origin.revision == 0
+    {
+        return Err(conflict(
+            "unit reference IDs must be nonempty and revision positive",
+        ));
     }
+    Ok(())
 }
 
 /// Bounded native launch label, not an identity or authorization token. Full binding
@@ -215,39 +122,29 @@ pub struct CommitInput {
     pub exported: Export,
 }
 
-/// Exact durable host artifact; no task semantics are interpreted here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Seed {
-    pub version: u64,
-    pub execution: ExecutionRef,
-    pub binding: Binding,
-    pub exported: Export,
-}
-
-impl From<CommitInput> for Seed {
-    fn from(input: CommitInput) -> Self {
-        Self {
-            version: 1,
-            execution: input.execution,
-            binding: input.binding,
-            exported: input.exported,
-        }
+pub fn seed_from_commit(input: CommitInput) -> Seed {
+    Seed {
+        version: 1,
+        execution: input.execution,
+        binding: input.binding,
+        exported: input.exported,
     }
 }
 
-impl Seed {
-    pub fn validate(&self, id: &str, owner: &str) -> Result<&str> {
-        if self.version != 1
-            || self.execution.executor != "dogsled"
-            || self.execution.request_id != id
-            || self.execution.owner_id != owner
-        {
-            return Err(conflict("seed does not match launch identity"));
-        }
-        self.exported
-            .validate(&self.binding, &self.binding.contract, &self.execution)
+pub fn validate_seed<'a>(seed: &'a Seed, id: &str, owner: &str) -> Result<&'a str> {
+    if seed.version != 1
+        || seed.execution.executor != "dogsled"
+        || seed.execution.request_id != id
+        || seed.execution.owner_id != owner
+    {
+        return Err(conflict("seed does not match launch identity"));
     }
+    validate_export(
+        &seed.exported,
+        &seed.binding,
+        &seed.binding.contract,
+        &seed.execution,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,31 +159,11 @@ pub struct TerminalAck {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Evidence {
-    pub execution: ExecutionRef,
-    pub result_id: String,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Returned {
     pub version: u64,
     pub event_id: String,
     pub binding: Binding,
     pub result: ReturnedResult,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReturnedResult {
-    Returned {
-        evidence: Evidence,
-    },
-    /// The host proved the worker ended without a sealed reply.
-    Stopped {
-        reason: String,
-    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,12 +226,6 @@ pub struct NotStarted {
     pub result: NotStartedResult,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum NotStartedResult {
-    NotStarted { reason: String },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,7 +235,7 @@ mod tests {
         let origin = UnitRef {
             session_id: "01a15a42-78ee-7513-8f13-5005bbbeaf7c".into(),
             unit_id: "u-6ce8048d-2317-4b7e-988e-cf6591d1b7a0-1".into(),
-            revision: u64::MAX,
+            revision: u32::MAX,
             contract_entry_id: "入口🙂".into(),
         };
         let execution = ExecutionRef {
@@ -373,7 +244,7 @@ mod tests {
             request_id: "r-1792515815179-47198-0".into(),
         };
         // Independent Python hashlib SHA256 of the ordered UTF-8 JSON tuple.
-        let expected = "u-9434db3875758021e0c33aa2c9f747";
+        let expected = "u-10d4395753ff76990ac04f309e8f17";
         assert_eq!(agent_name(&origin, &execution).unwrap(), expected);
         assert_eq!(agent_name(&origin, &execution).unwrap(), expected);
         let mut names = std::collections::BTreeSet::from([expected.to_owned()]);
@@ -406,16 +277,18 @@ mod tests {
 
     #[test]
     fn canonical_bytes_match_javascript_fixtures() {
-        let fixtures: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/unit-exports.json")).unwrap();
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../crates/todo-core/tests/fixtures/unit-exports.json"
+        ))
+        .unwrap();
         for fixture in fixtures.as_array().unwrap() {
             let canonical = fixture["canonical"].as_str().unwrap();
             let mut value: serde_json::Value = serde_json::from_str(canonical).unwrap();
             value["digest"] = fixture["digest"].clone();
             let export: Export = serde_json::from_value(value).unwrap();
-            assert_eq!(export.canonical_bytes().unwrap(), canonical.as_bytes());
+            assert_eq!(canonical_export(&export).unwrap(), canonical);
             assert_eq!(
-                digest_hex(&export.canonical_bytes().unwrap()),
+                todo_core::export_digest(&canonical_export(&export).unwrap()).unwrap(),
                 export.digest
             );
         }
