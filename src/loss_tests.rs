@@ -135,6 +135,33 @@ impl Drop for Repo {
 }
 
 #[test]
+fn recovery_holds_a_detached_tip_but_never_proves_a_merge() {
+    let repo = Repo::new();
+    git(&repo.tree, &["checkout", "--detach"]);
+    repo.commit();
+    let head = git(&repo.tree, &["rev-parse", "HEAD"]);
+    let saved =
+        crate::preservation::snapshot(&crate::shell::System::default(), &repo.tree).unwrap();
+    let evidence = Evidence::keeping_recovery(repo.repo.to_str().unwrap(), &saved);
+    let assessed = evidence
+        .assess(&System, head.trim(), Some(repo.tree.to_str().unwrap()))
+        .unwrap();
+    assert_eq!(assessed.held, Some(Held::Recovery));
+    assert!(assessed.loses_nothing());
+    assert!(!assessed.landed());
+    let ordinary = repo.evidence().assess(&System, head.trim(), None).unwrap();
+    assert!(ordinary.held.is_none());
+    git(&repo.repo, &["update-ref", &saved.ref_name, "HEAD"]);
+    assert!(
+        evidence
+            .assess(&System, head.trim(), None)
+            .unwrap()
+            .held
+            .is_none()
+    );
+}
+
+#[test]
 fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
     let mut repo = Repo::new();
     let nested = repo.repo.join(".worktrees/feature");
@@ -875,6 +902,25 @@ struct ShellIn {
 }
 
 impl Shell for ShellIn {
+    fn run_input_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        crate::shell::System::default().run_input_bounded(program, args, input, timeout)
+    }
+
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<crate::shell::BytesOutput> {
+        crate::shell::System::default().run_bytes_bounded(program, args, timeout)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         let value = if program == "herdr" && args == ["pane", "list"] {
             Some(serde_json::json!({"result":{"panes":[
@@ -1430,6 +1476,25 @@ impl LifecycleShell {
 }
 
 impl Shell for LifecycleShell {
+    fn run_input_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<Output> {
+        crate::shell::System::default().run_input_bounded(program, args, input, timeout)
+    }
+
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<crate::shell::BytesOutput> {
+        crate::shell::System::default().run_bytes_bounded(program, args, timeout)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         use std::sync::atomic::Ordering::SeqCst;
         if program == "git"

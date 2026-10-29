@@ -150,14 +150,11 @@ fn perform(
             let pane = card
                 .pane
                 .ok_or_else(|| Error::Invalid("no pane to close".into()))?;
-            crate::close::local(
-                &shell,
-                ledger,
-                &pane,
-                &crate::close::Caller::from_env(),
-                crate::close::Guard::Clean,
-            )?;
-            Ok(format!("Closed {}", card.name))
+            let fleet = Fleet::discover(&shell, ledger, policy, home.to_owned())?;
+            let (closed, label) = crate::runtime::close(&fleet, &pane, Some("local"))?;
+            Ok(crate::runtime::closed_line(&closed, &label)
+                .trim_end()
+                .to_owned())
         }
         Effect::CloseDock => {
             let socket = crate::herdr_socket::Client::from_env()?;

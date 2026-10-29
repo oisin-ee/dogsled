@@ -388,6 +388,24 @@ fn mcp_lists_the_tools_with_their_schemas() {
 }
 
 #[test]
+fn p3_close_and_read_keep_the_same_recovery_without_task_completion() {
+    let (rig, tree) = preservation::p3_rig("p3-mcp-close");
+    fs::write(tree.join("draft"), b"abandoned work\n").unwrap();
+    let mut client = Client::start(&rig);
+    let (closed, failed) = client.call("close", &json!({"pane":"w2:p1"}));
+    assert!(!failed, "{closed}");
+    assert!(closed["recovery"]["id"].is_string(), "{closed}");
+    assert!(!tree.exists());
+    let (read, failed) = client.call("read", &json!({"target":"p3-child"}));
+    assert!(!failed, "{read}");
+    assert_eq!(read["recovery"], closed["recovery"]);
+    let item = &rig.read("state/items.json")[0];
+    assert_ne!(item["native_done"], true);
+    assert!(item["reply"].is_null());
+    assert!(!rig.dir.join("state/done.json").exists());
+}
+
+#[test]
 fn mcp_custody_tools_claim_and_accept_without_completing_the_item() {
     let rig = super::claim::rig("mcp-custody", "w9:p9");
     super::claim::returned(&rig);

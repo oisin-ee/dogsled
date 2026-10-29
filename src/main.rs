@@ -592,26 +592,36 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             pane,
             pushed,
             stopped_orphan,
+            preservation_request,
             landed,
             writer,
         } => {
-            let closed = if let Some(episode) = stopped_orphan {
-                close::stopped_orphan(
-                    node.shell,
-                    node.ledger,
-                    &pane,
-                    &close::Caller::default(),
-                    &serde_json::from_str(&episode)?,
-                )?
-            } else {
-                close::local(
-                    node.shell,
-                    node.ledger,
-                    &pane,
-                    &close::Caller::default(),
-                    close::Guard::from_flags(pushed, landed, writer),
-                )?
-            };
+            let episode = stopped_orphan
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let request = preservation_request
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let mode = episode.as_ref().map_or_else(
+                || close::Guard::from_flags(pushed, landed, writer),
+                |episode| close::Guard::StoppedOrphan { episode },
+            );
+            let closed = close::with_request(
+                node.shell,
+                node.ledger,
+                &pane,
+                &close::Caller::default(),
+                close::Options {
+                    guard: mode,
+                    request: request.as_ref(),
+                },
+                |closed| {
+                    items::saved_close(node.ledger, hosts::LOCAL, &closed)?;
+                    Ok(closed)
+                },
+            )?;
             print(true, &closed, String::new)?;
         }
         HostCommand::Parent { pane } => {

@@ -1540,6 +1540,15 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = pane_holds(usage, seen, decider);
+    if !matches!(
+        decider,
+        Decider::Close {
+            guard: crate::close::Guard::Clean | crate::close::Guard::StoppedOrphan { .. }
+        }
+    ) && let Some(reason) = crate::preservation::hold(node.ledger, tree)?
+    {
+        held.push(reason);
+    }
     // Reload under the final repository-protected check too, not just the survey.
     // Corrupt Job evidence propagates an error and cannot authorize removal.
     held.extend(
@@ -1595,10 +1604,10 @@ fn held(
             }
         )
     {
-        for item in items
-            .iter()
-            .filter(|i| seen.panes.iter().any(|p| p.pane_id == i.owner_pane))
-        {
+        for item in items.iter().filter(|i| {
+            seen.panes.iter().any(|p| p.pane_id == i.owner_pane)
+                && caller.pane.as_deref() != Some(i.owner_pane.as_str())
+        }) {
             held.push(format!("not landed by its owner {}", item.owner_pane));
         }
     }
