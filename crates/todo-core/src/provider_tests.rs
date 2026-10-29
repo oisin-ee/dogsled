@@ -136,6 +136,99 @@ fn exact_claim_replay_and_explicit_acceptance() {
     );
 }
 
+fn scoped_worker(content: &str, path: &str, generated: bool) -> Item {
+    let mut contract = pending().tasks[0].unit.as_ref().unwrap().draft.clone();
+    contract.scope = Some(Scope {
+        repository_id: "repo".to_owned(),
+        owns: if generated {
+            vec![]
+        } else {
+            vec![path.to_owned()]
+        },
+        reads: vec![],
+        generates: if generated {
+            vec![path.to_owned()]
+        } else {
+            vec![]
+        },
+    });
+    Item::Draft(Box::new(DraftItem {
+        content: content.to_owned(),
+        description: None,
+        key: None,
+        contract,
+    }))
+}
+
+#[test]
+fn held_workers_allow_equal_and_prefix_owned_and_generated_scopes() {
+    for (left, right) in [
+        ("src/", "src/"),
+        ("src/", "src/file.rs"),
+        ("src/file.rs", "src/"),
+    ] {
+        for (left_generated, right_generated) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut init = request(Operation::Init, "");
+            init.task = None;
+            init.items = Some(vec![
+                scoped_worker("First", left, left_generated),
+                scoped_worker("Second", right, right_generated),
+            ]);
+            let mut list = apply(TodoList::default(), init, &context()).unwrap().list;
+            for task in &mut list.tasks {
+                task.unit.as_mut().unwrap().reference.contract_entry_id = "entry".to_owned();
+            }
+            let first = claim(list.clone(), &input(&list, "first"), "session").unwrap();
+            let frozen = first.list.tasks[0].unit.as_ref().unwrap().clone();
+            let expected = first.list.tasks[1].unit.as_ref().unwrap().reference.clone();
+            let second = claim(
+                first.list,
+                &ClaimInput {
+                    expected,
+                    execution: execution("second"),
+                },
+                "session",
+            )
+            .unwrap();
+            assert!(second.persist, "overlapping claim is persisted");
+            assert_eq!(second.list.tasks[0].unit.as_ref(), Some(&frozen));
+            assert_eq!(
+                second.list.tasks[1].unit.as_ref().unwrap().binding.as_ref(),
+                Some(&second.value.binding),
+                "both worker bindings remain held"
+            );
+            assert_eq!(active(&second.list, "session").unwrap(), None);
+        }
+    }
+}
+
+#[test]
+fn local_work_can_overlap_a_held_worker_without_changing_its_binding() {
+    let list = pending();
+    let held = claim(list.clone(), &input(&list, "worker"), "session").unwrap();
+    let frozen = held.list.tasks[0].unit.as_ref().unwrap().clone();
+    let mut local = frozen.draft.clone();
+    local.assignment = Some(Assignment::Self_);
+    let mut append = request(Operation::Append, "");
+    append.task = None;
+    append.items = Some(vec![Item::Draft(Box::new(DraftItem {
+        content: "Local".to_owned(),
+        description: None,
+        key: Some("local".to_owned()),
+        contract: local,
+    }))]);
+    append.start = Some("local".to_owned());
+    let started = apply(held.list, append, &context()).unwrap().list;
+    assert_eq!(started.tasks[0].unit.as_ref(), Some(&frozen));
+    assert_eq!(started.tasks[1].status, Status::InProgress);
+    assert_eq!(
+        active(&started, "session").unwrap().unwrap().r#ref,
+        started.tasks[1].unit.as_ref().unwrap().reference
+    );
+}
+
 #[test]
 fn duplicate_event_cannot_clear_a_new_binding() {
     let list = pending();

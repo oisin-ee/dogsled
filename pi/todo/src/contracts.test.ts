@@ -138,7 +138,7 @@ describe("concurrent scope", () => {
           start: "first",
         }),
         nextId = rootId(list, second);
-      expect(() => test.call({ op: "start", task: nextId })).toThrow("SCOPE_CONFLICT");
+      expect(() => test.call({ op: "start", task: nextId })).toThrow("LOCAL_UNIT_ACTIVE");
       test.call({
         contract: Object.assign(contract(), {
           scope: { generates: [], owns: [], reads: ["src"], repositoryId: "repo" },

@@ -132,33 +132,6 @@ fn cycle<'a>(
     Ok(())
 }
 
-fn overlap(left: &str, right: &str) -> bool {
-    let left = left.trim_end_matches('/');
-    let right = right.trim_end_matches('/');
-    left == right
-        || left
-            .strip_prefix(right)
-            .is_some_and(|rest| rest.starts_with('/'))
-        || right
-            .strip_prefix(left)
-            .is_some_and(|rest| rest.starts_with('/'))
-}
-
-pub(crate) fn scope_conflict(left: &Unit, right: &Unit) -> bool {
-    match (&left.draft.scope, &right.draft.scope) {
-        (Some(left), Some(right)) if left.repository_id == right.repository_id => {
-            left.owns.iter().chain(&left.generates).any(|a| {
-                right
-                    .owns
-                    .iter()
-                    .chain(&right.generates)
-                    .any(|b| overlap(a, b))
-            })
-        }
-        _ => false,
-    }
-}
-
 pub(crate) fn prerequisites(list: &TodoList, unit: &Unit) -> Result<(), TodoError> {
     if unit.imported.is_some() {
         return Ok(()); // Frozen prerequisite evidence is validated with the import.
@@ -174,14 +147,6 @@ pub(crate) fn prerequisites(list: &TodoList, unit: &Unit) -> Result<(), TodoErro
         }
     }
     Ok(())
-}
-
-fn concurrent_error(left: &Unit, right: &Unit) -> TodoError {
-    error(if scope_conflict(left, right) {
-        "SCOPE_CONFLICT: active ownership overlaps"
-    } else {
-        "LOCAL_UNIT_ACTIVE: only one local executable unit is allowed"
-    })
 }
 
 fn held_binding(unit: &Unit, status: Status, leaf: bool) -> Result<(), TodoError> {
@@ -216,8 +181,7 @@ fn held_binding(unit: &Unit, status: Status, leaf: bool) -> Result<(), TodoError
 pub(crate) fn validate_units(list: &TodoList) -> Result<(), TodoError> {
     let entries = units(list);
     let mut graph = HashMap::new();
-    let mut active = None;
-    let mut held: Vec<&Unit> = vec![];
+    let mut local_active = false;
     for (unit, status, leaf) in &entries {
         nonempty(&unit.reference.unit_id)?;
         nonempty(&unit.reference.session_id)?;
@@ -242,16 +206,12 @@ pub(crate) fn validate_units(list: &TodoList) -> Result<(), TodoError> {
             }
             unit.contract("validation")?;
             prerequisites(list, unit)?;
-            if let Some(previous) = active {
-                return Err(concurrent_error(previous, unit));
+            if local_active {
+                return Err(error(
+                    "LOCAL_UNIT_ACTIVE: only one local executable unit is allowed",
+                ));
             }
-            active = Some(*unit);
-        }
-        if unit.binding.is_some() || unit.local_session_id.is_some() {
-            if held.iter().any(|other| scope_conflict(other, unit)) {
-                return Err(error("SCOPE_CONFLICT: active ownership overlaps"));
-            }
-            held.push(unit);
+            local_active = true;
         }
     }
     let mut done = HashSet::new();
