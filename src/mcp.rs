@@ -483,7 +483,9 @@ impl Server {
         .await
     }
 
-    #[tool(description = "Cancel a queued ticket before it starts.")]
+    #[tool(
+        description = "Prohibit future admission without stopping execution; completed admission is too late."
+    )]
     async fn cancel(&self, Parameters(args): Parameters<Id>) -> Result<String, String> {
         self.call(move |fleet| crate::work::cancel(fleet.ledger, &args.id))
             .await

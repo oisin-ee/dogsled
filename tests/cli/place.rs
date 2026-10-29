@@ -100,6 +100,84 @@ fn lookup_fixture(case: &str) -> (Rig, String, Value) {
     (rig, id, query)
 }
 
+fn assert_nonplacement_lookup(case: &str, state: &str, outcome: Option<&str>) {
+    let (rig, id, placement) = lookup_fixture(case);
+    let mut request = placement["placement"]["request"].clone();
+    request["action"] = json!({"type":"agent","kind":"pi","name":"lookup","message":"read only"});
+    let query = json!({"version":1,"request":request,
+        "host":placement["placement"]["host"],"preparation":placement["preparation"],"binding":placement["binding"]});
+    fs::remove_file(rig.dir.join(format!("state/placement-grants/{id}.json"))).unwrap();
+    let before = state_bytes(&rig.dir.join("state"));
+    let (code, reply) = rig.json(&[
+        "host",
+        "preparation-lookup",
+        "--preparation-protocol",
+        "1",
+        "--input",
+        &query.to_string(),
+    ]);
+    assert_eq!(code, 0, "{reply}");
+    assert_eq!(reply["query"], query);
+    assert_eq!(reply["result"]["state"], state, "{reply}");
+    if let Some(outcome) = outcome {
+        assert_eq!(reply["result"]["outcome"]["outcome"], outcome, "{reply}");
+    }
+    assert_eq!(state_bytes(&rig.dir.join("state")), before);
+}
+
+#[test]
+fn nonplacement_lookup_absent_is_read_only() {
+    assert_nonplacement_lookup("absent", "absent", None);
+}
+#[test]
+fn nonplacement_lookup_receipt_is_read_only() {
+    assert_nonplacement_lookup("prepared", "receipt_only", Some("prepared"));
+}
+#[test]
+fn nonplacement_lookup_incomplete_is_read_only() {
+    assert_nonplacement_lookup("incomplete", "receipt_only", Some("incomplete"));
+}
+#[test]
+fn nonplacement_lookup_failed_is_read_only() {
+    assert_nonplacement_lookup("failed", "receipt_only", Some("failed"));
+}
+#[test]
+fn nonplacement_lookup_disposition_is_read_only() {
+    assert_nonplacement_lookup("disposition", "disposition", Some("prepared"));
+}
+#[test]
+fn nonplacement_lookup_unsupported_is_read_only() {
+    assert_nonplacement_lookup("unsupported", "unsupported_version", None);
+}
+#[test]
+fn nonplacement_lookup_corrupt_is_unresolved() {
+    assert_nonplacement_lookup("corrupt", "unresolved", None);
+}
+#[test]
+fn nonplacement_lookup_mismatched_binding_is_refused() {
+    assert_nonplacement_lookup("mismatch", "mismatch", None);
+}
+#[test]
+fn nonplacement_lookup_mismatched_request_is_refused() {
+    let (rig, _, placement) = lookup_fixture("prepared");
+    let mut request = placement["placement"]["request"].clone();
+    request["action"] = json!({"type":"agent","kind":"pi","name":"lookup","message":"read only"});
+    request["id"] = json!("another-request");
+    let query = json!({"version":1,"request":request,"host":placement["placement"]["host"],"preparation":placement["preparation"],"binding":null});
+    let before = state_bytes(&rig.dir.join("state"));
+    let (code, reply) = rig.json(&[
+        "host",
+        "preparation-lookup",
+        "--preparation-protocol",
+        "1",
+        "--input",
+        &query.to_string(),
+    ]);
+    assert_eq!(code, 0, "{reply}");
+    assert_eq!(reply["result"]["state"], "mismatch", "{reply}");
+    assert_eq!(state_bytes(&rig.dir.join("state")), before);
+}
+
 fn assert_lookup(case: &str, state: &str, outcome: Option<&str>) {
     let (rig, _, query) = lookup_fixture(case);
     let before = state_bytes(&rig.dir.join("state"));
@@ -151,6 +229,34 @@ fn queued_placement_accepts_symlinked_repository_root() {
     );
     assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
     assert_eq!(rig.log("setup.log").lines().count(), 1);
+}
+
+#[test]
+fn cancellation_basis_refuses_invalid_operation_or_request_without_releasing_claim() {
+    for case in ["operation", "request"] {
+        let (rig, _, id) = interrupted_placement("placement-preparation-received");
+        let mut intent: Value = serde_json::from_str(&rig.disposition_request(&id)).unwrap();
+        let mut basis = json!({"operation_id":"cancel-operation","request_id":id});
+        basis[if case == "operation" {
+            "operation_id"
+        } else {
+            "request_id"
+        }] = json!(if case == "operation" {
+            "bad/id"
+        } else {
+            "another-request"
+        });
+        intent["policy"] = json!({"kind":"prohibit","basis":{"cancelled":basis}});
+        let claims = rig.read("state/preparations.json");
+        let (code, _) = rig.json(&["host", "prepared", "--input", &intent.to_string()]);
+        assert_eq!(code, 2);
+        assert_eq!(rig.read("state/preparations.json"), claims);
+        assert!(
+            !rig.dir
+                .join(format!("state/preparation-receipts/{id}.disposition.json"))
+                .exists()
+        );
+    }
 }
 
 #[test]
@@ -255,7 +361,7 @@ fn preparation_lookup_rejects_unsupported_transport_without_writes() {
     assert_eq!(state_bytes(&rig.dir.join("state")), before);
 }
 
-fn real_preparation_peer(rig: &Rig) {
+pub(super) fn real_preparation_peer(rig: &Rig) {
     real_reservation_peer(rig, false);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     let handler = format!(
@@ -740,7 +846,7 @@ fn reserve_delivery(rig: &Rig, envelope: &Value) -> (i32, Value) {
     ])
 }
 
-fn real_reservation_peer(rig: &Rig, pause: bool) {
+pub(super) fn real_reservation_peer(rig: &Rig, pause: bool) {
     rig.peer();
     fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
     rig.snapshot("peer-state/host.json", rig.origin_ms, 0.0, 16);
@@ -961,6 +1067,46 @@ fn queued_preparation_pending_recovers_the_acknowledged_grant() {
         saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
         grant
     );
+    assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
+}
+
+#[test]
+fn cancellation_of_pending_release_fences_resume_and_preserves_result() {
+    let (rig, repo) = place_rig("cancel-pending-release");
+    real_preparation_peer(&rig);
+    fs::write(rig.dir.join("lose-release"), "").unwrap();
+    let (code, result) = rig.json(&[
+        "place",
+        "--host",
+        "netcup",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "cancel-release",
+        "--base",
+        "main",
+    ]);
+    assert_eq!(code, 1, "{result}");
+    assert_eq!(result["status"], "pending_release");
+    let id = result["request_id"].as_str().unwrap();
+    let ticket = rig.read("state/queue.json")[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(rig.run(&["cancel", &ticket]).status.success());
+    assert!(!rig.run(&["place", "--resume", id]).status.success());
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(
+        rig.read(&format!("state/cancellations/{id}.json"))["release"],
+        "acknowledged"
+    );
+    assert_eq!(
+        rig.read(&format!("state/admissions/{id}.json"))["placement"]["saved"]["result"],
+        result["result"]
+    );
+    assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
 }
 
