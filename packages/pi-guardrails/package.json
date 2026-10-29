@@ -1,6 +1,6 @@
 {
   "name": "@oisin-ee/pi-guardrails",
-  "version": "0.28.0",
+  "version": "0.28.1",
   "description": "Agent guardrails for pi, Claude Code, and Codex: Git safety, no waiting, no typing into other agents, GitOps-only clusters.",
   "keywords": [
     "claude-code",

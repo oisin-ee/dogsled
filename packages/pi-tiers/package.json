@@ -1,6 +1,6 @@
 {
   "name": "@oisin-ee/pi-tiers",
-  "version": "0.28.0",
+  "version": "0.28.1",
   "description": "Sticky virtual model tiers with quota-aware recovery for pi.",
   "keywords": [
     "pi-extension",

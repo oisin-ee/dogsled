@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Deprecate the npm packages that the 0.28.0 release replaces:
+# Deprecate the npm packages that pi-dogsled 0.28 replaces:
 # - @oisin-ee/pi-todo: the todo tool ships in @oisin-ee/pi-dogsled.
 # - @oisin-ee/oisinpi: install pi-dogsled, pi-prewalk, pi-tiers, and pi-guardrails directly.
 #
-# Run it only after 0.28.0 of every package is on npm. Deprecation keeps every
+# Run it only after $release of every package is on npm. Deprecation keeps every
 # version installable; it only adds a warning, and `npm deprecate <pkg> ""` undoes it.
 #
 # Requirements: `npm login` as a package owner, and 2FA. On the npm web page,
@@ -12,7 +12,7 @@
 # Usage: scripts/npm-retire.sh [--dry-run]
 set -euo pipefail
 
-release=0.28.0
+release=0.28.1
 run=()
 [[ ${1:-} == --dry-run ]] && run=(echo)
 

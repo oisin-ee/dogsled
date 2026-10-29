@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.28.1 - 2026-10-29
+
+- The npm packages publish again. The 0.28.0 release built its binaries and GitHub release, but its npm job stopped before it published anything, so 0.28.0 is not on npm. `actions/setup-node` started pnpm caching on its own, because `package.json` names pnpm, and proto had not installed pnpm yet.
+
 ## 0.28.0 - 2026-10-29
 
 - `dogsled stop <id>` ends a pending job that never started and prevents `dogsled exec` from running it later.
