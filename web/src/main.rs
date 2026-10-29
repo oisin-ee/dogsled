@@ -4,6 +4,9 @@ mod agent_view;
 mod api;
 mod app;
 mod board;
+#[cfg(test)]
+mod component_tests;
+pub mod components;
 mod conversations;
 mod question_form;
 mod review_view;

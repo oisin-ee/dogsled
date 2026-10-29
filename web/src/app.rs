@@ -10,6 +10,8 @@ use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
 use crate::conversations::Conversations;
 
+const COMPONENTS_CSS: Asset = asset!("/assets/dx-components-theme.css");
+const COMPONENTS_THEME_CSS: Asset = asset!("/assets/components-theme.css");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
 /// The pending item the owner picked from the inbox. The shell passes it to
@@ -263,6 +265,8 @@ pub fn App() -> Element {
     let groups = view.as_ref().map(|view| navigation_groups(view, &agents()));
 
     rsx! {
+        document::Stylesheet { href: COMPONENTS_CSS }
+        document::Stylesheet { href: COMPONENTS_THEME_CSS }
         document::Stylesheet { href: MAIN_CSS }
         document::Link { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" }
         div { class: "app", onkeydown: move |event| {

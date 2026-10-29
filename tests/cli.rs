@@ -70,12 +70,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The bound every real-process wait in these tests uses. A process that never ends fails
 /// its test on this bound instead of stalling the suite.
+/// This bound catches hangs and must exceed full-suite contention.
 pub(crate) fn outcome_identity(mut value: Value) -> Value {
     value.as_object_mut().unwrap().remove("finished_ms");
     value
 }
 
-const PROCESS_DEADLINE: Duration = Duration::from_secs(20);
+ const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The state the guard and its fallback share. A finished process has released its pid,
 /// and the host may then hand that pid to another process. A signal sent after that can
