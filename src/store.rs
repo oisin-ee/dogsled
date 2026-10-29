@@ -53,7 +53,8 @@ fn version(connection: &Connection) -> Result<i64> {
     Ok(version)
 }
 
-fn open(ledger: &Ledger) -> Result<Connection> {
+/// The database path, refused when SQLite could not open its WAL file there.
+fn database(ledger: &Ledger) -> Result<std::path::PathBuf> {
     let directory = std::path::absolute(&ledger.dir)?;
     let wal_length = directory.join("state.db-wal").as_os_str().len();
     if wal_length >= 512 {
@@ -63,8 +64,13 @@ fn open(ledger: &Ledger) -> Result<Connection> {
             directory.as_os_str().len()
         )));
     }
+    Ok(directory.join("state.db"))
+}
+
+fn open(ledger: &Ledger) -> Result<Connection> {
+    let path = database(ledger)?;
     std::fs::create_dir_all(&ledger.dir)?;
-    let mut connection = Connection::open(ledger.dir.join("state.db"))?;
+    let mut connection = Connection::open(path)?;
     connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
     // Refuse a newer schema before changing persistent connection settings.
     let current = version(&connection)?;
@@ -116,7 +122,16 @@ fn transact<T>(
     f: impl FnOnce(&Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
     (|| {
-        let mut connection = open(ledger)?;
+        let mut connection = if matches!(behavior, TransactionBehavior::Deferred)
+            && !database(ledger)?.try_exists()?
+        {
+            // A read never creates the store: a host without one has empty tables.
+            let connection = Connection::open_in_memory()?;
+            connection.execute_batch(SCHEMA)?;
+            connection
+        } else {
+            open(ledger)?
+        };
         connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
         let tx = connection.transaction_with_behavior(behavior)?;
         let result = f(&tx)?;
@@ -329,6 +344,15 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn reading_an_absent_store_creates_nothing() {
+        let ledger = ledger();
+        assert_eq!(items(&ledger).unwrap(), json!([]));
+        let tickets: Vec<Value> = read(&ledger, |tx| rows(tx, Table::Tickets)).unwrap();
+        assert_eq!(tickets, [] as [Value; 0]);
+        assert!(!ledger.dir.exists());
     }
 
     #[test]
