@@ -180,6 +180,70 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
 }
 
 #[test]
+fn historical_preparation_replays_final_launch_without_releasing_claim() {
+    let (rig, repo) = place::place_rig("historical-final-replay");
+    let prepared = disposition_prepared(&rig, &repo, "recover-one", "historical", true);
+    let mut launch = host_request(&rig);
+    launch["cwd"] = prepared["path"].clone();
+    launch["pane"] = prepared["pane_id"].clone();
+    launch["terminal"] = prepared["terminal_id"].clone();
+    let request = launch.to_string();
+    let args = ["host", "launch", "--request", &request];
+    let out = rig
+        .cmd(&args)
+        .env("DOGSLED_TEST_UNIT_CRASH", "preparation-before-fence")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(86), "{out:?}");
+    let outcome_path = "state/preparation-receipts/recover-one.json";
+    let mut outcome = rig.read(outcome_path);
+    outcome.as_object_mut().unwrap().remove("binding");
+    rig.put(outcome_path, &outcome);
+    let claims = rig.read("state/preparations.json");
+    let receipt = rig.read("state/launches/recover-one.json");
+    let calls = rig.log("herdr.log");
+    assert_eq!(rig.json(&args), (0, receipt));
+    assert_eq!(rig.read("state/preparations.json"), claims);
+    assert_eq!(rig.read(outcome_path), outcome);
+    assert!(
+        !rig.dir
+            .join("state/preparation-receipts/recover-one.disposition.json")
+            .exists()
+    );
+    assert_eq!(rig.log("herdr.log"), calls);
+}
+
+#[test]
+fn released_claim_replay_acknowledges_without_repository() {
+    let (rig, repo) = place::place_rig("released-replay-no-repository");
+    let prepared = disposition_prepared(&rig, &repo, "recover-one", "released", true);
+    let mut launch = host_request(&rig);
+    launch["cwd"] = prepared["path"].clone();
+    launch["pane"] = prepared["pane_id"].clone();
+    launch["terminal"] = prepared["terminal_id"].clone();
+    let request = launch.to_string();
+    let args = ["host", "launch", "--request", &request];
+    let out = rig
+        .cmd(&args)
+        .env("DOGSLED_TEST_UNIT_CRASH", "preparation-claim-released")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(86), "{out:?}");
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    let fence = rig.read("state/preparation-receipts/recover-one.disposition.json");
+    assert_eq!(fence["progress"], "fenced");
+    let receipt = rig.read("state/launches/recover-one.json");
+    let calls = rig.log("herdr.log");
+    fs::remove_dir_all(&repo).unwrap();
+    assert_eq!(rig.json(&args), (0, receipt));
+    let released = rig.read("state/preparation-receipts/recover-one.disposition.json");
+    assert_eq!(released["request"], fence["request"]);
+    assert_eq!(released["progress"], "released");
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(rig.log("herdr.log"), calls);
+}
+
+#[test]
 fn agent_receipt_replay_completes_fenced_preparation_transfer() {
     for point in [
         "preparation-before-fence",

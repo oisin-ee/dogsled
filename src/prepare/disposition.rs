@@ -122,7 +122,9 @@ fn binding(ledger: &Ledger, id: &str) -> Result<Option<Binding>> {
         || saved.claim.tree.identity.is_none()
         || receipt.prepared.is_some() == receipt.failure.is_some()
         || saved.prepared.as_ref().is_some_and(|p| {
-            p.path.as_ref() != Some(&saved.claim.tree.path)
+            p.path
+                .as_deref()
+                .is_none_or(|path| !crate::worktree::same(path, &saved.claim.tree.path))
                 || p.pane_id.as_deref().is_none_or(str::is_empty)
                 || p.terminal_id.as_deref().is_none_or(str::is_empty)
         })
@@ -189,7 +191,9 @@ pub fn allow_launch(ledger: &Ledger, launch: &crate::work::Launch) -> Result<()>
 
 fn match_launch(binding: &Binding, launch: &crate::work::Launch) -> Result<()> {
     let prepared = binding.prepared.as_ref().ok_or_else(conflict)?;
-    if launch.id != binding.request_id || launch.cwd != binding.claim.tree.path {
+    if launch.id != binding.request_id
+        || !crate::worktree::same(&launch.cwd, &binding.claim.tree.path)
+    {
         return Err(conflict());
     }
     match &launch.action {
@@ -342,37 +346,47 @@ pub fn dispose(
     }
     let id = &request.binding.request_id;
     crate::jobs::validate_id(id)?;
-    ledger.child("preparation-receipts").with_lock(id, || {
-        let saved = read(ledger, id)?;
-        if binding(ledger, id)?.as_ref() != Some(&request.binding)
-            || saved
-                .as_ref()
-                .is_some_and(|saved| saved.request != *request)
-        {
-            return Err(conflict());
+    ledger
+        .child("preparation-receipts")
+        .with_lock(id, || dispose_guarded(ledger, shell, request))
+}
+
+/// The preparation gate is already held by disposal or final launch replay.
+fn dispose_guarded(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    request: &Request,
+) -> Result<Acknowledgement> {
+    let id = &request.binding.request_id;
+    let saved = read(ledger, id)?;
+    if binding(ledger, id)?.as_ref() != Some(&request.binding)
+        || saved
+            .as_ref()
+            .is_some_and(|saved| saved.request != *request)
+    {
+        return Err(conflict());
+    }
+    if let Some(saved) = &saved {
+        let held = ledger.with_lock("preparations", || {
+            let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+            Ok(records
+                .iter()
+                .any(|record| record.request_id.as_deref() == Some(id)))
+        })?;
+        // The matching fence already captured validated host proof. A removed claim
+        // needs no current repository or launch observation to finish acknowledgement.
+        // A released receipt never removes even an identical recreated claim.
+        if saved.progress == Progress::Released || !held {
+            return apply(ledger, request);
         }
-        if let Some(saved) = &saved {
-            let held = ledger.with_lock("preparations", || {
-                let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-                Ok(records
-                    .iter()
-                    .any(|record| record.request_id.as_deref() == Some(id)))
-            })?;
-            // The matching fence already captured validated host proof. A removed claim
-            // needs no current repository or launch observation to finish acknowledgement.
-            // A released receipt never removes even an identical recreated claim.
-            if saved.progress == Progress::Released || !held {
-                return apply(ledger, request);
+    }
+    crate::worktree::with_lifecycle(shell, ledger, &request.binding.request.0, |guard| {
+        validate_tree(shell, guard, &request.binding)?;
+        ledger.child("launches").with_lock(id, || {
+            if saved.is_none() {
+                validate_policy(ledger, shell, request)?;
             }
-        }
-        crate::worktree::with_lifecycle(shell, ledger, &request.binding.request.0, |guard| {
-            validate_tree(shell, guard, &request.binding)?;
-            ledger.child("launches").with_lock(id, || {
-                if saved.is_none() {
-                    validate_policy(ledger, shell, request)?;
-                }
-                apply(ledger, request)
-            })
+            apply(ledger, request)
         })
     })
 }
@@ -504,12 +518,18 @@ pub fn replay_guarded(
         if **expected != *launch {
             return Err(conflict());
         }
-        if saved.progress == Progress::Released {
-            apply(ledger, &saved.request)?;
+        dispose_guarded(ledger, shell, &saved.request)?;
+        return Ok(());
+    } else {
+        // Historical outcomes carry no release authority. A correlated final launch
+        // still replays read-only, leaving its preparation claim held.
+        if ledger
+            .child("preparation-receipts")
+            .read::<super::PreparationReceipt>(&format!("{}.json", launch.id))?
+            .is_some_and(|receipt| receipt.binding.is_none())
+        {
             return Ok(());
         }
-        saved.request
-    } else {
         let Some(binding) = binding(ledger, &launch.id)? else {
             return Ok(());
         };

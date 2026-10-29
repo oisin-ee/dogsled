@@ -263,6 +263,68 @@ fn refusal_release_and_settlement_recover_after_each_durable_boundary() {
 }
 
 #[test]
+fn refusal_release_recovers_each_boundary_through_symlinked_home() {
+    for point in [
+        "preparation-fenced",
+        "preparation-claim-released",
+        "refusal-hold-released",
+        "refusal-settlement-persisted",
+    ] {
+        let rig = rig(&format!("refused-alias-{point}"), false);
+        let repo = rig.dir.join("home");
+        let actual = rig.dir.join("actual-home");
+        fs::rename(&repo, &actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &repo).unwrap();
+        close::git(&repo, &["init", "-q", "-b", "main"]);
+        close::git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git",
+            ],
+        );
+        close::git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let tree = repo.join(".worktrees/proof");
+        rig.put("worktrees.json", &json!({"result":{"worktrees":[{"path":repo,"open_workspace_id":"w1","is_linked_worktree":false}]}}));
+        rig.put("prepared-workspace.json", &json!({"result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"},"worktree":{"path":tree}}}));
+        let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+        rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'worktree open'*) cat \"$RIG/prepared-workspace.json\" ;;").replace("  'agent start'*|", "  'agent start'*) echo '{\"error\":{\"code\":\"invalid_agent_name\",\"message\":\"native refusal\"}}' >&2; exit 1 ;;\n  "));
+        let prepare_input =
+            json!({"origin":exported(0)["contract"]["ref"],"placement":{"branch":"proof"}});
+        let (code, execution) = rig.json(&[
+            "unit",
+            "prepare",
+            "--input",
+            &prepare_input.to_string(),
+            "--tool-call-id",
+            "call-1",
+        ]);
+        assert_eq!(code, 0, "{execution}");
+        let (code, error) = operation(&rig, "commit", &commit_input(&execution, 0));
+        assert_eq!(code, 2, "{error}");
+        let id = execution["requestId"].as_str().unwrap();
+        let claims = rig.read("state/preparations.json");
+        assert_eq!(claims.as_array().unwrap().len(), 1);
+        let result = rig
+            .cmd(&["unit", "settlements"])
+            .env("DOGSLED_TEST_UNIT_CRASH", point)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(86), "{point}: {result:?}");
+        let (code, events) = rig.json(&["unit", "settlements"]);
+        assert_eq!(code, 0, "{point}: {events}");
+        assert_eq!(events.as_array().unwrap().len(), 1, "{point}: {events}");
+        assert_eq!(events[0]["result"]["kind"], "not_started");
+        let disposition = rig.read(&format!("state/preparation-receipts/{id}.disposition.json"));
+        assert_eq!(disposition["progress"], "released");
+        assert_eq!(rig.read("state/preparations.json"), json!([]));
+        assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+    }
+}
+
+#[test]
 fn remote_refusal_correlates_full_launch_and_rejects_contradictions() {
     let (rig, execution, input) = refused_unit("refused-remote-correlation");
     let id = execution["requestId"].as_str().unwrap();
