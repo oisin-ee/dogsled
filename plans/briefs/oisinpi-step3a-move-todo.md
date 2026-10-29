@@ -11,7 +11,7 @@
 **Edits.**
 
 1. Move `packages/pi-todo/{src,moon.yml,tsconfig.json,README.md,CHANGELOG.md}` to `pi/todo/` with `git mv`. Delete `packages/pi-todo/package.json`.
-2. `.moon/workspace.yml`: set `pi-todo: pi/todo`. `pi/todo/moon.yml`: fix the relative paths of the `generate` task (`../../target` becomes `../../../target`). `pi/todo/tsconfig.json`: extend `../../tsconfig.base.json`.
+2. `.moon/workspace.yml`: set `pi-todo: pi/todo`. `pi/todo/` is two levels deep, like `packages/pi-todo/`, so the relative paths in `pi/todo/moon.yml` and `pi/todo/tsconfig.json` stay unchanged.
 3. `.gitignore` and `.oxlintrc.json` `ignorePatterns`: add `pi/todo/src/generated/`. Root `moon.yml`: add `pi/todo` to the `oxfmt` paths of the `format` and `fix` tasks.
 4. `pi/todo/src/source.ts`: `OWN` is the set of realpaths of `pi/index.ts` and `pi/todo/src/index.ts`. Add a `source.test.ts` case for `pi/index.ts`.
 5. `pi/index.ts`: import pi-todo's default export from `./todo/src/index.ts`, and call it as the first statement of `dogsled()`.
