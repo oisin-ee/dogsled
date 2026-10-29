@@ -139,8 +139,12 @@ fn perform(
             Ok(format!("Stopped {}", card.name))
         }
         Effect::Cancel(card) => {
-            crate::work::cancel(ledger, &card.id)?;
-            Ok(format!("Cancelled {}", card.name))
+            let result = crate::work::cancel(ledger, &card.id)?;
+            Ok(if result["status"] == "too_late" {
+                format!("Too late: {} already admitted; result preserved", card.name)
+            } else {
+                format!("Cancelled future admission for {}", card.name)
+            })
         }
         Effect::Close(card) => {
             let pane = card

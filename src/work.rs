@@ -1,6 +1,23 @@
 //! Placement-backed actions, pane creation, and caller-owned admission tickets.
 
 mod placement;
+
+fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
+    let validity = request_validity(fleet.ledger, request)?;
+    let placed = commands::place_with(
+        fleet,
+        host,
+        &request.id,
+        now,
+        validity,
+        matches!(request.action, Action::Place).then_some(request),
+    )
+    .map_err(prelaunch_error)?;
+    if let Placement::Full { hosts, .. } = &placed {
+        defer(fleet, request, hosts, now)?;
+    }
+    Ok(placed)
+}
 pub(crate) use placement::{PlacementPhase, PlacementProgress, resume as resume_placement};
 
 use crate::checkout::Repository;
@@ -183,7 +200,22 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                 && jobs::record(ledger, &ticket.request.id)?
                     .is_some_and(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
             {
+                if cancellation(ledger, &ticket.request)?
+                    .is_some_and(|saved| saved.release == "pending")
+                {
+                    continue;
+                }
                 expired.push(ticket.id.clone());
+                match std::fs::remove_file(
+                    ledger
+                        .child("cancellations")
+                        .dir
+                        .join(format!("{}.json", ticket.request.id)),
+                ) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         if !expired.is_empty() {
@@ -392,19 +424,587 @@ pub fn enqueue_retry(
     Ok(id)
 }
 
-pub fn cancel(ledger: &Ledger, id: &str) -> Result<()> {
+/// The expectation is captured once under admission. Release progress never replaces it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Cancellation {
+    version: u32,
+    operation_id: String,
+    ticket: Ticket,
+    admission: Option<Value>,
+    preparation: Option<crate::prepare::PreparationLookup>,
+    placement: Option<crate::prepare::LookupRequest>,
+    outcome: crate::prepare::disposition::Outcome,
+    release: String,
+    intent: Option<crate::prepare::disposition::Request>,
+    acknowledgement: Option<crate::prepare::disposition::Acknowledgement>,
+    error: Option<String>,
+}
+
+fn cancellation(ledger: &Ledger, request: &Request) -> Result<Option<Cancellation>> {
+    let saved = ledger
+        .child("cancellations")
+        .read::<Cancellation>(&format!("{}.json", request.id))?;
+    if let Some(saved) = &saved {
+        jobs::validate_id(&saved.operation_id)?;
+        if saved.version != 1
+            || serde_json::to_value(&saved.ticket.request)? != serde_json::to_value(request)?
+        {
+            return Err(crate::unit_transport::conflict(
+                "cancellation expectation changed or unsupported",
+            ));
+        }
+    }
+    Ok(saved)
+}
+
+/// Every caller owns admission before checking this durable prohibition.
+pub(crate) fn admission_prohibited(ledger: &Ledger, request: &Request) -> Result<bool> {
+    Ok(cancellation(ledger, request)?.is_some())
+}
+
+pub(crate) fn allow_admission(ledger: &Ledger, request: &Request) -> Result<()> {
+    if admission_prohibited(ledger, request)? {
+        return Err(crate::unit_transport::conflict(
+            "request cancelled; future admission prohibited",
+        ));
+    }
+    Ok(())
+}
+
+fn capture_cancellation(ledger: &Ledger, ticket: &Ticket) -> Result<Cancellation> {
+    let admission = ledger
+        .child("admissions")
+        .read::<Value>(&format!("{}.json", ticket.request.id))?;
+    capture_cancellation_from(ledger, ticket, admission)
+}
+
+fn capture_cancellation_from(
+    ledger: &Ledger,
+    ticket: &Ticket,
+    admission: Option<Value>,
+) -> Result<Cancellation> {
+    use crate::prepare::disposition::Outcome;
+    let request = &ticket.request;
+    if let Some(saved) = cancellation(ledger, request)? {
+        if saved.ticket.id != ticket.id {
+            return Err(crate::unit_transport::conflict(
+                "cancellation ticket changed",
+            ));
+        }
+        return Ok(saved);
+    }
+    let expected_request = serde_json::to_value(request)?;
+    let attempt = admission
+        .clone()
+        .map(serde_json::from_value::<Attempt>)
+        .transpose()?;
+    if attempt
+        .as_ref()
+        .is_some_and(|a| a.request != expected_request)
+    {
+        return Err(crate::unit_transport::conflict(
+            "cancellation admission request changed",
+        ));
+    }
+    let launches = ledger.child("launches");
+    let no_launch = attempt
+        .as_ref()
+        .is_some_and(|a| a.launch.is_none() && a.result.is_none())
+        && ticket.result.is_none()
+        && launches
+            .read::<Value>(&format!("{}.json", request.id))?
+            .is_none()
+        && launches
+            .read::<Value>(&format!("{}.progress.json", request.id))?
+            .is_none();
+    let outcome = if no_launch {
+        Outcome::NotStarted
+    } else if attempt.as_ref().is_some_and(|a| a.launch.is_some()) {
+        Outcome::PossiblyExecuted
+    } else {
+        Outcome::Unknown
+    };
+    let operation_id = new_id();
+    let mut preparation =
+        ledger
+            .child("preparation-expectations")
+            .read::<crate::prepare::PreparationLookup>(&format!("{}.json", request.id))?;
+    if let Some(query) = &mut preparation {
+        if serde_json::to_value(&query.request)? != expected_request
+            || attempt.as_ref().and_then(|a| a.host.as_ref()) != Some(&query.host)
+        {
+            return Err(crate::unit_transport::conflict(
+                "cancellation preparation expectation changed",
+            ));
+        }
+        query.binding = attempt
+            .as_ref()
+            .and_then(|a| a.launch.as_ref())
+            .and_then(|l| l.preparation.as_deref().cloned());
+    }
+    let placement = cancellation_placement(request, attempt.as_ref(), admission.as_ref())?;
+    cancellation_intent(
+        ledger,
+        ticket,
+        admission,
+        preparation,
+        placement,
+        outcome,
+        operation_id,
+    )
+}
+
+fn cancellation_placement(
+    request: &Request,
+    attempt: Option<&Attempt>,
+    admission: Option<&Value>,
+) -> Result<Option<crate::prepare::LookupRequest>> {
+    Ok(if let Some(a) = &attempt {
+        if let Some(p) = &a.placement {
+            let transport = p.expectation(request)?;
+            let envelope = admission
+                .as_ref()
+                .and_then(|a| {
+                    a.pointer("/placement/preparation")
+                        .or_else(|| a.pointer("/placement/prepared/preparation"))
+                        .or_else(|| a.pointer("/placement/saved/prepared/preparation"))
+                        .or_else(|| a.pointer("/placement/failed/preparation"))
+                })
+                .filter(|e| !e.is_null());
+            match (transport, envelope) {
+                (Some(placement), Some(envelope)) => Some(crate::prepare::LookupRequest {
+                    version: crate::prepare::disposition::VERSION,
+                    placement,
+                    preparation: serde_json::from_value(envelope.clone())?,
+                    binding: a
+                        .launch
+                        .as_ref()
+                        .and_then(|l| l.preparation.as_deref().cloned()),
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    })
+}
+
+fn cancellation_intent(
+    ledger: &Ledger,
+    ticket: &Ticket,
+    admission: Option<Value>,
+    preparation: Option<crate::prepare::PreparationLookup>,
+    placement: Option<crate::prepare::LookupRequest>,
+    outcome: crate::prepare::disposition::Outcome,
+    operation_id: String,
+) -> Result<Cancellation> {
+    let request = &ticket.request;
+    let attempt = admission
+        .clone()
+        .map(serde_json::from_value::<Attempt>)
+        .transpose()?;
+    // A placement may already have persisted its C3 release. Preserve that exact intent.
+    let existing_intent = admission
+        .as_ref()
+        .and_then(|a| {
+            a.pointer("/placement/saved/disposition")
+                .or_else(|| a.pointer("/placement/failed/disposition"))
+        })
+        .filter(|v| !v.is_null());
+    let intent = if let Some(intent) = existing_intent {
+        Some(serde_json::from_value(intent.clone())?)
+    } else {
+        attempt
+            .as_ref()
+            .and_then(|a| a.launch.as_ref())
+            .and_then(|l| l.preparation.as_ref())
+            .map(|binding| crate::prepare::disposition::Request {
+                version: crate::prepare::disposition::VERSION,
+                binding: *binding.clone(),
+                policy: crate::prepare::disposition::Policy::Prohibit {
+                    basis: crate::prepare::disposition::Basis::Cancelled {
+                        operation_id: operation_id.clone(),
+                        request_id: request.id.clone(),
+                    },
+                },
+                outcome: outcome.clone(),
+            })
+    };
+    let pending = intent.is_some()
+        || request.branch.is_some() && attempt.as_ref().is_some_and(|a| a.host.is_some());
+    let saved = Cancellation {
+        version: 1,
+        operation_id,
+        ticket: ticket.clone(),
+        admission,
+        preparation,
+        placement,
+        outcome,
+        release: if pending { "pending" } else { "not_needed" }.into(),
+        intent,
+        acknowledgement: None,
+        error: pending.then(|| "preparation release pending".into()),
+    };
+    ledger
+        .child("cancellations")
+        .write(&format!("{}.json", request.id), &saved)?;
+    crate::unit_request::crash_point("cancellation-intent-saved");
+    Ok(saved)
+}
+
+fn validate_cancellation_admission(request: &Request, admission: Option<&Value>) -> Result<()> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let attempt: Attempt = serde_json::from_value(admission.clone())?;
+    if attempt.request != serde_json::to_value(request)? {
+        return Err(crate::unit_transport::conflict(
+            "cancellation request changed",
+        ));
+    }
+    if let Some(progress) = &attempt.placement {
+        if let Some(transport) = progress.expectation(request)?
+            && transport.expected_grant.is_some()
+            && attempt.host.as_ref() != Some(&transport.envelope.host)
+        {
+            return Err(crate::unit_transport::conflict(
+                "cancellation placement host changed",
+            ));
+        }
+        match &progress.phase {
+            placement::PlacementPhase::ResultSaved { saved }
+            | placement::PlacementPhase::ReleaseAcknowledged { saved, .. }
+            | placement::PlacementPhase::Completed { saved, .. } => {
+                placement::validate_saved(request, saved)?;
+            }
+            _ => (),
+        }
+    }
+    Ok(())
+}
+
+fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
     ledger.with_lock("queue", || {
         let mut tickets = queue(ledger)?;
-        let ticket = tickets
-            .iter_mut()
-            .find(|t| t.id == id)
-            .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))?;
-        if ticket.state != "pending" {
-            return Err(Error::Invalid(format!("ticket {id} is {}", ticket.state)));
+        let Some(ticket) = tickets.iter_mut().find(|t| t.id == saved.ticket.id) else {
+            return if saved.release == "pending" {
+                Err(crate::unit_transport::conflict(
+                    "cancelled ticket disappeared; release remains held",
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        if serde_json::to_value(&ticket.request)? != serde_json::to_value(&saved.ticket.request)? {
+            return Err(crate::unit_transport::conflict(
+                "cancelled ticket request changed",
+            ));
         }
-        ticket.state = "cancelled".into();
+        if saved.ticket.state != "failed" {
+            ticket.error.clone_from(&saved.error);
+        }
+        ticket.state = if saved.ticket.state == "failed" {
+            "failed"
+        } else {
+            "cancelled"
+        }
+        .into();
         save_queue(ledger, &tickets)
     })
+}
+
+pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
+    let original = ledger.with_lock("queue", || {
+        queue(ledger)?
+            .into_iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
+    })?;
+    launch_test_barrier("CANCEL_BEFORE_ADMISSION")?;
+    ledger.child("admissions").with_lock(&original.request.id, || {
+        launch_test_barrier("CANCEL_ENTERED_ADMISSION")?;
+        let ticket = ledger.with_lock("queue", || queue(ledger)?.into_iter().find(|t| t.id == id)
+            .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}"))))?;
+        if serde_json::to_value(&original.request)? != serde_json::to_value(&ticket.request)? {
+            return Err(crate::unit_transport::conflict("ticket changed while cancelling"));
+        }
+        if ticket.state == "admitted" {
+            return Ok(json!({"status":"too_late","ticket":id,"result":ticket.result}));
+        }
+        if !matches!(ticket.state.as_str(), "pending" | "admitting" | "cancelled") {
+            return Err(Error::Invalid(format!("ticket {id} is {}", ticket.state)));
+        }
+        let admission = ledger.child("admissions").read::<Value>(&format!("{}.json", ticket.request.id))?;
+        if let Err(error) = validate_cancellation_admission(&ticket.request, admission.as_ref()) {
+            let mut saved = capture_cancellation_from(ledger, &ticket, admission)?;
+            saved.release = "pending".into();
+            saved.intent = None;
+            saved.error = Some(error.to_string());
+            ledger.child("cancellations").write(&format!("{}.json", ticket.request.id), &saved)?;
+            project_cancellation(ledger, &saved)?;
+            return Err(error);
+        }
+        if !admission_prohibited(ledger, &ticket.request)?
+            && let Some(result) = completed_admission(&ticket.request, admission.as_ref())? {
+            // A saved placement result is final to the caller, but admission still owns
+            // its unacknowledged release and must keep replaying the original journal.
+            let release_pending = admission.as_ref().and_then(|a| a.pointer("/placement/phase")).and_then(Value::as_str) == Some("result_saved");
+            update_ticket(ledger, id, |t| { t.state = if release_pending { "pending" } else { "admitted" }.into(); t.result = Some(result.clone()); t.error = release_pending.then(|| "placement release pending".into()); t.diagnostic = None; t.wait_reason = None; })?;
+            return Ok(json!({"status":"too_late","ticket":id,"result":result}));
+        }
+        let saved = capture_cancellation_from(ledger, &ticket, admission)?;
+        project_cancellation(ledger, &saved)?;
+        Ok(json!({"cancelled":id,"status":"cancelled","operation_id":saved.operation_id,
+            "future_admission":"prohibited","outcome":saved.outcome,"release":saved.release,"error":saved.error}))
+    })
+}
+
+fn completed_admission(request: &Request, admission: Option<&Value>) -> Result<Option<Value>> {
+    let Some(admission) = admission else {
+        return Ok(None);
+    };
+    if admission["request"] != serde_json::to_value(request)? {
+        return Err(crate::unit_transport::conflict(
+            "admission request changed while cancelling",
+        ));
+    }
+    if matches!(request.action, Action::Place) {
+        return Ok(admission
+            .pointer("/placement/saved/result")
+            .filter(|result| !result.is_null())
+            .cloned());
+    }
+    Ok(admission.get("result").filter(|r| !r.is_null()).cloned())
+}
+
+/// An admission-locked witness, saved before the existing provider settlement event.
+pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> {
+    let saved = if let Some(saved) = cancellation(ledger, &ticket.request)? {
+        saved
+    } else if ticket.state == "failed" {
+        capture_cancellation(ledger, ticket)?
+    } else {
+        return Ok(false);
+    };
+    let current = ledger
+        .child("admissions")
+        .read::<Value>(&format!("{}.json", ticket.request.id))?;
+    let matches = ["request", "host", "launch", "result", "placement"]
+        .iter()
+        .all(|field| {
+            current.as_ref().map(|a| &a[field]) == saved.admission.as_ref().map(|a| &a[field])
+        });
+    Ok(saved.ticket.id == ticket.id
+        && matches
+        && saved.outcome == crate::prepare::disposition::Outcome::NotStarted)
+}
+
+fn repair_cancellations(fleet: &Fleet) -> Result<()> {
+    let directory = fleet.ledger.child("cancellations");
+    let entries = match std::fs::read_dir(&directory.dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let result = jobs::validate_id(id).and_then(|()| {
+            fleet.ledger.child("admissions").with_lock(id, || {
+                let saved = directory
+                    .read::<Cancellation>(&format!("{id}.json"))?
+                    .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
+                let mut saved = cancellation(fleet.ledger, &saved.ticket.request)?
+                    .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
+                if let Err(error) = project_cancellation(fleet.ledger, &saved) {
+                    saved.error = Some(error.to_string());
+                    directory.write(&format!("{id}.json"), &saved)?;
+                    return Err(error);
+                }
+                if saved.release != "pending" {
+                    return Ok(());
+                }
+                let result = release_cancelled(fleet, &mut saved);
+                if let Err(error) = result {
+                    saved.error = Some(error.to_string());
+                }
+                directory.write(&format!("{id}.json"), &saved)?;
+                project_cancellation(fleet.ledger, &saved)
+            })
+        });
+        if let Err(error) = result {
+            eprintln!("dogsled cancellation {id}: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn release_cancelled(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
+    let request = &saved.ticket.request;
+    let attempt = fleet
+        .ledger
+        .child("admissions")
+        .read::<Value>(&format!("{}.json", request.id))?;
+    for field in ["request", "host", "launch", "result", "placement"] {
+        if attempt.as_ref().map(|a| &a[field]) != saved.admission.as_ref().map(|a| &a[field]) {
+            return Err(crate::unit_transport::conflict(
+                "cancelled admission evidence changed",
+            ));
+        }
+    }
+    let host: Host =
+        serde_json::from_value(
+            saved
+                .admission
+                .as_ref()
+                .ok_or_else(|| crate::unit_transport::conflict("missing cancellation admission"))?
+                ["host"]
+                .clone(),
+        )?;
+    if *fleet.find(&host.id)? != host {
+        return Err(crate::unit_transport::conflict(
+            "cancelled host target changed",
+        ));
+    }
+    validate_cancellation_admission(request, saved.admission.as_ref())?;
+    // Durable release proof survives host loss. Validate it before any lookup can
+    // replace the captured intent or require the host to repeat its acknowledgement.
+    if saved.acknowledgement.is_some() {
+        return acknowledge_cancellation(fleet, &host, saved);
+    }
+    resolve_cancelled_intent(fleet, saved)?;
+    if saved.release != "pending" {
+        return Ok(());
+    }
+    match acknowledge_cancellation(fleet, &host, saved) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let previous = saved.intent.clone();
+            resolve_cancelled_intent(fleet, saved)?;
+            if saved.intent == previous {
+                Err(error)
+            } else {
+                acknowledge_cancellation(fleet, &host, saved)
+            }
+        }
+    }
+}
+
+fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
+    use crate::prepare::{self, LookupOutcome, LookupState, disposition};
+    let request = &saved.ticket.request;
+    let observed = if let Some(query) = &saved.placement {
+        prepare::lookup(fleet, query)?
+    } else if let Some(query) = &saved.preparation {
+        prepare::lookup_preparation(fleet, query)?
+    } else {
+        return Err(crate::unit_transport::conflict(
+            "missing historical preparation identity; release requires inspection",
+        ));
+    };
+    let binding = match observed {
+        LookupState::ReceiptOnly {
+            outcome: LookupOutcome::Prepared { prepared },
+        } => prepared.binding.map(|b| *b),
+        LookupState::ReceiptOnly {
+            outcome: LookupOutcome::Failed { binding, .. },
+        } => binding.map(|b| *b),
+        LookupState::Absent => {
+            saved.release = "not_needed".into();
+            saved.error = None;
+            return Ok(());
+        }
+        LookupState::Disposition { receipt, .. } => {
+            saved.intent = Some(receipt.request);
+            fleet
+                .ledger
+                .child("cancellations")
+                .write(&format!("{}.json", request.id), saved)?;
+            return Ok(());
+        }
+        _ => {
+            return Err(crate::unit_transport::conflict(
+                "preparation unresolved; release remains pending",
+            ));
+        }
+    };
+    let Some(binding) = binding else {
+        saved.release = "not_needed".into();
+        saved.error = None;
+        return Ok(());
+    };
+    if let Some(intent) = &saved.intent {
+        if intent.binding != binding {
+            return Err(crate::unit_transport::conflict(
+                "cancellation disposition binding changed",
+            ));
+        }
+        return Ok(());
+    }
+    saved.intent = Some(disposition::Request {
+        version: disposition::VERSION,
+        binding,
+        policy: disposition::Policy::Prohibit {
+            basis: disposition::Basis::Cancelled {
+                operation_id: saved.operation_id.clone(),
+                request_id: request.id.clone(),
+            },
+        },
+        outcome: saved.outcome.clone(),
+    });
+    fleet
+        .ledger
+        .child("cancellations")
+        .write(&format!("{}.json", request.id), saved)?;
+    Ok(())
+}
+
+fn acknowledge_cancellation(fleet: &Fleet, host: &Host, saved: &mut Cancellation) -> Result<()> {
+    use crate::prepare;
+    let request = &saved.ticket.request;
+    let intent = saved
+        .intent
+        .as_ref()
+        .ok_or_else(|| crate::unit_transport::conflict("missing cancellation disposition"))?;
+    if intent.binding.request_id != request.id
+        || intent.binding.claim.request_id != request.id
+        || request.branch.as_ref() != Some(&intent.binding.request.1)
+        || request.base != intent.binding.request.2
+        || saved
+            .preparation
+            .as_ref()
+            .and_then(|q| q.binding.as_ref())
+            .is_some_and(|binding| *binding != intent.binding)
+        || saved
+            .placement
+            .as_ref()
+            .and_then(|q| q.binding.as_ref())
+            .is_some_and(|binding| *binding != intent.binding)
+    {
+        return Err(crate::unit_transport::conflict(
+            "cancellation disposition binding changed",
+        ));
+    }
+    if let Some(ack) = &saved.acknowledgement {
+        prepare::validate_ack(intent, ack)?;
+    } else {
+        saved.acknowledgement = Some(prepare::dispose(fleet, host, intent)?);
+        fleet
+            .ledger
+            .child("cancellations")
+            .write(&format!("{}.json", request.id), saved)?;
+        crate::unit_request::crash_point("cancellation-acknowledgement-saved");
+    }
+    saved.release = "acknowledged".into();
+    saved.error = None;
+    Ok(())
 }
 
 pub fn workspace(shell: &dyn Shell, id: &str) -> Result<String> {
@@ -1266,6 +1866,7 @@ pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value
     launch_test_barrier("PLACEMENT_BEFORE_ADMISSION")?;
     let attempts = fleet.ledger.child("admissions");
     attempts.with_lock(&request.id, || {
+        allow_admission(fleet.ledger, request)?;
         if !placement::reserved(&attempts, request)? && waits_behind(fleet, request)? {
             placement::record(&attempts, request)?;
             return Ok(None);
@@ -1319,6 +1920,7 @@ pub(crate) struct Attempt {
     pub result: Option<Value>,
 }
 
+#[cfg(test)]
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
     let attempts = fleet.ledger.child("admissions");
@@ -1330,9 +1932,20 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     // Admission checks the request's age before it places, prepares, or dispatches
     // anything. A request that may not start new execution is refused here.
+    allow_admission(fleet.ledger, request)?;
     check_request_validity(fleet.ledger, request)?;
     if matches!(request.action, Action::Place) {
-        return placement::perform(fleet, request, now);
+        let mut result = placement::perform(fleet, request, now)?;
+        if let Some(value) = &mut result
+            && value["status"] == "pending_release"
+        {
+            let ticket = enqueue(fleet.ledger, request.clone(), false, now)?;
+            update_ticket(fleet.ledger, &ticket, |t| {
+                t.result = Some(value.clone());
+            })?;
+            value["ticket"] = json!(ticket);
+        }
+        return Ok(result);
     }
     let mut request = request.clone();
     if let Action::Job { validity, .. } = &mut request.action {
@@ -1420,10 +2033,9 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
 }
 
 fn save_result(attempts: &Ledger, file: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
-    if attempt.unit.is_some() {
-        attempt.result = Some(result.clone());
-        attempts.write(file, &attempt)?;
-    }
+    attempt.result = Some(result.clone());
+    attempts.write(file, &attempt)?;
+    crate::unit_request::crash_point("admission-result-saved");
     Ok(())
 }
 
@@ -1466,23 +2078,6 @@ fn begin(
     Ok(Some(result))
 }
 
-fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
-    let validity = request_validity(fleet.ledger, request)?;
-    let placed = commands::place_with(
-        fleet,
-        host,
-        &request.id,
-        now,
-        validity,
-        matches!(request.action, Action::Place).then_some(request),
-    )
-    .map_err(prelaunch_error)?;
-    if let Placement::Full { hosts, .. } = &placed {
-        defer(fleet, request, hosts, now)?;
-    }
-    Ok(placed)
-}
-
 /// Only transport errors are retryable before a launch receipt exists. Local setup errors
 /// and the peer's structured refusals remain terminal.
 fn prelaunch_error(error: Error) -> Error {
@@ -1507,6 +2102,31 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
             .repository
             .as_ref()
             .ok_or_else(|| Error::Invalid("branch requires repository".into()))?;
+        let query = crate::prepare::PreparationLookup {
+            version: crate::prepare::disposition::VERSION,
+            request: request.clone(),
+            host: host.clone(),
+            preparation: crate::prepare::envelope(
+                fleet,
+                host,
+                &repo.path,
+                branch,
+                request.base.as_deref(),
+                &request.id,
+            )?,
+            binding: None,
+        };
+        let expectations = fleet.ledger.child("preparation-expectations");
+        let file = format!("{}.json", request.id);
+        if let Some(saved) = expectations.read::<crate::prepare::PreparationLookup>(&file)? {
+            if serde_json::to_value(&saved)? != serde_json::to_value(&query)? {
+                return Err(crate::unit_transport::conflict(
+                    "preparation expectation changed",
+                ));
+            }
+        } else {
+            expectations.write(&file, &query)?;
+        }
         crate::prepare::run(
             fleet,
             host,
@@ -1554,6 +2174,7 @@ fn prepared_launch(
         .and_then(|a| a.unit)
         .and_then(|u| u.committed)
         .map(crate::unit_transport::seed_from_commit);
+    crate::unit_request::crash_point("preparation-returned-before-launch");
     let mut action = request.action.clone();
     if let Action::Job { validity, .. } = &mut action {
         *validity = jobs::request_validity(fleet.ledger, &request.id)?;
@@ -1751,12 +2372,27 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
     })
 }
 
+fn report_admission_failure(ledger: &Ledger, ticket: &Ticket, error: &Error) -> Result<()> {
+    eprintln!("dogsled admission {}: {error}", ticket.request.id);
+    update_ticket(ledger, &ticket.id, |t| {
+        t.error = Some(error.to_string());
+    })?;
+    Ok(())
+}
+
 fn admit(fleet: &Fleet, now: u64) -> Result<()> {
     // Hosts that had no room for an earlier ticket in this pass. A later ticket that can use
     // only these hosts waits, so it cannot pass an earlier one; any other ticket is still served.
     let mut full: Vec<String> = Vec::new();
     for ticket in queue(fleet.ledger)? {
-        let mut ticket = ticket;
+        let expected_request = serde_json::to_value(&ticket.request)?;
+        let result = fleet.ledger.child("admissions").with_lock(&ticket.request.id, || {
+        let Some(mut ticket) = queue(fleet.ledger)?.into_iter().find(|t| t.id == ticket.id) else { return Ok(()); };
+        if serde_json::to_value(&ticket.request)? != expected_request { return Err(crate::unit_transport::conflict("queued request changed before admission")); }
+        if let Some(saved) = cancellation(fleet.ledger, &ticket.request)? {
+            project_cancellation(fleet.ledger, &saved)?;
+            return Ok(());
+        }
         if ticket.state == "admitting" {
             let saved = fleet
                 .ledger
@@ -1787,11 +2423,11 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
             })?;
         }
         if ticket.state != "pending" || !ticket.retry.ready(now) {
-            continue;
+            return Ok(());
         }
         let hosts = candidates(fleet, &ticket.request);
         if hosts.iter().all(|h| full.contains(h)) {
-            continue;
+            return Ok(());
         }
         let claimed = update_ticket(fleet.ledger, &ticket.id, |t| {
             if t.state == "pending" {
@@ -1799,10 +2435,11 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
             }
         })?;
         if claimed.state != "admitting" {
-            continue;
+            return Ok(());
         }
         // No store lock spans SSH, cloning, hooks, or agent readiness.
-        let outcome = perform(fleet, &claimed.request, now);
+        let outcome = perform_locked(fleet, &claimed.request, now);
+        launch_test_barrier("BEFORE_FINALIZATION")?;
         let no_room = matches!(&outcome, Ok(None));
         update_ticket(fleet.ledger, &ticket.id, |t| match outcome {
             Ok(Some(result)) if result["status"] == "pending_release" => {
@@ -1837,9 +2474,14 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
         })?;
         if no_room {
             full.extend(hosts);
-            if fleet.hosts.iter().all(|h| full.contains(&h.id)) {
-                break;
-            }
+        }
+        Ok(())
+        });
+        if let Err(error) = result {
+            report_admission_failure(fleet.ledger, &ticket, &error)?;
+        }
+        if fleet.hosts.iter().all(|h| full.contains(&h.id)) {
+            break;
         }
     }
     Ok(())
@@ -1872,6 +2514,7 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     let reports = fleet.status(now)?;
     launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {
+        repair_cancellations(fleet)?;
         crate::unit_request::recover(fleet.ledger, now)?;
         admit(fleet, now)?;
         for ticket in queue(fleet.ledger)? {

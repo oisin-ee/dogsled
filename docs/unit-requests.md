@@ -209,7 +209,7 @@ Successful duplicate application acknowledges the same event. Inbox text deliver
 With a built first-party pi-todo checkout, run:
 
 ```sh
-PI_TODO_SOURCE=/path/to/oisinpi/packages/pi-todo/src npm test
+npm test
 ```
 
 `pi/unit-contract.test.ts` loads both actual extensions through `DefaultResourceLoader` in both orders. It also loads Dogsled alone and checks zero initial model requests for a managed seed without a provider.

@@ -231,6 +231,7 @@ pub(crate) fn start_queued(fleet: &Fleet, request: Request) -> Result<Value> {
 /// Only for a caller that already owns the request's admission lock.
 pub(crate) fn start_locked(fleet: &Fleet, request: Request) -> Result<Value> {
     start_using(fleet, request, false, |fleet, request, now| {
+        work::allow_admission(fleet.ledger, request)?;
         if work::waits_behind(fleet, request)? {
             return Ok(None);
         }
@@ -797,7 +798,22 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
                     + "\n"
             })?;
         }
-        Command::Cancel { ticket } => work::cancel(fleet.ledger, &ticket)?,
+        Command::Cancel { ticket } => {
+            let result = work::cancel(fleet.ledger, &ticket)?;
+            crate::print(json_output, &result, || {
+                if result["status"] == "too_late" {
+                    format!("Too late: ticket {ticket} already admitted; result preserved\n")
+                } else {
+                    format!(
+                        "Cancelled future admission for ticket {ticket}; execution outcome: {}\n",
+                        result["outcome"]
+                    )
+                }
+            })?;
+            if result["status"] == "too_late" {
+                return Ok(ExitCode::from(2));
+            }
+        }
         Command::Retry { host } => {
             let host = fleet.find(&host)?;
             fleet.retry_now(host)?;

@@ -268,7 +268,7 @@ fn validate_prepared(request: &Request, prepared: &PreparedPlacement) -> Result<
     Ok(())
 }
 
-fn validate_saved(request: &Request, saved: &SavedPlacement) -> Result<()> {
+pub(crate) fn validate_saved(request: &Request, saved: &SavedPlacement) -> Result<()> {
     validate_prepared(request, &saved.prepared)?;
     if saved.result != public_result(request, &saved.prepared)
         || saved.disposition != intent(&saved.prepared)
