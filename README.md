@@ -79,6 +79,7 @@ dogsled status --watch             # refresh until interrupted
 dogsled place --json               # reserve the host with the most headroom
 dogsled place --host netcup --json # pin by host id or label
 dogsled place --branch feat/unit-a --base main --repo /path/to/repo --json
+dogsled place --resume REQUEST_ID --json # replay the original placement request
 ```
 
 Exit codes: 0 success, 1 queued without waiting, 2 error. Job waits return the job's exit code.
@@ -132,7 +133,9 @@ Setup includes worktree creation and removal, `setup` and `teardown` commands, r
 A non-waiting action reports the operation that exceeded its deadline.
 `logs --follow` can continue indefinitely, but each remote read has a 30-second limit.
 Run long waits through the harness's background-task facility.
-A wait deadline does not cancel its job or ticket. `cancel` only cancels pending tickets.
+A wait deadline does not cancel its job or ticket.
+`cancel` records intent under the admission lock. After admission, it returns `too_late` with the saved result.
+Cancellation never stops a process. An unreachable host leaves preparation release pending.
 
 ### Agents and profiles
 
@@ -145,7 +148,14 @@ Herdr refuses a start before it types into the pane, for example `agent_pane_bus
 `--profile NAME` (Pi only) reads `~/.config/dogsled/profiles/NAME/profile.json` on the host that runs the child:
 
 ```json
-{"description": "Ordinary units", "model": "alias/sol", "thinking": "medium", "prompt": "prompt.md", "role": "writer", "pi_args": []}
+{
+  "description": "Ordinary units",
+  "model": "alias/sol",
+  "thinking": "medium",
+  "prompt": "prompt.md",
+  "role": "writer",
+  "pi_args": []
+}
 ```
 
 The child gets `--model`, `--thinking`, `--append-system-prompt <prompt>`, then `pi_args`. Unknown keys are ignored, so Shepherdr profiles load as they are.
@@ -168,18 +178,39 @@ Marks in `done.json` use the launch/item id, pane, and `agent_session.value`, no
 
 New inbox work accepted during that same working turn cancels its mark. After that turn ends, the mark is terminal. Senders receive `<name> finished; start a new child for more work`.
 
-A child without its own `done` stays open, including a child that asks a question or orchestrates other children. Automatic closure never closes the caller or a busy pane. Shared worktrees remain, and only the finished child pane closes. A last primary pane stays while closing it would close linked workspaces.
+End each turn with native `done`, `ask`, or `blocked`, or wait for owned child work.
+`ask` sends a question to the owner. `blocked` records an external blocker. Neither completes the task.
+Dogsled derives `waiting` from open items and pending or admitting child tickets. There is no `waiting` command.
+Identical same-turn signals replay successfully. Conflicting signals refuse without a change.
+The next positively identified turn clears a visible question or blocker, but not its pending delivery.
 
-Closed children retain TO LAND rows: `<child>: branch <b> +N to land`. These rows come from durable items and branch observations, not live panes. Integration or branch deletion removes the row.
+Dogsled derives one agent state: `queued`, `starting`, `working`, `waiting`, `asking`, `blocked`, `finishing`, `done`, `stopped`, `lost`, or `unknown`.
+Herdr `done` means that a turn ended, not that the task completed.
+An accepted native `done` remains `finishing` until the required final handoff evidence exists.
 
-`dogsled board` groups an owner's children, jobs, and queued tickets by what the owner must do: TO LAND, ATTENTION, RUNNING, and WAITING. Each agent row names the harness and model; each job row names its command. `--json` is what the Pi widget draws.
+A stopped child receives a recorded prompt to signal or wait for its children.
+With a live owner, it remains under NEEDS YOU.
+If its custodian is gone, the sweep records the last reply and can close a clean stopped orphan.
+A unit-bound orphan receives resource-only closure. Its task binding remains unresolved.
+The sweep keeps dirty orphans until automatic preservation is implemented.
+Automatic closure never closes the caller or a busy pane. Shared checkouts remain while other work uses them.
+
+Closed children with retained branches appear under READY TO MERGE.
+These rows describe results, not agent states. A missing branch does not prove a merge.
+
+`dogsled board` groups work under NEEDS YOU, READY TO MERGE, WORKING, and QUEUED.
+Each agent row names the harness and model. Each job row names its command.
+`--json` supplies the Pi widget.
+See [Agent lifecycle and recovery](docs/lifecycle.md) for the state signals and safety rules.
 `dogsled read TARGET [--host H]` shows a child's or job's newest output and the captured final reply.
 
 ```sh
 dogsled close w2:p1
 dogsled close w9:p1 --host netcup --json
 dogsled drop <item-id> --host netcup
-dogsled done                       # as a child: my whole task is complete
+dogsled done                       # CLI completion signal; managed agents use the native tool
+dogsled ask "Which API owns this operation?"
+dogsled blocked "The required host is unavailable."
 ```
 
 `drop` deletes a closed child's retained local and origin branches, including unmerged commits. Only the item's owner can use it, except on an orphan: when the origin's evidence proves the owner pane is gone or its session ended, any session can drop it. It refuses a branch checked out in a worktree. Already absent branches count as success. The item and its done mark stay settled and leave the board.
@@ -208,7 +239,12 @@ Close uses the same loss rule as cleanup: no unique checkout content and every c
 When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
 A pane outside a worktree, or in an unlocked worktree (someone's own checkout), is closed alone; the checkout stays.
 A pane in a checkout that another agent, an open item, or a busy pane still uses is closed alone too, even by an explicit close: close never closes agents it was not asked to close, and never removes a checkout they use. The last pane in the checkout takes the checkout with it.
-A child tab in the caller's own workspace is closed. Close refuses a missing pane, the caller's own pane, a worktree the caller works in or whose workspace is the caller's, a worktree outside the repository's worktree directory, a dirty or detached worktree, and any other lock.
+A child tab in the caller's own workspace closes.
+Close refuses the caller's pane, checkout, or workspace, a checkout outside the configured worktree directory, unique content, and foreign locks.
+A clean detached checkout can close when the default branch or freshly fetched remote refs protect its HEAD.
+Dogsled does not create a branch implicitly for a detached checkout.
+The repository lifecycle lock protects the final identity decision through record reconciliation.
+A replacement checkout at the same path stays. Verified prior removal permits record reconciliation.
 It also refuses a busy target or a busy pane that uses the worktree: an agent that is not `idle` or `done`, or a shell with a foreground command.
 Each refusal happens before a change. If a `teardown` command fails, the worktree, its panes, its lock, and the item stay, and the error shows the command's last lines of output.
 After removal, close drops the worktree's registration, as prune does.
@@ -219,7 +255,31 @@ The order holds per host. A ticket waits only behind earlier tickets that could 
 It records an admission error rather than silently choosing another host after a clone, prepare, or launch failure.
 A service interruption during admission leaves an explicit failed ticket for inspection, not an automatic duplicate launch.
 For non-waiting callers, admission tells the owner through its inbox. An owner without an inbox reader hears once it has one; nothing is typed into its terminal.
-`status` lists open items per owner and pending tickets. `--brief` includes their counts. Prompt context adds the caller's own `To land:` line.
+`status` lists open items per owner and pending tickets. `--brief` includes their counts.
+Prompt context includes the caller's retained branches under `Ready to merge:`.
+
+### Recovery and preparation holds
+
+```sh
+dogsled recovery list --repo /path/to/repo
+dogsled recovery show RECOVERY_ID --repo /path/to/repo
+dogsled recovery restore RECOVERY_ID --repo /path/to/repo --to /path/to/new-checkout --branch recovered/work
+dogsled retire-preparation REQUEST_ID --host HOST --reason "Historical claim no longer has an owner."
+```
+
+Recovery refs stay local and do not expire.
+Restore creates an independent checkout. It does not resume the original task, preparation, grant, or pane.
+The current CLI has no snapshot-creation command. Automatic preservation during owner close and orphan close remains in progress.
+
+Preparation dispositions validate the exact claim, persist a startup fence, then release only that claim.
+Placement retains its host grant and saves its result before release.
+`place --resume REQUEST_ID` replays the original journal without another grant, completed setup, or pane.
+
+`retire-preparation` prohibits future dispatch for one historical request claim. It does not remove a checkout or settle a task.
+After acknowledgement, it reports unknown execution outcome and released ownership. Claims without request IDs are unsupported.
+The separately authorized `--cleanup` override is CLI-only. MCP does not expose it.
+
+See [Agent lifecycle and recovery](docs/lifecycle.md) for command limits, custody, origin release certificates, and migration.
 
 ## Inbox
 
@@ -364,7 +424,9 @@ A local branch with no worktree is removable when it is integrated or every comm
 Prune and the sweep share the same holds: active panes or processes, the caller, an unreadable process table, and pending preparations or launches.
 An unfinished launch holds its checkout before pane allocation completes, or while its attempted start has the matching agent. An empty shell from a final launch holds nothing.
 An open agent item holds its checkout in prune and the sweep; `close` ends it and keeps the reply. Within `close`, a live owner holds the checkout until the default branch holds its work.
-An idle or done agent that has not called `dogsled done` holds its checkout in prune, the sweep, and an automatic close; only an explicit `dogsled close` takes it. An idle shell, a done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
+An agent without native `done` normally holds its checkout.
+The sweep can close a clean stopped orphan after it proves that the custodian is gone.
+Explicit `dogsled close` still requires the safety and loss checks. An idle shell, a done agent without an open item, and a workspace alone are not holds. The processes of an idle agent pane are not holds, but a background job that a shell started is. Foreign locks still prevent removal.
 A dirty checkout whose commits are in the default branch gets a `landed_dirty` finding when no hold applies.
 The finding includes the repository, checkout, branch or HEAD, dirty-path count, and up to ten paths. It is never removable.
 Before it reads checkout changes, the loss rule requires the checkout's own `.git` and a matching Git top-level path.
@@ -381,7 +443,15 @@ A shell without a Dogsled record closes after 15 minutes continuously at an empt
 A pane is an empty prompt only when its root process is a shell that waits there. A shell that runs a command, such as `sh -c "..."`, a shell that runs a script, and a shell with an unknown option all keep the pane. A report names the program of a running command, never its arguments.
 An agent pane still needs more than 24 hours continuously idle or done and a `done` mark. An agent with open children stays open.
 A workspace whose every pane is idle is one `workspaces` entry, and prune closes it whole. The caller's workspace stays, and so does a workspace that a worktree removal closes.
-Ended jobs expire after 24 hours, together with their logs. Disk usage above 90% lists the largest known dogsled-owned paths.
+The service timer removes job output after more than 24 hours from `ended_ms`. The remaining log marker says `output expired`.
+It removes conclusively terminal Job records and the remaining log marker after more than 30 days.
+A stale owner item or unread result does not extend retention. Running, pending, and uncertain jobs stay.
+Current readers report `output expired` for expired output, including deleted records with a retained job item.
+Explicit `prune jobs` currently removes conclusively terminal records and output after more than 24 hours.
+Alignment with the service record window remains pending.
+The planned `result unavailable: expired or unknown` message is not yet released.
+See [Retention](docs/lifecycle.md#retention) for the current rules and pending record expiry.
+Disk usage above 90% lists the largest known Dogsled-owned paths.
 A `targets` entry is build output: a directory with a `CACHEDIR.TAG` that starts with the cache-directory signature, directly under a main checkout or a linked worktree, such as Rust's `target/`.
 It is removable when no Herdr workspace shows the checkout and no pane or process works in it. Work in a linked worktree inside the main checkout uses that worktree, not the main checkout.
 Prune removes it after it checks the tag again. A worktree that the same plan removes takes its build output with it, so that output is not listed.
@@ -400,6 +470,7 @@ Placement records repositories in `repositories.json`, independently of `worktre
 Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
 An absent remembered repository produces a removable `repositories` entry. Prune and the sweep recheck absence under the registry locks, then remove only stale records.
 Existing worktree records stay. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only. Doctor changes no registrations.
+
 ### The sweep in `serve`
 
 The sweep closes finished children (see [Items and closing](#items-and-closing)), and a job closes its own tab. That closed loop ends most work.
@@ -591,14 +662,14 @@ The removed lead ledger and event log are not read or migrated.
 ## Prompt context and integrations
 
 `dogsled hook context --harness claude|codex|pi` leads with your own children and jobs, then shows the fleet totals from `status --brief`.
-The owner summary separates work to land, attention, idle, done, running, and queued work.
-The `To land:` line names finished children with unmerged commits or uncommitted changes.
+The owner summary separates retained results, attention, active work, and queued work.
+The `Ready to merge:` line names retained branches that await integration.
 Claude Code and Codex register `SessionStart` and `UserPromptSubmit` context hooks, and `UserPromptSubmit` and `Stop` inbox hooks (see [Inbox](#inbox)), in `plugins/dogsled`.
 Each registration supplies `--event`. The default context event is `UserPromptSubmit`.
 The CLI never reads stdin. Claude Code and Codex receive `hookSpecificOutput` JSON with `hookEventName` and `additionalContext`.
 Pi receives plain text through its `before_agent_start` extension. All three use the same snapshot reader and formatter.
 
-Before an orchestrator stops, the stop gate checks its own TO LAND children.
+Before an orchestrator stops, the stop gate checks its own children with retained results or unfinished work.
 Pi calls `dogsled hook gate` from `agent_before_settle` on every completed stop, which also requests a cleanup pass. A reminder is added as a visible message that continues the run.
 Claude Code and Codex include the reminder in their existing `Stop` inbox response.
 The reminder requests a review, a commit from dirty children, integration, or an explicit blocker or deferral.
