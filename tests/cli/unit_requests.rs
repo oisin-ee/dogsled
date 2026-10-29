@@ -731,9 +731,21 @@ fn unreachable_host_keeps_cancel_release_pending() {
         acknowledged["acknowledgement"]["released"], true,
         "{acknowledged}"
     );
+    // After saving proof, every remote operation fails, including read-only lookup.
+    rig.script(
+        "ssh",
+        &script.replacen("case \"$*\" in", "exit 255\ncase \"$*\" in", 1),
+    );
+    let transport_before = rig.log("ssh.log");
     assert!(rig.run(&["serve", "--once"]).status.success());
     let saved = rig.read(&format!("state/cancellations/{id}.json"));
     assert_eq!(saved["release"], "acknowledged", "{saved}");
+    for command in ["host preparation-lookup ", "host prepared "] {
+        assert_eq!(
+            rig.log("ssh.log").matches(command).count(),
+            transport_before.matches(command).count()
+        );
+    }
     assert_eq!(saved["operation_id"], acknowledged["operation_id"]);
     assert_eq!(saved["acknowledgement"], acknowledged["acknowledgement"]);
     assert_eq!(rig.read("peer-state/preparations.json"), json!([unrelated]));
@@ -756,6 +768,51 @@ fn committed_queued(name: &str) -> (Rig, Value, String) {
     assert_eq!(receipt["disposition"], "queued");
     let ticket = receipt["ticket"].as_str().unwrap().to_owned();
     (rig, execution, ticket)
+}
+
+#[test]
+fn corrupt_cancellation_holds_only_its_committed_unit() {
+    for unsupported in [true, false] {
+        let (rig, execution, ticket) = committed_queued("cancel-corrupt-isolation");
+        let id = execution["requestId"].as_str().unwrap();
+        let mut queue = rig.read("state/queue.json");
+        assert!(rig.run(&["cancel", &ticket]).status.success());
+        let file = format!("state/cancellations/{id}.json");
+        let corrupt = if unsupported {
+            let mut saved = rig.read(&file);
+            saved["version"] = json!(99);
+            saved
+        } else {
+            json!("invalid cancellation")
+        };
+        rig.put(&file, &corrupt);
+        let mut unrelated = queue[0].clone();
+        unrelated["id"] = json!("unrelated-ticket");
+        unrelated["request"] = json!({"id":"unrelated-place","action":{"type":"place"},
+            "host":"local","cwd":rig.dir.join("home"),"owner":"w1:p1"});
+        queue.as_array_mut().unwrap().push(unrelated);
+        rig.put("state/queue.json", &queue);
+        rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+        rig.snapshot("state/host.json", now(), 0.0, 2);
+        let out = rig.run(&["serve", "--once"]);
+        assert!(out.status.success(), "{out:?}");
+        let queue = rig.read("state/queue.json");
+        assert_eq!(queue[0]["id"], ticket);
+        assert_eq!(queue[0]["state"], "pending", "{queue}");
+        let reason = queue[0]["error"].as_str().unwrap();
+        assert!(
+            reason.contains(if unsupported {
+                "unsupported"
+            } else {
+                "invalid type"
+            }),
+            "{queue}"
+        );
+        assert_eq!(queue[1]["state"], "admitted", "{queue}");
+        assert_eq!(rig.read(&format!("state/cancellations/{id}.json")), corrupt);
+        assert!(admission(&rig, &execution)["launch"].is_null());
+        assert!(!rig.log("herdr.log").contains("agent start"));
+    }
 }
 
 fn set_ticket(rig: &Rig, state: &str, error: Value) {

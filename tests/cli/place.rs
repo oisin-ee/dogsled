@@ -104,7 +104,26 @@ fn cancellation_after_placement_result_saved_is_too_late() {
     let (code, cancelled) = rig.json(&["cancel", "cancel-ticket"]);
     assert_eq!(code, 2, "{cancelled}");
     assert_eq!(cancelled["status"], "too_late");
-    assert_eq!(rig.json(&["place", "--resume", &id]).0, 0);
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    let file = format!("state/admissions/{id}.json");
+    let result = rig.read(&file)["placement"]["saved"]["result"].clone();
+    assert_eq!(
+        rig.read("state/preparations.json")
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(rig.read(&file)["placement"]["phase"], "completed");
+    let receipt_file = format!("state/preparation-receipts/{id}.disposition.json");
+    let receipt = rig.read(&receipt_file);
+    assert_eq!(receipt["progress"], "released");
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read(&receipt_file), receipt);
+    assert_eq!(rig.json(&["place", "--resume", &id]), (0, result));
 }
 
 fn state_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
@@ -1161,7 +1180,6 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     let (code, cancellation) = rig.json(&["cancel", &ticket]);
     assert_eq!(code, 2, "{cancellation}");
     assert_eq!(cancellation["status"], "too_late");
-    assert!(rig.run(&["place", "--resume", id]).status.success());
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
@@ -1175,6 +1193,11 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
         result["result"]
     );
     assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
+    assert_eq!(
+        rig.read(&format!("state/admissions/{id}.json"))["placement"]["phase"],
+        "completed"
+    );
+    assert_eq!(rig.log("ssh.log").matches("host prepared ").count(), 2);
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
 }
 
