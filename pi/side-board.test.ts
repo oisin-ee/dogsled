@@ -3,12 +3,12 @@ import { test } from "node:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TodoPublisher, snapshot as parseSnapshot, type TodoSnapshot } from "./work-todo.ts";
+import { TodoPublisher, type TodoSnapshot } from "./work-todo.ts";
 import { todoDisplay, todoSections } from "./todo-fixture.test.ts";
 import { herdrAvailable, parseBoard, renderBoard } from "./board.ts";
 
 function snapshot(): TodoSnapshot {
-	return { version: 3, presenter: "presenter", publisher: "publisher", request: "request", session: "session", branch: "branch", revision: 1, display: todoDisplay() };
+	return { session: "session", branch: "branch", revision: 1, display: todoDisplay() };
 }
 
 test("todo publisher writes the typed sections, orders revisions, and clears sessions", async () => {
@@ -42,16 +42,10 @@ test("todo publisher writes the typed sections, orders revisions, and clears ses
 	} finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("publisher rejects a path without a string and the integration boundary rejects other versions and malformed sections", () => {
+test("publisher rejects a path without a string", () => {
 	const publisher = new TodoPublisher("w1:p1", () => {});
 	assert.throws(() => publisher.configure({ path: 1 }));
 	assert.throws(() => publisher.configure(null));
-	assert.ok(parseSnapshot(snapshot()));
-	assert.equal(parseSnapshot({ ...snapshot(), version: 2 }), undefined);
-	const display = todoDisplay();
-	assert.equal(parseSnapshot({ ...snapshot(), display: { ...display, sections: display.sections.slice(1) } }), undefined);
-	assert.equal(parseSnapshot({ ...snapshot(), display: { ...display, sections: [...display.sections].reverse() } }), undefined);
-	assert.equal(parseSnapshot({ ...snapshot(), display: { ...display, sections: undefined } }), undefined);
 });
 
 test("the board decoder keeps lifecycle strings and unknown groups visible", () => {

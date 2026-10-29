@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { TaskProviderV1 } from "./todo/src/provider.ts";
 
 export interface UnitRef { sessionId: string; unitId: string; revision: number; contractEntryId: string }
 export interface Execution { executor: string; ownerId: string; requestId: string }
@@ -7,12 +7,7 @@ export interface Exported { version: number; provider: string; contract: { ref: 
 export interface Prepared { execution: Execution; binding: Binding; exported: Exported }
 export interface Receipt { version: number; execution: Execution; unitRef: UnitRef; digest: string; localSessionId: string; seal: { entryId: string; disposition: "completed" | "abandoned" } | null }
 export type Result = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } };
-export interface TaskProvider {
-	inspect(id: string): Result;
-	claim(input: { expected: UnitRef; execution: Execution }): Result;
-	settle(input: unknown): Result;
-	imported(): Result;
-}
+export type TaskProvider = TaskProviderV1;
 export type Placement = { host?: string; branch?: string; base?: string };
 export function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function text(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
@@ -78,15 +73,6 @@ export function receipt(value: unknown): value is Receipt {
 	return record(value) && value.version === 1 && execution(value.execution) && reference(value.unitRef)
 		&& typeof value.digest === "string" && /^[a-f0-9]{64}$/.test(value.digest) && text(value.localSessionId)
 		&& (value.seal === null || (record(value.seal) && text(value.seal.entryId) && ["completed", "abandoned"].includes(String(value.seal.disposition))));
-}
-function provider(value: unknown): value is TaskProvider {
-	return record(value) && ["inspect", "claim", "settle", "imported"].every(key => typeof value[key] === "function");
-}
-export function acquire(events: ExtensionAPI["events"]): TaskProvider | undefined {
-	const replies: unknown[] = [];
-	events.emit("oisin.tasks.acquire.v1", { version: 1, reply: (value: unknown) => { replies.push(value); } });
-	if (replies.length !== 1 || !provider(replies[0])) return undefined;
-	return replies[0];
 }
 export function unwrap(result: Result): unknown {
 	if (!record(result) || typeof result.ok !== "boolean") throw new Error("PROVIDER_UNAVAILABLE: invalid capability result");

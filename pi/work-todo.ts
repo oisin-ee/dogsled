@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { TodoPresenter, TodoWork } from "./todo/src/work.ts";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { rename, rm, writeFile } from "node:fs/promises";
 
@@ -17,12 +18,12 @@ export interface TodoView {
 }
 export type TodoStatus = "in_progress" | "pending" | "completed" | "abandoned";
 export const TODO_STATUSES: readonly TodoStatus[] = ["in_progress", "pending", "completed", "abandoned"];
-export interface TodoChild { status: TodoStatus; text: string; description?: string; unit: string | null }
-export interface TodoItem { status: TodoStatus; text: string; description?: string; review: boolean; unit: string | null; children: TodoChild[] }
+export interface TodoChild { status: TodoStatus; text: string; description?: string | undefined; unit: string | null | undefined }
+export interface TodoItem { status: TodoStatus; text: string; description?: string | undefined; review: boolean; unit: string | null | undefined; children: readonly TodoChild[] }
 /** Typed rows the sidebar draws itself. Always four sections, in `TODO_STATUSES` order. */
-export interface TodoSection { status: TodoStatus; count: number; items: TodoItem[] }
+export interface TodoSection { status: TodoStatus; count: number; items: readonly TodoItem[] }
 export interface TodoDisplay {
-	sections: TodoSection[];
+	sections: readonly TodoSection[];
 	empty: boolean;
 	summary: string;
 	current: string;
@@ -31,10 +32,6 @@ export interface TodoDisplay {
 	createView(host: TodoViewHost): TodoView;
 }
 export interface TodoSnapshot {
-	version: 3;
-	presenter: string;
-	request: string;
-	publisher: string;
 	revision: number;
 	session: string;
 	branch: string | null;
@@ -48,7 +45,7 @@ export interface TodoPayload {
 	revision: number;
 	current: string;
 	pane: string;
-	sections: TodoSection[];
+	sections: readonly TodoSection[];
 }
 
 /** Atomic per-pane publication into Dogsled's ledger. One ordered writer per Pi session. */
@@ -92,29 +89,7 @@ export class TodoPublisher {
 	async flushed(): Promise<void> { await this.queue; }
 }
 
-type Bus = ExtensionAPI["events"];
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
-function isSections(value: unknown): value is TodoSection[] {
-	return Array.isArray(value) && value.length === TODO_STATUSES.length
-		&& value.every((section, index) => record(section) && section["status"] === TODO_STATUSES[index]
-			&& Number.isSafeInteger(section["count"]) && Array.isArray(section["items"]));
-}
-function isDisplay(value: unknown): boolean {
-	return record(value) && typeof value["empty"] === "boolean" && typeof value["summary"] === "string"
-		&& typeof value["current"] === "string" && typeof value["text"] === "string" && isSections(value["sections"]) && "state" in value && typeof value["createView"] === "function";
-}
-function isView(value: unknown): value is TodoView {
-	return record(value) && ["render", "handleInput", "invalidate", "update", "dispose"].every(key => typeof value[key] === "function");
-}
-
-/** Validate the independently installed provider's capability, never its task schema. */
-export function snapshot(value: unknown): TodoSnapshot | undefined {
-	if (!record(value) || value["version"] !== 3 || typeof value["presenter"] !== "string" || typeof value["request"] !== "string"
-		|| typeof value["publisher"] !== "string" || typeof value["session"] !== "string"
-		|| (value["branch"] !== null && typeof value["branch"] !== "string")
-		|| !Number.isSafeInteger(value["revision"]) || Number(value["revision"]) < 1 || !isDisplay(value["display"])) return undefined;
-	return value as unknown as TodoSnapshot;
-}
 
 /** A view lease catches provider failures on every path and disposes exactly once. */
 class HostedTodo implements TodoView {
@@ -142,52 +117,27 @@ class HostedTodo implements TodoView {
 }
 
 /** A session-scoped display lease. The provider remains the only task-state writer. */
-export class WorkTodo {
-	private subscriptions: (() => void)[] = [];
+export class WorkTodo implements TodoPresenter {
+	private detach: (() => void) | undefined;
 	private ctx: ExtensionContext | undefined;
-	private presenter = "";
-	private request = "";
-	private retired = new Set<string>();
 	private views = new Set<HostedTodo>();
 	private rejecting = false;
 	current: TodoSnapshot | undefined;
 	error: string | undefined;
 
-	private readonly bus: Bus;
+	private readonly todo: Pick<TodoWork, "attach">;
 	private readonly changed: () => void;
-	private readonly open: () => void;
-	constructor(bus: Bus, changed: () => void, open: () => void) { this.bus = bus; this.changed = changed; this.open = open; }
+	private readonly onOpen: () => void;
+	constructor(todo: Pick<TodoWork, "attach">, changed: () => void, open: () => void) { this.todo = todo; this.changed = changed; this.onOpen = open; }
+	open(): void { this.onOpen(); }
 
 	start(ctx: ExtensionContext): void {
 		this.stop();
 		if (ctx.mode !== "tui") return;
 		this.ctx = ctx;
-		this.presenter = randomUUID();
-		this.retired.clear();
-		this.subscriptions = [
-			this.bus.on("oisin.todo.ready", value => {
-				if (!record(value) || value["version"] !== 3 || typeof value["publisher"] !== "string") { this.reject(); return; }
-				if (this.retired.has(value["publisher"])) return;
-				this.ask();
-			}),
-			this.bus.on("oisin.todo.snapshot", value => this.receive(value)),
-			this.bus.on("oisin.todo.stop", value => {
-				if (!record(value) || !this.current || value["publisher"] !== this.current.publisher) return;
-				this.retired.add(this.current.publisher);
-				this.release();
-				this.changed();
-			}),
-			this.bus.on("oisin.work.open", value => {
-				if (record(value) && value["version"] === 3 && value["presenter"] === this.presenter && value["request"] === this.request) this.open();
-			}),
-		];
-		this.ask();
-	}
-
-	private ask(): void {
-		this.release();
-		this.request = randomUUID();
-		this.bus.emit("oisin.work.request", { version: 3, presenter: this.presenter, request: this.request });
+		const detach = this.todo.attach(this);
+		if (this.error || this.ctx !== ctx) detach();
+		else this.detach = detach;
 	}
 
 	private reject(error?: unknown): void {
@@ -203,8 +153,7 @@ export class WorkTodo {
 
 	private preflight(next: TodoSnapshot): void {
 		if (!this.ctx) return;
-		const view: unknown = next.display.createView({ theme: this.ctx.ui.theme, height: () => 1, requestRender() {} });
-		if (!isView(view)) throw new Error("Invalid todo component");
+		const view = next.display.createView({ theme: this.ctx.ui.theme, height: () => 1, requestRender() {} });
 		try {
 			view.update(next.display.state);
 			const lines: unknown = view.render(1);
@@ -212,34 +161,26 @@ export class WorkTodo {
 		} finally { view.dispose(); }
 	}
 
-	private receive(value: unknown): void {
-		if (!record(value) || value["presenter"] !== this.presenter || value["request"] !== this.request) return;
-		const next = snapshot(value);
-		if (!next) { this.reject(); return; }
-		if (!this.ctx || next.session !== this.ctx.sessionManager.getSessionId() || next.branch !== this.ctx.sessionManager.getLeafId() || this.retired.has(next.publisher)) return;
-		if (this.current?.publisher === next.publisher && next.revision <= this.current.revision) return;
+	show(next: TodoSnapshot): boolean {
+		if (!Number.isSafeInteger(next.revision) || next.revision < 1) { this.reject(); return false; }
+		if (!this.ctx || next.session !== this.ctx.sessionManager.getSessionId() || next.branch !== this.ctx.sessionManager.getLeafId()) return false;
+		if (this.current && next.revision <= this.current.revision) return false;
 		try {
 			this.preflight(next);
-			if (this.current && this.current.publisher !== next.publisher) {
-				this.retired.add(this.current.publisher);
-				this.disposeViews();
-			}
 			this.current = next;
 			this.error = undefined;
 			for (const view of this.views) view.update(next.display.state);
-			if (this.current !== next) return;
+			if (this.current !== next) return false;
 			this.changed();
-			if (this.current !== next) return;
-			this.bus.emit("oisin.work.claim", { version: 3, presenter: this.presenter, request: this.request, publisher: next.publisher, revision: next.revision });
-		} catch (error) { this.reject(error); }
+			return this.current === next;
+		} catch (error) { this.reject(error); return false; }
 	}
 
 	/** An inline expansion owns this instance until it collapses or its lease ends. */
 	createView(host: TodoViewHost): TodoView | undefined {
 		if (!this.current) return undefined;
 		try {
-			const created: unknown = this.current.display.createView(host);
-			if (!isView(created)) throw new Error("Invalid todo component");
+			const created = this.current.display.createView(host);
 			const view = new HostedTodo(created, error => this.reject(error), () => this.views.delete(view));
 			this.views.add(view);
 			return view;
@@ -248,17 +189,18 @@ export class WorkTodo {
 
 	private disposeViews(): void { for (const view of [...this.views]) view.dispose(); }
 	private release(): void {
-		const claimed = this.current !== undefined;
+		const detach = this.detach;
+		this.detach = undefined;
 		this.current = undefined;
 		this.disposeViews();
-		if (claimed) this.bus.emit("oisin.work.release", { version: 3, presenter: this.presenter, request: this.request });
+		detach?.();
 	}
 
 	stop(): void {
-		for (const off of this.subscriptions) off();
-		this.subscriptions = [];
+		const claimed = this.current !== undefined;
 		this.release();
 		this.ctx = undefined;
 		this.error = undefined;
+		if (claimed) this.changed();
 	}
 }
