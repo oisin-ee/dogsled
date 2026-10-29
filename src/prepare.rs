@@ -1287,6 +1287,49 @@ pub(crate) fn retention_completion(
     )
 }
 
+pub(crate) fn held(ledger: &crate::ledger::Ledger, id: &str) -> Result<bool> {
+    let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    Ok(pending
+        .iter()
+        .any(|claim| claim.request_id.as_deref() == Some(id)))
+}
+
+/// The preparation gate is held by the admission or host expiry owner. An absent
+/// outcome is harmless only when no exact preparation claim remains.
+pub(crate) fn retention_ready(ledger: &crate::ledger::Ledger, id: &str, now: u64) -> Result<bool> {
+    let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    if pending
+        .iter()
+        .any(|claim| claim.request_id.as_deref() == Some(id))
+    {
+        return Ok(false);
+    }
+    let receipts = ledger.child("preparation-receipts");
+    if receipts
+        .read::<PreparationReceipt>(&format!("{id}.json"))?
+        .is_none()
+    {
+        return Ok(!receipts.dir.join(format!("{id}.disposition.json")).exists());
+    }
+    Ok(retention_completion(ledger, id)?
+        .is_some_and(|finished| now.saturating_sub(finished) > crate::jobs::RECORD_KEEP_MS))
+}
+
+pub(crate) fn expire_record(ledger: &crate::ledger::Ledger, id: &str, now: u64) -> Result<()> {
+    if !retention_ready(ledger, id, now)? {
+        return Ok(());
+    }
+    let receipts = ledger.child("preparation-receipts");
+    crate::jobs::remove(&receipts.dir.join(format!("{id}.disposition.json")))?;
+    crate::jobs::remove(&receipts.dir.join(format!("{id}.json")))?;
+    crate::jobs::remove(
+        &ledger
+            .child("preparation-expectations")
+            .dir
+            .join(format!("{id}.json")),
+    )
+}
+
 // Absence alone identifies the historical format; an explicit null is not a version.
 pub(crate) fn receipt_version<'de, D: serde::Deserializer<'de>>(
     decoder: D,

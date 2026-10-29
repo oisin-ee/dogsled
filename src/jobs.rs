@@ -48,6 +48,8 @@ pub const LOG_KEEP_MS: u64 = 24 * 60 * 60 * 1000;
 pub const RECORD_KEEP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// What a reader sees when a job's output has expired.
 pub const OUTPUT_EXPIRED: &str = "output expired";
+/// No permanent identity tombstones are kept.
+pub const RESULT_UNAVAILABLE: &str = "result unavailable: expired or unknown";
 
 /// Read the request-owned authority, which old queue writers never touch.
 pub fn request_validity(ledger: &Ledger, id: &str) -> Result<Option<Validity>> {
@@ -220,6 +222,11 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
             note(&value, "/envelope/request/validity/created_ms");
             note(&value, "/finished_ms");
             note(&value, "/recorded_ms");
+            note(&value, "/accepted_ms");
+            note(&value, "/terminal_job/ended_ms");
+            note(&value, "/certificate/terminal_evidence/job/ended_ms");
+            note(&value, "/certificate/terminal_evidence/closed_ms");
+            note(&value, "/origin_release/accepted_ms");
         }
     }
     for value in json_files(&ledger.child("admissions").dir)? {
@@ -503,7 +510,7 @@ pub fn get(ledger: &Ledger, id: &str) -> Result<Job> {
         .read(&format!("{id}.json"))?
         .ok_or_else(|| Error::Refused {
             code: crate::error::Refusal::UnknownJob,
-            detail: format!("unknown job {id}"),
+            detail: RESULT_UNAVAILABLE.into(),
         })
 }
 
@@ -626,11 +633,11 @@ pub fn expire(ledger: &Ledger, now: u64) -> Result<()> {
     crate::work::expire_requests(ledger, now)?;
     let store = store(ledger);
     let entries = match fs::read_dir(&store.dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    for entry in entries {
+    for entry in entries.into_iter().flatten() {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
@@ -648,34 +655,45 @@ pub fn expire(ledger: &Ledger, now: u64) -> Result<()> {
             eprintln!("dogsled job expiry: {id}: {error}");
         }
     }
+    crate::done::expire(ledger, now)?;
+    crate::items::expire(ledger, now)?;
+    crate::launch::expire(ledger, now)?;
+    crate::node::expire_grants(ledger, now)?;
+    crate::work::expire_requests(ledger, now)?;
     Ok(())
 }
 
 /// Expire one job under its own record lock, so a job that starts or ends meanwhile is
 /// never half expired.
-fn expire_one(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
+pub(crate) fn expire_one(ledger: &Ledger, id: &str, now: u64) -> Result<Expiry> {
     validate_id(id)?;
     let jobs = store(ledger);
-    jobs.with_lock(id, || {
-        let Some(job) = record(ledger, id)? else {
-            return Ok(());
-        };
-        match expiry(&job, now) {
-            Expiry::Keep => Ok(()),
-            Expiry::Log => {
-                expire_log(ledger, &jobs, &job)?;
-                Ok(())
+    ledger.child("launches").with_lock(id, || {
+        jobs.with_lock(id, || {
+            let Some(job) = record(ledger, id)? else {
+                return Ok(Expiry::Record);
+            };
+            match expiry(&job, now) {
+                Expiry::Keep => Ok(Expiry::Keep),
+                Expiry::Log => {
+                    expire_log(ledger, &jobs, &job)?;
+                    Ok(Expiry::Log)
+                }
+                Expiry::Record => {
+                    expire_log(ledger, &jobs, &job)?;
+                    crate::items::job_finished(ledger, &job)?;
+                    if let Err(error) = crate::work::job_finished(ledger, &job) {
+                        eprintln!("dogsled job terminal evidence {}: {error}", job.id);
+                    }
+                    // The record goes last: a reader that still sees the record finds the
+                    // expiry marker on it.
+                    remove(&jobs.dir.join(format!("{id}.json")))?;
+                    // The marker went with the record: nothing names this job any more.
+                    remove(&jobs.dir.join(format!("{id}.log")))?;
+                    Ok(Expiry::Record)
+                }
             }
-            Expiry::Record => {
-                expire_log(ledger, &jobs, &job)?;
-                // The record goes last: a reader that still sees the record finds the
-                // expiry marker on it.
-                remove(&jobs.dir.join(format!("{id}.json")))?;
-                // The marker went with the record: nothing names this job any more.
-                remove(&jobs.dir.join(format!("{id}.log")))?;
-                Ok(())
-            }
-        }
+        })
     })
 }
 
@@ -705,7 +723,7 @@ fn expire_log(ledger: &Ledger, jobs: &Ledger, job: &Job) -> Result<()> {
 }
 
 /// Delete a file that may already be gone. A missing file is the wanted end state.
-fn remove(path: &std::path::Path) -> Result<()> {
+pub(crate) fn remove(path: &std::path::Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -749,7 +767,8 @@ pub fn record_expired(ledger: &Ledger, id: &str) -> Result<bool> {
     }
     Ok(crate::items::list(ledger)?
         .iter()
-        .any(|item| item.kind == "job" && item.id == id))
+        .any(|item| item.kind == "job" && item.id == id)
+        || crate::launch::retained_job(ledger, id)?.is_some())
 }
 
 pub fn logs(ledger: &Ledger, id: &str, offset: u64) -> Result<LogChunk> {

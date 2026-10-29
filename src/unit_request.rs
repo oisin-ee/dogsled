@@ -132,6 +132,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
             request_id: request.id.clone(),
         };
         let attempt = Attempt {
+            ordinary_release: None,
             finished_ms: None,
             request: serde_json::to_value(request)?,
             placement: None,
@@ -425,11 +426,13 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
             let Some(attempt) = attempts.read::<Attempt>(&file)? else {
                 return Ok(());
             };
-            if attempt
-                .unit
-                .as_ref()
-                .is_some_and(|u| u.committed.is_some() && u.abandoned.is_none())
-                && attempt.result.is_none()
+            if attempt.unit.as_ref().is_some_and(|u| {
+                u.committed.is_some()
+                    && u.abandoned.is_none()
+                    && u.returned.is_none()
+                    && u.stopped.is_none()
+                    && u.reference_release.is_none()
+            }) && attempt.result.is_none()
             {
                 let request = serde_json::from_value(attempt.request)?;
                 match work::admission_prohibited(ledger, &request) {

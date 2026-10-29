@@ -143,18 +143,30 @@ fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
 }
 
 /// Job tickets expire only with a conclusively terminal local job record. Missing
-/// execution evidence and non-job tickets are kept. Orphan sidecars expire only
+/// execution evidence and unsettled tickets are kept. Orphan sidecars expire only
 /// without a ticket, job record, or launch receipt.
 pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
+    expire_admissions(ledger, now)?;
     ledger.with_lock("queue", || {
         let mut tickets = queue(ledger)?;
         let mut expired = Vec::new();
         for ticket in &tickets {
-            if matches!(ticket.request.action, Action::Job { .. })
-                && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
-                && now.saturating_sub(ticket.created_ms) > jobs::RECORD_KEEP_MS
+            let cancelled_without_admission =
+                cancellation(ledger, &ticket.request)?.is_some_and(|saved| {
+                    saved.completion_version == Some(1)
+                        && saved.finished_ms.is_some()
+                        && saved.admission.is_none()
+                        && saved.intent.is_none()
+                        && saved.release == "not_needed"
+                        && saved.outcome == crate::prepare::disposition::Outcome::NotStarted
+                });
+            let terminal_job = matches!(ticket.request.action, Action::Job { .. })
                 && jobs::record(ledger, &ticket.request.id)?
-                    .is_some_and(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
+                    .is_some_and(|job| matches!(jobs::expiry(&job, now), jobs::Expiry::Record));
+            if (terminal_job || cancelled_without_admission)
+                && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
+                && ticket_completion(ledger, ticket)?
+                    .is_some_and(|finished| now.saturating_sub(finished) > jobs::RECORD_KEEP_MS)
             {
                 if cancellation(ledger, &ticket.request)?
                     .is_some_and(|saved| saved.release == "pending")
@@ -178,46 +190,67 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
             tickets.retain(|t| !expired.contains(&t.id));
             save_queue(ledger, &tickets)?;
         }
-        let sidecars = ledger.child("job-validity");
-        let entries = match std::fs::read_dir(&sidecars.dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
+        expire_request_sidecars(ledger, now, &tickets)
+    })
+}
+
+fn expire_request_sidecars(ledger: &Ledger, now: u64, tickets: &[Ticket]) -> Result<()> {
+    let sidecars = ledger.child("job-validity");
+    let entries = match std::fs::read_dir(&sidecars.dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
         };
-        for entry in entries {
-            let path = entry?.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let nonjob_owner = ledger
-                .child("admissions")
-                .read::<Value>(&format!("{id}.json"))?
-                .is_some_and(|admission| admission["request"]["action"]["type"] != "job");
-            if nonjob_owner
-                || [
-                    "preparation-receipts",
-                    "placement-grants",
-                    "preparation-expectations",
-                ]
-                .iter()
-                .any(|directory| {
-                    ledger
-                        .child(directory)
-                        .dir
-                        .join(format!("{id}.json"))
-                        .exists()
-                })
-                || tickets.iter().any(|t| t.request.id == id)
-                || ledger
+        let admission_owner = ledger
+            .child("admissions")
+            .dir
+            .join(format!("{id}.json"))
+            .exists();
+        if admission_owner
+            || [
+                "preparation-receipts",
+                "placement-grants",
+                "preparation-expectations",
+            ]
+            .iter()
+            .any(|directory| {
+                ledger
+                    .child(directory)
+                    .dir
+                    .join(format!("{id}.json"))
+                    .exists()
+            })
+            || [
+                "progress.json",
+                "unit.json",
+                "release.json",
+                "reference-release.json",
+            ]
+            .iter()
+            .any(|extension| {
+                ledger
                     .child("launches")
-                    .read::<Value>(&format!("{id}.json"))?
-                    .is_some()
-            {
-                continue;
-            }
+                    .dir
+                    .join(format!("{id}.{extension}"))
+                    .exists()
+            })
+            || tickets.iter().any(|t| t.request.id == id)
+            || ledger
+                .child("launches")
+                .read::<Value>(&format!("{id}.json"))?
+                .is_some()
+        {
+            continue;
+        }
+        ledger.child("request-ingress").with_lock(id, || {
             sidecars.with_lock(id, || {
                 let Some(validity) = jobs::request_validity(ledger, id)? else {
                     return Ok(());
@@ -226,16 +259,275 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                     && jobs::record(ledger, id)?
                         .is_none_or(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
                 {
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => (),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                        Err(e) => return Err(e.into()),
-                    }
+                    jobs::remove(&path)?;
+                    jobs::remove(
+                        &ledger
+                            .child("request-ingress")
+                            .dir
+                            .join(format!("{id}.json")),
+                    )?;
                 }
                 Ok(())
-            })?;
+            })
+        })?;
+    }
+    Ok(())
+}
+
+/// Positive release proof is independent of settlement delivery. Callers that mutate
+/// custody-dependent records hold custody while using this predicate.
+pub(crate) fn references_released(ledger: &Ledger, id: &str) -> Result<bool> {
+    if crate::prepare::held(ledger, id)? {
+        return Ok(false);
+    }
+    if queue(ledger)?.iter().any(|ticket| {
+        ticket.request.id == id && matches!(ticket.state.as_str(), "pending" | "admitting")
+    }) {
+        return Ok(false);
+    }
+    if crate::preservation::operations(ledger)?
+        .iter()
+        .any(|operation| {
+            !matches!(
+                operation.stage,
+                crate::preservation::Stage::Removed | crate::preservation::Stage::Finished
+            ) && (operation.expectation.launch.as_deref() == Some(id)
+                || operation
+                    .expectation
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.item == id)
+                || operation
+                    .expectation
+                    .owners
+                    .iter()
+                    .any(|owner| owner.item == id))
+        })
+    {
+        return Ok(false);
+    }
+    let Some(attempt) = ledger
+        .child("admissions")
+        .read::<Attempt>(&format!("{id}.json"))?
+    else {
+        return host_references_released(ledger, id);
+    };
+    let request: Request = serde_json::from_value(attempt.request.clone())?;
+    if request.id != id {
+        return Err(crate::unit_transport::conflict(
+            "retention admission identity changed",
+        ));
+    }
+    if cancellation(ledger, &request)?.is_some_and(|saved| saved.release == "pending") {
+        return Ok(false);
+    }
+    if let Some(unit) = &attempt.unit {
+        return unit_references_released(ledger, id, &attempt, unit);
+    }
+    if let Some(placement) = &attempt.placement {
+        if placement.completion_ack != Some(true) {
+            return Ok(false);
+        }
+        let Some(grant) = placement.terminal_grant() else {
+            return Ok(false);
+        };
+        validate_placement_completion(&crate::node::GrantCompletion {
+            version: 1,
+            grant: grant.clone(),
+            admission: serde_json::to_value(&attempt)?,
+        })?;
+        return Ok(true);
+    }
+    if let Some(intent) = &attempt.ordinary_release {
+        intent.certificate.validate()?;
+        return Ok(intent
+            .acknowledgement
+            .as_ref()
+            .is_some_and(|ack| ack.certificate == intent.certificate)
+            && crate::custody::get(ledger, id)?.map_or(0, |custody| custody.revision)
+                == intent.certificate.custody_revision);
+    }
+    Ok(attempt.launch.is_none() && admission_completion(ledger, id)?.is_some())
+}
+
+fn unit_references_released(
+    ledger: &Ledger,
+    id: &str,
+    attempt: &Attempt,
+    unit: &crate::unit_request::Prepared,
+) -> Result<bool> {
+    let Some(intent) = &unit.reference_release else {
+        return Ok(attempt.launch.is_none()
+            && unit.abandoned.is_some()
+            && unit.returned.is_none()
+            && unit.stopped.is_none()
+            && unit.settlement_ack.is_some()
+            && crate::custody::get(ledger, id)?.is_none());
+    };
+    let Some(ack) = &intent.acknowledgement else {
+        return Ok(false);
+    };
+    intent.certificate.validate()?;
+    if ack.certificate != intent.certificate
+        || intent.certificate.execution.request_id != id
+        || intent.certificate.execution != unit.execution
+        || attempt.launch.as_ref() != Some(&intent.certificate.launch)
+        || crate::custody::get(ledger, id)?.map_or(0, |custody| custody.revision)
+            != intent.certificate.custody_revision
+    {
+        return Ok(false);
+    }
+    Ok(match &intent.certificate.terminal_evidence {
+        crate::unit_reply::HostEvidence::Returned(receipt) => {
+            unit.returned.is_some()
+                && unit.stopped.is_none()
+                && unit.abandoned.is_none()
+                && unit.terminal_receipt.as_ref() == Some(receipt.as_ref())
+        }
+        crate::unit_reply::HostEvidence::Stopped(_) => {
+            unit.stopped.is_some() && unit.returned.is_none() && unit.abandoned.is_none()
+        }
+        crate::unit_reply::HostEvidence::Refused(_) => {
+            unit.abandoned.is_some() && unit.returned.is_none() && unit.stopped.is_none()
+        }
+    })
+}
+
+fn host_references_released(ledger: &Ledger, id: &str) -> Result<bool> {
+    let custody = crate::custody::get(ledger, id)?;
+    if custody
+        .as_ref()
+        .is_none_or(crate::custody::Custody::is_unclaimed)
+    {
+        return Ok(true);
+    }
+    let revision = custody.map_or(0, |custody| custody.revision);
+    let launches = ledger.child("launches");
+    if let Some(release) =
+        launches.read::<crate::launch::OrdinaryReleaseAck>(&format!("{id}.release.json"))?
+    {
+        release.certificate.validate()?;
+        return Ok(
+            release.certificate.launch.id == id && release.certificate.custody_revision == revision
+        );
+    }
+    if let Some(release) = launches
+        .read::<crate::launch::ReferenceReleaseAck>(&format!("{id}.reference-release.json"))?
+    {
+        release.certificate.validate()?;
+        return Ok(
+            release.certificate.launch.id == id && release.certificate.custody_revision == revision
+        );
+    }
+    Ok(false)
+}
+
+/// Preserve conclusive job evidence before the job owner removes its bounded record.
+pub(crate) fn job_finished(ledger: &Ledger, job: &Job) -> Result<()> {
+    let launches = ledger.child("launches");
+    // The caller holds launch before job, just like dispatch.
+    {
+        let file = format!("{}.json", job.id);
+        if let Some(mut receipt) = launches.read::<Value>(&file)? {
+            let Some(launch) = receipt.get("launch") else {
+                return Ok(());
+            };
+            let launch: Launch = serde_json::from_value(launch.clone())?;
+            if launch.id != job.id
+                || launch.host != job.host
+                || receipt["id"] != job.id
+                || receipt["host"] != job.host
+            {
+                // A mismatched historical reader cannot extend the Job record window.
+                return Ok(());
+            }
+            receipt["terminal_job"] = serde_json::to_value(job)?;
+            launches.write(&file, &receipt)?;
         }
         Ok(())
+    }
+}
+
+fn expire_admissions(ledger: &Ledger, now: u64) -> Result<()> {
+    let attempts = ledger.child("admissions");
+    let entries = match std::fs::read_dir(&attempts.dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let Some(id) = path
+            .file_stem()
+            .and_then(|id| id.to_str())
+            .filter(|_| path.extension().is_some_and(|ext| ext == "json"))
+        else {
+            continue;
+        };
+        if jobs::validate_id(id).is_err() {
+            continue;
+        }
+        let outcome = (|| {
+            let Some(attempt) = attempts.read::<Attempt>(&format!("{id}.json"))? else {
+                return Ok(());
+            };
+            let request: Request = serde_json::from_value(attempt.request)?;
+            // Same-origin preparation discovery takes this gate before publication.
+            let owner = format!(
+                "owner-{}",
+                crate::unit_transport::digest_hex(request.owner.as_bytes())
+            );
+            attempts.with_lock(&owner, || {
+                attempts.with_lock(id, || expire_admission(ledger, id, now))
+            })
+        })();
+        if let Err(error) = outcome {
+            eprintln!("dogsled admission expiry: {id}: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn expire_admission(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
+    if admission_completion(ledger, id)?
+        .is_none_or(|finished| now.saturating_sub(finished) <= jobs::RECORD_KEEP_MS)
+        || !references_released(ledger, id)?
+    {
+        return Ok(());
+    }
+    if items::retained(ledger, id, now)? {
+        return Ok(());
+    }
+    let receipts = ledger.child("preparation-receipts");
+    receipts.with_lock(id, || {
+        if !crate::prepare::retention_ready(ledger, id, now)? {
+            return Ok(());
+        }
+        crate::done::expire(ledger, now)?;
+        items::expire(ledger, now)?;
+        if !crate::launch::expire_request(ledger, id, now)? {
+            return Ok(());
+        }
+        if !crate::node::expire_grant(ledger, id, now)? {
+            return Ok(());
+        }
+        crate::prepare::expire_record(ledger, id, now)?;
+        commands::expire_selection(ledger, id)?;
+        ledger.with_lock("queue", || {
+            let mut tickets = queue(ledger)?;
+            for ticket in tickets.iter().filter(|ticket| ticket.request.id == id) {
+                if ticket_completion(ledger, ticket)?
+                    .is_none_or(|finished| now.saturating_sub(finished) <= jobs::RECORD_KEEP_MS)
+                {
+                    return Ok(());
+                }
+            }
+            tickets.retain(|ticket| ticket.request.id != id);
+            save_queue(ledger, &tickets)?;
+            jobs::remove(&ledger.child("cancellations").dir.join(format!("{id}.json")))?;
+            jobs::remove(&ledger.child("admissions").dir.join(format!("{id}.json")))
+        })?;
+        crate::custody::locked(ledger, id, |_| crate::custody::forget_released(ledger, id))
     })
 }
 
@@ -1432,6 +1724,7 @@ fn launch_job(
     // snapshot sampled before it may predate the pane, so it cannot prove the pane gone.
     Ok(json!({"id":launch.id,"host":launch.host,"pane":pane,
         "launch_confirmed_ms":crate::ledger::now_ms(),
+        "launch":launch,
         "request":request_evidence(ledger, launch, cmd, timeout_ms, idle_timeout_ms)?}))
 }
 
@@ -1988,6 +2281,8 @@ pub(crate) struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinary_release: Option<crate::launch::OrdinaryReleaseIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<PlacementProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<Host>,
@@ -2022,7 +2317,14 @@ pub(crate) fn admission_completion(ledger: &Ledger, id: &str) -> Result<Option<u
         return Ok(None);
     }
     let request: Request = serde_json::from_value(attempt.request.clone())?;
-    let terminal = if let Some(unit) = &attempt.unit {
+    let terminal = if let Some(intent) = &attempt.ordinary_release {
+        intent.certificate.validate()?;
+        attempt.launch.as_ref() == Some(&intent.certificate.launch)
+            && intent
+                .acknowledgement
+                .as_ref()
+                .is_some_and(|ack| ack.certificate == intent.certificate)
+    } else if let Some(unit) = &attempt.unit {
         let terminal = usize::from(unit.abandoned.is_some())
             + usize::from(unit.returned.is_some())
             + usize::from(unit.stopped.is_some());
@@ -2212,6 +2514,7 @@ fn begin(
         return Ok(None);
     };
     let mut attempt = Attempt {
+        ordinary_release: None,
         request: serde_json::to_value(request)?,
         finished_ms: None,
         placement: None,
@@ -2740,6 +3043,7 @@ fn reconcile_finished(ledger: &Ledger) -> Result<()> {
 
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     reconcile_finished(fleet.ledger)?;
+    crate::launch::release_owned(fleet)?;
     let reports = fleet.status(now)?;
     launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {
@@ -2805,12 +3109,18 @@ pub fn job_host<'a>(fleet: &'a Fleet<'_>, id: &str, now: u64) -> Result<&'a Host
     {
         return fleet.find(&item.host);
     }
+    if let Some(job) = crate::launch::retained_job(fleet.ledger, id)? {
+        return fleet.find(&job.host);
+    }
     for host in fleet.status(now)? {
         if host.jobs.iter().any(|j| j.id == id) {
             return fleet.find(&host.host.id);
         }
     }
-    Err(Error::Invalid(format!("unknown job {id}")))
+    Err(Error::Refused {
+        code: crate::error::Refusal::ResultUnavailable,
+        detail: jobs::RESULT_UNAVAILABLE.into(),
+    })
 }
 
 #[cfg(test)]

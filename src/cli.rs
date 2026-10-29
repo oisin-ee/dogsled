@@ -538,6 +538,10 @@ pub enum HostCommand {
         #[arg(long)]
         input: String,
     },
+    /// Read exact ordinary execution-host terminal identity for release.
+    ExecutionEvidence {
+        id: String,
+    },
     /// Read origin release status without inferring it from host or origin silence.
     ReferenceReleaseStatus {
         #[arg(long)]

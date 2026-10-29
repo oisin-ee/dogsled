@@ -22,6 +22,9 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_confirmed_ms: Option<u64>,
     pub closed_ms: Option<u64>,
+    /// Execution-host terminal proof copied before bounded Job metadata is removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_ended_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_ms: Option<u64>,
     /// Last successful missing-mark branch check on the origin clock.
@@ -214,6 +217,95 @@ pub fn told(ledger: &Ledger, ids: &[String], now: u64) -> Result<()> {
         {
             reply.reported_ms.get_or_insert(now);
         }
+    })
+}
+
+pub(crate) fn job_finished(ledger: &Ledger, job: &crate::jobs::Job) -> Result<()> {
+    if !crate::jobs::terminal(job) {
+        return Ok(());
+    }
+    change(ledger, |items| {
+        for item in items
+            .iter_mut()
+            .filter(|item| item.kind == "job" && item.id == job.id && item.host == job.host)
+        {
+            item.job_ended_ms = item.job_ended_ms.or(job.ended_ms);
+            item.closed_ms = item.closed_ms.or(job.ended_ms);
+        }
+    })
+}
+
+pub(crate) fn retention_ready(ledger: &Ledger, item: &Item, now: u64) -> Result<bool> {
+    let Some(closed) = item.closed_ms else {
+        return Ok(false);
+    };
+    if now.saturating_sub(closed) <= crate::jobs::RECORD_KEEP_MS
+        || closed < item.created_ms
+        || item.resource_closed_ms.is_some()
+        || item.recovery.is_some()
+        || (item.dropped_ms.is_none() && item.branch.as_ref().is_some_and(|branch| !branch.landed))
+        || !crate::work::references_released(ledger, &item.id)?
+    {
+        return Ok(false);
+    }
+    if item.kind == "job" {
+        return Ok(item.job_ended_ms.is_some_and(|ended| {
+            ended <= closed && now.saturating_sub(ended) > crate::jobs::RECORD_KEEP_MS
+        }));
+    }
+    Ok(item.native_done
+        && item
+            .reply
+            .as_ref()
+            .is_some_and(|reply| reply.done && reply.reported_ms.is_some()))
+}
+
+pub(crate) fn retained(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
+    for item in list(ledger)?.iter().filter(|item| item.id == id) {
+        if !retention_ready(ledger, item, now)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Custody and child notification share this lock order. Re-read after locking.
+pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
+    if !list(ledger)?.iter().any(|item| {
+        item.closed_ms
+            .is_some_and(|closed| now.saturating_sub(closed) > crate::jobs::RECORD_KEEP_MS)
+    }) {
+        return Ok(());
+    }
+    let (panes, _) = crate::cleanup::pane_snapshot(&crate::shell::System::default())?;
+    ledger.with_lock("custody", || {
+        ledger.with_lock("items", || {
+            let items = list(ledger)?;
+            let mut kept = Vec::new();
+            let mut expired = Vec::new();
+            for item in items {
+                if (item.kind == "agent"
+                    && item.host == crate::hosts::LOCAL
+                    && panes.iter().any(|pane| pane.pane_id == item.pane))
+                    || crate::done::list(ledger)?
+                        .iter()
+                        .any(|mark| mark.item.as_deref() == Some(&item.id))
+                    || !retention_ready(ledger, &item, now)?
+                {
+                    kept.push(item);
+                } else {
+                    expired.push(item.id);
+                }
+            }
+            if expired.is_empty() {
+                return Ok(());
+            }
+            ledger.write("items.json", &kept)?;
+            for id in expired {
+                crate::custody::forget_released(ledger, &id)?;
+            }
+            Ok(())
+        })
     })
 }
 
@@ -516,12 +608,15 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
             let Some(probe) = &host.probe else {
                 continue;
             };
-            // A job's own record proves its end, whenever the snapshot was sampled.
-            let ended = item.kind == "job"
-                && host
-                    .jobs
-                    .iter()
-                    .any(|j| j.id == item.id && j.ended_ms.is_some());
+            // Only conclusive execution-host evidence, not a missing pane, proves job completion.
+            let terminal_job = host
+                .jobs
+                .iter()
+                .find(|job| job.id == item.id && crate::jobs::terminal(job));
+            let ended = item.kind == "job" && terminal_job.is_some();
+            if ended {
+                item.job_ended_ms = terminal_job.and_then(|job| job.ended_ms);
+            }
             // A missing pane proves only that a sample taken after the pane existed lacks it.
             // Admission time is earlier than the pane: a launch can take many seconds.
             let after_launch = if let Some(confirmed) = item.launch_confirmed_ms {

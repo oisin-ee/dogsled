@@ -82,6 +82,14 @@ struct ReservationAttempt {
     host: String,
 }
 
+/// Admission expiry has already proved completion and released every dependant.
+pub(crate) fn expire_selection(ledger: &crate::ledger::Ledger, id: &str) -> Result<()> {
+    let selections = ledger.child("placement-attempts");
+    selections.with_lock(id, || {
+        crate::jobs::remove(&selections.dir.join(format!("{id}.json")))
+    })
+}
+
 /// A placement for a job request. The request's own creation time rides with the
 /// reservation, so the host checks the age before it holds capacity.
 pub fn place_with(
