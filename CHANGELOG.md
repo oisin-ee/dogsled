@@ -4,6 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## 0.28.0 - 2026-10-29
 
+- `dogsled stop <id>` ends a pending job that never started and prevents `dogsled exec` from running it later.
 - `@oisin-ee/pi-dogsled` includes the `todo` tool. Install it alone; do not install `@oisin-ee/pi-todo` next to it. Existing sessions keep their todo lists, because the stored entries do not change.
 - `@oisin-ee/oisinpi` no longer includes pi-todo. It still loads pi-prewalk, pi-tiers, and pi-guardrails.
 - Dogsled and the todo tool call each other directly. The seed-path, plan-approval, and work-display events are gone. `oisin.tasks.acquire.v1` stays for extensions outside pi-dogsled, such as pi-prewalk.
