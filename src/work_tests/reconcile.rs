@@ -1,6 +1,14 @@
 use super::*;
 use serde_json::json;
 
+fn missing_pane_snapshot(peer: &Host) -> Snapshot {
+    let mut current = snapshot(100);
+    current.probe.host = peer.id.clone();
+    current.probe.panes.clear();
+    current.probe.disk_free_percent = 1.0;
+    current
+}
+
 #[test]
 fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() {
     // With skew, the owner's admission time is later than even the disappearance sample.
@@ -24,10 +32,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
             hosts: vec![peer.clone()],
         };
         let remote = |args: &[String]| format!("ssh {}", fleet.remote_argv(&peer, args).join(" "));
-        let mut current = snapshot(100);
-        current.probe.host = peer.id.clone();
-        current.probe.panes.clear();
-        current.probe.disk_free_percent = 1.0;
+        let mut current = missing_pane_snapshot(&peer);
         shell.on(
             &remote(&["snapshot".into()]),
             &serde_json::to_string(&current).unwrap(),
@@ -64,6 +69,8 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
         shell.on(
             &remote(&[
                 "launch".into(),
+                "--preparation-protocol".into(),
+                crate::prepare::disposition::VERSION.to_string(),
                 "--request".into(),
                 serde_json::to_string(&launch).unwrap(),
             ]),

@@ -824,6 +824,8 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
     );
     let mut request = request_at(&rig, now);
     request["cwd"] = json!(tree);
+    request["preparation"] = rig.read("state/preparation-receipts/job-1.json")["binding"].clone();
+    request["preparation_protocol"] = json!(1);
     let (code, error) = rig.json(&[
         "host",
         "launch",

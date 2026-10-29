@@ -4,6 +4,246 @@
 use super::unit_requests::*;
 use super::unit_seeded::*;
 use super::*;
+use std::io::Write as _;
+
+/// A saved legacy execution with C3 host-captured ownership, without changing its seed.
+fn bound_legacy(name: &str) -> (Rig, Value) {
+    let (rig, execution, _) = legacy_unreturned(name);
+    let id = request_id(&execution);
+    let repo = rig.dir.join("home");
+    repository(&repo);
+    close::git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    );
+    let common = repo.join(".git").canonicalize().unwrap();
+    let generation = "a".repeat(32);
+    fs::write(common.join("dogsled-checkout-id"), &generation).unwrap();
+    let tree = json!({"repo":repo,"path":repo,"branch":"main","head":close::git(&repo, &["rev-parse", "HEAD"]).trim(),
+        "identity":{"common":common,"gitdir":common,"generation":generation}});
+    let prepared = json!({"pane_id":"w2:p1","terminal_id":"term_child","path":repo});
+    rig.preparation_outcome(&id, &tree, &prepared);
+    let binding = rig.read(&format!("state/preparation-receipts/{id}.json"))["binding"].clone();
+    let (progress_file, mut progress) = owner_progress(&rig, &execution);
+    let mut launch = progress["request"].clone();
+    launch["preparation"] = binding.clone();
+    launch["preparation_protocol"] = json!(1);
+    launch["pane"] = json!("w2:p1");
+    launch["terminal"] = json!("term_child");
+    progress["request"] = launch.clone();
+    progress["result"]["checkout"] = tree.clone();
+    rig.put(&progress_file, &progress);
+    let final_file = format!("state/launches/{id}.json");
+    let mut result = rig.read(&final_file);
+    result["checkout"] = tree;
+    rig.put(&final_file, &result);
+    let file = format!("state/admissions/{id}.json");
+    let mut admission = rig.read(&file);
+    admission["launch"] = launch.clone();
+    admission["result"] = result;
+    rig.put(&file, &admission);
+    rig.put(&format!("state/preparation-receipts/{id}.disposition.json"),
+        &json!({"request":{"version":1,"binding":binding,"policy":{"kind":"transfer","launch":launch,"pane":"w2:p1","job":null},"outcome":"possibly_executed"},"progress":"released"}));
+    (rig, execution)
+}
+
+#[test]
+fn continuation_ignores_the_ambient_default_branch() {
+    let rig = Rig::new("legacy-default-branch");
+    let home = rig.dir.join("home");
+    fs::write(
+        home.join(".gitconfig"),
+        "[init]\n\tdefaultBranch = master\n",
+    )
+    .unwrap();
+    let mut command = isolated(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "legacy_continue::legacy_continuation_checks_fence_before_done_and_launch_locks",
+            "--nocapture",
+        ])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .stdout(fs::File::create(rig.dir.join("regression-output")).unwrap())
+        .stderr(fs::File::create(rig.dir.join("regression-error")).unwrap());
+    let status = Owned::spawn(&mut command).wait();
+    assert!(
+        status.success(),
+        "{}\n{}",
+        rig.log("regression-output"),
+        rig.log("regression-error")
+    );
+}
+
+#[test]
+fn historical_continuation_does_not_mint_checkout_identity() {
+    let (rig, execution) = bound_legacy("historical-fence");
+    let id = request_id(&execution);
+    let file = format!("state/preparation-receipts/{id}.json");
+    let mut receipt = rig.read(&file);
+    receipt.as_object_mut().unwrap().remove("version");
+    receipt.as_object_mut().unwrap().remove("binding");
+    rig.put(&file, &receipt);
+    let (file, mut progress) = owner_progress(&rig, &execution);
+    progress["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation");
+    rig.put(&file, &progress);
+    let file = format!("state/admissions/{id}.json");
+    let mut admission = rig.read(&file);
+    admission["launch"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation");
+    rig.put(&file, &admission);
+    let marker = rig.dir.join("home/.git/dogsled-checkout-id");
+    fs::remove_file(&marker).unwrap();
+    assert_continue_refused(&rig, &id, "w1:p1", "historical preparation has no identity");
+    assert!(!marker.exists());
+}
+
+fn assert_continuation_gate_order(rig: &Rig, id: &str, case: &str) {
+    let path = if case == "preparation-lock" {
+        rig.dir
+            .join(format!("state/preparation-receipts/{id}.lock"))
+    } else {
+        rig.dir.join("home/.git/dogsled-lifecycle.lock")
+    };
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    lock.lock().unwrap();
+    let before = state(rig, id);
+    let ready = Fifo::new(&rig.dir, "continue.ready");
+    let go = Fifo::new(&rig.dir, "continue.go");
+    let _ready = ready.hold();
+    let _go = go.hold();
+    let mut command = rig.cmd(&[
+        "legacy-continue",
+        "w2:p1",
+        "--message",
+        "continue",
+        "--json",
+        "--budget-ms",
+        "1000",
+    ]);
+    command.env(
+        "DOGSLED_TEST_LAUNCH_CONTINUATION_BEFORE_GATE",
+        rig.dir.join("continue"),
+    );
+    command.stdout(fs::File::create(rig.dir.join("continue-output")).unwrap());
+    command.stderr(fs::File::create(rig.dir.join("continue-error")).unwrap());
+    let mut contender = Owned::spawn(&mut command);
+    read_fifo(
+        ready.path(),
+        "continuation before preparation/repository gates",
+    );
+    let mut inner_locks = Vec::new();
+    for path in [
+        rig.dir.join("state/done.lock"),
+        rig.dir.join(format!("state/launches/{id}.lock")),
+    ] {
+        let probe = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        probe.try_lock().unwrap();
+        inner_locks.push(probe);
+    }
+    writeln!(go.hold(), "go").unwrap();
+    assert_eq!(contender.wait().code(), Some(2));
+    let refusal: Value = serde_json::from_str(&rig.log("continue-output")).unwrap();
+    assert_eq!(refusal["deadline"], true, "{refusal}");
+    let expected_gate = if case == "preparation-lock" {
+        "preparation-receipts"
+    } else {
+        "dogsled-lifecycle.lock"
+    };
+    assert!(
+        refusal["error"].as_str().unwrap().contains(expected_gate),
+        "{refusal}"
+    );
+    drop(inner_locks);
+    assert_eq!(state(rig, id), before);
+    lock.unlock().unwrap();
+    assert_eq!(continue_from(rig, "w1:p1", "continue").0, 0);
+}
+
+#[test]
+fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
+    for case in [
+        "transfer",
+        "prohibit",
+        "identity",
+        "historical",
+        "unsupported",
+        "preparation-lock",
+        "repository-lock",
+    ] {
+        let (rig, execution) = bound_legacy(&format!("legacy-fence-{case}"));
+        let id = request_id(&execution);
+        let file = format!("state/preparation-receipts/{id}.disposition.json");
+        match case {
+            "prohibit" => {
+                let mut fence = rig.read(&file);
+                fence["request"]["policy"] =
+                    json!({"kind":"prohibit","basis":"placement_returned"});
+                rig.put(&file, &fence);
+                assert_continue_refused(&rig, &id, "w1:p1", "fence prohibits");
+            }
+            "identity" => {
+                fs::write(
+                    rig.dir.join("home/.git/dogsled-checkout-id"),
+                    "b".repeat(32),
+                )
+                .unwrap();
+                assert_continue_refused(&rig, &id, "w1:p1", "identity changed");
+            }
+            "historical" => {
+                let file = format!("state/preparation-receipts/{id}.json");
+                let mut receipt = rig.read(&file);
+                receipt.as_object_mut().unwrap().remove("binding");
+                assert!(receipt["version"].is_number());
+                rig.put(&file, &receipt);
+                assert_continue_refused(&rig, &id, "w1:p1", "missing its binding");
+            }
+            "unsupported" => {
+                let file = format!("state/preparation-receipts/{id}.json");
+                let mut receipt = rig.read(&file);
+                receipt["version"] = json!(99);
+                rig.put(&file, &receipt);
+                assert_continue_refused(&rig, &id, "w1:p1", "unsupported preparation");
+            }
+            "preparation-lock" | "repository-lock" => {
+                assert_continuation_gate_order(&rig, &id, case);
+            }
+            _ => {
+                let (code, sent) = continue_from(&rig, "w1:p1", "continue");
+                assert_eq!(code, 0, "{sent}");
+                assert_eq!(continue_from(&rig, "w1:p1", "continue"), (0, sent));
+                assert_eq!(inbox(&rig).as_array().unwrap().len(), 1);
+            }
+        }
+    }
+}
 
 /// The immutable records of request `id` that continuation must never rewrite.
 const IMMUTABLE: [&str; 6] = [

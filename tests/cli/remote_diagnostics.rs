@@ -90,8 +90,21 @@ fn real_peer_prepare(rig: &Rig) {
     DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;"#,
         env!("CARGO_BIN_EXE_dogsled")
     );
-    rig.script("ssh", &script.replace(
-        "  *'host prepare'*) printf '%s\\n' '{\"pane_id\":\"w9:p1\",\"terminal_id\":\"term_remote\",\"path\":\"/remote/tree\"}' ;;", &handler));
+    let begin = script.find("  *'host prepare'*)").unwrap();
+    let end = script[begin..].find("  *) echo unexpected").unwrap() + begin;
+    let routing = format!(
+        r#"  *'host launch'*|*'host prepared'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;
+"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    let script = format!("{}{}{}", &script[..begin], handler, &script[end..]);
+    rig.script(
+        "ssh",
+        &script.replacen("case \"$*\" in", &format!("case \"$*\" in\n{routing}"), 1),
+    );
 }
 
 /// The peer runs the real prepare command, so the cause it sends is the real one.
@@ -126,7 +139,7 @@ fn a_real_remote_unknown_base_names_the_base_in_the_ticket() {
 fn origin_with_branch(rig: &Rig, repo: &Path, branch: &str) {
     let bare = rig.dir.join("origin.git");
     let out = isolated("git")
-        .args(["init", "-q", "--bare"])
+        .args(["init", "-q", "--bare", "-b", "main"])
         .arg(&bare)
         .output()
         .unwrap();

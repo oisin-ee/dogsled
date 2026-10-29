@@ -6,7 +6,7 @@
 //! selected this host, and the caller's live Pi session must be the admission's origin session.
 //! Nothing is backfilled, relaunched, sealed, returned, or settled.
 //!
-//! Lock order: `admissions/<request>`, then `done`, then `launches/<request>`, held for the
+//! Lock order: `admissions/<request>`, preparation, repository, `done`, then `launches/<request>`, held for the
 //! whole decision. Inside them, `inbox/<terminal>` and then `outbox` are taken one at a time,
 //! and neither holds another lock. No lock is taken twice, and no lock is taken out of this
 //! order.
@@ -18,6 +18,10 @@
 //! series can never continue another mark.
 
 use crate::done::Mark;
+use crate::prepare::disposition;
+use crate::worktree;
+use std::path::Path;
+
 use crate::error::{Error, Result};
 use crate::inbox::{Record, Sender, Sent, State};
 use crate::ledger::Ledger;
@@ -63,75 +67,162 @@ pub fn legacy(
         &digest_hex(json!([id, owner, kind, text]).to_string().as_bytes())[..24]
     );
     let sent = ledger.child("admissions").with_lock(&id, || {
-        crate::done::continue_legacy(ledger, &worker, &from, |mark| {
-            crate::launch::with_legacy_unreturned(ledger, &id, &worker, |launch| {
-                let origin = admission(ledger, &id, &owner, &worker.pane, launch)?;
-                // Fresh observations, immediately before the input is stored.
-                let current = crate::inbox::local_agent(shell, &owner)?;
-                if sender(&current) != from || pi_session(&current)? != origin {
-                    return Err(conflict(&format!(
-                        "{owner} no longer runs the session that started this unit"
-                    )));
-                }
-                let live = crate::inbox::local_agent(shell, target)?;
-                if live.terminal_id != worker.terminal_id
-                    || live.agent_session != worker.agent_session
-                    || live.agent != worker.agent
-                    || live.name != worker.name
-                {
-                    return Err(conflict(&format!("{target}: worker identity changed")));
-                }
-                item(ledger, &id, target)?;
-                let request = Continuation {
-                    request: id.clone(),
-                    series: series.clone(),
-                    owner: from.clone(),
-                    session: origin,
-                    worker: Worker::of(&worker),
-                    kind: kind.into(),
-                    text_sha256: digest_hex(text.as_bytes()),
-                };
-                if let Some(receipt) = receipts(ledger, &id)?.remove(&series) {
-                    return resume(ledger, &request, receipt, mark, text, now);
-                }
-                let mark = mark.ok_or_else(|| {
-                    Error::Invalid(format!(
-                        "{target} has no done mark to continue; nothing was accepted"
-                    ))
-                })?;
-                let receipt = Receipt {
-                    sent: Sent {
-                        id: record_id(&series, mark),
-                        host: crate::hosts::LOCAL.into(),
-                        host_label: crate::hosts::LOCAL.into(),
-                        terminal: terminal.clone(),
-                        pane: target.into(),
-                        name: worker.name.clone(),
-                        harness: worker.agent.clone(),
-                        from: from.clone(),
-                        kind: kind.into(),
-                        created_ms: now,
-                        state: State::Pending,
-                        reason: None,
-                        check: crate::backoff::Backoff::default(),
-                    },
-                    request,
-                    mark: mark.clone(),
-                    phase: Phase::Prepared,
-                };
-                // A record that nothing would deliver is refused before any write.
-                crate::inbox::deliverable(ledger, &record(&receipt.sent, text))?;
-                // The intent is durable before any input exists: it fences this series to
-                // this mark for good.
-                write(ledger, &id, &receipt, None)?;
-                crate::unit_request::crash_point("legacy-continue-prepared");
-                complete(ledger, receipt, text, now)
-            })
-        })
+        let expected = ledger
+            .child("admissions")
+            .read::<Attempt>(&format!("{id}.json"))?
+            .and_then(|attempt| attempt.launch)
+            .ok_or_else(|| {
+                conflict("this host has no original admission or saved launch to continue")
+            })?;
+        with_continuation_gates(
+            ledger,
+            shell,
+            &expected,
+            target,
+            worker.terminal_id.as_deref(),
+            || {
+                crate::done::continue_legacy(ledger, &worker, &from, |mark| {
+                    crate::launch::with_legacy_unreturned(ledger, &id, &worker, |launch| {
+                        if serde_json::from_value::<Launch>(launch.clone())? != expected {
+                            return Err(conflict(
+                                "the saved launch does not equal the captured continuation launch",
+                            ));
+                        }
+                        let origin = admission(ledger, &id, &owner, &worker.pane, launch)?;
+                        // Fresh observations, immediately before the input is stored.
+                        let current = crate::inbox::local_agent(shell, &owner)?;
+                        if sender(&current) != from || pi_session(&current)? != origin {
+                            return Err(conflict(&format!(
+                                "{owner} no longer runs the session that started this unit"
+                            )));
+                        }
+                        let live = crate::inbox::local_agent(shell, target)?;
+                        if live.terminal_id != worker.terminal_id
+                            || live.agent_session != worker.agent_session
+                            || live.agent != worker.agent
+                            || live.name != worker.name
+                        {
+                            return Err(conflict(&format!("{target}: worker identity changed")));
+                        }
+                        item(ledger, &id, target)?;
+                        let request = Continuation {
+                            request: id.clone(),
+                            series: series.clone(),
+                            owner: from.clone(),
+                            session: origin,
+                            worker: Worker::of(&worker),
+                            kind: kind.into(),
+                            text_sha256: digest_hex(text.as_bytes()),
+                        };
+                        if let Some(receipt) = receipts(ledger, &id)?.remove(&series) {
+                            return resume(ledger, &request, receipt, mark, text, now);
+                        }
+                        let mark = mark.ok_or_else(|| {
+                            Error::Invalid(format!(
+                                "{target} has no done mark to continue; nothing was accepted"
+                            ))
+                        })?;
+                        let receipt = prepared_receipt(request, mark, &terminal, now);
+                        // A record that nothing would deliver is refused before any write.
+                        crate::inbox::deliverable(ledger, &record(&receipt.sent, text))?;
+                        // The intent is durable before any input exists: it fences this series to
+                        // this mark for good.
+                        write(ledger, &id, &receipt, None)?;
+                        crate::unit_request::crash_point("legacy-continue-prepared");
+                        complete(ledger, receipt, text, now)
+                    })
+                })
+            },
+        )
     })?;
     // The done mark is removed. A retry from here returns this record from the receipt.
     crate::unit_request::crash_point("legacy-continue-removed");
     Ok(sent)
+}
+
+/// Capture the immutable continuation intent before publishing any input.
+fn prepared_receipt(request: Continuation, mark: &Mark, terminal: &str, now: u64) -> Receipt {
+    let sent = Sent {
+        id: record_id(&request.series, mark),
+        host: crate::hosts::LOCAL.into(),
+        host_label: crate::hosts::LOCAL.into(),
+        terminal: terminal.into(),
+        pane: request.worker.pane.clone(),
+        name: request.worker.name.clone(),
+        harness: request.worker.agent.clone(),
+        from: request.owner.clone(),
+        kind: request.kind.clone(),
+        created_ms: now,
+        state: State::Pending,
+        reason: None,
+        check: crate::backoff::Backoff::default(),
+    };
+    Receipt {
+        sent,
+        request,
+        mark: mark.clone(),
+        phase: Phase::Prepared,
+    }
+}
+
+/// Admission is held by the caller. Enter preparation and repository gates BEFORE done
+/// and launch locks. Observe a captured incarnation; never mint a historical generation.
+fn with_continuation_gates<T>(
+    ledger: &crate::ledger::Ledger,
+    shell: &dyn crate::shell::Shell,
+    launch: &crate::work::Launch,
+    pane: &str,
+    terminal: Option<&str>,
+    run: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    crate::work::launch_test_barrier("CONTINUATION_BEFORE_GATE")?;
+    ledger.child("preparation-receipts").with_lock(&launch.id, || {
+        let authority = crate::prepare::validate_launch_binding(ledger, launch)?;
+        if authority.historical {
+            return Err(worktree::refuse("historical preparation has no identity; continuation remains held"));
+        }
+        let fence = ledger.child("preparation-receipts")
+            .read::<disposition::Receipt>(&format!("{}.disposition.json", launch.id))?;
+        if let Some(fence) = fence {
+            if fence.progress != disposition::Progress::Released
+                || fence.request.version != disposition::VERSION
+                || fence.request.outcome != disposition::Outcome::PossiblyExecuted
+                || authority.binding.as_deref() != Some(&fence.request.binding)
+                || !matches!(&fence.request.policy, disposition::Policy::Transfer { launch: saved, pane: saved_pane, job: None }
+                    if **saved == *launch && saved_pane == pane)
+            {
+                return Err(worktree::refuse("preparation fence prohibits continuation; nothing was sent"));
+            }
+        } else if authority.binding.is_some() {
+            return Err(worktree::refuse("preparation has no transfer; continuation remains held"));
+        }
+        if launch.terminal.as_deref().is_some_and(|saved| Some(saved) != terminal) {
+            return Err(worktree::refuse("continued terminal identity changed"));
+        }
+        // Final launch results are immutable. Correlation to admission and progress stays
+        // inside the existing legacy launch guard, after its own native refusal checks.
+        let captured = ledger.child("launches")
+            .read::<serde_json::Value>(&format!("{}.json", launch.id))?
+            .and_then(|result| result.get("checkout").cloned())
+            .map(serde_json::from_value::<crate::cleanup::Tree>)
+            .transpose()?;
+        let captured = authority.binding.as_ref().map(|b| b.claim.tree.clone()).or(captured);
+        if let Some(tree) = captured {
+            if tree.identity.is_none() {
+                return Err(worktree::refuse("historical checkout has no identity; continuation remains held"));
+            }
+            worktree::with_lifecycle(shell, ledger, Path::new(&tree.repo), |guard| {
+                let live = guard.observe(shell, &tree.path)?
+                    .ok_or_else(|| worktree::refuse("continued checkout disappeared"))?;
+                if tree.drift(&live.tree()) == crate::cleanup::Drift::Identity {
+                    return Err(worktree::refuse("continued checkout identity changed"));
+                }
+                run()
+            })
+        } else {
+            run()
+        }
+    })
 }
 
 /// The receipts file of request `id`: one receipt per continuation series. It belongs to the

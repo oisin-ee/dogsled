@@ -537,6 +537,8 @@ impl<'a> Fleet<'a> {
         let t = self.thresholds();
         let mut args = vec![
             "reserve".into(),
+            "--preparation-protocol".into(),
+            crate::prepare::disposition::VERSION.to_string(),
             "--id".into(),
             id.into(),
             "--free-core-fraction-min".into(),

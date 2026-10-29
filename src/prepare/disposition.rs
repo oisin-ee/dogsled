@@ -314,33 +314,6 @@ pub(super) fn failure_guarded(
     Ok(())
 }
 
-/// Identified legacy host input is temporary. Its authority still comes from the immutable
-/// host outcome, not the path supplied by its caller. Requestless release is unsupported.
-pub fn release(
-    ledger: &Ledger,
-    shell: &dyn crate::shell::Shell,
-    path: &str,
-    id: Option<&str>,
-) -> Result<Acknowledgement> {
-    let id = id.ok_or_else(conflict)?;
-    crate::jobs::validate_id(id)?;
-    let request = ledger.child("preparation-receipts").with_lock(id, || {
-        let binding = binding(ledger, id)?.ok_or_else(conflict)?;
-        if binding.claim.tree.path != path || binding.prepared.is_none() {
-            return Err(conflict());
-        }
-        Ok(Request {
-            version: VERSION,
-            binding,
-            policy: Policy::Prohibit {
-                basis: Basis::PlacementReturned,
-            },
-            outcome: Outcome::Unknown,
-        })
-    })?;
-    dispose(ledger, shell, &request)
-}
-
 /// Versioned host transaction for correlated transport. Unsupported or conflicting input
 /// refuses before repository observation. Captured expectations are compared, never replaced.
 pub fn dispose(
@@ -865,6 +838,7 @@ mod tests {
                     request_id: "a".into(),
                 },
                 prepared: Some(Prepared {
+                    binding: None,
                     pane_id: Some("w8:p1".into()),
                     terminal_id: Some("term_tree".into()),
                     workspace_id: Some("w8".into()),

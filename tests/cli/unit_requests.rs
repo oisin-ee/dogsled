@@ -10,7 +10,7 @@ pub(super) fn exported(index: usize) -> Value {
 }
 
 pub(super) fn rig(name: &str, full: bool) -> Rig {
-    let rig = Rig::new(name);
+    let rig = Rig::short(name);
     rig.snapshot("state/host.json", now(), if full { 3.0 } else { 0.0 }, 2);
     let dir = rig.dir.join("profiles/worker");
     fs::create_dir_all(&dir).unwrap();
@@ -262,6 +262,44 @@ fn failed_launch_ticket_settles_unit_as_not_started_and_delivers_once() {
     assert_eq!(operation(&rig, "ack-settlement", &ack).1["applied"], true);
     assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
     assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+#[test]
+fn unknown_release_does_not_settle_possibly_launched_unit() {
+    for response in ["lost", "mismatch"] {
+        let rig = rig(&format!("unknown-release-{response}"), false);
+        let repo = rig.dir.join("home");
+        repository(&repo);
+        rig.peer();
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        let handler = if response == "lost" {
+            "  *'host prepared'*) echo response-lost >&2; exit 255;"
+        } else {
+            "  *'host prepared'*) printf '{\"prepared\":true}\n'; exit 0;"
+        };
+        rig.script("ssh", &script.replace("  *'host prepared'*)", handler));
+        let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{"host":"netcup","branch":"ambiguous","base":"main"}});
+        let (code, execution) = rig.json(&[
+            "unit",
+            "prepare",
+            "--input",
+            &input.to_string(),
+            "--tool-call-id",
+            "call-ambiguous",
+        ]);
+        assert_eq!(code, 0, "{execution}");
+        let (code, reply) = operation(&rig, "commit", &commit_input(&execution, 0));
+        assert_eq!(code, 2, "{reply}");
+        let attempt = admission(&rig, &execution);
+        assert!(attempt["launch"]["preparation"].is_object(), "{attempt}");
+        let (_, state) = operation(&rig, "observe", &execution_input(&execution));
+        assert_eq!(state["phase"], "unresolved", "{state}");
+        assert!(state["settlement"].is_null(), "{state}");
+        assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+        assert_eq!(rig.log("ssh.log").matches("host launch ").count(), 1);
+        assert_eq!(rig.log("ssh.log").matches("host prepared ").count(), 1);
+        assert!(!rig.log("herdr.log").contains("agent start"));
+    }
 }
 
 #[test]

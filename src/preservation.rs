@@ -1293,7 +1293,7 @@ mod tests {
     fn nested_repository_refuses() {
         let repo = Repo::new(true);
         fs::create_dir(repo.path.join("nested")).unwrap();
-        repo.git(&["-C", "nested", "init"]);
+        repo.git(&["-C", "nested", "init", "-b", "main"]);
         assert!(matches!(
             snapshot(&System::default(), &repo.path),
             Err(Error::Refused(Refusal::NestedRepository(_)))
