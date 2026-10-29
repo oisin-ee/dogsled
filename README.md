@@ -674,11 +674,13 @@ All three harness packages share `plugins/dogsled/skills/dogsled/SKILL.md`. It d
 
 ## Build and development
 
+The shell does not activate Proto, so a bare `moon`, `pnpm`, or `node` does not use the version that `.prototools` pins. Run a pinned tool with `proto run <tool> -- <arguments>`. Every `moon run` and `moon ci` in this README means `proto run moon -- run` and `proto run moon -- ci`. Run any other command that needs the pinned tools with `proto exec --tools-from-config -- <command>`.
+
 Build this branch with the repository's pinned Rust toolchain:
 
 ```sh
 cargo build --release
-pnpm install --frozen-lockfile
+proto run pnpm -- install --frozen-lockfile
 ```
 
 The server embeds the Dioxus portal UI, so the web bundle must exist before the binary builds.
@@ -686,7 +688,7 @@ The server embeds the Dioxus portal UI, so the web bundle must exist before the 
 Run it before a plain `cargo build`:
 
 ```sh
-moon run :web-build
+proto run moon -- run :web-build
 cargo build --release
 ```
 
@@ -694,7 +696,7 @@ Proto and moon own the development tooling. `proto install` installs the version
 
 ```sh
 proto install
-moon run :fmt-check :lint :test :typecheck :test-shim
+proto run moon -- run :fmt-check :lint :test :typecheck :test-shim
 ```
 
 The `lint` and `test` tasks build the web bundle first, so they work in a fresh checkout.
