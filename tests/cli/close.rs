@@ -511,10 +511,8 @@ fn a_settled_preparation_no_longer_holds_its_landed_checkout() {
     let (code, ack) = rig.json(&[
         "host",
         "prepared",
-        "--path",
-        tree.to_str().unwrap(),
-        "--request-id",
-        "settled",
+        "--input",
+        &rig.disposition_request("settled"),
     ]);
     assert_eq!(code, 0, "{ack}");
     assert_eq!(ack["released"], true);

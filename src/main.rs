@@ -598,13 +598,21 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     Ok(())
 }
 
-fn print_preparation_disposition(
+/// Decode and validate the launch wire before ingress can publish any evidence.
+fn print_host_launch(
     node: &Node<'_>,
-    path: &str,
-    request_id: Option<&str>,
+    request: &str,
+    validity: Option<u32>,
+    preparation_protocol: Option<u32>,
 ) -> Result<()> {
-    let ack = prepare::disposition::release(node.ledger, node.shell, path, request_id)?;
-    print(true, &ack, String::new)
+    prepare::require_protocol(preparation_protocol)?;
+    let launch: work::Launch = serde_json::from_str(request)?;
+    let result = work::receive_launch(node.ledger, node.shell, &launch, now_ms(), validity)?;
+    print(
+        true,
+        &prepare::launch_response(node.ledger, &launch, result)?,
+        String::new,
+    )
 }
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
@@ -615,17 +623,8 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         HostCommand::Launch {
             request,
             job_validity,
-        } => print(
-            true,
-            &work::receive_launch(
-                node.ledger,
-                node.shell,
-                &serde_json::from_str(&request)?,
-                now_ms(),
-                job_validity,
-            )?,
-            String::new,
-        )?,
+            preparation_protocol,
+        } => print_host_launch(node, &request, job_validity, preparation_protocol)?,
         HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
         HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
         HostCommand::Logs { id, offset } => {
@@ -676,10 +675,12 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         )?,
         HostCommand::Reserve {
             id,
+            preparation_protocol,
             thresholds,
             job_validity,
             job_created_ms,
         } => {
+            prepare::require_protocol(preparation_protocol)?;
             let node = Node {
                 thresholds: thresholds.over(node.thresholds),
                 ..*node
@@ -691,15 +692,23 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
                 return Ok(Error::Full.exit_code());
             }
         }
-        HostCommand::Prepared { path, request_id } => {
-            print_preparation_disposition(node, &path, request_id.as_deref())?;
+        HostCommand::Prepared {
+            input,
+            preparation_protocol,
+        } => {
+            prepare::require_protocol(Some(preparation_protocol))?;
+            let request = serde_json::from_str(&input)?;
+            let ack = prepare::disposition::dispose(node.ledger, node.shell, &request)?;
+            print(true, &ack, String::new)?;
         }
         HostCommand::Prepare {
+            preparation_protocol,
             repo,
             branch,
             base,
             request_id,
         } => {
+            prepare::require_protocol(preparation_protocol)?;
             let prepared =
                 prepare::on_host(node, &repo, &branch, base.as_deref(), request_id.as_deref())?;
             print(true, &prepared, String::new)?;

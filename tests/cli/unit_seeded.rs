@@ -803,10 +803,8 @@ fn preparation_owners_coexist_and_release_only_their_records() {
         rig.json(&[
             "host",
             "prepared",
-            "--path",
-            path.to_str().unwrap(),
-            "--request-id",
-            "first"
+            "--input",
+            &rig.disposition_request("first")
         ])
         .0,
         0
@@ -816,9 +814,10 @@ fn preparation_owners_coexist_and_release_only_their_records() {
     assert_eq!(remaining[0]["request_id"], "later");
     assert_eq!(remaining[1], legacy);
     assert_eq!(
-        rig.json(&["host", "prepared", "--path", path.to_str().unwrap()])
-            .0,
-        2
+        rig.run(&["host", "prepared", "--path", path.to_str().unwrap()])
+            .status
+            .code(),
+        Some(2)
     );
     assert_eq!(rig.read("state/preparations.json"), remaining);
     let before = rig.log("herdr.log");
@@ -906,15 +905,6 @@ fn remote_preparation_and_placement_release_route_the_same_request_id() {
     repository(&repo);
     rig.peer();
     rig.snapshot("remote.json", now(), 0.0, 8);
-    rig.script(
-        "ssh",
-        &fs::read_to_string(rig.dir.join("bin/ssh"))
-            .unwrap()
-            .replace(
-                "case \"$*\" in",
-                "case \"$*\" in\n  *'host prepared'*) printf '{}\\n' ;;",
-            ),
-    );
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -944,7 +934,7 @@ fn remote_preparation_and_placement_release_route_the_same_request_id() {
         .next()
         .unwrap();
     assert!(
-        released.contains(&format!("--request-id {request_arg}")),
+        released.contains(&format!("\"request_id\":\"{request_arg}\"")),
         "{log}"
     );
 }

@@ -60,6 +60,8 @@ pub struct Request {
 pub struct Launch {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<Box<crate::prepare::disposition::Binding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<crate::unit_transport::Seed>,
     pub action: Action,
     pub host: String,
@@ -786,6 +788,7 @@ pub fn receive_launch(
             .with_lock(&launch.id, || {
                 // Ingress can publish validity. Validate the disposition before that first write;
                 // a final correlated receipt remains a read-only replay instead.
+                crate::prepare::validate_launch_binding(ledger, launch)?;
                 crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
                 if replay_launch(ledger, launch)?.is_some() {
                     return Ok(());
@@ -845,6 +848,7 @@ pub fn launch(
         ledger
             .child("preparation-receipts")
             .with_lock(&launch.id, || {
+                crate::prepare::validate_launch_binding(ledger, launch)?;
                 crate::prepare::disposition::replay_guarded(ledger, shell, launch)
             })?;
         return replay?.ok_or_else(|| Error::Invalid("final launch receipt disappeared".into()));
@@ -857,6 +861,7 @@ pub fn launch(
         .child("preparation-receipts")
         .with_lock(&launch.id, || {
             launch_test_barrier("ENTERED_GATE")?;
+            crate::prepare::validate_launch_binding(ledger, launch)?;
             // The preparation gate can wait behind a completed dispatch.
             crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
             if let Some(result) = replay_launch(ledger, launch)? {
@@ -1298,26 +1303,19 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
         };
         let launch = prepare_launch(fleet, request, &host)
             .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
-        if request.branch.is_some() {
-            if host.is_local() {
-                crate::prepare::disposition::release(
-                    fleet.ledger,
-                    fleet.shell,
-                    &launch.cwd,
-                    Some(&launch.id),
-                )?;
-            } else {
-                let _: Value = fleet.remote_setup(
-                    &host,
-                    &[
-                        "prepared".into(),
-                        "--path".into(),
-                        launch.cwd.clone(),
-                        "--request-id".into(),
-                        launch.id.clone(),
-                    ],
-                )?;
-            }
+        if let Some(binding) = &launch.preparation {
+            crate::prepare::dispose(
+                fleet,
+                &host,
+                &crate::prepare::disposition::Request {
+                    version: crate::prepare::disposition::VERSION,
+                    binding: *binding.clone(),
+                    policy: crate::prepare::disposition::Policy::Prohibit {
+                        basis: crate::prepare::disposition::Basis::PlacementReturned,
+                    },
+                    outcome: crate::prepare::disposition::Outcome::Unknown,
+                },
+            )?;
         }
         return Ok(Some(
             json!({"host":host,"reservation":reservation,"path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane}),
@@ -1541,6 +1539,7 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
     }
     Ok(Launch {
         id: request.id.clone(),
+        preparation: prepared.binding,
         unit,
         action,
         host: host.id.clone(),
@@ -1580,6 +1579,8 @@ fn finish(
     } else {
         let mut args = vec![
             "launch".into(),
+            "--preparation-protocol".into(),
+            crate::prepare::disposition::VERSION.to_string(),
             "--request".into(),
             serde_json::to_string(launch_request)?,
         ];
@@ -1593,13 +1594,23 @@ fn finish(
         }
         fleet.remote_setup(host, &args)
     };
-    let result = launched.map_err(|e| {
+    let response = launched.map_err(|e| {
         if retryable(&e) && matches!(request.action, Action::Agent { .. }) {
             Error::Launch(e.to_string())
         } else {
             e
         }
     })?;
+    let result = if launch_request.preparation.is_some() {
+        let response = if host.is_local() {
+            crate::prepare::launch_response(fleet.ledger, launch_request, response)?
+        } else {
+            response
+        };
+        crate::prepare::accept_launch(fleet, host, launch_request, response)?
+    } else {
+        response
+    };
     let pane = result["pane"]
         .as_str()
         .ok_or_else(|| Error::Invalid("launch returned no pane".into()))?;

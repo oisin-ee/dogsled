@@ -623,16 +623,52 @@ case "$*" in
     cat "$RIG/remote.json" ;;
   *'host reserve'*) cat "$RIG/reserve.json" ;;
   *'host checkout'*) printf '%s\n' '"/remote/repo"' ;;
-  *'host launch'*) printf '%s\n' '{"id":"remote-job","host":"8103","pane":"w9:p1","name":"worker"}' ;;
+  *'host launch'*)
+    if test -f "$RIG/remote-binding.json"; then
+      for remote do :; done
+      sh -c "$RIG/bin/peer-fixture $remote"
+    else
+      printf '%s\n' '{"id":"remote-job","host":"8103","pane":"w9:p1","name":"worker"}'
+    fi ;;
   *'host jobs'*) cat "$RIG/jobs.json" ;;
   *'host job '*) cat "$RIG/job.json" ;;
   *'host logs'*) cat "$RIG/logs.json" ;;
   *'host stop'*) printf '{}\n' ;;
-  *'host prepare'*) printf '%s\n' '{"pane_id":"w9:p1","terminal_id":"term_remote","path":"/remote/tree"}' ;;
+  *'host prepared'*)
+    for remote do :; done
+    DOGSLED_STATE="$RIG/state" sh -c "$RIG/bin/peer-fixture $remote" ;;
+  *'host prepare'*)
+    for remote do :; done
+    DOGSLED_STATE="$RIG/state" sh -c "$RIG/bin/peer-fixture $remote" ;;
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#,
         );
+        rig.script("peer-fixture", r#"#!/bin/sh
+while test "$1" != host; do shift; done
+shift
+operation=$1; shift
+while test "$#" -gt 0; do
+  case "$1" in
+    --request-id) id=$2; shift ;;
+    --branch) branch=$2; shift ;;
+    --base) base=$2; shift ;;
+    --input) input=$2; shift ;;
+    --request) request=$2; shift ;;
+  esac
+  shift
+done
+case "$operation" in
+  prepared) printf '%s,"released":true}\n' "${input%\}}" ;;
+  prepare)
+    prepared='{"pane_id":"w9:p1","terminal_id":"term_remote","path":"/remote/tree"}'
+    if test -n "$base"; then base="\"$base\""; else base=null; fi
+    printf '{"request_id":"%s","request":["/remote/repo","%s",%s],"claim":{"request_id":"%s","tree":{"repo":"/remote/repo","path":"/remote/tree","branch":"%s","head":"head","identity":{"common":"/remote/repo/.git","gitdir":"/remote/repo/.git/worktrees/tree","generation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}},"prepared":%s}' "$id" "$branch" "$base" "$id" "$branch" "$prepared" > "$RIG/remote-binding.json"
+    printf '%s,"binding":%s}\n' "${prepared%\}}" "$(cat "$RIG/remote-binding.json")" ;;
+  launch)
+    printf '{"result":{"id":"remote-job","host":"8103","pane":"w9:p1","name":"worker"},"disposition":{"version":1,"binding":%s,"policy":{"kind":"transfer","launch":%s,"pane":"w9:p1","job":null},"outcome":"possibly_executed"}}\n' "$(cat "$RIG/remote-binding.json")" "$request" ;;
+esac
+"#);
         rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
         rig
     }
@@ -677,6 +713,13 @@ esac
         )
         .unwrap();
     }
+    fn disposition_request(&self, id: &str) -> String {
+        let receipt = self.read(&format!("state/preparation-receipts/{id}.json"));
+        json!({"version":1,"binding":receipt["binding"],
+            "policy":{"kind":"prohibit","basis":"placement_returned"},"outcome":"unknown"})
+        .to_string()
+    }
+
     /// An immutable host outcome for identity-bearing preparation fixtures.
     fn preparation_outcome(&self, id: &str, tree: &Value, prepared: &Value) {
         assert!(tree["identity"].is_object());
@@ -685,7 +728,7 @@ esac
         fs::create_dir_all(self.dir.join("state/preparation-receipts")).unwrap();
         self.put(
             &format!("state/preparation-receipts/{id}.json"),
-            &json!({"request":request,"prepared":prepared,"failure":null,"binding":binding}),
+            &json!({"version":1,"request":request,"prepared":prepared,"failure":null,"binding":binding}),
         );
     }
 
@@ -703,6 +746,13 @@ esac
         }
         let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
         cmd.args(args);
+        // Fixtures speak the current wire unless a test explicitly selects another version.
+        if args.windows(2).any(|w| {
+            w[0] == "host" && matches!(w[1], "reserve" | "prepare" | "launch" | "prepared")
+        }) && !args.contains(&"--preparation-protocol")
+        {
+            cmd.args(["--preparation-protocol", "1"]);
+        }
         self.rig_env(&mut cmd);
         cmd
     }
@@ -780,13 +830,21 @@ esac
     }
     fn json(&self, args: &[&str]) -> (i32, Value) {
         let out = self.cmd(args).arg("--json").output().unwrap();
-        let value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
             panic!(
                 "{e}: {} {}",
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             )
         });
+        // Direct-host fixtures compare the immutable result, not its transport envelope.
+        let value = if args.windows(2).any(|w| w == ["host", "launch"])
+            && value.get("disposition").is_some()
+        {
+            value["result"].clone()
+        } else {
+            value
+        };
         (out.status.code().unwrap(), value)
     }
     fn snapshot(&self, path: &str, sampled: u64, load: f64, cores: u32) {
@@ -1370,13 +1428,22 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
         "{id}"
     );
-    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --repo 'repo space' --branch feature --request-id {id} --base main --budget-ms 600000 --json")), "{ssh}");
+    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --budget-ms 600000 --json")), "{ssh}");
     let releases: Vec<_> = ssh
         .lines()
         .filter(|line| line.contains("host prepared "))
         .collect();
     assert_eq!(releases.len(), 1, "{ssh}");
-    assert!(releases[0].ends_with(&format!("custom dogsled host prepared --path /remote/tree --request-id {id} --budget-ms 600000 --json")), "{ssh}");
+    assert!(
+        releases[0].contains("custom dogsled host prepared --preparation-protocol 1 --input "),
+        "{ssh}"
+    );
+    assert!(
+        releases[0].contains(&format!("\"request_id\":\"{id}\"")),
+        "{ssh}"
+    );
+    assert!(releases[0].contains("/remote/tree"), "{ssh}");
+    assert!(releases[0].ends_with("--budget-ms 600000 --json"), "{ssh}");
     assert!(!ssh.contains("host bind"));
 }
 

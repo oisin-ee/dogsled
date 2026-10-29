@@ -249,6 +249,7 @@ mod tests {
 
     fn launch() -> Launch {
         Launch {
+            preparation: None,
             id: "r-1".into(),
             unit: None,
             action: crate::work::Action::Place,

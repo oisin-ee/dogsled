@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prepared {
+    /// Host-captured authority. Receipt snapshots omit this to avoid recursive authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<Box<disposition::Binding>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,6 +32,152 @@ struct Pending {
     tree: crate::cleanup::Tree,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
+}
+
+/// Refuse changed or missing authority before ingress can publish validity or dispatch.
+/// Historical, already-published launches keep their read-only replay semantics.
+pub fn validate_launch_binding(
+    ledger: &crate::ledger::Ledger,
+    launch: &crate::work::Launch,
+) -> Result<()> {
+    let receipt = ledger
+        .child("preparation-receipts")
+        .read::<PreparationReceipt>(&format!("{}.json", launch.id))?;
+    if receipt
+        .as_ref()
+        .is_some_and(|r| r.version.is_some() && r.binding.is_none())
+    {
+        return Err(worktree::refuse(
+            "preparation receipt is missing its binding; claim remains held",
+        ));
+    }
+    let expected = receipt.as_ref().and_then(|r| r.binding.as_ref());
+    if launch.preparation.as_deref() != expected {
+        return Err(worktree::refuse(
+            "preparation binding changed; ownership remains unresolved",
+        ));
+    }
+    Ok(())
+}
+
+/// Retry only this exact transaction. Transport failure never supplies execution evidence.
+pub fn dispose(
+    fleet: &Fleet,
+    host: &Host,
+    request: &disposition::Request,
+) -> Result<disposition::Acknowledgement> {
+    let ack = if host.is_local() {
+        disposition::dispose(fleet.ledger, fleet.shell, request)?
+    } else {
+        fleet.remote_setup(
+            host,
+            &[
+                "prepared".into(),
+                "--preparation-protocol".into(),
+                disposition::VERSION.to_string(),
+                "--input".into(),
+                serde_json::to_string(request)?,
+            ],
+        )?
+    };
+    validate_ack(request, &ack)?;
+    Ok(ack)
+}
+
+pub fn validate_ack(
+    request: &disposition::Request,
+    ack: &disposition::Acknowledgement,
+) -> Result<()> {
+    if request.version != disposition::VERSION
+        || ack.version != request.version
+        || ack.binding != request.binding
+        || ack.policy != request.policy
+        || ack.outcome != request.outcome
+        || !ack.released
+    {
+        return Err(worktree::refuse(
+            "unproven preparation disposition acknowledgement; ownership remains unresolved",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct LaunchResponse {
+    result: serde_json::Value,
+    disposition: disposition::Request,
+}
+
+/// The wire carries host-produced disposition proof separately from the immutable result.
+/// Neither a transport envelope nor its acknowledgement rewrites the launch receipt.
+pub fn launch_response(
+    ledger: &crate::ledger::Ledger,
+    launch: &crate::work::Launch,
+    result: serde_json::Value,
+) -> Result<serde_json::Value> {
+    if launch.preparation.is_none() {
+        return Ok(result);
+    }
+    let receipt = ledger
+        .child("preparation-receipts")
+        .read::<disposition::Receipt>(&format!("{}.disposition.json", launch.id))?
+        .ok_or_else(|| {
+            worktree::refuse("launch has no disposition proof; execution remains unresolved")
+        })?;
+    if receipt.progress != disposition::Progress::Released {
+        return Err(worktree::refuse("launch disposition remains held"));
+    }
+    validate_transfer(launch, &result, &receipt.request)?;
+    Ok(serde_json::to_value(LaunchResponse {
+        result,
+        disposition: receipt.request,
+    })?)
+}
+
+fn validate_transfer(
+    launch: &crate::work::Launch,
+    result: &serde_json::Value,
+    request: &disposition::Request,
+) -> Result<()> {
+    if request.version != disposition::VERSION
+        || launch.preparation.as_deref() != Some(&request.binding)
+        || request.outcome != disposition::Outcome::PossiblyExecuted
+    {
+        return Err(worktree::refuse(
+            "launch disposition binding changed; execution remains unresolved",
+        ));
+    }
+    match &request.policy {
+        disposition::Policy::Transfer {
+            launch: saved,
+            pane,
+            job,
+        } if **saved == *launch
+            && result["pane"].as_str() == Some(pane)
+            && matches!(
+                (&launch.action, job),
+                (crate::work::Action::Agent { .. }, None)
+                    | (crate::work::Action::Job { .. }, Some(_))
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(worktree::refuse(
+            "launch disposition owner changed; execution remains unresolved",
+        )),
+    }
+}
+
+pub fn accept_launch(
+    fleet: &Fleet,
+    host: &Host,
+    launch: &crate::work::Launch,
+    response: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let response: LaunchResponse = serde_json::from_value(response)?;
+    validate_transfer(launch, &response.result, &response.disposition)?;
+    dispose(fleet, host, &response.disposition)?;
+    Ok(response.result)
 }
 
 pub fn main_checkout(shell: &dyn Shell, repo: &str) -> Result<PathBuf> {
@@ -91,6 +240,8 @@ pub fn run(
         .to_string();
     let mut args = vec![
         "prepare".into(),
+        "--preparation-protocol".into(),
+        disposition::VERSION.to_string(),
         "--repo".into(),
         remote,
         "--branch".into(),
@@ -101,7 +252,39 @@ pub fn run(
     if let Some(base) = base {
         args.extend(["--base".into(), base.into()]);
     }
-    fleet.remote_setup(host, &args)
+    let prepared: Prepared = fleet.remote_setup(host, &args)?;
+    validate_prepared(&prepared, request_id)?;
+    Ok(prepared)
+}
+
+/// The caller retains the exact host capture, never a newly observed checkout identity.
+pub fn validate_prepared(prepared: &Prepared, id: &str) -> Result<()> {
+    let binding = prepared.binding.as_deref().ok_or_else(|| {
+        worktree::refuse("peer returned no preparation binding; ownership remains unresolved")
+    })?;
+    let mut snapshot = prepared.clone();
+    snapshot.binding = None;
+    if binding.request_id != id
+        || binding.claim.request_id != id
+        || binding.claim.tree.identity.is_none()
+        || binding.prepared.as_ref() != Some(&snapshot)
+        || prepared.path.as_deref() != Some(&binding.claim.tree.path)
+    {
+        return Err(worktree::refuse(
+            "peer returned a mismatched preparation binding; ownership remains unresolved",
+        ));
+    }
+    Ok(())
+}
+
+/// Required at every caller mutation boundary. Never retry without the argument.
+pub fn require_protocol(version: Option<u32>) -> Result<()> {
+    if version != Some(disposition::VERSION) {
+        return Err(worktree::refuse(
+            "unsupported preparation disposition protocol; ownership remains held",
+        ));
+    }
+    Ok(())
 }
 
 /// Create or reuse the branch's linked worktree in the main checkout of `repo`, lock it as an
@@ -172,7 +355,7 @@ pub fn local(
                     prepared: result.as_ref().ok().cloned(),
                 });
             match result {
-                Ok(prepared) => {
+                Ok(mut prepared) => {
                     receipts.write(
                         &file,
                         &PreparationReceipt {
@@ -180,9 +363,10 @@ pub fn local(
                             request,
                             prepared: Some(prepared.clone()),
                             failure: None,
-                            binding,
+                            binding: binding.clone(),
                         },
                     )?;
+                    prepared.binding = binding.map(Box::new);
                     Ok(prepared)
                 }
                 Err(error) => {
@@ -286,7 +470,9 @@ fn replay_guarded(
             disposition::require_binding(ledger, id)?;
         }
     }
-    replay(id, receipt)
+    let mut prepared = replay(id, receipt)?;
+    prepared.binding = receipt.binding.clone().map(Box::new);
+    Ok(prepared)
 }
 
 fn replay(id: &str, receipt: &PreparationReceipt) -> Result<Prepared> {
@@ -824,6 +1010,7 @@ fn open(shell: &dyn Shell, checkout: &Path, path: &str) -> Result<Prepared> {
         })?
         .to_owned();
     Ok(Prepared {
+        binding: None,
         pane_id,
         terminal_id: Some(terminal_id),
         workspace_id,
@@ -1025,6 +1212,7 @@ mod tests {
     fn a_receipt_holds_exactly_one_outcome() {
         let request = (PathBuf::from("/repo"), "worker".to_owned(), None);
         let prepared = Prepared {
+            binding: None,
             pane_id: Some("w8:p1".into()),
             terminal_id: Some("term_tree".into()),
             workspace_id: None,

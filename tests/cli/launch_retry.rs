@@ -1,6 +1,127 @@
 use super::*;
 use std::io::Write as _;
 
+#[test]
+fn remote_preparation_release_requires_correlated_ack() {
+    for (case, filter) in [
+        ("empty", "printf '{}\n'"),
+        ("legacy", "printf '{\"prepared\":true}\n'"),
+        (
+            "request",
+            "sed 's/\"request_id\":\"[^\"]*\"/\"request_id\":\"foreign\"/g'",
+        ),
+        (
+            "identity",
+            "sed 's/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/g'",
+        ),
+        ("policy", "sed 's/placement_returned/preparation_failed/g'"),
+        ("version", "sed 's/\"version\":1/\"version\":99/g'"),
+        ("released", "sed 's/\"released\":true/\"released\":false/g'"),
+        (
+            "outcome",
+            "sed 's/\"outcome\":\"unknown\"/\"outcome\":\"not_started\"/g'",
+        ),
+        ("exact", "cat"),
+    ] {
+        let rig = Rig::new(&format!("ack-{case}"));
+        let repo = rig.dir.join("home/repo");
+        repository(&repo);
+        rig.peer();
+        let other = json!([{ "request_id":"other", "path":"/other", "repo":"/other", "branch":"other", "head":"old" }]);
+        rig.put("state/preparations.json", &other);
+        // Keep the filter outside the protocol fixture: the response is untrusted wire data.
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        let start = script.find("  *'host prepared'*)").unwrap();
+        let end = script[start..].find("  *'host prepare'*)").unwrap() + start;
+        let handler = format!(
+            r#"  *'host prepared'*)
+    for remote do :; done
+    sh -c "$RIG/bin/peer-fixture $remote" > "$RIG/exact-ack"
+    {filter} < "$RIG/exact-ack" ;;
+"#
+        );
+        rig.script(
+            "ssh",
+            &format!("{}{}{}", &script[..start], handler, &script[end..]),
+        );
+        let (code, result) = rig.json(&[
+            "place",
+            "--host",
+            "netcup",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--branch",
+            "wire",
+            "--base",
+            "main",
+        ]);
+        assert_eq!(code == 0, case == "exact", "{case}: {result}");
+        assert_eq!(rig.read("state/preparations.json"), other);
+        assert!(!rig.dir.join("state/unit-requests").exists());
+        let log = rig.log("ssh.log");
+        assert_eq!(log.matches("host prepared ").count(), 1, "{log}");
+        assert!(!log.contains("host launch "), "{log}");
+    }
+}
+
+#[test]
+fn lost_disposition_ack_replays_only_the_same_release() {
+    let (rig, repo) = place::place_rig("lost-disposition");
+    disposition_prepared(&rig, &repo, "release", "shared", true);
+    disposition_prepared(&rig, &repo, "other", "shared", false);
+    let input = rig.disposition_request("release");
+    let request: Value = serde_json::from_str(&input).unwrap();
+    let args = ["host", "prepared", "--input", &input];
+    let calls = rig.log("herdr.log");
+    let setup = rig.log("setup.log");
+    let out = rig
+        .cmd(&args)
+        .env("DOGSLED_TEST_UNIT_CRASH", "preparation-claim-released")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(86));
+    let claims = rig.read("state/preparations.json");
+    assert_eq!(claims.as_array().unwrap().len(), 1);
+    assert_eq!(claims[0]["request_id"], "other");
+    let (code, ack) = rig.json(&args);
+    assert_eq!(code, 0, "{ack}");
+    let mut expected = request;
+    expected["released"] = json!(true);
+    assert_eq!(ack, expected);
+    assert_eq!(rig.json(&args), (0, ack));
+    assert_eq!(rig.read("state/preparations.json"), claims);
+    assert_eq!(rig.log("herdr.log"), calls);
+    assert_eq!(rig.log("setup.log"), setup);
+    assert!(!rig.dir.join("ssh.log").exists());
+}
+
+#[test]
+fn old_preparation_peer_refuses_at_reserve_before_preparation() {
+    let (rig, repo) = place::place_rig("old-disposition-peer");
+    rig.peer();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &script.replace(
+            "  *'host reserve'*)",
+            "  *'host reserve'*) echo 'unexpected argument --preparation-protocol' >&2; exit 2;",
+        ),
+    );
+    let (code, error) = remote_agent(&rig, Some(&repo));
+    assert_eq!(code, 2, "{error}");
+    let log = rig.log("ssh.log");
+    assert!(
+        log.contains("host reserve --preparation-protocol 1"),
+        "{log}"
+    );
+    for command in ["host checkout ", "host prepare ", "host launch "] {
+        assert!(!log.contains(command), "{log}");
+    }
+    assert!(!rig.dir.join("state/preparation-receipts").exists());
+    assert!(!repo.join(".worktrees/remote-complete").exists());
+    assert!(!rig.dir.join("state/placements.json").exists());
+}
+
 fn disposition_prepared(rig: &Rig, repo: &Path, id: &str, branch: &str, base: bool) -> Value {
     let mut args = vec![
         "host",
@@ -72,10 +193,8 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
     let (code, ack) = rig.json(&[
         "host",
         "prepared",
-        "--path",
-        path,
-        "--request-id",
-        "recover-one",
+        "--input",
+        &rig.disposition_request("recover-one"),
     ]);
     assert_eq!(code, 0, "{ack}");
     assert_eq!(ack["released"], true);
@@ -105,6 +224,7 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
     launch["cwd"] = prepared["path"].clone();
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
+    launch["preparation"] = prepared["binding"].clone();
     let (code, error) = rig.json(&["host", "launch", "--request", &launch.to_string()]);
     assert_ne!(code, 0, "{error}");
     assert!(!admin.join("dogsled-checkout-id").exists());
@@ -126,7 +246,7 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
 fn disposition_recovers_fence_before_release_and_release_before_ack() {
     for point in ["preparation-fenced", "preparation-claim-released"] {
         let (rig, repo) = place::place_rig(point);
-        let prepared = disposition_prepared(&rig, &repo, "a", "shared", true);
+        disposition_prepared(&rig, &repo, "a", "shared", true);
         disposition_prepared(&rig, &repo, "b", "shared", false);
         let claims = rig.read("state/preparations.json");
         let other = claims
@@ -137,14 +257,7 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
             .unwrap()
             .clone();
         let outcome = fs::read(rig.dir.join("state/preparation-receipts/a.json")).unwrap();
-        let args = [
-            "host",
-            "prepared",
-            "--path",
-            prepared["path"].as_str().unwrap(),
-            "--request-id",
-            "a",
-        ];
+        let args = ["host", "prepared", "--input", &rig.disposition_request("a")];
         let out = rig
             .cmd(&args)
             .env("DOGSLED_TEST_UNIT_CRASH", point)
@@ -187,6 +300,7 @@ fn historical_preparation_replays_final_launch_without_releasing_claim() {
     launch["cwd"] = prepared["path"].clone();
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
+    launch["preparation"] = prepared["binding"].clone();
     let request = launch.to_string();
     let args = ["host", "launch", "--request", &request];
     let out = rig
@@ -205,6 +319,17 @@ fn historical_preparation_replays_final_launch_without_releasing_claim() {
         "failure": current["failure"],
     });
     rig.put(outcome_path, &outcome);
+    // Historical launch records also predate transported preparation authority.
+    launch.as_object_mut().unwrap().remove("preparation");
+    let progress_file = "state/launches/recover-one.progress.json";
+    let mut progress = rig.read(progress_file);
+    progress["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation");
+    rig.put(progress_file, &progress);
+    let request = launch.to_string();
+    let args = ["host", "launch", "--request", &request];
     let claims = rig.read("state/preparations.json");
     let receipt = rig.read("state/launches/recover-one.json");
     let calls = rig.log("herdr.log");
@@ -227,6 +352,7 @@ fn versioned_preparation_without_binding_refuses_final_launch_replay() {
     launch["cwd"] = prepared["path"].clone();
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
+    launch["preparation"] = prepared["binding"].clone();
     let request = launch.to_string();
     let args = ["host", "launch", "--request", &request];
     let out = rig
@@ -269,6 +395,7 @@ fn over_budget_agent_refusal_releases_preparation_before_dispatch_and_on_replay(
         launch["cwd"] = prepared["path"].clone();
         launch["pane"] = prepared["pane_id"].clone();
         launch["terminal"] = prepared["terminal_id"].clone();
+        launch["preparation"] = prepared["binding"].clone();
         launch["action"]["name"] = json!("n".repeat(1000));
         let request = launch.to_string();
         let args = ["host", "launch", "--request", &request];
@@ -314,6 +441,7 @@ fn released_claim_replay_acknowledges_without_repository() {
     launch["cwd"] = prepared["path"].clone();
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
+    launch["preparation"] = prepared["binding"].clone();
     let request = launch.to_string();
     let args = ["host", "launch", "--request", &request];
     let out = rig
@@ -349,6 +477,7 @@ fn agent_receipt_replay_completes_fenced_preparation_transfer() {
         launch["cwd"] = prepared["path"].clone();
         launch["pane"] = prepared["pane_id"].clone();
         launch["terminal"] = prepared["terminal_id"].clone();
+        launch["preparation"] = prepared["binding"].clone();
         let request = launch.to_string();
         let args = ["host", "launch", "--request", &request];
         let out = rig
@@ -409,6 +538,7 @@ fn prepared_agent_refusal_releases_only_known_not_started_claims() {
         launch["cwd"] = prepared["path"].clone();
         launch["pane"] = prepared["pane_id"].clone();
         launch["terminal"] = prepared["terminal_id"].clone();
+        launch["preparation"] = prepared["binding"].clone();
         if final_refusal {
             let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
             rig.script("herdr", &script.replace("  'agent start'*)\n", "  'agent start'*) echo '{\"error\":{\"code\":\"agent_name_taken\",\"message\":\"already used\"}}' >&2; exit 1 ;;\n  'unused start'*)\n"));
@@ -456,10 +586,8 @@ fn unsupported_preparation_disposition_refuses_job_ingress_without_writes() {
         rig.json(&[
             "host",
             "prepared",
-            "--path",
-            path,
-            "--request-id",
-            "ingress"
+            "--input",
+            &rig.disposition_request("ingress")
         ])
         .0,
         0
@@ -973,6 +1101,7 @@ fn incomplete_launch_keeps_saved_checkout_identity_after_preparation_retires() {
     request["cwd"] = json!(tree);
     request["pane"] = prepared["pane_id"].clone();
     request["terminal"] = prepared["terminal_id"].clone();
+    request["preparation"] = prepared["binding"].clone();
     fs::write(rig.dir.join("start-fails"), "").unwrap();
     assert_ne!(
         rig.json(&["host", "launch", "--request", &request.to_string()])
@@ -1291,7 +1420,13 @@ fn ssh_failure_before_launch_retries_reservation_checkout_and_preparation() {
         assert_eq!(ticket["state"], "admitted", "{step}: {ticket}");
         let log = rig.log("ssh.log");
         assert_eq!(log.matches("host launch").count(), 1, "{log}");
-        assert_eq!(log.matches(&format!("host {step}")).count(), 2, "{log}");
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.contains(&format!("host {step} ")))
+                .count(),
+            2,
+            "{log}"
+        );
         if step == "reserve" {
             let calls: Vec<_> = log.lines().filter(|s| s.contains("host reserve")).collect();
             let ids: Vec<_> = calls
@@ -1467,7 +1602,6 @@ fn expired_preparation_reservations_revalidate_on_the_same_host_and_keep_refusal
             env!("CARGO_BIN_EXE_dogsled")
         );
         rig.script("ssh", &script
-            .replace("case \"$*\" in", "case \"$*\" in\n  *'host prepared'*) printf '{}\\n' ;;")
             .replace("  *'host reserve'*) cat \"$RIG/reserve.json\" ;;", &reserve)
             .replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
         let (code, queued) = if action == "agent" {
@@ -1693,7 +1827,19 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
         env!("CARGO_BIN_EXE_dogsled")
     );
     // The peer runs real preparation in its own ledger; SSH drops its first successful reply.
-    rig.script("ssh", &script.replace("  *'host prepare'*) printf '%s\\n' '{\"pane_id\":\"w9:p1\",\"terminal_id\":\"term_remote\",\"path\":\"/remote/tree\"}' ;;", &handler));
+    let begin = script.find("  *'host prepare'*)").unwrap();
+    let end = script[begin..].find("  *) echo unexpected").unwrap() + begin;
+    let routing = format!(
+        r#"  *'host launch'*|*'host prepared'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;
+"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    let script = format!("{}{}{}", &script[..begin], handler, &script[end..]);
+    let script = script.replacen("case \"$*\" in", &format!("case \"$*\" in\n{routing}"), 1);
+    rig.script("ssh", &script);
     let (code, queued) = remote_agent(&rig, Some(&repo));
     assert_eq!(code, 1, "{queued}");
     assert_eq!(rig.read("state/queue.json")[0]["retry"]["attempts"], 1);
@@ -1702,7 +1848,7 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
     assert_eq!(rig.log("setup.log").lines().count(), 1);
     assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
     assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 2);
-    assert_eq!(rig.log("ssh.log").matches("host prepare").count(), 2);
+    assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 2);
     let id = ticket["request"]["id"].as_str().unwrap();
     let attempt = rig.read(&format!("state/admissions/{id}.json"));
     assert_eq!(attempt["launch"]["terminal"], "term_tree");
@@ -2383,7 +2529,13 @@ fn remote_retry_keeps_selected_host_and_skips_checkout_and_prepare() {
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     let log = rig.log("ssh.log");
     for command in ["host checkout", "host prepare", "host reserve"] {
-        assert_eq!(log.matches(command).count(), 1, "{log}");
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.contains(&format!("{command} ")))
+                .count(),
+            1,
+            "{log}"
+        );
     }
     assert_eq!(log.matches("host launch").count(), 2);
     assert!(!rig.log("herdr.log").contains("agent start"));

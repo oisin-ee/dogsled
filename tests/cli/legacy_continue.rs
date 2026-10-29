@@ -5,6 +5,148 @@ use super::unit_requests::*;
 use super::unit_seeded::*;
 use super::*;
 
+/// A saved legacy execution with C3 host-captured ownership, without changing its seed.
+fn bound_legacy(name: &str) -> (Rig, Value) {
+    let (rig, execution, _) = legacy_unreturned(name);
+    let id = request_id(&execution);
+    let repo = rig.dir.join("home");
+    repository(&repo);
+    close::git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    );
+    let common = repo.join(".git").canonicalize().unwrap();
+    let generation = "a".repeat(32);
+    fs::write(common.join("dogsled-checkout-id"), &generation).unwrap();
+    let tree = json!({"repo":repo,"path":repo,"branch":"main","head":close::git(&repo, &["rev-parse", "HEAD"]).trim(),
+        "identity":{"common":common,"gitdir":common,"generation":generation}});
+    let prepared = json!({"pane_id":"w2:p1","terminal_id":"term_child","path":repo});
+    rig.preparation_outcome(&id, &tree, &prepared);
+    let binding = rig.read(&format!("state/preparation-receipts/{id}.json"))["binding"].clone();
+    let (progress_file, mut progress) = owner_progress(&rig, &execution);
+    let mut launch = progress["request"].clone();
+    launch["preparation"] = binding.clone();
+    launch["pane"] = json!("w2:p1");
+    launch["terminal"] = json!("term_child");
+    progress["request"] = launch.clone();
+    progress["result"]["checkout"] = tree.clone();
+    rig.put(&progress_file, &progress);
+    let final_file = format!("state/launches/{id}.json");
+    let mut result = rig.read(&final_file);
+    result["checkout"] = tree;
+    rig.put(&final_file, &result);
+    let file = format!("state/admissions/{id}.json");
+    let mut admission = rig.read(&file);
+    admission["launch"] = launch.clone();
+    admission["result"] = result;
+    rig.put(&file, &admission);
+    rig.put(&format!("state/preparation-receipts/{id}.disposition.json"),
+        &json!({"request":{"version":1,"binding":binding,"policy":{"kind":"transfer","launch":launch,"pane":"w2:p1","job":null},"outcome":"possibly_executed"},"progress":"released"}));
+    (rig, execution)
+}
+
+#[test]
+fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
+    for case in [
+        "transfer",
+        "prohibit",
+        "identity",
+        "historical",
+        "preparation-lock",
+        "repository-lock",
+    ] {
+        let (rig, execution) = bound_legacy(&format!("legacy-fence-{case}"));
+        let id = request_id(&execution);
+        let file = format!("state/preparation-receipts/{id}.disposition.json");
+        match case {
+            "prohibit" => {
+                let mut fence = rig.read(&file);
+                fence["request"]["policy"] =
+                    json!({"kind":"prohibit","basis":"placement_returned"});
+                rig.put(&file, &fence);
+                assert_continue_refused(&rig, &id, "w1:p1", "fence prohibits");
+            }
+            "identity" => {
+                fs::write(
+                    rig.dir.join("home/.git/dogsled-checkout-id"),
+                    "b".repeat(32),
+                )
+                .unwrap();
+                assert_continue_refused(&rig, &id, "w1:p1", "identity changed");
+            }
+            "historical" => {
+                let file = format!("state/preparation-receipts/{id}.json");
+                let mut receipt = rig.read(&file);
+                receipt.as_object_mut().unwrap().remove("binding");
+                assert!(receipt["version"].is_number());
+                rig.put(&file, &receipt);
+                assert_continue_refused(&rig, &id, "w1:p1", "missing its binding");
+            }
+            "preparation-lock" | "repository-lock" => {
+                let path = if case == "preparation-lock" {
+                    rig.dir
+                        .join(format!("state/preparation-receipts/{id}.lock"))
+                } else {
+                    rig.dir.join("home/.git/dogsled-lifecycle.lock")
+                };
+                let lock = fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .unwrap();
+                lock.lock().unwrap();
+                let before = state(&rig, &id);
+                let out = rig.run(&[
+                    "legacy-continue",
+                    "w2:p1",
+                    "--message",
+                    "continue",
+                    "--json",
+                    "--budget-ms",
+                    "100",
+                ]);
+                assert_eq!(out.status.code(), Some(2));
+                let refusal: Value = serde_json::from_slice(&out.stdout).unwrap();
+                assert_eq!(refusal["deadline"], true, "{refusal}");
+                for path in [
+                    rig.dir.join("state/done.lock"),
+                    rig.dir.join(format!("state/launches/{id}.lock")),
+                ] {
+                    let probe = fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(path)
+                        .unwrap();
+                    probe.try_lock().unwrap();
+                    probe.unlock().unwrap();
+                }
+                assert_eq!(state(&rig, &id), before);
+                lock.unlock().unwrap();
+                assert_eq!(continue_from(&rig, "w1:p1", "continue").0, 0);
+            }
+            _ => {
+                let (code, sent) = continue_from(&rig, "w1:p1", "continue");
+                assert_eq!(code, 0, "{sent}");
+                assert_eq!(continue_from(&rig, "w1:p1", "continue"), (0, sent));
+                assert_eq!(inbox(&rig).as_array().unwrap().len(), 1);
+            }
+        }
+    }
+}
+
 /// The immutable records of request `id` that continuation must never rewrite.
 const IMMUTABLE: [&str; 6] = [
     "admissions/{id}.json",

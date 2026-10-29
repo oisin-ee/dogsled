@@ -19,6 +19,7 @@ fn transferred_job(variant: &str) -> (Rig, Value) {
     startup_herdr(&rig);
     let tree = PathBuf::from(prepared["path"].as_str().unwrap());
     let mut request = startup_request(&rig, &tree);
+    request["preparation"] = prepared["binding"].clone();
     request["action"]["cmd"] = json!(["sh", "-c", "echo once >> \"$RIG/command-marker\""]);
     let args = [
         "host",
