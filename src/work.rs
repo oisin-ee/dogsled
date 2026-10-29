@@ -4,21 +4,17 @@ mod placement;
 
 fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
     let validity = request_validity(fleet.ledger, request)?;
-    let placed = commands::place_with(
-        fleet,
-        host,
-        &request.id,
-        now,
-        validity,
-        matches!(request.action, Action::Place).then_some(request),
-    )
-    .map_err(prelaunch_error)?;
+    let placed = commands::place_with(fleet, host, &request.id, now, validity, Some(request))
+        .map_err(prelaunch_error)?;
     if let Placement::Full { hosts, .. } = &placed {
         defer(fleet, request, hosts, now)?;
     }
     Ok(placed)
 }
-pub(crate) use placement::{PlacementPhase, PlacementProgress, resume as resume_placement};
+pub(crate) use placement::{
+    PlacementPhase, PlacementProgress, resume as resume_placement,
+    validate_completion as validate_placement_completion,
+};
 
 use crate::checkout::Repository;
 use crate::commands::{self, Placement};
@@ -61,6 +57,9 @@ const LAUNCH_TRIES: u32 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub id: String,
+    /// Immutable origin validity, outside the action replaced by unit commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<jobs::Validity>,
     pub action: Action,
     pub host: Option<String>,
     pub branch: Option<String>,
@@ -79,6 +78,8 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launch {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<jobs::Validity>,
     /// New launch receipts retain this format marker inside their saved request.
     #[serde(
         default,
@@ -109,6 +110,8 @@ pub struct Launch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ticket {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
     pub request: Request,
     pub created_ms: u64,
     pub state: String,
@@ -236,7 +239,25 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if tickets.iter().any(|t| t.request.id == id)
+            let nonjob_owner = ledger
+                .child("admissions")
+                .read::<Value>(&format!("{id}.json"))?
+                .is_some_and(|admission| admission["request"]["action"]["type"] != "job");
+            if nonjob_owner
+                || [
+                    "preparation-receipts",
+                    "placement-grants",
+                    "preparation-expectations",
+                ]
+                .iter()
+                .any(|directory| {
+                    ledger
+                        .child(directory)
+                        .dir
+                        .join(format!("{id}.json"))
+                        .exists()
+                })
+                || tickets.iter().any(|t| t.request.id == id)
                 || ledger
                     .child("launches")
                     .read::<Value>(&format!("{id}.json"))?
@@ -265,6 +286,20 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
     })
 }
 
+pub(crate) fn ticket_completion(ledger: &Ledger, ticket: &Ticket) -> Result<Option<u64>> {
+    if ticket.finished_ms.is_none() {
+        return Ok(None);
+    }
+    let pending =
+        cancellation(ledger, &ticket.request)?.is_some_and(|saved| saved.release == "pending");
+    jobs::completion_time(
+        ledger,
+        ticket.finished_ms,
+        Some(ticket.created_ms),
+        matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled") && !pending,
+    )
+}
+
 pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
     let mut tickets: Vec<Ticket> = queue_records(ledger)?
         .into_iter()
@@ -283,20 +318,28 @@ pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
 
 /// Inline evidence is transport only. After ingress, the immutable sidecar is the
 /// authority, even when an older queue writer strips or changes the inline copy.
-fn request_validity(ledger: &Ledger, request: &Request) -> Result<Option<jobs::Validity>> {
-    if matches!(request.action, Action::Job { .. }) {
-        jobs::request_validity(ledger, &request.id)
-    } else {
-        Ok(None)
+pub(crate) fn request_validity(
+    ledger: &Ledger,
+    request: &Request,
+) -> Result<Option<jobs::Validity>> {
+    let saved = jobs::request_validity(ledger, &request.id)?;
+    if !matches!(request.action, Action::Job { .. }) {
+        jobs::match_request_validity(saved, request.validity)?;
     }
+    Ok(saved)
 }
 
-fn launch_validity(ledger: &Ledger, launch: &Launch) -> Result<Option<jobs::Validity>> {
-    if matches!(launch.action, Action::Job { .. }) {
-        jobs::request_validity(ledger, &launch.id)
-    } else {
-        Ok(None)
+pub(crate) fn check_launch_validity(ledger: &Ledger, launch: &Launch) -> Result<()> {
+    jobs::check_validity(ledger, launch_validity(ledger, launch)?.as_ref())
+        .map_err(|error| validity_refusal(error, &launch.id))
+}
+
+pub(crate) fn launch_validity(ledger: &Ledger, launch: &Launch) -> Result<Option<jobs::Validity>> {
+    let saved = jobs::request_validity(ledger, &launch.id)?;
+    if !matches!(launch.action, Action::Job { .. }) {
+        jobs::match_request_validity(saved, launch.validity)?;
     }
+    Ok(saved)
 }
 
 fn record_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
@@ -315,11 +358,22 @@ fn record_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
 
 /// Check a request against this host's clock. A request that may not start new execution
 /// is refused here, before any placement, preparation, dispatch, or ownership change.
-fn check_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
-    if !matches!(request.action, Action::Job { .. }) {
-        return Ok(());
-    }
+pub(crate) fn check_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
     crate::jobs::check_validity(ledger, request_validity(ledger, request)?.as_ref())
+        .map_err(|error| validity_refusal(error, &request.id))
+}
+
+fn validity_refusal(error: Error, id: &str) -> Error {
+    let error = match error {
+        Error::Refused { code, detail } => Error::Refused {
+            code,
+            detail: format!(
+                "{detail}; request {id}: unresolved preparation remains held; inspect preparation and use request-scoped retirement"
+            ),
+        },
+        error => error,
+    };
+    error.correlate(Some(id))
 }
 
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
@@ -352,6 +406,7 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
         let id = new_id();
         tickets.push(Ticket {
             id: id.clone(),
+            finished_ms: None,
             request,
             created_ms: now,
             state: "pending".into(),
@@ -428,6 +483,10 @@ pub fn enqueue_retry(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Cancellation {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_ms: Option<u64>,
     operation_id: String,
     ticket: Ticket,
     admission: Option<Value>,
@@ -635,8 +694,14 @@ fn cancellation_intent(
     };
     let pending = intent.is_some()
         || request.branch.is_some() && attempt.as_ref().is_some_and(|a| a.host.is_some());
+    let mut finished_ms = None;
+    if !pending {
+        jobs::finish_once(ledger, &mut finished_ms, Some(ticket.created_ms))?;
+    }
     let saved = Cancellation {
         version: 1,
+        completion_version: Some(1),
+        finished_ms,
         operation_id,
         ticket: ticket.clone(),
         admission,
@@ -687,6 +752,17 @@ fn validate_cancellation_admission(request: &Request, admission: Option<&Value>)
 }
 
 fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
+    if let Some(finished) = saved.finished_ms {
+        let attempts = ledger.child("admissions");
+        let file = format!("{}.json", saved.ticket.request.id);
+        if let Some(mut attempt) = attempts.read::<Attempt>(&file)?
+            && attempt.unit.is_none()
+            && attempt.finished_ms.is_none()
+        {
+            attempt.finished_ms = Some(finished);
+            attempts.write(&file, &attempt)?;
+        }
+    }
     ledger.with_lock("queue", || {
         let mut tickets = queue(ledger)?;
         let Some(ticket) = tickets.iter_mut().find(|t| t.id == saved.ticket.id) else {
@@ -712,6 +788,9 @@ fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
             "cancelled"
         }
         .into();
+        if saved.release != "pending" && ticket.finished_ms.is_none() {
+            ticket.finished_ms = saved.finished_ms;
+        }
         save_queue(ledger, &tickets)
     })
 }
@@ -850,6 +929,13 @@ fn repair_cancellations(fleet: &Fleet) -> Result<()> {
                 let result = release_cancelled(fleet, &mut saved);
                 if let Err(error) = result {
                     saved.error = Some(error.to_string());
+                }
+                if saved.release != "pending" && saved.completion_version == Some(1) {
+                    jobs::finish_once(
+                        fleet.ledger,
+                        &mut saved.finished_ms,
+                        Some(saved.ticket.created_ms),
+                    )?;
                 }
                 directory.write(&format!("{id}.json"), &saved)?;
                 project_cancellation(fleet.ledger, &saved)
@@ -1445,15 +1531,26 @@ pub fn receive_launch(
                 Ok(())
             })?;
     }
-    self::launch(ledger, shell, launch, now, peer_validity)
+    launch_with_ingress(ledger, shell, launch, now, peer_validity, true)
 }
 
 pub fn launch(
     ledger: &Ledger,
     shell: &dyn Shell,
     launch: &Launch,
+    now: u64,
+    peer_validity: Option<u32>,
+) -> Result<Value> {
+    launch_with_ingress(ledger, shell, launch, now, peer_validity, false)
+}
+
+fn launch_with_ingress(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    launch: &Launch,
     _now: u64,
     peer_validity: Option<u32>,
+    ingress: bool,
 ) -> Result<Value> {
     jobs::validate_id(&launch.id)?;
     if launch.unit.is_some() && !matches!(launch.action, Action::Agent { .. }) {
@@ -1486,6 +1583,13 @@ pub fn launch(
             })?;
         return replay?.ok_or_else(|| Error::Invalid("final launch receipt disappeared".into()));
     }
+    if !matches!(launch.action, Action::Job { .. })
+        && peer_validity != Some(jobs::REQUEST_VALIDITY_PROTOCOL_VERSION)
+    {
+        return Err(Error::Invalid(
+            "unsupported non-job request validity protocol".into(),
+        ));
+    }
     if matches!(launch.action, Action::Job { .. }) {
         require_unclaimed(ledger, &launch.id)?;
     }
@@ -1504,6 +1608,9 @@ pub fn launch(
                 return Ok(result);
             }
             crate::prepare::disposition::allow_launch(ledger, launch)?;
+            if ingress && !matches!(launch.action, Action::Job { .. }) {
+                jobs::receive_request_validity(ledger, &launch.id, launch.validity)?;
+            }
             let result = launch_owned(ledger, shell, launch);
             launch_test_barrier("COMPLETED_GATE")?;
             result
@@ -1563,6 +1670,9 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
         }
         crate::prepare::disposition::allow_launch(ledger, launch)?;
         let (recorded, current) = launch_checkout(ledger, launch)?;
+        if !recorded {
+            check_launch_validity(ledger, launch)?;
+        }
         if current != saved {
             return Err(crate::worktree::refuse(
                 "launch checkout changed while waiting",
@@ -1923,6 +2033,8 @@ pub(crate) fn waits_behind(fleet: &Fleet, request: &Request) -> Result<bool> {
 pub(crate) struct Attempt {
     pub request: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<PlacementProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<Host>,
@@ -1945,11 +2057,94 @@ pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Valu
 
 /// The caller owns the request's admission lock. Commit uses this path so the lock is
 /// never reacquired while `runtime::start` enters admission.
+pub(crate) fn admission_completion(ledger: &Ledger, id: &str) -> Result<Option<u64>> {
+    jobs::validate_id(id)?;
+    let Some(attempt) = ledger
+        .child("admissions")
+        .read::<Attempt>(&format!("{id}.json"))?
+    else {
+        return Ok(None);
+    };
+    if attempt.finished_ms.is_none() {
+        return Ok(None);
+    }
+    let request: Request = serde_json::from_value(attempt.request.clone())?;
+    let terminal = if let Some(unit) = &attempt.unit {
+        let terminal = usize::from(unit.abandoned.is_some())
+            + usize::from(unit.returned.is_some())
+            + usize::from(unit.stopped.is_some());
+        terminal == 1 && (unit.settlement_ack.is_some() || !unit.custody_acks.is_empty())
+    } else if cancellation(ledger, &request)?.is_some() {
+        true
+    } else if let Some(progress) = &attempt.placement {
+        progress.version == crate::node::PLACEMENT_VERSION
+            && matches!(
+                progress.phase,
+                PlacementPhase::Completed { .. } | PlacementPhase::PreparationFailed { .. }
+            )
+    } else {
+        attempt.launch.as_ref().is_some_and(|launch| {
+            items::list(ledger).is_ok_and(|items| {
+                items.iter().any(|item| {
+                    item.id == id
+                        && item.host == launch.host
+                        && item.closed_ms == attempt.finished_ms
+                        && item.resource_closed_ms.is_none()
+                })
+            })
+        }) || cancellation(ledger, &request)?.is_some()
+    };
+    jobs::completion_time(
+        ledger,
+        attempt.finished_ms,
+        request.validity.map(|v| v.created_ms),
+        terminal,
+    )
+}
+
+fn retained_admission(fleet: &Fleet, request: &Request) -> Result<Option<Value>> {
+    if !matches!(request.action, Action::Job { .. }) {
+        let attempt = fleet
+            .ledger
+            .child("admissions")
+            .read::<Attempt>(&format!("{}.json", request.id))?;
+        if let Some(attempt) = attempt {
+            if attempt.request != serde_json::to_value(request)? {
+                return Err(crate::unit_transport::conflict("admission request changed"));
+            }
+            if matches!(request.action, Action::Place) {
+                if let Some(result) = placement::retained(fleet, &attempt, request)? {
+                    return Ok(Some(result));
+                }
+            } else if matches!(request.action, Action::Agent { .. })
+                && let Some(result) = attempt.result
+            {
+                return Ok(Some(result));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn restored_request(ledger: &Ledger, request: &Request) -> Result<Request> {
+    let mut request = request.clone();
+    if let Action::Job { validity, .. } = &mut request.action {
+        *validity = jobs::request_validity(ledger, &request.id)?;
+    }
+    Ok(request)
+}
+
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    admission_completion(fleet.ledger, &request.id)?;
+    if let Some(result) = retained_admission(fleet, request)? {
+        return Ok(Some(result));
+    }
     // Admission checks the request's age before it places, prepares, or dispatches
     // anything. A request that may not start new execution is refused here.
     allow_admission(fleet.ledger, request)?;
-    check_request_validity(fleet.ledger, request)?;
+    if !matches!(request.action, Action::Place) {
+        check_request_validity(fleet.ledger, request)?;
+    }
     if matches!(request.action, Action::Place) {
         let mut result = placement::perform(fleet, request, now)?;
         if let Some(value) = &mut result
@@ -1963,11 +2158,8 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
         }
         return Ok(result);
     }
-    let mut request = request.clone();
-    if let Action::Job { validity, .. } = &mut request.action {
-        *validity = jobs::request_validity(fleet.ledger, &request.id)?;
-    }
-    let request = &request;
+    let restored = restored_request(fleet.ledger, request)?;
+    let request = &restored;
     let attempts = fleet.ledger.child("admissions");
     let file = format!("{}.json", request.id);
     if let Some(mut attempt) = attempts.read::<Attempt>(&file)? {
@@ -2068,6 +2260,7 @@ fn begin(
     };
     let mut attempt = Attempt {
         request: serde_json::to_value(request)?,
+        finished_ms: None,
         placement: None,
         host: Some(host.clone()),
         launch: None,
@@ -2109,7 +2302,7 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
         .repository
         .as_ref()
         .map(|repo| {
-            crate::checkout::ensure(fleet, host, repo)
+            crate::checkout::ensure(fleet, host, repo, request)
                 .map_err(|error| error.correlate(Some(&request.id)).on_host(&host.label))
         })
         .transpose()?;
@@ -2197,6 +2390,7 @@ fn prepared_launch(
     }
     Ok(Launch {
         id: request.id.clone(),
+        validity: request.validity,
         preparation_protocol: prepared
             .binding
             .as_ref()
@@ -2236,7 +2430,11 @@ fn finish(
             fleet.shell,
             launch_request,
             now,
-            Some(jobs::VALIDITY_PROTOCOL_VERSION),
+            Some(if matches!(request.action, Action::Job { .. }) {
+                jobs::VALIDITY_PROTOCOL_VERSION
+            } else {
+                jobs::REQUEST_VALIDITY_PROTOCOL_VERSION
+            }),
         )
     } else {
         let mut args = vec![
@@ -2252,6 +2450,11 @@ fn finish(
             args.extend([
                 "--job-validity".into(),
                 crate::jobs::VALIDITY_PROTOCOL_VERSION.to_string(),
+            ]);
+        } else {
+            args.extend([
+                "--request-validity".into(),
+                jobs::REQUEST_VALIDITY_PROTOCOL_VERSION.to_string(),
             ]);
         }
         fleet.remote_setup(host, &args)
@@ -2381,7 +2584,15 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))?;
+        let before = ticket.state.clone();
         update(ticket);
+        if before != ticket.state
+            && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
+            && cancellation(ledger, &ticket.request)?.is_none_or(|saved| saved.release != "pending")
+        {
+            jobs::finish_once(ledger, &mut ticket.finished_ms, Some(ticket.created_ms))?;
+            ticket_completion(ledger, ticket)?;
+        }
         let result = ticket.clone();
         save_queue(ledger, &tickets)?;
         Ok(result)
@@ -2526,7 +2737,56 @@ fn transient_ssh(error: &Error) -> bool {
     )
 }
 
+/// Owner-specific closure evidence remains distinct from unit settlement and resources.
+fn reconcile_finished(ledger: &Ledger) -> Result<()> {
+    let attempts = ledger.child("admissions");
+    for item in items::list(ledger)? {
+        let Some(closed) = item.closed_ms.filter(|_| item.resource_closed_ms.is_none()) else {
+            continue;
+        };
+        jobs::validate_id(&item.id)?;
+        attempts.with_lock(&item.id, || {
+            let file = format!("{}.json", item.id);
+            let Some(mut attempt) = attempts.read::<Attempt>(&file)? else {
+                return Ok(());
+            };
+            if attempt.unit.is_some() || attempt.placement.is_some() {
+                return Ok(());
+            }
+            let Some(launch) = &attempt.launch else {
+                return Ok(());
+            };
+            if launch.id != item.id
+                || launch.host != item.host
+                || attempt
+                    .result
+                    .as_ref()
+                    .is_none_or(|result| result["pane"].as_str() != Some(&item.pane))
+            {
+                return Ok(());
+            }
+            let effective = jobs::advance_clock(ledger, crate::ledger::now_ms().max(closed))?;
+            if attempt
+                .finished_ms
+                .is_some_and(|finished| finished != closed || finished > effective)
+            {
+                return Err(Error::Invalid(
+                    "closed admission completion timestamp changed".into(),
+                ));
+            }
+            if attempt.finished_ms.is_none() {
+                attempt.finished_ms = Some(closed);
+                attempts.write(&file, &attempt)?;
+            }
+            crate::launch::execution_closed(ledger, &item)?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
+    reconcile_finished(fleet.ledger)?;
     let reports = fleet.status(now)?;
     launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {

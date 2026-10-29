@@ -7,6 +7,12 @@ struct StartingShell {
     starts: AtomicUsize,
 }
 
+fn validity_for(ledger: &Ledger, id: &str) -> crate::jobs::Validity {
+    let validity = crate::jobs::origin_validity(ledger).unwrap();
+    crate::jobs::record_request_validity(ledger, id, Some(validity)).unwrap();
+    validity
+}
+
 impl Shell for StartingShell {
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         assert_eq!(program, "herdr");
@@ -41,7 +47,7 @@ impl Shell for StartingShell {
 fn another_request_cannot_start_while_the_pane_is_locked_for_recovery() {
     let mut ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
     let progress: Progress = serde_json::from_value(json!({
-        "request":{"id":"different","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+        "request":{"id":"different","validity":validity_for(&ledger,"different"),"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
             "host":"local","cwd":"/checkout","pane":"w2:p2","terminal":"term_shell","owner":"w1:p1"},
         "pane":"w2:p2","terminal":"term_shell","attempted":false,"confirmed":false,
         "result":{},"error":null
@@ -157,7 +163,7 @@ fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
     for recovering in [false, true] {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let progress: Progress = serde_json::from_value(json!({
-            "request":{"id":"stamp","action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
+            "request":{"id":"stamp","validity":validity_for(&ledger,"stamp"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
                 "host":"peer","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
             "pane":"w2:p2","terminal":"term_shell","attempted":recovering,"confirmed":false,
             "result":{"host":"peer","pane":"w2:p2"},"error":null
@@ -177,7 +183,7 @@ fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
             &shell,
             &progress.request,
             1,
-            Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
+            Some(crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION),
         )
         .unwrap();
         let confirmed = result["launch_confirmed_ms"].as_u64().unwrap();
@@ -255,6 +261,15 @@ impl Shell for BusyShell {
     }
 }
 
+fn busy_request(ledger: &Ledger) -> Launch {
+    let validity = crate::jobs::origin_validity(ledger).unwrap();
+    crate::jobs::record_request_validity(ledger, "busy", Some(validity)).unwrap();
+    serde_json::from_value(json!({"id":"busy","validity":validity,
+        "action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+        "host":"local","cwd":"/checkout","owner":"parent"}))
+    .unwrap()
+}
+
 fn start_args() -> Vec<String> {
     vec!["agent".into(), "start".into()]
 }
@@ -271,6 +286,7 @@ fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
         "w2:p2",
         "term_shell",
         window,
+        &busy_request(&ledger),
     )
     .unwrap();
     assert_eq!(shell.starts.load(Ordering::SeqCst), 3);
@@ -291,6 +307,7 @@ fn a_busy_retry_is_refused_once_another_terminal_holds_the_pane() {
         "w2:p2",
         "term_shell",
         window,
+        &busy_request(&ledger),
     )
     .unwrap_err();
     assert!(matches!(error, Error::Launch(_)), "{error:?}");
@@ -314,6 +331,7 @@ fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
         "w2:p2",
         "term_shell",
         window,
+        &busy_request(&ledger),
     )
     .unwrap_err();
     let Error::Launch(message) = &error else {
@@ -367,7 +385,7 @@ fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_n
     for uncertain in [false, true] {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let progress: Progress = serde_json::from_value(json!({
-            "request":{"id":"budget","action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
+            "request":{"id":"budget","validity":validity_for(&ledger,"budget"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
                 "host":"local","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
             "pane":"w2:p2","terminal":"term_shell","attempted":false,"confirmed":false,
             "result":{"host":"local","pane":"w2:p2"},"error":null
@@ -425,6 +443,7 @@ fn only_a_busy_refusal_is_repeated() {
         "w2:p2",
         "term_shell",
         window,
+        &busy_request(&ledger),
     )
     .unwrap_err();
     assert!(matches!(error, Error::Command { .. }), "{error:?}");

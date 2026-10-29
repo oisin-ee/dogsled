@@ -68,7 +68,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The bound every real-process wait in these tests uses. A process that never ends fails
 /// its test on this bound instead of stalling the suite.
-pub(crate) const PROCESS_DEADLINE: Duration = Duration::from_secs(20);
+pub(crate) fn outcome_identity(mut value: Value) -> Value {
+    value.as_object_mut().unwrap().remove("finished_ms");
+    value
+}
+
+const PROCESS_DEADLINE: Duration = Duration::from_secs(20);
 
 /// The state the guard and its fallback share. A finished process has released its pid,
 /// and the host may then hand that pid to another process. A signal sent after that can
@@ -655,6 +660,7 @@ case "$*" in
     else
       printf '%s\n' '{"id":"remote-job","host":"8103","pane":"w9:p1","name":"worker"}'
     fi ;;
+  *'host placement-finished'*) printf 'true\n' ;;
   *'host jobs'*) cat "$RIG/jobs.json" ;;
   *'host job '*) cat "$RIG/job.json" ;;
   *'host logs'*) cat "$RIG/logs.json" ;;
@@ -696,7 +702,7 @@ with open(sys.argv[2]) as f:
     reply = json.load(f)
 grant = None
 if reply['reserved']:
-    grant = {'version': 2, 'envelope': {k: v for k, v in request.items() if k != 'expected_grant'},
+    grant = {'version': 3, 'envelope': {k: v for k, v in request.items() if k != 'expected_grant'},
              'reservation': {'id': request['reservation'], 'created_ms': 1},
              'headroom': {'host': request['host']['id'], 'headroom': 1.0, 'eligible': True,
                           'live_agents': 0, 'reasons': []}, 'materialized': True}
@@ -798,6 +804,27 @@ esac
         {
             cmd.args(["--preparation-protocol", "1"]);
         }
+        if args.windows(2).any(|w| w == ["host", "prepare"])
+            && args.contains(&"--request-id")
+            && !args.contains(&"--preparation-envelope-version")
+        {
+            cmd.args([
+                "--preparation-envelope-version",
+                "2",
+                "--request-created-ms",
+                &self.origin_ms.to_string(),
+            ]);
+        }
+        if args.windows(2).any(|w| w == ["host", "launch"])
+            && !args.contains(&"--request-validity")
+            && args
+                .windows(2)
+                .find(|w| w[0] == "--request")
+                .and_then(|w| serde_json::from_str::<Value>(w[1]).ok())
+                .is_some_and(|request| !request["validity"].is_null())
+        {
+            cmd.args(["--request-validity", "1"]);
+        }
         self.rig_env(&mut cmd);
         cmd
     }
@@ -896,7 +923,7 @@ esac
         // Busy fraction that reproduces the old load rule's verdict for this load. The zero
         // tick counters let a Linux `serve --once` derive a busy sample from one real reading.
         let busy = (load / (1.5 * f64::from(cores))).min(1.0);
-        self.put(path, &json!({"placement_replay":2,"sampled_ms":sampled,"probe":{
+        self.put(path, &json!({"placement_replay":3,"request_validity":1,"sampled_ms":sampled,"probe":{
             "host":"local","label":"local","load1":load,"cores":cores,"busy":busy,
             "cpu_ticks":{"busy":0,"total":0},
             "memory":{"used_bytes":1_073_741_824_u64,"total_bytes":8_589_934_592_u64},
@@ -1488,7 +1515,10 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         serde_json::from_str::<Value>(replay).unwrap(),
         expected_replay
     );
-    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
+    let created = grant["envelope"]["request"]["validity"]["created_ms"]
+        .as_u64()
+        .unwrap();
+    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-envelope-version 2 --request-created-ms {created} --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
     let releases: Vec<_> = ssh
         .lines()
         .filter(|line| line.contains("host prepared "))

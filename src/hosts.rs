@@ -551,6 +551,7 @@ impl<'a> Fleet<'a> {
         now: u64,
         validity: Option<crate::jobs::Validity>,
         placement: Option<&crate::node::PlacementReplay>,
+        nonjob: bool,
     ) -> Result<ReserveOutcome> {
         if let Some(replay) = placement {
             replay.validate(id)?;
@@ -564,8 +565,17 @@ impl<'a> Fleet<'a> {
             return if let Some(envelope) = placement {
                 self.node().reserve_placement(envelope, now)
             } else {
-                self.node().reserve(id, now, validity)
+                self.node().reserve(id, now, validity, nonjob)
             };
+        }
+        if nonjob {
+            let capability: crate::node::SnapshotReport =
+                self.remote(host, &["snapshot".into()])?;
+            if capability.request_validity != Some(crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION) {
+                return Err(crate::unit_transport::conflict(
+                    "peer does not support non-job request validity; no dispatch",
+                ));
+            }
         }
         if placement.is_some() {
             let capability: crate::node::SnapshotReport =
@@ -596,7 +606,19 @@ impl<'a> Fleet<'a> {
         ];
         // The validity protocol rides with a job reservation. A peer that does not
         // speak it refuses the flag, and the caller reports an unsupported protocol.
-        if let Some(validity) = validity {
+        if nonjob {
+            args.extend([
+                "--request-validity".into(),
+                crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION.to_string(),
+            ]);
+            if let Some(validity) = validity {
+                args.extend([
+                    "--request-created-ms".into(),
+                    validity.created_ms.to_string(),
+                ]);
+            }
+        }
+        if let Some(validity) = validity.filter(|_| !nonjob) {
             args.extend([
                 "--job-validity".into(),
                 crate::jobs::VALIDITY_PROTOCOL_VERSION.to_string(),

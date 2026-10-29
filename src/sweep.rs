@@ -842,7 +842,17 @@ mod liveness_tests {
                 assert_eq!(reports[0].sampled_ms, Some(1000));
                 assert!(!reports[0].headroom.as_ref().unwrap().eligible);
                 assert!(!reports[0].fresh(61_000));
-                assert!(!fleet.node().reserve("new", 61_000, None)?.reserved);
+                assert!(
+                    !fleet
+                        .node()
+                        .reserve(
+                            "new",
+                            61_000,
+                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                            false
+                        )?
+                        .reserved
+                );
                 assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
                 assert!(crate::items::list(&ledger)?[0].closed_ms.is_some());
                 // The same old observation cannot close an agent after its done mark disappears.
