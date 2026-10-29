@@ -1518,7 +1518,12 @@ fn make(
             path: &path,
             branch,
         };
-        if crate::repository::run(shell, "setup", &settings.worktree.setup, values).is_err() {
+        if crate::repository::load(Path::new(&path))
+            .and_then(|settings| {
+                crate::repository::run(shell, "setup", &settings.worktree.setup, values)
+            })
+            .is_err()
+        {
             discard(guard, shell, &linked, (!has_branch).then_some(branch)).map_err(|error| {
                 error.with_diagnostic(Diagnostic::new(
                     Operation::Prepare,

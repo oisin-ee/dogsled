@@ -1582,16 +1582,12 @@ fn unborn_main_checkout_recovers_an_interrupted_same_request_launch() {
 
 #[test]
 fn setup_failure_preserves_replacement_checkout() {
-    let (rig, repo) = place::place_rig("setup-replacement");
     let script = "git -C {main} worktree remove -f -f {path} && git -C {main} worktree add --lock --reason agent:worktree {path} {branch} && printf replacement > {path}/replacement; exit 1";
-    fs::write(
-        repo.join("dogsled.toml"),
-        format!(
-            "[worktree]\nsetup = [{}]\n",
-            serde_json::to_string(script).unwrap()
-        ),
-    )
-    .unwrap();
+    let config = format!(
+        "[worktree]\nsetup = [{}]\n",
+        serde_json::to_string(script).unwrap()
+    );
+    let (rig, repo) = place::place_rig_with("setup-replacement", &config);
     let (code, error) = rig.json(&[
         "host",
         "prepare",
@@ -2056,13 +2052,17 @@ fn expired_agent_preparation_reservations_revalidate_on_the_same_host_and_keep_r
 #[test]
 fn interrupted_preparation_refuses_to_adopt_or_rerun_incomplete_setup() {
     for base in [Some("main"), None] {
-        let (rig, repo) = place::place_rig(if base.is_some() {
-            "interrupted-with-base"
-        } else {
-            "interrupted-without-base"
-        });
-        let config = fs::read_to_string(repo.join("dogsled.toml")).unwrap();
-        fs::write(repo.join("dogsled.toml"), config.replace("setup = [", "setup = [\n  \"if test -f \\\"$RIG/state/preparation-receipts/interrupted.json\\\"; then cp \\\"$RIG/state/preparation-receipts/interrupted.json\\\" \\\"$RIG/intent-at-setup.json\\\"; fi; kill -KILL $PPID\"," )).unwrap();
+        let config = r#"[worktree]
+setup = ['if test -f "$RIG/state/preparation-receipts/interrupted.json"; then cp "$RIG/state/preparation-receipts/interrupted.json" "$RIG/intent-at-setup.json"; fi; kill -KILL $PPID']
+"#;
+        let (rig, repo) = place::place_rig_with(
+            if base.is_some() {
+                "interrupted-with-base"
+            } else {
+                "interrupted-without-base"
+            },
+            config,
+        );
         let mut args = vec![
             "host",
             "prepare",
@@ -2092,7 +2092,6 @@ fn interrupted_preparation_refuses_to_adopt_or_rerun_incomplete_setup() {
         assert!(receipt["prepared"].is_null(), "{receipt}");
         let pending = rig.read("state/preparations.json");
         fs::write(tree.join("keep-me"), "unfinished setup output").unwrap();
-        fs::write(repo.join("dogsled.toml"), config).unwrap();
         let (code, error) = rig.json(&args);
         assert_eq!(code, 2, "{error}");
         assert!(
