@@ -875,16 +875,23 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
 
 fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
     let mine = |pane: &str| owner.is_none_or(|owner| owner == pane);
+    let mut request_ids = std::collections::BTreeSet::new();
     for row in rows.iter_mut() {
+        // Queue rows expose the ticket ID; retained resources belong to its request.
+        let request_id = status
+            .queue
+            .iter()
+            .find(|ticket| ticket.id == row.id)
+            .map_or_else(|| row.id.clone(), |ticket| ticket.request.id.clone());
         for hold in status
             .holds
             .iter()
-            .filter(|hold| hold.request_id.as_deref() == Some(row.id.as_str()))
+            .filter(|hold| hold.request_id.as_deref() == Some(request_id.as_str()))
         {
             row.holds.push(hold.clone());
         }
+        request_ids.insert(request_id);
     }
-    let item_ids: std::collections::BTreeSet<_> = rows.iter().map(|row| row.id.clone()).collect();
     rows.extend(
         status
             .holds
@@ -893,7 +900,7 @@ fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
                 !hold
                     .request_id
                     .as_ref()
-                    .is_some_and(|id| item_ids.contains(id))
+                    .is_some_and(|id| request_ids.contains(id))
             })
             .filter(|hold| hold.owner_pane.as_deref().is_none_or(mine))
             .map(|hold| Row {
