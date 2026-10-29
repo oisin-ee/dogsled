@@ -1292,11 +1292,78 @@ pub(crate) fn waits_behind(fleet: &Fleet, request: &Request) -> Result<bool> {
         }))
 }
 
+/// Placement admission captures its immutable expectation before reservation transport.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PlacementProgress {
+    pub version: u32,
+    #[serde(flatten)]
+    pub phase: PlacementPhase,
+    /// Definitive refusals are retained, never overwritten by another candidate.
+    pub declined: Vec<crate::node::PlacementReply>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub(crate) enum PlacementPhase {
+    Recorded,
+    SelectionPending {
+        envelope: crate::node::PlacementReservation,
+    },
+    HostSelected {
+        grant: crate::node::PlacementGrant,
+    },
+}
+
+impl PlacementProgress {
+    pub(crate) fn expectation(
+        &self,
+        request: &Request,
+    ) -> Result<Option<crate::node::PlacementReservation>> {
+        if self.version != crate::node::PLACEMENT_VERSION {
+            return Err(crate::unit_transport::conflict(
+                "unsupported placement progress version",
+            ));
+        }
+        let pending = match &self.phase {
+            PlacementPhase::Recorded => None,
+            PlacementPhase::SelectionPending { envelope } => Some(envelope.clone()),
+            PlacementPhase::HostSelected { grant } => {
+                crate::node::PlacementReply {
+                    envelope: grant.envelope.clone(),
+                    grant: Some(grant.clone()),
+                }
+                .validate(&grant.envelope, true)?;
+                Some(grant.envelope.clone())
+            }
+        };
+        let expected = serde_json::to_value(request)?;
+        if let Some(envelope) = &pending {
+            envelope.validate(&request.id)?;
+            if envelope.request != expected {
+                return Err(crate::unit_transport::conflict(
+                    "placement expectation changed",
+                ));
+            }
+        }
+        for declined in &self.declined {
+            declined.validate(&declined.envelope, false)?;
+            if declined.envelope.request != expected {
+                return Err(crate::unit_transport::conflict(
+                    "declined placement request changed",
+                ));
+            }
+        }
+        Ok(pending)
+    }
+}
+
 /// Caller-owned progress is durable before any preparation or launch side effect. An
 /// interrupted preparation cannot be adopted: only a saved launch may be resumed.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Attempt {
     pub request: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<Host>,
     pub launch: Option<Launch>,
@@ -1311,33 +1378,6 @@ pub(crate) struct Attempt {
 
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
-    if matches!(request.action, Action::Place) {
-        let Placement::Placed {
-            host, reservation, ..
-        } = placement(fleet, request, request.host.as_deref(), now)?
-        else {
-            return Ok(None);
-        };
-        let launch = prepare_launch(fleet, request, &host)
-            .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
-        if let Some(binding) = &launch.preparation {
-            crate::prepare::dispose(
-                fleet,
-                &host,
-                &crate::prepare::disposition::Request {
-                    version: crate::prepare::disposition::VERSION,
-                    binding: *binding.clone(),
-                    policy: crate::prepare::disposition::Policy::Prohibit {
-                        basis: crate::prepare::disposition::Basis::PlacementReturned,
-                    },
-                    outcome: crate::prepare::disposition::Outcome::Unknown,
-                },
-            )?;
-        }
-        return Ok(Some(
-            json!({"host":host,"reservation":reservation,"path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane}),
-        ));
-    }
     let attempts = fleet.ledger.child("admissions");
     attempts.with_lock(&request.id, || perform_locked(fleet, request, now))
 }
@@ -1348,6 +1388,9 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
     // Admission checks the request's age before it places, prepares, or dispatches
     // anything. A request that may not start new execution is refused here.
     check_request_validity(fleet.ledger, request)?;
+    if matches!(request.action, Action::Place) {
+        return perform_placement(fleet, request, now);
+    }
     let mut request = request.clone();
     if let Action::Job { validity, .. } = &mut request.action {
         *validity = jobs::request_validity(fleet.ledger, &request.id)?;
@@ -1433,6 +1476,68 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
     begin(fleet, request, &attempts, &file, now)
 }
 
+/// C4a owns admission and capacity replay only. Preparation and completion retain C3's
+/// existing policy; C4b owns their separate result journal and recovery windows.
+fn perform_placement(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    let attempts = fleet.ledger.child("admissions");
+    let file = format!("{}.json", request.id);
+    let expected = serde_json::to_value(request)?;
+    if let Some(attempt) = attempts.read::<Attempt>(&file)? {
+        if attempt.request != expected
+            || attempt
+                .placement
+                .as_ref()
+                .is_none_or(|p| p.version != crate::node::PLACEMENT_VERSION)
+        {
+            return Err(crate::unit_transport::conflict(
+                "placement admission identity or version changed",
+            ));
+        }
+    } else {
+        attempts.write(
+            &file,
+            &Attempt {
+                request: expected,
+                placement: Some(PlacementProgress {
+                    version: crate::node::PLACEMENT_VERSION,
+                    phase: PlacementPhase::Recorded,
+                    declined: Vec::new(),
+                }),
+                host: None,
+                launch: None,
+                error: None,
+                diagnostic: None,
+                unit: None,
+                result: None,
+            },
+        )?;
+    }
+    let Placement::Placed {
+        host, reservation, ..
+    } = placement(fleet, request, request.host.as_deref(), now)?
+    else {
+        return Ok(None);
+    };
+    let launch = prepare_launch(fleet, request, &host)
+        .map_err(|error| prelaunch_error(error.correlate(Some(&request.id))))?;
+    if let Some(binding) = &launch.preparation {
+        crate::prepare::dispose(
+            fleet,
+            &host,
+            &crate::prepare::disposition::Request {
+                version: crate::prepare::disposition::VERSION,
+                binding: *binding.clone(),
+                policy: crate::prepare::disposition::Policy::Prohibit {
+                    basis: crate::prepare::disposition::Basis::PlacementReturned,
+                },
+                outcome: crate::prepare::disposition::Outcome::Unknown,
+            },
+        )?;
+    }
+    Ok(Some(json!({"host":host,"reservation":reservation,
+        "path":request.branch.as_ref().map(|_| launch.cwd),"pane_id":launch.pane})))
+}
+
 fn save_result(attempts: &Ledger, file: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
     if attempt.unit.is_some() {
         attempt.result = Some(result.clone());
@@ -1454,6 +1559,7 @@ fn begin(
     };
     let mut attempt = Attempt {
         request: serde_json::to_value(request)?,
+        placement: None,
         host: Some(host.clone()),
         launch: None,
         error: None,
@@ -1481,8 +1587,15 @@ fn begin(
 
 fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
     let validity = request_validity(fleet.ledger, request)?;
-    let placed =
-        commands::place_with(fleet, host, &request.id, now, validity).map_err(prelaunch_error)?;
+    let placed = commands::place_with(
+        fleet,
+        host,
+        &request.id,
+        now,
+        validity,
+        matches!(request.action, Action::Place).then_some(request),
+    )
+    .map_err(prelaunch_error)?;
     if let Placement::Full { hosts, .. } = &placed {
         defer(fleet, request, hosts, now)?;
     }
@@ -1758,14 +1871,24 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
                 .ledger
                 .child("admissions")
                 .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
-            let recoverable = matches!(ticket.request.action, Action::Agent { .. })
+            let recoverable = (matches!(ticket.request.action, Action::Place)
                 && saved.as_ref().is_some_and(|a| {
-                    a.launch.is_some()
-                        || (a.unit.is_some() && a.host.is_none())
-                        || (ticket.retry.attempts > 0
-                            && a.error.is_some()
-                            && a.host.as_ref().is_some_and(|h| !h.is_local()))
-                });
+                    a.placement.as_ref().is_some_and(|p| {
+                        p.version == crate::node::PLACEMENT_VERSION
+                            && matches!(
+                                p.phase,
+                                PlacementPhase::Recorded | PlacementPhase::SelectionPending { .. }
+                            )
+                    })
+                }))
+                || matches!(ticket.request.action, Action::Agent { .. })
+                    && saved.as_ref().is_some_and(|a| {
+                        a.launch.is_some()
+                            || (a.unit.is_some() && a.host.is_none())
+                            || (ticket.retry.attempts > 0
+                                && a.error.is_some()
+                                && a.host.as_ref().is_some_and(|h| !h.is_local()))
+                    });
             ticket = update_ticket(fleet.ledger, &ticket.id, |t| {
                 t.state = if recoverable { "pending" } else { "failed" }.into();
                 t.diagnostic = saved.as_ref().and_then(|a| a.diagnostic.clone());

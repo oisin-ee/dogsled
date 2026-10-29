@@ -65,12 +65,120 @@ pub fn place_with(
     id: &str,
     now: u64,
     validity: Option<crate::jobs::Validity>,
+    placement: Option<&crate::work::Request>,
 ) -> Result<Placement> {
     crate::jobs::validate_id(id)?;
     let selections = fleet.ledger.child("placement-attempts");
     selections.with_lock(id, || {
+        if let Some(request) = placement {
+            return place_recorded(fleet, request, now);
+        }
         place_locked(fleet, host, id, now, &selections, validity)
     })
+}
+
+/// The caller holds admission before entering selection. Only a correlated definitive
+/// refusal permits another candidate; an ambiguous reply retains the pending envelope.
+fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Result<Placement> {
+    use crate::work::{Attempt, PlacementPhase};
+    let attempts = fleet.ledger.child("admissions");
+    let file = format!("{}.json", request.id);
+    let mut attempt = attempts
+        .read::<Attempt>(&file)?
+        .ok_or_else(|| crate::unit_transport::conflict("placement admission is missing"))?;
+    if attempt.request != serde_json::to_value(request)? {
+        return Err(crate::unit_transport::conflict("placement request changed"));
+    }
+    if fleet
+        .ledger
+        .child("placement-attempts")
+        .read::<serde_json::Value>(&file)?
+        .is_some_and(|v| !v.is_null())
+    {
+        return Err(crate::unit_transport::conflict(
+            "historical selection has no placement replay evidence",
+        ));
+    }
+    let progress = attempt
+        .placement
+        .as_ref()
+        .ok_or_else(|| crate::unit_transport::conflict("placement progress is missing"))?;
+    let mut pending = progress.expectation(request)?;
+    if let Some(envelope) = &pending
+        && *fleet.find(&envelope.host.id)? != envelope.host
+    {
+        return Err(crate::unit_transport::conflict(
+            "selected placement host or target changed",
+        ));
+    }
+    let pinned = request.host.as_deref().map(|h| fleet.find(h)).transpose()?;
+    let mut reports = fleet.status(now)?;
+    let mut candidates: Vec<_> = reports
+        .iter()
+        .filter(|r| pinned.is_none_or(|h| h.id == r.host.id))
+        .filter_map(|r| r.headroom.clone())
+        .collect();
+    loop {
+        let envelope = if let Some(envelope) = pending.take() {
+            envelope
+        } else {
+            let Some(selected) = plan::choose(&candidates) else {
+                break;
+            };
+            let envelope = crate::node::PlacementReservation {
+                version: crate::node::PLACEMENT_VERSION,
+                request: attempt.request.clone(),
+                host: fleet.find(&selected.host)?.clone(),
+                reservation: request.id.clone(),
+            };
+            attempt
+                .placement
+                .as_mut()
+                .ok_or_else(|| crate::unit_transport::conflict("missing placement progress"))?
+                .phase = PlacementPhase::SelectionPending {
+                envelope: envelope.clone(),
+            };
+            attempts.write(&file, &attempt)?;
+            envelope
+        };
+        let outcome = fleet.reserve(&envelope.host, &request.id, now, None, Some(&envelope))?;
+        let reply = outcome.placement.ok_or_else(|| {
+            crate::unit_transport::conflict(
+                "peer lacks placement replay evidence; no preparation authorized",
+            )
+        })?;
+        let progress = attempt
+            .placement
+            .as_mut()
+            .ok_or_else(|| crate::unit_transport::conflict("missing placement progress"))?;
+        if let PlacementPhase::HostSelected { grant } = &progress.phase
+            && reply.grant.as_ref() != Some(grant)
+        {
+            return Err(crate::unit_transport::conflict(
+                "original placement grant changed",
+            ));
+        }
+        if let Some(grant) = reply.grant {
+            progress.phase = PlacementPhase::HostSelected { grant };
+            attempt.host = Some(envelope.host.clone());
+            attempts.write(&file, &attempt)?;
+            return Ok(Placement::Placed {
+                host: envelope.host,
+                reservation: envelope.reservation,
+                prepared: Prepared::default(),
+            });
+        }
+        // No hold was granted. Keep the immutable negative acknowledgement as proof
+        // that this candidate finished, rather than silently replacing an expectation.
+        progress.declined.push(reply);
+        progress.phase = PlacementPhase::Recorded;
+        attempts.write(&file, &attempt)?;
+        if let Some(report) = reports.iter_mut().find(|r| r.host.id == envelope.host.id) {
+            report.headroom = outcome.headroom;
+        }
+        candidates.retain(|c| c.host != envelope.host.id);
+    }
+    full(reports, pinned)
 }
 
 fn place_locked(
@@ -153,7 +261,7 @@ fn place_locked(
                 host: host.id.clone(),
             }),
         )?;
-        let outcome = fleet.reserve(host, id, now, validity)?;
+        let outcome = fleet.reserve(host, id, now, validity, None)?;
         if outcome.reserved {
             let prepared = Prepared::default();
             return Ok(Placement::Placed {
@@ -173,6 +281,12 @@ fn place_locked(
         candidates.retain(|c| c.host != host.id);
         selections.write(&file, &Option::<ReservationAttempt>::None)?;
     }
+    full(reports, pinned)
+}
+
+/// A timed-out report is not evidence that capacity is full. Preserve the original
+/// terminal deadline behavior for placement as well as Agent and Job selection.
+fn full(reports: Vec<HostReport>, pinned: Option<&Host>) -> Result<Placement> {
     if let Some(error) = reports
         .iter()
         .filter(|report| pinned.is_none_or(|host| host.id == report.host.id))

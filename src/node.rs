@@ -52,6 +52,8 @@ pub struct SnapshotReport {
     /// The job validity protocol this host speaks. A peer without it cannot run a job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_validity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_replay: Option<u32>,
 }
 
 impl Snapshot {
@@ -64,6 +66,76 @@ impl Snapshot {
 pub struct ReserveOutcome {
     pub reserved: bool,
     pub headroom: Option<Headroom>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementReply>,
+}
+
+pub const PLACEMENT_VERSION: u32 = 1;
+
+/// One complete origin expectation. Neither transport nor recovery may reconstruct it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementReservation {
+    pub version: u32,
+    pub request: serde_json::Value,
+    pub host: crate::hosts::Host,
+    pub reservation: String,
+}
+
+impl PlacementReservation {
+    pub fn validate(&self, id: &str) -> Result<()> {
+        let request: crate::work::Request = serde_json::from_value(self.request.clone())?;
+        crate::jobs::validate_id(id)?;
+        if self.version != PLACEMENT_VERSION
+            || self.reservation != id
+            || request.id != id
+            || !matches!(request.action, crate::work::Action::Place)
+            || self.host.id.is_empty()
+            || self.host.target.as_deref() == Some("")
+        {
+            return Err(crate::unit_transport::conflict(
+                "placement reservation identity or protocol changed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Retained until R1 can expire it safely. Existence proves the original capacity decision;
+/// materialization never permits refreshing or recreating an expired hold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementGrant {
+    pub version: u32,
+    pub envelope: PlacementReservation,
+    pub reservation: Reservation,
+    pub headroom: Headroom,
+    pub materialized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlacementReply {
+    pub envelope: PlacementReservation,
+    pub grant: Option<PlacementGrant>,
+}
+
+impl PlacementReply {
+    pub fn validate(&self, envelope: &PlacementReservation, reserved: bool) -> Result<()> {
+        envelope.validate(&envelope.reservation)?;
+        if self.envelope != *envelope
+            || self.grant.is_some() != reserved
+            || self.grant.as_ref().is_some_and(|grant| {
+                grant.version != PLACEMENT_VERSION
+                    || grant.envelope != *envelope
+                    || grant.reservation.id != envelope.reservation
+                    || !grant.materialized
+                    || !grant.headroom.eligible
+            })
+        {
+            return Err(crate::unit_transport::conflict(
+                "placement grant does not match admission",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Busy fraction between two Linux `/proc/stat` readings. `None` without a
@@ -93,6 +165,7 @@ impl Node<'_> {
             running: Some(self.ledger.locked("service")?),
             handoffs: crate::done::list(self.ledger)?,
             job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
+            placement_replay: Some(PLACEMENT_VERSION),
         })
     }
 
@@ -146,6 +219,123 @@ impl Node<'_> {
         Ok(reservations)
     }
 
+    /// Preparation fencing precedes the short capacity transaction. No lifecycle work
+    /// runs while capacity is locked, and a retired request cannot repair a delayed grant.
+    pub fn reserve_placement(
+        &self,
+        envelope: &PlacementReservation,
+        now: u64,
+    ) -> Result<ReserveOutcome> {
+        envelope.validate(&envelope.reservation)?;
+        crate::work::launch_test_barrier("PLACEMENT_BEFORE_GATE")?;
+        self.ledger
+            .child("preparation-receipts")
+            .with_lock(&envelope.reservation, || {
+                crate::prepare::disposition::allow_preparation(self.ledger, &envelope.reservation)?;
+                crate::work::launch_test_barrier("PLACEMENT_ENTERED_GATE")?;
+                self.ledger
+                    .with_lock("host", || self.placement_locked(envelope, now))
+            })
+    }
+
+    fn placement_locked(
+        &self,
+        envelope: &PlacementReservation,
+        now: u64,
+    ) -> Result<ReserveOutcome> {
+        let grants = self.ledger.child("placement-grants");
+        let file = format!("{}.json", envelope.reservation);
+        let raw: Vec<Reservation> = self.ledger.read("placements.json")?.unwrap_or_default();
+        let mut grant = if let Some(grant) = grants.read::<PlacementGrant>(&file)? {
+            if grant.version != PLACEMENT_VERSION
+                || grant.envelope != *envelope
+                || grant.reservation.id != envelope.reservation
+                || !grant.headroom.eligible
+                || raw
+                    .iter()
+                    .filter(|hold| hold.id == envelope.reservation)
+                    .count()
+                    > 1
+                || raw
+                    .iter()
+                    .any(|hold| hold.id == envelope.reservation && *hold != grant.reservation)
+            {
+                return Err(crate::unit_transport::conflict(
+                    "placement grant identity changed",
+                ));
+            }
+            grant
+        } else {
+            // A recordless same-ID hold is not authority to adopt somebody else's grant.
+            if raw.iter().any(|hold| hold.id == envelope.reservation) {
+                return Err(crate::unit_transport::conflict(
+                    "placement hold has no grant evidence",
+                ));
+            }
+            let reservations = self.live_reservations(now)?;
+            let mut snapshot = self
+                .ledger
+                .read::<Snapshot>("host.json")?
+                .filter(|s| s.fresh(now));
+            let headroom = snapshot.as_mut().map(|s| {
+                s.probe.reservations = reservations;
+                evaluate(&s.probe, &self.thresholds)
+            });
+            let headroom = match headroom {
+                Some(headroom) if headroom.eligible => headroom,
+                headroom => {
+                    return Ok(ReserveOutcome {
+                        reserved: false,
+                        headroom,
+                        placement: Some(PlacementReply {
+                            envelope: envelope.clone(),
+                            grant: None,
+                        }),
+                    });
+                }
+            };
+            let grant = PlacementGrant {
+                version: PLACEMENT_VERSION,
+                envelope: envelope.clone(),
+                reservation: Reservation {
+                    id: envelope.reservation.clone(),
+                    created_ms: now,
+                },
+                headroom,
+                materialized: false,
+            };
+            grants.write(&file, &grant)?;
+            crate::unit_request::crash_point("placement-grant-intent");
+            grant
+        };
+        if grant.materialized {
+            self.live_reservations(now)?;
+        } else {
+            let mut holds = self
+                .ledger
+                .reservations(now, self.thresholds.reservation_ttl_ms)?;
+            // Preserve the original timestamp even if publication was interrupted before
+            // acknowledgement. An expired original hold cannot become live again.
+            if now.saturating_sub(grant.reservation.created_ms) < self.thresholds.reservation_ttl_ms
+                && !holds.iter().any(|hold| hold.id == grant.reservation.id)
+            {
+                holds.push(grant.reservation.clone());
+            }
+            self.ledger.write("placements.json", &holds)?;
+            crate::unit_request::crash_point("placement-hold-published");
+            grant.materialized = true;
+            grants.write(&file, &grant)?;
+        }
+        Ok(ReserveOutcome {
+            reserved: true,
+            headroom: Some(grant.headroom.clone()),
+            placement: Some(PlacementReply {
+                envelope: envelope.clone(),
+                grant: Some(grant),
+            }),
+        })
+    }
+
     pub fn reserve(
         &self,
         id: &str,
@@ -154,6 +344,16 @@ impl Node<'_> {
     ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
         self.ledger.with_lock("host", || {
+            if self
+                .ledger
+                .child("placement-grants")
+                .read::<serde_json::Value>(&format!("{id}.json"))?
+                .is_some()
+            {
+                return Err(crate::unit_transport::conflict(
+                    "placement reservation requires its replay envelope",
+                ));
+            }
             // The host checks the request's age before it reads or rewrites any capacity
             // record, and before it replays a hold. A request that may not start new
             // execution never takes, keeps, or confirms a reservation.
@@ -167,6 +367,7 @@ impl Node<'_> {
                 return Ok(ReserveOutcome {
                     reserved: true,
                     headroom: None,
+                    placement: None,
                 });
             }
             let Some(mut snapshot) = self
@@ -177,6 +378,7 @@ impl Node<'_> {
                 return Ok(ReserveOutcome {
                     reserved: false,
                     headroom: None,
+                    placement: None,
                 });
             };
             // Agent discovery cannot retire reservations: a new agent's first
@@ -195,6 +397,7 @@ impl Node<'_> {
             Ok(ReserveOutcome {
                 reserved: headroom.eligible,
                 headroom: Some(headroom),
+                placement: None,
             })
         })
     }

@@ -544,6 +544,9 @@ pub enum HostCommand {
     Reserve {
         #[arg(long)]
         id: String,
+        /// Versioned placement expectation; never falls back to TTL-only admission.
+        #[arg(long, conflicts_with_all = ["job_validity", "job_created_ms"])]
+        placement_replay: Option<String>,
         #[arg(long)]
         preparation_protocol: Option<u32>,
         /// The job validity protocol the caller speaks. A job reservation carries it.

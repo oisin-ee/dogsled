@@ -640,7 +640,9 @@ case "$*" in
   *'host snapshot'*)
     if test -f "$RIG/unreachable"; then echo offline >&2; exit 255; fi
     cat "$RIG/remote.json" ;;
-  *'host reserve'*) cat "$RIG/reserve.json" ;;
+  *'host reserve'*)
+    for remote do :; done
+    sh -c "$RIG/bin/peer-fixture $remote" ;;
   *'host checkout'*) printf '%s\n' '"/remote/repo"' ;;
   *'host launch'*)
     if test -f "$RIG/remote-binding.json"; then
@@ -674,10 +676,30 @@ while test "$#" -gt 0; do
     --base) base=$2; shift ;;
     --input) input=$2; shift ;;
     --request) request=$2; shift ;;
+    --id) id=$2; shift ;;
+    --placement-replay) placement=$2; shift ;;
   esac
   shift
 done
 case "$operation" in
+  reserve)
+    if test -z "$placement"; then cat "$RIG/reserve.json"; exit; fi
+    # The fixture echoes the complete wire expectation, as the real host does.
+    python3 - "$placement" "$RIG/reserve.json" <<'PY'
+import json, sys
+request = json.loads(sys.argv[1])
+with open(sys.argv[2]) as f:
+    reply = json.load(f)
+grant = None
+if reply['reserved']:
+    grant = {'version': 1, 'envelope': request,
+             'reservation': {'id': request['reservation'], 'created_ms': 1},
+             'headroom': {'host': request['host']['id'], 'headroom': 1.0, 'eligible': True,
+                          'live_agents': 0, 'reasons': []}, 'materialized': True}
+reply['placement'] = {'envelope': request, 'grant': grant}
+print(json.dumps(reply))
+PY
+    ;;
   prepared) printf '%s,"released":true}\n' "${input%\}}" ;;
   prepare)
     prepared='{"pane_id":"w9:p1","terminal_id":"term_remote","path":"/remote/tree"}'
@@ -870,7 +892,7 @@ esac
         // Busy fraction that reproduces the old load rule's verdict for this load. The zero
         // tick counters let a Linux `serve --once` derive a busy sample from one real reading.
         let busy = (load / (1.5 * f64::from(cores))).min(1.0);
-        self.put(path, &json!({"sampled_ms":sampled,"probe":{
+        self.put(path, &json!({"placement_replay":1,"sampled_ms":sampled,"probe":{
             "host":"local","label":"local","load1":load,"cores":cores,"busy":busy,
             "cpu_ticks":{"busy":0,"total":0},
             "memory":{"used_bytes":1_073_741_824_u64,"total_bytes":8_589_934_592_u64},

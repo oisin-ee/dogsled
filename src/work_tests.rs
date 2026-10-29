@@ -507,6 +507,103 @@ fn place_request(id: &str) -> Request {
     }
 }
 
+#[test]
+fn placement_replay_preserves_the_complete_origin_expectation() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
+    let shell = Fake::new();
+    let policy = Policy {
+        memory_reserve_bytes: 0,
+        ..Policy::default()
+    };
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local()],
+    };
+    ledger.write("host.json", &snapshot(100)).unwrap();
+    let request = place_request("captured-placement");
+    assert!(work::perform(&fleet, &request, 100).unwrap().is_some());
+    let admission = ledger.child("admissions");
+    let before = std::fs::read(admission.dir.join("captured-placement.json")).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(saved["request"], serde_json::to_value(&request).unwrap());
+    assert_eq!(saved["placement"]["phase"], "host_selected");
+    let hold = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    for field in ["cwd", "owner", "branch", "host"] {
+        let mut changed = serde_json::to_value(&request).unwrap();
+        changed[field] = json!("changed");
+        let changed: Request = serde_json::from_value(changed).unwrap();
+        assert!(work::perform(&fleet, &changed, 101).is_err(), "{field}");
+        assert_eq!(
+            std::fs::read(admission.dir.join("captured-placement.json")).unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read(ledger.dir.join("placements.json")).unwrap(),
+            hold
+        );
+    }
+    let redirected = Fleet {
+        hosts: vec![Host {
+            target: Some("different-target".into()),
+            ..Host::local()
+        }],
+        ..fleet
+    };
+    assert!(work::perform(&redirected, &request, 101).is_err());
+    assert_eq!(
+        std::fs::read(admission.dir.join("captured-placement.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(ledger.dir.join("placements.json")).unwrap(),
+        hold
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn placement_admission_never_downgrades_missing_or_newer_progress() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let shell = Fake::new();
+    let policy = Policy::default();
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local()],
+    };
+    let request = place_request("no-downgrade");
+    let admissions = ledger.child("admissions");
+    for progress in [
+        json!(null),
+        json!({"version":2,"phase":"recorded","declined":[]}),
+    ] {
+        let record =
+            json!({"request":request,"host":null,"launch":null,"error":null,"placement":progress});
+        admissions.write("no-downgrade.json", &record).unwrap();
+        assert!(work::perform(&fleet, &request, 100).is_err());
+        assert_eq!(
+            admissions
+                .read::<serde_json::Value>("no-downgrade.json")
+                .unwrap(),
+            Some(record)
+        );
+        assert!(!ledger.dir.join("placements.json").exists());
+        assert!(
+            !ledger
+                .dir
+                .join("placement-grants/no-downgrade.json")
+                .exists()
+        );
+    }
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
 fn pinned(id: &str, host: &str) -> Request {
     Request {
         host: Some(host.into()),

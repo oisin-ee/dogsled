@@ -135,7 +135,9 @@ fn remote_repository_clone_precedes_prepare_and_failures_do_not_fall_back() {
 printf '%s\n' "$*" >> "$RIG/ssh.log"
 case "$*" in
  *'host snapshot'*) cat "$RIG/remote.json" ;;
- *'host reserve'*) cat "$RIG/reserve.json" ;;
+ *'host reserve'*)
+   for remote do :; done
+   sh -c "$RIG/bin/peer-fixture $remote" ;;
  *'host checkout'*) printf '%s\n' '{"error":"netcup: clone https://example.invalid/repo.git failed: credentials","code":"CLONE_FAILED"}'; exit 2 ;;
  *) echo 'must not prepare after clone failure' >&2; exit 2 ;;
 esac

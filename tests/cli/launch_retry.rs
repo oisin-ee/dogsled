@@ -1947,89 +1947,73 @@ fn terminal_ssh_categories_never_enter_the_retry_queue() {
 }
 
 #[test]
-fn expired_preparation_reservations_revalidate_on_the_same_host_and_keep_refusals() {
-    for action in ["agent", "place"] {
-        let rig = Rig::new(&format!("expired-preparation-{action}"));
-        let repo = rig.dir.join("home/repo");
-        repository(&repo);
-        rig.peer();
-        rig.snapshot("state/host.json", now(), 0.0, 8);
-        fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
-        rig.snapshot("peer-state/host.json", now(), 0.0, 16);
-        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
-        let reserve = format!(
-            r#"  *'host reserve'*)
+fn expired_agent_preparation_reservations_revalidate_on_the_same_host_and_keep_refusals() {
+    let rig = Rig::short("expired-preparation-agent");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.peer();
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    rig.snapshot("peer-state/host.json", now(), 0.0, 16);
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let reserve = format!(
+        r#"  *'host reserve'*)
     for remote do :; done
     remote=${{remote#* host }}
     DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;"#,
-            env!("CARGO_BIN_EXE_dogsled")
-        );
-        rig.script("ssh", &script
-            .replace("  *'host reserve'*) cat \"$RIG/reserve.json\" ;;", &reserve)
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    rig.script("ssh", &script
+            .replace("  *'host reserve'*)\n    for remote do :; done\n    sh -c \"$RIG/bin/peer-fixture $remote\" ;;", &reserve)
             .replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
-        let (code, queued) = if action == "agent" {
-            remote_agent(&rig, Some(&repo))
-        } else {
-            rig.json(&[
-                "place",
-                "--host",
-                "netcup",
-                "--repo",
-                repo.to_str().unwrap(),
-                "--branch",
-                "remote-complete",
-                "--base",
-                "main",
-            ])
-        };
-        assert_eq!(code, 1, "{action}: {queued}");
-        let mut holds = rig.read("peer-state/placements.json");
-        holds[0]["created_ms"] = json!(1);
-        rig.put("peer-state/placements.json", &holds);
-        // Admission now refuses this host despite the caller's eligible cached snapshot.
-        let mut snapshot = rig.read("peer-state/host.json");
-        snapshot["probe"]["disk_free_percent"] = json!(-1.0);
-        rig.put("peer-state/host.json", &snapshot);
-        let ticket = advance(&rig);
-        assert_eq!(ticket["state"], "pending", "{action}: {ticket}");
-        let reason = ticket["wait_reason"].as_str().unwrap();
-        assert!(reason.starts_with("netcup: "), "{ticket}");
-        assert!(!reason.contains("local:"), "{ticket}");
-        assert_eq!(ticket["retry"]["attempts"], 1, "{ticket}");
-        let log = rig.log("ssh.log");
-        assert_eq!(log.matches("host reserve").count(), 2, "{log}");
-        assert_eq!(log.matches("host checkout").count(), 1, "{log}");
-        assert!(!log.contains("host prepare"), "{log}");
-        assert!(!log.contains("host launch"), "{log}");
-        let calls: Vec<_> = log.lines().filter(|s| s.contains("host reserve")).collect();
-        let ids: Vec<_> = calls
-            .iter()
-            .map(|call| {
-                call.split(" --id ")
-                    .nth(1)
-                    .unwrap()
-                    .split_whitespace()
-                    .next()
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(ids[0], ids[1], "{log}");
-        assert!(
-            calls.iter().all(|call| call.contains("netcup-dev")),
-            "{log}"
-        );
-        rig.snapshot("peer-state/host.json", now(), 0.0, 16);
-        let ticket = advance(&rig);
-        assert_eq!(ticket["state"], "admitted", "{action}: {ticket}");
-        assert!(ticket.get("wait_reason").is_none(), "{ticket}");
-        assert_eq!(
-            rig.read("peer-state/placements.json")
-                .as_array()
+    let (code, queued) = remote_agent(&rig, Some(&repo));
+    assert_eq!(code, 1, "{queued}");
+    let mut holds = rig.read("peer-state/placements.json");
+    holds[0]["created_ms"] = json!(1);
+    rig.put("peer-state/placements.json", &holds);
+    // Admission now refuses this host despite the caller's eligible cached snapshot.
+    let mut snapshot = rig.read("peer-state/host.json");
+    snapshot["probe"]["disk_free_percent"] = json!(-1.0);
+    rig.put("peer-state/host.json", &snapshot);
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "pending", "{ticket}");
+    let reason = ticket["wait_reason"].as_str().unwrap();
+    assert!(reason.starts_with("netcup: "), "{ticket}");
+    assert!(!reason.contains("local:"), "{ticket}");
+    assert_eq!(ticket["retry"]["attempts"], 1, "{ticket}");
+    let log = rig.log("ssh.log");
+    assert_eq!(log.matches("host reserve").count(), 2, "{log}");
+    assert_eq!(log.matches("host checkout").count(), 1, "{log}");
+    assert!(!log.contains("host prepare"), "{log}");
+    assert!(!log.contains("host launch"), "{log}");
+    let calls: Vec<_> = log.lines().filter(|s| s.contains("host reserve")).collect();
+    let ids: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            call.split(" --id ")
+                .nth(1)
                 .unwrap()
-                .len(),
-            1
-        );
-    }
+                .split_whitespace()
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(ids[0], ids[1], "{log}");
+    assert!(
+        calls.iter().all(|call| call.contains("netcup-dev")),
+        "{log}"
+    );
+    rig.snapshot("peer-state/host.json", now(), 0.0, 16);
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "admitted", "{ticket}");
+    assert!(ticket.get("wait_reason").is_none(), "{ticket}");
+    assert_eq!(
+        rig.read("peer-state/placements.json")
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -2112,7 +2096,7 @@ fn lost_successful_reservation_reply_reuses_one_hold_on_the_selected_host() {
     );
     rig.script(
         "ssh",
-        &script.replace("  *'host reserve'*) cat \"$RIG/reserve.json\" ;;", &handler),
+        &script.replace("  *'host reserve'*)\n    for remote do :; done\n    sh -c \"$RIG/bin/peer-fixture $remote\" ;;", &handler),
     );
     let (code, queued) = remote_agent(&rig, None);
     assert_eq!(code, 1, "{queued}");
