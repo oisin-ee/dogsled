@@ -180,6 +180,117 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
 }
 
 #[test]
+fn agent_receipt_replay_completes_fenced_preparation_transfer() {
+    for point in [
+        "preparation-before-fence",
+        "preparation-fenced",
+        "preparation-claim-released",
+    ] {
+        let (rig, repo) = place::place_rig(&format!("agent-transfer-{point}"));
+        let prepared = disposition_prepared(&rig, &repo, "recover-one", "transferred", true);
+        let mut launch = host_request(&rig);
+        launch["cwd"] = prepared["path"].clone();
+        launch["pane"] = prepared["pane_id"].clone();
+        launch["terminal"] = prepared["terminal_id"].clone();
+        let request = launch.to_string();
+        let args = ["host", "launch", "--request", &request];
+        let out = rig
+            .cmd(&args)
+            .env("DOGSLED_TEST_UNIT_CRASH", point)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(86), "{out:?}");
+        let fence = if point == "preparation-before-fence" {
+            assert!(
+                !rig.dir
+                    .join("state/preparation-receipts/recover-one.disposition.json")
+                    .exists()
+            );
+            None
+        } else {
+            let fence = rig.read("state/preparation-receipts/recover-one.disposition.json");
+            assert_eq!(fence["progress"], "fenced");
+            Some(fence)
+        };
+        if point == "preparation-fenced" {
+            assert_eq!(
+                rig.read("state/preparations.json")
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        let receipt = rig.read("state/launches/recover-one.json");
+        let calls = rig.log("herdr.log");
+        for _ in 0..2 {
+            let (code, replay) = rig.json(&args);
+            assert_eq!(code, 0, "{replay}");
+            assert_eq!(replay, receipt);
+            assert_eq!(rig.read("state/preparations.json"), json!([]));
+            let transferred = rig.read("state/preparation-receipts/recover-one.disposition.json");
+            assert_eq!(transferred["progress"], "released");
+            if let Some(fence) = &fence {
+                assert_eq!(transferred["request"], fence["request"]);
+            }
+            assert_eq!(transferred["request"]["policy"]["kind"], "transfer");
+            assert_eq!(rig.log("herdr.log"), calls);
+        }
+    }
+}
+
+#[test]
+fn prepared_agent_refusal_releases_only_known_not_started_claims() {
+    for final_refusal in [true, false] {
+        let (rig, repo) = place::place_rig(if final_refusal {
+            "prepared-refusal"
+        } else {
+            "prepared-uncertain"
+        });
+        let prepared = disposition_prepared(&rig, &repo, "recover-one", "refusal", true);
+        let mut launch = host_request(&rig);
+        launch["cwd"] = prepared["path"].clone();
+        launch["pane"] = prepared["pane_id"].clone();
+        launch["terminal"] = prepared["terminal_id"].clone();
+        if final_refusal {
+            let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+            rig.script("herdr", &script.replace("  'agent start'*)\n", "  'agent start'*) echo '{\"error\":{\"code\":\"agent_name_taken\",\"message\":\"already used\"}}' >&2; exit 1 ;;\n  'unused start'*)\n"));
+        } else {
+            fs::write(rig.dir.join("start-fails"), "").unwrap();
+        }
+        let pending = rig.read("state/preparations.json");
+        let request = launch.to_string();
+        let args = ["host", "launch", "--request", &request];
+        for _ in 0..2 {
+            let (code, error) = rig.json(&args);
+            assert_ne!(code, 0, "{error}");
+            if final_refusal {
+                assert_eq!(rig.read("state/preparations.json"), json!([]));
+                let disposition =
+                    rig.read("state/preparation-receipts/recover-one.disposition.json");
+                assert_eq!(disposition["progress"], "released");
+                assert_eq!(
+                    disposition["request"]["policy"]["basis"]["agent_refused"]["launch"],
+                    launch
+                );
+                assert_eq!(disposition["request"]["outcome"], "not_started");
+            } else {
+                assert_eq!(rig.read("state/preparations.json"), pending);
+                assert!(
+                    !rig.dir
+                        .join("state/preparation-receipts/recover-one.disposition.json")
+                        .exists()
+                );
+            }
+        }
+        assert_eq!(
+            rig.log("herdr.log").matches("agent start worker ").count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn unsupported_preparation_disposition_refuses_job_ingress_without_writes() {
     let (rig, repo) = place::place_rig("disposition-ingress");
     let prepared = disposition_prepared(&rig, &repo, "ingress", "ingress", true);

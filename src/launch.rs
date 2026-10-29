@@ -600,6 +600,33 @@ fn refused(
     }))
 }
 
+/// Only the typed final native refusal proves that no agent was started.
+/// The caller holds preparation protection, and the final check holds the launch lock.
+pub(crate) fn refused_before_start(ledger: &Ledger, request: &Launch) -> Result<bool> {
+    let receipts = ledger.child("launches");
+    let Some(Receipt::Refused { failed }) =
+        receipts.read::<Receipt>(&format!("{}.json", request.id))?
+    else {
+        return Ok(false);
+    };
+    let progress = receipts
+        .read::<Progress>(&format!("{}.progress.json", request.id))?
+        .ok_or_else(|| crate::worktree::refuse("native refusal has no launch provenance"))?;
+    if progress.request != *request
+        || !progress.attempted
+        || progress.confirmed
+        || progress.terminal_receipt.is_some()
+        || progress.error.as_deref() != Some(failed.as_str())
+        || progress.pane.as_deref().is_none_or(str::is_empty)
+        || progress.terminal.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(crate::worktree::refuse(
+            "native refusal has inconsistent launch provenance",
+        ));
+    }
+    Ok(true)
+}
+
 fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
     if std::env::var("HERDR_PANE_ID").ok().as_deref() == Some(pane)
         || crate::cleanup::current_panes(shell)?

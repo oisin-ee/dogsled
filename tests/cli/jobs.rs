@@ -28,10 +28,17 @@ fn transferred_job(variant: &str) -> (Rig, Value) {
         "--request",
         &request.to_string(),
     ];
-    if variant == "fenced" {
+    if variant == "fenced" || variant == "before-fence" {
         let out = rig
             .cmd(&args)
-            .env("DOGSLED_TEST_UNIT_CRASH", "preparation-fenced")
+            .env(
+                "DOGSLED_TEST_UNIT_CRASH",
+                if variant == "fenced" {
+                    "preparation-fenced"
+                } else {
+                    "preparation-before-fence"
+                },
+            )
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(86));
@@ -47,6 +54,7 @@ fn transferred_preparation_allows_only_its_existing_job_owner() {
     for variant in [
         "matching",
         "fenced",
+        "before-fence",
         "owner",
         "identity",
         "unrelated",
@@ -55,6 +63,16 @@ fn transferred_preparation_allows_only_its_existing_job_owner() {
         let (rig, request) = transferred_job(variant);
         let text = request.to_string();
         let args = ["host", "launch", "--job-validity", "2", "--request", &text];
+        if variant == "before-fence" {
+            assert!(
+                !rig.dir
+                    .join("state/preparation-receipts/startup.disposition.json")
+                    .exists()
+            );
+            let (code, result) = rig.json(&args);
+            assert_eq!(code, 0, "{result}");
+            assert_eq!(rig.read("state/preparations.json"), json!([]));
+        }
         let transfer = rig.read("state/preparation-receipts/startup.disposition.json");
         assert_eq!(transfer["request"]["policy"]["kind"], "transfer");
         let mut job = rig.read("state/jobs/startup.json");
@@ -94,9 +112,10 @@ fn transferred_preparation_allows_only_its_existing_job_owner() {
             let mut wrapper =
                 rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "transferred wrapper");
             let status = wrapper.wait();
-            if variant == "matching" || variant == "fenced" {
+            if variant == "matching" || variant == "fenced" || variant == "before-fence" {
                 assert!(status.success(), "{}", rig.log("wrapper-error"));
                 assert_eq!(rig.log("command-marker"), "once\n");
+                assert_transferred_job_replay(&rig, &request, &transfer);
                 let disposition = fs::read(
                     rig.dir
                         .join("state/preparation-receipts/startup.disposition.json"),
@@ -133,6 +152,18 @@ fn transferred_preparation_allows_only_its_existing_job_owner() {
         assert!(!wrapper.wait().success());
         assert!(!rig.dir.join("command-marker").exists());
     }
+}
+
+fn assert_transferred_job_replay(rig: &Rig, request: &Value, transfer: &Value) {
+    let calls = rig.log("herdr.log");
+    let text = request.to_string();
+    let (code, result) = rig.json(&["host", "launch", "--job-validity", "2", "--request", &text]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    let completed = rig.read("state/preparation-receipts/startup.disposition.json");
+    assert_eq!(completed["progress"], "released");
+    assert_eq!(completed["request"], transfer["request"]);
+    assert_eq!(rig.log("herdr.log"), calls);
 }
 
 fn startup_herdr(rig: &Rig) {

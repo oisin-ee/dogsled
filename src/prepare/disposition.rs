@@ -42,6 +42,7 @@ pub enum Basis {
     PlacementReturned,
     PreparationFailed,
     UnitRefused { launch: Box<crate::work::Launch> },
+    AgentRefused { launch: Box<crate::work::Launch> },
 }
 
 /// Execution evidence is independent of releasing ownership.
@@ -409,6 +410,16 @@ fn validate_policy(
             }
         }
         Policy::Prohibit {
+            basis: Basis::AgentRefused { launch },
+        } => {
+            match_launch(binding, launch)?;
+            if request.outcome != Outcome::NotStarted
+                || !crate::launch::refused_before_start(ledger, launch)?
+            {
+                return Err(conflict());
+            }
+        }
+        Policy::Prohibit {
             basis: Basis::UnitRefused { launch },
         } => {
             match_launch(binding, launch)?;
@@ -471,6 +482,106 @@ fn validate_policy(
     Ok(())
 }
 
+/// Finish a final launch under the preparation gate, before returning its saved result.
+/// The persisted fence is the original proof; replay never discovers a new checkout owner.
+pub fn replay_guarded(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    launch: &crate::work::Launch,
+) -> Result<()> {
+    let saved = read(ledger, &launch.id)?;
+    let request = if let Some(saved) = saved {
+        let (Policy::Transfer {
+            launch: expected, ..
+        }
+        | Policy::Prohibit {
+            basis:
+                Basis::AgentRefused { launch: expected } | Basis::UnitRefused { launch: expected },
+        }) = &saved.request.policy
+        else {
+            return Err(conflict());
+        };
+        if **expected != *launch {
+            return Err(conflict());
+        }
+        if saved.progress == Progress::Released {
+            apply(ledger, &saved.request)?;
+            return Ok(());
+        }
+        saved.request
+    } else {
+        let Some(binding) = binding(ledger, &launch.id)? else {
+            return Ok(());
+        };
+        if !crate::launch::refused_before_start(ledger, launch)? {
+            let Some(result) = ledger
+                .child("launches")
+                .read::<serde_json::Value>(&format!("{}.json", launch.id))?
+            else {
+                return Ok(());
+            };
+            return crate::worktree::with_lifecycle(shell, ledger, &binding.request.0, |_guard| {
+                ledger.with_lock("done", || {
+                    ledger
+                        .child("launches")
+                        .with_lock(&launch.id, || transfer_guarded(ledger, launch, &result))
+                })
+            });
+        }
+        if launch.unit.is_some() {
+            return Ok(());
+        }
+        match_launch(&binding, launch)?;
+        Request {
+            version: VERSION,
+            binding,
+            policy: Policy::Prohibit {
+                basis: Basis::AgentRefused {
+                    launch: Box::new(launch.clone()),
+                },
+            },
+            outcome: Outcome::NotStarted,
+        }
+    };
+    crate::worktree::with_lifecycle(shell, ledger, &request.binding.request.0, |_guard| {
+        ledger.with_lock("done", || {
+            ledger.child("launches").with_lock(&launch.id, || {
+                apply(ledger, &request)?;
+                Ok(())
+            })
+        })
+    })
+}
+
+/// A failed call is not proof. Only the persisted native refusal can release its claim.
+/// Preparation, repository, done, and launch locks are already held in that order.
+pub fn agent_refused_guarded(ledger: &Ledger, launch: &crate::work::Launch) -> Result<()> {
+    if launch.unit.is_some() {
+        return Ok(());
+    }
+    if !crate::launch::refused_before_start(ledger, launch)? {
+        return Ok(());
+    }
+    let Some(binding) = binding(ledger, &launch.id)? else {
+        return Ok(());
+    };
+    match_launch(&binding, launch)?;
+    apply(
+        ledger,
+        &Request {
+            version: VERSION,
+            binding,
+            policy: Policy::Prohibit {
+                basis: Basis::AgentRefused {
+                    launch: Box::new(launch.clone()),
+                },
+            },
+            outcome: Outcome::NotStarted,
+        },
+    )?;
+    Ok(())
+}
+
 /// Successful dispatch has already published the matching launch owner. The outer gates
 /// remain held while ownership passes to it; the first pending wrapper is not prohibited.
 pub fn transfer_guarded(
@@ -478,6 +589,15 @@ pub fn transfer_guarded(
     launch: &crate::work::Launch,
     result: &serde_json::Value,
 ) -> Result<()> {
+    if let Some(saved) = read(ledger, &launch.id)? {
+        if !matches!(&saved.request.policy, Policy::Transfer { launch: expected, pane, .. }
+            if **expected == *launch && result["pane"].as_str() == Some(pane))
+        {
+            return Err(conflict());
+        }
+        apply(ledger, &saved.request)?;
+        return Ok(());
+    }
     let Some(binding) = binding(ledger, &launch.id)? else {
         return Ok(());
     };
@@ -517,6 +637,7 @@ pub fn transfer_guarded(
         }
         None
     };
+    crate::unit_request::crash_point("preparation-before-fence");
     apply(
         ledger,
         &Request {
