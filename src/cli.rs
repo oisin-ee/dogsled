@@ -542,6 +542,9 @@ pub enum HostCommand {
         /// Correlated stopped-orphan episode; the host verifies its current session and turn.
         #[arg(long, conflicts_with_all = ["pushed", "landed", "writer"])]
         stopped_orphan: Option<String>,
+        /// Stable origin item identity for host-owned preservation replay.
+        #[arg(long, conflicts_with_all = ["pushed", "landed", "writer"])]
+        preservation_request: Option<String>,
         /// Legacy transport spelling for an owned handoff: require done and keep its branch.
         #[arg(long)]
         landed: bool,
