@@ -349,14 +349,29 @@ fn read(ledger: &Ledger, id: &str) -> Result<Option<Receipt>> {
 
 /// Read-only retirement evidence is a resource fence, never a no-launch witness.
 pub fn retired(ledger: &Ledger, id: &str) -> Result<bool> {
-    Ok(read(ledger, id)?.is_some_and(|receipt| {
-        matches!(
-            receipt.request.policy,
+    let raw = ledger
+        .child("preparation-receipts")
+        .read::<serde_json::Value>(&file(id))?;
+    // Historical non-retirement dispositions keep their existing evidence rules.
+    // Only this new basis adds a resource-only exclusion to settlement.
+    if raw
+        .as_ref()
+        .and_then(|value| value.pointer("/request/policy/basis/retired"))
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let receipt = read(ledger, id)?.ok_or_else(conflict)?;
+    crate::preparation_retirement::validate(
+        match &receipt.request.policy {
             Policy::Prohibit {
-                basis: Basis::Retired { .. }
-            }
-        )
-    }))
+                basis: Basis::Retired { audit, .. },
+            } => audit,
+            _ => return Err(conflict()),
+        },
+        &receipt.request,
+    )?;
+    Ok(true)
 }
 
 /// Called under the request's preparation lock, before any discovery or side effect.

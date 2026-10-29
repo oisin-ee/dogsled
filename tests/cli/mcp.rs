@@ -196,6 +196,26 @@ fn mcp_retirement_requires_live_custody_and_has_no_cleanup_override() {
     assert!(!error, "{duplicate}");
     assert_eq!(duplicate, result);
 }
+#[test]
+fn p2_recovery_tools_share_the_runtime() {
+    let rig = Rig::short("p2-mcp");
+    let repo = rig.dir.join("repo");
+    let snapshot = preservation::saved(&repo, false);
+    let mut client = Client::start(&rig);
+    let (entries, failed) = client.call("recovery_list", &json!({"repo":repo}));
+    assert!(!failed, "{entries}");
+    assert_eq!(entries[0]["id"], snapshot["id"]);
+    let (shown, failed) = client.call("recovery_show", &json!({"repo":repo,"id":snapshot["id"]}));
+    assert!(!failed, "{shown}");
+    assert_eq!(shown, snapshot);
+    let to = rig.dir.join("restored");
+    let (result, failed) = client.call(
+        "recovery_restore",
+        &json!({"repo":repo,"id":snapshot["id"],"to":to}),
+    );
+    assert!(!failed, "{result}");
+    assert_eq!(fs::read(to.join("file")).unwrap(), b"raw\0\xff\n");
+}
 
 #[test]
 fn mcp_place_resume_replays_original_request_and_rejects_overrides() {
@@ -334,6 +354,9 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("inbox", &[]),
             expect("place", &[]),
             expect("read", &["target"]),
+            expect("recovery_list", &["repo"]),
+            expect("recovery_restore", &["id", "repo", "to"]),
+            expect("recovery_show", &["id", "repo"]),
             expect("retire_preparation", &["reason", "request_id"]),
             expect("run", &["cmd"]),
             expect("send", &["message", "target"]),
