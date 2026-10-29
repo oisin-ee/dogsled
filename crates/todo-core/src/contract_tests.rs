@@ -142,6 +142,41 @@ fn revisions_freeze_and_closed_work_never_reopens() {
 }
 
 #[test]
+fn second_local_activation_is_refused_regardless_of_scope() {
+    for owns in [vec!["src/".to_owned()], vec!["other/".to_owned()]] {
+        let list = create(true);
+        let mut second = draft();
+        second.scope.as_mut().unwrap().owns = owns;
+        let mut append = request(Operation::Append);
+        append.items = Some(vec![Item::Draft(Box::new(DraftItem {
+            content: "Second".to_owned(),
+            description: None,
+            key: Some("second".to_owned()),
+            contract: second,
+        }))]);
+        let pending = apply(list, append, &context()).unwrap().list;
+        let mut start = request(Operation::Start);
+        start.task = Some(
+            pending.tasks[1]
+                .unit
+                .as_ref()
+                .unwrap()
+                .reference
+                .unit_id
+                .clone(),
+        );
+        assert!(
+            apply(pending.clone(), start, &context())
+                .unwrap_err()
+                .to_string()
+                .contains("LOCAL_UNIT_ACTIVE"),
+            "second local unit is refused for overlapping and disjoint paths"
+        );
+        assert_eq!(pending.tasks[1].status, Status::Pending);
+    }
+}
+
+#[test]
 fn failed_create_start_preserves_the_previous_list() {
     let list = create(false);
     let mut req = request(Operation::Init);
