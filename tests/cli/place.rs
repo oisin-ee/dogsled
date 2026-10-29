@@ -42,6 +42,71 @@ pub(super) fn interrupted_placement(boundary: &str) -> (Rig, PathBuf, String) {
     (rig, repo, id)
 }
 
+fn queue_interrupted(rig: &Rig, id: &str) {
+    let request = rig.read(&format!("state/admissions/{id}.json"))["request"].clone();
+    rig.put(
+        "state/queue.json",
+        &json!([{"id":"cancel-ticket","request":request,
+        "created_ms":rig.origin_ms,"state":"pending","waiting":false,"notified":false,
+        "retry":{"attempts":0,"next_ms":rig.origin_ms}}]),
+    );
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+}
+
+#[test]
+fn cancellation_rejects_another_requests_saved_disposition() {
+    let (rig, _, id) = interrupted_placement("placement-result-saved");
+    let (other, _, other_id) = interrupted_placement("placement-result-saved");
+    queue_interrupted(&rig, &id);
+    let file = format!("state/admissions/{id}.json");
+    let mut admission = rig.read(&file);
+    admission["placement"]["saved"]["disposition"] = other
+        .read(&format!("state/admissions/{other_id}.json"))["placement"]["saved"]["disposition"]
+        .clone();
+    rig.put(&file, &admission);
+    let claims = rig.read("state/preparations.json");
+    let other_claims = other.read("state/preparations.json");
+    assert_eq!(rig.json(&["cancel", "cancel-ticket"]).0, 2);
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read("state/preparations.json"), claims);
+    assert_eq!(other.read("state/preparations.json"), other_claims);
+    assert!(
+        rig.read("state/queue.json")[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("disposition")
+    );
+    assert!(
+        !rig.dir
+            .join(format!("state/preparation-receipts/{id}.disposition.json"))
+            .exists()
+    );
+    assert!(!rig.log("ssh.log").contains("host prepared"));
+}
+
+#[test]
+fn cancellation_after_resume_completion_is_too_late_with_pending_ticket() {
+    let (rig, _, id) = interrupted_placement("placement-result-saved");
+    queue_interrupted(&rig, &id);
+    let (code, result) = rig.json(&["place", "--resume", &id]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    let (code, cancelled) = rig.json(&["cancel", "cancel-ticket"]);
+    assert_eq!(code, 2, "{cancelled}");
+    assert_eq!(cancelled["status"], "too_late");
+    assert_eq!(rig.json(&["place", "--resume", &id]), (0, result));
+}
+
+#[test]
+fn cancellation_after_placement_result_saved_is_too_late() {
+    let (rig, _, id) = interrupted_placement("placement-result-saved");
+    queue_interrupted(&rig, &id);
+    let (code, cancelled) = rig.json(&["cancel", "cancel-ticket"]);
+    assert_eq!(code, 2, "{cancelled}");
+    assert_eq!(cancelled["status"], "too_late");
+    assert_eq!(rig.json(&["place", "--resume", &id]).0, 0);
+}
+
 fn state_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     for entry in fs::read_dir(path).unwrap() {
@@ -1071,7 +1136,7 @@ fn queued_preparation_pending_recovers_the_acknowledged_grant() {
 }
 
 #[test]
-fn cancellation_of_pending_release_fences_resume_and_preserves_result() {
+fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     let (rig, repo) = place_rig("cancel-pending-release");
     real_preparation_peer(&rig);
     fs::write(rig.dir.join("lose-release"), "").unwrap();
@@ -1093,14 +1158,17 @@ fn cancellation_of_pending_release_fences_resume_and_preserves_result() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(rig.run(&["cancel", &ticket]).status.success());
-    assert!(!rig.run(&["place", "--resume", id]).status.success());
+    let (code, cancellation) = rig.json(&["cancel", &ticket]);
+    assert_eq!(code, 2, "{cancellation}");
+    assert_eq!(cancellation["status"], "too_late");
+    assert!(rig.run(&["place", "--resume", id]).status.success());
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
-    assert_eq!(
-        rig.read(&format!("state/cancellations/{id}.json"))["release"],
-        "acknowledged"
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
+    assert!(
+        !rig.dir
+            .join(format!("state/cancellations/{id}.json"))
+            .exists()
     );
     assert_eq!(
         rig.read(&format!("state/admissions/{id}.json"))["placement"]["saved"]["result"],

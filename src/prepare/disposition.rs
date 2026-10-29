@@ -819,19 +819,31 @@ pub fn refused(
                         if evidence.launch != *expected {
                             return Err(conflict());
                         }
-                        apply(
-                            ledger,
-                            &Request {
-                                version: VERSION,
-                                binding,
-                                policy: Policy::Prohibit {
-                                    basis: Basis::UnitRefused {
-                                        launch: Box::new(expected.clone()),
-                                    },
+                        let refusal = Request {
+                            version: VERSION,
+                            binding,
+                            policy: Policy::Prohibit {
+                                basis: Basis::UnitRefused {
+                                    launch: Box::new(expected.clone()),
                                 },
-                                outcome: Outcome::NotStarted,
                             },
-                        )?;
+                            outcome: Outcome::NotStarted,
+                        };
+                        let existing = read(ledger, &execution.request_id)?;
+                        let disposition = if let Some(saved) = &existing
+                            && matches!(
+                                saved.request.policy,
+                                Policy::Prohibit {
+                                    basis: Basis::Cancelled { .. }
+                                }
+                            )
+                            && saved.request.binding == refusal.binding
+                        {
+                            &saved.request
+                        } else {
+                            &refusal
+                        };
+                        apply(ledger, disposition)?;
                         crate::unit_request::crash_point("refusal-hold-released");
                         Ok(())
                     })

@@ -196,6 +196,13 @@ fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
     work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
     assert_eq!(work::queue(&ledger).unwrap().len(), 1);
     assert!(
+        !ledger
+            .child("cancellations")
+            .dir
+            .join("terminal.json")
+            .exists()
+    );
+    assert!(
         crate::jobs::request_validity(&ledger, "terminal")
             .unwrap()
             .is_none()
@@ -339,6 +346,81 @@ fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
         Some(saved)
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
+    for (pending, expire) in [(false, false), (true, false), (false, true)] {
+        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let _service = service(&ledger);
+        let created = crate::ledger::now_ms();
+        let mut request = place_request("missing-cancel");
+        if expire {
+            request.action = Action::Job {
+                cmd: vec!["true".into()],
+                timeout_ms: None,
+                idle_timeout_ms: None,
+                validity: Some(crate::jobs::Validity::new(created)),
+            };
+        }
+        let ticket = work::enqueue(&ledger, request, false, created).unwrap();
+        work::cancel(&ledger, &ticket).unwrap();
+        if pending {
+            let mut saved: serde_json::Value = ledger
+                .child("cancellations")
+                .read("missing-cancel.json")
+                .unwrap()
+                .unwrap();
+            saved["release"] = json!("pending");
+            ledger
+                .child("cancellations")
+                .write("missing-cancel.json", &saved)
+                .unwrap();
+        }
+        if expire {
+            ledger.child("jobs").write("missing-cancel.json", &json!({
+                "id":"missing-cancel","cmd":["true"],"cwd":"/","host":"local","owner":"owner","pane":"pane",
+                "state":"idle","exit":0,"started_ms":created,"ended_ms":created,"output_expired":false
+            })).unwrap();
+            work::expire_requests(&ledger, created + 1 + crate::jobs::RECORD_KEEP_MS).unwrap();
+            assert!(work::queue(&ledger).unwrap().is_empty());
+            assert!(
+                !ledger
+                    .child("cancellations")
+                    .dir
+                    .join("missing-cancel.json")
+                    .exists()
+            );
+        } else {
+            ledger.write("queue.json", &json!([])).unwrap();
+        }
+        work::enqueue(&ledger, place_request("unrelated"), false, 100).unwrap();
+        ledger.write("host.json", &snapshot(100)).unwrap();
+        let shell = Fake::new();
+        let policy = Policy {
+            memory_reserve_bytes: 0,
+            ..Policy::default()
+        };
+        let fleet = Fleet {
+            ledger: &ledger,
+            shell: &shell,
+            policy: &policy,
+            home: "/".into(),
+            hosts: vec![Host::local()],
+        };
+        work::tick(&fleet, 100).unwrap();
+        assert_eq!(work::queue(&ledger).unwrap()[0].state, "admitted");
+        if pending {
+            let saved: serde_json::Value = ledger
+                .child("cancellations")
+                .read("missing-cancel.json")
+                .unwrap()
+                .unwrap();
+            assert!(saved["error"].as_str().unwrap().contains("ticket"));
+            assert_eq!(saved["release"], "pending");
+        }
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
 }
 
 fn service(ledger: &Ledger) -> std::fs::File {

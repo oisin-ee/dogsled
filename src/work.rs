@@ -200,7 +200,22 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                 && jobs::record(ledger, &ticket.request.id)?
                     .is_some_and(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
             {
+                if cancellation(ledger, &ticket.request)?
+                    .is_some_and(|saved| saved.release == "pending")
+                {
+                    continue;
+                }
                 expired.push(ticket.id.clone());
+                match std::fs::remove_file(
+                    ledger
+                        .child("cancellations")
+                        .dir
+                        .join(format!("{}.json", ticket.request.id)),
+                ) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         if !expired.is_empty() {
@@ -639,13 +654,49 @@ fn cancellation_intent(
     Ok(saved)
 }
 
+fn validate_cancellation_admission(request: &Request, admission: Option<&Value>) -> Result<()> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    let attempt: Attempt = serde_json::from_value(admission.clone())?;
+    if attempt.request != serde_json::to_value(request)? {
+        return Err(crate::unit_transport::conflict(
+            "cancellation request changed",
+        ));
+    }
+    if let Some(progress) = &attempt.placement {
+        if let Some(transport) = progress.expectation(request)?
+            && transport.expected_grant.is_some()
+            && attempt.host.as_ref() != Some(&transport.envelope.host)
+        {
+            return Err(crate::unit_transport::conflict(
+                "cancellation placement host changed",
+            ));
+        }
+        match &progress.phase {
+            placement::PlacementPhase::ResultSaved { saved }
+            | placement::PlacementPhase::ReleaseAcknowledged { saved, .. }
+            | placement::PlacementPhase::Completed { saved, .. } => {
+                placement::validate_saved(request, saved)?;
+            }
+            _ => (),
+        }
+    }
+    Ok(())
+}
+
 fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
     ledger.with_lock("queue", || {
         let mut tickets = queue(ledger)?;
-        let ticket = tickets
-            .iter_mut()
-            .find(|t| t.id == saved.ticket.id)
-            .ok_or_else(|| crate::unit_transport::conflict("cancelled ticket disappeared"))?;
+        let Some(ticket) = tickets.iter_mut().find(|t| t.id == saved.ticket.id) else {
+            return if saved.release == "pending" {
+                Err(crate::unit_transport::conflict(
+                    "cancelled ticket disappeared; release remains held",
+                ))
+            } else {
+                Ok(())
+            };
+        };
         if serde_json::to_value(&ticket.request)? != serde_json::to_value(&saved.ticket.request)? {
             return Err(crate::unit_transport::conflict(
                 "cancelled ticket request changed",
@@ -686,6 +737,15 @@ pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
             return Err(Error::Invalid(format!("ticket {id} is {}", ticket.state)));
         }
         let admission = ledger.child("admissions").read::<Value>(&format!("{}.json", ticket.request.id))?;
+        if let Err(error) = validate_cancellation_admission(&ticket.request, admission.as_ref()) {
+            let mut saved = capture_cancellation_from(ledger, &ticket, admission)?;
+            saved.release = "pending".into();
+            saved.intent = None;
+            saved.error = Some(error.to_string());
+            ledger.child("cancellations").write(&format!("{}.json", ticket.request.id), &saved)?;
+            project_cancellation(ledger, &saved)?;
+            return Err(error);
+        }
         if !admission_prohibited(ledger, &ticket.request)?
             && let Some(result) = completed_admission(&ticket.request, admission.as_ref())? {
             update_ticket(ledger, id, |t| { t.state = "admitted".into(); t.result = Some(result.clone()); t.error = None; t.diagnostic = None; t.wait_reason = None; })?;
@@ -708,8 +768,10 @@ fn completed_admission(request: &Request, admission: Option<&Value>) -> Result<O
         ));
     }
     if matches!(request.action, Action::Place) {
-        return Ok((admission["placement"]["phase"] == "completed")
-            .then(|| admission["placement"]["saved"]["result"].clone()));
+        return Ok(admission
+            .pointer("/placement/saved/result")
+            .filter(|result| !result.is_null())
+            .cloned());
     }
     Ok(admission.get("result").filter(|r| !r.is_null()).cloned())
 }
@@ -751,24 +813,32 @@ fn repair_cancellations(fleet: &Fleet) -> Result<()> {
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        jobs::validate_id(id)?;
-        fleet.ledger.child("admissions").with_lock(id, || {
-            let saved = directory
-                .read::<Cancellation>(&format!("{id}.json"))?
-                .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
-            let mut saved = cancellation(fleet.ledger, &saved.ticket.request)?
-                .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
-            project_cancellation(fleet.ledger, &saved)?;
-            if saved.release != "pending" {
-                return Ok(());
-            }
-            let result = release_cancelled(fleet, &mut saved);
-            if let Err(error) = result {
-                saved.error = Some(error.to_string());
-            }
-            directory.write(&format!("{id}.json"), &saved)?;
-            project_cancellation(fleet.ledger, &saved)
-        })?;
+        let result = jobs::validate_id(id).and_then(|()| {
+            fleet.ledger.child("admissions").with_lock(id, || {
+                let saved = directory
+                    .read::<Cancellation>(&format!("{id}.json"))?
+                    .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
+                let mut saved = cancellation(fleet.ledger, &saved.ticket.request)?
+                    .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
+                if let Err(error) = project_cancellation(fleet.ledger, &saved) {
+                    saved.error = Some(error.to_string());
+                    directory.write(&format!("{id}.json"), &saved)?;
+                    return Err(error);
+                }
+                if saved.release != "pending" {
+                    return Ok(());
+                }
+                let result = release_cancelled(fleet, &mut saved);
+                if let Err(error) = result {
+                    saved.error = Some(error.to_string());
+                }
+                directory.write(&format!("{id}.json"), &saved)?;
+                project_cancellation(fleet.ledger, &saved)
+            })
+        });
+        if let Err(error) = result {
+            eprintln!("dogsled cancellation {id}: {error}");
+        }
     }
     Ok(())
 }
@@ -800,13 +870,23 @@ fn release_cancelled(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
             "cancelled host target changed",
         ));
     }
-    if saved.intent.is_none() {
-        resolve_cancelled_intent(fleet, saved)?;
-        if saved.release != "pending" {
-            return Ok(());
+    validate_cancellation_admission(request, saved.admission.as_ref())?;
+    resolve_cancelled_intent(fleet, saved)?;
+    if saved.release != "pending" {
+        return Ok(());
+    }
+    match acknowledge_cancellation(fleet, &host, saved) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let previous = saved.intent.clone();
+            resolve_cancelled_intent(fleet, saved)?;
+            if saved.intent == previous {
+                Err(error)
+            } else {
+                acknowledge_cancellation(fleet, &host, saved)
+            }
         }
     }
-    acknowledge_cancellation(fleet, &host, saved)
 }
 
 fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
@@ -834,19 +914,13 @@ fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<(
             return Ok(());
         }
         LookupState::Disposition { receipt, .. } => {
-            if receipt.request.policy
-                != (disposition::Policy::Prohibit {
-                    basis: disposition::Basis::Cancelled {
-                        operation_id: saved.operation_id.clone(),
-                        request_id: request.id.clone(),
-                    },
-                })
-            {
-                return Err(crate::unit_transport::conflict(
-                    "preparation already disposed by another operation",
-                ));
-            }
-            Some(receipt.request.binding)
+            saved.intent = Some(receipt.request);
+            saved.acknowledgement = None;
+            fleet
+                .ledger
+                .child("cancellations")
+                .write(&format!("{}.json", request.id), saved)?;
+            return Ok(());
         }
         _ => {
             return Err(crate::unit_transport::conflict(
@@ -859,6 +933,14 @@ fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<(
         saved.error = None;
         return Ok(());
     };
+    if let Some(intent) = &saved.intent {
+        if intent.binding != binding {
+            return Err(crate::unit_transport::conflict(
+                "cancellation disposition binding changed",
+            ));
+        }
+        return Ok(());
+    }
     saved.intent = Some(disposition::Request {
         version: disposition::VERSION,
         binding,
@@ -2264,13 +2346,21 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
     })
 }
 
+fn report_admission_failure(ledger: &Ledger, ticket: &Ticket, error: &Error) -> Result<()> {
+    eprintln!("dogsled admission {}: {error}", ticket.request.id);
+    update_ticket(ledger, &ticket.id, |t| {
+        t.error = Some(error.to_string());
+    })?;
+    Ok(())
+}
+
 fn admit(fleet: &Fleet, now: u64) -> Result<()> {
     // Hosts that had no room for an earlier ticket in this pass. A later ticket that can use
     // only these hosts waits, so it cannot pass an earlier one; any other ticket is still served.
     let mut full: Vec<String> = Vec::new();
     for ticket in queue(fleet.ledger)? {
         let expected_request = serde_json::to_value(&ticket.request)?;
-        fleet.ledger.child("admissions").with_lock(&ticket.request.id, || {
+        let result = fleet.ledger.child("admissions").with_lock(&ticket.request.id, || {
         let Some(mut ticket) = queue(fleet.ledger)?.into_iter().find(|t| t.id == ticket.id) else { return Ok(()); };
         if serde_json::to_value(&ticket.request)? != expected_request { return Err(crate::unit_transport::conflict("queued request changed before admission")); }
         if let Some(saved) = cancellation(fleet.ledger, &ticket.request)? {
@@ -2360,7 +2450,10 @@ fn admit(fleet: &Fleet, now: u64) -> Result<()> {
             full.extend(hosts);
         }
         Ok(())
-        })?;
+        });
+        if let Err(error) = result {
+            report_admission_failure(fleet.ledger, &ticket, &error)?;
+        }
         if fleet.hosts.iter().all(|h| full.contains(&h.id)) {
             break;
         }

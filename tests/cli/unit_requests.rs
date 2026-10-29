@@ -552,6 +552,147 @@ fn remotely_prepared_queued(name: &str) -> (Rig, Value, String) {
     (rig, execution, ticket)
 }
 
+fn cancellation_launch_fixture(name: &str) -> (Rig, Value, String, Value) {
+    let (rig, execution, ticket) = remotely_prepared_queued(name);
+    set_ticket(&rig, "pending", Value::Null);
+    let id = execution["requestId"].as_str().unwrap();
+    let file = format!("state/admissions/{id}.json");
+    let mut attempt = admission(&rig, &execution);
+    let receipt = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
+    let commit = &attempt["unit"]["committed"];
+    let request = &attempt["request"];
+    let launch = json!({"id":id,"action":request["action"],"host":attempt["host"]["id"],
+        "cwd":receipt["prepared"]["path"],"pane":receipt["prepared"]["pane_id"],
+        "terminal":receipt["prepared"]["terminal_id"],"workspace":null,"workspace_name":request["workspace_name"],
+        "owner":request["owner"],"owner_host":request["owner_host"],"preparation_protocol":1,"preparation":receipt["binding"],
+        "unit":{"version":1,"execution":commit["execution"],"binding":commit["binding"],"exported":commit["exported"]}});
+    attempt["launch"] = launch.clone();
+    rig.put(&file, &attempt);
+    (rig, execution, ticket, launch)
+}
+
+#[test]
+fn cancellation_adopts_transfer_after_lost_launch_reply() {
+    let (rig, execution, ticket, launch) = cancellation_launch_fixture("cancel-transfer");
+    let id = execution["requestId"].as_str().unwrap();
+    let out = rig
+        .cmd(&[
+            "host",
+            "launch",
+            "--preparation-protocol",
+            "1",
+            "--request",
+            &launch.to_string(),
+        ])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        rig.dir
+            .join(format!(
+                "peer-state/preparation-receipts/{id}.disposition.json"
+            ))
+            .exists(),
+        "queue={} admission={} ssh={} herdr={}",
+        rig.read("state/queue.json"),
+        admission(&rig, &execution),
+        rig.log("ssh.log"),
+        rig.log("herdr.log")
+    );
+    let disposition = rig.read(&format!(
+        "peer-state/preparation-receipts/{id}.disposition.json"
+    ));
+    assert_eq!(disposition["request"]["policy"]["kind"], "transfer");
+    assert!(rig.run(&["cancel", &ticket]).status.success());
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    let cancellation = rig.read(&format!("state/cancellations/{id}.json"));
+    assert_eq!(cancellation["release"], "acknowledged", "{cancellation}");
+    assert_eq!(cancellation["intent"], disposition["request"]);
+    assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
+    assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
+}
+
+#[test]
+fn native_refusal_and_cancellation_settle_in_both_orders() {
+    for cancel_first in [true, false] {
+        let (rig, execution, ticket, launch) = cancellation_launch_fixture("cancel-refusal");
+        let id = execution["requestId"].as_str().unwrap();
+        let ssh = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        let handler = format!(
+            r#"case "$*" in
+  *'host unit-receipts '*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;
+"#,
+            env!("CARGO_BIN_EXE_dogsled")
+        );
+        rig.script("ssh", &ssh.replacen("case \"$*\" in", &handler, 1));
+        let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+        rig.script("herdr", &script.replace("  'agent start'*)", "  'agent start'*) echo '{\"error\":{\"code\":\"agent_name_taken\"}}' >&2; exit 1 ;;\n  'unused start'*)"));
+        let out = rig
+            .cmd(&[
+                "host",
+                "launch",
+                "--preparation-protocol",
+                "1",
+                "--request",
+                &launch.to_string(),
+            ])
+            .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let input = json!({"execution":execution});
+        if cancel_first {
+            assert!(rig.run(&["cancel", &ticket]).status.success());
+            let intent = rig.read(&format!("state/cancellations/{id}.json"))["intent"].clone();
+            let out = rig
+                .cmd(&[
+                    "host",
+                    "prepared",
+                    "--preparation-protocol",
+                    "1",
+                    "--input",
+                    &intent.to_string(),
+                ])
+                .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            assert!(rig.run(&["serve", "--once"]).status.success());
+        } else {
+            let out = rig
+                .cmd(&["host", "unit-receipt", "--input", &input.to_string()])
+                .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            assert!(rig.run(&["cancel", &ticket]).status.success());
+        }
+        assert!(rig.run(&["serve", "--once"]).status.success());
+        let state = operation(&rig, "observe", &input).1;
+        assert_eq!(state["phase"], "not_started", "{state}");
+        let event = state["settlement"].clone();
+        assert_eq!(operation(&rig, "observe", &input).1["settlement"], event);
+        assert_eq!(rig.json(&["unit", "settlements"]).1, json!([event]));
+        assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
+        let disposition = rig.read(&format!(
+            "peer-state/preparation-receipts/{id}.disposition.json"
+        ));
+        assert_eq!(disposition["progress"], "released");
+        assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+        assert!(rig.run(&["serve", "--once"]).status.success());
+        assert_eq!(
+            rig.read(&format!(
+                "peer-state/preparation-receipts/{id}.disposition.json"
+            )),
+            disposition
+        );
+    }
+}
+
 #[test]
 fn unreachable_host_keeps_cancel_release_pending() {
     let (rig, execution, ticket) = remotely_prepared_queued("cancel-remote-release");
