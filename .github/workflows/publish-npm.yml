@@ -29,7 +29,7 @@ jobs:
           PLAN: ${{ inputs.plan }}
         run: |
           tag=$(jq -r '.announcement_tag' <<<"$PLAN")
-          for directory in . packages/pi-todo packages/pi-prewalk packages/pi-tiers packages/pi-guardrails packages/oisinpi; do
+          for directory in . packages/pi-prewalk packages/pi-tiers packages/pi-guardrails packages/oisinpi; do
             version=$(node -p 'require(process.argv[1]).version' "$PWD/$directory/package.json")
             test "$tag" = "v$version" || { echo "tag $tag does not match $directory/package.json $version"; exit 1; }
           done
@@ -38,7 +38,7 @@ jobs:
         id: pending
         run: |
           : > "$RUNNER_TEMP/npm-pending"
-          for directory in . packages/pi-todo packages/pi-prewalk packages/pi-tiers packages/pi-guardrails packages/oisinpi; do
+          for directory in . packages/pi-prewalk packages/pi-tiers packages/pi-guardrails packages/oisinpi; do
             name=$(node -p 'require(process.argv[1]).name' "$PWD/$directory/package.json")
             version=$(node -p 'require(process.argv[1]).version' "$PWD/$directory/package.json")
             if npm view "$name@$version" version >/dev/null 2>&1; then
@@ -64,8 +64,6 @@ jobs:
       - if: steps.pending.outputs.publish == 'true'
         run: pnpm run typecheck
       - if: steps.pending.outputs.publish == 'true'
-        env:
-          PI_TODO_SOURCE: ${{ github.workspace }}/packages/pi-todo/src
         run: pnpm test
       - name: Publish unpublished versions with provenance
         if: steps.pending.outputs.publish == 'true'

@@ -6,7 +6,7 @@ projects:
   dogsled: "."
   todo-core: crates/todo-core
   todo-wasm: crates/todo-wasm
-  pi-todo: packages/pi-todo
+  pi-todo: pi/todo
   prewalk-core: crates/prewalk-core
   prewalk-wasm: crates/prewalk-wasm
   pi-prewalk: packages/pi-prewalk

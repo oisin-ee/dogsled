@@ -3,6 +3,7 @@ node_modules/
 coverage/
 # Generated WASM bindings and hook runtime are published, but not tracked.
 packages/*/src/generated/
+pi/todo/src/generated/
 packages/pi-guardrails/dist/
 /dist
 *.log
