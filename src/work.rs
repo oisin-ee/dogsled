@@ -1159,6 +1159,23 @@ pub fn agent_args(
     files: &Files,
     profile: Option<&crate::profiles::Profile>,
 ) -> Result<Vec<String>> {
+    let args = agent_argv(kind, name, lead, files, profile)?;
+    let len = line_len(kind, &args);
+    if len > LINE_BUDGET {
+        return Err(line_budget_error(kind, len));
+    }
+    Ok(args)
+}
+
+/// Encode argv without dispatch. The launch owner records a typed budget refusal before
+/// allocation; every dispatch still uses `agent_args` to enforce the limit.
+pub(crate) fn agent_argv(
+    kind: &str,
+    name: &str,
+    lead: &[String],
+    files: &Files,
+    profile: Option<&crate::profiles::Profile>,
+) -> Result<Vec<String>> {
     let mut args = lead.to_vec();
     let task = match kind {
         "pi" => {
@@ -1205,15 +1222,15 @@ pub fn agent_args(
         }
     };
     args.push(task);
-    let len = line_len(kind, &args);
-    if len > LINE_BUDGET {
-        return Err(Error::Invalid(format!(
-            "the {kind} launch line is {len} bytes, over the {LINE_BUDGET}-byte budget: Herdr \
-             types it as one terminal line, which holds at most 1024 bytes; the task is not on \
-             it, so shorten the name, the profile's flags or the state directory's path"
-        )));
-    }
     Ok(args)
+}
+
+pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
+    Error::Invalid(format!(
+        "the {kind} launch line is {len} bytes, over the {LINE_BUDGET}-byte budget: Herdr \
+         types it as one terminal line, which holds at most 1024 bytes; the task is not on \
+         it, so shorten the name, the profile's flags or the state directory's path"
+    ))
 }
 
 /// A new request runs now only when no ticket that could take one of its hosts waits ahead of

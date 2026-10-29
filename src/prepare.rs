@@ -139,15 +139,7 @@ pub fn local(
         disposition::allow_fresh(ledger, id)?;
         // Persist intent before setup, worktree creation, or Herdr can change host state.
         // Without a completed receipt, a later call cannot prove those effects finished.
-        receipts.write(
-            &file,
-            &PreparationReceipt {
-                request: request.clone(),
-                prepared: None,
-                failure: None,
-                binding: None,
-            },
-        )?;
+        receipts.write(&file, &PreparationReceipt::intent(request.clone()))?;
         let repository = request.0.clone();
         worktree::with_lifecycle(shell, ledger, &repository, |guard| {
             let mut captured = Capture::default();
@@ -184,6 +176,7 @@ pub fn local(
                     receipts.write(
                         &file,
                         &PreparationReceipt {
+                            version: Some(disposition::VERSION),
                             request,
                             prepared: Some(prepared.clone()),
                             failure: None,
@@ -201,6 +194,7 @@ pub fn local(
                         .write(
                             &file,
                             &PreparationReceipt {
+                                version: Some(disposition::VERSION),
                                 request,
                                 prepared: None,
                                 failure: Some(failure),
@@ -229,6 +223,12 @@ pub fn local(
 /// interruption, and stays uncertain.
 #[derive(Debug, Serialize, Deserialize)]
 struct PreparationReceipt {
+    #[serde(
+        default,
+        deserialize_with = "receipt_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     binding: Option<disposition::Binding>,
     request: (PathBuf, String, Option<String>),
@@ -237,6 +237,25 @@ struct PreparationReceipt {
     /// were retained, and in receipts of an interrupted preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<crate::error::RetainedFailure>,
+}
+
+// Absence alone identifies the historical format; an explicit null is not a version.
+fn receipt_version<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> std::result::Result<Option<u32>, D::Error> {
+    u32::deserialize(decoder).map(Some)
+}
+
+impl PreparationReceipt {
+    fn intent(request: (PathBuf, String, Option<String>)) -> Self {
+        Self {
+            version: Some(disposition::VERSION),
+            request,
+            prepared: None,
+            failure: None,
+            binding: None,
+        }
+    }
 }
 
 /// Replay a recorded outcome for the same request. A recorded failure returns its original
@@ -1012,6 +1031,7 @@ mod tests {
             path: Some("/repo/.worktrees/worker".into()),
         };
         let success = PreparationReceipt {
+            version: None,
             binding: None,
             request: request.clone(),
             prepared: Some(prepared.clone()),
@@ -1028,6 +1048,7 @@ mod tests {
             detail_withheld: true,
         };
         let recorded = PreparationReceipt {
+            version: None,
             binding: None,
             request: request.clone(),
             prepared: None,
@@ -1036,6 +1057,7 @@ mod tests {
         let error = replay("r", &recorded).unwrap_err();
         assert!(error.to_string().contains("withheld"), "{error}");
         let contradictory = PreparationReceipt {
+            version: None,
             binding: None,
             request,
             prepared: Some(prepared),
@@ -1048,6 +1070,7 @@ mod tests {
                 .contains("contradictory preparation receipt")
         );
         let uncertain = PreparationReceipt {
+            version: None,
             binding: None,
             request: (PathBuf::from("/repo"), "worker".to_owned(), None),
             prepared: None,

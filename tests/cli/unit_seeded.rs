@@ -58,15 +58,33 @@ pub(super) fn ack(rig: &Rig, input: &Value) -> (i32, Value) {
     )
 }
 
+/// Native-refusal fixtures must reach agent.start even on macOS's long tempdir paths.
+fn refusal_rig(name: &str) -> Rig {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut rig = rig(name, false);
+    let short = PathBuf::from("/tmp").join(format!(
+        "ds-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    assert!(!short.exists(), "{}", short.display());
+    fs::rename(&rig.dir, &short).unwrap();
+    rig.dir = short;
+    rig
+}
+
 fn refused_unit(name: &str) -> (Rig, Value, Value) {
-    let rig = rig(name, false);
+    let rig = refusal_rig(name);
     rig.script("herdr", &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
         "  'agent start'*|",
         "  'agent start'*) echo '{\"error\":{\"code\":\"invalid_agent_name\",\"message\":\"native refusal\"}}' >&2; exit 1 ;;\n  ",
     ));
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
-    assert_eq!(operation(&rig, "commit", &input).0, 2);
+    let (code, error) = operation(&rig, "commit", &input);
+    assert_eq!(code, 2, "{error}");
+    assert!(error.to_string().contains("native refusal"), "{error}");
     (rig, execution, input)
 }
 
@@ -122,6 +140,25 @@ fn committed_native_refusal_settles_once_without_start_or_acceptance() {
 }
 
 #[test]
+fn refusal_without_progress_reports_why_settlement_is_skipped() {
+    let (rig, execution, _) = refused_unit("refusal-no-progress");
+    let id = execution["requestId"].as_str().unwrap();
+    fs::remove_file(rig.dir.join(format!("state/launches/{id}.progress.json"))).unwrap();
+    let before = admission(&rig, &execution);
+    let out = rig.run(&["unit", "settlements"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        json!([])
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("host refusal has no launch provenance"),
+        "{out:?}"
+    );
+    assert_eq!(admission(&rig, &execution), before);
+}
+
+#[test]
 fn refusal_requires_final_consistent_host_provenance() {
     for case in [
         "lost",
@@ -172,8 +209,7 @@ fn refusal_requires_final_consistent_host_provenance() {
     }
 }
 
-fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
-    let rig = rig(name, false);
+fn prepare_refusal_workspace(rig: &Rig) {
     let repo = rig.dir.join("home");
     close::git(&repo, &["init", "-q", "-b", "main"]);
     close::git(
@@ -191,6 +227,11 @@ fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
     rig.put("prepared-workspace.json", &json!({"result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"},"worktree":{"path":tree}}}));
     let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
     rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'worktree open'*) cat \"$RIG/prepared-workspace.json\" ;;").replace("  'agent start'*|", "  'agent start'*) echo '{\"error\":{\"code\":\"invalid_agent_name\",\"message\":\"native refusal\"}}' >&2; exit 1 ;;\n  "));
+}
+
+fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
+    let rig = refusal_rig(name);
+    prepare_refusal_workspace(&rig);
     let prepare_input =
         json!({"origin":exported(0)["contract"]["ref"],"placement":{"branch":"proof"}});
     let (code, execution) = rig.json(&[
@@ -205,6 +246,7 @@ fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
     let input = commit_input(&execution, 0);
     let (code, error) = operation(&rig, "commit", &input);
     assert_eq!(code, 2, "{error}");
+    assert!(error.to_string().contains("native refusal"), "{error}");
     assert_eq!(
         rig.read("state/preparations.json")
             .as_array()
@@ -213,6 +255,104 @@ fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
         1
     );
     (rig, execution, input)
+}
+
+#[test]
+fn over_budget_prepared_unit_releases_only_its_claim_and_settles_idempotently() {
+    for point in [
+        "preflight-refusal-persisted",
+        "preparation-fenced",
+        "preparation-claim-released",
+        "refusal-hold-released",
+        "refusal-settlement-persisted",
+    ] {
+        let original = refusal_rig(&format!("budget-{point}"));
+        let alias = original.dir.join("long".repeat(60));
+        std::os::unix::fs::symlink(&original.dir, &alias).unwrap();
+        let rig = Rig {
+            dir: alias,
+            service: std::sync::Mutex::new(None),
+            origin_ms: original.origin_ms,
+        };
+        prepare_refusal_workspace(&rig);
+        let prepare_input =
+            json!({"origin":exported(0)["contract"]["ref"],"placement":{"branch":"proof"}});
+        let (code, execution) = rig.json(&[
+            "unit",
+            "prepare",
+            "--input",
+            &prepare_input.to_string(),
+            "--tool-call-id",
+            "call-1",
+        ]);
+        assert_eq!(code, 0, "{execution}");
+        let input = commit_input(&execution, 0);
+        let mut cmd = rig.cmd(&["unit", "commit", "--input", &input.to_string()]);
+        if point == "preflight-refusal-persisted" {
+            cmd.env("DOGSLED_TEST_UNIT_CRASH", point);
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(if point == "preflight-refusal-persisted" {
+                86
+            } else {
+                2
+            }),
+            "{point}: {out:?}"
+        );
+        if point != "preflight-refusal-persisted" {
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("960-byte budget"),
+                "{out:?}"
+            );
+        }
+        let id = execution["requestId"].as_str().unwrap();
+        let own = rig.read("state/preparations.json")[0].clone();
+        let mut other = own.clone();
+        other["request_id"] = json!("other-request");
+        rig.put("state/preparations.json", &json!([own, other]));
+        let progress = rig.read(&format!("state/launches/{id}.progress.json"));
+        assert_eq!(progress["attempted"], false);
+        assert_eq!(progress["preflight_refusal"]["kind"], "line_budget");
+        if point == "preflight-refusal-persisted" {
+            let mut corrupt = progress.clone();
+            corrupt["attempted"] = json!(true);
+            rig.put(&format!("state/launches/{id}.progress.json"), &corrupt);
+            let before = rig.read("state/preparations.json");
+            let out = rig.run(&["unit", "settlements"]);
+            assert!(out.status.success(), "{out:?}");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+                json!([])
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stderr)
+                    .contains("inconsistent preflight refusal provenance"),
+                "{out:?}"
+            );
+            assert_eq!(rig.read("state/preparations.json"), before);
+            rig.put(&format!("state/launches/{id}.progress.json"), &progress);
+        }
+        let mut cmd = rig.cmd(&["unit", "settlements"]);
+        if point != "preflight-refusal-persisted" {
+            cmd.env("DOGSLED_TEST_UNIT_CRASH", point);
+            let out = cmd.output().unwrap();
+            assert_eq!(out.status.code(), Some(86), "{point}: {out:?}");
+        }
+        let (code, events) = rig.json(&["unit", "settlements"]);
+        assert_eq!(code, 0, "{point}: {events}");
+        assert_eq!(events.as_array().unwrap().len(), 1, "{point}: {events}");
+        assert_eq!(events[0]["result"]["kind"], "not_started");
+        assert_eq!(rig.read("state/preparations.json"), json!([other]));
+        assert_eq!(rig.json(&["unit", "settlements"]), (0, events));
+        assert_eq!(rig.read("state/preparations.json"), json!([other]));
+        assert!(!rig.log("herdr.log").contains("agent start "));
+        assert_eq!(
+            rig.read(&format!("state/preparation-receipts/{id}.disposition.json"))["progress"],
+            "released"
+        );
+    }
 }
 
 #[test]
@@ -270,7 +410,15 @@ fn refusal_release_recovers_each_boundary_through_symlinked_home() {
         "refusal-hold-released",
         "refusal-settlement-persisted",
     ] {
-        let rig = rig(&format!("refused-alias-{point}"), false);
+        let original = refusal_rig(&format!("refused-alias-{point}"));
+        // Model /var -> /private/var as well as the separate HOME alias.
+        let root = original.dir.join("r");
+        std::os::unix::fs::symlink(&original.dir, &root).unwrap();
+        let rig = Rig {
+            dir: root,
+            service: std::sync::Mutex::new(None),
+            origin_ms: original.origin_ms,
+        };
         let repo = rig.dir.join("home");
         let actual = rig.dir.join("actual-home");
         fs::rename(&repo, &actual).unwrap();
@@ -304,6 +452,11 @@ fn refusal_release_recovers_each_boundary_through_symlinked_home() {
         assert_eq!(code, 0, "{execution}");
         let (code, error) = operation(&rig, "commit", &commit_input(&execution, 0));
         assert_eq!(code, 2, "{error}");
+        assert!(
+            error.to_string().contains("native refusal"),
+            "{point}: {error}; typed: {}",
+            rig.log("typed.log")
+        );
         let id = execution["requestId"].as_str().unwrap();
         let claims = rig.read("state/preparations.json");
         assert_eq!(claims.as_array().unwrap().len(), 1);

@@ -196,8 +196,14 @@ fn historical_preparation_replays_final_launch_without_releasing_claim() {
         .unwrap();
     assert_eq!(out.status.code(), Some(86), "{out:?}");
     let outcome_path = "state/preparation-receipts/recover-one.json";
-    let mut outcome = rig.read(outcome_path);
-    outcome.as_object_mut().unwrap().remove("binding");
+    let current = rig.read(outcome_path);
+    assert_eq!(current["version"], 1);
+    // Main's pre-disposition format had only these outcome fields.
+    let outcome = json!({
+        "request": current["request"],
+        "prepared": current["prepared"],
+        "failure": current["failure"],
+    });
     rig.put(outcome_path, &outcome);
     let claims = rig.read("state/preparations.json");
     let receipt = rig.read("state/launches/recover-one.json");
@@ -211,6 +217,93 @@ fn historical_preparation_replays_final_launch_without_releasing_claim() {
             .exists()
     );
     assert_eq!(rig.log("herdr.log"), calls);
+}
+
+#[test]
+fn versioned_preparation_without_binding_refuses_final_launch_replay() {
+    let (rig, repo) = place::place_rig("versioned-final-replay");
+    let prepared = disposition_prepared(&rig, &repo, "recover-one", "corrupt", true);
+    let mut launch = host_request(&rig);
+    launch["cwd"] = prepared["path"].clone();
+    launch["pane"] = prepared["pane_id"].clone();
+    launch["terminal"] = prepared["terminal_id"].clone();
+    let request = launch.to_string();
+    let args = ["host", "launch", "--request", &request];
+    let out = rig
+        .cmd(&args)
+        .env("DOGSLED_TEST_UNIT_CRASH", "preparation-before-fence")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(86), "{out:?}");
+    let path = "state/preparation-receipts/recover-one.json";
+    let mut outcome = rig.read(path);
+    outcome["version"] = json!(1);
+    outcome.as_object_mut().unwrap().remove("binding");
+    rig.put(path, &outcome);
+    let claims = rig.read("state/preparations.json");
+    let receipt = rig.read("state/launches/recover-one.json");
+    let calls = rig.log("herdr.log");
+    let out = rig.run(&args);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("missing its binding"),
+        "{out:?}"
+    );
+    assert_eq!(rig.read("state/preparations.json"), claims);
+    assert_eq!(rig.read("state/launches/recover-one.json"), receipt);
+    assert_eq!(rig.read(path), outcome);
+    assert!(
+        !rig.dir
+            .join("state/preparation-receipts/recover-one.disposition.json")
+            .exists()
+    );
+    assert_eq!(rig.log("herdr.log"), calls);
+}
+
+#[test]
+fn over_budget_agent_refusal_releases_preparation_before_dispatch_and_on_replay() {
+    for interrupted in [false, true] {
+        let (rig, repo) = place::place_rig(&format!("budget-agent-{interrupted}"));
+        let prepared = disposition_prepared(&rig, &repo, "recover-one", "budget", true);
+        let mut launch = host_request(&rig);
+        launch["cwd"] = prepared["path"].clone();
+        launch["pane"] = prepared["pane_id"].clone();
+        launch["terminal"] = prepared["terminal_id"].clone();
+        launch["action"]["name"] = json!("n".repeat(1000));
+        let request = launch.to_string();
+        let args = ["host", "launch", "--request", &request];
+        let mut command = rig.cmd(&args);
+        if interrupted {
+            command.env("DOGSLED_TEST_UNIT_CRASH", "preflight-refusal-persisted");
+        }
+        let out = command.output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(if interrupted { 86 } else { 2 }),
+            "{out:?}"
+        );
+        let calls = rig.log("herdr.log");
+        assert!(!calls.contains("agent start "));
+        let outcome = rig.read("state/preparation-receipts/recover-one.json");
+        let out = rig.run(&args);
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("960-byte budget"),
+            "{out:?}"
+        );
+        assert_eq!(rig.read("state/preparations.json"), json!([]));
+        assert_eq!(
+            rig.read("state/preparation-receipts/recover-one.json"),
+            outcome
+        );
+        assert_eq!(
+            rig.read("state/preparation-receipts/recover-one.disposition.json")["progress"],
+            "released"
+        );
+        assert_eq!(rig.run(&args).status.code(), Some(2));
+        assert_eq!(rig.read("state/preparations.json"), json!([]));
+        assert!(!rig.log("herdr.log").contains("agent start "));
+    }
 }
 
 #[test]

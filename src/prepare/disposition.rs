@@ -114,7 +114,14 @@ fn binding(ledger: &Ledger, id: &str) -> Result<Option<Binding>> {
         }
         return Ok(None);
     };
-    let saved = receipt.binding.ok_or_else(conflict)?;
+    if receipt.version.is_some_and(|version| version != VERSION) {
+        return Err(crate::worktree::refuse(
+            "unsupported preparation receipt version",
+        ));
+    }
+    let saved = receipt.binding.ok_or_else(|| {
+        crate::worktree::refuse("preparation receipt is missing its binding; claim remains held")
+    })?;
     if saved.request_id != id
         || saved.claim.request_id != id
         || saved.request != receipt.request
@@ -526,7 +533,7 @@ pub fn replay_guarded(
         if ledger
             .child("preparation-receipts")
             .read::<super::PreparationReceipt>(&format!("{}.json", launch.id))?
-            .is_some_and(|receipt| receipt.binding.is_none())
+            .is_some_and(|receipt| receipt.version.is_none() && receipt.binding.is_none())
         {
             return Ok(());
         }
@@ -877,6 +884,7 @@ mod tests {
             .write(
                 "a.json",
                 &super::super::PreparationReceipt {
+                    version: Some(VERSION),
                     request: request.binding.request.clone(),
                     prepared: request.binding.prepared.clone(),
                     failure: None,
@@ -1012,6 +1020,7 @@ mod tests {
             .write(
                 "a.json",
                 &super::super::PreparationReceipt {
+                    version: Some(VERSION),
                     request: request.binding.request.clone(),
                     prepared: request.binding.prepared.clone(),
                     failure: None,
