@@ -88,6 +88,172 @@ fn refused_unit(name: &str) -> (Rig, Value, Value) {
     (rig, execution, input)
 }
 
+fn release_fixture(name: &str) -> (Rig, Value, Value) {
+    let (rig, execution, input) = launched(name);
+    transcript(&rig, &execution, &entries());
+    let (code, receipt) = ack(&rig, &acknowledgement(&execution, &input));
+    assert_eq!(code, 0, "{receipt}");
+    let (code, settlements) = rig.json(&["unit", "settlements"]);
+    assert_eq!(code, 0, "{settlements}");
+    let attempt = admission(&rig, &execution);
+    let certificate = json!({
+        "version":1, "origin_host":attempt["launch"]["owner_host"],
+        "execution":execution, "binding":input["binding"],
+        "launch":attempt["launch"], "terminal_evidence":receipt,
+        "custody_revision":0,
+        "released_references":["execution","recovery","task_binding","custody"]
+    });
+    (rig, execution, certificate)
+}
+
+fn host_release(rig: &Rig, certificate: &Value) -> (i32, Value) {
+    rig.json(&[
+        "host",
+        "release-references",
+        "--input",
+        &certificate.to_string(),
+    ])
+}
+
+#[test]
+fn r1c_remote_release_requires_exact_execution_and_terminal_identity() {
+    let (rig, execution, certificate) = release_fixture("r1c-exact");
+    let id = execution["requestId"].as_str().unwrap();
+    let progress = rig.read(&format!("state/launches/{id}.progress.json"));
+    let event = admission(&rig, &execution)["unit"]["returned"]["eventId"].clone();
+    assert_eq!(
+        operation(
+            &rig,
+            "ack-settlement",
+            &json!({"execution":execution,"eventId":event})
+        )
+        .0,
+        0
+    );
+    assert!(rig.read(&format!("state/launches/{id}.progress.json"))["origin_release"].is_null());
+    let (_, status) = rig.json(&[
+        "host",
+        "reference-release-status",
+        "--input",
+        &execution_input(&execution).to_string(),
+    ]);
+    assert_eq!(status["reason"], "awaiting origin reference release");
+    assert_eq!(status["retryable"], true);
+    for field in [
+        "version",
+        "origin",
+        "execution",
+        "launch",
+        "terminal",
+        "binding",
+        "references",
+    ] {
+        let mut changed = certificate.clone();
+        match field {
+            "version" => changed["version"] = json!(2),
+            "origin" => changed["origin_host"] = json!("another-origin"),
+            "execution" => changed["execution"]["ownerId"] = json!("another-owner"),
+            "launch" => changed["launch"]["cwd"] = json!("/another-checkout"),
+            "terminal" => {
+                changed["terminal_evidence"]["ack"]["sessionLeafId"] = json!("another-leaf");
+            }
+            "binding" => changed["binding"]["exportDigest"] = json!("another-digest"),
+            "references" => changed["released_references"] = json!(["execution"]),
+            _ => unreachable!(),
+        }
+        let before = rig.read(&format!("state/launches/{id}.progress.json"));
+        assert_eq!(host_release(&rig, &changed).0, 2, "{field}");
+        assert_eq!(
+            rig.read(&format!("state/launches/{id}.progress.json")),
+            before
+        );
+    }
+    let (code, accepted) = host_release(&rig, &certificate);
+    assert_eq!(code, 0, "{accepted}");
+    assert_eq!(accepted["certificate"], certificate);
+    assert_eq!(host_release(&rig, &certificate).1, accepted);
+    let mut changed = certificate.clone();
+    changed["custody_revision"] = json!(1);
+    assert_eq!(host_release(&rig, &changed).0, 2);
+    let after = rig.read(&format!("state/launches/{id}.progress.json"));
+    assert_eq!(after["request"], progress["request"]);
+    assert_eq!(after["terminal_receipt"], progress["terminal_receipt"]);
+}
+
+#[test]
+fn r1c_lost_release_ack_replays_without_reopening_references() {
+    let (rig, execution, certificate) = release_fixture("r1c-lost-ack");
+    let id = execution["requestId"].as_str().unwrap();
+    rig.peer();
+    rig.config(&format!(
+        "remote_command = ['{}']\n",
+        env!("CARGO_BIN_EXE_dogsled")
+    ));
+    let mut attempt = admission(&rig, &execution);
+    attempt["host"] = json!({"id":"peer","label":"netcup","target":"dev@peer"});
+    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    fs::create_dir_all(rig.dir.join("peer-state/launches")).unwrap();
+    for suffix in ["progress.json", "unit.json", "json"] {
+        let file = format!("{id}.{suffix}");
+        fs::copy(
+            rig.dir.join("state/launches").join(&file),
+            rig.dir.join("peer-state/launches").join(&file),
+        )
+        .unwrap();
+    }
+    rig.script(
+        "ssh",
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+for remote do :; done
+remote=${{remote#* host }}
+DOGSLED_STATE="$RIG/peer-state" sh -c "'{}' host $remote" > "$RIG/release-response"
+code=$?
+if test "$code" = 0 && ! test -f "$RIG/lost-release-ack"; then
+  touch "$RIG/lost-release-ack"
+  exit 255
+fi
+cat "$RIG/release-response"
+exit "$code"
+"#,
+            env!("CARGO_BIN_EXE_dogsled")
+        ),
+    );
+    let (code, pending) = operation(&rig, "release-references", &certificate);
+    assert_eq!(code, 0, "{pending}");
+    assert_eq!(pending["reason"], "awaiting origin reference release");
+    let saved = admission(&rig, &execution);
+    assert_eq!(
+        saved["unit"]["reference_release"]["certificate"],
+        certificate
+    );
+    assert!(saved["unit"]["reference_release"]["acknowledgement"].is_null());
+    let host = rig.read(&format!("peer-state/launches/{id}.progress.json"));
+    assert_eq!(host["origin_release"]["certificate"], certificate);
+    let (code, retries) = rig.json(&["unit", "retry-reference-releases"]);
+    assert_eq!(code, 0, "{retries}");
+    assert_eq!(retries[0]["acknowledgement"], host["origin_release"]);
+    let (code, replay) = operation(&rig, "release-references", &certificate);
+    assert_eq!(code, 0, "{replay}");
+    assert_eq!(replay["acknowledgement"], host["origin_release"]);
+    assert_eq!(
+        rig.read(&format!("peer-state/launches/{id}.progress.json")),
+        host
+    );
+    assert_eq!(
+        admission(&rig, &execution)["unit"]["reference_release"]["certificate"],
+        certificate
+    );
+    assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+    assert_eq!(
+        rig.log("ssh.log")
+            .matches("host release-references ")
+            .count(),
+        2
+    );
+}
+
 #[test]
 fn done_handoff_waits_for_host_terminal_evidence_not_owner_acknowledgement() {
     let (rig, execution, input) = launched("seeded-done-handoff");

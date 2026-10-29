@@ -377,6 +377,13 @@ pub enum UnitCommand {
     },
     /// Pending task settlements for this owner; never consumes transcript delivery.
     Settlements,
+    /// Explicit provider release of the exact execution binding and recovery references.
+    ReleaseReferences {
+        #[arg(long)]
+        input: String,
+    },
+    /// Retry durable release intents without recapturing or reopening references.
+    RetryReferenceReleases,
     /// Record provider success or confirmed duplicate application.
     AckSettlement {
         #[arg(long)]
@@ -525,6 +532,16 @@ pub enum HostCommand {
     Tail {
         kind: String,
         id: String,
+    },
+    /// Accept a versioned origin reference-release certificate.
+    ReleaseReferences {
+        #[arg(long)]
+        input: String,
+    },
+    /// Read origin release status without inferring it from host or origin silence.
+    ReferenceReleaseStatus {
+        #[arg(long)]
+        input: String,
     },
     /// Read immutable seeded terminal evidence on its execution host.
     UnitReceipt {

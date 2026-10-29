@@ -549,6 +549,19 @@ fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool)
 /// The host commands that act on one child pane.
 fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     match cmd {
+        HostCommand::ReleaseReferences { input } => print(
+            true,
+            &node.release_references(&serde_json::from_str(&input)?)?,
+            String::new,
+        )?,
+        HostCommand::ReferenceReleaseStatus { input } => print(
+            true,
+            &launch::reference_release_status(
+                node.ledger,
+                &serde_json::from_str::<unit_transport::ExecutionInput>(&input)?.execution,
+            )?,
+            String::new,
+        )?,
         HostCommand::UnitReceipt { input } => print(
             true,
             &launch::unit_receipt(
@@ -775,6 +788,8 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         | HostCommand::Close { .. }
         | HostCommand::UnitReceipt { .. }
         | HostCommand::UnitReceipts { .. }
+        | HostCommand::ReleaseReferences { .. }
+        | HostCommand::ReferenceReleaseStatus { .. }
         | HostCommand::Drop { .. }
         | HostCommand::RefreshBranches { .. }
         | HostCommand::Parent { .. } => {
