@@ -102,6 +102,7 @@ const RULES: &[Rule] = &[
     },
     Rule {
         code: "ordinary_reference_release",
+        evidence: &[],
         reason: "awaiting origin reference release; ordinary result is retained at the origin",
         command: &["dogsled", "serve", "--once"],
     },

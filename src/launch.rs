@@ -1310,14 +1310,12 @@ pub fn execution(
                 }
             }
         }
+        // Closure is not evidence of a unit launch: ordinary handoffs close items too.
         if let Some(id) = item
-            && (ledger
+            && ledger
                 .child("admissions")
                 .read::<work::Attempt>(&format!("{id}.json"))?
                 .is_some_and(|attempt| attempt.unit.is_some())
-                || crate::items::list(ledger)?
-                    .iter()
-                    .any(|item| item.id == id && item.closed_ms.is_some()))
         {
             return Err(crate::unit_transport::conflict(
                 "result unavailable: expired or unknown",
