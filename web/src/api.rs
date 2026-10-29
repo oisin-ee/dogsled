@@ -75,13 +75,16 @@ pub async fn fetch_agent(pane: &str) -> Result<Option<AgentView>, String> {
         .find(|agent| agent.pane == pane))
 }
 
-/// The turns of the agent in `pane`.
-pub async fn fetch_conversation(pane: &str) -> Result<Conversation, String> {
+/// The turns of the agent in `pane`, or `None` when the agent no longer exists.
+pub async fn fetch_conversation(pane: &str) -> Result<Option<Conversation>, String> {
     let response = Request::get(&format!("{BASE}/api/agents/{}/conversation", encode(pane)))
         .send()
         .await
         .map_err(|error| error.to_string())?;
-    read_json(response).await
+    if response.status() == 404 {
+        return Ok(None);
+    }
+    read_json(response).await.map(Some)
 }
 
 /// Read the terminal of the agent in `pane`.

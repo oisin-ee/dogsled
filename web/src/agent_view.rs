@@ -9,6 +9,7 @@ use portal_types::{BoardView, TodoStatusView, TodoView};
 use serde::de::DeserializeOwned;
 
 use crate::api;
+use crate::conversations::{Conversations, use_conversation};
 use crate::question_form::QuestionForm;
 use crate::review_view::ReviewView;
 
@@ -91,11 +92,12 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
     let mut questions = use_signal(|| None::<Vec<Pending>>);
     let mut selection = use_context::<Signal<Option<crate::app::InboxSelection>>>();
-    let mut turns = use_signal(Vec::<Turn>::new);
+    let conversations = use_context::<Signal<Conversations>>();
     let mut screen = use_signal(|| None::<String>);
-    let mut loading = use_signal(|| true);
+    let mut metadata_loading = use_signal(|| true);
     let mut reachable = use_signal(|| false);
-    let mut read_error = use_signal(|| None::<String>);
+    let mut metadata_error = use_signal(|| None::<String>);
+    let mut screen_error = use_signal(|| None::<String>);
     let mut pending_error = use_signal(|| None::<String>);
     let mut board_error = use_signal(|| None::<String>);
     let mut stream_error = use_signal(|| None::<String>);
@@ -108,52 +110,53 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     let local_draft = use_signal(String::new);
     let mut draft = try_use_context::<Draft>().map_or(local_draft, |draft| draft.0);
 
+    // Transcript I/O must start and render without waiting for the full agent list.
+    let transcript = use_conversation(pane.clone(), refresh);
+
     let read_pane = pane.clone();
     use_resource(move || {
         let _ = refresh();
         let pane = read_pane.clone();
         async move {
-            let result = async {
-                let current = match api::fetch_agent(&pane).await {
-                    Ok(current) => {
-                        reachable.set(true);
-                        current
-                    }
-                    Err(message) => {
-                        reachable.set(false);
-                        return Err(message);
-                    }
-                };
-                let Some(current) = current else {
-                    agent.set(None);
-                    turns.set(Vec::new());
-                    screen.set(None);
-                    return Err(
+            match api::fetch_agent(&pane).await {
+                Ok(current) => {
+                    reachable.set(true);
+                    metadata_error.set(current.is_none().then(|| {
                         "This agent is no longer available. Select another agent.".to_owned()
-                    );
-                };
-                let blocked = is_blocked(&current);
-                agent.set(Some(current));
-                let conversation = api::fetch_conversation(&pane).await;
-                // A failed transcript must not hide the prompt needed to reply.
-                let screen_result = if blocked {
-                    api::fetch_screen(&pane).await.map(|value| Some(value.text))
-                } else {
-                    Ok(None)
-                };
-                match screen_result.as_ref() {
-                    Ok(value) => screen.set(value.clone()),
-                    Err(_) => screen.set(None),
+                    }));
+                    agent.set(current);
                 }
-                let conversation = conversation?;
-                if *turns.peek() != conversation.turns {
-                    turns.set(conversation.turns);
+                Err(message) => {
+                    reachable.set(false);
+                    metadata_error.set(Some(message));
                 }
-                screen_result.map(|_| ())
             }
-            .await;
-            read_error.set(result.err());
-            loading.set(false);
+            metadata_loading.set(false);
+        }
+    });
+
+    let screen_pane = pane.clone();
+    use_resource(move || {
+        let _ = refresh();
+        let blocked = agent.read().as_ref().is_some_and(is_blocked);
+        let pane = screen_pane.clone();
+        async move {
+            // A failed or pending transcript must not hide the prompt needed to reply.
+            let result = if blocked {
+                api::fetch_screen(&pane).await.map(|value| Some(value.text))
+            } else {
+                Ok(None)
+            };
+            match result {
+                Ok(value) => {
+                    screen.set(value);
+                    screen_error.set(None);
+                }
+                Err(message) => {
+                    screen.set(None);
+                    screen_error.set(Some(message));
+                }
+            }
         }
     });
 
@@ -210,7 +213,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 "await new Promise(resolve => setTimeout(resolve, {POLL_MS})); dioxus.send(true);"
             ));
             if timer.recv::<bool>().await.is_err() {
-                read_error.set(Some(
+                metadata_error.set(Some(
                     "Live refresh stopped. Reload the page to reconnect.".to_owned(),
                 ));
                 break;
@@ -274,6 +277,12 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     };
     let mut interrupt = send_key.clone();
     let current = agent();
+    let retained = conversations.read().get(&pane).cloned();
+    let transcript_loading = retained.is_none() && transcript.read().is_none();
+    let transcript_error = transcript
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().err().cloned());
     let board_view = board();
     let row = board_view.as_ref().and_then(|board| {
         board
@@ -341,7 +350,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
         .or_else(|| current.as_ref().map(|agent| agent.state.as_str()))
         .unwrap_or("Loading…")
         .to_owned();
-    let disabled = busy() || loading() || !reachable() || current.is_none();
+    let disabled = busy() || metadata_loading() || !reachable() || current.is_none();
     let waiting = pending.is_some();
     let plan_open = tab == Tab::Pending && matches!(pending, Some(RequestTab::Review(_)));
     let focus_pane = pane.clone();
@@ -402,10 +411,12 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                         onclick: move |_| choice.set(Some((branch_identity.clone(), Tab::Branch))), "Branch" }
                 }
             }
-            if !loading() && !reachable() {
-                p { class: "av-notice", role: "status", "Herdr is not reachable. The board still works; conversation and messages do not." }
+            if !metadata_loading() && !reachable() {
+                p { class: "av-notice", role: "status", "Herdr is not reachable. The board and retained conversation still work; messages do not." }
             }
-            if let Some(message) = read_error() { p { class: "error av-notice", role: "alert", "{message}" } }
+            if let Some(message) = metadata_error() { p { class: "error av-notice", role: "alert", "{message}" } }
+            if let Some(message) = screen_error() { p { class: "error av-notice", role: "alert", "{message}" } }
+            if let Some(message) = transcript_error { p { class: "error av-notice", role: "alert", "{message}" } }
             if let Some(message) = pending_error() { p { class: "error av-notice", role: "alert", "{message}" } }
             if let Some(message) = board_error() { p { class: "error av-notice", role: "alert", "{message}" } }
             if stream_error().is_some() {
@@ -445,7 +456,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 },
                 Tab::Conversation => rsx! {
                     div { class: "av-chat",
-                        Conversation { turns: turns(), loading: loading(), working: current.as_ref().is_some_and(|agent| agent.state == "working") && reachable() }
+                        Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working: current.as_ref().is_some_and(|agent| agent.state == "working") && reachable() }
                         Composer { draft, disabled, busy: busy(), on_send: move |_| conversation_send(false) }
                     }
                 },
@@ -538,7 +549,7 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
 }
 
 #[component]
-fn Conversation(turns: Vec<Turn>, loading: bool, working: bool) -> Element {
+fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool) -> Element {
     rsx! {
         section {
             id: "agent-conversation", class: "av-conversation", aria_label: "Conversation", tabindex: "0",
@@ -561,7 +572,7 @@ fn Conversation(turns: Vec<Turn>, loading: bool, working: bool) -> Element {
             },
             div { class: "av-turns",
                 if loading { p { class: "av-muted", role: "status", "Loading conversation…" } }
-                else if turns.is_empty() { p { class: "av-muted", "No conversation yet. Send a message to start." } }
+                else if available && turns.is_empty() { p { class: "av-muted", "No conversation yet. Send a message to start." } }
                 for (index, turn) in turns.iter().enumerate() {
                     article { key: "{index}", class: match turn.role { Role::User => "av-turn av-user", Role::Assistant => "av-turn av-assistant" },
                         h3 { match turn.role { Role::User => "You", Role::Assistant => "Agent" } }

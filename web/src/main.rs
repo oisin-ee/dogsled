@@ -4,6 +4,7 @@ mod agent_view;
 mod api;
 mod app;
 mod board;
+mod conversations;
 mod question_form;
 mod review_view;
 

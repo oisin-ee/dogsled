@@ -8,6 +8,7 @@ use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 use crate::agent_view::{AgentView, Draft};
 use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
+use crate::conversations::Conversations;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
@@ -179,6 +180,7 @@ pub fn App() -> Element {
     let mut selected = use_context_provider(|| Signal::new(link.pane.clone()));
     let mut selection = use_context_provider(|| Signal::new(link.selection()));
     use_context_provider(|| Draft(Signal::new(String::new())));
+    use_context_provider(|| Signal::new(Conversations::default()));
 
     use_future(move || async move {
         let (board_result, inbox_result) =
