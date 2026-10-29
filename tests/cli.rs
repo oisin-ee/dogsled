@@ -68,7 +68,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The bound every real-process wait in these tests uses. A process that never ends fails
 /// its test on this bound instead of stalling the suite.
-pub(crate) const PROCESS_DEADLINE: Duration = Duration::from_secs(20);
+/// This bound catches hangs and must exceed full-suite contention.
+pub(crate) const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The state the guard and its fallback share. A finished process has released its pid,
 /// and the host may then hand that pid to another process. A signal sent after that can
@@ -1485,7 +1486,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         .unwrap()
         .0;
     assert_eq!(
-        serde_json::from_str::<Value>(replay).unwrap(),
+        serde_json::from_str::<Value>(&replay.replace("'\\''", "'")).unwrap(),
         expected_replay
     );
     assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
