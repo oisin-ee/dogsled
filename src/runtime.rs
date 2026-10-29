@@ -67,8 +67,14 @@ pub(crate) fn request_with_id(
                 .ok_or_else(|| Error::Invalid("HERDR_WORKSPACE_ID is required".into()))?,
         )?)
     };
+    let validity = if matches!(action, Action::Job { .. }) {
+        None
+    } else {
+        Some(jobs::issue_request_validity(fleet.ledger, &id)?)
+    };
     Ok(Request {
         id,
+        validity,
         action,
         host: args.host.clone(),
         branch: args.branch.clone(),

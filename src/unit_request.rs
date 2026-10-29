@@ -121,6 +121,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
             request_id: request.id.clone(),
         };
         let attempt = Attempt {
+            finished_ms: None,
             request: serde_json::to_value(request)?,
             placement: None,
             host: None,
@@ -1053,6 +1054,9 @@ fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -
                 }
                 let applied = unit.settlement_ack.is_none();
                 unit.settlement_ack = Some(input.event_id.clone());
+                if applied {
+                    crate::jobs::finish_once(fleet.ledger, &mut attempt.finished_ms, None)?;
+                }
                 attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
                 Ok(json!({"applied":applied}))
             })
@@ -1092,6 +1096,7 @@ fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -
             let applied = !unit.custody_acks.contains(&reference.claim_id);
             if applied {
                 unit.custody_acks.push(reference.claim_id.clone());
+                crate::jobs::finish_once(fleet.ledger, &mut attempt.finished_ms, None)?;
                 attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
             }
             Ok(json!({"applied":applied}))

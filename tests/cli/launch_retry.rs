@@ -440,7 +440,8 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
     let (rig, repo) = place::place_rig("disposition-prohibited");
     let prepared = disposition_prepared(&rig, &repo, "recover-one", "fenced", true);
     let path = prepared["path"].as_str().unwrap();
-    let receipt = fs::read(rig.dir.join("state/preparation-receipts/recover-one.json")).unwrap();
+    let mut receipt = rig.read("state/preparation-receipts/recover-one.json");
+    receipt.as_object_mut().unwrap().remove("finished_ms");
     let (code, ack) = rig.json(&[
         "host",
         "prepared",
@@ -483,10 +484,10 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
     assert_eq!(rig.log("herdr.log"), calls);
     assert_eq!(rig.log("setup.log"), setup);
     assert_eq!(rig.read("state/preparations.json"), json!([]));
-    assert_eq!(
-        fs::read(rig.dir.join("state/preparation-receipts/recover-one.json")).unwrap(),
-        receipt
-    );
+    let mut completed = rig.read("state/preparation-receipts/recover-one.json");
+    assert!(completed["finished_ms"].is_u64());
+    completed.as_object_mut().unwrap().remove("finished_ms");
+    assert_eq!(completed, receipt);
     assert!(
         !rig.dir
             .join("state/launches/recover-one.progress.json")
@@ -508,7 +509,7 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
             .find(|p| p["request_id"] == "b")
             .unwrap()
             .clone();
-        let outcome = fs::read(rig.dir.join("state/preparation-receipts/a.json")).unwrap();
+        let outcome = rig.read("state/preparation-receipts/a.json");
         let args = ["host", "prepared", "--input", &rig.disposition_request("a")];
         let out = rig
             .cmd(&args)
@@ -537,10 +538,10 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
         assert_eq!(released["request"], fence["request"]);
         assert_eq!(released["progress"], "released");
         assert_eq!(rig.read("state/preparations.json"), json!([other]));
-        assert_eq!(
-            fs::read(rig.dir.join("state/preparation-receipts/a.json")).unwrap(),
-            outcome
-        );
+        let mut completed = rig.read("state/preparation-receipts/a.json");
+        assert!(completed["finished_ms"].is_u64());
+        completed.as_object_mut().unwrap().remove("finished_ms");
+        assert_eq!(completed, outcome);
     }
 }
 
@@ -674,10 +675,12 @@ fn over_budget_agent_refusal_releases_preparation_before_dispatch_and_on_replay(
             "{out:?}"
         );
         assert_eq!(rig.read("state/preparations.json"), json!([]));
-        assert_eq!(
-            rig.read("state/preparation-receipts/recover-one.json"),
-            outcome
-        );
+        let mut completed = rig.read("state/preparation-receipts/recover-one.json");
+        assert!(completed["finished_ms"].is_u64());
+        completed.as_object_mut().unwrap().remove("finished_ms");
+        let mut outcome = outcome;
+        outcome.as_object_mut().unwrap().remove("finished_ms");
+        assert_eq!(completed, outcome);
         assert_eq!(
             rig.read("state/preparation-receipts/recover-one.disposition.json")["progress"],
             "released"
@@ -855,6 +858,8 @@ fn unsupported_preparation_disposition_refuses_job_ingress_without_writes() {
     unsupported["request"]["version"] = json!(2);
     rig.put(disposition, &unsupported);
     let original = fs::read(rig.dir.join(disposition)).unwrap();
+    let authority = rig.read("state/job-validity/ingress.json");
+    let clock = rig.read("state/job-validity-clock.json");
     let herdr = rig.log("herdr.log");
     let mut request = job_launch_request(&rig, "ingress", &["true"]);
     request["cwd"] = json!(path);
@@ -868,8 +873,8 @@ fn unsupported_preparation_disposition_refuses_job_ingress_without_writes() {
     ]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(fs::read(rig.dir.join(disposition)).unwrap(), original);
-    assert!(!rig.dir.join("state/job-validity/ingress.json").exists());
-    assert!(!rig.dir.join("state/job-validity-clock.json").exists());
+    assert_eq!(rig.read("state/job-validity/ingress.json"), authority);
+    assert_eq!(rig.read("state/job-validity-clock.json"), clock);
     assert!(!rig.dir.join("state/jobs/ingress.json").exists());
     assert!(!rig.dir.join("state/launches/ingress.json").exists());
     assert_eq!(rig.log("herdr.log"), herdr);
@@ -1879,10 +1884,15 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
     rig.snapshot("state/host.json", now(), 0.0, 8);
     let repo = rig.dir.join("home/repo");
     repository(&repo);
+    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
+    rig.put(
+        "state/job-validity/invalid-request.json",
+        &rig.job_validity(),
+    );
     rig.put(
         "state/queue.json",
         &json!([{
-            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},
+            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
                 "workspace":null,"workspace_name":null,"owner":"w1:p1"},
@@ -1911,10 +1921,15 @@ fn queued_placement_validates_branch_under_symlinked_temp_root() {
     assert_ne!(repo, repo.canonicalize().unwrap());
     rig.snapshot("state/host.json", now(), 0.0, 8);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
+    rig.put(
+        "state/job-validity/invalid-request.json",
+        &rig.job_validity(),
+    );
     rig.put(
         "state/queue.json",
         &json!([{
-            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},
+            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
                 "workspace":null,"workspace_name":null,"owner":"w1:p1"},
@@ -2244,7 +2259,7 @@ fn advance(rig: &Rig) -> Value {
     let next = rig.read("state/queue.json")[0]["retry"]["next_ms"]
         .as_u64()
         .unwrap();
-    fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
+    fs::write(rig.dir.join("clock"), next.max(rig.origin_ms).to_string()).unwrap();
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -2301,7 +2316,7 @@ fn branch_retry_keeps_preparation_host_and_terminal_across_service_restart() {
 }
 
 fn host_request(rig: &Rig) -> Value {
-    json!({"id":"recover-one","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":rig.dir.join("home"),"pane":null,"workspace":"w1","workspace_name":"caller","owner":"parent"})
+    json!({"id":"recover-one","validity":rig.job_validity(),"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":rig.dir.join("home"),"pane":null,"workspace":"w1","workspace_name":"caller","owner":"parent"})
 }
 
 pub(super) const NPM_FAILURE: &str =

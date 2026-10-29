@@ -790,6 +790,12 @@ fn checkout_identity_and_clone_failures_never_show_credential_origins() {
         let (code, error) = rig.json(&[
             "host",
             "checkout",
+            "--request-validity",
+            "1",
+            "--request-id",
+            "checkout-diagnostic",
+            "--request-created-ms",
+            &rig.origin_ms.to_string(),
             "--path",
             "repo",
             "--origin",
