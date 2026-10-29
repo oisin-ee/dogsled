@@ -678,7 +678,7 @@ Build this branch with the repository's pinned Rust toolchain:
 
 ```sh
 cargo build --release
-npm ci
+pnpm install --frozen-lockfile
 ```
 
 The server embeds the Dioxus portal UI, so the web bundle must exist before the binary builds.

@@ -1,5 +1,125 @@
 [workspace]
-members = [".", "portal-types", "web"]
+members = [".", "portal-types", "web", "crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.99"
+repository = "https://github.com/oisin-ee/dogsled"
+
+[workspace.dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# `js` converts through serde-wasm-bindgen instead of JSON strings.
+tsify = { version = "0.5.8", default-features = false, features = ["js"] }
+# Must equal the wasm-bindgen CLI version in `.prototools`.
+wasm-bindgen = "=0.2.129"
+todo-core = { path = "crates/todo-core" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused = { level = "deny", priority = -1 }
+let_underscore_drop = "deny"
+redundant_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unit_bindings = "deny"
+unreachable_pub = "deny"
+unused_import_braces = "deny"
+unused_lifetimes = "deny"
+unused_macro_rules = "deny"
+
+[workspace.lints.clippy]
+# `all` is correctness, suspicious, style, complexity, and perf.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+# Conflicts with rustc `unreachable_pub`, which this policy keeps.
+redundant_pub_crate = "allow"
+
+# Size and complexity. Clippy's own docs advise against `cognitive_complexity`
+# as a measure; nesting depth and function length replace it.
+excessive_nesting = "deny"
+fn_params_excessive_bools = "deny"
+struct_excessive_bools = "deny"
+too_many_arguments = "deny"
+too_many_lines = "deny"
+type_complexity = "deny"
+
+# Duplication.
+branches_sharing_code = "deny"
+if_same_then_else = "deny"
+match_same_arms = "deny"
+redundant_clone = "deny"
+redundant_type_annotations = "deny"
+same_functions_in_if_condition = "deny"
+
+# Panics and hidden failures. clippy.toml lets tests unwrap, expect, panic, and index.
+assertions_on_result_states = "deny"
+exit = "deny"
+expect_used = "deny"
+get_unwrap = "deny"
+indexing_slicing = "deny"
+let_underscore_must_use = "deny"
+let_underscore_untyped = "deny"
+map_err_ignore = "deny"
+missing_assert_message = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+string_slice = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+unwrap_in_result = "deny"
+unwrap_used = "deny"
+
+# Debug leftovers.
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+use_debug = "deny"
+
+# A suppression must be `#[expect(lint, reason = "...")]`, so a stale one fails.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# Other smells.
+clone_on_ref_ptr = "deny"
+create_dir = "deny"
+deref_by_slicing = "deny"
+empty_drop = "deny"
+empty_enum_variants_with_brackets = "deny"
+empty_structs_with_brackets = "deny"
+fn_to_numeric_cast_any = "deny"
+format_push_string = "deny"
+if_then_some_else_none = "deny"
+infinite_loop = "deny"
+lossy_float_literal = "deny"
+mem_forget = "deny"
+mixed_read_write_in_expression = "deny"
+multiple_inherent_impl = "deny"
+mutex_atomic = "deny"
+needless_raw_strings = "deny"
+partial_pub_fields = "deny"
+pathbuf_init_then_push = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+redundant_test_prefix = "deny"
+renamed_function_params = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+str_to_string = "deny"
+string_lit_chars_any = "deny"
+try_err = "deny"
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+unnecessary_self_imports = "deny"
+unneeded_field_pattern = "deny"
+unused_result_ok = "deny"
+verbose_file_reads = "deny"
+wildcard_enum_match_arm = "deny"
 
 [package]
 name = "dogsled"
@@ -74,3 +194,12 @@ inherits = "release"
 lto = "thin"
 strip = true
 codegen-units = 1
+
+# Keep the WASM size settings separate from the dogsled release profile.
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

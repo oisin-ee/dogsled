@@ -1,0 +1,14 @@
+$schema: https://moonrepo.dev/schemas/project.json
+language: rust
+tags: [rust]
+toolchains:
+  default: system
+dependsOn: [todo-core]
+tasks:
+  # The bindings only build for WebAssembly; the host clippy and test tasks
+  # still cover the shared code.
+  clippy-wasm:
+    extends: clippy
+    command: cargo clippy --locked -p todo-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+    options:
+      mergeArgs: replace

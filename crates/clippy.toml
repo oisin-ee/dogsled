@@ -1,0 +1,21 @@
+# Clippy settings for every crate. Clippy uses the first clippy.toml it finds
+# from the crate folder upwards, so keep this file the only one.
+# Lint levels are in the root Cargo.toml.
+# https://doc.rust-lang.org/clippy/lint_configuration.html
+
+# Size and complexity limits.
+too-many-lines-threshold = 60
+too-many-arguments-threshold = 5
+excessive-nesting-threshold = 4
+type-complexity-threshold = 200
+max-fn-params-bools = 1
+max-struct-bools = 2
+max-trait-bounds = 3
+
+# Tests may fail loudly.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true

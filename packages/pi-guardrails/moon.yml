@@ -1,0 +1,13 @@
+$schema: https://moonrepo.dev/schemas/project.json
+language: typescript
+tags: [javascript]
+toolchains:
+  default: javascript
+tasks:
+  # Compiles the Claude Code and Codex hook command to `dist/`, which is
+  # gitignored and published in the tarball: Node does not strip types from
+  # files under `node_modules`. pi loads `src/pi/index.ts` directly.
+  build:
+    command: tsc -p tsconfig.build.json
+    inputs: ["src/**/*.ts", "!src/**/*.test.ts", "tsconfig.json", "tsconfig.build.json"]
+    outputs: [dist]

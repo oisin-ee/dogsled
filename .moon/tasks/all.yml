@@ -2,6 +2,8 @@ $schema: https://moonrepo.dev/schemas/tasks.json
 # Every task depends on the toolchain configuration.
 implicitInputs:
   - /.prototools
+  - /.config/proto/plugins/*.toml
+  - /rust-toolchain.toml
   - /.moon/**/*.yml
   - /.gitignore
 taskOptions:

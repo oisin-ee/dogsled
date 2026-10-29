@@ -1,0 +1,35 @@
+$schema: https://moonrepo.dev/schemas/project.json
+language: typescript
+tags: [javascript]
+toolchains:
+  default: javascript
+dependsOn: [todo-wasm, todo-core]
+tasks:
+  lint:
+    deps: [generate]
+  test:
+    deps: [generate]
+  wasm:
+    command: cargo build --locked -p todo-wasm --profile wasm --target wasm32-unknown-unknown
+    inputs:
+      - /Cargo.toml
+      - /Cargo.lock
+      - project://todo-wasm?group=sources
+      - project://todo-core?group=sources
+    outputs: [/target/wasm32-unknown-unknown/wasm/todo_wasm.wasm]
+    checks:
+      - check: fingerprint
+        script: rustc --version --verbose
+        hash: stdout
+    options:
+      runFromWorkspaceRoot: true
+  # Writes `src/generated/`, which is gitignored and published in the tarball.
+  generate:
+    command: wasm-bindgen --target web --remove-name-section --remove-producers-section --out-dir src/generated --out-name todo_core ../../target/wasm32-unknown-unknown/wasm/todo_wasm.wasm
+    deps: [wasm]
+    inputs: []
+    outputs:
+      - src/generated/todo_core.js
+      - src/generated/todo_core.d.ts
+      - src/generated/todo_core_bg.wasm
+      - src/generated/todo_core_bg.wasm.d.ts

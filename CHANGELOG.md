@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- The workspace includes pi-todo, pi-prewalk, pi-tiers, pi-guardrails, and oisinpi, with their Rust crates and shared toolchains. Runtime behavior stays unchanged.
+
 ## 0.27.0 - 2026-10-28
 
 - `dogsled claim <item> [--revision N]` takes custody of an orphaned child on its recording host. Claims use the live caller identity and preserve the original owner. Repeated claims by the custodian are harmless.

@@ -1,0 +1,46 @@
+{
+  "name": "@oisin-ee/pi-guardrails",
+  "version": "0.27.0",
+  "description": "Agent guardrails for pi, Claude Code, and Codex: Git safety, no waiting, no typing into other agents, GitOps-only clusters.",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "guardrails",
+    "pi-extension",
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oisin-ee/dogsled.git",
+    "directory": "packages/pi-guardrails"
+  },
+  "bin": {
+    "agent-hook": "./dist/agent-hook.js"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "!src/**/*.test.ts"
+  ],
+  "type": "module",
+  "scripts": {
+    "prepack": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "catalog:"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./src/pi/index.ts"
+    ]
+  }
+}

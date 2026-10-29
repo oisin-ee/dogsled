@@ -1,0 +1,31 @@
+format = "2"
+
+[metadata]
+name = "shfmt"
+type = "command-line"
+
+[resolve]
+git_url = "https://github.com/mvdan/sh"
+
+[install]
+download_url = "https://github.com/mvdan/sh/releases/download/v{version}/{download_name}"
+
+[platform.macos]
+download_name = "shfmt_v{version}_darwin_{arch}"
+archs = ["arm64", "x64"]
+
+[platform.macos.arch]
+arm64 = "arm64"
+x64 = "amd64"
+
+[platform.linux]
+download_name = "shfmt_v{version}_linux_{arch}"
+archs = ["arm64", "x64"]
+
+[platform.linux.arch]
+arm64 = "arm64"
+x64 = "amd64"
+
+[locate.exes.shfmt]
+exe_path = "shfmt"
+primary = true

@@ -1,0 +1,20 @@
+[package]
+name = "todo-wasm"
+version = "0.0.0"
+description = "wasm-bindgen bindings of todo-core for @oisin-ee/pi-todo."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+todo-core = { workspace = true, features = ["wasm"] }
+tsify.workspace = true
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true
