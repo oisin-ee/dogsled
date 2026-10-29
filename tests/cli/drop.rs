@@ -13,7 +13,17 @@ fn rig(name: &str) -> (Rig, PathBuf) {
     git(&repo, &["commit", "-q", "-m", "unmerged work"]);
     git(&repo, &["checkout", "-q", "main"]);
     let origin = rig.dir.join("origin.git");
-    git(&repo, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(
+        &repo,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
     git(
         &repo,
         &["remote", "add", "origin", origin.to_str().unwrap()],

@@ -57,6 +57,35 @@ fn bound_legacy(name: &str) -> (Rig, Value) {
 }
 
 #[test]
+fn continuation_ignores_the_ambient_default_branch() {
+    let rig = Rig::new("legacy-default-branch");
+    let home = rig.dir.join("home");
+    fs::write(
+        home.join(".gitconfig"),
+        "[init]\n\tdefaultBranch = master\n",
+    )
+    .unwrap();
+    let mut command = isolated(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "legacy_continue::legacy_continuation_checks_fence_before_done_and_launch_locks",
+            "--nocapture",
+        ])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .stdout(fs::File::create(rig.dir.join("regression-output")).unwrap())
+        .stderr(fs::File::create(rig.dir.join("regression-error")).unwrap());
+    let status = Owned::spawn(&mut command).wait();
+    assert!(
+        status.success(),
+        "{}\n{}",
+        rig.log("regression-output"),
+        rig.log("regression-error")
+    );
+}
+
+#[test]
 fn historical_continuation_does_not_mint_checkout_identity() {
     let (rig, execution) = bound_legacy("historical-fence");
     let id = request_id(&execution);

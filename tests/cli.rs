@@ -1382,7 +1382,7 @@ fn repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
     assert!(
         isolated("git")
-            .args(["init", "-q"])
+            .args(["init", "-q", "-b", "main"])
             .arg(path)
             .status()
             .unwrap()

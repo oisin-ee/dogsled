@@ -139,7 +139,7 @@ fn a_real_remote_unknown_base_names_the_base_in_the_ticket() {
 fn origin_with_branch(rig: &Rig, repo: &Path, branch: &str) {
     let bare = rig.dir.join("origin.git");
     let out = isolated("git")
-        .args(["init", "-q", "--bare"])
+        .args(["init", "-q", "--bare", "-b", "main"])
         .arg(&bare)
         .output()
         .unwrap();
