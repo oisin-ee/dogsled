@@ -162,6 +162,42 @@ Decisions:
 
 Acceptance: `moon run :check :lint :test :clippy :format` passes. `pi/unit-contract.test.ts` and `pi/work-contract.test.ts` run with `skipped 0`. `rg 'pub struct (UnitRef|ExecutionRef|Binding|Contract|Export|Seed|Evidence)\b' src` finds nothing.
 
+## Step 3: Fold pi-todo into the Dogsled extension
+
+Status: 3a specified. Facts checked at `41312d3`.
+
+Step 3 has two parts. Each part is one writer session.
+
+- **3a. Move.** pi-todo's source moves into the `@oisin-ee/pi-dogsled` package, and `pi/index.ts` registers it. The event bus stays. Behavior does not change.
+- **3b. Direct calls.** Dogsled calls pi-todo's objects directly. 3b gets its own brief after 3a merges, because 3a moves every path that 3b edits.
+
+### 3a decisions
+
+- **Layout.** `packages/pi-todo/{src,moon.yml,tsconfig.json,README.md,CHANGELOG.md}` moves to `pi/todo/`. The moon project keeps the id `pi-todo`, so `ci.yml` and the `pi-todo:*` task names do not change. Delete `packages/pi-todo/package.json`: pi-todo is no longer an npm package.
+- **Registration.** `pi/index.ts` calls pi-todo's default export first in `dogsled()`. Today `oisinpi` loads before `pi-dogsled`, so pi-todo's handlers run first. The same order keeps the same behavior.
+- **Ownership check.** Pi reports a tool's `sourceInfo.path` as the extension entry. After the move, that entry is `pi/index.ts`, not pi-todo's `index.ts`. `isOwnSource` in `pi/todo/src/source.ts` must compare with `pi/index.ts`. Otherwise the provider and the reminder stay off.
+- **Separate TypeScript settings.** pi-todo uses `tsconfig.base.json` (bundler resolution, `noPropertyAccessFromIndexSignature`), vitest, oxlint, and oxfmt. `pi/` uses `tsconfig.json`, `node --test`, and no formatter. Keep both as they are. The root `tsconfig.json` excludes `pi/todo/**`, and the root `test` script runs only `pi/*.test.ts`.
+- **Package.** pi-dogsled publishes `pi/todo/src/` and its generated WASM bindings, with no tests. It adds pi-todo's `typebox` and `@earendil-works/pi-ai` peers.
+- **Collection.** `@oisin-ee/oisinpi` drops pi-todo from `dependencies`, `bundleDependencies`, and `pi.extensions` in the same release.
+- **Publishing.** `publish-npm.yml` stops publishing `@oisin-ee/pi-todo`. Step 4 deprecates the npm package.
+- **Contract tests.** `pi/unit-contract.test.ts` and `pi/work-contract.test.ts` import `pi/todo/src` directly. `PI_TODO_SOURCE` goes away.
+- **pi-prewalk.** pi-prewalk stays a separate extension. It gets the task provider through `oisin.tasks.acquire.v1` (`packages/pi-prewalk/src/tasks.ts`). 3b must keep that event.
+
+Acceptance:
+
+- `moon run :check :lint :test :clippy :format` passes.
+- The shim tests report `skipped 0` with no `PI_TODO_SOURCE` set.
+- `pnpm pack` of the root package lists `pi/todo/src/index.ts` and `pi/todo/src/generated/todo_core_bg.wasm`, and no `*.test.ts`.
+- `pnpm pack` of `packages/oisinpi` contains no pi-todo files.
+- A test loads `pi/index.ts` with a fake Pi API. It shows that `todo` is registered once and that `oisin.tasks.acquire.v1` gets one provider reply.
+
+### 3b outline
+
+- `pi/work-todo.ts`, `pi/unit-bridge.ts`, and `pi/unit-worker.ts` take pi-todo's presentation, provider, and seed path as objects. The `oisin.todo.*`, `oisin.work.*`, `oisin.tasks.seed-source.v1`, and `dogsled:plan-approved` events go away.
+- `oisin.tasks.acquire.v1` stays for pi-prewalk.
+- The runtime checks in `pi/unit-protocol.ts` and `pi/work-todo.ts` that exist only because the provider was untrusted go away. `docs/pi-work.md` loses the event table.
+- `ownsTodo` and `isOwnSource` go away if nothing else needs them. Pi rejects a second `todo` registration anyway.
+
 ## Constraints for steps 3 and 4
 
 - Existing Pi sessions store todo state as custom entries. The merged extension must read the entries of today's pi-todo, with the same `customType` names and payloads. Otherwise open sessions lose their todos.
