@@ -380,10 +380,21 @@ pub fn run(
     deliver(fleet, host, &envelope)
 }
 
+/// Validity-aware preparation transport; disposition and release keep their own version.
+pub const ENVELOPE_VERSION: u32 = 2;
+
+#[derive(Clone, Copy)]
+struct Delivery<'a> {
+    validity: Option<crate::jobs::Validity>,
+    placement: Option<(&'a crate::node::PlacementReplay, &'a str)>,
+}
+
 /// The exact preparation transport is captured before delivery and never rediscovered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<crate::jobs::Validity>,
     pub request_id: String,
     pub repo: String,
     pub branch: String,
@@ -402,7 +413,8 @@ pub fn envelope(
     let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
         return Ok(Envelope {
-            version: disposition::VERSION,
+            version: ENVELOPE_VERSION,
+            validity: crate::jobs::request_validity(fleet.ledger, request_id)?,
             request_id: request_id.into(),
             repo: checkout.display().to_string(),
             branch: branch.into(),
@@ -423,7 +435,8 @@ pub fn envelope(
         .display()
         .to_string();
     Ok(Envelope {
-        version: disposition::VERSION,
+        version: ENVELOPE_VERSION,
+        validity: crate::jobs::request_validity(fleet.ledger, request_id)?,
         request_id: request_id.into(),
         repo: remote,
         branch: branch.into(),
@@ -455,9 +468,30 @@ fn deliver_with(
     envelope: &Envelope,
     placement: Option<&crate::node::PlacementReplay>,
 ) -> Result<Prepared> {
-    require_protocol(Some(envelope.version))?;
+    if envelope.version != ENVELOPE_VERSION {
+        return Err(worktree::refuse(
+            "unsupported preparation validity envelope",
+        ));
+    }
     crate::jobs::validate_id(&envelope.request_id)?;
+    if envelope
+        .validity
+        .is_some_and(|validity| validity.version != crate::jobs::Validity::VERSION)
+    {
+        return Err(worktree::refuse("unsupported preparation validity stamp"));
+    }
     if host.is_local() {
+        if placement.is_none() {
+            return local(
+                fleet.shell,
+                fleet.ledger,
+                &envelope.repo,
+                &envelope.branch,
+                envelope.base.as_deref(),
+                Some(&envelope.request_id),
+                envelope.validity,
+            );
+        }
         return local_with(
             fleet.shell,
             fleet.ledger,
@@ -465,13 +499,24 @@ fn deliver_with(
             &envelope.branch,
             envelope.base.as_deref(),
             Some(&envelope.request_id),
-            placement.map(|p| (p, envelope.repo.as_str())),
+            Delivery {
+                validity: envelope.validity,
+                placement: placement.map(|p| (p, envelope.repo.as_str())),
+            },
         );
     }
     let mut args = vec![
         "prepare".into(),
+        "--preparation-envelope-version".into(),
+        ENVELOPE_VERSION.to_string(),
+        "--request-created-ms".into(),
+        envelope
+            .validity
+            .ok_or_else(|| worktree::refuse("request validity is unprovable"))?
+            .created_ms
+            .to_string(),
         "--preparation-protocol".into(),
-        envelope.version.to_string(),
+        disposition::VERSION.to_string(),
         "--repo".into(),
         envelope.repo.clone(),
         "--branch".into(),
@@ -586,8 +631,7 @@ pub fn lookup_on_host(
     let id = &query.preparation.request_id;
     let result = if crate::jobs::validate_id(id).is_err() {
         LookupState::Mismatch
-    } else if query.version != disposition::VERSION
-        || query.preparation.version != disposition::VERSION
+    } else if query.version != disposition::VERSION || query.preparation.version != ENVELOPE_VERSION
     {
         LookupState::UnsupportedVersion
     } else if query.placement.validate(id).is_err() {
@@ -628,7 +672,8 @@ fn validate_placement_delivery(
 ) -> Result<()> {
     let (placement, repo) = delivery;
     let envelope = Envelope {
-        version: disposition::VERSION,
+        version: ENVELOPE_VERSION,
+        validity: crate::jobs::request_validity(ledger, id)?,
         request_id: id.into(),
         repo: repo.into(),
         branch: request.1.clone(),
@@ -717,8 +762,70 @@ pub struct PreparationLookupReply {
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum LookupQuery {
+    Historical(HistoricalQuery),
     Placement(LookupRequest),
     Preparation(PreparationLookup),
+}
+
+/// A read-only retirement capture never prepares or allocates a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalQuery {
+    pub version: u32,
+    pub retirement: String,
+    pub host: Host,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoricalReply {
+    pub version: u32,
+    pub query: HistoricalQuery,
+    pub historical: disposition::Historical,
+}
+
+pub fn historical_on_host(
+    ledger: &crate::ledger::Ledger,
+    query: &HistoricalQuery,
+) -> Result<HistoricalReply> {
+    require_protocol(Some(query.version))?;
+    Ok(HistoricalReply {
+        version: disposition::VERSION,
+        query: query.clone(),
+        historical: disposition::historical(ledger, &query.retirement)?,
+    })
+}
+
+pub fn lookup_historical(fleet: &Fleet, host: &Host, id: &str) -> Result<disposition::Historical> {
+    if *fleet.find(&host.id)? != *host {
+        return Err(worktree::refuse("retirement host changed"));
+    }
+    let query = HistoricalQuery {
+        version: disposition::VERSION,
+        retirement: id.into(),
+        host: host.clone(),
+    };
+    let reply: HistoricalReply = if host.is_local() {
+        historical_on_host(fleet.ledger, &query)?
+    } else {
+        fleet.remote_setup(
+            host,
+            &[
+                "preparation-lookup".into(),
+                "--preparation-protocol".into(),
+                disposition::VERSION.to_string(),
+                "--input".into(),
+                serde_json::to_string(&query)?,
+            ],
+        )?
+    };
+    require_protocol(Some(reply.version))?;
+    if reply.query != query
+        || reply.historical.binding.request_id != id
+        || reply.historical.binding.claim.request_id != id
+    {
+        return Err(worktree::refuse("retirement lookup correlation changed"));
+    }
+    Ok(reply.historical)
 }
 
 pub fn lookup_preparation(fleet: &Fleet, query: &PreparationLookup) -> Result<LookupState> {
@@ -756,42 +863,41 @@ pub fn lookup_preparation_on_host(
     query: &PreparationLookup,
 ) -> PreparationLookupReply {
     let id = &query.preparation.request_id;
-    let result = if query.version != disposition::VERSION
-        || query.preparation.version != disposition::VERSION
-    {
-        LookupState::UnsupportedVersion
-    } else if crate::jobs::validate_id(id).is_err()
-        || query.request.id != *id
-        || !matches!(
-            query.request.action,
-            crate::work::Action::Agent { .. } | crate::work::Action::Job { .. }
-        )
-        || query.request.branch.as_ref() != Some(&query.preparation.branch)
-        || query.request.base != query.preparation.base
-        || query.request.repository.as_ref().is_none_or(|repo| {
-            if query.host.is_local() {
-                !worktree::same(&repo.path, &query.preparation.repo)
-            } else {
-                repo.relative != query.preparation.repo
-            }
-        })
-    {
-        LookupState::Mismatch
-    } else {
-        (|| {
-            let gate = std::fs::File::open(
-                ledger
-                    .child("preparation-receipts")
-                    .dir
-                    .join(format!("{id}.lock")),
-            )?;
-            if gate.try_lock().is_err() {
-                return Ok(LookupState::Unresolved);
-            }
-            lookup_receipt(ledger, home, &query.preparation, query.binding.as_ref())
-        })()
-        .unwrap_or(LookupState::Unresolved)
-    };
+    let result =
+        if query.version != disposition::VERSION || query.preparation.version != ENVELOPE_VERSION {
+            LookupState::UnsupportedVersion
+        } else if crate::jobs::validate_id(id).is_err()
+            || query.request.id != *id
+            || !matches!(
+                query.request.action,
+                crate::work::Action::Agent { .. } | crate::work::Action::Job { .. }
+            )
+            || query.request.branch.as_ref() != Some(&query.preparation.branch)
+            || query.request.base != query.preparation.base
+            || query.request.repository.as_ref().is_none_or(|repo| {
+                if query.host.is_local() {
+                    !worktree::same(&repo.path, &query.preparation.repo)
+                } else {
+                    repo.relative != query.preparation.repo
+                }
+            })
+        {
+            LookupState::Mismatch
+        } else {
+            (|| {
+                let gate = std::fs::File::open(
+                    ledger
+                        .child("preparation-receipts")
+                        .dir
+                        .join(format!("{id}.lock")),
+                )?;
+                if gate.try_lock().is_err() {
+                    return Ok(LookupState::Unresolved);
+                }
+                lookup_receipt(ledger, home, &query.preparation, query.binding.as_ref())
+            })()
+            .unwrap_or(LookupState::Unresolved)
+        };
     PreparationLookupReply {
         version: disposition::VERSION,
         query: query.clone(),
@@ -975,8 +1081,20 @@ pub fn local(
     branch: &str,
     base: Option<&str>,
     request_id: Option<&str>,
+    validity: Option<crate::jobs::Validity>,
 ) -> Result<Prepared> {
-    local_with(shell, ledger, repo, branch, base, request_id, None)
+    local_with(
+        shell,
+        ledger,
+        repo,
+        branch,
+        base,
+        request_id,
+        Delivery {
+            validity,
+            placement: None,
+        },
+    )
 }
 
 fn local_with(
@@ -986,16 +1104,12 @@ fn local_with(
     branch: &str,
     base: Option<&str>,
     request_id: Option<&str>,
-    placement: Option<(&crate::node::PlacementReplay, &str)>,
+    delivery: Delivery<'_>,
 ) -> Result<Prepared> {
-    let Some(id) = request_id else {
-        if placement.is_some() {
-            return Err(crate::unit_transport::conflict(
-                "placement preparation requires its original request id",
-            ));
-        }
-        return local_once(shell, ledger, repo, branch, base, None);
-    };
+    let id = request_id.ok_or_else(|| {
+        worktree::refuse("request validity is unprovable; requestless preparation refused")
+    })?;
+    let placement = delivery.placement;
     crate::jobs::validate_id(id)?;
     let receipts = ledger.child("preparation-receipts");
     receipts.with_lock(id, || {
@@ -1009,7 +1123,8 @@ fn local_with(
             validate_placement_delivery(ledger, id, &request, placement)?;
         }
         if let Some(receipt) = receipts.read::<PreparationReceipt>(&file)? {
-            if receipt.request != request {
+            retention_completion(ledger, id)?;
+            if receipt.request != request || receipt.validity != delivery.validity {
                 return Err(crate::unit_transport::conflict(
                     "preparation request changed",
                 ));
@@ -1017,11 +1132,16 @@ fn local_with(
             return replay_guarded(shell, ledger, id, &receipt);
         }
         disposition::allow_fresh(ledger, id)?;
+        crate::jobs::receive_request_validity(ledger, id, delivery.validity)?;
+        crate::jobs::check_validity(ledger, delivery.validity.as_ref())?;
         // Persist intent before setup, worktree creation, or Herdr can change host state.
         // Without a completed receipt, a later call cannot prove those effects finished.
-        receipts.write(&file, &PreparationReceipt::intent(request.clone()))?;
+        let mut intent = PreparationReceipt::intent(request.clone());
+        intent.validity = delivery.validity;
+        receipts.write(&file, &intent)?;
         let repository = request.0.clone();
         worktree::with_lifecycle(shell, ledger, &repository, |guard| {
+            check_delivery(ledger, id, delivery.validity)?;
             let mut captured = Capture::default();
             let result = (|| {
                 let settings = crate::repository::load(&repository)?;
@@ -1050,6 +1170,8 @@ fn local_with(
                         &PreparationReceipt {
                             version: Some(disposition::VERSION),
                             request,
+                            finished_ms: None,
+                            validity: delivery.validity,
                             prepared: Some(prepared.clone()),
                             failure: None,
                             binding: binding.clone(),
@@ -1068,6 +1190,8 @@ fn local_with(
                             &PreparationReceipt {
                                 version: Some(disposition::VERSION),
                                 request,
+                                finished_ms: None,
+                                validity: delivery.validity,
                                 prepared: None,
                                 failure: Some(failure),
                                 binding: binding.clone(),
@@ -1115,6 +1239,10 @@ fn preparation_binding(
 /// interruption, and stays uncertain.
 #[derive(Debug, Serialize, Deserialize)]
 struct PreparationReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    validity: Option<crate::jobs::Validity>,
     #[serde(
         default,
         deserialize_with = "receipt_version",
@@ -1131,6 +1259,34 @@ struct PreparationReceipt {
     failure: Option<crate::error::RetainedFailure>,
 }
 
+/// Retention requires the exact acknowledged disposition, not a prepared worktree.
+pub(crate) fn retention_completion(
+    ledger: &crate::ledger::Ledger,
+    id: &str,
+) -> Result<Option<u64>> {
+    crate::jobs::validate_id(id)?;
+    let Some(receipt) = ledger
+        .child("preparation-receipts")
+        .read::<PreparationReceipt>(&format!("{id}.json"))?
+    else {
+        return Ok(None);
+    };
+    let Some(finished) = receipt.finished_ms else {
+        return Ok(None);
+    };
+    if disposition::retention_completion(ledger, id)? != Some(finished) {
+        return Err(worktree::refuse(
+            "preparation completion provenance changed",
+        ));
+    }
+    crate::jobs::completion_time(
+        ledger,
+        Some(finished),
+        receipt.validity.map(|v| v.created_ms),
+        true,
+    )
+}
+
 // Absence alone identifies the historical format; an explicit null is not a version.
 pub(crate) fn receipt_version<'de, D: serde::Deserializer<'de>>(
     decoder: D,
@@ -1141,6 +1297,8 @@ pub(crate) fn receipt_version<'de, D: serde::Deserializer<'de>>(
 impl PreparationReceipt {
     fn intent(request: (PathBuf, String, Option<String>)) -> Self {
         Self {
+            finished_ms: None,
+            validity: None,
             version: Some(disposition::VERSION),
             request,
             prepared: None,
@@ -1216,6 +1374,7 @@ fn unretained(branch: &str, base: Option<&str>, request_id: &str) -> Error {
     .with_diagnostic(diagnostic)
 }
 
+#[cfg(test)]
 fn local_once(
     shell: &dyn Shell,
     ledger: &crate::ledger::Ledger,
@@ -1326,6 +1485,7 @@ fn local_guarded(
             // fetch itself and is reported as itself. A fetch that runs and exits non-zero
             // leaves the base unresolved, and the refusal below names it.
             let refspec = format!("+refs/heads/{remote}:refs/remotes/origin/{remote}");
+            check_effect(ledger, request_id)?;
             git(
                 checkout,
                 &["fetch", "--no-tags", "--", "origin", refspec.as_str()],
@@ -1364,12 +1524,27 @@ fn local_guarded(
         head: String::new(),
         identity: None,
     };
+    check_effect(ledger, request_id)?;
     record(ledger, pending.clone(), request_id)?;
     captured.intended = Some(Pending {
         tree: pending,
         request_id: request_id.map(str::to_owned),
     });
     make(preparation, existing, branch, base, has_branch)
+}
+
+fn check_delivery(
+    ledger: &crate::ledger::Ledger,
+    id: &str,
+    validity: Option<crate::jobs::Validity>,
+) -> Result<()> {
+    crate::jobs::match_request_validity(crate::jobs::request_validity(ledger, id)?, validity)?;
+    crate::jobs::check_validity(ledger, validity.as_ref())
+}
+
+fn check_effect(ledger: &crate::ledger::Ledger, request_id: Option<&str>) -> Result<()> {
+    let id = request_id.ok_or_else(|| worktree::refuse("requestless preparation refused"))?;
+    crate::jobs::check_validity(ledger, crate::jobs::request_validity(ledger, id)?.as_ref())
 }
 
 struct Preparation<'a> {
@@ -1431,6 +1606,7 @@ fn make(
                 ),
             );
         }
+        check_effect(ledger, request_id)?;
         git(checkout, &args).setup_ok(shell).map_err(|error| {
             error.with_diagnostic(Diagnostic::new(
                 Operation::Prepare,
@@ -1456,7 +1632,13 @@ fn make(
             path: &path,
             branch,
         };
-        if crate::repository::run(shell, "setup", &settings.worktree.setup, values).is_err() {
+        check_effect(ledger, request_id)?;
+        if crate::repository::load(Path::new(&path))
+            .and_then(|settings| {
+                crate::repository::run(shell, "setup", &settings.worktree.setup, values)
+            })
+            .is_err()
+        {
             discard(guard, shell, &linked, (!has_branch).then_some(branch)).map_err(|error| {
                 error.with_diagnostic(Diagnostic::new(
                     Operation::Prepare,
@@ -1475,6 +1657,7 @@ fn make(
         }
     }
     worktree::validate_identity(shell, &linked)?;
+    check_effect(ledger, request_id)?;
     let prepared = open(shell, checkout, &path)?;
     crate::cleanup::remember(ledger, linked.tree())?;
     Ok(prepared)
@@ -1502,29 +1685,31 @@ fn record(
 /// Internal remote preparation applies host-relative checkout routing and remembers cleanup.
 pub fn on_host(
     node: &crate::node::Node<'_>,
-    repo: &str,
-    branch: &str,
-    base: Option<&str>,
-    request_id: Option<&str>,
+    envelope: &Envelope,
     placement: Option<&crate::node::PlacementReplay>,
 ) -> Result<Prepared> {
-    let transport_repo = repo;
-    let repo = Path::new(node.home).join(repo).display().to_string();
-    let prepared = if placement.is_some() {
-        local_with(
-            node.shell,
-            node.ledger,
-            &repo,
-            branch,
-            base,
-            request_id,
-            placement.map(|p| (p, transport_repo)),
-        )
-    } else {
-        local(node.shell, node.ledger, &repo, branch, base, request_id)
+    if envelope.version != ENVELOPE_VERSION {
+        return Err(worktree::refuse(
+            "unsupported preparation validity envelope",
+        ));
     }
-    .map_err(|error| error.correlate(request_id))?;
-    Ok(prepared)
+    let repo = Path::new(node.home)
+        .join(&envelope.repo)
+        .display()
+        .to_string();
+    local_with(
+        node.shell,
+        node.ledger,
+        &repo,
+        &envelope.branch,
+        envelope.base.as_deref(),
+        Some(&envelope.request_id),
+        Delivery {
+            validity: envelope.validity,
+            placement: placement.map(|p| (p, envelope.repo.as_str())),
+        },
+    )
+    .map_err(|error| error.correlate(Some(&envelope.request_id)))
 }
 
 /// Only an exact disposition transaction removes a preparation hold. Admission failures,
@@ -1882,6 +2067,12 @@ mod tests {
         );
         let shell = DeadlineFetch(fake);
         let ledger = crate::ledger::Ledger::new(root.join("state"));
+        crate::jobs::record_request_validity(
+            &ledger,
+            "deadline",
+            Some(crate::jobs::origin_validity(&ledger).unwrap()),
+        )
+        .unwrap();
         let error = local_once(
             &shell,
             &ledger,
@@ -1993,6 +2184,8 @@ mod tests {
             path: Some("/repo/.worktrees/worker".into()),
         };
         let success = PreparationReceipt {
+            finished_ms: None,
+            validity: None,
             version: None,
             binding: None,
             request: request.clone(),
@@ -2010,6 +2203,8 @@ mod tests {
             detail_withheld: true,
         };
         let recorded = PreparationReceipt {
+            finished_ms: None,
+            validity: None,
             version: None,
             binding: None,
             request: request.clone(),
@@ -2019,6 +2214,8 @@ mod tests {
         let error = replay("r", &recorded).unwrap_err();
         assert!(error.to_string().contains("withheld"), "{error}");
         let contradictory = PreparationReceipt {
+            finished_ms: None,
+            validity: None,
             version: None,
             binding: None,
             request,
@@ -2032,6 +2229,8 @@ mod tests {
                 .contains("contradictory preparation receipt")
         );
         let uncertain = PreparationReceipt {
+            finished_ms: None,
+            validity: None,
             version: None,
             binding: None,
             request: (PathBuf::from("/repo"), "worker".to_owned(), None),

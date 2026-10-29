@@ -105,6 +105,17 @@ pub enum Command {
         #[arg(long)]
         cwd: String,
     },
+    /// Retire one historical preparation claim without settling its task.
+    RetirePreparation {
+        request_id: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        reason: String,
+        /// Explicit operator authority for historical claims without owner provenance.
+        #[arg(long)]
+        cleanup: bool,
+    },
     /// List cleanup candidates without changing them.
     Doctor {
         #[arg(long)]
@@ -366,6 +377,13 @@ pub enum UnitCommand {
     },
     /// Pending task settlements for this owner; never consumes transcript delivery.
     Settlements,
+    /// Explicit provider release of the exact execution binding and recovery references.
+    ReleaseReferences {
+        #[arg(long)]
+        input: String,
+    },
+    /// Retry durable release intents without recapturing or reopening references.
+    RetryReferenceReleases,
     /// Record provider success or confirmed duplicate application.
     AckSettlement {
         #[arg(long)]
@@ -515,6 +533,16 @@ pub enum HostCommand {
         kind: String,
         id: String,
     },
+    /// Accept a versioned origin reference-release certificate.
+    ReleaseReferences {
+        #[arg(long)]
+        input: String,
+    },
+    /// Read origin release status without inferring it from host or origin silence.
+    ReferenceReleaseStatus {
+        #[arg(long)]
+        input: String,
+    },
     /// Read immutable seeded terminal evidence on its execution host.
     UnitReceipt {
         #[arg(long)]
@@ -553,6 +581,8 @@ pub enum HostCommand {
     },
     Launch {
         #[arg(long)]
+        request_validity: Option<u32>,
+        #[arg(long)]
         request: String,
         #[arg(long)]
         preparation_protocol: Option<u32>,
@@ -574,11 +604,21 @@ pub enum HostCommand {
     },
     Checkout {
         #[arg(long)]
+        request_validity: Option<u32>,
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long)]
+        request_created_ms: Option<u64>,
+        #[arg(long)]
         path: String,
         #[arg(long)]
         origin: String,
         #[arg(long)]
         host_label: String,
+    },
+    PlacementFinished {
+        #[arg(long)]
+        input: String,
     },
     Reserve {
         #[arg(long)]
@@ -588,6 +628,11 @@ pub enum HostCommand {
         placement_replay: Option<String>,
         #[arg(long)]
         preparation_protocol: Option<u32>,
+        /// Non-job validity capability; required for agent and placement reservations.
+        #[arg(long)]
+        request_validity: Option<u32>,
+        #[arg(long)]
+        request_created_ms: Option<u64>,
         /// The job validity protocol the caller speaks. A job reservation carries it.
         #[arg(long)]
         job_validity: Option<u32>,
@@ -610,6 +655,10 @@ pub enum HostCommand {
         preparation_protocol: u32,
     },
     Prepare {
+        #[arg(long)]
+        request_created_ms: Option<u64>,
+        #[arg(long)]
+        preparation_envelope_version: Option<u32>,
         #[arg(long)]
         preparation_protocol: Option<u32>,
         #[arg(long)]

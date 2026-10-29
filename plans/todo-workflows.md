@@ -108,11 +108,11 @@ Keep `init`, `append`, `view`, `start`, `done`, and `drop`. Add `update` for pen
 
 Creation can retain incomplete draft units, but `start` and contract export refuse incomplete contracts. `start` activates self-assigned work without spawning. For delegation, the agent calls Dogsled's existing spawn tool with a unit reference and necessary placement choices. The Dogsled Pi adapter obtains the validated frozen contract and its provider-rendered brief, uses the assigned profile, derives a worker name, and supplies those to the existing launch path. No second agent-authored brief or activation call is required.
 
-Allow one locally executing leaf per session, alongside independent delegated leaves. `init` cannot replace a list containing an active local unit or a held delegation binding; finish or explicitly drop eligible work first. A completed dependency satisfies a prerequisite. Dropped work does not. Unknown dependencies and cycles fail atomically. Represent owned paths as repository-relative files or directory prefixes, not arbitrary glob patterns. Same-repository overlaps require ordering rather than concurrent execution. Read-only inputs do not claim ownership. This checks declared scopes, not actual filesystem access.
+Allow one locally executing leaf per session alongside delegated leaves, even with overlapping owned or generated paths. `init` cannot replace a list containing an active local unit or a held delegation binding; finish or explicitly drop eligible work first. A completed dependency satisfies a prerequisite. Dropped work does not. Unknown dependencies and cycles fail atomically. Represent owned paths as repository-relative files or directory prefixes, not arbitrary glob patterns. Same-repository overlap does not require ordering. A second local activation returns `LOCAL_UNIT_ACTIVE`, regardless of paths. Read-only inputs do not claim ownership. This checks declared scopes, not actual filesystem access.
 
 Block contract mutation, completion, or replacement while an affected gated call is in flight. Exclude read-only and control wrappers from that execution lease. Release leases on success, error, abort, and shutdown. Mutating operations serialize and check the current revision after asynchronous work. Explicit `done` records a short note from the lead. An integration-review unit gives the lead a bounded context for shell-based review.
 
-A started leaf cannot change its scope, dependencies, or assignment. The owning lead can close any open leaf with `done` and a short note, or with `drop`. Closing a leaf that a worker holds clears its binding and records the execution as released, so its owned paths stop blocking other units. A later settlement for a released execution is a no-op. Parents still require explicit integration review after their children close.
+A started leaf cannot change its scope, dependencies, or assignment. The owning lead can close any open leaf with `done` and a short note, or with `drop`. Closing a leaf that a worker holds clears its binding and records the execution as released. A later settlement for a released execution is a no-op. Parents still require explicit integration review after their children close.
 
 Pi-todo owns task status and acceptance. Dogsled owns launch, queue, worker, and cancellation facts. A worker's final message becomes evidence for review, not automatic task completion. A queued receipt is not a running worker.
 
@@ -240,7 +240,7 @@ type UnitState = {
 
 `UnitState` has no host, pane, PID, queued/running state, retry count, launch error, or cancellation state. Those remain in Dogsled. The task can be in progress while its worker is queued; the shared Dogsled panel shows execution facts.
 
-An empty `owns` is valid for read-only research. Reject absolute paths, `..`, duplicate ownership paths, and same-repository prefix overlap between simultaneously claimed/locally active units. This is declared-scope validation, not filesystem authorization. Acceptance commands are structured evidence requirements; creating a task never executes them.
+An empty `owns` is valid for read-only research. Reject absolute paths, `..`, glob patterns, and duplicate paths within each scope list. Allow equal and prefix overlaps between concurrent worker units and one local unit, including overlaps between owned and generated paths. This is declared-scope validation, not filesystem authorization. Acceptance commands are structured evidence requirements; creating a task never executes them.
 
 The lead authors the complete contract once; pi-todo generates IDs, revision references, and export formatting. `contractEntryId` is derived when reading the Pi entry that introduced the revision, not embedded through a circular self-reference during append. Later status-only entries preserve that origin. Changing domain fields increments the revision and records a new contract entry. Bound or locally executing revisions cannot change. A new execution after a returned failure requires a new task revision, preventing accidental duplicate launches of the old revision.
 
@@ -474,7 +474,7 @@ Implementation correction: a prepared request knows the origin and execution ID,
 
 #### 9. Errors and compatibility
 
-Provider error codes are `PROVIDER_UNAVAILABLE`, `VERSION_UNSUPPORTED`, `UNIT_NOT_FOUND`, `STALE_ORIGIN`, `CONTRACT_INCOMPLETE`, `DEPENDENCY_OPEN`, `SCOPE_CONFLICT`, `WRONG_ASSIGNMENT`, `UNIT_ALREADY_BOUND`, `BINDING_MISMATCH`, and `SEEDED_SCOPE_LOCKED`. Each returns `{code, message, unitId?}`. Errors perform no partial task mutation.
+Provider error codes are `PROVIDER_UNAVAILABLE`, `VERSION_UNSUPPORTED`, `UNIT_NOT_FOUND`, `STALE_ORIGIN`, `CONTRACT_INCOMPLETE`, `DEPENDENCY_OPEN`, `LOCAL_UNIT_ACTIVE`, `WRONG_ASSIGNMENT`, `UNIT_ALREADY_BOUND`, `BINDING_MISMATCH`, and `SEEDED_SCOPE_LOCKED`. Each returns `{code, message, unitId?}`. Errors perform no partial task mutation.
 
 Dogsled owns `REQUEST_CONFLICT`, `PROFILE_INVALID`, `LAUNCH_UNRESOLVED`, and `IMPORT_FAILED`. It never fabricates a provider error by inspecting task domain internals. Its transport validator checks only envelope/version/correlation/digest fields; the provider/importer validates task semantics.
 
@@ -548,7 +548,7 @@ Each deliverable includes behavior tests and a real caller. Merge dependent work
 
 No code changed and no tests ran during planning. Implementation must prove five groups:
 
-- **Core:** incomplete contracts, duplicate IDs, dependency cycles, dropped prerequisites, overlapping concurrent scope, one local unit, immutable dispatched scope, evidence-required completion, and explicit parent review. Invalid operations leave state unchanged.
+- **Core:** reject incomplete contracts, duplicate IDs, malformed or duplicate paths, dependency cycles, and dropped prerequisites. Accept overlapping concurrent worker scopes and one overlapping local unit, including owned/generated paths. Reject a second local unit with `LOCAL_UNIT_ACTIVE`, regardless of scope. Preserve immutable dispatched scope, evidence-required completion, and explicit parent review. Invalid operations leave state unchanged.
 - **Gate:** no-unit shell/edit/code fails; reads and workflow control work; a parent or another worker's unit cannot authorize local execution. Test direct and nested calls, LSP mutations, in-flight completion races, planning units, and tool-owner collisions.
 - **Import/prewalk:** with the Dogsled guard loaded in a fresh worker, the exact contract activates before the initial task request, without a worker todo call. Missing/invalid import aborts that request. Cover branch/reload/new behavior, prewalk on/off, and unchanged post-edit switching. Do not assert zero requests for resume-time compaction or absent guards.
 - **Dogsled/results:** test queue versus running state, invalid profiles, lost responses, duplicate launch, structured correlation, stale/duplicate evidence, and cancellation visibility in Dogsled. Provider tests prove that evidence attachment cannot accept the deliverable and absent confirmation cannot release a held contract.

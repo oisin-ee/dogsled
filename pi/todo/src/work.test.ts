@@ -1,65 +1,34 @@
-import type { WorkContext, WorkHost } from "./work.ts";
+import type { TodoPresenter, WorkContext, WorkHost } from "./work.ts";
 import { describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Mock } from "vitest";
 import { TodoPresentation } from "./presentation.ts";
 import { TodoWork } from "./work.ts";
 import { sections } from "./wasm.ts";
 
-type Listener = (value: unknown) => void;
-interface Fixture {
-  readonly ctx: WorkContext;
-  readonly events: Readonly<ExtensionAPI["events"]>;
-  readonly opened: Mock<Listener>;
-  readonly snapshot: Mock<Listener>;
-  readonly work: Readonly<TodoWork>;
-  readonly claim: (value?: unknown) => void;
-  readonly request: () => void;
-  readonly release: () => void;
-}
-
-/**
- * Creates a synchronous bus with independent extension listeners.
- * @returns {ExtensionAPI["events"]} Public event bus seam.
- */
 const firstArgument = 0,
   oneCall = 1,
-  eventBus = (): ExtensionAPI["events"] => {
-    const listeners = new Map<string, Set<Listener>>();
-    return {
-      emit: (name, value): void => {
-        for (const listener of listeners.get(name) ?? []) {
-          listener(value);
-        }
-      },
-      on: (name, listener): (() => void) => {
-        const group = listeners.get(name) ?? new Set<Listener>();
-        group.add(listener);
-        listeners.set(name, group);
-        return (): void => {
-          group.delete(listener);
-        };
-      },
-    };
-  },
   /**
    * Builds the real provider against a branch-sensitive terminal context.
    * @param {boolean} collision Whether another tool owns todo.
-   * @returns {Fixture} Provider and public boundary spies.
+   * @returns {object} Provider and direct presenter spies.
    */
-  fixture = (collision = false): Fixture => {
-    const events = eventBus(),
-      host: WorkHost = {
-        events,
+  fixture = (
+    collision = false,
+  ): {
+    ctx: WorkContext;
+    presenter: TodoPresenter;
+    work: Readonly<TodoWork>;
+    snapshot: ReturnType<typeof vi.fn<TodoPresenter["show"]>>;
+    opened: ReturnType<typeof vi.fn<() => void>>;
+    stopped: ReturnType<typeof vi.fn<() => void>>;
+  } => {
+    const host: WorkHost = {
         getAllTools: () =>
           collision
             ? []
             : [
                 {
                   name: "todo",
-                  sourceInfo: {
-                    path: decodeURIComponent(new URL("index.ts", import.meta.url).pathname),
-                  },
+                  sourceInfo: { path: new URL("index.ts", import.meta.url).pathname },
                 },
               ],
       },
@@ -73,98 +42,105 @@ const firstArgument = 0,
         ui: { notify: vi.fn<() => void>(), setWidget: vi.fn<() => void>() },
       },
       work = new TodoWork(host, new TodoPresentation()),
-      snapshot = vi.fn<Listener>(),
-      opened = vi.fn<Listener>(),
-      envelope = { presenter: "work", request: "request", version: 3 };
-    events.on("oisin.todo.snapshot", snapshot);
-    events.on("oisin.work.open", opened);
+      snapshot = vi.fn<TodoPresenter["show"]>(() => false),
+      opened = vi.fn<() => void>(),
+      stopped = vi.fn<() => void>();
     return {
-      claim: (value = snapshot.mock.lastCall?.at(firstArgument)): void => {
-        events.emit("oisin.work.claim", value);
-      },
       ctx,
-      events,
       opened,
-      release: (): void => {
-        events.emit("oisin.work.release", envelope);
-      },
-      request: (): void => {
-        events.emit("oisin.work.request", envelope);
-      },
+      presenter: { open: opened, show: snapshot, stop: stopped },
       snapshot,
+      stopped,
       work,
     };
   };
 
-describe("work provider", () => {
+describe("work publication", () => {
   it("publishes validated data without hiding before acknowledgement", { timeout: 5000 }, () => {
     expect.hasAssertions();
     const test = fixture();
     test.work.start(test.ctx);
-    test.request();
+    test.work.attach(test.presenter);
     expect(test.snapshot).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        branch: null,
-        revision: 1,
-        session: "session",
-        version: 3,
-      }),
+      expect.objectContaining({ branch: null, revision: 1, session: "session" }),
     );
     expect(test.ctx.ui.setWidget).not.toHaveBeenCalled();
     test.work.stop();
   });
+});
 
+describe("work claims", () => {
   it("routes the read-only view after claim and restores it on release", { timeout: 5000 }, () => {
     expect.hasAssertions();
     const test = fixture();
+    test.snapshot.mockReturnValue(true);
     test.work.start(test.ctx);
-    test.request();
-    test.claim();
+    const detach = test.work.attach(test.presenter);
     expect(test.work.open()).toBe(true);
-    expect(test.opened).toHaveBeenCalledExactlyOnceWith({
-      presenter: "work",
-      request: "request",
-      version: 3,
-      view: "todos",
-    });
-    test.release();
+    expect(test.opened).toHaveBeenCalledExactlyOnceWith();
+    detach();
     expect(test.work.open()).toBe(false);
     test.work.stop();
   });
 
-  it("rejects a stale claim and unsubscribes at shutdown", { timeout: 5000 }, () => {
+  it("stops the presenter and releases its claim at shutdown", { timeout: 5000 }, () => {
+    expect.hasAssertions();
+    const test = fixture();
+    test.snapshot.mockReturnValue(true);
+    test.work.start(test.ctx);
+    test.work.attach(test.presenter);
+    expect(test.work.open()).toBe(true);
+    test.work.stop();
+    expect(test.stopped).toHaveBeenCalledExactlyOnceWith();
+    expect(test.work.open()).toBe(false);
+  });
+
+  it("does not publish after shutdown", { timeout: 5000 }, () => {
     expect.hasAssertions();
     const test = fixture();
     test.work.start(test.ctx);
-    test.request();
-    test.claim({ presenter: "old", request: "old", version: 3 });
-    expect(test.work.open()).toBe(false);
+    test.work.attach(test.presenter);
     test.work.stop();
-    test.request();
+    test.work.publish(test.ctx);
     expect(test.snapshot).toHaveBeenCalledTimes(oneCall);
   });
 });
 
-describe("work protocol v3", () => {
+describe("work lifecycle", () => {
+  it("publishes when the provider starts after attachment", { timeout: 5000 }, () => {
+    expect.hasAssertions();
+    const test = fixture();
+    test.work.attach(test.presenter);
+    expect(test.snapshot).not.toHaveBeenCalled();
+    test.work.start(test.ctx);
+    expect(test.snapshot).toHaveBeenCalledTimes(oneCall);
+    test.work.stop();
+  });
+
+  it("releases a claimed view when the presenter rejects an update", { timeout: 5000 }, () => {
+    expect.hasAssertions();
+    const test = fixture();
+    test.snapshot.mockReturnValue(true);
+    test.work.start(test.ctx);
+    test.work.attach(test.presenter);
+    expect(test.work.open()).toBe(true);
+    test.snapshot.mockReturnValue(false);
+    test.work.publish(test.ctx);
+    expect(test.work.open()).toBe(false);
+    test.work.stop();
+  });
+});
+
+describe("work snapshots", () => {
   it("publishes core-owned sections in the snapshot", { timeout: 5000 }, () => {
     expect.hasAssertions();
     const test = fixture();
     test.work.start(test.ctx);
-    test.request();
+    test.work.attach(test.presenter);
     expect(test.snapshot).toHaveBeenCalledTimes(oneCall);
     expect(test.snapshot.mock.lastCall?.at(firstArgument)).toMatchObject({
       display: { sections: sections({ tasks: [] }) },
-      version: 3,
     });
-    test.work.stop();
-  });
-
-  it("rejects a v2 request like any incompatible version", { timeout: 5000 }, () => {
-    expect.hasAssertions();
-    const test = fixture();
-    test.work.start(test.ctx);
-    test.events.emit("oisin.work.request", { presenter: "work", request: "request", version: 2 });
-    expect(test.snapshot).not.toHaveBeenCalled();
     test.work.stop();
   });
 });
@@ -174,7 +150,7 @@ describe("provider ownership", () => {
     expect.hasAssertions();
     const test = fixture(true);
     test.work.start(test.ctx);
-    test.request();
+    test.work.attach(test.presenter);
     expect(test.snapshot).not.toHaveBeenCalled();
     expect(test.ctx.ui.setWidget).not.toHaveBeenCalled();
   });
@@ -184,7 +160,7 @@ describe("provider ownership", () => {
     const test = fixture(),
       ctx = Object.assign({}, test.ctx, { mode: "rpc" as const });
     test.work.start(ctx);
-    test.request();
+    test.work.attach(test.presenter);
     expect(test.snapshot).not.toHaveBeenCalled();
     expect(test.ctx.ui.setWidget).not.toHaveBeenCalled();
   });

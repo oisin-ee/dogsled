@@ -47,7 +47,7 @@ export class WorkPanel {
 	readonly cursor: WorkCursor;
 	private theme: Theme;
 	private todoView: TodoView | undefined;
-	private publisher: string | undefined;
+	private session: string | undefined;
 	private readonly todos: WorkTodo | undefined;
 	private readonly done: (action: WorkAction | undefined) => void;
 	private readonly renderRequest: () => void;
@@ -61,8 +61,8 @@ export class WorkPanel {
 	}
 	update(data: WorkData): void {
 		this.data = data;
-		if (this.publisher !== data.todo?.publisher) { this.todoView?.dispose(); this.todoView = undefined; }
-		this.publisher = data.todo?.publisher;
+		if (this.session !== data.todo?.session) { this.todoView?.dispose(); this.todoView = undefined; }
+		this.session = data.todo?.session;
 		this.rebuild(); this.renderRequest();
 	}
 	setTheme(theme: Theme): void { this.theme = theme; this.invalidate(); }
@@ -70,7 +70,7 @@ export class WorkPanel {
 	private hosted(): TodoView | undefined {
 		if (!this.todoView && this.data.todo && this.todos) {
 			const panel = this;
-			this.publisher = this.data.todo.publisher;
+			this.session = this.data.todo.session;
 			this.todoView = this.todos.createView({
 				theme: { fg: (color, text) => panel.theme.fg(color, text), bold: text => panel.theme.bold(text) },
 				height: () => panel.listHeight(), requestRender: this.renderRequest,

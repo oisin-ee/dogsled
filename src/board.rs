@@ -2486,8 +2486,10 @@ mod tests {
     #[test]
     fn a_queued_row_carries_the_repository_of_its_request() {
         let ticket = crate::work::Ticket {
+            finished_ms: None,
             id: "t1".into(),
             request: crate::work::Request {
+                validity: None,
                 id: "t1".into(),
                 action: crate::work::Action::Job {
                     cmd: vec!["cargo".into(), "test".into()],

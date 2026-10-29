@@ -92,28 +92,27 @@ Outside the terminal UI, `/todos` prints the list instead.
 
 ## Shared work display
 
-When a compatible pi-dogsled extension is active, its work widget replaces the standalone todo widget.
-Tasks remain on the current Pi session branch. Dogsled receives a read-only presentation capability through `pi.events`.
+The merged Dogsled extension attaches its work widget directly to pi-todo.
+Tasks remain on the current Pi session branch. Dogsled receives a typed, read-only presentation capability.
 Pi-todo owns the renderer in both standalone and shared views. Dogsled hosts it above the editor without opening a popup.
 Alt+J/K scrolls the hosted rows. Alt+I toggles their expansion. Ordinary editor keys remain unchanged.
 `/todos` and Alt+T request the shared Todos view. `/todos list` still prints the full list.
 When shared presentation ends, the standalone widget returns without changing task state.
 
-The [version 3 display contract](https://github.com/oisin-ee/dogsled/blob/main/docs/pi-work.md)
-defines the snapshot request, acknowledgement, release, and read-only view events.
-Version 3 adds `display.sections` to the snapshot: four typed status groups (`in_progress`, `pending`, `completed`, `abandoned`), always present and in that order, each with a count and its items. Each item carries its text, optional description, review flag, contract summary, and all subtasks (each with its own optional description). The core owns this grouping; a presenter only draws it.
-Pi-todo does not answer version 2 requests.
-Incompatible versions leave the standalone widget available. Rendering failures restore it without changing saved tasks.
+The [display contract](https://github.com/oisin-ee/dogsled/blob/main/docs/pi-work.md) defines direct attachment, snapshots, claims, and release.
+`display.sections` contains four typed status groups in order: `in_progress`, `pending`, `completed`, `abandoned`. Each group contains a count and its items.
+Each item carries its text, optional description, review flag, contract summary, and subtasks with their optional descriptions.
+The core owns this grouping. A presenter only draws it. Rendering failures restore standalone todos without changing saved tasks.
 
 ## Dogsled plans
 
-Dogsled plan mode (`/plan` and `submit_plan`) emits `dogsled:plan-approved` when the user approves a plan.
+After the user approves a plan, Dogsled plan mode (`/plan` and `submit_plan`) calls the todo approval handle directly.
 Pi-todo continues the approved plan in the same session. No setting is needed.
 
 After approval, the agent reads the current todo list and adds the remaining approved work before implementation.
 It preserves unrelated tasks and completed progress. Free-form plans do not need a special checklist format.
 The todo tool owns progress, persistence, reminders, and the shared work display.
-Malformed events, a different working directory, or another owner of the `todo` tool stop the handoff with an error.
+A different working directory or another owner of the `todo` tool stops the handoff with an error.
 
 ## Reminder
 

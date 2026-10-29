@@ -8,7 +8,7 @@ No changes in this release.
 
 ### Minor Changes
 
-- [#40](https://github.com/oisin-ee/oisinpi/pull/40) [`7fcdc45`](https://github.com/oisin-ee/oisinpi/commit/7fcdc45f08c065faf38c3841c0b2d2133ad9322f) Thanks [@momo-momokaya](https://github.com/apps/momo-momokaya)! - Continue plans approved in Dogsled plan mode through the existing todo tool in the same session. Listen for `dogsled:plan-approved` without additional configuration.
+- [#40](https://github.com/oisin-ee/oisinpi/pull/40) [`7fcdc45`](https://github.com/oisin-ee/oisinpi/commit/7fcdc45f08c065faf38c3841c0b2d2133ad9322f) Thanks [@momo-momokaya](https://github.com/apps/momo-momokaya)! - Continue plans approved in Dogsled plan mode through the existing todo tool in the same session. Receive plan approvals without additional configuration.
 
   Document Dogsled plan mode as the owner of planning restrictions.
 
@@ -62,7 +62,7 @@ No changes in this release.
 
 - [`50877ec`](https://github.com/oisin-ee/oisinpi/commit/50877ec0f9bba71b7f70d8bf8d3754191ac73364) Thanks [@oisincoveney](https://github.com/oisincoveney)! - Add executable task contracts, local activation gates, and profile-assigned worker handoff. Import exact worker contracts before their first task request. Attach returned evidence without accepting the lead task automatically.
 
-  Use the executor-owned seed-source capability with compatible Dogsled tooling. Require Pi 1.3.0 for the loaded startup guard. Prewalk recognizes validated activation and preserves its post-edit model switch.
+  Use the executor-owned seed path capability with compatible Dogsled tooling. Require Pi 1.3.0 for the loaded startup guard. Prewalk recognizes validated activation and preserves its post-edit model switch.
 
 ## 0.7.2
 

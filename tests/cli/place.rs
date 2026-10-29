@@ -293,7 +293,7 @@ fn queued_placement_accepts_symlinked_repository_root() {
     rig.put(
         "state/queue.json",
         &json!([{
-            "id":"alias-ticket","request":{"id":"alias-request","action":{"type":"place"},
+            "id":"alias-ticket","request":{"id":"alias-request","validity":request_authority(&rig,"alias-request"),"action":{"type":"place"},
                 "host":"local","branch":"alias-branch","base":"main","cwd":aliased_repo,
                 "repository":{"path":aliased_repo,"origin":"https://example.invalid/repo.git","relative":"repo space","working_root":aliased_repo},
                 "workspace":null,"workspace_name":null,"owner":"w1:p1"},
@@ -515,8 +515,8 @@ fn lost_placement_reply(marker: &str) {
         assert_eq!(resumed, result);
     }
     assert_eq!(
-        rig.read(&format!("peer-state/preparation-receipts/{id}.json")),
-        original
+        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        outcome_identity(original)
     );
     assert_eq!(
         rig.read(&format!("peer-state/placement-grants/{id}.json")),
@@ -638,8 +638,8 @@ fn review_failed_preparation_finishes_matching_failure_disposition() {
     );
     assert_eq!(disposition["progress"], "released");
     assert_eq!(
-        rig.read(&format!("state/preparation-receipts/{id}.json")),
-        original
+        outcome_identity(rig.read(&format!("state/preparation-receipts/{id}.json"))),
+        outcome_identity(original)
     );
     assert_eq!(rig.json(&["place", "--resume", id]), (2, failure));
     assert_eq!(
@@ -686,8 +686,8 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
     assert_eq!(rig.log("ssh.log").matches("host reserve ").count(), 1);
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
     assert_eq!(
-        rig.read(&format!("peer-state/preparation-receipts/{id}.json")),
-        original
+        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        outcome_identity(original)
     );
     assert_eq!(
         rig.read(&format!("peer-state/placement-grants/{id}.json")),
@@ -912,9 +912,16 @@ esac
     assert!(!log.contains("host launch"), "{log}");
 }
 
+fn request_authority(rig: &Rig, id: &str) -> Value {
+    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
+    let stamp = json!({"version":1,"created_ms":rig.now_ms()});
+    rig.put(&format!("state/job-validity/{id}.json"), &stamp);
+    stamp
+}
+
 fn placement_envelope(rig: &Rig, id: &str) -> Value {
-    json!({"version":2,"expected_grant":null,"reservation":id,"host":{"id":"local","label":"local"},
-        "request":{"id":id,"action":{"type":"place"},"host":null,"branch":null,"base":null,
+    json!({"version":3,"expected_grant":null,"reservation":id,"host":{"id":"local","label":"local"},
+        "request":{"id":id,"validity":request_authority(rig,id),"action":{"type":"place"},"host":null,"branch":null,"base":null,
             "cwd":rig.dir.join("home"),"repository":null,"workspace":null,"workspace_name":null,
             "owner":"w1:p1","owner_host":null}})
 }
@@ -1204,7 +1211,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
 #[test]
 fn result_is_durable_before_host_release() {
     let (rig, repo) = place_rig("result-before-release");
-    let request = json!({"id":"durable-placement","action":{"type":"place"},"host":"local",
+    let request = json!({"id":"durable-placement","validity":request_authority(&rig,"durable-placement"),"action":{"type":"place"},"host":"local",
         "branch":"durable","base":"main","cwd":repo,"owner":"w1:p1",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
@@ -1256,7 +1263,7 @@ fn placement_crash_boundaries_replay_one_result() {
         "preparation-claim-released",
     ] {
         let (rig, repo) = place_rig(boundary);
-        let request = json!({"id":"queued-placement", "action":{"type":"place"}, "host":"local",
+        let request = json!({"id":"queued-placement", "validity":request_authority(&rig,"queued-placement"), "action":{"type":"place"}, "host":"local",
         "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
@@ -1317,11 +1324,12 @@ fn placement_crash_boundaries_replay_one_result() {
             rig.json(&["place", "--resume", "queued-placement"]),
             (0, ticket["result"].clone())
         );
-        if let Some(receipt) = receipt {
-            assert_eq!(
-                rig.read("state/preparation-receipts/queued-placement.json"),
-                receipt
-            );
+        if let Some(mut receipt) = receipt {
+            let mut completed = rig.read("state/preparation-receipts/queued-placement.json");
+            assert!(completed["finished_ms"].is_u64());
+            completed.as_object_mut().unwrap().remove("finished_ms");
+            receipt.as_object_mut().unwrap().remove("finished_ms");
+            assert_eq!(completed, receipt);
         }
         assert_eq!(
             rig.read("state/placement-grants/queued-placement.json"),
@@ -1461,7 +1469,7 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
         match change {
             "request" => changed["request"]["cwd"] = json!("/different"),
             "target" => changed["host"]["target"] = json!("other-target"),
-            "version" => changed["version"] = json!(3),
+            "version" => changed["version"] = json!(4),
             "missing" => {
                 changed.as_object_mut().unwrap().remove("request");
             }
@@ -1595,6 +1603,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
 /// A real repository with a `dogsled.toml` setup, and a fake Herdr whose `worktree open`
 /// opens the main checkout's workspace w7 as the anchor on first use.
 pub(super) fn place_rig(name: &str) -> (Rig, PathBuf) {
+    place_rig_with(name, SETUP)
+}
+
+pub(super) fn place_rig_with(name: &str, config: &str) -> (Rig, PathBuf) {
     let rig = Rig::short(name);
     let repo = rig.dir.join("home/repo space");
     fs::create_dir_all(&repo).unwrap();
@@ -1608,7 +1620,7 @@ pub(super) fn place_rig(name: &str) -> (Rig, PathBuf) {
             "https://example.invalid/repo.git",
         ],
     );
-    fs::write(repo.join("dogsled.toml"), SETUP).unwrap();
+    fs::write(repo.join("dogsled.toml"), config).unwrap();
     git(&repo, &["add", "dogsled.toml"]);
     git(&repo, &["commit", "-q", "-m", "init"]);
     rig.snapshot("state/host.json", now(), 0.0, 8);
@@ -1710,6 +1722,46 @@ fn place_creates_a_locked_worktree_runs_setup_opens_it_and_records_the_anchor() 
         fs::read_to_string(repo.join(".git/agent-worktree-anchor")).unwrap(),
         "kept\n"
     );
+}
+
+#[test]
+fn place_runs_setup_from_the_base_revision_instead_of_the_main_checkout() {
+    let (rig, repo) = place_rig_with("place-base-setup", "[worktree]\nsetup = [\"false\"]\n");
+    git(&repo, &["checkout", "-q", "-b", "setup-base"]);
+    fs::write(
+        repo.join("dogsled.toml"),
+        "[worktree]\nsetup = [\"printf ready > setup-marker\"]\n",
+    )
+    .unwrap();
+    git(&repo, &["commit", "-q", "-am", "new setup"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "-q", "main"]);
+
+    let (code, placed) = place(&rig, &repo, "from-new-setup", Some(base.trim()));
+    assert_eq!(code, 0, "{placed}");
+    let tree = repo.join(".worktrees/from-new-setup");
+    assert_eq!(placed["path"], json!(tree));
+    assert_eq!(
+        fs::read_to_string(tree.join("setup-marker")).unwrap(),
+        "ready"
+    );
+}
+
+#[test]
+fn place_skips_setup_when_the_base_revision_has_no_repository_config() {
+    let (rig, repo) = place_rig_with("place-base-no-config", "[worktree]\nsetup = [\"false\"]\n");
+    git(&repo, &["checkout", "-q", "-b", "no-config-base"]);
+    git(&repo, &["rm", "-q", "dogsled.toml"]);
+    git(&repo, &["commit", "-q", "-m", "remove repository config"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "-q", "main"]);
+
+    let (code, placed) = place(&rig, &repo, "from-no-config", Some(base.trim()));
+    assert_eq!(code, 0, "{placed}");
+    let tree = repo.join(".worktrees/from-no-config");
+    assert_eq!(placed["path"], json!(tree));
+    assert!(!tree.join("dogsled.toml").exists());
+    assert_eq!(rig.log("setup.log"), "");
 }
 
 #[test]
@@ -1818,6 +1870,26 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert_eq!(place(&rig, &repo, "kept", None).0, 2);
     assert!(!repo.join(".worktrees/kept").exists());
     assert_ne!(git(&repo, &["branch", "--list", "kept"]), "");
+    // An invalid config in the new worktree follows the same cleanup path.
+    git(&repo, &["checkout", "-q", "-b", "invalid-config-base"]);
+    fs::write(repo.join("dogsled.toml"), "[worktree]\nhooks = []\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "invalid repository config"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    let setup = rig.log("setup.log");
+    let (code, error) = place(&rig, &repo, "invalid-config", Some(base.trim()));
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["diagnostic"]["cause"], "setup_failed");
+    assert_eq!(error["diagnostic"]["context"]["new_worktree_removed"], true);
+    assert!(!repo.join(".worktrees/invalid-config").exists());
+    assert!(!locks(&repo).contains("branch refs/heads/invalid-config\n"));
+    assert_eq!(git(&repo, &["branch", "--list", "invalid-config"]), "");
+    assert_eq!(rig.log("setup.log"), setup);
+    assert!(!rig.log("herdr.log").contains("worktree open"));
+    assert_eq!(
+        rig.read("state/placements.json").as_array().unwrap().len(),
+        1
+    );
 }
 
 #[test]

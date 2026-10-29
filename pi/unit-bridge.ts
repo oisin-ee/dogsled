@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult, SessionStartEvent } from "@earendil-works/pi-coding-agent";
-import { acquire, acknowledgement, decodeDelivery, execution, prepared, record, reference, repositoryIdentity, sameExecution, sameRef, settlementExecution, settlementOrigin, unitInput, unwrap, type Execution, type Prepared, type UnitRef } from "./unit-protocol.ts";
+import { type TaskProvider, acknowledgement, decodeDelivery, execution, prepared, record, reference, repositoryIdentity, sameExecution, sameRef, settlementExecution, settlementOrigin, unitInput, unwrap, type Execution, type Prepared, type UnitRef } from "./unit-protocol.ts";
 import { UnitWorker, type UnitExec } from "./unit-worker.ts";
 
 interface Invocation { origin: UnitRef; execution?: Execution; cwd: string; prepared?: Prepared; ended: boolean }
@@ -14,15 +14,17 @@ export class UnitBridge {
 	private recovered = false;
 	private readonly worker: UnitWorker;
 	private readonly exec: UnitExec;
-	private readonly pi: Pick<ExtensionAPI, "events" | "exec" | "getFlag" | "registerFlag">;
-	constructor(pi: Pick<ExtensionAPI, "events" | "exec" | "getFlag" | "registerFlag">, binary: string) {
+	private readonly pi: Pick<ExtensionAPI, "exec" | "getFlag" | "registerFlag">;
+	private readonly tasks: () => TaskProvider | undefined;
+	constructor(pi: Pick<ExtensionAPI, "exec" | "getFlag" | "registerFlag">, binary: string, tasks: () => TaskProvider | undefined) {
 		this.pi = pi;
+		this.tasks = tasks;
 		this.exec = async (args, cwd) => {
 			const result = await pi.exec(binary, args, cwd === undefined ? undefined : { cwd });
 			if (result.code !== 0) throw new Error(`dogsled ${args.slice(0, 2).join(" ")} failed: ${result.stderr.trim() || result.stdout.trim() || result.code}`);
 			return JSON.parse(result.stdout);
 		};
-		this.worker = new UnitWorker(pi, this.exec);
+		this.worker = new UnitWorker(pi, this.exec, tasks);
 	}
 	start(reason: SessionStartEvent["reason"] = "startup"): void { this.epoch++; this.recovered = false; this.worker.start(reason); }
 	stop(): void { this.epoch++; }
@@ -30,7 +32,7 @@ export class UnitBridge {
 
 	/** Startup handlers have completed before this boundary; no registration-order race. */
 	ready(ctx: ExtensionContext): Promise<void> {
-		if (this.recovered || !acquire(this.pi.events)) return Promise.resolve();
+		if (this.recovered || !this.tasks()) return Promise.resolve();
 		if (this.recovery) return this.recovery;
 		const epoch = this.epoch;
 		this.recovery = this.resume(ctx).then(() => { if (epoch === this.epoch) this.recovered = true; }).finally(() => { this.recovery = undefined; });
@@ -39,7 +41,7 @@ export class UnitBridge {
 
 	/** A completed runtime startup establishes that untracked prior invocations cannot execute here. */
 	async resume(ctx: ExtensionContext): Promise<void> {
-		if (!acquire(this.pi.events)) return;
+		if (!this.tasks()) return;
 		const epoch = this.epoch, session = ctx.sessionManager.getSessionId();
 		const pending = await this.exec(["unit", "prepared"], ctx.cwd);
 		if (!Array.isArray(pending)) throw new Error("LAUNCH_UNRESOLVED: prepared listing returned no list");
@@ -70,7 +72,7 @@ export class UnitBridge {
 			const request = unitInput(input), epoch = this.epoch, session = ctx.sessionManager.getSessionId();
 			await this.ready(ctx);
 			this.current(epoch, session, ctx);
-			const provider = acquire(this.pi.events);
+			const provider = this.tasks();
 			if (!provider) throw new Error("PROVIDER_UNAVAILABLE: pi-todo capability is unavailable or ambiguous");
 			const contract = unwrap(provider.inspect(request.id));
 			if (!record(contract) || !reference(contract.ref) || !record(contract.scope) || typeof contract.scope.repositoryId !== "string") {
@@ -88,7 +90,7 @@ export class UnitBridge {
 			invocation.execution = result;
 			this.current(epoch, session, ctx);
 			// Reacquire after I/O so shutdown and ownership changes cannot revive old authority.
-			const current = acquire(this.pi.events);
+			const current = this.tasks();
 			if (!current) throw new Error("PROVIDER_UNAVAILABLE: task provider disappeared before claim");
 			const claim = unwrap(current.claim({ expected: contract.ref, execution: result }));
 			const enriched = record(claim) ? { execution: result, binding: claim.binding, exported: claim.exported } : null;
@@ -146,7 +148,7 @@ export class UnitBridge {
 		if (this.draining) return this.draining;
 		const epoch = this.epoch, session = ctx.sessionManager.getSessionId();
 		this.draining = (async () => {
-			if (!acquire(this.pi.events)) return;
+			if (!this.tasks()) return;
 			const pending = await this.exec(["unit", "settlements"], ctx.cwd);
 			if (!Array.isArray(pending)) throw new Error("LAUNCH_UNRESOLVED: settlements returned no list");
 			for (const event of pending) {
@@ -159,7 +161,7 @@ export class UnitBridge {
 				const origin = settlementOrigin(settlement);
 				if (!origin) throw new Error("LAUNCH_UNRESOLVED: missing settlement origin");
 				if (origin.sessionId !== session) continue; // Another session owns this result.
-				const provider = acquire(this.pi.events);
+				const provider = this.tasks();
 				if (!provider) return;
 				const inspected = provider.inspect(origin.unitId);
 				if (!inspected.ok) continue;

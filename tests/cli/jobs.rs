@@ -1317,9 +1317,16 @@ case "$1" in
 esac
 "#,
     );
+    let created = rig.origin_ms.to_string();
     let args = [
         "host",
         "checkout",
+        "--request-validity",
+        "1",
+        "--request-id",
+        "checkout-request",
+        "--request-created-ms",
+        &created,
         "--path",
         "repo",
         "--origin",
@@ -1355,6 +1362,12 @@ esac
     let (code, error) = rig.json(&[
         "host",
         "checkout",
+        "--request-validity",
+        "1",
+        "--request-id",
+        "missing-checkout",
+        "--request-created-ms",
+        &created,
         "--path",
         "missing",
         "--origin",

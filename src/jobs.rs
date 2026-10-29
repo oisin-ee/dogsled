@@ -58,6 +58,93 @@ pub fn request_validity(ledger: &Ledger, id: &str) -> Result<Option<Validity>> {
         .map_err(|_| refuse(crate::error::Refusal::JobValidityUnprovable))
 }
 
+/// Fresh origin issuance. The marker prevents transport from repairing deleted authority.
+pub fn issue_request_validity(ledger: &Ledger, id: &str) -> Result<Validity> {
+    validate_id(id)?;
+    let ingress = ledger.child("request-ingress");
+    ingress.with_lock(id, || {
+        let file = format!("{id}.json");
+        if request_validity(ledger, id)?.is_some() || ingress.read::<Value>(&file)?.is_some() {
+            return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+        }
+        let validity = origin_validity(ledger)?;
+        ingress.write(&file, &serde_json::json!({"version":1}))?;
+        record_request_validity(ledger, id, Some(validity))?;
+        Ok(validity)
+    })
+}
+
+/// Versioned non-job transport capability. No effectful downgrade is permitted.
+pub const REQUEST_VALIDITY_PROTOCOL_VERSION: u32 = 1;
+
+/// Accept validated first host ingress only. Existing owning evidence cannot restore
+/// a deleted sidecar from a transport copy.
+pub fn receive_request_validity(
+    ledger: &Ledger,
+    id: &str,
+    incoming: Option<Validity>,
+) -> Result<()> {
+    validate_id(id)?;
+    let ingress = ledger.child("request-ingress");
+    ingress.with_lock(id, || receive_nonjob_locked(ledger, &ingress, id, incoming))
+}
+
+fn receive_nonjob_locked(
+    ledger: &Ledger,
+    ingress: &Ledger,
+    id: &str,
+    incoming: Option<Validity>,
+) -> Result<()> {
+    if let Some(saved) = request_validity(ledger, id)? {
+        return match_request_validity(Some(saved), incoming);
+    }
+    let file = format!("{id}.json");
+    if ingress.read::<Value>(&file)?.is_some() {
+        return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+    }
+    for directory in [
+        "admissions",
+        "launches",
+        "preparation-receipts",
+        "placement-grants",
+        "preparation-expectations",
+        "placement-attempts",
+        "cancellations",
+    ] {
+        if ledger.child(directory).read::<Value>(&file)?.is_some() {
+            return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+        }
+    }
+    let holds = ledger
+        .read::<Vec<Value>>("placements.json")?
+        .unwrap_or_default();
+    if holds.iter().any(|hold| hold["id"] == id)
+        || ledger
+            .child("launches")
+            .read::<Value>(&format!("{id}.progress.json"))?
+            .is_some()
+        || crate::work::queue_records(ledger)?
+            .iter()
+            .any(|ticket| ticket["request"]["id"] == id)
+    {
+        return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+    }
+    check_validity(ledger, incoming.as_ref())?;
+    // This is publication provenance only, never a second validity authority.
+    // Publish it first: interrupted issuance refuses rather than recreating authority.
+    ingress.write(&file, &serde_json::json!({"version":1}))?;
+    record_request_validity(ledger, id, incoming)
+}
+
+/// Compare a non-job transport stamp with its recorded authority. Missing authority
+/// never repairs itself from a queue, admission, or launch envelope.
+pub fn match_request_validity(saved: Option<Validity>, incoming: Option<Validity>) -> Result<()> {
+    match (saved, incoming) {
+        (Some(saved), Some(incoming)) if saved == incoming => Ok(()),
+        _ => Err(refuse(crate::error::Refusal::JobValidityUnprovable)),
+    }
+}
+
 /// Only a request origin or transport ingress may create a sidecar. Once published,
 /// the same id cannot acquire a different creation time. Ledger writes are atomic.
 pub fn record_request_validity(
@@ -116,8 +203,24 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
         note(&value, "/started_ms");
         note(&value, "/ended_ms");
     }
-    for value in json_files(&ledger.child("launches").dir)? {
-        note(&value, "/request/validity/created_ms");
+    for directory in [
+        "launches",
+        "admissions",
+        "preparation-receipts",
+        "placement-grants",
+        "preparation-expectations",
+        "preparation-retirements",
+        "cancellations",
+    ] {
+        for value in json_files(&ledger.child(directory).dir)? {
+            note(&value, "/request/validity/created_ms");
+            note(&value, "/validity/created_ms");
+            note(&value, "/launch/validity/created_ms");
+            note(&value, "/preparation/validity/created_ms");
+            note(&value, "/envelope/request/validity/created_ms");
+            note(&value, "/finished_ms");
+            note(&value, "/recorded_ms");
+        }
     }
     for value in json_files(&ledger.child("admissions").dir)? {
         note(&value, "/request/action/validity/created_ms");
@@ -131,6 +234,8 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
     {
         note(&ticket, "/created_ms");
         note(&ticket, "/request/action/validity/created_ms");
+        note(&ticket, "/request/validity/created_ms");
+        note(&ticket, "/finished_ms");
     }
     Ok(newest)
 }
@@ -185,6 +290,50 @@ fn load_clock(ledger: &Ledger, now: u64) -> Result<Clock> {
             Ok(clock)
         }
     }
+}
+
+/// Stamp the owner's first terminal transition. Retrying validates and preserves the
+/// original value; observation of a legacy terminal record must not call this helper.
+pub fn finish_once(
+    ledger: &Ledger,
+    finished: &mut Option<u64>,
+    created: Option<u64>,
+) -> Result<()> {
+    let effective = advance_clock(ledger, now_ms())?;
+    if let Some(saved) = finished {
+        if *saved > effective
+            || created.is_some_and(|created| saved.saturating_add(VALIDITY_SKEW_MS) < created)
+        {
+            return Err(Error::Invalid(
+                "completion timestamp contradicts its owner evidence; retention refused".into(),
+            ));
+        }
+    } else {
+        *finished = Some(effective);
+    }
+    Ok(())
+}
+
+/// Owner-local retention proof. This never repairs legacy timestamps or deletes records.
+pub(crate) fn completion_time(
+    ledger: &Ledger,
+    finished: Option<u64>,
+    created: Option<u64>,
+    terminal: bool,
+) -> Result<Option<u64>> {
+    let Some(finished) = finished else {
+        return Ok(None);
+    };
+    let effective = clock(ledger)?.high_water_ms.max(now_ms());
+    if !terminal
+        || finished > effective
+        || created.is_some_and(|created| finished.saturating_add(VALIDITY_SKEW_MS) < created)
+    {
+        return Err(Error::Invalid(
+            "completion timestamp contradicts terminal provenance; retention refused".into(),
+        ));
+    }
+    Ok(Some(finished))
 }
 
 /// The host's effective time: the later of its high-water time and its wall clock. The

@@ -251,7 +251,7 @@ fn claimed_result(
 /// Freezes contract, prerequisite evidence and binding in one snapshot.
 ///
 /// # Errors
-/// Rejects stale origins, competing claims, incomplete contracts and scope conflicts.
+/// Rejects stale origins, competing claims, incomplete contracts and open prerequisites.
 pub fn claim(
     mut list: TodoList,
     input: &ClaimInput,

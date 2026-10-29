@@ -432,10 +432,11 @@ pub fn deliver_signals(fleet: &crate::hosts::Fleet, hosts: &[HostReport], now: u
             continue;
         };
         crate::custody::ensure(fleet.ledger, &item)?;
-        if crate::inbox::notify(
+        let child = crate::inbox::ChildIdentity::capture(fleet.ledger, &item)?;
+        if crate::inbox::notify_child(
             fleet,
             hosts,
-            &item.owner_pane,
+            &child,
             &format!("signal-{}-{}", item.id, signal.event_id),
             signal.kind.as_str(),
             signal.text.clone(),

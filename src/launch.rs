@@ -24,6 +24,10 @@ fn with_pane<T>(ledger: &Ledger, pane: &str, f: impl FnOnce() -> Result<T>) -> R
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Progress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed_ms: Option<u64>,
     request: Launch,
     pane: Option<String>,
     terminal: Option<String>,
@@ -40,16 +44,33 @@ struct Progress {
     /// by `unit_receipt` under the launch lock; `terminal_ack` refuses after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stopped: Option<crate::unit_reply::Stopped>,
+    /// Explicit origin proof, independent of terminal/settlement delivery. No deletion yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_release: Option<ReferenceReleaseAck>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PreflightRefusal {
     LineBudget { bytes: usize },
+    Validity { detail: String },
 }
 
 impl Progress {
     fn preflight_failure(&self) -> Result<Option<&str>> {
+        if let Some(PreflightRefusal::Validity { detail }) = &self.preflight_refusal {
+            if self.attempted
+                || self.confirmed
+                || self.terminal_receipt.is_some()
+                || self.stopped.is_some()
+                || self.error.as_ref() != Some(detail)
+            {
+                return Err(crate::worktree::refuse(
+                    "inconsistent validity refusal provenance",
+                ));
+            }
+            return Ok(Some(detail));
+        }
         let Some(PreflightRefusal::LineBudget { bytes }) = self.preflight_refusal else {
             return Ok(None);
         };
@@ -74,6 +95,269 @@ impl Progress {
         }
         Ok(self.error.as_deref())
     }
+}
+
+/// R1 asks the launch owner, never startup confirmation, for completion evidence.
+pub(crate) fn retention_completion(ledger: &Ledger, id: &str) -> Result<Option<u64>> {
+    crate::jobs::validate_id(id)?;
+    let Some(progress) = ledger
+        .child("launches")
+        .read::<Progress>(&format!("{id}.progress.json"))?
+    else {
+        return Ok(None);
+    };
+    if progress.request.id != id {
+        return Err(crate::worktree::refuse(
+            "launch completion identity changed",
+        ));
+    }
+    if let Some(stopped) = &progress.stopped
+        && (stopped.launch != progress.request
+            || !progress.confirmed
+            || !progress.attempted
+            || progress.terminal_receipt.is_some())
+    {
+        return Err(crate::worktree::refuse(
+            "stopped completion provenance changed",
+        ));
+    }
+    if let Some(receipt) = &progress.terminal_receipt {
+        let seed = progress
+            .request
+            .unit
+            .as_ref()
+            .ok_or_else(|| crate::worktree::refuse("terminal seed missing"))?;
+        crate::unit_transport::validate_seed(seed, id, &progress.request.owner)?;
+        if !progress.confirmed
+            || !progress.attempted
+            || receipt.ack.execution != seed.execution
+            || receipt.ack.unit_ref != seed.binding.contract
+            || receipt.ack.digest != seed.exported.digest
+        {
+            return Err(crate::worktree::refuse(
+                "terminal completion provenance changed",
+            ));
+        }
+    }
+    let terminal = progress.preflight_failure()?.is_some()
+        || progress.stopped.is_some()
+        || progress.terminal_receipt.is_some()
+        || (progress.confirmed && progress.closed_ms.is_some())
+        || refused_before_start(ledger, &progress.request)?;
+    crate::jobs::completion_time(
+        ledger,
+        progress.finished_ms,
+        progress.request.validity.map(|v| v.created_ms),
+        terminal,
+    )
+}
+
+pub(crate) fn execution_closed(ledger: &Ledger, item: &crate::items::Item) -> Result<()> {
+    let receipts = ledger.child("launches");
+    let Some(closed) = item.closed_ms.filter(|_| item.resource_closed_ms.is_none()) else {
+        return Ok(());
+    };
+    receipts.with_lock(&item.id, || {
+        let file = format!("{}.progress.json", item.id);
+        let Some(mut progress) = receipts.read::<Progress>(&file)? else {
+            return Ok(());
+        };
+        if progress.request.id != item.id
+            || progress.request.host != item.host
+            || progress.pane.as_ref() != Some(&item.pane)
+            || !progress.confirmed
+        {
+            return Ok(());
+        }
+        if progress.closed_ms.is_some_and(|saved| saved != closed) {
+            return Err(crate::worktree::refuse(
+                "closed execution provenance changed",
+            ));
+        }
+        if progress.closed_ms.is_none() {
+            progress.closed_ms = Some(closed);
+            if progress.finished_ms.is_none() {
+                progress.finished_ms = Some(closed);
+            }
+            receipts.write(&file, &progress)?;
+        }
+        Ok(())
+    })
+}
+
+/// The versioned assertion made by the origin after its provider explicitly releases
+/// this exact binding. Full immutable identities avoid interpreting delivery as release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceRelease {
+    pub version: u32,
+    pub origin_host: String,
+    pub execution: crate::unit_transport::ExecutionRef,
+    pub binding: crate::unit_transport::Binding,
+    pub launch: Launch,
+    pub terminal_evidence: crate::unit_reply::HostEvidence,
+    pub custody_revision: u64,
+    pub released_references: std::collections::BTreeSet<ReleasedReference>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleasedReference {
+    Execution,
+    Recovery,
+    TaskBinding,
+    Custody,
+}
+
+impl ReferenceRelease {
+    pub fn validate(&self) -> Result<()> {
+        use ReleasedReference::{Custody, Execution, Recovery, TaskBinding};
+        let seed = self
+            .launch
+            .unit
+            .as_ref()
+            .ok_or_else(|| crate::unit_transport::conflict("release has no launch seed"))?;
+        crate::unit_transport::validate_seed(seed, &self.launch.id, &self.launch.owner)?;
+        if self.version != 1
+            || self.origin_host.is_empty()
+            || self.launch.owner_host.as_deref() != Some(self.origin_host.as_str())
+            || self.execution != seed.execution
+            || self.binding != seed.binding
+            || self.released_references
+                != [Execution, Recovery, TaskBinding, Custody]
+                    .into_iter()
+                    .collect()
+        {
+            return Err(crate::unit_transport::conflict(
+                "origin reference release identity mismatch",
+            ));
+        }
+        let terminal_matches = match &self.terminal_evidence {
+            crate::unit_reply::HostEvidence::Returned(receipt) => {
+                receipt.ack.execution == self.execution
+                    && receipt.ack.unit_ref == self.binding.contract
+                    && receipt.ack.digest == self.binding.export_digest
+                    && receipt.session_id == self.launch.id
+                    && !receipt.ack.seal_entry_id.is_empty()
+                    && !receipt.ack.session_leaf_id.is_empty()
+                    && !receipt.reply_entry_id.is_empty()
+            }
+            crate::unit_reply::HostEvidence::Stopped(stopped) => {
+                stopped.launch == self.launch && !stopped.reason.is_empty()
+            }
+            crate::unit_reply::HostEvidence::Refused(refusal) => {
+                refusal.launch == self.launch && !refusal.failed.is_empty()
+            }
+        };
+        if !terminal_matches {
+            return Err(crate::unit_transport::conflict(
+                "release terminal identity does not match execution",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceReleaseAck {
+    pub certificate: ReferenceRelease,
+    pub accepted_ms: u64,
+}
+
+/// Accept under the launch lock, before any dependent evidence can be removed. The
+/// origin's task/settlement acknowledgement is deliberately not read here.
+pub fn release_references(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    certificate: &ReferenceRelease,
+) -> Result<ReferenceReleaseAck> {
+    certificate.validate()?;
+    crate::jobs::validate_id(&certificate.execution.request_id)?;
+    let launches = ledger.child("launches");
+    launches.with_lock(&certificate.execution.request_id, || {
+        let file = format!("{}.progress.json", certificate.execution.request_id);
+        let mut progress = launches
+            .read::<Progress>(&file)?
+            .ok_or_else(|| crate::unit_transport::conflict("unknown host launch"))?;
+        if progress.request != certificate.launch {
+            return Err(crate::unit_transport::conflict(
+                "release does not match retained launch",
+            ));
+        }
+        if let Some(saved) = &progress.origin_release {
+            if saved.certificate != *certificate {
+                return Err(crate::unit_transport::conflict(
+                    "origin reference release changed",
+                ));
+            }
+            return Ok(saved.clone());
+        }
+        let final_receipt: Option<Value> =
+            launches.read(&format!("{}.json", certificate.execution.request_id))?;
+        let refused = final_receipt
+            .as_ref()
+            .is_some_and(|value| value.get("failed").is_some());
+        if usize::from(progress.terminal_receipt.is_some())
+            + usize::from(progress.stopped.is_some())
+            + usize::from(refused)
+            != 1
+        {
+            return Err(crate::unit_transport::conflict(
+                "missing or contradictory terminal evidence",
+            ));
+        }
+        let evidence = if let Some(receipt) = &progress.terminal_receipt {
+            if !progress.attempted || progress.preflight_refusal.is_some() {
+                return Err(crate::unit_transport::conflict(
+                    "inconsistent returned launch",
+                ));
+            }
+            crate::unit_reply::HostEvidence::Returned(Box::new(receipt.clone()))
+        } else if let Some(stopped) = &progress.stopped {
+            if !progress.attempted || !progress.confirmed || stopped.launch != progress.request {
+                return Err(crate::unit_transport::conflict(
+                    "inconsistent stopped launch",
+                ));
+            }
+            crate::unit_reply::HostEvidence::Stopped(Box::new(stopped.clone()))
+        } else {
+            // A retained refusal answers without probing or creating a new terminal fact.
+            unit_receipt_locked(ledger, shell, &certificate.execution)?
+                .ok_or_else(|| crate::unit_transport::conflict("awaiting terminal evidence"))?
+        };
+        if evidence != certificate.terminal_evidence {
+            return Err(crate::unit_transport::conflict(
+                "release terminal evidence mismatch",
+            ));
+        }
+        let acknowledgement = ReferenceReleaseAck {
+            certificate: certificate.clone(),
+            accepted_ms: crate::ledger::now_ms(),
+        };
+        progress.origin_release = Some(acknowledgement.clone());
+        launches.write(&file, &progress)?;
+        Ok(acknowledgement)
+    })
+}
+
+/// A read-only synchronization status. Absence is never treated as origin release.
+pub fn reference_release_status(
+    ledger: &Ledger,
+    execution: &crate::unit_transport::ExecutionRef,
+) -> Result<Value> {
+    crate::jobs::validate_id(&execution.request_id)?;
+    ledger.child("launches").with_lock(&execution.request_id, || {
+        let progress = ledger.child("launches").read::<Progress>(&format!("{}.progress.json", execution.request_id))?
+            .ok_or_else(|| crate::unit_transport::conflict("unknown host launch"))?;
+        if progress.request.unit.as_ref().map(|seed| &seed.execution) != Some(execution) {
+            return Err(crate::unit_transport::conflict("host execution mismatch"));
+        }
+        Ok(match progress.origin_release {
+            Some(acknowledgement) => json!({"acknowledgement":acknowledgement}),
+            None => json!({"reason":"awaiting origin reference release", "retryable":true, "action":"retry unit release-references at the origin"}),
+        })
+    })
 }
 
 /// The reason a unit settles `stopped`.
@@ -126,6 +410,7 @@ fn start_while_busy(
     pane: &str,
     terminal: &str,
     window: std::time::Duration,
+    request: &Launch,
 ) -> Result<()> {
     let began = std::time::Instant::now();
     let mut pause = BUSY_FIRST_PAUSE;
@@ -151,6 +436,7 @@ fn start_while_busy(
                 ))
             })?;
         }
+        work::check_launch_validity(ledger, request)?;
         retry = true;
         match shell.run_setup_ok("herdr", args) {
             Err(error) if is_busy(&error) => {
@@ -558,6 +844,7 @@ pub fn agent_guarded(
 ) -> Result<Value> {
     let receipts = ledger.child("launches");
     receipts.with_lock(&request.id, || {
+        retention_completion(ledger, &request.id)?;
         let file = format!("{}.json", request.id);
         let progress_file = format!("{}.progress.json", request.id);
         let saved = receipts.read::<Progress>(&progress_file)?;
@@ -583,9 +870,11 @@ pub fn agent_guarded(
             )?;
             return Err(Error::Invalid(failed.into()));
         }
-        let mut progress = match saved {
-            Some(progress) => progress,
-            None => allocate(&receipts, shell, request, &progress_file, checkout)?,
+        let mut progress = if let Some(progress) = saved {
+            progress
+        } else {
+            work::check_launch_validity(ledger, request)?;
+            allocate(ledger, shell, request, &progress_file, checkout)?
         };
         let pane = progress.pane.clone().ok_or_else(|| {
             Error::Invalid(format!(
@@ -603,7 +892,7 @@ pub fn agent_guarded(
                         .terminal
                         .as_deref()
                         .map(|terminal| (pane.as_str(), terminal));
-                    return Err(refused(&receipts, shell, &file, owned, error)?);
+                    return Err(refused(ledger, shell, &file, owned, error)?);
                 }
                 Ok(())
             })?;
@@ -624,7 +913,7 @@ pub fn agent_guarded(
 /// close only its still-owned idle shell, whether allocated or prepared. Unknown or occupied panes
 /// survive the final refusal. Any other error passes through unchanged.
 fn refused(
-    receipts: &Ledger,
+    ledger: &Ledger,
     shell: &dyn Shell,
     file: &str,
     pane: Option<(&str, &str)>,
@@ -639,7 +928,17 @@ fn refused(
     if !code.is_some_and(|code| REFUSALS.contains(&code.as_str())) {
         return Ok(error);
     }
+    let receipts = ledger.child("launches");
     let failed = error.to_string();
+    let progress_file = file.replace(".json", ".progress.json");
+    if let Some(mut progress) = receipts.read::<Progress>(&progress_file)? {
+        crate::jobs::finish_once(
+            ledger,
+            &mut progress.finished_ms,
+            progress.request.validity.map(|v| v.created_ms),
+        )?;
+        receipts.write(&progress_file, &progress)?;
+    }
     receipts.write(
         file,
         &Receipt::Refused {
@@ -719,12 +1018,13 @@ fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<(
 }
 
 fn allocate(
-    receipts: &Ledger,
+    ledger: &Ledger,
     shell: &dyn Shell,
     request: &Launch,
     file: &str,
     checkout: Option<&crate::cleanup::Tree>,
 ) -> Result<Progress> {
+    let receipts = ledger.child("launches");
     let Action::Agent {
         kind,
         name,
@@ -747,7 +1047,7 @@ fn allocate(
     let argv = work::agent_argv(
         kind,
         name,
-        &seed_args(request, receipts),
+        &seed_args(request, &receipts),
         &work::Files::at(&receipts.dir, &request.id),
         profile.as_ref(),
     )?;
@@ -773,6 +1073,8 @@ fn allocate(
         }
     }
     let mut progress = Progress {
+        finished_ms: None,
+        closed_ms: None,
         request: request.clone(),
         pane: None,
         terminal: request.terminal.clone(),
@@ -783,6 +1085,7 @@ fn allocate(
         preflight_refusal: None,
         terminal_receipt: None,
         stopped: None,
+        origin_release: None,
     };
     let bytes = work::line_len(kind, &argv);
     if bytes > work::LINE_BUDGET {
@@ -790,6 +1093,11 @@ fn allocate(
         progress.pane.clone_from(&request.pane);
         progress.error = Some(error.to_string());
         progress.preflight_refusal = Some(PreflightRefusal::LineBudget { bytes });
+        crate::jobs::finish_once(
+            ledger,
+            &mut progress.finished_ms,
+            request.validity.map(|v| v.created_ms),
+        )?;
         receipts.write(file, &progress)?;
         crate::unit_request::crash_point("preflight-refusal-persisted");
         receipts.write(
@@ -800,6 +1108,7 @@ fn allocate(
         )?;
         return Err(error);
     }
+    work::check_launch_validity(ledger, request)?;
     receipts.write(file, &progress)?;
     let (pane, terminal) = work::pane(shell, request)?;
     progress.pane = Some(pane.clone());
@@ -807,6 +1116,43 @@ fn allocate(
     progress.terminal = terminal;
     receipts.write(file, &progress)?;
     Ok(progress)
+}
+
+fn validity_refused(
+    ledger: &Ledger,
+    progress: &mut Progress,
+    file: &str,
+    error: &Error,
+) -> Result<()> {
+    let receipts = ledger.child("launches");
+    progress.attempted = false;
+    progress.error = Some(error.to_string());
+    progress.preflight_refusal = Some(PreflightRefusal::Validity {
+        detail: error.to_string(),
+    });
+    crate::jobs::finish_once(
+        ledger,
+        &mut progress.finished_ms,
+        progress.request.validity.map(|v| v.created_ms),
+    )?;
+    receipts.write(file, progress)?;
+    receipts.write(
+        &format!("{}.json", progress.request.id),
+        &Receipt::Refused {
+            failed: error.to_string(),
+        },
+    )
+}
+
+fn finish_progress(ledger: &Ledger, progress: &mut Progress) -> Result<()> {
+    crate::jobs::finish_once(
+        ledger,
+        &mut progress.finished_ms,
+        progress.request.validity.map(|v| v.created_ms),
+    )?;
+    ledger
+        .child("launches")
+        .write(&format!("{}.progress.json", progress.request.id), progress)
 }
 
 fn start_or_reconcile(
@@ -870,6 +1216,7 @@ fn start_or_reconcile(
         ledger.child("launches").write(file, progress)?;
         return Err(error);
     }
+    work::check_launch_validity(ledger, request)?;
     // Native agent.start owns shell readiness and its atomic busy refusal. An eager
     // process snapshot here rejects startup before that supported boundary can run.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
@@ -895,7 +1242,13 @@ fn start_or_reconcile(
     )?);
     progress.attempted = true;
     receipts.write(file, progress)?;
-    if let Err(error) = start_while_busy(ledger, shell, &args, pane, &current, busy_window()) {
+    if let Err(error) =
+        start_while_busy(ledger, shell, &args, pane, &current, busy_window(), request)
+    {
+        if matches!(error.root(), Error::Refused { .. }) {
+            validity_refused(ledger, progress, file, &error)?;
+            return Err(error);
+        }
         if matches!(error, Error::Launch(_)) {
             // Herdr never typed into the pane, so the launch may be tried again.
             progress.attempted = false;
@@ -1297,10 +1650,7 @@ pub(crate) fn unit_receipt_locked(
         };
         let mut progress = progress;
         progress.stopped = Some(stopped.clone());
-        receipts.write(
-            &format!("{}.progress.json", execution.request_id),
-            &progress,
-        )?;
+        finish_progress(ledger, &mut progress)?;
         Ok(Some(HostEvidence::Stopped(Box::new(stopped))))
     })()
 }

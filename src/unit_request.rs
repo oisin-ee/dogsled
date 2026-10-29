@@ -40,6 +40,17 @@ pub struct Prepared {
     /// refresh no longer reads its host, and later returned or refusal evidence is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<crate::unit_transport::Returned>,
+    /// Explicit reference-release intent, retained through a lost host acknowledgement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_release: Option<ReferenceReleaseIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceReleaseIntent {
+    pub certificate: crate::launch::ReferenceRelease,
+    pub acknowledgement: Option<crate::launch::ReferenceReleaseAck>,
+    pub reason: Option<String>,
 }
 
 fn owner() -> Result<String> {
@@ -121,6 +132,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
             request_id: request.id.clone(),
         };
         let attempt = Attempt {
+            finished_ms: None,
             request: serde_json::to_value(request)?,
             placement: None,
             host: None,
@@ -141,6 +153,7 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
                 custody_acks: Vec::new(),
                 reviews: Vec::new(),
                 stopped: None,
+                reference_release: None,
             }),
         };
         attempts.write(&format!("{}.json", execution.request_id), &attempt)?;
@@ -223,6 +236,9 @@ fn commit_using(
             .unit
             .as_mut()
             .ok_or_else(|| conflict("not a unit request"))?;
+        if unit.reference_release.is_some() {
+            return Err(conflict("execution references were permanently released"));
+        }
         if unit.abandoned.is_some() {
             return Err(conflict("prepared request was permanently abandoned"));
         }
@@ -355,6 +371,9 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
         "unresolved"
     };
     let mut value = json!({"execution":execution,"origin":unit.origin,"phase":phase,"receipt":receipt,"settlement":settlement(unit)?});
+    if let Some(release) = &unit.reference_release {
+        value["referenceRelease"] = json!(release);
+    }
     if let Some(error) = &attempt.error {
         value["error"] = json!(error);
     }
@@ -574,6 +593,7 @@ fn refreshable(
     !resource_only(attempt, closed)
         && attempt.unit.as_ref().is_some_and(|unit| {
             unit.committed.is_some()
+                && unit.reference_release.is_none()
                 && unit.settlement_ack.is_none()
                 && unit.stopped.is_none()
                 && scope.includes(&unit.execution)
@@ -581,6 +601,7 @@ fn refreshable(
 }
 
 pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
+    retry_reference_releases(fleet, scope)?;
     settle_unlaunched(fleet.ledger)?;
     let resource_closed = resource_closed_items(fleet.ledger)?;
     let attempts = fleet.ledger.child("admissions");
@@ -1026,6 +1047,156 @@ pub fn settlements(fleet: &Fleet) -> Result<Value> {
     Ok(json!(pending))
 }
 
+/// Only an explicit release envelope can release the task binding. Settlement delivery
+/// does not enter this path. Capture the immutable expectation before contacting the host.
+fn release_references(
+    fleet: &Fleet,
+    certificate: &crate::launch::ReferenceRelease,
+) -> Result<Value> {
+    certificate.validate()?;
+    if certificate.origin_host != crate::inbox::hostname() {
+        return Err(conflict("reference release belongs to another origin host"));
+    }
+    let execution = &certificate.execution;
+    let attempts = fleet.ledger.child("admissions");
+    attempts.with_lock(&execution.request_id, || {
+        let mut attempt = load(&attempts, execution)?;
+        if attempt.launch.as_ref() != Some(&certificate.launch) || attempt.host.is_none() {
+            return Err(conflict("release does not match origin launch"));
+        }
+        crate::custody::locked(fleet.ledger, &execution.request_id, |custody| {
+            let unit = attempt.unit.as_mut().ok_or_else(|| conflict("not a unit request"))?;
+            if let Some(saved) = &unit.reference_release {
+                return if saved.certificate == *certificate {
+                    Ok(())
+                } else {
+                    Err(conflict("origin reference release changed"))
+                };
+            }
+            if custody.map_or(0, |record| record.revision) != certificate.custody_revision
+                || unit.committed.as_ref().map(|input| &input.binding) != Some(&certificate.binding)
+            {
+                return Err(conflict("release binding or custody revision changed"));
+            }
+            let expected = match &certificate.terminal_evidence {
+                crate::unit_reply::HostEvidence::Returned(receipt) => {
+                    unit.returned.is_some() && unit.stopped.is_none() && unit.abandoned.is_none()
+                        && unit.terminal_receipt.as_ref() == Some(receipt.as_ref())
+                }
+                crate::unit_reply::HostEvidence::Stopped(stopped) => {
+                    stopped.launch == certificate.launch && unit.returned.is_none() && unit.abandoned.is_none()
+                        && unit.stopped.as_ref().is_some_and(|event| {
+                            matches!(&event.result, crate::unit_transport::ReturnedResult::Stopped { reason, .. } if reason == &stopped.reason)
+                        })
+                }
+                crate::unit_reply::HostEvidence::Refused(refusal) => {
+                    refusal.launch == certificate.launch && unit.returned.is_none() && unit.stopped.is_none()
+                        && unit.abandoned.as_ref().is_some_and(|event| {
+                            matches!(&event.result, NotStartedResult::NotStarted { reason } if reason == &refusal.failed)
+                        })
+                }
+            };
+            if !expected {
+                return Err(conflict("release does not match origin terminal evidence"));
+            }
+            unit.reference_release = Some(ReferenceReleaseIntent {
+                certificate: certificate.clone(), acknowledgement: None,
+                reason: Some("awaiting origin reference release".into()),
+            });
+            attempts.write(&format!("{}.json", execution.request_id), &attempt)
+        })
+    })?;
+    synchronize_release(fleet, execution)
+}
+
+/// The RPC holds no admission, custody, or items lock. A lost reply leaves the exact
+/// intent durable, and a retry sends it unchanged without reopening any reference.
+fn synchronize_release(fleet: &Fleet, execution: &ExecutionRef) -> Result<Value> {
+    let attempts = fleet.ledger.child("admissions");
+    let (host, intent) = attempts.with_lock(&execution.request_id, || {
+        let attempt = correlate(&attempts, execution)?;
+        let intent = attempt
+            .unit
+            .as_ref()
+            .and_then(|unit| unit.reference_release.as_ref())
+            .ok_or_else(|| conflict("missing origin reference release intent"))?
+            .clone();
+        let host = attempt
+            .host
+            .ok_or_else(|| conflict("missing execution host"))?;
+        Ok((host, intent))
+    })?;
+    if intent.acknowledgement.is_some() {
+        return Ok(json!(intent));
+    }
+    let response = fleet.release_references(&host, &intent.certificate);
+    attempts.with_lock(&execution.request_id, || {
+        let mut attempt = correlate(&attempts, execution)?;
+        let saved = attempt
+            .unit
+            .as_mut()
+            .and_then(|unit| unit.reference_release.as_mut())
+            .ok_or_else(|| conflict("origin reference release intent disappeared"))?;
+        if saved.certificate != intent.certificate {
+            return Err(conflict("origin reference release intent changed"));
+        }
+        match response {
+            Ok(acknowledgement) => {
+                if acknowledgement.certificate != saved.certificate {
+                    return Err(conflict(
+                        "host reference release acknowledgement changed identity",
+                    ));
+                }
+                if let Some(previous) = &saved.acknowledgement {
+                    if *previous != acknowledgement {
+                        return Err(conflict("host reference release acknowledgement changed"));
+                    }
+                } else {
+                    saved.acknowledgement = Some(acknowledgement);
+                }
+                saved.reason = None;
+            }
+            Err(_) if saved.acknowledgement.is_none() => {
+                // Transport text can contain secrets; retain a fixed, actionable reason.
+                saved.reason = Some("awaiting origin reference release".into());
+            }
+            Err(_) => (),
+        }
+        let result = json!(saved);
+        attempts.write(&format!("{}.json", execution.request_id), &attempt)?;
+        Ok(result)
+    })
+}
+
+fn retry_reference_releases(fleet: &Fleet, scope: Scope<'_>) -> Result<Value> {
+    let attempts = fleet.ledger.child("admissions");
+    let mut results = Vec::new();
+    for file in records(&attempts)? {
+        let Some(attempt) = attempts.read::<Attempt>(&file)? else {
+            continue;
+        };
+        let Some(unit) = attempt.unit.as_ref() else {
+            continue;
+        };
+        if !scope.includes(&unit.execution)
+            || unit
+                .reference_release
+                .as_ref()
+                .is_none_or(|intent| intent.acknowledgement.is_some())
+        {
+            continue;
+        }
+        match synchronize_release(fleet, &unit.execution) {
+            Ok(result) => results.push(result),
+            Err(error) => eprintln!(
+                "dogsled reference release {}: {error}",
+                unit.execution.request_id
+            ),
+        }
+    }
+    Ok(json!(results))
+}
+
 fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -> Result<Value> {
     crate::jobs::validate_id(&input.execution.request_id)?;
     let attempts = fleet.ledger.child("admissions");
@@ -1053,6 +1224,9 @@ fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -
                 }
                 let applied = unit.settlement_ack.is_none();
                 unit.settlement_ack = Some(input.event_id.clone());
+                if applied {
+                    crate::jobs::finish_once(fleet.ledger, &mut attempt.finished_ms, None)?;
+                }
                 attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
                 Ok(json!({"applied":applied}))
             })
@@ -1092,6 +1266,7 @@ fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -
             let applied = !unit.custody_acks.contains(&reference.claim_id);
             if applied {
                 unit.custody_acks.push(reference.claim_id.clone());
+                crate::jobs::finish_once(fleet.ledger, &mut attempt.finished_ms, None)?;
                 attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
             }
             Ok(json!({"applied":applied}))
@@ -1209,6 +1384,10 @@ fn dispatch(fleet: &Fleet, command: crate::cli::UnitCommand) -> Result<Value> {
         UnitCommand::TerminalAck { input } => Ok(serde_json::to_value(
             crate::launch::terminal_ack(fleet.ledger, fleet.shell, &decode(&input)?)?,
         )?),
+        UnitCommand::ReleaseReferences { input } => release_references(fleet, &decode(&input)?),
+        UnitCommand::RetryReferenceReleases => {
+            retry_reference_releases(fleet, Scope::Owner(&owner()?))
+        }
         UnitCommand::Settlements => settlements(fleet),
         UnitCommand::AckSettlement { input } => ack_settlement(fleet, &decode(&input)?),
         UnitCommand::AbandonPrepared { input } => Ok(serde_json::to_value(abandon(

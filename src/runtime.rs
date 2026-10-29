@@ -152,8 +152,14 @@ pub(crate) fn request_with_id(
                 .ok_or_else(|| Error::Invalid("HERDR_WORKSPACE_ID is required".into()))?,
         )?)
     };
+    let validity = if matches!(action, Action::Job { .. }) {
+        None
+    } else {
+        Some(jobs::issue_request_validity(fleet.ledger, &id)?)
+    };
     Ok(Request {
         id,
+        validity,
         action,
         host: args.host.clone(),
         branch: args.branch.clone(),
@@ -540,6 +546,26 @@ fn place(
 
 pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
     match command {
+        Command::RetirePreparation {
+            request_id,
+            host,
+            reason,
+            cleanup,
+        } => {
+            let result = crate::preparation_retirement::retire(
+                fleet,
+                &request_id,
+                host.as_deref(),
+                &reason,
+                cleanup,
+            )?;
+            crate::print(true, &result, String::new)?;
+            Ok(if result["status"] == "retired" {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         Command::Place {
             resume,
             host,

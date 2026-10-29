@@ -599,7 +599,8 @@ fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
                 || format!("reply-{}-{}", item.id, reply.seq),
                 |id| format!("unit-reply-{id}"),
             );
-            if crate::inbox::notify(fleet, reports, &item.owner_pane, &id, "reply", text, now)? {
+            let child = crate::inbox::ChildIdentity::capture(fleet.ledger, &item)?;
+            if crate::inbox::notify_child(fleet, reports, &child, &id, "reply", text, now)? {
                 told.push(item.id.clone());
             }
             continue;
@@ -631,7 +632,8 @@ fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             item.id,
             agent.state_since_ms.unwrap_or_default()
         );
-        crate::inbox::notify(fleet, reports, &item.owner_pane, &id, "blocked", text, now)?;
+        let child = crate::inbox::ChildIdentity::capture(fleet.ledger, &item)?;
+        crate::inbox::notify_child(fleet, reports, &child, &id, "blocked", text, now)?;
     }
     if told.is_empty() {
         return Ok(());
@@ -848,7 +850,17 @@ mod liveness_tests {
                 assert_eq!(reports[0].sampled_ms, Some(1000));
                 assert!(!reports[0].headroom.as_ref().unwrap().eligible);
                 assert!(!reports[0].fresh(61_000));
-                assert!(!fleet.node().reserve("new", 61_000, None)?.reserved);
+                assert!(
+                    !fleet
+                        .node()
+                        .reserve(
+                            "new",
+                            61_000,
+                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                            false
+                        )?
+                        .reserved
+                );
                 assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
                 assert!(crate::items::list(&ledger)?[0].closed_ms.is_some());
                 // The same old observation cannot close an agent after its done mark disappears.

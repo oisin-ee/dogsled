@@ -561,7 +561,7 @@ fn cancellation_launch_fixture(name: &str) -> (Rig, Value, String, Value) {
     let receipt = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
     let commit = &attempt["unit"]["committed"];
     let request = &attempt["request"];
-    let launch = json!({"id":id,"action":request["action"],"host":attempt["host"]["id"],
+    let launch = json!({"id":id,"validity":request["validity"],"action":request["action"],"host":attempt["host"]["id"],
         "cwd":receipt["prepared"]["path"],"pane":receipt["prepared"]["pane_id"],
         "terminal":receipt["prepared"]["terminal_id"],"workspace":null,"workspace_name":request["workspace_name"],
         "owner":request["owner"],"owner_host":request["owner_host"],"preparation_protocol":1,"preparation":receipt["binding"],
@@ -750,8 +750,8 @@ fn unreachable_host_keeps_cancel_release_pending() {
     assert_eq!(saved["acknowledgement"], acknowledged["acknowledgement"]);
     assert_eq!(rig.read("peer-state/preparations.json"), json!([unrelated]));
     assert_eq!(
-        rig.read(&format!("peer-state/preparation-receipts/{id}.json")),
-        receipt
+        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        outcome_identity(receipt)
     );
     assert_eq!(
         operation(&rig, "observe", &execution_input(&execution)).1["phase"],
@@ -788,7 +788,12 @@ fn corrupt_cancellation_holds_only_its_committed_unit() {
         rig.put(&file, &corrupt);
         let mut unrelated = queue[0].clone();
         unrelated["id"] = json!("unrelated-ticket");
-        unrelated["request"] = json!({"id":"unrelated-place","action":{"type":"place"},
+        fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
+        rig.put(
+            "state/job-validity/unrelated-place.json",
+            &rig.job_validity(),
+        );
+        unrelated["request"] = json!({"id":"unrelated-place","validity":rig.job_validity(),"action":{"type":"place"},
             "host":"local","cwd":rig.dir.join("home"),"owner":"w1:p1"});
         queue.as_array_mut().unwrap().push(unrelated);
         rig.put("state/queue.json", &queue);

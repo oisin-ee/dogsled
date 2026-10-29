@@ -158,7 +158,7 @@ esac
 #[test]
 fn host_launch_matches_workspace_name_or_creates_it_and_validates_cwd() {
     let rig = Rig::new("workspace-name");
-    let request = json!({"id":"launch-one","action":{"type":"agent","kind":"claude","name":"worker","message":"hello"},
+    let request = json!({"id":"launch-one","validity":rig.job_validity(),"action":{"type":"agent","kind":"claude","name":"worker","message":"hello"},
         "host":"remote","cwd":rig.dir.join("home"),"pane":null,"workspace":null,"workspace_name":"caller","owner":"parent"});
     assert_eq!(
         rig.json(&[

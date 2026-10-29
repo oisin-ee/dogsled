@@ -9,8 +9,11 @@ import { DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, c
 import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { UnitBridge } from "./unit-bridge.ts";
-import { acquire, prepared, receipt, unwrap, type Prepared } from "./unit-protocol.ts";
+import { prepared, receipt, unwrap, type Prepared } from "./unit-protocol.ts";
 import { worker as makeWorker } from "./todo/src/provider-fixture.ts";
+import { createTodo, type TodoParts } from "./todo/src/index.ts";
+import { imported as importedUnit } from "./todo/src/wasm.ts";
+import { branchSnapshot } from "./todo/src/state.ts";
 
 test("native turn guidance agrees across launch, MCP, and Pi without changing todo", async () => {
 	const guidance = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children.";
@@ -35,10 +38,11 @@ type Executor = ExtensionAPI["exec"];
 async function runtime(cwd: string, providerFirst: boolean, execute: Executor, options: { id?: string; seed?: string; manager?: SessionManager; spawn?: (input: unknown) => Promise<void> } = {}) {
 	const events = createEventBus(), manager = options.manager ?? SessionManager.inMemory(cwd, options.id ? { id: options.id } : undefined);
 	const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
-	let bridge!: UnitBridge, context!: ExtensionContext;
+	let bridge!: UnitBridge, context!: ExtensionContext, todo!: TodoParts;
+	const todoExtension: ExtensionFactory = pi => { todo = createTodo(pi, { seedPath: () => options.seed }); };
 	const adapter: ExtensionFactory = pi => {
-		bridge = new UnitBridge({ events: pi.events, registerFlag: pi.registerFlag, getFlag: pi.getFlag,
-			exec: (binary, args, execOptions) => binary === "git" ? pi.exec(binary, args, execOptions) : execute(binary, args, execOptions) }, "fixture-executor");
+		bridge = new UnitBridge({ registerFlag: pi.registerFlag, getFlag: pi.getFlag,
+			exec: (binary, args, execOptions) => binary === "git" ? pi.exec(binary, args, execOptions) : execute(binary, args, execOptions) }, "fixture-executor", () => todo?.tasks());
 		pi.on("session_start", (event, ctx) => { context = ctx; bridge.start(event.reason); });
 		pi.on("before_agent_start", async (_event, ctx) => { if (bridge.guard(ctx)) await bridge.ready(ctx); });
 		pi.on("tool_call", (event, ctx) => bridge.call(event, ctx));
@@ -53,11 +57,13 @@ async function runtime(cwd: string, providerFirst: boolean, execute: Executor, o
 		} });
 	};
 	const loader = new DefaultResourceLoader({ cwd, agentDir: "/nonexistent/unit-contract-test", eventBus: events, settingsManager: settings,
-		additionalExtensionPaths: [fileURLToPath(new URL("./todo/src/index.ts", import.meta.url))], extensionFactories: [adapter],
-		extensionsOverride: loaded => ({ ...loaded, extensions: loaded.extensions.toSorted((a, b) => {
-			const left = a.tools.has("todo"), right = b.tools.has("todo");
-			return left === right ? 0 : left === providerFirst ? -1 : 1;
-		}) }),
+		extensionFactories: providerFirst ? [todoExtension, adapter] : [adapter, todoExtension],
+		extensionsOverride: loaded => {
+			for (const extension of loaded.extensions) if (extension.tools.has("todo")) {
+				extension.path = fileURLToPath(new URL("./todo/src/index.ts", import.meta.url));
+			}
+			return loaded;
+		},
 		noContextFiles: true, noExtensions: true, noPromptTemplates: true, noSkills: true, noThemes: true });
 	const models = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(), modelsPath: null, refreshOnCreate: false });
 	const faux = fauxProvider({ tokensPerSecond: 0 }); models.registerNativeProvider(faux.provider);
@@ -66,8 +72,8 @@ async function runtime(cwd: string, providerFirst: boolean, execute: Executor, o
 	const { session } = await createAgentSession({ cwd, modelRuntime: models, model: faux.getModel(), sessionManager: manager, settingsManager: settings, resourceLoader: loader, thinkingLevel: "off" });
 	if (options.seed) session.extensionRunner.setFlagValue("todo-unit-file", options.seed);
 	await session.bindExtensions({});
-	assert.ok(acquire(events), "real pi-todo must own its tool and expose the capability");
-	return { session, manager, faux, provider: () => acquire(events)!, bridge, context };
+	assert.ok(todo.tasks(), "real pi-todo must own its tool and expose the capability");
+	return { session, manager, faux, provider: () => todo.tasks()!, bridge, context };
 }
 
 async function todo(session: Session, input: any): Promise<any> {
@@ -106,8 +112,9 @@ test("actual extension loader and startup guard: merged extension", async () => 
 		({ session } = await createAgentSession({ cwd, modelRuntime: models, model: faux.getModel(), sessionManager: manager, settingsManager: settings, resourceLoader: loader, thinkingLevel: "off" }));
 		session.extensionRunner.setFlagValue("todo-unit-file", seed);
 		await session.bindExtensions({});
-		const provider = acquire(events); assert.ok(provider);
-		const imported = unwrap(provider.imported()); assert.ok(receipt(imported)); assert.equal(imported.digest, origin.claimed.exported.digest);
+		const persisted = importedUnit(branchSnapshot(manager.getBranch()), manager.getSessionId()); assert.ok(persisted);
+		const imported = { ...persisted, seal: persisted.seal ?? null };
+		assert.ok(receipt(imported)); assert.equal(imported.digest, origin.claimed.exported.digest);
 		faux.setResponses([fauxAssistantMessage("Imported task ready."), fauxAssistantMessage("Awaiting implementation.")]);
 		await session.prompt("Check the loaded import.");
 		assert.equal(faux.state.callCount, 2);
