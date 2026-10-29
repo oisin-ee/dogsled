@@ -189,6 +189,8 @@ pub struct Id {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct PlaceArgs {
+    #[serde(default)]
+    pub resume: Option<String>,
     #[serde(flatten)]
     pub placement: Placement,
 }
@@ -496,7 +498,21 @@ impl Server {
     )]
     async fn place(&self, Parameters(args): Parameters<PlaceArgs>) -> Result<String, String> {
         self.call(move |fleet| {
-            let request = crate::runtime::request(fleet, &args.placement.args(), Action::Place)?;
+            let request = if let Some(id) = args.resume {
+                let placement = &args.placement;
+                if placement.host.is_some()
+                    || placement.branch.is_some()
+                    || placement.base.is_some()
+                    || placement.cwd.is_some()
+                {
+                    return Err(Error::Invalid(format!(
+                        "placement request {id}: resume conflicts with host, branch, base, or cwd"
+                    )));
+                }
+                crate::work::resume_placement(fleet.ledger, &id)?
+            } else {
+                crate::runtime::request(fleet, &args.placement.args(), Action::Place)?
+            };
             crate::runtime::start(fleet, request, false)
         })
         .await

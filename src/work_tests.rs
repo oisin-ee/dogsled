@@ -530,7 +530,11 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
     let before = std::fs::read(admission.dir.join("captured-placement.json")).unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&before).unwrap();
     assert_eq!(saved["request"], serde_json::to_value(&request).unwrap());
-    assert_eq!(saved["placement"]["phase"], "host_selected");
+    assert_eq!(saved["placement"]["phase"], "completed");
+    assert_eq!(
+        saved["placement"]["saved"]["prepared"]["grant"]["envelope"]["request"],
+        saved["request"]
+    );
     let hold = std::fs::read(ledger.dir.join("placements.json")).unwrap();
     for field in ["cwd", "owner", "branch", "host"] {
         let mut changed = serde_json::to_value(&request).unwrap();

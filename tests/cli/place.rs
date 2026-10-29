@@ -1,5 +1,14 @@
 use super::*;
 
+fn saved_grant(attempt: &Value) -> Value {
+    let progress = &attempt["placement"];
+    match progress["phase"].as_str().unwrap() {
+        "host_selected" | "preparation_pending" => progress["grant"].clone(),
+        "prepared" => progress["prepared"]["grant"].clone(),
+        _ => progress["saved"]["prepared"]["grant"].clone(),
+    }
+}
+
 #[test]
 fn placement_host_report_deadline_fails_without_granting_capacity() {
     let rig = Rig::short("placement-report-deadline");
@@ -58,7 +67,11 @@ fn real_reservation_peer(rig: &Rig, pause: bool) {
         ":"
     };
     let handler = format!(
-        r#"  *'host reserve'*)
+        r#"  *'host preparation-lookup'*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" ;;
+  *'host reserve'*)
     {barrier}
     for remote do :; done
     remote=${{remote#* host }}
@@ -67,6 +80,7 @@ fn real_reservation_peer(rig: &Rig, pause: bool) {
     test "$status" = 0 || exit "$status"
     if test -f "$RIG/lose-reply"; then rm "$RIG/lose-reply"; exit 255; fi
     cat "$RIG/reserve-response" ;;"#,
+        env!("CARGO_BIN_EXE_dogsled"),
         env!("CARGO_BIN_EXE_dogsled")
     );
     rig.script("ssh", &script.replace("  *'host reserve'*)\n    for remote do :; done\n    sh -c \"$RIG/bin/peer-fixture $remote\" ;;", &handler));
@@ -203,12 +217,12 @@ fn acknowledged_placement_grant_replays_after_real_ttl_without_readmission() {
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(rig.read(&grant_path), grant);
     assert_eq!(
-        rig.read(&format!("state/admissions/{id}.json"))["placement"]["grant"],
+        saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
         grant
     );
-    assert_eq!(rig.read("peer-state/placements.json"), json!([]));
+    assert_eq!(rig.read("peer-state/placements.json"), original_hold);
     let log = rig.log("ssh.log");
-    assert_eq!(log.matches("host reserve").count(), 2, "{log}");
+    assert_eq!(log.matches("host reserve").count(), 1, "{log}");
     assert_eq!(log.matches("host prepare ").count(), 1, "{log}");
     assert!(!log.contains("host launch"), "{log}");
 }
@@ -227,17 +241,15 @@ fn acknowledged_placement_missing_grant_never_allocates_after_ttl() {
     assert!(rig.run(&["serve", "--once"]).status.success());
     let ticket = rig.read("state/queue.json")[0].clone();
     assert_eq!(ticket["state"], "failed", "{ticket}");
-    let refusal = rig.read("reserve-response");
     assert!(
-        refusal
-            .to_string()
-            .contains("placement grant missing; no new capacity"),
-        "{refusal}"
+        ticket["error"].as_str().unwrap().contains("changed"),
+        "{ticket}"
     );
+    assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 1);
     assert!(!rig.dir.join(&grant_path).exists());
     assert_eq!(rig.read("peer-state/placements.json"), before);
     assert_eq!(
-        rig.read(&format!("state/admissions/{id}.json"))["placement"]["grant"],
+        saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
         grant
     );
     let log = rig.log("ssh.log");
@@ -261,17 +273,20 @@ fn queued_host_selected_recovers_the_acknowledged_grant() {
     let ticket = rig.read("state/queue.json")[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(
-        rig.read(&format!("state/admissions/{id}.json"))["placement"]["grant"],
+        saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
         grant
     );
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
 }
 
 #[test]
-fn queued_placement_recovers_after_preparation_receipt_without_preparing_again() {
+fn placement_crash_boundaries_replay_one_result() {
     for boundary in [
         "placement-host-selected",
         "placement-preparation-received",
+        "placement-result-saved",
+        "placement-acknowledgement-saved",
+        "placement-completed",
         "preparation-fenced",
         "preparation-claim-released",
     ] {

@@ -376,18 +376,38 @@ pub fn run(
     base: Option<&str>,
     request_id: &str,
 ) -> Result<Prepared> {
+    let envelope = envelope(fleet, host, repo, branch, base, request_id)?;
+    deliver(fleet, host, &envelope)
+}
+
+/// The exact preparation transport is captured before delivery and never rediscovered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Envelope {
+    pub version: u32,
+    pub request_id: String,
+    pub repo: String,
+    pub branch: String,
+    pub base: Option<String>,
+}
+
+pub fn envelope(
+    fleet: &Fleet,
+    host: &Host,
+    repo: &str,
+    branch: &str,
+    base: Option<&str>,
+    request_id: &str,
+) -> Result<Envelope> {
     crate::jobs::validate_id(request_id)?;
     let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
-        let prepared = local(
-            fleet.shell,
-            fleet.ledger,
-            &checkout.display().to_string(),
-            branch,
-            base,
-            Some(request_id),
-        )?;
-        return Ok(prepared);
+        return Ok(Envelope {
+            version: disposition::VERSION,
+            request_id: request_id.into(),
+            repo: checkout.display().to_string(),
+            branch: branch.into(),
+            base: base.map(str::to_owned),
+        });
     }
     let home = Path::new(&fleet.home);
     let canonical = home.canonicalize().ok();
@@ -402,32 +422,251 @@ pub fn run(
         .unwrap_or(&checkout)
         .display()
         .to_string();
+    Ok(Envelope {
+        version: disposition::VERSION,
+        request_id: request_id.into(),
+        repo: remote,
+        branch: branch.into(),
+        base: base.map(str::to_owned),
+    })
+}
+
+pub fn deliver(fleet: &Fleet, host: &Host, envelope: &Envelope) -> Result<Prepared> {
+    require_protocol(Some(envelope.version))?;
+    crate::jobs::validate_id(&envelope.request_id)?;
+    if host.is_local() {
+        return local(
+            fleet.shell,
+            fleet.ledger,
+            &envelope.repo,
+            &envelope.branch,
+            envelope.base.as_deref(),
+            Some(&envelope.request_id),
+        );
+    }
     let mut args = vec![
         "prepare".into(),
         "--preparation-protocol".into(),
-        disposition::VERSION.to_string(),
+        envelope.version.to_string(),
         "--repo".into(),
-        remote,
+        envelope.repo.clone(),
         "--branch".into(),
-        branch.into(),
+        envelope.branch.clone(),
         "--request-id".into(),
-        request_id.into(),
+        envelope.request_id.clone(),
     ];
-    if let Some(base) = base {
-        args.extend(["--base".into(), base.into()]);
+    if let Some(base) = &envelope.base {
+        args.extend(["--base".into(), base.clone()]);
     }
     let prepared: Prepared = fleet.remote_setup(host, &args)?;
-    validate_prepared(&prepared, request_id)?;
+    validate_prepared(&prepared, &envelope.request_id)?;
     let binding = prepared
         .binding
         .as_deref()
         .ok_or_else(|| worktree::refuse("preparation binding disappeared"))?;
-    if binding.request.1 != branch || binding.request.2.as_deref() != base {
+    if binding.request.1 != envelope.branch || binding.request.2 != envelope.base {
         return Err(worktree::refuse(
             "peer returned a different preparation request; ownership remains unresolved",
         ));
     }
     Ok(prepared)
+}
+
+/// Read-only lookup authority includes the acknowledged host grant and exact transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LookupRequest {
+    pub version: u32,
+    pub placement: crate::node::PlacementReplay,
+    pub preparation: Envelope,
+    pub binding: Option<disposition::Binding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LookupState {
+    Absent,
+    ReceiptOnly {
+        outcome: LookupOutcome,
+    },
+    Disposition {
+        outcome: LookupOutcome,
+        receipt: Box<disposition::Receipt>,
+    },
+    UnsupportedVersion,
+    Mismatch,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum LookupOutcome {
+    Incomplete,
+    Prepared {
+        prepared: Prepared,
+    },
+    Failed {
+        failure: crate::error::RetainedFailure,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LookupReply {
+    pub version: u32,
+    pub query: LookupRequest,
+    pub result: LookupState,
+}
+
+pub fn lookup(fleet: &Fleet, query: &LookupRequest) -> Result<LookupState> {
+    let host = &query.placement.envelope.host;
+    if *fleet.find(&host.id)? != *host {
+        return Err(crate::unit_transport::conflict(
+            "preparation lookup host changed",
+        ));
+    }
+    let reply: LookupReply = if host.is_local() {
+        lookup_on_host(fleet.ledger, &fleet.home, query)
+    } else {
+        fleet.remote(
+            host,
+            &[
+                "preparation-lookup".into(),
+                "--preparation-protocol".into(),
+                disposition::VERSION.to_string(),
+                "--input".into(),
+                serde_json::to_string(query)?,
+            ],
+        )?
+    };
+    require_protocol(Some(reply.version))?;
+    if serde_json::to_value(&reply.query)? != serde_json::to_value(query)? {
+        return Err(crate::unit_transport::conflict(
+            "preparation lookup correlation changed",
+        ));
+    }
+    Ok(reply.result)
+}
+
+/// Only immutable record reads. No locks, path discovery, writes, repair, or release.
+pub fn lookup_on_host(
+    ledger: &crate::ledger::Ledger,
+    home: &str,
+    query: &LookupRequest,
+) -> LookupReply {
+    let result = match lookup_records(ledger, home, query) {
+        Ok(result) => result,
+        Err(_) => LookupState::Unresolved,
+    };
+    LookupReply {
+        version: disposition::VERSION,
+        query: query.clone(),
+        result,
+    }
+}
+
+fn lookup_records(
+    ledger: &crate::ledger::Ledger,
+    home: &str,
+    query: &LookupRequest,
+) -> Result<LookupState> {
+    if query.version != disposition::VERSION || query.preparation.version != disposition::VERSION {
+        return Ok(LookupState::UnsupportedVersion);
+    }
+    let id = &query.preparation.request_id;
+    query.placement.validate(id)?;
+    let request: crate::work::Request =
+        serde_json::from_value(query.placement.envelope.request.clone())?;
+    let grant = ledger
+        .child("placement-grants")
+        .read::<crate::node::PlacementGrant>(&format!("{id}.json"))?;
+    if query.placement.expected_grant.is_none()
+        || grant != query.placement.expected_grant
+        || request.branch.as_deref() != Some(query.preparation.branch.as_str())
+        || request.base != query.preparation.base
+    {
+        return Ok(LookupState::Mismatch);
+    }
+    let holds: Vec<crate::ledger::Reservation> =
+        ledger.read("placements.json")?.unwrap_or_default();
+    if let Some(grant) = &grant
+        && holds
+            .iter()
+            .any(|hold| hold.id == *id && *hold != grant.reservation)
+    {
+        return Ok(LookupState::Mismatch);
+    }
+    let receipts = ledger.child("preparation-receipts");
+    let raw = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
+    let raw_disposition = receipts.read::<serde_json::Value>(&format!("{id}.disposition.json"))?;
+    let claims: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    let held: Vec<_> = claims
+        .iter()
+        .filter(|p| p.request_id.as_ref() == Some(id))
+        .collect();
+    let Some(raw) = raw else {
+        return Ok(
+            if raw_disposition.is_some() || !held.is_empty() || query.binding.is_some() {
+                LookupState::Unresolved
+            } else {
+                LookupState::Absent
+            },
+        );
+    };
+    if raw.get("version").and_then(serde_json::Value::as_u64)
+        != Some(u64::from(disposition::VERSION))
+    {
+        return Ok(LookupState::UnsupportedVersion);
+    }
+    let receipt: PreparationReceipt = serde_json::from_value(raw)?;
+    let expected = (
+        Path::new(home).join(&query.preparation.repo),
+        query.preparation.branch.clone(),
+        query.preparation.base.clone(),
+    );
+    if receipt.request != expected {
+        return Ok(LookupState::Mismatch);
+    }
+    if let Some(binding) = &receipt.binding {
+        if binding.request_id != *id
+            || binding.claim.request_id != *id
+            || binding.request != receipt.request
+            || binding.prepared != receipt.prepared
+            || binding.claim.tree.identity.is_none()
+            || held.iter().any(|p| p.tree != binding.claim.tree)
+            || query.binding.as_ref().is_some_and(|b| b != binding)
+        {
+            return Ok(LookupState::Mismatch);
+        }
+    } else if receipt.prepared.is_some() || query.binding.is_some() {
+        return Ok(LookupState::Unresolved);
+    }
+    let outcome = match (receipt.prepared, receipt.failure) {
+        (Some(mut prepared), None) => {
+            prepared.binding = receipt.binding.clone().map(Box::new);
+            validate_prepared(&prepared, id)?;
+            LookupOutcome::Prepared { prepared }
+        }
+        (None, Some(failure)) => LookupOutcome::Failed { failure },
+        (None, None) => LookupOutcome::Incomplete,
+        _ => return Ok(LookupState::Unresolved),
+    };
+    if let Some(raw) = raw_disposition {
+        if raw
+            .pointer("/request/version")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(disposition::VERSION))
+        {
+            return Ok(LookupState::UnsupportedVersion);
+        }
+        let saved: disposition::Receipt = serde_json::from_value(raw)?;
+        if receipt.binding.as_ref() != Some(&saved.request.binding) {
+            return Ok(LookupState::Mismatch);
+        }
+        return Ok(LookupState::Disposition {
+            outcome,
+            receipt: Box::new(saved),
+        });
+    }
+    Ok(LookupState::ReceiptOnly { outcome })
 }
 
 /// The caller retains the exact host capture, never a newly observed checkout identity.

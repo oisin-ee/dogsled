@@ -150,7 +150,9 @@ fn start_using(
     waiting: bool,
     submit: fn(&Fleet, &Request, u64) -> Result<Option<Value>>,
 ) -> Result<Value> {
-    match submit(fleet, &request, now_ms()) {
+    let placement = matches!(request.action, Action::Place);
+    let request_id = request.id.clone();
+    let result = match submit(fleet, &request, now_ms()) {
         Ok(Some(result)) => Ok(result),
         Ok(None) => {
             let ticket = work::enqueue(fleet.ledger, request, waiting, now_ms())?;
@@ -160,7 +162,14 @@ fn start_using(
             let ticket = work::enqueue_retry(fleet.ledger, request, waiting, &error, now_ms())?;
             Ok(json!({"queued":true,"ticket":ticket,"retrying":error.to_string()}))
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.correlate(Some(&request_id))),
+    }?;
+    if placement && result["queued"] == true {
+        let mut result = result;
+        result["request_id"] = json!(request_id);
+        Ok(result)
+    } else {
+        Ok(result)
     }
 }
 
@@ -344,25 +353,40 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
 pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
     match command {
         Command::Place {
+            resume,
             host,
             branch,
             base,
             repo,
             wait,
             max,
-        } => submit(
-            fleet,
-            &WorkArgs {
-                host,
-                branch,
-                base,
-                cwd: repo,
-                wait,
-                max,
-            },
-            Action::Place,
-            json_output,
-        ),
+        } => {
+            let request = if let Some(id) = resume {
+                work::resume_placement(fleet.ledger, &id)?
+            } else {
+                request(
+                    fleet,
+                    &WorkArgs {
+                        host,
+                        branch,
+                        base,
+                        cwd: repo,
+                        wait,
+                        max,
+                    },
+                    Action::Place,
+                )?
+            };
+            eprintln!("placement request {}", request.id);
+            let mut result = start(fleet, request, wait)?;
+            if result["queued"] == true && wait {
+                crate::print(true, &result, String::new)?;
+                result = wait_ticket(fleet, result["ticket"].as_str().unwrap_or_default())?;
+            }
+            let pending = result["queued"] == true || result["status"] == "pending_release";
+            crate::print(true, &result, String::new)?;
+            Ok(ExitCode::from(u8::from(pending)))
+        }
         Command::Run {
             placement,
             timeout,
