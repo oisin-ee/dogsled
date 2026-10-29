@@ -1902,6 +1902,40 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
 }
 
 #[test]
+fn queued_placement_validates_branch_under_symlinked_temp_root() {
+    let rig = Rig::short("queued-invalid-alias");
+    let temp_root = rig.dir.join("tmp-alias");
+    std::os::unix::fs::symlink(rig.dir.join("home"), &temp_root).unwrap();
+    let repo = temp_root.join("repo");
+    repository(&repo);
+    assert_ne!(repo, repo.canonicalize().unwrap());
+    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.put(
+        "state/queue.json",
+        &json!([{
+            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},
+                "host":"local","branch":"bad..branch","base":null,"cwd":repo,
+                "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
+                "workspace":null,"workspace_name":null,"owner":"w1:p1"},
+            "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
+            "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
+        }]),
+    );
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    assert_eq!(ticket["retry"]["attempts"], 0, "{ticket}");
+    assert!(
+        ticket["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a valid branch name"),
+        "{ticket}"
+    );
+    assert!(!repo.join(".worktrees").exists());
+    assert!(!rig.log("herdr.log").contains("worktree open"));
+}
+
+#[test]
 fn terminal_ssh_categories_never_enter_the_retry_queue() {
     for step in ["reserve", "checkout", "prepare", "launch"] {
         for (case, response, status) in [

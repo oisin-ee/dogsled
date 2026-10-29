@@ -663,12 +663,11 @@ fn matching_lookup(
         && request.branch.as_deref() == Some(query.preparation.branch.as_str())
         && request.base == query.preparation.base
         && request.repository.as_ref().is_some_and(|repo| {
-            let expected = if query.placement.envelope.host.is_local() {
-                &repo.path
+            if query.placement.envelope.host.is_local() {
+                worktree::same(&repo.path, &query.preparation.repo)
             } else {
-                &repo.relative
-            };
-            *expected == query.preparation.repo
+                repo.relative == query.preparation.repo
+            }
         })
 }
 

@@ -235,12 +235,11 @@ fn validate_prepared(request: &Request, prepared: &PreparedPlacement) -> Result<
                 || Some(&envelope.branch) != request.branch.as_ref()
                 || envelope.base != request.base
                 || request.repository.as_ref().is_none_or(|repo| {
-                    envelope.repo
-                        != if prepared.grant.envelope.host.is_local() {
-                            repo.path.clone()
-                        } else {
-                            repo.relative.clone()
-                        }
+                    if prepared.grant.envelope.host.is_local() {
+                        !crate::worktree::same(&envelope.repo, &repo.path)
+                    } else {
+                        envelope.repo != repo.relative
+                    }
                 })
                 || binding.request_id != request.id
                 || binding.claim.request_id != request.id

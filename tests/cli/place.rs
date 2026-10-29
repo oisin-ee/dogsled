@@ -121,6 +121,38 @@ fn assert_lookup(case: &str, state: &str, outcome: Option<&str>) {
 }
 
 #[test]
+fn queued_placement_accepts_symlinked_repository_root() {
+    let (rig, repo) = place_rig("queued-place-alias");
+    let temp_root = rig.dir.join("tmp-alias");
+    std::os::unix::fs::symlink(rig.dir.join("home"), &temp_root).unwrap();
+    let aliased_repo = temp_root.join(repo.file_name().unwrap());
+    assert_ne!(aliased_repo, repo);
+    rig.put(
+        "state/queue.json",
+        &json!([{
+            "id":"alias-ticket","request":{"id":"alias-request","action":{"type":"place"},
+                "host":"local","branch":"alias-branch","base":"main","cwd":aliased_repo,
+                "repository":{"path":aliased_repo,"origin":"https://example.invalid/repo.git","relative":"repo space","working_root":aliased_repo},
+                "workspace":null,"workspace_name":null,"owner":"w1:p1"},
+            "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
+            "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
+        }]),
+    );
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(out.status.success(), "{out:?}");
+    let ticket = &rig.read("state/queue.json")[0];
+    assert_eq!(ticket["state"], "admitted", "{ticket}");
+    assert_eq!(ticket["retry"]["attempts"], 0, "{ticket}");
+    let returned = ticket["result"].clone();
+    assert_eq!(
+        rig.json(&["place", "--resume", "alias-request"]),
+        (0, returned)
+    );
+    assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
+    assert_eq!(rig.log("setup.log").lines().count(), 1);
+}
+
+#[test]
 fn preparation_lookup_absent_is_read_only() {
     assert_lookup("absent", "absent", None);
 }
