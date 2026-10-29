@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write as _;
 
 pub(super) fn exported(index: usize) -> Value {
     let fixtures: Value = serde_json::from_str(include_str!(
@@ -14,11 +15,15 @@ pub(super) fn exported(index: usize) -> Value {
 pub(super) fn rig(name: &str, full: bool) -> Rig {
     let rig = Rig::short(name);
     rig.snapshot("state/host.json", now(), if full { 3.0 } else { 0.0 }, 2);
+    worker_profile(&rig);
+    rig
+}
+
+fn worker_profile(rig: &Rig) {
     let dir = rig.dir.join("profiles/worker");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("profile.json"), json!({"description":"worker","model":"alias/sol","thinking":"medium","prompt":"prompt.md","pi_args":[],"role":"reader"}).to_string()).unwrap();
     fs::write(dir.join("prompt.md"), "Implement the unit.").unwrap();
-    rig
 }
 
 pub(super) fn prepare(rig: &Rig) -> Value {
@@ -224,6 +229,384 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
     );
 }
 
+#[test]
+fn cancel_before_admission_fences_every_replay() {
+    let (rig, execution, ticket) = committed_queued("cancel-replays");
+    assert!(rig.run(&["cancel", &ticket]).status.success());
+    let id = execution["requestId"].as_str().unwrap();
+    let saved = rig.read(&format!("state/cancellations/{id}.json"));
+    assert_eq!(saved["version"], 1);
+    assert_eq!(saved["outcome"], "not_started");
+    assert!(rig.run(&["cancel", &ticket]).status.success());
+    assert_eq!(saved, rig.read(&format!("state/cancellations/{id}.json")));
+    let first = operation(&rig, "observe", &execution_input(&execution)).1["settlement"].clone();
+    assert_eq!(first["result"]["kind"], "not_started");
+    assert_eq!(
+        operation(&rig, "commit", &commit_input(&execution, 0)).1["error"]["code"],
+        "REQUEST_CONFLICT"
+    );
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).1["settlement"],
+        first
+    );
+    assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+#[test]
+fn terminal_ticket_without_no_launch_proof_stays_unresolved() {
+    for case in ["legacy", "missing", "corrupt", "launch", "mismatch", "ack"] {
+        let (rig, execution, _) = committed_queued(&format!("cancel-no-proof-{case}"));
+        set_ticket(&rig, "cancelled", Value::Null);
+        let file = format!(
+            "state/admissions/{}.json",
+            execution["requestId"].as_str().unwrap()
+        );
+        if case == "missing" {
+            fs::remove_file(rig.dir.join(&file)).unwrap();
+        }
+        if case == "corrupt" {
+            fs::write(rig.dir.join(&file), "{corrupt").unwrap();
+        }
+        if case == "launch" {
+            let mut attempt = rig.read(&file);
+            attempt["launch"] = json!({"id":execution["requestId"],"action":attempt["request"]["action"],"host":"local","cwd":"/tmp","pane":null,"workspace":null,"workspace_name":null,"owner":"w1:p1"});
+            rig.put(&file, &attempt);
+        }
+        if case == "mismatch" {
+            let mut attempt = rig.read(&file);
+            attempt["request"]["cwd"] = json!("/changed");
+            rig.put(&file, &attempt);
+        }
+        if case == "ack" {
+            fs::create_dir_all(rig.dir.join("state/cancellations")).unwrap();
+            let ticket = rig.read("state/queue.json")[0].clone();
+            let binding = json!({"request_id":execution["requestId"],"request":["/repo","worker",null],
+                "claim":{"request_id":execution["requestId"],"tree":{"repo":"/repo","path":"/repo/tree","branch":"worker","head":"head"}},"prepared":null});
+            let policy = json!({"kind":"prohibit","basis":{"cancelled":{"operation_id":"cancel-ack","request_id":execution["requestId"]}}});
+            let intent = json!({"version":1,"binding":binding,"policy":policy,"outcome":"unknown"});
+            let ack = json!({"version":1,"binding":binding,"policy":policy,"outcome":"unknown","released":true});
+            rig.put(&format!("state/cancellations/{}.json", execution["requestId"].as_str().unwrap()),
+                &json!({"version":1,"operation_id":"cancel-ack","ticket":ticket,"admission":rig.read(&file),
+                    "preparation":null,"placement":null,"outcome":"unknown","release":"acknowledged",
+                    "intent":intent,"acknowledgement":ack,"error":null}));
+        }
+        let (_, state) = operation(&rig, "observe", &execution_input(&execution));
+        assert!(state["settlement"].is_null(), "{case}: {state}");
+        let (code, settlements) = rig.json(&["unit", "settlements"]);
+        assert!(
+            code == 2 || settlements == json!([]),
+            "{case}: {settlements}"
+        );
+    }
+}
+
+fn admission_service(rig: &Rig) {
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    rig.snapshot("state/host.json", rig.origin_ms, 0.0, 16);
+}
+
+#[test]
+fn cancellation_intent_crash_repairs_queue_without_readmission() {
+    let (rig, execution, ticket) = committed_queued("cancel-intent-crash");
+    let out = rig
+        .cmd(&["cancel", &ticket])
+        .env("DOGSLED_TEST_UNIT_CRASH", "cancellation-intent-saved")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(86), "{out:?}");
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    let id = execution["requestId"].as_str().unwrap();
+    let intent = rig.read(&format!("state/cancellations/{id}.json"));
+    admission_service(&rig);
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(rig.read(&format!("state/cancellations/{id}.json")), intent);
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).1["settlement"]["result"]["kind"],
+        "not_started"
+    );
+    assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+#[test]
+fn cancellation_after_saved_result_repairs_projection_as_too_late() {
+    let (rig, execution, ticket) = committed_queued("cancel-saved-result");
+    admission_service(&rig);
+    let out = rig
+        .cmd(&["serve", "--once"])
+        .env("DOGSLED_TEST_UNIT_CRASH", "admission-result-saved")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(86), "{out:?}");
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitting");
+    let result = admission(&rig, &execution)["result"].clone();
+    let (code, reply) = rig.json(&["cancel", &ticket]);
+    assert_eq!(code, 2, "{reply}");
+    assert_eq!(reply["status"], "too_late");
+    assert_eq!(reply["result"], result);
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
+    assert_eq!(rig.read("state/queue.json")[0]["result"], result);
+    assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
+    assert!(!rig.dir.join("state/cancellations").exists());
+}
+
+#[test]
+fn cancel_during_admitting_orders_before_finalization() {
+    let (rig, execution, ticket) = committed_queued("cancel-finalization");
+    admission_service(&rig);
+    let ready = Fifo::new(&rig.dir, "final.ready");
+    let go = Fifo::new(&rig.dir, "final.go");
+    let _ready = ready.hold();
+    let mut go = go.hold();
+    let mut service = Owned::spawn(rig.cmd(&["serve", "--once"]).env(
+        "DOGSLED_TEST_LAUNCH_BEFORE_FINALIZATION",
+        rig.dir.join("final"),
+    ));
+    read_fifo(ready.path(), "admission before finalization");
+    let result = admission(&rig, &execution)["result"].clone();
+    assert!(result.is_object(), "{result}");
+    let cancel_ready = Fifo::new(&rig.dir, "cancel.ready");
+    let cancel_go = Fifo::new(&rig.dir, "cancel.go");
+    let _cancel_ready = cancel_ready.hold();
+    let mut cancel_go = cancel_go.hold();
+    let mut cancel = Owned::spawn(rig.cmd(&["cancel", &ticket]).env(
+        "DOGSLED_TEST_LAUNCH_CANCEL_BEFORE_ADMISSION",
+        rig.dir.join("cancel"),
+    ));
+    read_fifo(cancel_ready.path(), "cancel before admission gate");
+    cancel_go.write_all(b"go\n").unwrap();
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitting");
+    go.write_all(b"go\n").unwrap();
+    assert!(service.wait().success());
+    assert_eq!(cancel.wait().code(), Some(2));
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "admitted");
+    assert_eq!(rig.read("state/queue.json")[0]["result"], result);
+    assert_eq!(admission(&rig, &execution)["result"], result);
+    assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
+}
+
+#[test]
+fn dispatch_before_cancel_preserves_possible_execution() {
+    let rig = rig("cancel-lost-launch-reply", true);
+    rig.peer();
+    rig.snapshot("remote.json", rig.origin_ms, 1000.0, 1);
+    let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{"host":"netcup"}});
+    let (code, execution) = rig.json(&[
+        "unit",
+        "prepare",
+        "--input",
+        &input.to_string(),
+        "--tool-call-id",
+        "lost-launch",
+    ]);
+    assert_eq!(code, 0, "{execution}");
+    let (code, queued) = operation(&rig, "commit", &commit_input(&execution, 0));
+    assert_eq!(code, 0, "{queued}");
+    let ticket = queued["ticket"].as_str().unwrap();
+    admission_service(&rig);
+    let ready = Fifo::new(&rig.dir, "launch.ready");
+    let go = Fifo::new(&rig.dir, "launch.go");
+    let _ready = ready.hold();
+    let mut go = go.hold();
+    let original = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let handler = format!(
+        r#"case "$*" in
+  *'host launch '*)
+    printf 'launch\n' > "$RIG/launch.ready"
+    read go < "$RIG/launch.go"
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" > "$RIG/launch-response"
+    code=$?; test "$code" = 0 || exit "$code"
+    exit 255 ;;
+"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    rig.script("ssh", &original.replacen("case \"$*\" in", &handler, 1));
+    let mut service = Owned::spawn(&mut rig.cmd(&["serve", "--once"]));
+    read_fifo(ready.path(), "origin saved launch before host dispatch");
+    let saved_launch = admission(&rig, &execution)["launch"].clone();
+    assert!(saved_launch.is_object());
+    let cancel_ready = Fifo::new(&rig.dir, "cancel.ready");
+    let cancel_go = Fifo::new(&rig.dir, "cancel.go");
+    let _cancel_ready = cancel_ready.hold();
+    let mut cancel_go = cancel_go.hold();
+    let mut cancel = Owned::spawn(rig.cmd(&["cancel", ticket]).env(
+        "DOGSLED_TEST_LAUNCH_CANCEL_BEFORE_ADMISSION",
+        rig.dir.join("cancel"),
+    ));
+    read_fifo(cancel_ready.path(), "cancel waits behind dispatch");
+    cancel_go.write_all(b"go\n").unwrap();
+    go.write_all(b"go\n").unwrap();
+    assert!(service.wait().success());
+    assert!(cancel.wait().success());
+    let id = execution["requestId"].as_str().unwrap();
+    let cancellation = rig.read(&format!("state/cancellations/{id}.json"));
+    assert_eq!(cancellation["outcome"], "possibly_executed");
+    assert_eq!(admission(&rig, &execution)["launch"], saved_launch);
+    let host = rig.read(&format!("peer-state/launches/{id}.json"));
+    assert!(host["pane"].is_string(), "{host}");
+    assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
+    assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read(&format!("peer-state/launches/{id}.json")), host);
+    assert_eq!(rig.log("ssh.log").matches("host launch ").count(), 1);
+    assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
+    assert!(!rig.log("herdr.log").contains("pane close"));
+}
+
+#[test]
+fn cancellation_wins_admission_before_service_and_commit_replay() {
+    let (rig, execution, ticket) = committed_queued("cancel-wins-admission");
+    let id = execution["requestId"].as_str().unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(rig.dir.join(format!("state/admissions/{id}.lock")))
+        .unwrap();
+    lock.lock().unwrap();
+    let ready = Fifo::new(&rig.dir, "cancel.ready");
+    let go = Fifo::new(&rig.dir, "cancel.go");
+    let entered = Fifo::new(&rig.dir, "entered.ready");
+    let entered_go = Fifo::new(&rig.dir, "entered.go");
+    let _ready = ready.hold();
+    let _entered = entered.hold();
+    let mut go = go.hold();
+    let mut entered_go = entered_go.hold();
+    let mut cancel = Owned::spawn(
+        rig.cmd(&["cancel", &ticket])
+            .env(
+                "DOGSLED_TEST_LAUNCH_CANCEL_BEFORE_ADMISSION",
+                rig.dir.join("cancel"),
+            )
+            .env(
+                "DOGSLED_TEST_LAUNCH_CANCEL_ENTERED_ADMISSION",
+                rig.dir.join("entered"),
+            ),
+    );
+    read_fifo(ready.path(), "cancel before held admission");
+    go.write_all(b"go\n").unwrap();
+    drop(lock);
+    read_fifo(entered.path(), "cancellation owns admission");
+    admission_service(&rig);
+    let mut service = Owned::spawn(&mut rig.cmd(&["serve", "--once"]));
+    let input = commit_input(&execution, 0).to_string();
+    let mut replay = Owned::spawn(&mut rig.cmd(&["unit", "commit", "--input", &input]));
+    entered_go.write_all(b"go\n").unwrap();
+    assert!(cancel.wait().success());
+    assert!(service.wait().success());
+    assert_eq!(replay.wait().code(), Some(2));
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).1["phase"],
+        "not_started"
+    );
+    assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+fn remotely_prepared_queued(name: &str) -> (Rig, Value, String) {
+    let (rig, repo) = super::place::place_rig(name);
+    worker_profile(&rig);
+    rig.peer();
+    rig.snapshot("remote.json", rig.origin_ms, 1000.0, 1);
+    let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{"host":"netcup","branch":"cancel-worker","base":"main"}});
+    let out = rig
+        .cmd(&[
+            "unit",
+            "prepare",
+            "--input",
+            &input.to_string(),
+            "--tool-call-id",
+            "remote-cancel",
+            "--json",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let (code, receipt) = operation(&rig, "commit", &commit_input(&execution, 0));
+    assert_eq!(code, 0, "{receipt}");
+    let ticket = receipt["ticket"].as_str().unwrap().to_owned();
+    admission_service(&rig);
+    super::place::real_preparation_peer(&rig);
+    let out = rig
+        .cmd(&["serve", "--once"])
+        .env(
+            "DOGSLED_TEST_UNIT_CRASH",
+            "preparation-returned-before-launch",
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(86),
+        "{out:?} queue={} ssh={}",
+        rig.read("state/queue.json"),
+        rig.log("ssh.log")
+    );
+    assert!(admission(&rig, &execution)["launch"].is_null());
+    (rig, execution, ticket)
+}
+
+#[test]
+fn unreachable_host_keeps_cancel_release_pending() {
+    let (rig, execution, ticket) = remotely_prepared_queued("cancel-remote-release");
+    let id = execution["requestId"].as_str().unwrap();
+    let receipt = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
+    let mut claims = rig.read("peer-state/preparations.json");
+    let mut unrelated = claims[0].clone();
+    unrelated["request_id"] = json!("other-request");
+    claims.as_array_mut().unwrap().push(unrelated.clone());
+    rig.put("peer-state/preparations.json", &claims);
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    // Keep the real transport handler; this guard runs before its case dispatch.
+    rig.script("ssh", &script.replacen("case \"$*\" in", "if test -f \"$RIG/disposition-offline\"; then case \"$*\" in *'host prepared '*) exit 255 ;; esac; fi\ncase \"$*\" in", 1));
+    fs::write(rig.dir.join("disposition-offline"), "").unwrap();
+    assert!(rig.run(&["cancel", &ticket]).status.success());
+    for _ in 0..2 {
+        assert!(rig.run(&["serve", "--once"]).status.success());
+        let saved = rig.read(&format!("state/cancellations/{id}.json"));
+        assert_eq!(saved["release"], "pending", "{saved}");
+        assert_eq!(saved["outcome"], "not_started");
+        assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    }
+    assert_eq!(rig.read("peer-state/preparations.json"), claims);
+    fs::remove_file(rig.dir.join("disposition-offline")).unwrap();
+    let out = rig
+        .cmd(&["serve", "--once"])
+        .env(
+            "DOGSLED_TEST_UNIT_CRASH",
+            "cancellation-acknowledgement-saved",
+        )
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(86), "{out:?}");
+    let acknowledged = rig.read(&format!("state/cancellations/{id}.json"));
+    assert_eq!(
+        acknowledged["acknowledgement"]["released"], true,
+        "{acknowledged}"
+    );
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    let saved = rig.read(&format!("state/cancellations/{id}.json"));
+    assert_eq!(saved["release"], "acknowledged", "{saved}");
+    assert_eq!(saved["operation_id"], acknowledged["operation_id"]);
+    assert_eq!(saved["acknowledgement"], acknowledged["acknowledgement"]);
+    assert_eq!(rig.read("peer-state/preparations.json"), json!([unrelated]));
+    assert_eq!(
+        rig.read(&format!("peer-state/preparation-receipts/{id}.json")),
+        receipt
+    );
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).1["phase"],
+        "not_started"
+    );
+    assert!(!rig.log("ssh.log").contains("host launch"));
+}
+
 fn committed_queued(name: &str) -> (Rig, Value, String) {
     let rig = rig(name, true);
     let execution = prepare(&rig);
@@ -328,8 +711,8 @@ fn unfinished_or_possibly_launched_tickets_never_settle() {
 
 #[test]
 fn settling_does_not_touch_other_owners_or_prepared_units() {
-    let (rig, execution, _) = committed_queued("unit-settle-scope");
-    set_ticket(&rig, "cancelled", Value::Null);
+    let (rig, execution, ticket) = committed_queued("unit-settle-scope");
+    assert!(rig.run(&["cancel", &ticket]).status.success());
     let other = rig
         .cmd(&["unit", "settlements"])
         .env("HERDR_PANE_ID", "other")

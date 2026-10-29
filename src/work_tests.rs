@@ -130,6 +130,30 @@ fn a_newer_queue_version_refuses_writes_without_changing_the_file() {
 }
 
 #[test]
+fn cancellation_version_and_request_conflicts_refuse_replay_without_replacing_expectations() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let request = place_request("cancel-expectation");
+    let ticket = work::enqueue(&ledger, request.clone(), false, 100).unwrap();
+    let first = work::cancel(&ledger, &ticket).unwrap();
+    assert_eq!(work::cancel(&ledger, &ticket).unwrap(), first);
+    assert!(work::allow_admission(&ledger, &request).is_err());
+    let path = ledger.child("cancellations");
+    let mut saved: serde_json::Value = path.read("cancel-expectation.json").unwrap().unwrap();
+    saved["version"] = json!(99);
+    path.write("cancel-expectation.json", &saved).unwrap();
+    assert!(work::cancel(&ledger, &ticket).is_err());
+    assert!(work::allow_admission(&ledger, &request).is_err());
+    assert_eq!(
+        path.read::<serde_json::Value>("cancel-expectation.json")
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    assert_eq!(work::queue(&ledger).unwrap()[0].state, "cancelled");
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
 fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     let created = crate::ledger::now_ms();
