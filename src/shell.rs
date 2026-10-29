@@ -20,7 +20,24 @@ impl Output {
     }
 }
 
+/// Byte-preserving captured stdout, using the same process budget as text commands.
+#[derive(Debug)]
+pub struct BytesOutput {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
 pub trait Shell: Send + Sync + std::fmt::Debug {
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<BytesOutput> {
+        let _ = (program, args, timeout);
+        Err(Error::Invalid("shell does not support byte output".into()))
+    }
     fn budget(&self) -> crate::budget::Budget {
         crate::budget::Budget::default()
     }
@@ -97,6 +114,14 @@ pub struct System {
 }
 
 impl Shell for System {
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<BytesOutput> {
+        self.execute_bytes(program, args, None, timeout)
+    }
     fn budget(&self) -> crate::budget::Budget {
         self.budget
     }
@@ -132,6 +157,21 @@ impl System {
         input: Option<&[u8]>,
         timeout: std::time::Duration,
     ) -> Result<Output> {
+        let out = self.execute_bytes(program, args, input, timeout)?;
+        Ok(Output {
+            status: out.status,
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: out.stderr,
+        })
+    }
+
+    fn execute_bytes(
+        &self,
+        program: &str,
+        args: &[String],
+        input: Option<&[u8]>,
+        timeout: std::time::Duration,
+    ) -> Result<BytesOutput> {
         use std::io::Write as _;
         use std::os::unix::process::CommandExt as _;
         let operation = crate::diagnostic::shell_operation(program).to_owned();
@@ -192,9 +232,9 @@ impl System {
             .join()
             .map_err(|_| Error::Invalid("command worker failed".into()))?;
         let out = result?;
-        Ok(Output {
+        Ok(BytesOutput {
             status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stdout: out.stdout,
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
@@ -330,6 +370,28 @@ pub fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_output_preserves_non_utf8_and_obeys_deadlines() {
+        let shell = System::default();
+        let output = shell
+            .run_bytes_bounded(
+                "sh",
+                &["-c".into(), "printf '\\000\\377'".into()],
+                std::time::Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(output.stdout, [0, 255]);
+        let error = shell
+            .run_bytes_bounded(
+                "sh",
+                &["-c".into(), "sleep 1".into()],
+                std::time::Duration::from_millis(10),
+            )
+            .unwrap_err();
+        assert!(matches!(error.root(), Error::Deadline(_)));
+    }
 
     #[test]
     fn deadline_never_formats_scripts_credentials_or_launch_json() {
