@@ -183,6 +183,30 @@ pub struct DropArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct RecoveryRepo {
+    pub repo: String,
+    #[serde(default)]
+    pub host: Option<String>,
+}
+#[derive(Deserialize, JsonSchema)]
+pub struct RecoveryShow {
+    pub id: String,
+    pub repo: String,
+    #[serde(default)]
+    pub host: Option<String>,
+}
+#[derive(Deserialize, JsonSchema)]
+pub struct RecoveryRestore {
+    pub id: String,
+    pub repo: String,
+    pub to: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct Id {
     pub id: String,
 }
@@ -239,6 +263,74 @@ impl Server {
 
 #[tool_router]
 impl Server {
+    #[tool(
+        description = "List pinned recovery snapshots on the explicit host (local by default).",
+        annotations(read_only_hint = true)
+    )]
+    async fn recovery_list(
+        &self,
+        Parameters(args): Parameters<RecoveryRepo>,
+    ) -> Result<String, String> {
+        self.call(move |fleet| {
+            crate::runtime::recovery(
+                fleet.shell,
+                fleet.ledger,
+                fleet.policy,
+                &fleet.home,
+                args.host.as_deref(),
+                &crate::cli::RecoveryCommand::List { repo: args.repo },
+            )
+        })
+        .await
+    }
+    #[tool(
+        description = "Verify and show an archived recovery snapshot by ID.",
+        annotations(read_only_hint = true)
+    )]
+    async fn recovery_show(
+        &self,
+        Parameters(args): Parameters<RecoveryShow>,
+    ) -> Result<String, String> {
+        self.call(move |fleet| {
+            crate::runtime::recovery(
+                fleet.shell,
+                fleet.ledger,
+                fleet.policy,
+                &fleet.home,
+                args.host.as_deref(),
+                &crate::cli::RecoveryCommand::Show {
+                    id: args.id,
+                    repo: args.repo,
+                },
+            )
+        })
+        .await
+    }
+    #[tool(
+        description = "Restore raw saved content into an absent independent checkout. No setup or preparation. Unborn snapshots require an unused branch."
+    )]
+    async fn recovery_restore(
+        &self,
+        Parameters(args): Parameters<RecoveryRestore>,
+    ) -> Result<String, String> {
+        self.call(move |fleet| {
+            crate::runtime::recovery(
+                fleet.shell,
+                fleet.ledger,
+                fleet.policy,
+                &fleet.home,
+                args.host.as_deref(),
+                &crate::cli::RecoveryCommand::Restore {
+                    id: args.id,
+                    repo: args.repo,
+                    to: args.to,
+                    branch: args.branch,
+                },
+            )
+        })
+        .await
+    }
+
     #[tool(
         description = "Your children, jobs, and queued work, grouped by what needs you: to land, \
         attention, running, waiting. Each row has its harness, model, host, and state.",
