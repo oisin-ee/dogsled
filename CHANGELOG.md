@@ -2,10 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.28.0 - 2026-10-29
 
 - `dogsled stop <id>` ends a pending job that never started and prevents `dogsled exec` from running it later.
-- The workspace includes pi-todo, pi-prewalk, pi-tiers, pi-guardrails, and oisinpi, with their Rust crates and shared toolchains. Runtime behavior stays unchanged.
+- `@oisin-ee/pi-dogsled` includes the `todo` tool. Install it alone; do not install `@oisin-ee/pi-todo` next to it. Existing sessions keep their todo lists, because the stored entries do not change.
+- `@oisin-ee/oisinpi` no longer includes pi-todo. It still loads pi-prewalk, pi-tiers, and pi-guardrails.
+- Dogsled and the todo tool call each other directly. The seed-path, plan-approval, and work-display events are gone. `oisin.tasks.acquire.v1` stays for extensions outside pi-dogsled, such as pi-prewalk.
+- The workspace includes pi-todo, pi-prewalk, pi-tiers, pi-guardrails, and oisinpi, with their Rust crates and shared toolchains. All packages release together with the Dogsled version.
+- The Dogsled unit contract types come from todo-core. The wire JSON does not change.
+- A new worktree runs the `setup` commands of its own `dogsled.toml`, from its base revision. Before, setup came from the host's main checkout, which can be out of date. A base without `dogsled.toml` runs no setup, and an invalid one fails like a failed setup command.
+- Lifecycle and recovery: `docs/lifecycle.md` describes the states and recovery protocols below.
+  - `dogsled status`, the board, and MCP list each held resource with its owner, the reason, and the command that releases it.
+  - An owner or orphan close saves dirty and deleted work in a pinned, verified Git snapshot before it removes the checkout. A failed teardown keeps the checkout and shows the blocker. Snapshots can be inspected and restored.
+  - `retire-preparation <request-id>` ends future use of one historical preparation claim. It never deletes a checkout and never settles a task.
+  - Placement saves its capacity grant and result, and `place --resume <request-id>` replays a request without new capacity, setup, or pane. Cancellation is ordered under admission, and an unreachable host leaves its release pending.
+  - Non-job requests carry the same validity record as jobs. A finished time cannot change once set.
+  - A repository lock fences worktree removal against job startup and preparation.
+  - A child event whose subject is gone is refused and logged, not sent to the owner pane.
 
 ## 0.27.0 - 2026-10-28
 
