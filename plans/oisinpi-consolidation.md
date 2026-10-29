@@ -223,11 +223,11 @@ Acceptance:
 
 ## Step 4: Release and retire
 
-Status: released. Retirement and local adoption in progress.
+Status: done, except the oisinpi repository archive.
 
 - 0.28.0 (#235, tag at `a34963f`): the binaries and the GitHub release published. The npm job failed before it published anything. `actions/setup-node` v5 turns on pnpm caching when `package.json` has `packageManager`, and proto installs pnpm later in that job. 0.28.0 is not on npm.
 - 0.28.1 (#239, tag at `0098f69`): `package-manager-cache: false` in `publish-npm.yml`. Release run 40901102354 published all five packages at 0.28.1 with SLSA provenance.
-- Retirement: `scripts/npm-retire.sh` deprecates `@oisin-ee/pi-todo` and `@oisin-ee/oisinpi`. The npm owner runs it once, with 2FA. It refuses until all five 0.28.1 packages are on npm.
+- Retirement: done. The owner ran `scripts/npm-retire.sh`, which deprecated every version of `@oisin-ee/pi-todo` and `@oisin-ee/oisinpi`. It needs 2FA, so only the npm owner can run it.
 - Local adoption: done. dotfiles #70 (`caafc8b`) replaces `oisinpi@0.12.0` and `pi-dogsled@0.27.0` in the Pi settings with `pi-dogsled`, `pi-prewalk`, `pi-tiers`, and `pi-guardrails` at 0.28.1, and moves the dogsled tag and the `pi-guardrails` tool pin to 0.28.1. `mise bootstrap` ran on local, netcup, and momokaya-2. Pi loads one `todo` tool. Each host's `dogsled serve` keeps its 0.27.0 binary until the service restarts.
 - Then archive the oisinpi GitHub repository, with a README that points here.
 
