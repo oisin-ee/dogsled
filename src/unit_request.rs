@@ -413,8 +413,14 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
                 && attempt.result.is_none()
             {
                 let request = serde_json::from_value(attempt.request)?;
-                if !work::admission_prohibited(ledger, &request)? {
-                    work::enqueue(ledger, request, false, now)?;
+                match work::admission_prohibited(ledger, &request) {
+                    Ok(false) => {
+                        work::enqueue(ledger, request, false, now)?;
+                    }
+                    Ok(true) => (),
+                    // Unreadable prohibition is a hold, never permission to dispatch.
+                    // Admission projects its error onto this ticket without stopping peers.
+                    Err(error) => eprintln!("dogsled unit recovery {id}: {error}"),
                 }
             }
             Ok(())

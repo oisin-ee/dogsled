@@ -748,7 +748,10 @@ pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
         }
         if !admission_prohibited(ledger, &ticket.request)?
             && let Some(result) = completed_admission(&ticket.request, admission.as_ref())? {
-            update_ticket(ledger, id, |t| { t.state = "admitted".into(); t.result = Some(result.clone()); t.error = None; t.diagnostic = None; t.wait_reason = None; })?;
+            // A saved placement result is final to the caller, but admission still owns
+            // its unacknowledged release and must keep replaying the original journal.
+            let release_pending = admission.as_ref().and_then(|a| a.pointer("/placement/phase")).and_then(Value::as_str) == Some("result_saved");
+            update_ticket(ledger, id, |t| { t.state = if release_pending { "pending" } else { "admitted" }.into(); t.result = Some(result.clone()); t.error = release_pending.then(|| "placement release pending".into()); t.diagnostic = None; t.wait_reason = None; })?;
             return Ok(json!({"status":"too_late","ticket":id,"result":result}));
         }
         let saved = capture_cancellation_from(ledger, &ticket, admission)?;
@@ -871,6 +874,11 @@ fn release_cancelled(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
         ));
     }
     validate_cancellation_admission(request, saved.admission.as_ref())?;
+    // Durable release proof survives host loss. Validate it before any lookup can
+    // replace the captured intent or require the host to repeat its acknowledgement.
+    if saved.acknowledgement.is_some() {
+        return acknowledge_cancellation(fleet, &host, saved);
+    }
     resolve_cancelled_intent(fleet, saved)?;
     if saved.release != "pending" {
         return Ok(());
@@ -915,7 +923,6 @@ fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<(
         }
         LookupState::Disposition { receipt, .. } => {
             saved.intent = Some(receipt.request);
-            saved.acknowledgement = None;
             fleet
                 .ledger
                 .child("cancellations")
@@ -966,6 +973,25 @@ fn acknowledge_cancellation(fleet: &Fleet, host: &Host, saved: &mut Cancellation
         .intent
         .as_ref()
         .ok_or_else(|| crate::unit_transport::conflict("missing cancellation disposition"))?;
+    if intent.binding.request_id != request.id
+        || intent.binding.claim.request_id != request.id
+        || request.branch.as_ref() != Some(&intent.binding.request.1)
+        || request.base != intent.binding.request.2
+        || saved
+            .preparation
+            .as_ref()
+            .and_then(|q| q.binding.as_ref())
+            .is_some_and(|binding| *binding != intent.binding)
+        || saved
+            .placement
+            .as_ref()
+            .and_then(|q| q.binding.as_ref())
+            .is_some_and(|binding| *binding != intent.binding)
+    {
+        return Err(crate::unit_transport::conflict(
+            "cancellation disposition binding changed",
+        ));
+    }
     if let Some(ack) = &saved.acknowledgement {
         prepare::validate_ack(intent, ack)?;
     } else {
