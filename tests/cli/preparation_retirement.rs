@@ -429,7 +429,7 @@ fn retired_resource_leaves_unit_unresolved() {
     let unit = json!({"origin":unit_requests::exported(0)["contract"]["ref"],"execution":execution,"placement":{},"tool_call_id":"call","abandoned":null,"committed":unit_requests::commit_input(&execution, 0)});
     fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
     rig.put("state/admissions/a.json", &json!({"request":request,"host":{"id":"local","label":"local"},"launch":null,"error":null,"unit":unit}));
-    rig.put("state/queue.json", &json!([{"id":"ticket","request":request,"created_ms":rig.origin_ms,"state":"failed","waiting":false,"notified":false}]));
+    rig.put_tickets(&json!([{"id":"ticket","request":request,"created_ms":rig.origin_ms,"state":"failed","waiting":false,"notified":false}]));
     let before = rig.read("state/admissions/a.json");
     let (code, result) = retire(&rig, "a");
     assert_eq!(code, 0, "{result}");

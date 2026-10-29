@@ -823,7 +823,7 @@ mod liveness_tests {
             }),
             ..Item::default()
         };
-        ledger.write("items.json", &vec![item.clone()]).unwrap();
+        crate::store::put_items(&ledger, &vec![item.clone()]).unwrap();
         ledger
             .write(
                 "done.json",

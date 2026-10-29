@@ -949,6 +949,91 @@ esac
             &json!({terminal: {"pane":pane,"after":seq - 1,"sealed":seq,"marked_ms":1}}),
         );
     }
+    fn database(&self) -> rusqlite::Connection {
+        fs::create_dir_all(self.dir.join("state")).unwrap();
+        let mut connection = rusqlite::Connection::open(self.dir.join("state/state.db")).unwrap();
+        connection.busy_timeout(Duration::from_secs(30)).unwrap();
+        let initialization = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("state/state-db.lock"))
+            .unwrap();
+        initialization.lock().unwrap();
+        connection
+            .query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let version: u32 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        if version == 0 {
+            tx.execute_batch("\nCREATE TABLE items (\n    seq INTEGER PRIMARY KEY,\n    record TEXT NOT NULL CHECK (json_valid(record)),\n    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,\n    host TEXT GENERATED ALWAYS AS (json_extract(record, '$.host')) STORED NOT NULL,\n    pane TEXT GENERATED ALWAYS AS (json_extract(record, '$.pane')) STORED NOT NULL,\n    closed_ms INTEGER GENERATED ALWAYS AS (json_extract(record, '$.closed_ms')) STORED\n);\nCREATE INDEX items_open_pane ON items (host, pane) WHERE closed_ms IS NULL;\nCREATE TABLE tickets (\n    seq INTEGER PRIMARY KEY,\n    record TEXT NOT NULL CHECK (json_valid(record)),\n    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,\n    request_id TEXT GENERATED ALWAYS AS (json_extract(record, '$.request.id')) STORED NOT NULL UNIQUE,\n    state TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) STORED NOT NULL\n);\nPRAGMA user_version = 1;\n").unwrap();
+        }
+        tx.commit().unwrap();
+        initialization.unlock().unwrap();
+        connection
+    }
+    fn items(&self) -> Value {
+        self.records("SELECT record FROM items ORDER BY seq")
+    }
+    fn tickets(&self) -> Value {
+        self.records("SELECT record FROM tickets ORDER BY seq")
+    }
+    fn records(&self, sql: &str) -> Value {
+        let path = self.dir.join("state/state.db");
+        if !path.try_exists().unwrap() {
+            return json!([]);
+        }
+        let mut connection =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        connection.busy_timeout(Duration::from_secs(30)).unwrap();
+        let tx = connection.transaction().unwrap();
+        let version: u32 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        if version == 0 {
+            return json!([]);
+        }
+        let mut statement = tx.prepare(sql).unwrap();
+        let records = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
+        Value::Array(
+            records
+                .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+                .collect(),
+        )
+    }
+    fn put_items(&self, value: &Value) {
+        self.replace_records(
+            "DELETE FROM items",
+            "INSERT INTO items (record) VALUES (?1)",
+            value,
+        );
+    }
+    fn put_tickets(&self, value: &Value) {
+        self.replace_records(
+            "DELETE FROM tickets",
+            "INSERT INTO tickets (record) VALUES (?1)",
+            value,
+        );
+    }
+    fn replace_records(&self, delete: &str, insert: &str, value: &Value) {
+        let mut connection = self.database();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(delete, []).unwrap();
+        for record in value.as_array().unwrap() {
+            tx.execute(insert, [serde_json::to_string(record).unwrap()])
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
     fn read(&self, path: &str) -> Value {
         serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap()
     }
@@ -1379,7 +1464,7 @@ fn full_is_exit_one_with_durable_queue() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["queued"], true);
     assert!(value["ticket"].is_string());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    assert_eq!(rig.tickets()[0]["state"], "pending");
     rig.snapshot("state/host.json", 0, 0.0, 2);
     assert_eq!(rig.json(&["place"]).0, 1);
 }
@@ -1413,10 +1498,7 @@ fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
         &json!({"result":{"agents":[{"pane_id":"w1:p8"}]}}),
     );
     assert_eq!(rig.json(&["place"]).0, 1);
-    let queued = rig.read("state/queue.json")[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let queued = rig.tickets()[0]["id"].as_str().unwrap().to_owned();
     assert!(rig.run(&["cancel", &queued]).status.success());
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(

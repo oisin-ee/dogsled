@@ -105,8 +105,7 @@ fn panes(rig: &Rig, status: &str, cwd: &Path) {
 }
 
 fn item(rig: &Rig, host: &str) {
-    rig.put(
-        "state/items.json",
+    rig.put_items(
         &json!([{"id":"i1","kind":"agent","host":host,"pane":"w2:p1","owner_pane":"w1:p1",
             "name":"worker","created_ms":1,"closed_ms":null}]),
     );
@@ -163,7 +162,7 @@ fn close_runs_teardown_removes_the_worktree_and_deletes_an_integrated_branch() {
     assert!(herdr.contains("workspace close w2"));
     assert!(!herdr.contains("pane close"));
     assert!(!tree.exists());
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
     // Close forgets the removed worktree's registration, like prune.
     assert_eq!(registered(&rig), [other["path"].clone()]);
 }
@@ -268,7 +267,7 @@ fn close_refuses_active_unsupported_foreign_locked_or_own_work_without_changes()
     let herdr = rig.log("herdr.log");
     assert!(!herdr.contains("pane close") && !herdr.contains("workspace close"));
     assert!(tree.exists());
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 #[test]
@@ -292,7 +291,7 @@ fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
     );
     let repo = rig.dir.join("home/repo");
     assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 /// The teardown ran after the loss check and left a commit that no ref holds. The checkout,
@@ -324,7 +323,7 @@ fn a_teardown_commit_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
     );
     let repo = rig.dir.join("home/repo");
     assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 /// The teardown ran after the loss check and left a file that no ref holds. The checkout,
@@ -355,7 +354,7 @@ fn a_teardown_file_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
     );
     let repo = rig.dir.join("home/repo");
     assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 /// A launch receipt with no result, as an interrupted or failed launch leaves it.
@@ -624,19 +623,16 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
     let before = rig.read("state/launches/own.progress.json");
     let holds = json!([{"repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x","head":""}]);
     rig.put("state/preparations.json", &holds);
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"remote-item","kind":"agent","host":"remote","pane":"w2:p2",
-            "owner_pane":"w1:p1","created_ms":1
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"remote-item","kind":"agent","host":"remote","pane":"w2:p2",
+        "owner_pane":"w1:p1","created_ms":1
+    }]));
     let (code, result) = rig.json(&["close", "w2:p2", "--host", "local"]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["pane_closed"], true);
     assert!(result["worktree"].is_null());
     assert_eq!(rig.read("state/preparations.json"), holds);
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
     assert!(tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
     assert!(!rig.dir.join("hook.log").exists());
@@ -704,7 +700,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
                 pane["agent"] = json!("pi");
                 pane["agent_status"] = json!("idle");
             }
-            "item" => rig.put("state/items.json", &json!([{
+            "item" => rig.put_items(&json!([{
                 "id":"different","kind":"agent","host":"local","pane":"w2:p2",
                 "owner_pane":"w1:p1","created_ms":1
             }])),
@@ -1024,7 +1020,7 @@ esac
     let (code, closed) = rig.json(&["close", "w2:p1"]);
     assert_eq!(code, 0, "{closed}");
     assert!(rig.log("ssh.log").contains("netcup-dev"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
 }
 
 #[test]

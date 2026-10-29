@@ -58,19 +58,14 @@ fn stripped_queued_job(rig: &Rig, remote: bool) -> String {
     };
     let (code, result) = rig.json(&args);
     assert_eq!(code, 1, "{result}");
-    let mut tickets = rig.read("state/queue.json");
-    assert!(
-        tickets.is_array(),
-        "older servers must read the queue: {tickets}"
-    );
-    assert_eq!(rig.read("state/queue-format.json"), json!({"version": 1}));
+    let mut tickets = rig.tickets();
     let id = tickets[0]["request"]["id"].as_str().unwrap().to_owned();
     tickets[0]["request"]["action"]
         .as_object_mut()
         .unwrap()
         .remove("validity");
     // An old binary writes its original array, losing all unknown action fields.
-    rig.put("state/queue.json", &tickets);
+    rig.put_tickets(&tickets);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     id
 }
@@ -80,7 +75,7 @@ fn an_old_queue_writer_cannot_erase_job_validity() {
     let rig = Rig::new("validity-old-queue-writer");
     let id = stripped_queued_job(&rig, false);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
     let job = rig.read(&format!("state/jobs/{id}.json"));
     assert_eq!(
@@ -93,15 +88,15 @@ fn an_old_queue_writer_cannot_erase_job_validity() {
 fn a_queued_job_without_its_sidecar_refuses_even_with_inline_validity() {
     let rig = Rig::new("validity-missing-sidecar");
     let id = stripped_queued_job(&rig, false);
-    let mut tickets = rig.read("state/queue.json");
+    let mut tickets = rig.tickets();
     tickets[0]["request"]["action"]["validity"] = rig.job_validity();
-    rig.put("state/queue.json", &tickets);
+    rig.put_tickets(&tickets);
     let sidecar = rig.dir.join(format!("state/job-validity/{id}.json"));
     if sidecar.exists() {
         fs::remove_file(sidecar).unwrap();
     }
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets[0]["state"], "failed", "{tickets}");
     assert!(
         tickets[0]["error"]
@@ -128,7 +123,7 @@ fn remote_dispatch_forwards_sidecar_validity_after_an_old_queue_rewrite() {
     );
     rig.script("ssh", &script.replace("case \"$*\" in", &remote));
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
     let job = rig.read(&format!("peer-state/jobs/{id}.json"));
     assert_eq!(
@@ -153,7 +148,7 @@ fn rv_agent_and_place_stamp_once_at_origin() {
         };
         let (code, result) = rig.json(&args);
         assert_eq!(code, 1, "{result}");
-        let tickets = rig.read("state/queue.json");
+        let tickets = rig.tickets();
         let request = &tickets[0]["request"];
         assert_eq!(
             request["validity"],
@@ -216,7 +211,7 @@ fn rv_missing_or_changed_authority_never_repairs_from_inline_data() {
                 .0,
             1
         );
-        let tickets = rig.read("state/queue.json");
+        let tickets = rig.tickets();
         let id = tickets[0]["request"]["id"].as_str().unwrap();
         let file = format!("state/job-validity/{id}.json");
         if changed {
@@ -231,7 +226,7 @@ fn rv_missing_or_changed_authority_never_repairs_from_inline_data() {
                 .status
                 .success()
         );
-        assert_eq!(rig.read("state/queue.json")[0]["state"], "failed");
+        assert_eq!(rig.tickets()[0]["state"], "failed");
         assert_eq!(fs::read(rig.dir.join(&file)).ok(), before);
         rv_no_effects(&rig);
     }
@@ -259,7 +254,7 @@ fn rv_expired_agent_and_place_refuse_at_origin_and_host() {
                 .status
                 .success()
         );
-        assert_eq!(rig.read("state/queue.json")[0]["state"], "failed");
+        assert_eq!(rig.tickets()[0]["state"], "failed");
         let (code, error) = rv_launch(&rig, &rv_wire(&rig, created));
         assert_eq!(code, 2, "{error}");
         rv_no_effects(&rig);
@@ -472,18 +467,18 @@ fn rv_finished_ms_is_write_once_and_not_startup_time() {
             .0,
         1
     );
-    let id = rig.read("state/queue.json")[0]["request"]["id"]
+    let id = rig.tickets()[0]["request"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(rig.read("state/queue.json")[0]["finished_ms"].is_null());
+    assert!(rig.tickets()[0]["finished_ms"].is_null());
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(
         rig.run(&["serve", "--once", "--interval", "1"])
             .status
             .success()
     );
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(ticket["finished_ms"], now, "{ticket}");
     assert!(rig.read(&format!("state/launches/{id}.progress.json"))["finished_ms"].is_null());
@@ -494,10 +489,7 @@ fn rv_finished_ms_is_write_once_and_not_startup_time() {
             .status
             .success()
     );
-    assert_eq!(
-        rig.read("state/queue.json")[0]["finished_ms"],
-        ticket["finished_ms"]
-    );
+    assert_eq!(rig.tickets()[0]["finished_ms"], ticket["finished_ms"]);
 }
 
 fn expired_after_preparation(name: &str) -> (Rig, Value, String) {
@@ -1098,7 +1090,7 @@ fn the_queue_refuses_an_expired_request() {
     assert_eq!(code, 2, "{error}");
     assert_eq!(refusal_code(&error), "JOB_EXPIRED", "{error}");
     // Nothing entered the queue, and no claim exists.
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
     assert!(!rig.dir.join("state/jobs/old-job.json").exists());
 }
 

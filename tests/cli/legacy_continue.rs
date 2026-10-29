@@ -251,13 +251,11 @@ fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
 }
 
 /// The immutable records of request `id` that continuation must never rewrite.
-const IMMUTABLE: [&str; 6] = [
+const IMMUTABLE: [&str; 4] = [
     "admissions/{id}.json",
     "launches/{id}.progress.json",
     "launches/{id}.unit.json",
     "launches/{id}.json",
-    "queue.json",
-    "items.json",
 ];
 
 fn request_id(execution: &Value) -> String {
@@ -265,12 +263,15 @@ fn request_id(execution: &Value) -> String {
 }
 
 fn immutable(rig: &Rig, id: &str) -> Vec<Vec<u8>> {
-    IMMUTABLE
+    let mut records: Vec<_> = IMMUTABLE
         .iter()
         .map(|path| {
             fs::read(rig.dir.join("state").join(path.replace("{id}", id))).unwrap_or_default()
         })
-        .collect()
+        .collect();
+    records.push(serde_json::to_vec(&rig.items()).unwrap());
+    records.push(serde_json::to_vec(&rig.tickets()).unwrap());
+    records
 }
 
 /// The execution-owned continuation receipts of request `id`, as raw bytes.
@@ -620,9 +621,9 @@ fn mismatched_launch_evidence_refuses_with_no_change() {
                 "competing"
             }
             "item" => {
-                let mut items = rig.read("state/items.json");
+                let mut items = rig.items();
                 items[0]["closed_ms"] = json!(1);
-                rig.put("state/items.json", &items);
+                rig.put_items(&items);
                 "closed, missing, or competing"
             }
             "terminal" => {

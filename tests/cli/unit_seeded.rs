@@ -302,7 +302,7 @@ fn committed_native_refusal_settles_once_without_start_or_acceptance() {
     let (_, observed) = operation(&rig, "observe", &execution_input(&execution));
     assert_eq!(observed["phase"], "not_started");
     assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
-    assert!(!rig.dir.join("state/items.json").exists());
+    assert_eq!(rig.items(), json!([]));
 }
 
 #[test]
@@ -862,23 +862,23 @@ fn invalid_host_evidence_never_falls_back_to_cached_return_projection() {
     assert_eq!(rig.json(&["unit", "settlements"]).0, 0);
     let id = execution["requestId"].as_str().unwrap();
     let saved = admission(&rig, &execution);
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["reply"] = Value::Null;
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let progress_file = format!("state/launches/{id}.progress.json");
     let mut progress = rig.read(&progress_file);
     progress["request"]["unit"]["execution"]["ownerId"] = json!("wrong-owner");
     rig.put(&progress_file, &progress);
     let events = rejected_refresh(&rig, &["unit", "settlements"], id, "REQUEST_CONFLICT");
     assert_eq!(events, json!([saved["unit"]["returned"]]));
-    assert_eq!(rig.read("state/items.json"), items);
+    assert_eq!(rig.items(), items);
     assert_eq!(admission(&rig, &execution), saved);
     let mut remote = saved;
     remote["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
     rig.put(&format!("state/admissions/{id}.json"), &remote);
     rig.script("ssh", "#!/bin/sh\nprintf 'malformed evidence'\n");
     rejected_refresh(&rig, &["unit", "settlements"], id, "unexpected output");
-    assert_eq!(rig.read("state/items.json"), items);
+    assert_eq!(rig.items(), items);
     assert_eq!(admission(&rig, &execution), remote);
 }
 
@@ -1188,16 +1188,13 @@ fn terminal_receipt_pairs_seal_and_exact_reply_and_delivery_replays_until_ack() 
     let event = &observed["settlement"];
     assert_eq!(event["binding"], input["binding"]);
     assert_eq!(event["result"]["evidence"]["summary"], "EXACT FINAL");
-    assert_eq!(
-        rig.read("state/items.json")[0]["reply"]["text"],
-        "EXACT FINAL"
-    );
+    assert_eq!(rig.items()[0]["reply"]["text"], "EXACT FINAL");
     assert_eq!(rig.json(&["unit", "settlements"]).1, json!([event]));
     // Transcript delivery and elapsed time cannot consume task delivery.
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["reply"]["reported_ms"] = json!(now());
     items[0]["closed_ms"] = json!(now());
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     fs::write(rig.dir.join("clock"), (now() + 90 * 86_400_000).to_string()).unwrap();
     rig.put("agents.json", &json!({"result":{"agents":[]}}));
     assert_eq!(rig.json(&["unit", "settlements"]).1, json!([event]));
@@ -1228,9 +1225,9 @@ fn tell_once(rig: &Rig) -> Value {
     rig.put("agents.json", &agents);
     assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["closed_ms"] = json!(now());
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -1246,7 +1243,7 @@ fn tell_once(rig: &Rig) -> Value {
         .collect();
     assert_eq!(replies.len(), 1, "{records}");
     assert!(replies[0]["text"].as_str().unwrap().contains("EXACT FINAL"));
-    let saved = rig.read("state/items.json")[0]["reply"].clone();
+    let saved = rig.items()[0]["reply"].clone();
     assert!(saved["reported_ms"].is_number());
     saved
 }
@@ -1262,7 +1259,7 @@ fn replay_keeps_notification(rig: &Rig, execution: &Value, event: &Value, reply:
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(rig.read("state/items.json")[0]["reply"], *reply);
+        assert_eq!(rig.items()[0]["reply"], *reply);
         assert_eq!(
             rig.read("state/inbox/term_owner.json")
                 .as_array()
@@ -1282,7 +1279,7 @@ fn receipt_before_item_registration_restores_exact_reply_after_finish_replays() 
     assert_eq!(ack(&rig, &acknowledgement(&execution, &input)).0, 0);
     let id = execution["requestId"].as_str().unwrap();
     // Reproduce host completion before owner finish() registers its item/result.
-    rig.put("state/items.json", &json!([]));
+    rig.put_items(&json!([]));
     let mut attempt = admission(&rig, &execution);
     attempt["result"] = Value::Null;
     rig.put(&format!("state/admissions/{id}.json"), &attempt);
@@ -1290,7 +1287,7 @@ fn receipt_before_item_registration_restores_exact_reply_after_finish_replays() 
     assert_eq!(code, 0, "{state}");
     let event = state["settlement"].clone();
     assert_eq!(event["result"]["kind"], "returned");
-    assert_eq!(rig.read("state/items.json"), json!([]));
+    assert_eq!(rig.items(), json!([]));
     assert_eq!(operation(&rig, "commit", &input).0, 0);
     // Projection repair must not depend on the host still serving its receipt.
     let path = format!("state/launches/{id}.progress.json");
@@ -1301,7 +1298,7 @@ fn receipt_before_item_registration_restores_exact_reply_after_finish_replays() 
         operation(&rig, "observe", &execution_input(&execution)).0,
         0
     );
-    let reply = rig.read("state/items.json")[0]["reply"].clone();
+    let reply = rig.items()[0]["reply"].clone();
     assert_eq!(reply["text"], "EXACT FINAL");
     assert_eq!(reply["result_id"], event["result"]["evidence"]["resultId"]);
     let notified = tell_once(&rig);
@@ -1327,7 +1324,7 @@ fn terminal_projection_recovers_each_persistence_boundary_and_legacy_write_order
             .unwrap();
         assert_eq!(out.status.code(), Some(86));
         let event = admission(&rig, &execution)["unit"]["returned"].clone();
-        let has_reply = !rig.read("state/items.json")[0]["reply"].is_null();
+        let has_reply = !rig.items()[0]["reply"].is_null();
         assert_eq!(has_reply, point == "reply-persisted");
         assert_eq!(
             operation(&rig, "observe", &execution_input(&execution)).0,
@@ -1378,12 +1375,12 @@ fn terminal_replay_rejects_changed_full_receipt_and_changed_correlated_item() {
     assert_eq!(observed["settlement"], saved["unit"]["returned"]);
     assert_eq!(admission(&rig, &execution), saved);
     rig.put(&path, &original);
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items[0]["reply"]["text"] = json!("contradictory item");
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     let observed = rejected_refresh(&rig, &args, id, "REQUEST_CONFLICT");
     assert_eq!(observed["settlement"], saved["unit"]["returned"]);
-    assert_eq!(rig.read("state/items.json"), items);
+    assert_eq!(rig.items(), items);
     assert_eq!(admission(&rig, &execution), saved);
 }
 
@@ -1534,10 +1531,7 @@ fn selected_remote_host_receives_exact_seed_and_durable_receipt_refresh() {
         operation(&rig, "observe", &execution_input(&execution)).1["phase"],
         "returned"
     );
-    assert_eq!(
-        rig.read("state/items.json")[0]["reply"]["text"],
-        "EXACT FINAL"
-    );
+    assert_eq!(rig.items()[0]["reply"]["text"], "EXACT FINAL");
 }
 
 #[test]
@@ -2395,7 +2389,7 @@ fn returned_evidence_after_stop_leaves_the_record_unchanged() {
     assert_eq!(code, 0, "{events}");
     assert_eq!(events, stopped);
     assert_eq!(admission(&rig, &execution), before);
-    assert!(!rig.log("state/items.json").contains("EXACT FINAL"));
+    assert!(!rig.items().to_string().contains("EXACT FINAL"));
 }
 
 #[test]

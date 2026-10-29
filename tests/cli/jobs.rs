@@ -500,7 +500,7 @@ fn nonterminal_job_holds_survive_failed_ticket_and_missing_pane() {
         rig.put("state/jobs/startup.json", &job);
         rig.put("panes.json", &json!({"result":{"panes":[]}}));
         let request = startup_request(&rig, &tree);
-        rig.put("state/queue.json", &json!([{"request":request,"id":"startup","state":"failed","created_ms":rig.now_ms(),"waiting":false,"waiting_until_ms":null,"notified":true,"result":null,"error":"dispatch failed"}]));
+        rig.put_tickets(&json!([{"request":request,"id":"startup","state":"failed","created_ms":rig.now_ms(),"waiting":false,"waiting_until_ms":null,"notified":true,"result":null,"error":"dispatch failed"}]));
         let out = rig.run(&["prune", "--yes", "worktrees"]);
         let text = String::from_utf8_lossy(&out.stdout);
         assert_eq!(tree.exists(), state != "idle", "{state}: {text}");
@@ -955,7 +955,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     let log = rig.log(&format!("state/jobs/{id}.log"));
     assert!(log.contains("hi\n") && log.contains("err\n"));
     assert_eq!(rig.log("job-output"), log);
-    assert_eq!(rig.read("state/items.json")[0]["owner_pane"], "w1:p1");
+    assert_eq!(rig.items()[0]["owner_pane"], "w1:p1");
     let herdr = rig.log("herdr.log");
     assert!(herdr.contains("tab create --workspace w1"));
     assert!(herdr.contains("--source custom:dogsled --agent dogsled-job --state working"));
@@ -980,7 +980,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     );
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.read("state/host.json")["jobs"][0]["exit"], 3);
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_number());
+    assert!(rig.items()[0]["closed_ms"].is_number());
 }
 
 #[test]
@@ -1184,16 +1184,13 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
         "{log}"
     );
     assert!(!log.contains("agent prompt"), "{log}");
-    assert_eq!(rig.read("state/items.json")[0]["kind"], "agent");
-    assert_eq!(
-        rig.read("state/items.json")[0]["launch_confirmed_ms"],
-        confirmed
-    );
+    assert_eq!(rig.items()[0]["kind"], "agent");
+    assert_eq!(rig.items()[0]["launch_confirmed_ms"], confirmed);
     assert_eq!(
         rig.json(&["track", "local", "w3:p1", "--name", "other"]).0,
         0
     );
-    assert_eq!(rig.read("state/items.json").as_array().unwrap().len(), 2);
+    assert_eq!(rig.items().as_array().unwrap().len(), 2);
     assert!(
         String::from_utf8(rig.run(&["status"]).stdout)
             .unwrap()
@@ -1223,8 +1220,8 @@ fn concurrent_item_and_queue_writers_keep_every_record() {
             handle.join().unwrap();
         }
     });
-    assert_eq!(rig.read("state/items.json").as_array().unwrap().len(), 8);
-    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 8);
+    assert_eq!(rig.items().as_array().unwrap().len(), 8);
+    assert_eq!(rig.tickets().as_array().unwrap().len(), 8);
 }
 
 #[test]
@@ -1250,7 +1247,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
             .code(),
         Some(124)
     );
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets.as_array().unwrap().len(), 3);
     assert_eq!(rig.json(&["items"]).1["queue"][2]["waiting"], false);
     assert_eq!(
@@ -1271,7 +1268,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
         "agent_status":"working","terminal_id":"term_owner"}]}});
     rig.put("agents.json", &owner);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets[0]["id"], first["ticket"]);
     assert_eq!(tickets[0]["state"], "admitted");
     assert_eq!(tickets[1]["state"], "cancelled");
@@ -1281,7 +1278,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     // Once it reads its inbox, the notice arrives there, while the owner still works.
     assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["notified"], true);
+    assert_eq!(rig.tickets()[0]["notified"], true);
     let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert!(
         claimed[0]["text"].as_str().unwrap().starts_with(&format!(
@@ -1313,9 +1310,9 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
     snapshot["jobs"] = json!([job]);
     rig.put("remote.json", &snapshot);
     rig.put("logs.json", &json!({"bytes":[],"next":0,"done":true}));
-    fs::write(rig.dir.join("state/items.json"), serde_json::to_vec(&json!([{
+    rig.put_items(&json!([{
         "id":"remote-job","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","created_ms":0,"closed_ms":null,"name":null
-    }])).unwrap()).unwrap();
+    }]));
     assert_eq!(
         rig.run(&["wait", "remote-job", "--max", "30s"])
             .status
@@ -1683,13 +1680,10 @@ fn expired_item_rig(name: &str) -> Rig {
     serve(&rig);
     assert!(!rig.dir.join("state/jobs/aged.json").exists());
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"aged","kind":"job","host":"local","pane":"w2:p1",
-            "owner_pane":"w1:p1","created_ms":ended,"closed_ms":ended,"name":null
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"aged","kind":"job","host":"local","pane":"w2:p1",
+        "owner_pane":"w1:p1","created_ms":ended,"closed_ms":ended,"name":null
+    }]));
     rig
 }
 
@@ -1751,13 +1745,10 @@ fn remote_expired_item_rig(name: &str) -> Rig {
         env!("CARGO_BIN_EXE_dogsled")
     );
     rig.script("ssh", &script.replace("case \"$*\" in", &remote));
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"aged","kind":"job","host":"8103","pane":"w9:p1",
-            "owner_pane":"w1:p1","created_ms":0,"closed_ms":1,"name":null
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"aged","kind":"job","host":"8103","pane":"w9:p1",
+        "owner_pane":"w1:p1","created_ms":0,"closed_ms":1,"name":null
+    }]));
     rig
 }
 
