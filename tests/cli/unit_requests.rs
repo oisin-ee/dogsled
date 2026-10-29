@@ -222,6 +222,58 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
     );
 }
 
+#[test]
+fn cancel_before_admission_fences_every_replay() {
+    let (rig, execution, ticket) = committed_queued("cancel-replays");
+    assert!(rig.run(&["cancel", &ticket]).status.success());
+    let id = execution["requestId"].as_str().unwrap();
+    let saved = rig.read(&format!("state/cancellations/{id}.json"));
+    assert_eq!(saved["version"], 1);
+    assert_eq!(saved["outcome"], "not_started");
+    assert!(rig.run(&["cancel", &ticket]).status.success());
+    assert_eq!(saved, rig.read(&format!("state/cancellations/{id}.json")));
+    let first = operation(&rig, "observe", &execution_input(&execution)).1["settlement"].clone();
+    assert_eq!(first["result"]["kind"], "not_started");
+    assert_eq!(
+        operation(&rig, "commit", &commit_input(&execution, 0)).1["error"]["code"],
+        "REQUEST_CONFLICT"
+    );
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    assert!(rig.run(&["serve", "--once"]).status.success());
+    assert_eq!(rig.read("state/queue.json")[0]["state"], "cancelled");
+    assert_eq!(
+        operation(&rig, "observe", &execution_input(&execution)).1["settlement"],
+        first
+    );
+    assert!(!rig.log("herdr.log").contains("agent start"));
+}
+
+#[test]
+fn terminal_ticket_without_no_launch_proof_stays_unresolved() {
+    for case in ["legacy", "missing", "mismatch", "ack"] {
+        let (rig, execution, _) = committed_queued(&format!("cancel-no-proof-{case}"));
+        set_ticket(&rig, "cancelled", Value::Null);
+        let file = format!(
+            "state/admissions/{}.json",
+            execution["requestId"].as_str().unwrap()
+        );
+        if case == "missing" {
+            fs::remove_file(rig.dir.join(&file)).unwrap();
+        }
+        if case == "mismatch" {
+            let mut attempt = rig.read(&file);
+            attempt["request"]["cwd"] = json!("/changed");
+            rig.put(&file, &attempt);
+        }
+        if case == "ack" {
+            rig.put("state/cancellation-release.json", &json!({"released":true}));
+        }
+        let (_, state) = operation(&rig, "observe", &execution_input(&execution));
+        assert!(state["settlement"].is_null(), "{case}: {state}");
+        assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
+    }
+}
+
 fn committed_queued(name: &str) -> (Rig, Value, String) {
     let rig = rig(name, true);
     let execution = prepare(&rig);
@@ -326,8 +378,8 @@ fn unfinished_or_possibly_launched_tickets_never_settle() {
 
 #[test]
 fn settling_does_not_touch_other_owners_or_prepared_units() {
-    let (rig, execution, _) = committed_queued("unit-settle-scope");
-    set_ticket(&rig, "cancelled", Value::Null);
+    let (rig, execution, ticket) = committed_queued("unit-settle-scope");
+    assert!(rig.run(&["cancel", &ticket]).status.success());
     let other = rig
         .cmd(&["unit", "settlements"])
         .env("HERDR_PANE_ID", "other")

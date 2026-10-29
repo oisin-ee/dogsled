@@ -485,11 +485,8 @@ impl Server {
 
     #[tool(description = "Cancel a queued ticket before it starts.")]
     async fn cancel(&self, Parameters(args): Parameters<Id>) -> Result<String, String> {
-        self.call(move |fleet| {
-            crate::work::cancel(fleet.ledger, &args.id)?;
-            Ok(json!({"cancelled": args.id}))
-        })
-        .await
+        self.call(move |fleet| crate::work::cancel(fleet.ledger, &args.id))
+            .await
     }
 
     #[tool(

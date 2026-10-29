@@ -249,6 +249,8 @@ fn commit_using(
             attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
             crash_point("committed");
         }
+        let request: Request = serde_json::from_value(attempt.request.clone())?;
+        work::allow_admission(fleet.ledger, &request)?;
         if let Some(receipt) = receipt(fleet.ledger, &attempt)? {
             return Ok(receipt);
         }
@@ -407,7 +409,10 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
                 .is_some_and(|u| u.committed.is_some() && u.abandoned.is_none())
                 && attempt.result.is_none()
             {
-                work::enqueue(ledger, serde_json::from_value(attempt.request)?, false, now)?;
+                let request = serde_json::from_value(attempt.request)?;
+                if work::allow_admission(ledger, &request).is_ok() {
+                    work::enqueue(ledger, request, false, now)?;
+                }
             }
             Ok(())
         })?;
@@ -485,7 +490,15 @@ pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
             if resource_only(&attempt, &resource_closed) {
                 return Ok(());
             }
-            let Some(reason) = unlaunched(&attempt, ticket) else {
+            let Some(current) = work::queue(ledger)?.into_iter().find(|t| t.id == ticket.id) else {
+                return Ok(());
+            };
+            if serde_json::to_value(&current.request)? != attempt.request
+                || !work::no_launch_proof(ledger, &current)?
+            {
+                return Ok(());
+            }
+            let Some(reason) = unlaunched(&attempt, &current) else {
                 return Ok(());
             };
             let Some(unit) = attempt.unit.as_mut() else {

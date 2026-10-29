@@ -41,8 +41,16 @@ pub enum Policy {
 pub enum Basis {
     PlacementReturned,
     PreparationFailed,
-    UnitRefused { launch: Box<crate::work::Launch> },
-    AgentRefused { launch: Box<crate::work::Launch> },
+    Cancelled {
+        operation_id: String,
+        request_id: String,
+    },
+    UnitRefused {
+        launch: Box<crate::work::Launch>,
+    },
+    AgentRefused {
+        launch: Box<crate::work::Launch>,
+    },
 }
 
 /// Execution evidence is independent of releasing ownership.
@@ -472,6 +480,24 @@ fn validate_policy(
                 }
             }
         }
+        cancelled @ Policy::Prohibit { .. } => validate_cancelled(cancelled, binding)?,
+    }
+    Ok(())
+}
+
+fn validate_cancelled(policy: &Policy, binding: &Binding) -> Result<()> {
+    let Policy::Prohibit {
+        basis: Basis::Cancelled {
+            operation_id,
+            request_id,
+        },
+    } = policy
+    else {
+        return Err(conflict());
+    };
+    crate::jobs::validate_id(operation_id)?;
+    if *request_id != binding.request_id || binding.claim.request_id != *request_id {
+        return Err(conflict());
     }
     Ok(())
 }

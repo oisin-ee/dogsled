@@ -694,6 +694,111 @@ fn lookup_outcome(receipt: &PreparationReceipt, id: &str) -> Result<LookupOutcom
     Ok(outcome)
 }
 
+/// Non-placement preparation identity, captured before transport, never reconstructed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparationLookup {
+    pub version: u32,
+    pub request: crate::work::Request,
+    pub host: Host,
+    pub preparation: Envelope,
+    pub binding: Option<disposition::Binding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreparationLookupReply {
+    pub version: u32,
+    pub query: PreparationLookup,
+    pub result: LookupState,
+}
+
+/// Untagged only to retain the existing placement wire envelope unchanged.
+/// A non-placement query cannot deserialize as the older required-grant envelope.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum LookupQuery {
+    Placement(LookupRequest),
+    Preparation(PreparationLookup),
+}
+
+pub fn lookup_preparation(fleet: &Fleet, query: &PreparationLookup) -> Result<LookupState> {
+    if *fleet.find(&query.host.id)? != query.host {
+        return Err(crate::unit_transport::conflict(
+            "preparation lookup host changed",
+        ));
+    }
+    let reply: PreparationLookupReply = if query.host.is_local() {
+        lookup_preparation_on_host(fleet.ledger, &fleet.home, query)
+    } else {
+        fleet.remote(
+            &query.host,
+            &[
+                "preparation-lookup".into(),
+                "--preparation-protocol".into(),
+                disposition::VERSION.to_string(),
+                "--input".into(),
+                serde_json::to_string(query)?,
+            ],
+        )?
+    };
+    require_protocol(Some(reply.version))?;
+    if serde_json::to_value(&reply.query)? != serde_json::to_value(query)? {
+        return Err(crate::unit_transport::conflict(
+            "preparation lookup correlation changed",
+        ));
+    }
+    Ok(reply.result)
+}
+
+pub fn lookup_preparation_on_host(
+    ledger: &crate::ledger::Ledger,
+    home: &str,
+    query: &PreparationLookup,
+) -> PreparationLookupReply {
+    let id = &query.preparation.request_id;
+    let result = if query.version != disposition::VERSION
+        || query.preparation.version != disposition::VERSION
+    {
+        LookupState::UnsupportedVersion
+    } else if crate::jobs::validate_id(id).is_err()
+        || query.request.id != *id
+        || !matches!(
+            query.request.action,
+            crate::work::Action::Agent { .. } | crate::work::Action::Job { .. }
+        )
+        || query.request.branch.as_ref() != Some(&query.preparation.branch)
+        || query.request.base != query.preparation.base
+        || query.request.repository.as_ref().is_none_or(|repo| {
+            if query.host.is_local() {
+                !worktree::same(&repo.path, &query.preparation.repo)
+            } else {
+                repo.relative != query.preparation.repo
+            }
+        })
+    {
+        LookupState::Mismatch
+    } else {
+        (|| {
+            let gate = std::fs::File::open(
+                ledger
+                    .child("preparation-receipts")
+                    .dir
+                    .join(format!("{id}.lock")),
+            )?;
+            if gate.try_lock().is_err() {
+                return Ok(LookupState::Unresolved);
+            }
+            lookup_receipt(ledger, home, &query.preparation, query.binding.as_ref())
+        })()
+        .unwrap_or(LookupState::Unresolved)
+    };
+    PreparationLookupReply {
+        version: disposition::VERSION,
+        query: query.clone(),
+        result,
+    }
+}
+
 fn lookup_records(
     ledger: &crate::ledger::Ledger,
     home: &str,
@@ -717,6 +822,16 @@ fn lookup_records(
     {
         return Ok(LookupState::Mismatch);
     }
+    lookup_receipt(ledger, home, &query.preparation, query.binding.as_ref())
+}
+
+fn lookup_receipt(
+    ledger: &crate::ledger::Ledger,
+    home: &str,
+    preparation: &Envelope,
+    expected_binding: Option<&disposition::Binding>,
+) -> Result<LookupState> {
+    let id = &preparation.request_id;
     let receipts = ledger.child("preparation-receipts");
     let raw = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
     let raw_disposition = receipts.read::<serde_json::Value>(&format!("{id}.disposition.json"))?;
@@ -727,7 +842,7 @@ fn lookup_records(
         .collect();
     let Some(raw) = raw else {
         return Ok(
-            if raw_disposition.is_some() || !held.is_empty() || query.binding.is_some() {
+            if raw_disposition.is_some() || !held.is_empty() || expected_binding.is_some() {
                 LookupState::Unresolved
             } else {
                 LookupState::Absent
@@ -741,9 +856,9 @@ fn lookup_records(
     }
     let receipt: PreparationReceipt = serde_json::from_value(raw)?;
     let expected = (
-        Path::new(home).join(&query.preparation.repo),
-        query.preparation.branch.clone(),
-        query.preparation.base.clone(),
+        Path::new(home).join(&preparation.repo),
+        preparation.branch.clone(),
+        preparation.base.clone(),
     );
     if !worktree::same(
         &receipt.request.0.display().to_string(),
@@ -760,12 +875,12 @@ fn lookup_records(
             || binding.prepared != receipt.prepared
             || binding.claim.tree.identity.is_none()
             || held.iter().any(|p| p.tree != binding.claim.tree)
-            || query.binding.as_ref().is_some_and(|b| b != binding)
+            || expected_binding.is_some_and(|b| b != binding)
         {
             return Ok(LookupState::Mismatch);
         }
     } else if receipt.prepared.is_some()
-        || query.binding.is_some()
+        || expected_binding.is_some()
         || (!held.is_empty() && receipt.failure.is_some())
     {
         return Ok(LookupState::Unresolved);
