@@ -54,4 +54,34 @@ The lead reviews the exact commit, builds the web bundle, and repeats browser me
 Browser proof covers immediate revisits, independent first loads, fresh replacement, visible errors, and unavailable-agent handling.
 The writer can commit but cannot push, open a PR, merge, publish, or install a release.
 
-Status: implementation in progress. Candidate measurements and integration evidence remain pending.
+## Candidate evidence
+
+The writer committed `29087add937fb9de9c237e201c01ed7751c04fd7` on base `497f133c49b81885956fa67bd0dc2e821f2657d5`.
+The actual base has no scoped source, configuration, or lockfile differences from the specified base.
+The three writer checks passed on the committed inputs. Six new tests cover the production cache transitions.
+An independent reviewer accepted the exact commit without actionable findings.
+The lead integrated the fix locally as `34e008572f706b07eb0a1ee8f8d42a9efa243fa0`.
+The integrated web inputs match the tested candidate exactly.
+
+The candidate ran with `proto run dx -- serve --web --release --locked --package web --port 7466 --open false --watch false --interactive false`.
+Its existing development proxy used the same live API on port 7465 as the baseline.
+The isolated browser used the same viewport and the same two live panes.
+The first switch took 305 milliseconds. Three revisits took 7, 22, and 8 milliseconds without the loading placeholder.
+The initial transcript request started at 65 milliseconds and completed at 88 milliseconds.
+The full agent-list request completed at 1277 milliseconds. Transcript display no longer waits for that request.
+The candidate HAR is `/tmp/dogsled-portal-tab-candidate-29087add.har`.
+
+Managed browser interception also verified the response states without changing agent data:
+
+- An aborted refresh retained seven turns and showed a fetch error.
+- A successful refresh replaced the retained text and cleared the error.
+- A mismatched response retained the correct text and showed an identity error.
+- A successful empty response showed the empty state, without a loading placeholder.
+- A real missing pane showed the unavailable error and disabled the composer, without a false empty state.
+
+The browser closed, and the development-server job stopped after verification.
+The design detector reported only the existing Inter font warning in `web/src/app.rs`.
+The installed v0.27.0 portal remains unchanged. No release, installation, push, or PR occurred.
+The final scoped check passed: `proto run moon -- run dogsled:web-build --affected --base af28f11b0dbe4f5352b90f2cb36f84c39f887a34 --head 34e008572f706b07eb0a1ee8f8d42a9efa243fa0`.
+Moon completed the release web bundle in 31 seconds. The later unrelated documentation commit did not change its tested inputs.
+Status: implemented, reviewed, integrated locally, and verified. Publication and installation remain outside this change.
