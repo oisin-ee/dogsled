@@ -140,7 +140,20 @@ fn two_requests_on_one_path_retire_independently() {
             before.matches(effect).count()
         );
     }
-    assert_eq!(rig.read("state/preparation-receipts/a.json"), original);
+    let mut completed = rig.read("state/preparation-receipts/a.json");
+    assert_eq!(
+        completed["finished_ms"],
+        rig.read("state/preparation-receipts/a.disposition.json")["finished_ms"]
+    );
+    assert!(
+        completed
+            .as_object_mut()
+            .unwrap()
+            .remove("finished_ms")
+            .unwrap()
+            .is_u64()
+    );
+    assert_eq!(completed, original);
     let (code, doctor) = rig.json(&["doctor"]);
     assert_eq!(code, 0, "{doctor}");
     assert!(
@@ -148,6 +161,66 @@ fn two_requests_on_one_path_retire_independently() {
         "{doctor}"
     );
     assert_eq!(retire(&rig, "a"), (0, result));
+}
+
+#[test]
+fn retirement_completes_raw_provenance_and_recovers_only_the_saved_time() {
+    for explicit_null in [false, true] {
+        let (rig, _) = prepared(&format!("retire-completion-{explicit_null}"), "a");
+        let file = "state/preparation-receipts/a.json";
+        let mut original = rig.read(file);
+        original["historical_metadata"] = json!({"retained":true});
+        if explicit_null {
+            original["finished_ms"] = Value::Null;
+        }
+        rig.put(file, &original);
+        let (code, result) = retire(&rig, "a");
+        assert_eq!(code, 0, "{result}");
+        retired(&result);
+        let completed = rig.read(file);
+        let fence = rig.read("state/preparation-receipts/a.disposition.json");
+        assert_eq!(completed["finished_ms"], fence["finished_ms"]);
+        let mut expected = original.clone();
+        expected["finished_ms"] = fence["finished_ms"].clone();
+        assert_eq!(completed, expected);
+        // Simulate interruption after release but before the outcome timestamp was copied.
+        rig.put(file, &original);
+        fs::write(rig.dir.join("clock"), (now() + 1000).to_string()).unwrap();
+        let (code, replay) =
+            rig.json(&["host", "prepared", "--input", &fence["request"].to_string()]);
+        assert_eq!(code, 0, "{replay}");
+        assert_eq!(rig.read(file), completed);
+        assert_eq!(
+            rig.read("state/preparation-receipts/a.disposition.json"),
+            fence
+        );
+    }
+}
+
+#[test]
+fn retirement_replay_rejects_changed_completion_or_provenance() {
+    for field in ["finished_ms", "prepared"] {
+        let (rig, _) = prepared(&format!("retire-mutated-{field}"), "a");
+        let (code, result) = retire(&rig, "a");
+        assert_eq!(code, 0, "{result}");
+        let fence = rig.read("state/preparation-receipts/a.disposition.json");
+        let mut receipt = rig.read("state/preparation-receipts/a.json");
+        receipt[field] = if field == "finished_ms" {
+            json!(receipt[field].as_u64().unwrap() + 1)
+        } else {
+            Value::Null
+        };
+        rig.put("state/preparation-receipts/a.json", &receipt);
+        let (code, result) =
+            rig.json(&["host", "prepared", "--input", &fence["request"].to_string()]);
+        assert_ne!(code, 0, "{result}");
+        assert_eq!(rig.read("state/preparation-receipts/a.json"), receipt);
+        assert_eq!(
+            rig.read("state/preparation-receipts/a.disposition.json"),
+            fence
+        );
+        assert_eq!(rig.read("state/preparations.json"), json!([]));
+    }
 }
 
 #[test]
@@ -370,7 +443,7 @@ fn retirement_and_dispatch_share_the_request_gate() {
         let (rig, _) = prepared(&format!("retire-dispatch-{retire_first}"), "a");
         let prepared = rig.read("state/preparation-receipts/a.json")["prepared"].clone();
         let binding = rig.read("state/preparation-receipts/a.json")["binding"].clone();
-        let launch = json!({"id":"a","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":prepared["path"],"pane":prepared["pane_id"],"terminal":prepared["terminal_id"],"workspace":"w1","workspace_name":"caller","owner":"parent","preparation":binding,"preparation_protocol":1});
+        let launch = json!({"id":"a","validity":rig.job_validity(),"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":prepared["path"],"pane":prepared["pane_id"],"terminal":prepared["terminal_id"],"workspace":"w1","workspace_name":"caller","owner":"parent","preparation":binding,"preparation_protocol":1});
         let (mut retirement, retire_go) = barrier(
             &rig,
             if retire_first {

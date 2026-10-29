@@ -225,10 +225,28 @@ fn matches_binding(ledger: &Ledger, request: &Request) -> Result<bool> {
         if audit.request_id != *id || request.binding.claim.request_id != *id {
             return Ok(false);
         }
-        let current = ledger
-            .child("preparation-receipts")
-            .read::<serde_json::Value>(&format!("{id}.json"))?;
-        return Ok(current == *provenance);
+        let receipts = ledger.child("preparation-receipts");
+        let current = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
+        if current == *provenance {
+            return Ok(true);
+        }
+        // Completion may add only the timestamp proved by this exact released fence.
+        let released = receipts.read::<Receipt>(&file(id))?;
+        if let Some(released) = released
+            && released.request == *request
+            && released.progress == Progress::Released
+            && let Some(finished) = released.finished_ms
+            && crate::jobs::completion_time(ledger, Some(finished), None, true)?.is_some()
+            && let Some(expected) = provenance.as_ref().and_then(serde_json::Value::as_object)
+            && expected
+                .get("finished_ms")
+                .is_none_or(serde_json::Value::is_null)
+        {
+            let mut completed = expected.clone();
+            completed.insert("finished_ms".into(), finished.into());
+            return Ok(current.as_ref().and_then(serde_json::Value::as_object) == Some(&completed));
+        }
+        return Ok(false);
     }
     Ok(binding(ledger, &request.binding.request_id)?.as_ref() == Some(&request.binding))
 }
@@ -510,17 +528,7 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
                 progress: Progress::Released,
             },
         )?;
-        let receipt_file = format!("{id}.json");
-        let mut preparation = receipts
-            .read::<super::PreparationReceipt>(&receipt_file)?
-            .ok_or_else(conflict)?;
         if retention_completion(ledger, id)? != finished_ms {
-            return Err(conflict());
-        }
-        if preparation.finished_ms.is_none() {
-            preparation.finished_ms = finished_ms;
-            receipts.write(&receipt_file, &preparation)?;
-        } else if preparation.finished_ms != finished_ms {
             return Err(conflict());
         }
     } else {
@@ -532,16 +540,7 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
     }
     // Recover only the timestamp already proved by release, never the replay time.
     if let Some(finished) = read(ledger, id)?.and_then(|receipt| receipt.finished_ms) {
-        let file = format!("{id}.json");
-        let mut preparation = receipts
-            .read::<super::PreparationReceipt>(&file)?
-            .ok_or_else(conflict)?;
-        if preparation.finished_ms.is_none() {
-            preparation.finished_ms = Some(finished);
-            receipts.write(&file, &preparation)?;
-        } else if preparation.finished_ms != Some(finished) {
-            return Err(conflict());
-        }
+        finish_preparation(ledger, request, finished)?;
     }
     Ok(Acknowledgement {
         version: VERSION,
@@ -550,6 +549,33 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
         outcome: request.outcome.clone(),
         released: true,
     })
+}
+
+fn finish_preparation(ledger: &Ledger, request: &Request, finished: u64) -> Result<()> {
+    let receipts = ledger.child("preparation-receipts");
+    let file = format!("{}.json", request.binding.request_id);
+    let Some(mut preparation) = receipts.read::<serde_json::Value>(&file)? else {
+        // Identified legacy claims can retire without inventing an outcome receipt.
+        return if matches!(
+            request.policy,
+            Policy::Prohibit {
+                basis: Basis::Retired { .. }
+            }
+        ) {
+            Ok(())
+        } else {
+            Err(conflict())
+        };
+    };
+    let fields = preparation.as_object_mut().ok_or_else(conflict)?;
+    match fields.get("finished_ms").filter(|value| !value.is_null()) {
+        None => {
+            fields.insert("finished_ms".into(), finished.into());
+            receipts.write(&file, &preparation)
+        }
+        Some(value) if value.as_u64() == Some(finished) => Ok(()),
+        Some(_) => Err(conflict()),
+    }
 }
 
 pub(super) fn failure_guarded(

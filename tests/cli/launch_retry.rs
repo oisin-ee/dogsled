@@ -1712,6 +1712,18 @@ fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() 
         "netcup: reservation raced with another request"
     );
     let (_, board) = rig.json(&["board", "--all"]);
+    assert_ne!(ticket["id"], ticket["request"]["id"], "{ticket}");
+    assert_eq!(board["rows"].as_array().unwrap().len(), 1, "{board}");
+    assert_eq!(board["rows"][0]["id"], ticket["id"], "{board}");
+    assert!(
+        board["rows"][0]["holds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hold| hold["code"] == "validity"
+                && hold["request_id"] == ticket["request"]["id"]),
+        "{board}"
+    );
     assert_eq!(board["hosts"][1]["eligible"], true, "{board}");
     assert_eq!(
         board["rows"][0]["activity"],

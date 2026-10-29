@@ -842,6 +842,22 @@ fn print_tail(node: &Node<'_>, kind: &str, id: &str) -> Result<()> {
     print(true, &tail, String::new)
 }
 
+fn print_host_recovery(node: &Node<'_>, command: &cli::RecoveryCommand) -> Result<()> {
+    print(
+        true,
+        &runtime::recovery_local(node.shell, node.ledger, command)?,
+        String::new,
+    )
+}
+
+fn print_placement_finished(node: &Node<'_>, input: &str) -> Result<()> {
+    print(
+        true,
+        &node.finish_placement(&serde_json::from_str(input)?)?,
+        String::new,
+    )
+}
+
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
@@ -860,13 +876,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             request_validity,
         )?,
         HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
-        HostCommand::Recovery { command } => {
-            print(
-                true,
-                &runtime::recovery_local(node.shell, node.ledger, &command)?,
-                String::new,
-            )?;
-        }
+        HostCommand::Recovery { command } => print_host_recovery(node, &command)?,
         HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
         HostCommand::Logs { id, offset } => {
             print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;
@@ -917,11 +927,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             &quota::store(node.ledger, std::io::stdin().lock())?,
             String::new,
         )?,
-        HostCommand::PlacementFinished { input } => print(
-            true,
-            &node.finish_placement(&serde_json::from_str(&input)?)?,
-            String::new,
-        )?,
+        HostCommand::PlacementFinished { input } => print_placement_finished(node, &input)?,
         HostCommand::Reserve {
             id,
             placement_replay,
