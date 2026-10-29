@@ -190,9 +190,10 @@ An accepted native `done` remains `finishing` until the required final handoff e
 
 A stopped child receives a recorded prompt to signal or wait for its children.
 With a live owner, it remains under NEEDS YOU.
-If its custodian is gone, the sweep records the last reply and can close a clean stopped orphan.
+If its custodian is gone, the sweep records the last reply and can close a positively identified stopped orphan.
 A unit-bound orphan receives resource-only closure. Its task binding remains unresolved.
-The sweep keeps dirty orphans until automatic preservation is implemented.
+Owner close and stopped-orphan close save supported uncommitted work in pinned recovery snapshots before checkout removal.
+Unsupported content or an incomplete preservation keeps the checkout.
 Automatic closure never closes the caller or a busy pane. Shared checkouts remain while other work uses them.
 
 Closed children with retained branches appear under READY TO MERGE.
@@ -235,20 +236,28 @@ Both commands support `--json`. MCP exposes `claim` and `accept`, named `mcp__do
 For an interrupted launch with no final receipt, explicit `close` can retire its exact idle shell under the request and pane locks. This closes **only the pane**, retaining the checkout, preparation holds, and unknown launch evidence. It does not report that the task never started. Competing launch records, a changed terminal, any agent, or incomplete foreground evidence refuse recovery. Automatic cleanup never uses this recovery path; normal cleanup can assess the retained checkout after its holds are resolved.
 In an agent worktree (locked `agent:worktree`, as dogsled makes them), it runs the repository's `teardown` commands in the worktree (see [Repository configuration](#repository-configuration)).
 Then it closes every pane that uses the worktree and the Herdr workspace that shows it, unlocks the worktree, and runs `git worktree remove` without force.
-Close uses the same loss rule as cleanup: no unique checkout content and every commit held by the default branch or freshly fetched remote refs. It deletes the branch under that same rule. Local-only work refuses close, including an explicit owner close.
+Normal handoff and cleanup require no unique checkout content and every commit held by the default branch or freshly fetched remote refs.
+Explicit owner close and stopped-orphan close can save supported dirty content and local-only commits in pinned recovery snapshots.
+They report `saved (recovery <id>)` and retain unmerged branches for integration or explicit drop.
+These resource results do not settle the original task.
 When `place` opened the main checkout's workspace as the anchor and no linked worktree is open in Herdr any more, close closes that anchor too. It does so only while the anchor is unfocused, is not the caller's, and has one pane with no agent.
 A pane outside a worktree, or in an unlocked worktree (someone's own checkout), is closed alone; the checkout stays.
 A pane in a checkout that another agent, an open item, or a busy pane still uses is closed alone too, even by an explicit close: close never closes agents it was not asked to close, and never removes a checkout they use. The last pane in the checkout takes the checkout with it.
 A child tab in the caller's own workspace closes.
-Close refuses the caller's pane, checkout, or workspace, a checkout outside the configured worktree directory, unique content, and foreign locks.
+Close refuses the caller's pane, checkout, or workspace, a checkout outside the configured worktree directory, unsaved content, and foreign locks.
 A clean detached checkout can close when the default branch or freshly fetched remote refs protect its HEAD.
 Dogsled does not create a branch implicitly for a detached checkout.
 The repository lifecycle lock protects the final identity decision through record reconciliation.
 A replacement checkout at the same path stays. Verified prior removal permits record reconciliation.
 It also refuses a busy target or a busy pane that uses the worktree: an agent that is not `idle` or `done`, or a shell with a foreground command.
-Each refusal happens before a change. If a `teardown` command fails, the worktree, its panes, its lock, and the item stay, and the error shows the command's last lines of output.
+Preservation saves initial content before teardown and saves changed content again after successful teardown.
+It verifies the pinned snapshot before normalization and unforced removal.
+A failed or unknown teardown keeps the checkout, its panes, its lock, and the item.
+Dogsled does not automatically repeat an entered teardown with an unknown outcome.
+An interrupted normalization also keeps the checkout for inspection.
 After removal, close drops the worktree's registration, as prune does.
-The JSON result is `{pane,worktree:{path,branch,workspace,branch_deleted,anchor_closed?}|null,pane_closed}`. A remote host runs the same steps over SSH.
+The JSON result includes `pane`, `worktree`, and `pane_closed`, with optional `retained_branch` and `recovery` metadata.
+A remote host uses the same operations over SSH.
 
 The service admits tickets in FIFO order using the same placement policy.
 The order holds per host. A ticket waits only behind earlier tickets that could take one of its hosts. A full host does not hold back a ticket that is pinned to another host with room.
@@ -269,7 +278,9 @@ dogsled retire-preparation REQUEST_ID --host HOST --reason "Historical claim no 
 
 Recovery refs stay local and do not expire.
 Restore creates an independent checkout. It does not resume the original task, preparation, grant, or pane.
-The current CLI has no snapshot-creation command. Automatic preservation during owner close and orphan close remains in progress.
+There is no separate snapshot-creation command.
+Owner close and stopped-orphan close create snapshots through durable preservation operations.
+Failed or unsupported preservation keeps the live checkout and reports its blocker.
 
 Preparation dispositions validate the exact claim, persist a startup fence, then release only that claim.
 Placement retains its host grant and saves its result before release.
@@ -278,6 +289,16 @@ Placement retains its host grant and saves its result before release.
 `retire-preparation` prohibits future dispatch for one historical request claim. It does not remove a checkout or settle a task.
 After acknowledgement, it reports unknown execution outcome and released ownership. Claims without request IDs are unsupported.
 The separately authorized `--cleanup` override is CLI-only. MCP does not expose it.
+
+Preparation, placement, agent dispatch, and jobs retain one immutable request creation time.
+Missing, changed, unsupported, expired, or excessive future-dated validity refuses new execution.
+A refusal does not release an unresolved preparation claim.
+Owner-local completion times are write-once and require terminal evidence, not startup confirmation.
+
+`status`, the board, and MCP show each retained resource, its owner, its reason, and an exact next command.
+JSON also supplies `command_host` and `command_argv`.
+Validity refusals, completion-time gaps, preservation blockers, and undelivered child events remain visible.
+These reports do not change release decisions.
 
 See [Agent lifecycle and recovery](docs/lifecycle.md) for command limits, custody, origin release certificates, and migration.
 

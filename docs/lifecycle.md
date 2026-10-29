@@ -97,8 +97,8 @@ It records the last reply before closure.
 A unit-bound orphan receives resource-only closure. Its task binding remains unresolved.
 This path does not create a final handoff or prove task completion.
 
-The current path keeps an orphan with uncommitted work.
-Automatic snapshots during owner close and orphan close remain in progress.
+Owner close and stopped-orphan close save uncommitted work in pinned recovery snapshots before checkout removal.
+If preservation cannot prove that content is saved, the checkout remains.
 The orphan rule protects `working`, `waiting`, `asking`, `blocked`, `finishing`, `unknown`, and `lost` agents.
 Ordinary recorded `done` handoffs use their own closure rules.
 
@@ -114,14 +114,21 @@ dogsled recovery restore RECOVERY_ID --repo /path/to/repo --to /path/to/new-chec
 dogsled recovery restore RECOVERY_ID --repo /path/to/repo --to /path/to/new-checkout --branch recovered/work
 ```
 
-`close` refuses busy work and removal that loses unique content.
+`close` refuses busy work and removal that loses unsaved content.
+Explicit owner close and stopped-orphan close pin verified recovery snapshots before they remove supported dirty checkouts.
+These paths can retain unmerged commits locally without pushing them.
+Normal handoff, prune, and other cleanup paths retain their existing loss checks.
 Explicit close can restore tracked deletions alone when retained refs protect the tip.
-Other uncommitted changes keep the checkout.
 Managed checkouts use the lock reason `agent:worktree`.
 Shared checkouts remain while another agent, open item, or busy pane uses them.
 A clean detached checkout can close when the default branch or freshly fetched remote refs protect its HEAD.
 Dogsled does not create a branch implicitly for a detached checkout.
-A failed teardown keeps the checkout and its resources.
+Close saves the initial snapshot before teardown.
+After successful teardown, close saves changed content again before normalization and unforced removal.
+A failed or unknown teardown keeps the checkout and its resources.
+Dogsled does not automatically repeat an entered teardown with an unknown outcome.
+An interrupted normalization also keeps the checkout for inspection.
+Shared ownership, changed checkout identity, and unsupported content prevent removal.
 
 Recovery snapshots keep HEAD, the staged index, and working content in local Git refs.
 They can preserve untracked files, binary content, deletions, renames, symbolic links, and executable modes.
@@ -132,8 +139,10 @@ Dogsled neither pushes nor expires `refs/dogsled/recovery/<id>`.
 
 `list` and `show` inspect archived snapshots after the original checkout disappears or the process restarts.
 Invalid entries remain visible with an error.
-There is no public snapshot-creation command in the current CLI.
-These inspection commands do not enable automatic preservation during close.
+There is no separate public snapshot-creation command.
+Owner close and stopped-orphan close create snapshots through durable preservation operations.
+A successful preservation reports `saved (recovery <id>)` and retains recovery metadata with the resource result.
+This result does not complete the original task or prove that its branch merged.
 
 `restore` always creates an independent checkout at a new destination.
 It refuses an existing destination or a changed recovery ref.
@@ -166,6 +175,22 @@ Short store locks come last. Callers skip unused levels.
 Callers release queue locks before they acquire admission locks or make peer requests.
 
 Source: [`src/worktree.rs`](../src/worktree.rs), [`src/close.rs`](../src/close.rs), and [`src/cleanup.rs`](../src/cleanup.rs).
+
+## Request validity
+
+Preparation, placement, agent dispatch, and job execution retain one immutable request creation time.
+The origin records validity once and sends the same evidence through admission and startup.
+The execution host refuses missing, changed, unsupported, expired, or excessive future-dated validity before new side effects.
+It rechecks validity at preparation and dispatch boundaries.
+A refusal does not release an unresolved preparation claim.
+Request-scoped retirement remains a separate operation.
+
+Each owner records `finished_ms` once when its own terminal evidence permits completion.
+Startup confirmation is not a completion time.
+Missing completion times and contradictory timestamps prevent retention proof.
+These timestamps do not implement the pending R1, part 2 expiry rules.
+
+Source: [`src/jobs.rs`](../src/jobs.rs), [`src/prepare.rs`](../src/prepare.rs), [`src/node.rs`](../src/node.rs), and [`src/launch.rs`](../src/launch.rs).
 
 ## Job startup ownership
 
@@ -282,6 +307,22 @@ The certificate does not itself remove records or complete a task.
 
 Source: [`src/inbox.rs`](../src/inbox.rs), [`src/launch.rs`](../src/launch.rs), and [`src/unit_request.rs`](../src/unit_request.rs).
 
+## Resource hold reports
+
+`status`, the board, and MCP show retained resources separately from task states.
+Each report names the resource, host, owner, reason, and next command.
+JSON includes `code`, `command_host`, and `command_argv` as well as the quoted command text.
+Remote commands name the host on which they must operate.
+An unavailable host retains its last observed ownership with an explicit warning.
+
+The shared table covers preparation claims, capacity, admissions, cancellation, checkout ownership, retained branches, and origin references.
+It also covers request-validity refusals, missing or inconsistent completion times, preservation blockers, and undelivered child events.
+A teardown blocker can point to `recovery show` for the pinned snapshot.
+Inspection commands do not grant release or retry authority.
+A plausible completion time alone does not prove terminal execution or reference release.
+
+Source: [`src/holds.rs`](../src/holds.rs), [`src/commands.rs`](../src/commands.rs), [`src/board.rs`](../src/board.rs), and [`src/mcp.rs`](../src/mcp.rs).
+
 ## Retention
 
 The service timer runs job retention without a Stop event or a doctor pass.
@@ -320,13 +361,10 @@ Rollback must retain receipts, fences, and recovery refs.
 
 ## In progress
 
-These parts of the approved plan are not yet released:
+These parts of the approved plan remain pending in the source:
 
-- **RV:** Extend recorded request validity to preparation, placement, and agent dispatch before replay evidence can expire.
-- **P3:** Save uncommitted work during owner close and orphan close, then report `saved (recovery <id>)`.
 - **R1, part 2:** Expire finished records in the other stores after 30 days, while unresolved or live references remain protected.
 
 The plan also requires explicit prune to use the service retention windows. That alignment is not yet implemented.
 R1, part 2 also includes the reader message `result unavailable: expired or unknown`.
 That message is not the current reader behavior.
-The current preservation primitives and recovery commands do not mean that dirty close already saves work.
