@@ -546,6 +546,14 @@ pub fn stop(ledger: &Ledger, id: &str) -> Result<()> {
     store(ledger).with_lock(id, || {
         let job = get(ledger, id)?;
         if job.ended_ms.is_none() {
+            if let Ownership::Pending(mut pending) = ownership(ledger, id)? {
+                pending.state = "blocked".into();
+                pending.reason = Some("stopped".into());
+                pending.exit = None;
+                pending.signal = None;
+                pending.ended_ms = Some(now_ms());
+                save(ledger, &pending)?;
+            }
             store(ledger).write(&format!("{id}.stop"), &true)?;
         }
         Ok(())

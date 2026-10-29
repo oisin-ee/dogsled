@@ -27,12 +27,14 @@ struct Rule {
     code: &'static str,
     reason: &'static str,
     command: &'static [&'static str],
+    evidence: &'static [&'static str],
 }
 
 // Reporting policy only. A new reason is one entry; none changes release authority.
 const RULES: &[Rule] = &[
     Rule {
         code: "preparation_claim",
+        evidence: &[],
         reason: "matching preparation disposition missing; retirement releases ownership, not the task",
         command: &[
             "dogsled",
@@ -46,46 +48,55 @@ const RULES: &[Rule] = &[
     },
     Rule {
         code: "preparation_fenced",
+        evidence: &[],
         reason: "preparation disposition is fenced; matching claim release remains pending",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
         code: "legacy_preparation",
+        evidence: &[],
         reason: "requestless preparation claim; request-scoped retirement is unsupported",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
         code: "admission",
+        evidence: &[],
         reason: "admission progress retained; execution outcome is not settled by inspection",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
         code: "queued_admission",
+        evidence: &[],
         reason: "pending admission retains its request",
         command: &["dogsled", "cancel", "{id}"],
     },
     Rule {
         code: "placement",
+        evidence: &[],
         reason: "placement journal awaits same-request replay",
         command: &["dogsled", "place", "--resume", "{id}"],
     },
     Rule {
         code: "placement_grant",
+        evidence: &[],
         reason: "host-owned placement grant retained for same-request replay",
         command: &["dogsled", "place", "--resume", "{id}"],
     },
     Rule {
         code: "capacity",
+        evidence: &[],
         reason: "admission reservation holds capacity until release or expiry",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
         code: "cancellation",
+        evidence: &[],
         reason: "cancel intent retained; matching release acknowledgement pending",
         command: &["dogsled", "cancel", "{id}"],
     },
     Rule {
         code: "validity",
+        evidence: &[],
         reason: "immutable request validity evidence retained; age alone does not release ownership",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
@@ -96,51 +107,160 @@ const RULES: &[Rule] = &[
     },
     Rule {
         code: "reference_release",
+        evidence: &[],
         reason: "awaiting origin reference release acknowledgement",
         command: &["dogsled", "unit", "retry-reference-releases"],
     },
     Rule {
         code: "launch_reference",
+        evidence: &[],
         reason: "awaiting origin reference release; provider must release the exact execution binding",
         command: &["dogsled", "unit", "settlements"],
     },
     Rule {
         code: "release_certificate",
+        evidence: &[],
         reason: "origin release certificate retained as release evidence",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
         code: "checkout",
+        evidence: &[],
         reason: "open child retains its resources",
         command: &["dogsled", "close", "{pane}", "--host", "{host}"],
     },
     Rule {
         code: "registered_checkout",
+        evidence: &[],
         reason: "managed checkout registration retained; cleanup must revalidate ownership and content",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
         code: "job_checkout",
+        evidence: &[],
         reason: "nonterminal job owns its checkout",
         command: &["dogsled", "stop", "{id}"],
     },
     Rule {
         code: "retained_branch",
+        evidence: &[],
         reason: "closed child branch retained for integration or explicit drop",
         command: &["dogsled", "drop", "{id}", "--host", "{host}"],
     },
     Rule {
         code: "preservation",
+        evidence: &[],
         reason: "checkout retained by preservation or closure refusal",
         command: &["dogsled", "close", "{pane}", "--host", "{host}"],
     },
     Rule {
         code: "unlinked",
+        evidence: &[],
         reason: "checkout registration cannot prove safe removal",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
+        code: "validity_unprovable",
+        evidence: &[
+            "job request validity is unprovable",
+            "request validity changed",
+        ],
+        reason: "request validity is missing or changed; new execution refused",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "validity_expired",
+        evidence: &["job request is older than 30 days"],
+        reason: "request is older than 30 days; new execution refused",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "validity_future",
+        evidence: &["job request creation time is ahead"],
+        reason: "request creation time is ahead of the host clock; new execution refused",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "validity_clock",
+        evidence: &["job validity clock is unavailable"],
+        reason: "request validity clock is unavailable; new execution refused",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "validity_unsupported",
+        evidence: &[
+            "does not support job request validity",
+            "unsupported non-job request validity protocol",
+            "unsupported preparation validity envelope",
+        ],
+        reason: "request validity protocol is unsupported; new execution refused",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "completion_missing",
+        evidence: &[],
+        reason: "completion timestamp missing; retention is unproven",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "completion_invalid",
+        evidence: &[
+            "completion timestamp contradicts",
+            "completion provenance changed",
+            "completion identity changed",
+        ],
+        reason: "completion evidence is inconsistent; retention refused",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "teardown_failed",
+        evidence: &[
+            "failed teardown:",
+            "teardown failed or unknown, checkout kept",
+        ],
+        reason: "teardown failed or unknown, checkout kept",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "teardown_unknown",
+        evidence: &[
+            "unknown teardown outcome",
+            "close interrupted after teardown",
+        ],
+        reason: "teardown outcome is unknown; checkout kept; hook will not be rerun automatically",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "unsaved_work",
+        evidence: &["unsaved work", "unique content", "local-only commits"],
+        reason: "unsaved work keeps the checkout, lock, and panes",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "preservation_pending",
+        evidence: &[
+            "unfinished preservation operation",
+            "normalization was interrupted",
+            "preservation close expectation changed",
+        ],
+        reason: "preservation is incomplete; inspect recovery before another close",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "child_event_undelivered",
+        evidence: &["child notification undelivered:"],
+        reason: "child event is undelivered; its subject is missing or expired",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
+        code: "child_event_superseded",
+        evidence: &["child notification superseded:"],
+        reason: "child event is undelivered; its subject or custody changed",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
         code: "unreadable",
+        evidence: &[],
         reason: "resource ownership record is unreadable; no release is proven",
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
@@ -195,6 +315,22 @@ fn report(code: &str, host: &str, resource: String, owner: &str, id: &str, pane:
 }
 
 impl Hold {
+    fn with_reason(mut self, reason: &str) -> Self {
+        if let Some(rule) = RULES.iter().find(|rule| {
+            rule.evidence
+                .iter()
+                .any(|evidence| reason.contains(evidence))
+        }) {
+            let mapped = report(rule.code, &self.host, String::new(), &self.owner, "", "");
+            self.code = mapped.code;
+            self.command_host = mapped.command_host;
+            self.command_argv = mapped.command_argv;
+            self.next_command = mapped.next_command;
+        }
+        self.reason = reason.into();
+        self
+    }
+
     pub fn display(&self) -> String {
         format!(
             "{} on {} — owner: {}; {}; next (on {}): {}",
@@ -339,11 +475,165 @@ pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<H
             ));
         }
     }
+    for ticket in &tickets {
+        if let Some(reason) = &ticket.error {
+            holds.push(
+                owned(
+                    "admission",
+                    format!("ticket {}", ticket.id),
+                    &ticket.request.id,
+                )
+                .with_reason(reason),
+            );
+        }
+    }
+    holds.extend(completion_holds(ledger, now, &owned)?);
+    holds.extend(preservation_holds(ledger, host)?);
+    holds.extend(notification_holds(ledger, &owned)?);
     holds.extend(self::admissions(admissions, &tickets, &owned));
     holds.extend(releases(ledger, &launches, &owned)?);
     holds.extend(checkouts(ledger, host, &launches)?);
     holds.extend(branches(ledger, host, &owned)?);
     holds.extend(jobs_and_closures(ledger, host, jobs, &owned)?);
+    Ok(holds)
+}
+
+fn notification_holds(
+    ledger: &Ledger,
+    owned: &impl Fn(&str, String, &str) -> Hold,
+) -> Result<Vec<Hold>> {
+    let failures: BTreeMap<String, String> = ledger
+        .read("notification-failures.json")?
+        .unwrap_or_default();
+    Ok(failures
+        .into_iter()
+        .map(|(id, reason)| {
+            owned("child_event_undelivered", format!("child event {id}"), &id).with_reason(&reason)
+        })
+        .collect())
+}
+
+fn completion_holds(
+    ledger: &Ledger,
+    now: u64,
+    owned: &impl Fn(&str, String, &str) -> Hold,
+) -> Result<Vec<Hold>> {
+    let mut holds = Vec::new();
+    // Do not call the owners' retention predicates: those can initialize the clock.
+    let clock = ledger.read::<Value>("job-validity-clock.json");
+    let effective = clock
+        .as_ref()
+        .ok()
+        .and_then(|value| value.as_ref())
+        .and_then(|value| value["high_water_ms"].as_u64())
+        .map(|time| time.max(now));
+    for directory in [
+        "admissions",
+        "preparation-receipts",
+        "launches",
+        "placement-grants",
+    ] {
+        for (name, value) in records(ledger, directory)? {
+            if (directory == "launches" && !name.ends_with(".progress.json"))
+                || (directory == "placement-grants" && !name.ends_with(".lifecycle.json"))
+            {
+                continue;
+            }
+            let Some(value) = value else { continue };
+            let id = name
+                .trim_end_matches(".json")
+                .trim_end_matches(".progress")
+                .trim_end_matches(".disposition")
+                .trim_end_matches(".lifecycle");
+            let finished = &value["finished_ms"];
+            let created = value
+                .pointer("/request/validity/created_ms")
+                .or_else(|| value.pointer("/validity/created_ms"))
+                .and_then(Value::as_u64);
+            let code = if finished.is_null() {
+                "completion_missing"
+            } else if finished.as_u64().is_none_or(|time| {
+                effective.is_some_and(|effective| time > effective)
+                    || created.is_some_and(|created| {
+                        time.saturating_add(crate::jobs::VALIDITY_SKEW_MS) < created
+                    })
+            }) {
+                "completion_invalid"
+            } else {
+                // A plausible timestamp alone never proves terminal provenance or release.
+                continue;
+            };
+            holds.push(owned(
+                code,
+                format!("completion evidence {directory}/{name}"),
+                id,
+            ));
+        }
+    }
+    Ok(holds)
+}
+
+fn preservation_holds(ledger: &Ledger, host: &str) -> Result<Vec<Hold>> {
+    let mut holds = Vec::new();
+    for (name, value) in records(ledger, "preservation-operations")? {
+        let Some(value) = value else {
+            holds.push(report(
+                "unreadable",
+                host,
+                format!("preservation {name}"),
+                "unrecorded",
+                "",
+                "",
+            ));
+            continue;
+        };
+        if value["stage"] == "finished" {
+            continue;
+        }
+        let code = if value["stage"] == "teardown_entered" {
+            "teardown_unknown"
+        } else {
+            "preservation_pending"
+        };
+        let mut hold = report(
+            code,
+            host,
+            format!(
+                "checkout {} (operation {})",
+                text(&value, "/expectation/tree/path"),
+                text(&value, "/id")
+            ),
+            text(&value, "/expectation/caller/pane"),
+            "",
+            text(&value, "/expectation/pane"),
+        );
+        if let Some(reason) = value["blocker"].as_str() {
+            hold = hold.with_reason(reason);
+        }
+        // Inspect pinned content rather than rerun a hook with an unknown outcome.
+        if let Some(snapshot) = value
+            .get("latest")
+            .filter(|v| !v.is_null())
+            .or_else(|| value.get("initial").filter(|v| !v.is_null()))
+            && let (Some(id), Some(repo)) = (
+                snapshot["id"].as_str(),
+                value
+                    .pointer("/expectation/tree/repo")
+                    .and_then(Value::as_str),
+            )
+        {
+            hold.command_argv = vec![
+                "dogsled".into(),
+                "recovery".into(),
+                "show".into(),
+                id.into(),
+                "--repo".into(),
+                repo.into(),
+            ];
+            hold.next_command = command_line(&hold.command_argv);
+        }
+        holds.push(hold);
+    }
     Ok(holds)
 }
 
@@ -454,6 +744,11 @@ fn admissions(
             holds.push(owned("unreadable", format!("admission {id}"), id));
             continue;
         };
+        if let Some(reason) = value["error"].as_str() {
+            holds.push(
+                owned("admission", format!("admission refusal {id}"), id).with_reason(reason),
+            );
+        }
         if let Some(phase) = value.pointer("/placement/phase").and_then(Value::as_str) {
             if phase != "completed" {
                 let mut hold = owned("placement", format!("placement {id}"), id);
@@ -548,6 +843,9 @@ fn releases(
             continue;
         }
         let id = name.trim_end_matches(".progress.json");
+        if let Some(reason) = value.as_ref().and_then(|v| v["error"].as_str()) {
+            holds.push(owned("admission", format!("launch refusal {id}"), id).with_reason(reason));
+        }
         match value {
             Some(value)
                 if value
@@ -670,8 +968,7 @@ fn jobs_and_closures(
     }
     let landing: BTreeMap<String, String> = ledger.read("landing.json")?.unwrap_or_default();
     for (id, reason) in landing {
-        let mut hold = owned("preservation", format!("closure {id}"), &id);
-        hold.reason = reason;
+        let mut hold = owned("preservation", format!("closure {id}"), &id).with_reason(&reason);
         // The origin item supplies the child pane and exact close command below.
         hold.command_argv = vec![
             "dogsled".into(),
@@ -704,10 +1001,10 @@ pub fn owner(status: &crate::commands::Status) -> Vec<Hold> {
             hold.owner_pane = Some(item.owner_pane.clone());
             if let Some(reason) = &item.resource_close_reason {
                 hold.code = "preservation".into();
-                hold.reason.clone_from(reason);
+                hold = hold.with_reason(reason);
             }
             if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
-                hold.reason.clone_from(&orphan.reason);
+                hold = hold.with_reason(&orphan.reason);
             }
             if let Some(path) = status
                 .hosts
@@ -790,6 +1087,302 @@ mod tests {
             crate::cli::Cli::try_parse_from(&hold.command_argv)
                 .unwrap_or_else(|error| panic!("{}: {error}", rule.code));
         }
+    }
+
+    fn fixture() -> Ledger {
+        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+    }
+
+    fn saved_files(path: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(saved_files(&path));
+            } else {
+                files.insert(path.clone(), std::fs::read(path).unwrap());
+            }
+        }
+        files
+    }
+
+    fn assert_reported_reason(reason: &str, code: &str) {
+        let ledger = fixture();
+        ledger
+            .child("admissions")
+            .write(
+                "held.json",
+                &serde_json::json!({
+                    "request":{"owner":"w1:p1", "owner_host":"origin"}, "error":reason
+                }),
+            )
+            .unwrap();
+        let before = saved_files(&ledger.dir);
+        let holds = local(&ledger, "worker", 100, 90).unwrap();
+        let hold = holds.iter().find(|hold| hold.code == code).unwrap();
+        assert_eq!(hold.reason, reason);
+        assert_eq!(hold.owner, "w1:p1");
+        assert_eq!(hold.request_id.as_deref(), Some("held"));
+        assert_eq!(hold.command_argv, ["dogsled", "doctor", "--host", "worker"]);
+        assert_eq!(hold.command_host, "worker");
+        assert_eq!(
+            before,
+            saved_files(&ledger.dir),
+            "reports must not initialize clocks, acquire locks, or alter decisions"
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn validity_unprovable_has_an_exact_inspection_command() {
+        for reason in [
+            "job request validity is unprovable",
+            "request validity changed",
+        ] {
+            assert_reported_reason(reason, "validity_unprovable");
+        }
+    }
+
+    #[test]
+    fn validity_expired_has_an_exact_inspection_command() {
+        assert_reported_reason("job request is older than 30 days", "validity_expired");
+    }
+
+    #[test]
+    fn validity_future_has_an_exact_inspection_command() {
+        assert_reported_reason("job request creation time is ahead", "validity_future");
+    }
+
+    #[test]
+    fn validity_clock_has_an_exact_inspection_command() {
+        assert_reported_reason("job validity clock is unavailable", "validity_clock");
+    }
+
+    #[test]
+    fn validity_unsupported_has_an_exact_inspection_command() {
+        for reason in [
+            "does not support job request validity",
+            "unsupported non-job request validity protocol",
+            "unsupported preparation validity envelope",
+        ] {
+            assert_reported_reason(reason, "validity_unsupported");
+        }
+    }
+
+    #[test]
+    fn completion_invalid_has_an_exact_inspection_command() {
+        for reason in [
+            "completion timestamp contradicts",
+            "completion provenance changed",
+            "completion identity changed",
+        ] {
+            assert_reported_reason(reason, "completion_invalid");
+        }
+    }
+
+    #[test]
+    fn teardown_failed_has_an_exact_inspection_command() {
+        for reason in [
+            "failed teardown:",
+            "teardown failed or unknown, checkout kept",
+        ] {
+            assert_reported_reason(reason, "teardown_failed");
+        }
+    }
+
+    #[test]
+    fn teardown_unknown_has_an_exact_inspection_command() {
+        for reason in [
+            "unknown teardown outcome",
+            "close interrupted after teardown",
+        ] {
+            assert_reported_reason(reason, "teardown_unknown");
+        }
+    }
+
+    #[test]
+    fn unsaved_work_has_an_exact_inspection_command() {
+        for reason in ["unsaved work", "unique content", "local-only commits"] {
+            assert_reported_reason(reason, "unsaved_work");
+        }
+    }
+
+    #[test]
+    fn preservation_pending_has_an_exact_inspection_command() {
+        for reason in [
+            "unfinished preservation operation",
+            "normalization was interrupted",
+            "preservation close expectation changed",
+        ] {
+            assert_reported_reason(reason, "preservation_pending");
+        }
+    }
+
+    #[test]
+    fn child_event_undelivered_has_an_exact_inspection_command() {
+        assert_reported_reason("child notification undelivered:", "child_event_undelivered");
+    }
+
+    #[test]
+    fn child_event_superseded_has_an_exact_inspection_command() {
+        assert_reported_reason("child notification superseded:", "child_event_superseded");
+    }
+
+    #[test]
+    fn finished_time_gaps_and_contradictions_remain_read_only_holds() {
+        let ledger = fixture();
+        ledger
+            .write(
+                "job-validity-clock.json",
+                &serde_json::json!({"version":1,"high_water_ms":100}),
+            )
+            .unwrap();
+        for (id, evidence) in [
+            ("missing", serde_json::json!({})),
+            ("future", serde_json::json!({"finished_ms":101})),
+            ("malformed", serde_json::json!({"finished_ms":"100"})),
+            (
+                "before-creation",
+                serde_json::json!({"finished_ms":1,"validity":{"created_ms":300_002}}),
+            ),
+            ("plausible", serde_json::json!({"finished_ms":100})),
+        ] {
+            ledger
+                .child("preparation-receipts")
+                .write(&format!("{id}.json"), &evidence)
+                .unwrap();
+        }
+        let before = saved_files(&ledger.dir);
+        let holds = local(&ledger, "worker", 100, 90).unwrap();
+        for (id, code) in [
+            ("missing", "completion_missing"),
+            ("future", "completion_invalid"),
+            ("malformed", "completion_invalid"),
+            ("before-creation", "completion_invalid"),
+        ] {
+            let hold = holds
+                .iter()
+                .find(|hold| hold.request_id.as_deref() == Some(id))
+                .unwrap();
+            assert_eq!(hold.code, code);
+            assert_eq!(hold.command_argv, ["dogsled", "doctor", "--host", "worker"]);
+        }
+        assert!(
+            !holds
+                .iter()
+                .any(|hold| hold.request_id.as_deref() == Some("plausible"))
+        );
+        assert_eq!(before, saved_files(&ledger.dir));
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn teardown_and_incomplete_preservation_inspect_the_pinned_snapshot() {
+        for (stage, blocker, code) in [
+            (
+                "teardown_entered",
+                Some("failed teardown: exit 1; hook will not be rerun automatically"),
+                "teardown_failed",
+            ),
+            ("teardown_entered", None, "teardown_unknown"),
+            ("normalizing", None, "preservation_pending"),
+        ] {
+            let ledger = fixture();
+            ledger.child("preservation-operations").write("operation.json", &serde_json::json!({
+                "id":"operation", "stage":stage, "blocker":blocker,
+                "expectation":{"pane":"w2:p1","caller":{"pane":"w1:p1"},"tree":{"path":"/tmp/checkout","repo":"/tmp/repo"}},
+                "initial":{"id":"snapshot"}
+            })).unwrap();
+            let before = saved_files(&ledger.dir);
+            let holds = local(&ledger, "worker", 100, 90).unwrap();
+            let hold = holds.iter().find(|hold| hold.code == code).unwrap();
+            assert_eq!(
+                hold.command_argv,
+                [
+                    "dogsled",
+                    "recovery",
+                    "show",
+                    "snapshot",
+                    "--repo",
+                    "/tmp/repo"
+                ]
+            );
+            assert_eq!(hold.command_host, "worker");
+            assert!(hold.resource.contains("/tmp/checkout"));
+            crate::cli::Cli::try_parse_from(&hold.command_argv).unwrap();
+            assert_eq!(before, saved_files(&ledger.dir));
+            std::fs::remove_dir_all(ledger.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn unsaved_work_and_child_event_failures_are_not_hidden_in_generic_holds() {
+        let ledger = fixture();
+        ledger
+            .write(
+                "landing.json",
+                &serde_json::json!({"child":"the teardown left unsaved work; checkout kept"}),
+            )
+            .unwrap();
+        ledger
+            .write(
+                "notification-failures.json",
+                &serde_json::json!({
+                    "reply-child-1":"child notification undelivered: subject expired or missing",
+                    "reply-child-2":"child notification superseded: subject or custody changed"
+                }),
+            )
+            .unwrap();
+        let before = saved_files(&ledger.dir);
+        let holds = local(&ledger, "worker", 100, 90).unwrap();
+        for code in [
+            "unsaved_work",
+            "child_event_undelivered",
+            "child_event_superseded",
+        ] {
+            let hold = holds.iter().find(|hold| hold.code == code).unwrap();
+            assert_eq!(hold.command_argv, ["dogsled", "doctor", "--host", "worker"]);
+        }
+        assert_eq!(before, saved_files(&ledger.dir));
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn origin_reference_holds_name_the_existing_commands_on_the_origin() {
+        let ledger = fixture();
+        let request = serde_json::json!({"owner":"w1:p1","owner_host":"origin","unit":{}});
+        ledger
+            .child("admissions")
+            .write(
+                "held.json",
+                &serde_json::json!({
+                    "request":request,"unit":{"reference_release":{"acknowledgement":null}}
+                }),
+            )
+            .unwrap();
+        ledger
+            .child("launches")
+            .write(
+                "held.progress.json",
+                &serde_json::json!({
+                    "request":request,"origin_release":null
+                }),
+            )
+            .unwrap();
+        let before = saved_files(&ledger.dir);
+        let holds = local(&ledger, "worker", 100, 90).unwrap();
+        for (code, command) in [
+            ("reference_release", "retry-reference-releases"),
+            ("launch_reference", "settlements"),
+        ] {
+            let hold = holds.iter().find(|hold| hold.code == code).unwrap();
+            assert_eq!(hold.command_argv, ["dogsled", "unit", command]);
+            assert_eq!(hold.command_host, "origin");
+            assert!(hold.reason.contains("awaiting origin reference release"));
+            crate::cli::Cli::try_parse_from(&hold.command_argv).unwrap();
+        }
+        assert_eq!(before, saved_files(&ledger.dir));
+        std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
     #[test]

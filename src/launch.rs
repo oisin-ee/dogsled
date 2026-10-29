@@ -1084,6 +1084,37 @@ fn start_while_busy(
     request: &Launch,
 ) -> Result<()> {
     let began = std::time::Instant::now();
+    start_with_busy_wait(
+        ledger,
+        shell,
+        args,
+        pane,
+        terminal,
+        &BusyWait {
+            window,
+            elapsed: &|| began.elapsed(),
+            pause: &std::thread::sleep,
+        },
+        request,
+    )
+}
+
+/// Keep the monotonic clock and pause together so tests can drive retry events.
+struct BusyWait<'a> {
+    window: std::time::Duration,
+    elapsed: &'a dyn Fn() -> std::time::Duration,
+    pause: &'a dyn Fn(std::time::Duration),
+}
+
+fn start_with_busy_wait(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    args: &[String],
+    pane: &str,
+    terminal: &str,
+    wait: &BusyWait<'_>,
+    request: &Launch,
+) -> Result<()> {
     let mut pause = BUSY_FIRST_PAUSE;
     let mut retry = false;
     loop {
@@ -1096,7 +1127,7 @@ fn start_while_busy(
             .map_err(|_| {
                 Error::Launch(format!(
                     "{pane} was still not an available shell when the command deadline passed after {:.1}s; the pane stays open",
-                    began.elapsed().as_secs_f32()
+                    (wait.elapsed)().as_secs_f32()
                 ))
             })?;
         if retry {
@@ -1111,8 +1142,8 @@ fn start_while_busy(
         retry = true;
         match shell.run_setup_ok("herdr", args) {
             Err(error) if is_busy(&error) => {
-                let elapsed = began.elapsed();
-                let Some(left) = window.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
+                let elapsed = (wait.elapsed)();
+                let Some(left) = wait.window.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
                     return Err(Error::Launch(format!(
                         "{pane} was still not an available shell after {:.1}s; the pane stays open: {error}",
                         elapsed.as_secs_f32()
@@ -1124,7 +1155,7 @@ fn start_while_busy(
                     .with_limit("agent start", remaining)
                     .and_then(|left| shell.budget().with_limit("agent start", left))
                     .unwrap_or_default();
-                std::thread::sleep(pause.min(left).min(remaining));
+                (wait.pause)(pause.min(left).min(remaining));
                 pause = (pause * 2).min(BUSY_MAX_PAUSE);
             }
             other => return other.map(drop),

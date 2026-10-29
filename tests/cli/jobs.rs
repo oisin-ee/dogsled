@@ -675,6 +675,46 @@ fn log_of(rig: &Rig, id: &str) -> Option<String> {
     fs::read_to_string(rig.dir.join(format!("state/jobs/{id}.log"))).ok()
 }
 
+#[test]
+fn stop_ends_a_pending_job_that_never_started() {
+    let rig = Rig::new("stop-pending-job");
+    let marker = rig.dir.join("marker");
+    let command = format!("touch {}", marker.display());
+    rig.claim("pending", &["sh", "-c", &command]);
+
+    let output = rig.run(&["stop", "pending"]);
+    assert!(output.status.success(), "{output:?}");
+    let stopped = rig.read("state/jobs/pending.json");
+    assert_eq!(stopped["state"], "blocked");
+    assert_eq!(stopped["reason"], "stopped");
+    assert!(stopped["ended_ms"].as_u64().is_some());
+    assert!(stopped["started_ms"].is_null());
+    assert!(stopped["exit"].is_null());
+    assert!(stopped["signal"].is_null());
+    assert_eq!(rig.read("state/jobs/pending.stop"), json!(true));
+
+    let output = rig.run(&["exec", "pending", "--", "sh", "-c", &command]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("job already ended"),
+        "{output:?}"
+    );
+    assert!(!marker.exists());
+    assert_eq!(rig.read("state/jobs/pending.json"), stopped);
+
+    // A started job must let its capture loop stop the process and record its end.
+    rig.claim("started", &["sh", "-c", &command]);
+    let mut started = rig.read("state/jobs/started.json");
+    started["state"] = json!("working");
+    started["started_ms"] = json!(100);
+    rig.put("state/jobs/started.json", &started);
+    let output = rig.run(&["stop", "started"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(rig.read("state/jobs/started.json"), started);
+    assert!(started["ended_ms"].is_null());
+    assert_eq!(rig.read("state/jobs/started.stop"), json!(true));
+}
+
 /// A wrapper runs nothing when its claim is missing, corrupt, for another command, already
 /// started, ended, or uncertain. No process, no log, and no pane exist for such a job.
 #[test]
