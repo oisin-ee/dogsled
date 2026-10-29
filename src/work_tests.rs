@@ -269,6 +269,7 @@ fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
     let now = crate::ledger::now_ms();
     let shell = Fake::new();
     let launch = work::Launch {
+        preparation_protocol: None,
         preparation: None,
         id: "receipted".into(),
         unit: None,
@@ -761,6 +762,7 @@ fn a_job_launch_receipt_carries_its_own_request_evidence() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let launch = crate::work::Launch {
+        preparation_protocol: None,
         preparation: None,
         id: "replayed".into(),
         unit: None,

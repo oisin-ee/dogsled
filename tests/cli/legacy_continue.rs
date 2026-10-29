@@ -36,6 +36,7 @@ fn bound_legacy(name: &str) -> (Rig, Value) {
     let (progress_file, mut progress) = owner_progress(&rig, &execution);
     let mut launch = progress["request"].clone();
     launch["preparation"] = binding.clone();
+    launch["preparation_protocol"] = json!(1);
     launch["pane"] = json!("w2:p1");
     launch["terminal"] = json!("term_child");
     progress["request"] = launch.clone();

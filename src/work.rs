@@ -59,6 +59,13 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launch {
     pub id: String,
+    /// New launch receipts retain this format marker inside their saved request.
+    #[serde(
+        default,
+        deserialize_with = "crate::prepare::receipt_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub preparation_protocol: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preparation: Option<Box<crate::prepare::disposition::Binding>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -557,6 +564,9 @@ fn request_evidence(
     if let Some(validity) = launch_validity(ledger, launch)? {
         evidence["validity"] = json!(validity);
     }
+    if let Some(version) = launch.preparation_protocol {
+        evidence["preparation_protocol"] = json!(version);
+    }
     Ok(evidence)
 }
 
@@ -788,7 +798,9 @@ pub fn receive_launch(
             .with_lock(&launch.id, || {
                 // Ingress can publish validity. Validate the disposition before that first write;
                 // a final correlated receipt remains a read-only replay instead.
-                crate::prepare::validate_launch_binding(ledger, launch)?;
+                if crate::prepare::validate_launch_binding(ledger, launch)?.legacy_final {
+                    return Ok(());
+                }
                 crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
                 if replay_launch(ledger, launch)?.is_some() {
                     return Ok(());
@@ -848,7 +860,9 @@ pub fn launch(
         ledger
             .child("preparation-receipts")
             .with_lock(&launch.id, || {
-                crate::prepare::validate_launch_binding(ledger, launch)?;
+                if crate::prepare::validate_launch_binding(ledger, launch)?.legacy_final {
+                    return Ok(());
+                }
                 crate::prepare::disposition::replay_guarded(ledger, shell, launch)
             })?;
         return replay?.ok_or_else(|| Error::Invalid("final launch receipt disappeared".into()));
@@ -861,7 +875,10 @@ pub fn launch(
         .child("preparation-receipts")
         .with_lock(&launch.id, || {
             launch_test_barrier("ENTERED_GATE")?;
-            crate::prepare::validate_launch_binding(ledger, launch)?;
+            if crate::prepare::validate_launch_binding(ledger, launch)?.legacy_final {
+                return replay_launch(ledger, launch)?
+                    .ok_or_else(|| crate::worktree::refuse("historical final launch disappeared"));
+            }
             // The preparation gate can wait behind a completed dispatch.
             crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
             if let Some(result) = replay_launch(ledger, launch)? {
@@ -1539,6 +1556,10 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
     }
     Ok(Launch {
         id: request.id.clone(),
+        preparation_protocol: prepared
+            .binding
+            .as_ref()
+            .map(|_| crate::prepare::disposition::VERSION),
         preparation: prepared.binding,
         unit,
         action,

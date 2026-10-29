@@ -35,11 +35,20 @@ struct Pending {
 }
 
 /// Refuse changed or missing authority before ingress can publish validity or dispatch.
-/// Return true for historical authority: only a final read-only replay may use it.
+/// Capture once under the preparation gate. Callers retain it for their decision.
+pub struct LaunchAuthority {
+    pub binding: Option<Box<disposition::Binding>>,
+    pub historical: bool,
+    pub legacy_final: bool,
+}
+
 pub fn validate_launch_binding(
     ledger: &crate::ledger::Ledger,
     launch: &crate::work::Launch,
-) -> Result<bool> {
+) -> Result<LaunchAuthority> {
+    if launch.preparation.is_some() || launch.preparation_protocol.is_some() {
+        require_protocol(launch.preparation_protocol)?;
+    }
     let receipt = ledger
         .child("preparation-receipts")
         .read::<PreparationReceipt>(&format!("{}.json", launch.id))?;
@@ -70,12 +79,115 @@ pub fn validate_launch_binding(
         }
     }
     let expected = receipt.as_ref().and_then(|r| r.binding.as_ref());
-    if launch.preparation.as_deref() != expected {
+    let legacy_final = if launch.preparation.as_deref() == expected {
+        false
+    } else if let Some(binding) = expected {
+        legacy_bound_final(ledger, launch, binding)?
+    } else {
+        false
+    };
+    if launch.preparation.as_deref() != expected && !legacy_final {
         return Err(worktree::refuse(
             "preparation binding changed; ownership remains unresolved",
         ));
     }
-    Ok(historical)
+    Ok(LaunchAuthority {
+        binding: expected.cloned().map(Box::new),
+        historical,
+        legacy_final,
+    })
+}
+
+/// C3a saved no launch protocol/binding fields. Correlate its final native receipt
+/// format and any transfer proof without changing either or granting fresh dispatch.
+fn legacy_bound_final(
+    ledger: &crate::ledger::Ledger,
+    launch: &crate::work::Launch,
+    binding: &disposition::Binding,
+) -> Result<bool> {
+    if launch.preparation.is_some()
+        || launch.preparation_protocol.is_some()
+        || binding.request_id != launch.id
+        || binding.claim.request_id != launch.id
+        || binding.claim.tree.identity.is_none()
+        || !worktree::same(&launch.cwd, &binding.claim.tree.path)
+    {
+        return Ok(false);
+    }
+    let Some(result) = ledger
+        .child("launches")
+        .read::<serde_json::Value>(&format!("{}.json", launch.id))?
+    else {
+        return Ok(false);
+    };
+    if result["host"].as_str() != Some(&launch.host) {
+        return Ok(false);
+    }
+    let checkout = result
+        .get("checkout")
+        .cloned()
+        .map(serde_json::from_value::<crate::cleanup::Tree>)
+        .transpose()?;
+    if checkout
+        .as_ref()
+        .is_none_or(|tree| binding.claim.tree.drift(tree) == crate::cleanup::Drift::Identity)
+    {
+        return Ok(false);
+    }
+    if let Some(receipt) = ledger
+        .child("preparation-receipts")
+        .read::<disposition::Receipt>(&format!("{}.disposition.json", launch.id))?
+    {
+        let disposition::Policy::Transfer {
+            launch: saved,
+            pane,
+            job,
+        } = &receipt.request.policy
+        else {
+            return Ok(false);
+        };
+        if receipt.request.version != disposition::VERSION
+            || receipt.request.binding != *binding
+            || receipt.request.outcome != disposition::Outcome::PossiblyExecuted
+            || **saved != *launch
+            || result["pane"].as_str() != Some(pane)
+            || !matching_transfer_owner(launch, pane, job.as_deref(), binding)
+        {
+            return Ok(false);
+        }
+    }
+    let Some(prepared) = binding.prepared.as_ref() else {
+        return Ok(false);
+    };
+    match &launch.action {
+        crate::work::Action::Agent { .. } => {
+            let saved = ledger
+                .child("launches")
+                .read::<serde_json::Value>(&format!("{}.progress.json", launch.id))?;
+            if saved.as_ref().is_none_or(|saved| {
+                saved["request"].get("preparation_protocol").is_some()
+                    || saved["request"].get("preparation").is_some()
+            }) {
+                return Ok(false);
+            }
+            Ok(launch.pane == prepared.pane_id
+                && launch.terminal == prepared.terminal_id
+                && crate::launch::replay(ledger, launch)?.as_ref() == Some(&result))
+        }
+        crate::work::Action::Job {
+            cmd,
+            timeout_ms,
+            idle_timeout_ms,
+            ..
+        } => {
+            if result["request"].get("preparation_protocol").is_some() {
+                return Ok(false);
+            }
+            crate::work::correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &result)?;
+            Ok(true)
+        }
+        crate::work::Action::Place => Ok(false),
+    }
 }
 
 /// Retry only this exact transaction. Transport failure never supplies execution evidence.
@@ -333,10 +445,29 @@ pub fn validate_prepared(prepared: &Prepared, id: &str) -> Result<()> {
         || prepared.pane_id.as_deref().is_none_or(str::is_empty)
         || prepared.terminal_id.as_deref().is_none_or(str::is_empty)
         || binding.prepared.as_ref() != Some(&snapshot)
-        || prepared.path.as_deref() != Some(&binding.claim.tree.path)
+        || prepared.path.is_none()
     {
         return Err(worktree::refuse(
             "peer returned a mismatched preparation binding; ownership remains unresolved",
+        ));
+    }
+    Ok(())
+}
+
+/// Path equivalence can be established only where the checkout actually lives.
+fn validate_prepared_host(prepared: &Prepared, id: &str) -> Result<()> {
+    validate_prepared(prepared, id)?;
+    let binding = prepared
+        .binding
+        .as_deref()
+        .ok_or_else(|| worktree::refuse("missing preparation binding"))?;
+    if prepared
+        .path
+        .as_deref()
+        .is_none_or(|path| !worktree::same(path, &binding.claim.tree.path))
+    {
+        return Err(worktree::refuse(
+            "prepared path does not name the captured checkout",
         ));
     }
     Ok(())
@@ -420,7 +551,10 @@ pub fn local(
                     prepared: result.as_ref().ok().cloned(),
                 });
             match result {
-                Ok(mut prepared) => {
+                Ok(prepared) => {
+                    let mut wire = prepared.clone();
+                    wire.binding = binding.clone().map(Box::new);
+                    validate_prepared_host(&wire, id)?;
                     receipts.write(
                         &file,
                         &PreparationReceipt {
@@ -431,8 +565,7 @@ pub fn local(
                             binding: binding.clone(),
                         },
                     )?;
-                    prepared.binding = binding.map(Box::new);
-                    Ok(prepared)
+                    Ok(wire)
                 }
                 Err(error) => {
                     // A returned failure is a final outcome. Record it, so a later call replays
@@ -489,7 +622,7 @@ struct PreparationReceipt {
 }
 
 // Absence alone identifies the historical format; an explicit null is not a version.
-fn receipt_version<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn receipt_version<'de, D: serde::Deserializer<'de>>(
     decoder: D,
 ) -> std::result::Result<Option<u32>, D::Error> {
     u32::deserialize(decoder).map(Some)
@@ -537,6 +670,7 @@ fn replay_guarded(
     }
     let mut prepared = replay(id, receipt)?;
     prepared.binding = receipt.binding.clone().map(Box::new);
+    validate_prepared_host(&prepared, id)?;
     Ok(prepared)
 }
 
@@ -844,7 +978,8 @@ fn record(
     ledger.with_lock("preparations", || {
         let mut preparations: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
         preparations.retain(|record| {
-            record.tree.path != pending.path || record.request_id.as_deref() != request_id
+            !worktree::same(&record.tree.path, &pending.path)
+                || record.request_id.as_deref() != request_id
         });
         preparations.push(Pending {
             tree: pending,

@@ -1,6 +1,244 @@
 use super::*;
 use std::io::Write as _;
 
+#[test]
+fn c3a_bound_final_launch_replays_but_stripped_new_launch_refuses() {
+    for job in [false, true] {
+        for progress in ["released", "fenced", "missing"] {
+            for historical in [true, false] {
+                c3a_replay_case(historical, job, progress);
+            }
+        }
+    }
+}
+
+fn c3a_replay_case(historical: bool, job: bool, progress: &str) {
+    let (rig, repo) = short_disposition_rig("c3a-replay");
+    if job {
+        let herdr = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+        rig.script("herdr", &herdr.replace("case \"$*\" in", "case \"$*\" in\n  'tab create'*) printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w9:p1\",\"terminal_id\":\"job-terminal\"}}}' ;;\n  'pane run'*) printf '{}\\n' ;;"));
+    }
+    let prepared = disposition_prepared(&rig, &repo, "recover-one", "saved", true);
+    let mut launch = if job {
+        job_launch_request(&rig, "recover-one", &["true"])
+    } else {
+        host_request(&rig)
+    };
+    launch["cwd"] = prepared["path"].clone();
+    if !job {
+        launch["pane"] = prepared["pane_id"].clone();
+        launch["terminal"] = prepared["terminal_id"].clone();
+    }
+    launch["preparation"] = prepared["binding"].clone();
+    launch["preparation_protocol"] = json!(1);
+    if !historical && progress == "released" {
+        assert_unbound_launch_refuses(&rig, &launch);
+    }
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &launch.to_string(),
+    ]);
+    assert_eq!(code, 0, "{result}");
+    if historical {
+        write_c3a_launch_shape(&rig, job);
+    }
+    let file = "state/preparation-receipts/recover-one.disposition.json";
+    if progress == "missing" {
+        fs::remove_file(rig.dir.join(file)).unwrap();
+    } else if progress == "fenced" {
+        let mut fence = rig.read(file);
+        fence["progress"] = json!(progress);
+        rig.put(file, &fence);
+    }
+    launch.as_object_mut().unwrap().remove("preparation");
+    launch
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation_protocol");
+    let fence = rig
+        .dir
+        .join("state/preparation-receipts/recover-one.disposition.json");
+    let before = fs::read(&fence).ok();
+    let calls = rig.log("herdr.log");
+    let (code, replay) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &launch.to_string(),
+    ]);
+    assert_eq!(
+        code,
+        if historical { 0 } else { 2 },
+        "historical={historical} job={job} progress={progress}: {replay}"
+    );
+    if historical {
+        let mut expected = result;
+        if job {
+            expected["request"]
+                .as_object_mut()
+                .unwrap()
+                .remove("preparation_protocol");
+        }
+        assert_eq!(replay, expected);
+    }
+    assert_eq!(fs::read(fence).ok(), before);
+    assert_eq!(rig.log("herdr.log"), calls);
+}
+
+fn assert_unbound_launch_refuses(rig: &Rig, launch: &Value) {
+    let mut stripped = launch.clone();
+    stripped.as_object_mut().unwrap().remove("preparation");
+    stripped
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation_protocol");
+    let claims = rig.read("state/preparations.json");
+    let calls = rig.log("herdr.log");
+    assert_eq!(
+        rig.json(&[
+            "host",
+            "launch",
+            "--job-validity",
+            "2",
+            "--request",
+            &stripped.to_string()
+        ])
+        .0,
+        2
+    );
+    assert_eq!(rig.read("state/preparations.json"), claims);
+    assert_eq!(rig.log("herdr.log"), calls);
+    assert!(!rig.dir.join("state/launches/recover-one.json").exists());
+    for version in [Value::Null, json!(99)] {
+        let mut unsupported = launch.clone();
+        unsupported["preparation_protocol"] = version;
+        assert_eq!(
+            rig.json(&[
+                "host",
+                "launch",
+                "--job-validity",
+                "2",
+                "--request",
+                &unsupported.to_string()
+            ])
+            .0,
+            2
+        );
+        assert_eq!(rig.read("state/preparations.json"), claims);
+        assert_eq!(rig.log("herdr.log"), calls);
+    }
+}
+
+fn write_c3a_launch_shape(rig: &Rig, job: bool) {
+    let file = if job {
+        "state/launches/recover-one.json"
+    } else {
+        "state/launches/recover-one.progress.json"
+    };
+    let mut saved = rig.read(file);
+    saved["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation");
+    saved["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation_protocol");
+    rig.put(file, &saved);
+    let file = "state/preparation-receipts/recover-one.disposition.json";
+    let mut fence = rig.read(file);
+    fence["request"]["policy"]["launch"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation");
+    fence["request"]["policy"]["launch"]
+        .as_object_mut()
+        .unwrap()
+        .remove("preparation_protocol");
+    rig.put(file, &fence);
+}
+
+#[test]
+fn aliased_preparation_rows_merge_only_for_the_same_request() {
+    use std::os::unix::fs::symlink;
+    let (rig, repo) = short_disposition_rig("aliased-owners");
+    let storage = rig.dir.join("trees");
+    fs::create_dir_all(&storage).unwrap();
+    symlink(&storage, repo.join(".worktrees")).unwrap();
+    disposition_prepared(&rig, &repo, "first", "alias", true);
+    disposition_prepared(&rig, &repo, "second", "alias", false);
+    let claims = rig.read("state/preparations.json");
+    assert_eq!(claims.as_array().unwrap().len(), 2, "{claims}");
+    assert_eq!(claims[0]["request_id"], "first");
+    assert_eq!(claims[1]["request_id"], "second");
+    assert_eq!(claims[0]["identity"], claims[1]["identity"]);
+    let request = rig.disposition_request("first");
+    assert_eq!(rig.json(&["host", "prepared", "--input", &request]).0, 0);
+    assert_eq!(rig.read("state/preparations.json"), json!([claims[1]]));
+}
+
+#[test]
+fn remote_preparation_accepts_owning_hosts_symlink_equivalence() {
+    use std::os::unix::fs::symlink;
+    let (rig, repo) = short_disposition_rig("remote-symlink");
+    rig.peer();
+    let storage = rig.dir.join("trees");
+    fs::create_dir_all(&storage).unwrap();
+    symlink(&storage, repo.join(".worktrees")).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    let handler = format!(
+        r#"  *'host prepare '*|*'host prepared '*)
+    for remote do :; done
+    remote=${{remote#* host }}
+    DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" > "$RIG/peer-output" 2> "$RIG/peer-error"
+    status=$?; cat "$RIG/peer-output"; exit "$status" ;;
+"#,
+        env!("CARGO_BIN_EXE_dogsled")
+    );
+    rig.script(
+        "ssh",
+        &script.replacen("case \"$*\" in", &format!("case \"$*\" in\n{handler}"), 1),
+    );
+    let (code, placed) = rig.json(&[
+        "place",
+        "--host",
+        "netcup",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "alias",
+        "--base",
+        "main",
+    ]);
+    assert_eq!(
+        code,
+        0,
+        "{placed}: {} {}",
+        rig.log("peer-error"),
+        rig.log("peer-output")
+    );
+    let path = PathBuf::from(placed["path"].as_str().unwrap());
+    assert_eq!(path.canonicalize().unwrap(), storage.join("alias"));
+    let receipt = fs::read_dir(rig.dir.join("peer-state/preparation-receipts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".disposition.json")
+        })
+        .unwrap();
+    let receipt: Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+    assert_eq!(receipt["progress"], "released");
+}
+
 fn short_disposition_rig(name: &str) -> (Rig, PathBuf) {
     let (rig, repo) = place::place_rig(name);
     let relative = repo
@@ -236,6 +474,7 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
     launch["preparation"] = prepared["binding"].clone();
+    launch["preparation_protocol"] = json!(1);
     let (code, error) = rig.json(&["host", "launch", "--request", &launch.to_string()]);
     assert_ne!(code, 0, "{error}");
     assert!(!admin.join("dogsled-checkout-id").exists());
@@ -312,6 +551,7 @@ fn historical_preparation_replays_final_launch_without_releasing_claim() {
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
     launch["preparation"] = prepared["binding"].clone();
+    launch["preparation_protocol"] = json!(1);
     let request = launch.to_string();
     let args = ["host", "launch", "--request", &request];
     let out = rig
@@ -364,6 +604,7 @@ fn versioned_preparation_without_binding_refuses_final_launch_replay() {
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
     launch["preparation"] = prepared["binding"].clone();
+    launch["preparation_protocol"] = json!(1);
     let request = launch.to_string();
     let args = ["host", "launch", "--request", &request];
     let out = rig
@@ -407,6 +648,7 @@ fn over_budget_agent_refusal_releases_preparation_before_dispatch_and_on_replay(
         launch["pane"] = prepared["pane_id"].clone();
         launch["terminal"] = prepared["terminal_id"].clone();
         launch["preparation"] = prepared["binding"].clone();
+        launch["preparation_protocol"] = json!(1);
         launch["action"]["name"] = json!("n".repeat(1000));
         let request = launch.to_string();
         let args = ["host", "launch", "--request", &request];
@@ -453,6 +695,7 @@ fn released_claim_replay_acknowledges_without_repository() {
     launch["pane"] = prepared["pane_id"].clone();
     launch["terminal"] = prepared["terminal_id"].clone();
     launch["preparation"] = prepared["binding"].clone();
+    launch["preparation_protocol"] = json!(1);
     let request = launch.to_string();
     let args = ["host", "launch", "--request", &request];
     let out = rig
@@ -489,6 +732,7 @@ fn agent_receipt_replay_completes_fenced_preparation_transfer() {
         launch["pane"] = prepared["pane_id"].clone();
         launch["terminal"] = prepared["terminal_id"].clone();
         launch["preparation"] = prepared["binding"].clone();
+        launch["preparation_protocol"] = json!(1);
         let request = launch.to_string();
         let args = ["host", "launch", "--request", &request];
         let out = rig
@@ -550,6 +794,7 @@ fn prepared_agent_refusal_releases_only_known_not_started_claims() {
         launch["pane"] = prepared["pane_id"].clone();
         launch["terminal"] = prepared["terminal_id"].clone();
         launch["preparation"] = prepared["binding"].clone();
+        launch["preparation_protocol"] = json!(1);
         if final_refusal {
             let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
             rig.script("herdr", &script.replace("  'agent start'*)\n", "  'agent start'*) echo '{\"error\":{\"code\":\"agent_name_taken\",\"message\":\"already used\"}}' >&2; exit 1 ;;\n  'unused start'*)\n"));
@@ -840,6 +1085,7 @@ fn disposition_and_dispatch_obey_both_gate_orders() {
         let prepared = disposition_prepared(&rig, &repo, "recover-one", "ordered", true);
         let mut launch = host_request(&rig);
         launch["preparation"] = prepared["binding"].clone();
+        launch["preparation_protocol"] = json!(1);
         launch["cwd"] = prepared["path"].clone();
         launch["pane"] = prepared["pane_id"].clone();
         launch["terminal"] = prepared["terminal_id"].clone();
@@ -1218,6 +1464,7 @@ fn incomplete_launch_keeps_saved_checkout_identity_after_preparation_retires() {
     request["pane"] = prepared["pane_id"].clone();
     request["terminal"] = prepared["terminal_id"].clone();
     request["preparation"] = prepared["binding"].clone();
+    request["preparation_protocol"] = json!(1);
     fs::write(rig.dir.join("start-fails"), "").unwrap();
     assert_ne!(
         rig.json(&["host", "launch", "--request", &request.to_string()])

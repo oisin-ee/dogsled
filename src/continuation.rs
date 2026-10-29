@@ -177,7 +177,8 @@ fn with_continuation_gates<T>(
 ) -> Result<T> {
     crate::work::launch_test_barrier("CONTINUATION_BEFORE_GATE")?;
     ledger.child("preparation-receipts").with_lock(&launch.id, || {
-        if crate::prepare::validate_launch_binding(ledger, launch)? {
+        let authority = crate::prepare::validate_launch_binding(ledger, launch)?;
+        if authority.historical {
             return Err(worktree::refuse("historical preparation has no identity; continuation remains held"));
         }
         let fence = ledger.child("preparation-receipts")
@@ -186,13 +187,13 @@ fn with_continuation_gates<T>(
             if fence.progress != disposition::Progress::Released
                 || fence.request.version != disposition::VERSION
                 || fence.request.outcome != disposition::Outcome::PossiblyExecuted
-                || launch.preparation.as_deref() != Some(&fence.request.binding)
+                || authority.binding.as_deref() != Some(&fence.request.binding)
                 || !matches!(&fence.request.policy, disposition::Policy::Transfer { launch: saved, pane: saved_pane, job: None }
                     if **saved == *launch && saved_pane == pane)
             {
                 return Err(worktree::refuse("preparation fence prohibits continuation; nothing was sent"));
             }
-        } else if launch.preparation.is_some() {
+        } else if authority.binding.is_some() {
             return Err(worktree::refuse("preparation has no transfer; continuation remains held"));
         }
         if launch.terminal.as_deref().is_some_and(|saved| Some(saved) != terminal) {
@@ -205,7 +206,7 @@ fn with_continuation_gates<T>(
             .and_then(|result| result.get("checkout").cloned())
             .map(serde_json::from_value::<crate::cleanup::Tree>)
             .transpose()?;
-        let captured = launch.preparation.as_ref().map(|b| b.claim.tree.clone()).or(captured);
+        let captured = authority.binding.as_ref().map(|b| b.claim.tree.clone()).or(captured);
         if let Some(tree) = captured {
             if tree.identity.is_none() {
                 return Err(worktree::refuse("historical checkout has no identity; continuation remains held"));
