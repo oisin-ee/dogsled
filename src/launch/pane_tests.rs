@@ -274,12 +274,37 @@ fn start_args() -> Vec<String> {
     vec!["agent".into(), "start".into()]
 }
 
+fn start_with_simulated_busy_wait(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    args: &[String],
+    pane: &str,
+    terminal: &str,
+    window: std::time::Duration,
+    request: &Launch,
+) -> Result<()> {
+    let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+    start_with_busy_wait(
+        ledger,
+        shell,
+        args,
+        pane,
+        terminal,
+        &BusyWait {
+            window,
+            elapsed: &|| elapsed.get(),
+            pause: &|duration| elapsed.set(elapsed.get() + duration),
+        },
+        request,
+    )
+}
+
 #[test]
 fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
     let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
     let shell = BusyShell::new(2);
     let window = std::time::Duration::from_secs(5);
-    start_while_busy(
+    start_with_simulated_busy_wait(
         &ledger,
         &shell,
         &start_args(),
@@ -300,7 +325,7 @@ fn a_busy_retry_is_refused_once_another_terminal_holds_the_pane() {
         ..BusyShell::new(usize::MAX)
     };
     let window = std::time::Duration::from_secs(5);
-    let error = start_while_busy(
+    let error = start_with_simulated_busy_wait(
         &ledger,
         &shell,
         &start_args(),
@@ -324,7 +349,7 @@ fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
     let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
     let shell = BusyShell::new(usize::MAX);
     let window = std::time::Duration::from_millis(300);
-    let error = start_while_busy(
+    let error = start_with_simulated_busy_wait(
         &ledger,
         &shell,
         &start_args(),
@@ -338,8 +363,33 @@ fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
         panic!("expected a launch error, got {error:?}");
     };
     assert!(message.contains("w2:p2"), "{message}");
-    assert!(message.contains("after 0."), "{message}");
-    assert!(shell.starts.load(Ordering::SeqCst) >= 2);
+    assert!(message.contains("after 0.3s"), "{message}");
+    assert_eq!(shell.starts.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn a_first_busy_refusal_can_exhaust_the_window_without_a_retry() {
+    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let shell = BusyShell::new(usize::MAX);
+    let window = std::time::Duration::from_millis(300);
+    // A slow first command or a descheduled caller can consume the whole window.
+    let error = start_with_busy_wait(
+        &ledger,
+        &shell,
+        &start_args(),
+        "w2:p2",
+        "term_shell",
+        &BusyWait {
+            window,
+            elapsed: &|| window,
+            pause: &|_| panic!("an exhausted window must not pause"),
+        },
+        &busy_request(&ledger),
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Launch(_)), "{error:?}");
+    assert!(error.to_string().contains("after 0.3s"), "{error}");
+    assert_eq!(shell.starts.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Debug)]

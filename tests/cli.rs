@@ -355,6 +355,8 @@ impl Drop for Background {
 #[derive(Debug)]
 pub(crate) struct Fifo {
     path: PathBuf,
+    /// Keep releases buffered even before the peer opens its reader.
+    _hold: fs::File,
 }
 
 impl Fifo {
@@ -368,7 +370,8 @@ impl Fifo {
                 .unwrap()
                 .success()
         );
-        Self { path }
+        let hold = open_fifo(&path);
+        Self { path, _hold: hold }
     }
 
     /// The path of this FIFO.
