@@ -118,7 +118,7 @@ All packages take the Dogsled version. The oisinpi packages go from `0.12.1` to 
 Trusted publishing ties each npm package to one repository and one workflow file.
 Before the first release, the npm owner must change the trusted publisher of five packages to `oisin-ee/dogsled` and `release.yml`:
 `@oisin-ee/pi-todo`, `@oisin-ee/pi-prewalk`, `@oisin-ee/pi-tiers`, `@oisin-ee/pi-guardrails`, and `@oisin-ee/oisinpi`.
-An agent cannot do this step.
+Run `scripts/npm-trust.sh` after `npm login`. It needs the owner's 2FA code once.
 
 ### Acceptance
 
@@ -133,6 +133,34 @@ An agent cannot do this step.
 Change local installs only after the release is published on GitHub and npm.
 `~/.pi/agent/settings.json` lists `npm:@oisin-ee/oisinpi@0.12.0` and `npm:@oisin-ee/pi-dogsled@0.26.1`. Change both to the new version together.
 Then archive the oisinpi GitHub repository. Its README must point to this repository.
+
+## Step 2: One owner for the contract types
+
+Status: specified. Facts checked at `1caff54`.
+
+The Dogsled crate depends on `todo-core` and uses its contract types. `src/unit_transport.rs` keeps only the types that exist only in Dogsled.
+
+| Dogsled type (`src/unit_transport.rs`) | todo-core type |
+|---|---|
+| `UnitRef`, `ExecutionRef`, `Assignment`, `Scope`, `Acceptance`, `Prerequisite` | same names |
+| `Binding` | `TaskBinding` |
+| `Contract` | `UnitContract` |
+| `Export` | `TaskExport` |
+| `Seed` | `Seed` |
+| `Evidence` | `EvidenceRef` |
+| `ReturnedResult` | `BoundResult` |
+| `NotStartedResult` | `UnstartedResult` |
+
+Decisions:
+
+- **Width.** todo-core uses `u32` for `revision`, `completed_revision`, and `version`. Dogsled uses `u64`. todo-core is the owner, so `u32` wins. No stored or real value is near `u32::MAX`. Dogsled-only fields (`CustodyRef.revision`, `Review.revision`, `Delivery.version`) keep `u64`.
+- **`Stopped` evidence.** `BoundResult::Stopped` has an optional `evidence`. Dogsled's copy has none. The todo-core type accepts both, so Dogsled adopts it and does not set the field.
+- **Schemas.** Dogsled's MCP tools need `JsonSchema` on these types. todo-core gets an optional `schema` feature that derives `schemars::JsonSchema`, like the `wasm` feature derives `Tsify`. Dogsled enables it. The `schemars` version is the one that rmcp uses (1.2.3).
+- **Digest.** Dogsled computes the export digest with `todo_core::export_digest` over the same canonical projection. Delete `digest_hex` if nothing else uses it.
+- **Fixture.** Keep `crates/todo-core/tests/fixtures/unit-exports.json`. Delete `tests/fixtures/unit-exports.json`, and point the Dogsled tests at the kept file.
+- **TypeScript.** `pi/unit-protocol.ts` stays in step 2. Its types exist only for the event bus between the two extensions, and step 3 deletes that bus. A type import from the generated pi-todo bindings would add a build dependency that step 3 removes again.
+
+Acceptance: `moon run :check :lint :test :clippy :format` passes. `pi/unit-contract.test.ts` and `pi/work-contract.test.ts` run with `skipped 0`. `rg 'pub struct (UnitRef|ExecutionRef|Binding|Contract|Export|Seed|Evidence)\b' src` finds nothing.
 
 ## Constraints for steps 3 and 4
 
