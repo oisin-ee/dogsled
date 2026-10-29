@@ -24,6 +24,8 @@ jobs:
         with:
           node-version: 26.7.0
           registry-url: https://registry.npmjs.org
+          # package.json names pnpm, which proto installs later in this job.
+          package-manager-cache: false
       - name: Check every package version against the tag
         env:
           PLAN: ${{ inputs.plan }}

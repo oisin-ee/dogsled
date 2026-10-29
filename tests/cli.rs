@@ -355,6 +355,8 @@ impl Drop for Background {
 #[derive(Debug)]
 pub(crate) struct Fifo {
     path: PathBuf,
+    /// Keep releases buffered even before the peer opens its reader.
+    _hold: fs::File,
 }
 
 impl Fifo {
@@ -368,7 +370,8 @@ impl Fifo {
                 .unwrap()
                 .success()
         );
-        Self { path }
+        let hold = open_fifo(&path);
+        Self { path, _hold: hold }
     }
 
     /// The path of this FIFO.
@@ -1593,8 +1596,9 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         .split_once("' --budget-ms")
         .unwrap()
         .0;
+    // `shell::quote` writes an embedded `'` as `'\''`, for example in a host name.
     assert_eq!(
-        serde_json::from_str::<Value>(replay).unwrap(),
+        serde_json::from_str::<Value>(&replay.replace("'\\''", "'")).unwrap(),
         expected_replay
     );
     let created = grant["envelope"]["request"]["validity"]["created_ms"]

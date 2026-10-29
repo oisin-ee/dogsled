@@ -328,6 +328,23 @@ fn barrier(rig: &Rig, phase: &str, cleanup: bool) -> (Owned, Fifo) {
 }
 
 #[test]
+fn retirement_barrier_keeps_release_before_reader_opens() {
+    let rig = Rig::new("retirement-early-release");
+    let go = Fifo::new(&rig.dir, "retirement.go");
+    // The ready file can reach the coordinator before the child opens its FIFO.
+    // Closing the temporary writer must not discard the release in that interval.
+    writeln!(go.hold(), "go").unwrap();
+    assert_eq!(
+        read_fifo_within(
+            go.path(),
+            "early retirement release",
+            Duration::from_millis(50)
+        ),
+        Some("go\n".into())
+    );
+}
+
+#[test]
 fn changed_claim_or_custody_refuses_without_rebinding() {
     let (rig, _) = prepared("retire-changed-claim", "a");
     let (mut process, go) = barrier(&rig, "RETIREMENT_BEFORE_DISPOSE", true);
