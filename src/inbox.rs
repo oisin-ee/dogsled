@@ -1110,6 +1110,8 @@ pub fn holds(custodian: &Custodian, pane: &str, session: Option<&str>) -> bool {
 
 /// Whether an event id names `item`.
 ///
+/// After typed identity validation, check that this deduplication key still names the
+/// captured event. It cannot discover a subject or grant delivery authority.
 /// A child event names its item in the record id: `reply-{item}-{seq}`,
 /// `blocked-{item}-{seq}`, or `unit-reply-{result}`, whose result carries the item id.
 /// The tail of the first two is a number, so only the item it was built for matches.
@@ -1126,10 +1128,13 @@ fn names(id: &str, item: &crate::items::Item) -> bool {
             .and_then(|reply| reply.result_id.as_deref())
             == Some(result);
     }
-    let Some(rest) = ["reply-", "blocked-"]
-        .iter()
-        .find_map(|prefix| id.strip_prefix(prefix))
-    else {
+    if id.starts_with("reply-") {
+        return item
+            .reply
+            .as_ref()
+            .is_some_and(|reply| id == format!("reply-{}-{}", item.id, reply.seq));
+    }
+    let Some(rest) = id.strip_prefix("blocked-") else {
         return false;
     };
     let Some(tail) = rest
@@ -1141,43 +1146,91 @@ fn names(id: &str, item: &crate::items::Item) -> bool {
     !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// The child an event names, when it names exactly one.
-///
-/// The event reaches the pane that answers for the child, so the child is looked up by the
-/// pane that holds its custody as well as by its origin owner.
-fn subject(
-    ledger: &Ledger,
-    records: &[crate::custody::Custody],
-    owner: &str,
-    id: &str,
-) -> Result<Option<crate::items::Item>> {
-    let named: Vec<_> = crate::items::list(ledger)?
-        .into_iter()
-        .filter(|item| names(id, item))
-        .filter(|item| item.owner_pane == owner || custodian_of(records, item).pane == owner)
-        .collect();
-    Ok(match named.as_slice() {
-        [item] => Some(item.clone()),
-        _ => None,
-    })
+/// Authority captured while the caller still holds the child identity. Event IDs are
+/// only deduplication keys; they never grant pane-only delivery authority.
+#[derive(Debug, Clone)]
+pub struct ChildIdentity {
+    item: crate::items::Item,
+    custody: Option<crate::custody::Custody>,
 }
 
-/// The custodian that answers for the event `id`.
-///
-/// A child event goes to the current custodian of the child, so a reused pane id never
-/// inherits the custody. An event about no child keeps the pane it names, with no session
-/// to prove. The session of the custodian is proved against the live agent when the record
-/// is put: the published snapshot can name a session that already ended, so it never
-/// decides who holds the custody.
-fn custodian_of_event(ledger: &Ledger, owner: &str, id: &str) -> Result<Custodian> {
-    let records = crate::custody::list(ledger)?;
-    let Some(item) = subject(ledger, &records, owner, id)? else {
-        return Ok(Custodian {
-            pane: owner.to_owned(),
-            session: None,
-        });
-    };
-    Ok(custodian_of(&records, &item))
+impl ChildIdentity {
+    pub fn capture(ledger: &Ledger, item: &crate::items::Item) -> Result<Self> {
+        crate::custody::locked(ledger, &item.id, |custody| {
+            Ok(Self {
+                item: item.clone(),
+                custody: custody.cloned(),
+            })
+        })
+    }
+
+    fn validate(
+        &self,
+        ledger: &Ledger,
+        id: &str,
+        custody: Option<&crate::custody::Custody>,
+    ) -> Result<Custodian> {
+        let items = crate::items::list(ledger)?;
+        let mut matches = items.iter().filter(|item| item.id == self.item.id);
+        let Some(item) = matches.next() else {
+            return Err(Error::Invalid(
+                "child notification undelivered: subject expired or missing".into(),
+            ));
+        };
+        if matches.next().is_some()
+            || item.host != self.item.host
+            || item.pane != self.item.pane
+            || item.kind != self.item.kind
+            || item.created_ms != self.item.created_ms
+            || item.owner_pane != self.item.owner_pane
+            || item.owner_session != self.item.owner_session
+            || custody != self.custody.as_ref()
+            || !names(id, &self.item)
+            || !names(id, item)
+        {
+            return Err(Error::Invalid(
+                "child notification superseded: subject or custody changed".into(),
+            ));
+        }
+        Ok(custodian_of(
+            &custody.cloned().into_iter().collect::<Vec<_>>(),
+            item,
+        ))
+    }
+}
+
+/// Revalidate child identity and custody through the inbox write. Item removal and
+/// custody claims cannot turn this event into an unscoped owner-pane notification.
+pub fn notify_child(
+    fleet: &Fleet,
+    reports: &[crate::hosts::HostReport],
+    child: &ChildIdentity,
+    id: &str,
+    kind: &str,
+    text: String,
+    now: u64,
+) -> Result<bool> {
+    let result = crate::custody::locked(fleet.ledger, &child.item.id, |custody| {
+        fleet.ledger.with_lock("items", || {
+            let custodian = child.validate(fleet.ledger, id, custody)?;
+            notify_custodian(fleet, reports, &custodian, id, kind, text, now)
+        })
+    });
+    match result {
+        Err(Error::Invalid(reason) | Error::Refused { detail: reason, .. }) => {
+            fleet.ledger.with_lock("notification-failures", || {
+                let mut failures: std::collections::BTreeMap<String, String> = fleet
+                    .ledger
+                    .read("notification-failures.json")?
+                    .unwrap_or_default();
+                failures.insert(id.into(), reason.clone());
+                fleet.ledger.write("notification-failures.json", &failures)
+            })?;
+            eprintln!("dogsled notification {id}: {reason}");
+            Ok(false)
+        }
+        other => other,
+    }
 }
 
 /// The terminal of `owner`, an agent pane on this host, when a reader reads its inbox.
@@ -1203,9 +1256,8 @@ pub fn readable(
 /// session than the one that holds the custody: nothing would deliver it, so the caller
 /// keeps it for later.
 ///
-/// A note about a child reaches the child's current custodian, found by pane and by
-/// session, so a reused pane id never inherits the custody. A note about no child reaches
-/// the pane it names, as it did before.
+/// This boundary is only for non-child events. Child callers must use `notify_child`
+/// with a captured identity; event-name prefixes never grant delivery authority.
 pub fn notify(
     fleet: &Fleet,
     reports: &[crate::hosts::HostReport],
@@ -1215,9 +1267,34 @@ pub fn notify(
     text: String,
     now: u64,
 ) -> Result<bool> {
+    match notify_custodian(
+        fleet,
+        reports,
+        &Custodian {
+            pane: owner.into(),
+            session: None,
+        },
+        id,
+        kind,
+        text,
+        now,
+    ) {
+        Err(Error::Invalid(_) | Error::Refused { .. }) => Ok(false),
+        other => other,
+    }
+}
+
+fn notify_custodian(
+    fleet: &Fleet,
+    reports: &[crate::hosts::HostReport],
+    custodian: &Custodian,
+    id: &str,
+    kind: &str,
+    text: String,
+    now: u64,
+) -> Result<bool> {
     let ledger = fleet.ledger;
     let shell = fleet.shell;
-    let custodian = custodian_of_event(ledger, owner, id)?;
     let Some(terminal) = readable(ledger, reports, &custodian.pane)? else {
         return Ok(false);
     };
@@ -1236,11 +1313,7 @@ pub fn notify(
     };
     // The live agent of the custodian's pane is the one that must receive the record: a
     // pane another session took over never inherits the custody.
-    match put_checked(ledger, shell, record, Some(&custodian)) {
-        Ok(_) => Ok(true),
-        Err(Error::Invalid(_) | Error::Refused { .. }) => Ok(false),
-        Err(e) => Err(e),
-    }
+    put_checked(ledger, shell, record, Some(custodian)).map(|_| true)
 }
 
 /// Whether this host has sent records whose outcome it does not know yet.
@@ -1415,6 +1488,87 @@ mod tests {
             outcome.reason.as_deref(),
             Some("not acknowledged after 8 attempts")
         );
+    }
+
+    #[test]
+    fn r1b_item_expiry_between_tell_and_notify_never_delivers_to_reused_owner() {
+        let rig = Rig::new(&["replacement_owner"]);
+        let shell = crate::shell::Fake::new();
+        let policy = crate::config::Policy::default();
+        let fleet = Fleet {
+            ledger: &rig.ledger,
+            shell: &shell,
+            policy: &policy,
+            home: "/".into(),
+            hosts: vec![crate::hosts::Host::local()],
+        };
+        claim(&rig.ledger, "replacement_owner", &Rig::reader(), 0).unwrap();
+        for event in [
+            "reply-gone-1",
+            "unit-reply-gone",
+            "blocked-gone-1",
+            "signal-gone-1",
+        ] {
+            let item = crate::items::Item {
+                id: "gone".into(),
+                host: "child-host".into(),
+                pane: "child-pane".into(),
+                owner_pane: "w1:p0".into(),
+                owner_session: Some("original-owner".into()),
+                ..Default::default()
+            };
+            rig.ledger.write("items.json", &vec![item.clone()]).unwrap();
+            let child = ChildIdentity::capture(&rig.ledger, &item).unwrap();
+            // Sweep captured the subject; retention removes it before the inbox boundary.
+            rig.ledger
+                .write("items.json", &Vec::<crate::items::Item>::new())
+                .unwrap();
+            assert!(
+                !notify_child(&fleet, &[], &child, event, "reply", "old child".into(), 1).unwrap()
+            );
+            assert_eq!(received(&rig.ledger, "replacement_owner").unwrap().len(), 0);
+            let failures: std::collections::BTreeMap<String, String> = rig
+                .ledger
+                .read("notification-failures.json")
+                .unwrap()
+                .unwrap();
+            assert!(failures[event].contains("subject expired or missing"));
+        }
+        assert!(
+            shell.calls.lock().unwrap().is_empty(),
+            "no fallback to a pane-only live lookup"
+        );
+    }
+
+    #[test]
+    fn r1b_nonchild_notifications_keep_existing_delivery() {
+        let rig = Rig::new(&["term_owner"]);
+        let shell = crate::shell::Fake::new();
+        shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w1:p0","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}"#);
+        let policy = crate::config::Policy::default();
+        let fleet = Fleet {
+            ledger: &rig.ledger,
+            shell: &shell,
+            policy: &policy,
+            home: "/".into(),
+            hosts: vec![crate::hosts::Host::local()],
+        };
+        claim(&rig.ledger, "term_owner", &Rig::reader(), 0).unwrap();
+        let snapshot: crate::node::Snapshot = rig.ledger.read("host.json").unwrap().unwrap();
+        let reports: Vec<crate::hosts::HostReport> = serde_json::from_value(serde_json::json!([{ "id":"local", "label":"local", "service":"up", "reachable":true, "sampled_ms":1, "probe":snapshot.probe, "headroom":null, "error":null, "jobs":[] }])).unwrap();
+        assert!(
+            notify(
+                &fleet,
+                &reports,
+                "w1:p0",
+                "service-health",
+                "message",
+                "healthy".into(),
+                1
+            )
+            .unwrap()
+        );
+        assert_eq!(received(&rig.ledger, "term_owner").unwrap().len(), 1);
     }
 
     #[test]

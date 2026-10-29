@@ -524,6 +524,26 @@ impl<'a> Fleet<'a> {
         })
     }
 
+    /// Reference release is its own RPC, never an interpretation of settlement delivery.
+    pub fn release_references(
+        &self,
+        host: &Host,
+        certificate: &crate::launch::ReferenceRelease,
+    ) -> Result<crate::launch::ReferenceReleaseAck> {
+        if host.is_local() {
+            self.node().release_references(certificate)
+        } else {
+            self.remote(
+                host,
+                &[
+                    "release-references".into(),
+                    "--input".into(),
+                    serde_json::to_string(certificate)?,
+                ],
+            )
+        }
+    }
+
     pub fn reserve(
         &self,
         host: &Host,
