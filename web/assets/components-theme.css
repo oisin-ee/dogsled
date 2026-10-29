@@ -1,0 +1,33 @@
+/* Map the official component theme to the portal’s Catppuccin tokens. */
+:root {
+  --dark: initial;
+  --light: ;
+
+  --primary-color: var(--base);
+  --primary-color-1: var(--crust);
+  --primary-color-2: var(--mantle);
+  --primary-color-3: var(--base);
+  --primary-color-4: var(--surface0);
+  --primary-color-5: var(--surface0);
+  --primary-color-6: var(--surface1);
+  --primary-color-7: var(--overlay0);
+
+  --secondary-color: var(--text);
+  --secondary-color-1: var(--text);
+  --secondary-color-2: var(--accent);
+  --secondary-color-3: var(--text);
+  --secondary-color-4: var(--text);
+  --secondary-color-5: var(--subtext0);
+  --secondary-color-6: var(--overlay1);
+
+  --focused-border-color: var(--accent);
+  --primary-success-color: var(--surface0);
+  --secondary-success-color: var(--green);
+  --primary-warning-color: var(--surface0);
+  --secondary-warning-color: var(--yellow);
+  --primary-error-color: var(--red);
+  --secondary-error-color: var(--red);
+  --contrast-error-color: var(--crust);
+  --primary-info-color: var(--surface0);
+  --secondary-info-color: var(--blue);
+}
