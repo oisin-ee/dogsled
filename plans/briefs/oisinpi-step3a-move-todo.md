@@ -12,7 +12,7 @@
 
 1. Move `packages/pi-todo/{src,moon.yml,tsconfig.json,README.md,CHANGELOG.md}` to `pi/todo/` with `git mv`. Delete `packages/pi-todo/package.json`.
 2. `.moon/workspace.yml`: set `pi-todo: pi/todo`. `pi/todo/moon.yml`: fix the relative paths of the `generate` task (`../../target` becomes `../../../target`). `pi/todo/tsconfig.json`: extend `../../tsconfig.base.json`.
-3. `.gitignore` and `.oxlintrc.json` `ignorePatterns`: add `pi/todo/src/generated/`. Root `moon.yml`: add `pi/todo` to the `oxfmt` paths of `format` and `fmt-check`.
+3. `.gitignore` and `.oxlintrc.json` `ignorePatterns`: add `pi/todo/src/generated/`. Root `moon.yml`: add `pi/todo` to the `oxfmt` paths of the `format` and `fix` tasks.
 4. `pi/todo/src/source.ts`: `OWN` names `pi/index.ts`, the extension entry, not pi-todo's `index.ts`. Change the tests that depend on it.
 5. `pi/index.ts`: import pi-todo's default export from `./todo/src/index.ts`, and call it as the first statement of `dogsled()`.
 6. Root `package.json`:
@@ -36,6 +36,6 @@
 
 **Stop and report** if the moved code needs a behavior change to pass, other than edit 4.
 
-**Your checks.** `moon run pi-todo:lint pi-todo:test dogsled:typecheck dogsled:test-shim dogsled:fmt-check`. Do not run the full suite, a release, or a publish. The lead runs the full acceptance.
+**Your checks.** `moon run pi-todo:lint pi-todo:test dogsled:typecheck dogsled:test-shim dogsled:format`. Do not run the full suite, a release, or a publish. The lead runs the full acceptance.
 
 **Publication.** Commit with `refactor(pi): move pi-todo into the Dogsled extension` through the normal hook. Push the branch and open a draft PR. Do not merge, tag, or publish.
