@@ -1,7 +1,5 @@
-# Publishes @oisin-ee/pi-dogsled, the Pi extension, for the tagged version. dist calls it from
-# release.yml once the binaries are built, so the extension never ships without its binary.
-# npm trusted publishing (OIDC): the package's trusted publisher names release.yml, the
-# calling workflow, and the job has no npm token. Provenance comes from publishConfig.
+# release.yml calls this workflow after the binaries are built.
+# Each package's trusted publisher must name dogsled and release.yml.
 name: Publish npm
 
 on:
@@ -24,31 +22,54 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version: 26.7.0
           registry-url: https://registry.npmjs.org
-      - name: Check the tag matches package.json
+      - name: Check every package version against the tag
         env:
           PLAN: ${{ inputs.plan }}
         run: |
-          version=$(node -p 'require("./package.json").version')
           tag=$(jq -r '.announcement_tag' <<<"$PLAN")
-          test "$tag" = "v$version" || { echo "tag $tag does not match package.json $version"; exit 1; }
-      # A version already on npm is done: the first one is published by hand, before its
-      # trusted publisher can exist, and a re-run of a release must not fail on it.
-      - name: Skip a version already on npm
-        id: published
+          for directory in . packages/pi-todo packages/pi-prewalk packages/pi-tiers packages/pi-guardrails packages/oisinpi; do
+            version=$(node -p 'require(process.argv[1]).version' "$PWD/$directory/package.json")
+            test "$tag" = "v$version" || { echo "tag $tag does not match $directory/package.json $version"; exit 1; }
+          done
+      # Re-runs skip each version already on npm, including a manual first publish.
+      - name: Select unpublished versions
+        id: pending
         run: |
-          name=$(node -p 'require("./package.json").name')
-          version=$(node -p 'require("./package.json").version')
-          if npm view "$name@$version" version >/dev/null 2>&1; then
-            echo "$name@$version is already on npm"
-            echo "done=true" >> "$GITHUB_OUTPUT"
+          : > "$RUNNER_TEMP/npm-pending"
+          for directory in . packages/pi-todo packages/pi-prewalk packages/pi-tiers packages/pi-guardrails packages/oisinpi; do
+            name=$(node -p 'require(process.argv[1]).name' "$PWD/$directory/package.json")
+            version=$(node -p 'require(process.argv[1]).version' "$PWD/$directory/package.json")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already on npm"
+            else
+              echo "$directory" >> "$RUNNER_TEMP/npm-pending"
+            fi
+          done
+          if test -s "$RUNNER_TEMP/npm-pending"; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
-      - if: steps.published.outputs.done != 'true'
-        run: npm ci
-      - if: steps.published.outputs.done != 'true'
-        run: npm run typecheck
-      - if: steps.published.outputs.done != 'true'
-        run: npm test
-      - if: steps.published.outputs.done != 'true'
-        run: npm publish
+      - if: steps.pending.outputs.publish == 'true'
+        run: rustup toolchain install
+      - if: steps.pending.outputs.publish == 'true'
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      - if: steps.pending.outputs.publish == 'true'
+        run: proto install
+      - if: steps.pending.outputs.publish == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Build published bindings and hook runtime
+        if: steps.pending.outputs.publish == 'true'
+        run: moon run pi-todo:generate pi-prewalk:generate pi-guardrails:build
+      - if: steps.pending.outputs.publish == 'true'
+        run: pnpm run typecheck
+      - if: steps.pending.outputs.publish == 'true'
+        env:
+          PI_TODO_SOURCE: ${{ github.workspace }}/packages/pi-todo/src
+        run: pnpm test
+      - name: Publish unpublished versions with provenance
+        if: steps.pending.outputs.publish == 'true'
+        run: |
+          while IFS= read -r directory; do
+            pnpm --dir "$directory" publish --access public --provenance
+          done < "$RUNNER_TEMP/npm-pending"

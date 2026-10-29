@@ -1,0 +1,23 @@
+[package]
+name = "todo-core"
+version = "0.0.0"
+description = "Todo list state and operations for the pi todo tool."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[features]
+# TypeScript declarations and wasm-bindgen conversions for `todo-wasm`.
+wasm = ["dep:tsify", "dep:wasm-bindgen"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11.1"
+tsify = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+
+[lints]
+workspace = true

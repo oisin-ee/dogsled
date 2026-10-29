@@ -1,0 +1,33 @@
+packages:
+  - "packages/*"
+nodeLinker: isolated
+# Versions shared with rondo's catalog. pi is pinned to its latest release,
+# which pins its own sibling packages exactly; the packages declare it as a "*"
+# peer (docs/packages.md).
+catalog:
+  "@earendil-works/pi-ai": "1.3.0"
+  "@earendil-works/pi-coding-agent": "1.3.0"
+  "@earendil-works/pi-tui": "1.3.0"
+  "@changesets/changelog-github": "^1.0.1"
+  "@changesets/cli": "^3.0.3"
+  "@types/node": "^26.0.0"
+  "oxfmt": "^0.65.0"
+  "oxlint": "1.82.0"
+  "oxlint-tsgolint": "7.0.2001"
+  "typebox": "1.3.27"
+  "typescript": ~7.0.2
+  "vitest": "^5.0.1"
+# Install scripts of pi's dependencies. Neither builds anything: genai's
+# preinstall is a no-op echo, and protobufjs's postinstall only warns about the
+# version scheme of a dependent.
+allowBuilds:
+  "@google/genai": false
+  protobufjs: false
+minimumReleaseAgeExclude:
+  - "@earendil-works/pi-agent-core@1.3.0"
+  - "@earendil-works/pi-ai@1.3.0"
+  - "@earendil-works/pi-codemode@1.3.0"
+  - "@earendil-works/pi-coding-agent@1.3.0"
+  - "@earendil-works/pi-mcp@1.3.0"
+  - "@earendil-works/pi-telemetry@1.3.0"
+  - "@earendil-works/pi-tui@1.3.0"

@@ -1202,8 +1202,10 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
         "--message",
         "hello",
     ]);
+    // --max counts from command entry, so it must cover the caller and workspace lookups
+    // that run before the ticket is written, even on a loaded host.
     assert_eq!(
-        rig.run(&["run", "--wait", "--max", "200ms", "--", "true"])
+        rig.run(&["run", "--wait", "--max", "5s", "--", "true"])
             .status
             .code(),
         Some(124)

@@ -1,0 +1,20 @@
+[package]
+name = "prewalk-wasm"
+version = "0.0.0"
+description = "WASM boundary for the prewalk protocol."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+prewalk-core = { path = "../prewalk-core", features = ["wasm"] }
+tsify.workspace = true
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

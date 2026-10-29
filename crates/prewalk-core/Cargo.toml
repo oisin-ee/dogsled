@@ -1,0 +1,21 @@
+[package]
+name = "prewalk-core"
+version = "0.0.0"
+description = "Branch-backed prewalk protocol and config validation."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[features]
+wasm = ["dep:tsify", "dep:wasm-bindgen"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tsify = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+
+[lints]
+workspace = true

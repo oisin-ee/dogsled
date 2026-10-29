@@ -1,0 +1,34 @@
+$schema: https://moonrepo.dev/schemas/tasks.json
+inheritedBy:
+  tag: javascript
+implicitInputs:
+  - /package.json
+  - /pnpm-lock.yaml
+  - /pnpm-workspace.yaml
+  - /tsconfig.base.json
+  - /.oxlintrc.json
+  - /.npmrc
+fileGroups:
+  sources:
+    - "**/*"
+    - "!README.md"
+    - "!node_modules/**/*"
+    - "!src/generated/**/*"
+tasks:
+  # Oxlint with type-aware rules and the TypeScript type check
+  # (`.oxlintrc.json` options), so there is no separate `tsc` task.
+  lint:
+    command: oxlint --config $workspaceRoot/.oxlintrc.json --deny-warnings
+    inputs: ["group://sources"]
+    tags: [precommit]
+    checks:
+      - check: fingerprint
+        script: node --version && pnpm --version && node -p "process.platform + process.arch"
+        hash: stdout
+  test:
+    command: vitest run
+    inputs: ["group://sources"]
+    checks:
+      - check: fingerprint
+        script: node --version && pnpm --version && node -p "process.platform + process.arch"
+        hash: stdout

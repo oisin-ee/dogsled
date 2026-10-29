@@ -1,0 +1,40 @@
+{
+  "name": "@oisin-ee/oisinpi",
+  "version": "0.27.0",
+  "description": "Oisin's pi packages in one install: prewalk, todo, tiers, and guardrails.",
+  "keywords": [
+    "guardrails",
+    "pi-extension",
+    "pi-package",
+    "prewalk",
+    "todo"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oisin-ee/dogsled.git",
+    "directory": "packages/oisinpi"
+  },
+  "type": "module",
+  "dependencies": {
+    "@oisin-ee/pi-guardrails": "workspace:*",
+    "@oisin-ee/pi-prewalk": "workspace:*",
+    "@oisin-ee/pi-tiers": "workspace:*",
+    "@oisin-ee/pi-todo": "workspace:*"
+  },
+  "bundleDependencies": [
+    "@oisin-ee/pi-guardrails",
+    "@oisin-ee/pi-prewalk",
+    "@oisin-ee/pi-tiers",
+    "@oisin-ee/pi-todo"
+  ],
+  "pi": {
+    "extensions": [
+      "./node_modules/@oisin-ee/pi-todo/src/index.ts",
+      "./node_modules/@oisin-ee/pi-prewalk/src/index.ts",
+      "./node_modules/@oisin-ee/pi-tiers/src/index.ts",
+      "./node_modules/@oisin-ee/pi-guardrails/src/pi/index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/oisin-ee/oisinpi/main/assets/prewalk.png"
+  }
+}

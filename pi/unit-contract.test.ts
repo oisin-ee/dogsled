@@ -198,7 +198,8 @@ for (const providerFirst of [true, false]) test(`real unit export/import/result/
 		assert.deepEqual(envelope.binding.contract, origin);
 		assert.deepEqual(envelope.exported.contract, unwrap(lead.provider().inspect(envelope.binding.contract.unitId)));
 		assert.equal(snapshot(lead.manager).tasks[0].status, "in_progress");
-		await assert.rejects(todo(lead.session, { op: "done", task: envelope.binding.contract.unitId, evidence: "premature" }), /ACCEPTANCE_REQUIRED/);
+		// The lead may close a held leaf with a note (pi-todo ac2e931); without one, done is refused and the unit stays open.
+		await assert.rejects(todo(lead.session, { op: "done", task: envelope.binding.contract.unitId }), /ACCEPTANCE_REQUIRED/);
 		const seed = join(cwd, "seed.json"); await writeFile(seed, JSON.stringify({ version: 1, ...envelope }));
 		worker = await runtime(cwd, !providerFirst, execute, { id: execution.requestId, seed });
 		assert.equal(worker.faux.state.callCount, 0, "automatic import needs no model setup call");

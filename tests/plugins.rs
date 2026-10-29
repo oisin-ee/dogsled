@@ -33,7 +33,11 @@ fn all_package_versions_match_cargo_without_a_release_bump() {
     assert_eq!(version, env!("CARGO_PKG_VERSION"));
     for manifest in [
         "package.json",
-        "package-lock.json",
+        "packages/oisinpi/package.json",
+        "packages/pi-guardrails/package.json",
+        "packages/pi-prewalk/package.json",
+        "packages/pi-tiers/package.json",
+        "packages/pi-todo/package.json",
         "plugins/dogsled/.claude-plugin/plugin.json",
         "plugins/dogsled/.codex-plugin/plugin.json",
     ] {
@@ -41,10 +45,6 @@ fn all_package_versions_match_cargo_without_a_release_bump() {
     }
     assert_eq!(
         toml("herdr-plugin.toml")["version"].as_str().unwrap(),
-        version
-    );
-    assert_eq!(
-        json("package-lock.json")["packages"][""]["version"],
         version
     );
 }

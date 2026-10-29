@@ -1,0 +1,12 @@
+$schema: https://moonrepo.dev/schemas/project.json
+language: rust
+tags: [rust]
+toolchains:
+  default: system
+dependsOn: [prewalk-core]
+tasks:
+  clippy-wasm:
+    extends: clippy
+    command: cargo clippy --locked -p prewalk-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+    options:
+      mergeArgs: replace

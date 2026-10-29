@@ -1,0 +1,35 @@
+$schema: https://moonrepo.dev/schemas/project.json
+language: typescript
+tags: [javascript]
+toolchains:
+  default: javascript
+dependsOn: [prewalk-wasm, prewalk-core]
+tasks:
+  lint:
+    deps: [generate]
+  test:
+    deps: [generate]
+  wasm:
+    command: cargo build --locked -p prewalk-wasm --profile wasm --target wasm32-unknown-unknown
+    inputs:
+      - /Cargo.toml
+      - /Cargo.lock
+      - project://prewalk-wasm?group=sources
+      - project://prewalk-core?group=sources
+    outputs: [/target/wasm32-unknown-unknown/wasm/prewalk_wasm.wasm]
+    checks:
+      - check: fingerprint
+        script: rustc --version --verbose
+        hash: stdout
+    options:
+      runFromWorkspaceRoot: true
+  # Writes `src/generated/`, which is gitignored and published in the tarball.
+  generate:
+    command: wasm-bindgen --target web --remove-name-section --remove-producers-section --out-dir src/generated --out-name prewalk_core ../../target/wasm32-unknown-unknown/wasm/prewalk_wasm.wasm
+    deps: [wasm]
+    inputs: []
+    outputs:
+      - src/generated/prewalk_core.js
+      - src/generated/prewalk_core.d.ts
+      - src/generated/prewalk_core_bg.wasm
+      - src/generated/prewalk_core_bg.wasm.d.ts

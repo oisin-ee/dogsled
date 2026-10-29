@@ -1,5 +1,32 @@
 $schema: https://moonrepo.dev/schemas/project.json
 tasks:
+  # Limit Oxfmt to the moved paths. Dogsled keeps its existing format checks.
+  format:
+    command: oxfmt --check packages crates .config docs/todo-workflows.md plans/todo-workflows.md plans/PLAN-todo-work-units.md plans/PLAN-unified-work-panel.md plans/PLAN-work-sidebar.md .oxlintrc.json tsconfig.base.json pnpm-workspace.yaml
+    toolchain: javascript
+    inputs:
+      - "packages/**/*"
+      - "!packages/*/node_modules/**/*"
+      - "!packages/*/src/generated/**/*"
+      - "!packages/pi-guardrails/dist/**/*"
+      - "crates/**/*"
+      - ".config/**/*"
+      - "docs/todo-workflows.md"
+      - "plans/todo-workflows.md"
+      - "plans/PLAN-todo-work-units.md"
+      - "plans/PLAN-unified-work-panel.md"
+      - "plans/PLAN-work-sidebar.md"
+      - ".oxlintrc.json"
+      - "tsconfig.base.json"
+      - "pnpm-workspace.yaml"
+    tags: [precommit]
+  fix:
+    command: oxfmt packages crates .config docs/todo-workflows.md plans/todo-workflows.md plans/PLAN-todo-work-units.md plans/PLAN-unified-work-panel.md plans/PLAN-work-sidebar.md .oxlintrc.json tsconfig.base.json pnpm-workspace.yaml
+    toolchain: javascript
+    options:
+      cache: false
+      runInCI: false
+      mutex: source-fix
   fmt:
     command: cargo fmt
     description: Format the Rust sources.
@@ -71,32 +98,39 @@ tasks:
     outputs:
       - "web/public"
   typecheck:
-    command: npm run --silent typecheck
+    command: pnpm run --silent typecheck
     description: Typecheck the Pi extension.
     toolchain: node
     tags: [precommit]
     inputs:
       - "pi/**/*"
       - "package.json"
-      - "package-lock.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
       - "tsconfig.json"
   test-shim:
-    command: npm run --silent test
+    command: pnpm run --silent test
     description: Run the Pi extension tests.
     toolchain: node
+    env:
+      PI_TODO_SOURCE: $workspaceRoot/packages/pi-todo/src
+    deps:
+      - pi-todo:generate
     tags: [precommit]
     inputs:
       - "pi/**/*"
       - "package.json"
-      - "package-lock.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
       - "tsconfig.json"
   install:
-    command: npm ci --no-audit --no-fund
+    command: pnpm install --frozen-lockfile
     description: Install the Pi extension dependencies.
     toolchain: node
     inputs:
       - "package.json"
-      - "package-lock.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
   check:
     description: Run every check that CI runs.
     deps:

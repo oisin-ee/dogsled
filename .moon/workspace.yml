@@ -1,9 +1,17 @@
 $schema: https://moonrepo.dev/schemas/workspace.json
 versionConstraint: "=2.6.1"
-# The whole repository is one project: a Rust binary and a Pi extension.
+# The root binary and Pi extension share a workspace with the moved projects.
 defaultProject: dogsled
 projects:
   dogsled: "."
+  todo-core: crates/todo-core
+  todo-wasm: crates/todo-wasm
+  pi-todo: packages/pi-todo
+  prewalk-core: crates/prewalk-core
+  prewalk-wasm: crates/prewalk-wasm
+  pi-prewalk: packages/pi-prewalk
+  pi-tiers: packages/pi-tiers
+  pi-guardrails: packages/pi-guardrails
 vcs:
   defaultBranch: main
   # Moon writes the Git hook scripts and links them on every run.

@@ -1,0 +1,40 @@
+{
+  "name": "@oisin-ee/pi-prewalk",
+  "version": "0.27.0",
+  "description": "A one-shot planner-to-executor handoff for pi, with branch-backed Rust rules.",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "prewalk"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oisin-ee/dogsled.git",
+    "directory": "packages/pi-prewalk"
+  },
+  "files": [
+    "src/",
+    "!src/**/*.test.ts",
+    "!src/fixture.ts"
+  ],
+  "type": "module",
+  "devDependencies": {
+    "@earendil-works/pi-ai": "catalog:",
+    "@earendil-works/pi-coding-agent": "catalog:",
+    "@earendil-works/pi-tui": "catalog:",
+    "typebox": "catalog:"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/oisin-ee/oisinpi/main/assets/prewalk.png"
+  }
+}

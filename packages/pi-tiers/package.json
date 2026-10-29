@@ -1,0 +1,35 @@
+{
+  "name": "@oisin-ee/pi-tiers",
+  "version": "0.27.0",
+  "description": "Sticky virtual model tiers with quota-aware recovery for pi.",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "tiers"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oisin-ee/dogsled.git",
+    "directory": "packages/pi-tiers"
+  },
+  "files": [
+    "src/",
+    "!src/**/*.test.ts",
+    "!src/fixture.ts"
+  ],
+  "type": "module",
+  "devDependencies": {
+    "@earendil-works/pi-ai": "catalog:",
+    "@earendil-works/pi-coding-agent": "catalog:"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

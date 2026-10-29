@@ -1,0 +1,39 @@
+$schema: https://moonrepo.dev/schemas/tasks.json
+inheritedBy:
+  tag: rust
+implicitInputs:
+  - /Cargo.toml
+  - /Cargo.lock
+  - /clippy.toml
+  - /crates/clippy.toml
+  - $RUSTFLAGS
+  - $CARGO_ENCODED_RUSTFLAGS
+fileGroups:
+  sources:
+    - "**/*"
+taskOptions:
+  runFromWorkspaceRoot: true
+tasks:
+  fmt:
+    command: cargo fmt --check -p $project
+    inputs: ["group://sources"]
+    tags: [precommit]
+  fix:
+    command: cargo fmt -p $project
+    options:
+      cache: false
+      runInCI: false
+  clippy:
+    command: cargo clippy --locked -p $project --all-targets -- -D warnings
+    inputs: ["group://sources", "project://^?group=sources"]
+    checks:
+      - check: fingerprint
+        script: rustc --version --verbose
+        hash: stdout
+  test:
+    command: cargo test --locked -p $project
+    inputs: ["group://sources", "project://^?group=sources"]
+    checks:
+      - check: fingerprint
+        script: rustc --version --verbose
+        hash: stdout

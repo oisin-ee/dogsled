@@ -1,0 +1,230 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  // Every category at error, with no preset. A rule is off only where another
+  // enabled rule or a pi requirement contradicts it, and each one says why.
+  // Options that only name third-party APIs keep a rule on for this code.
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "pedantic": "error",
+    "perf": "error",
+    "style": "error",
+    "restriction": "error",
+    "nursery": "error"
+  },
+  // `plugins` replaces the default set. The UI plugins (react, react-perf,
+  // jsx-a11y, nextjs, vue) and jest have no code in this repository. vitest
+  // applies to the test files only (overrides).
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "import", "node", "promise", "jsdoc"],
+  // pi runs extensions under Node or Bun.
+  "env": { "node": true },
+  "options": {
+    "typeAware": true,
+    // Reports TypeScript errors, so there is no separate `tsc` step.
+    "typeCheck": true,
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "error"
+  },
+  "ignorePatterns": ["packages/*/src/generated/**"],
+  "rules": {
+    // Contradicts import/no-default-export, which stays on.
+    "import/no-named-export": "off",
+    // Contradicts import/no-default-export, which stays on.
+    "import/prefer-default-export": "off",
+    // Contradicts unicorn/prefer-ternary, which stays on.
+    "eslint/no-ternary": "off",
+    // Contradicts promise/prefer-await-to-then, which stays on.
+    "oxc/no-async-await": "off",
+    // Contradicts oxc/no-rest-spread-properties, which stays on.
+    "eslint/prefer-object-spread": "off",
+    // Contradicts typescript/promise-function-async, which stays on: a pi tool
+    // `execute` must return a promise, and one with nothing to await is async.
+    "eslint/require-await": "off",
+    // The type-aware form of the same rule; the same contradiction.
+    "typescript/require-await": "off",
+    // import/consistent-type-specifier-style requires separate type imports.
+    "eslint/no-duplicate-imports": ["error", { "allowSeparateTypeImports": true }],
+    // pi's `context_edit` entries need `replacement: null` (ContextEditEntry).
+    "unicorn/no-null": "off",
+    // Contradicts typescript/prefer-optional-chain, which stays on.
+    "oxc/no-optional-chaining": "off",
+    // Contradicts eslint/no-use-before-define, which stays on: a declarator that
+    // uses another must follow it, whatever the alphabetical order.
+    "eslint/sort-vars": "off",
+    // "consecutive": a declaration that reads the result of an earlier statement
+    // must follow that statement, so it cannot join the declarations above it
+    // (eslint/no-use-before-define).
+    "eslint/one-var": ["error", "consecutive"],
+    // pi's optional fields (e.g. a registry model lookup miss) and wasm-bindgen
+    // `Option<T>` parameters are `undefined`; with oxc/no-optional-chaining off
+    // the code compares against it directly, and unicorn/no-typeof-undefined
+    // (on) forbids the typeof form.
+    "eslint/no-undefined": "off",
+    // typebox's `Type.*` and pi-ai's `StringEnum` are factories, not classes.
+    "eslint/new-cap": [
+      "error",
+      { "capIsNewExceptionPattern": "^Type\\.", "capIsNewExceptions": ["StringEnum"] }
+    ],
+    // pi's API types and the types wasm-bindgen generates from the Rust cores
+    // are mutable by declaration; the rule stays on for every other type.
+    "typescript/prefer-readonly-parameter-types": [
+      "error",
+      {
+        "allow": [
+          {
+            "from": "package",
+            "package": "@earendil-works/pi-coding-agent",
+            "name": [
+              "AgentBeforeSettleEvent",
+              "AgentToolUpdateCallback",
+              "ContextEvent",
+              "ExtensionAPI",
+              "ExtensionCommandContext",
+              "ExtensionContext",
+              "ExtensionToolContext",
+              "InputEvent",
+              "SessionBoundaryDraft",
+              "SessionEntry",
+              "SessionMessageEntry",
+              "SessionStartEvent",
+              "SessionTreeEvent",
+              "ToolInfo",
+              "TurnEndEvent"
+            ]
+          },
+          {
+            "from": "package",
+            "package": "@earendil-works/pi-ai",
+            "name": ["Model", "ToolResultMessage"]
+          },
+          {
+            "from": "package",
+            "package": "@earendil-works/pi-agent-core",
+            "name": ["AgentMessage"]
+          },
+          { "from": "lib", "name": "AbortSignal" },
+          {
+            "from": "file",
+            "name": [
+              "Action",
+              "Call",
+              "ConfigReport",
+              "Decision",
+              "Event",
+              "Facts",
+              "Flags",
+              "Record",
+              "Selection",
+              "State",
+              "Status",
+              "Task",
+              "Thinking",
+              "TodoList"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      // Node open flags require bitwise composition to avoid blocking on a seed FIFO.
+      "files": ["packages/pi-todo/src/source.ts"],
+      "rules": { "eslint/no-bitwise": ["error", { "allow": ["|"] }] }
+    },
+    {
+      // pi loads an extension through its default export (docs/extensions.md),
+      // and a tool's `execute` has five parameters, the last being the context.
+      "files": ["packages/*/src/index.ts", "packages/pi-guardrails/src/pi/index.ts"],
+      "rules": { "import/no-default-export": "off", "eslint/max-params": "off" }
+    },
+    {
+      // The only modules that read files: the WASM bytes, the config, and the
+      // real path of a tool's source. The extension factory is synchronous, so
+      // the core loads synchronously.
+      "files": ["packages/*/src/wasm.ts", "packages/*/src/config.ts", "packages/*/src/source.ts"],
+      "rules": { "import/no-nodejs-modules": "off", "node/no-sync": "off" }
+    },
+    {
+      // The test makes a real symlink, the case `source.ts` exists for.
+      "files": [
+        "packages/pi-todo/src/source.test.ts",
+        "packages/pi-todo/src/import-fixture.ts",
+        "packages/pi-tiers/src/source.test.ts"
+      ],
+      "rules": { "import/no-nodejs-modules": "off" }
+    },
+    {
+      // pi-guardrails is the harness hook runtime ported from plain JS: shell
+      // parsing, Git, and the file system are its job, and its structure
+      // follows the policies it encodes. The style and structure rules below
+      // are off for it; the correctness, type-aware, and unsafe-type rules
+      // stay on.
+      "files": ["packages/pi-guardrails/src/**/*.ts"],
+      "rules": {
+        "eslint/capitalized-comments": "off",
+        "eslint/complexity": "off",
+        "eslint/func-style": "off",
+        "eslint/id-length": "off",
+        "eslint/init-declarations": "off",
+        "eslint/max-lines": "off",
+        "eslint/max-lines-per-function": "off",
+        "eslint/max-params": "off",
+        "eslint/max-statements": "off",
+        "eslint/no-continue": "off",
+        "eslint/no-magic-numbers": "off",
+        "eslint/no-use-before-define": "off",
+        "eslint/one-var": "off",
+        "eslint/prefer-destructuring": "off",
+        "eslint/prefer-named-capture-group": "off",
+        "eslint/require-unicode-regexp": "off",
+        "eslint/sort-imports": "off",
+        "eslint/sort-keys": "off",
+        "import/exports-last": "off",
+        "import/group-exports": "off",
+        "import/no-nodejs-modules": "off",
+        "import/no-relative-parent-imports": "off",
+        "node/no-process-env": "off",
+        "node/no-sync": "off",
+        "node/no-top-level-await": "off",
+        "oxc/no-map-spread": "off",
+        "oxc/no-rest-spread-properties": "off",
+        "oxc/only-used-in-recursion": "off",
+        "typescript/explicit-function-return-type": "off",
+        "typescript/no-unsafe-type-assertion": "off",
+        "typescript/prefer-readonly-parameter-types": "off",
+        "typescript/strict-boolean-expressions": "off",
+        "unicorn/import-style": "off",
+        "unicorn/no-array-callback-reference": "off"
+      }
+    },
+    {
+      "files": ["**/*.test.ts"],
+      "plugins": ["vitest"],
+      "rules": {
+        // Contradicts vitest/prefer-importing-vitest-globals, which stays on:
+        // tests import `describe`, `it`, and `expect`, so they are typed
+        // without vitest's globals mode.
+        "vitest/no-importing-vitest-globals": "off",
+        // Contradict vitest/prefer-strict-boolean-matchers, which stays on.
+        "vitest/prefer-to-be-truthy": "off",
+        "vitest/prefer-to-be-falsy": "off"
+      }
+    },
+    {
+      // Its table-driven tests run real Git and shfmt in loops.
+      "files": ["packages/pi-guardrails/src/**/*.test.ts"],
+      "plugins": ["vitest"],
+      "rules": {
+        "eslint/no-await-in-loop": "off",
+        "eslint/no-empty-function": "off",
+        "typescript/no-unnecessary-condition": "off",
+        "typescript/no-unnecessary-type-conversion": "off",
+        "vitest/no-conditional-in-test": "off",
+        "vitest/prefer-expect-assertions": "off",
+        "vitest/require-test-timeout": "off",
+        "vitest/require-top-level-describe": "off"
+      }
+    }
+  ]
+}

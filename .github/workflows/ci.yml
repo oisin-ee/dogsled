@@ -37,20 +37,7 @@ jobs:
       # not install it: its own rust install applies the toolchain file's
       # component list, which leaves the toolchain without cargo and rustc.
       - run: rustup toolchain install
-      # dx bundles the web portal UI. Proto's cargo backend would build it
-      # from source, which takes over ten minutes on macOS. binstall fetches
-      # the published binary instead, in seconds.
-      - uses: cargo-bins/cargo-binstall@81df5c23b0dc775b009efdfc9895c5965b7a4e40 # v1.26.1
-      - name: Cache dx
-        id: dx-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/dx
-          key: dx-${{ runner.os }}-${{ runner.arch }}-0.7.10
-      - name: Install dx
-        if: steps.dx-cache.outputs.cache-hit != 'true'
-        run: cargo binstall --no-confirm --locked dioxus-cli@0.7.10
-      # .prototools pins the other tools of this job: moon and node.
+      # .prototools pins moon, node, dx, pnpm, wasm-bindgen, and shfmt.
       - run: proto install
       - uses: Swatinem/rust-cache@v2
       - name: Web lint
@@ -58,11 +45,11 @@ jobs:
       - name: Web build
         run: moon run :web-build
       - name: Format
-        run: moon run :fmt-check
+        run: moon run dogsled:fmt-check todo-core:fmt todo-wasm:fmt prewalk-core:fmt prewalk-wasm:fmt
       - name: Lint
-        run: moon run :lint
+        run: moon run dogsled:lint :clippy
       - name: Test
-        run: moon run :test
+        run: moon run dogsled:test todo-core:test todo-wasm:test prewalk-core:test prewalk-wasm:test
 
   typescript:
     runs-on: ubuntu-24.04
@@ -73,11 +60,24 @@ jobs:
           # Moon diffs against main, so it needs the full history.
           fetch-depth: 0
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-      - run: proto install moon
-      - run: proto install node
+      - run: rustup toolchain install
+      - run: proto install
+      - id: store
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-store-
       - name: Install dependencies
-        run: moon run :install
+        run: moon run dogsled:install
       - name: Typecheck
-        run: moon run :typecheck
+        run: moon run dogsled:typecheck
+      - name: Format moved files
+        run: moon run dogsled:format
+      - name: Lint moved extensions
+        run: moon run pi-todo:lint pi-prewalk:lint pi-tiers:lint pi-guardrails:lint
+      - name: Test moved extensions
+        run: moon run pi-todo:test pi-prewalk:test pi-tiers:test pi-guardrails:test
       - name: Shim tests
-        run: moon run :test-shim
+        run: moon run dogsled:test-shim
