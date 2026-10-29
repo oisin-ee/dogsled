@@ -548,6 +548,37 @@ impl<'a> Fleet<'a> {
         }
     }
 
+    pub fn ordinary_evidence(
+        &self,
+        host: &Host,
+        id: &str,
+    ) -> Result<crate::launch::OrdinaryEvidence> {
+        if host.is_local() {
+            crate::launch::ordinary_evidence(self.ledger, id)
+        } else {
+            self.remote(host, &["execution-evidence".into(), id.into()])
+        }
+    }
+
+    pub fn release_ordinary(
+        &self,
+        host: &Host,
+        certificate: &crate::launch::OrdinaryRelease,
+    ) -> Result<crate::launch::OrdinaryReleaseAck> {
+        if host.is_local() {
+            crate::launch::release_ordinary(self.ledger, certificate)
+        } else {
+            self.remote(
+                host,
+                &[
+                    "release-references".into(),
+                    "--input".into(),
+                    serde_json::to_string(certificate)?,
+                ],
+            )
+        }
+    }
+
     pub fn reserve(
         &self,
         host: &Host,

@@ -87,6 +87,8 @@ pub enum Refusal {
     CloneFailed,
     /// No retained job is known on this host.
     UnknownJob,
+    /// All bounded result identity has expired, or the result was never known.
+    ResultUnavailable,
     /// A job request carries no usable validity evidence.
     JobValidityUnprovable,
     /// A job request is older than the validity window.
@@ -110,6 +112,7 @@ impl Refusal {
             Self::SignalConflict => "SIGNAL_CONFLICT",
             Self::CloneFailed => "CLONE_FAILED",
             Self::UnknownJob => "UNKNOWN_JOB",
+            Self::ResultUnavailable => "RESULT_UNAVAILABLE",
             Self::JobValidityUnprovable => "JOB_VALIDITY_UNPROVABLE",
             Self::JobExpired => "JOB_EXPIRED",
             Self::JobFromFuture => "JOB_FROM_FUTURE",
@@ -127,6 +130,7 @@ impl Refusal {
             Self::SignalConflict,
             Self::CloneFailed,
             Self::UnknownJob,
+            Self::ResultUnavailable,
             Self::JobValidityUnprovable,
             Self::JobExpired,
             Self::JobFromFuture,
@@ -149,6 +153,7 @@ impl Refusal {
             Self::SignalConflict => "the turn already has a conflicting signal or done handoff",
             Self::CloneFailed => "the peer could not clone the repository",
             Self::UnknownJob => "unknown job",
+            Self::ResultUnavailable => crate::jobs::RESULT_UNAVAILABLE,
             Self::JobValidityUnprovable => {
                 "job request validity is unprovable; new execution refused"
             }

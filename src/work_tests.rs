@@ -193,14 +193,21 @@ fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
         .unwrap();
     let orphan = crate::jobs::Validity::new(created);
     crate::jobs::record_request_validity(&ledger, "orphan", Some(orphan)).unwrap();
-    work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS).unwrap();
+    let completed = work::queue(&ledger)
+        .unwrap()
+        .into_iter()
+        .find(|ticket| ticket.request.id == "terminal")
+        .unwrap()
+        .finished_ms
+        .unwrap();
+    work::expire_requests(&ledger, completed + crate::jobs::RECORD_KEEP_MS).unwrap();
     assert_eq!(work::queue(&ledger).unwrap().len(), 2);
     assert!(
         crate::jobs::request_validity(&ledger, "terminal")
             .unwrap()
             .is_some()
     );
-    work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
+    work::expire_requests(&ledger, completed + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
     assert_eq!(work::queue(&ledger).unwrap().len(), 1);
     assert!(
         !ledger
@@ -390,7 +397,8 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
                 "id":"missing-cancel","cmd":["true"],"cwd":"/","host":"local","owner":"owner","pane":"pane",
                 "state":"idle","exit":0,"started_ms":created,"ended_ms":created,"output_expired":false
             })).unwrap();
-            work::expire_requests(&ledger, created + 1 + crate::jobs::RECORD_KEEP_MS).unwrap();
+            let completed = work::queue(&ledger).unwrap()[0].finished_ms.unwrap();
+            work::expire_requests(&ledger, completed + 1 + crate::jobs::RECORD_KEEP_MS).unwrap();
             assert!(work::queue(&ledger).unwrap().is_empty());
             assert!(
                 !ledger

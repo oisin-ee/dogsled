@@ -88,7 +88,7 @@ fn refused_unit(name: &str) -> (Rig, Value, Value) {
     (rig, execution, input)
 }
 
-fn release_fixture(name: &str) -> (Rig, Value, Value) {
+pub(super) fn release_fixture(name: &str) -> (Rig, Value, Value) {
     let (rig, execution, input) = launched(name);
     transcript(&rig, &execution, &entries());
     let (code, receipt) = ack(&rig, &acknowledgement(&execution, &input));
@@ -106,7 +106,7 @@ fn release_fixture(name: &str) -> (Rig, Value, Value) {
     (rig, execution, certificate)
 }
 
-fn host_release(rig: &Rig, certificate: &Value) -> (i32, Value) {
+pub(super) fn host_release(rig: &Rig, certificate: &Value) -> (i32, Value) {
     rig.json(&[
         "host",
         "release-references",

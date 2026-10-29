@@ -626,11 +626,13 @@ fn prune_old_job(state: &str, reversed: bool, kept: bool) {
     let out = rig.run(&["prune", "--yes", "jobs"]);
     assert!(out.status.success(), "{out:?}");
     let record = rig.dir.join("state/jobs/old.json");
-    assert_eq!(record.exists(), kept, "{out:?}");
-    assert_eq!(rig.dir.join("state/jobs/old.log").exists(), kept);
-    if kept {
-        assert_eq!(rig.read("state/jobs/old.json"), job);
+    // A terminal job releases its checkout after a day, not its thirty-day record.
+    assert!(record.exists(), "{out:?}");
+    assert!(rig.dir.join("state/jobs/old.log").exists());
+    if !kept {
+        job["output_expired"] = json!(true);
     }
+    assert_eq!(rig.read("state/jobs/old.json"), job);
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(tree.exists(), kept, "{out:?}");
@@ -648,7 +650,7 @@ fn prune_old_job_with_reversed_time_keeps_record_and_checkout() {
 }
 
 #[test]
-fn prune_old_job_with_terminal_evidence_removes_record() {
+fn prune_old_job_with_terminal_evidence_expires_output_but_keeps_record() {
     prune_old_job("idle", false, false);
 }
 

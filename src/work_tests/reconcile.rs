@@ -152,7 +152,7 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
     current.jobs.push(
         serde_json::from_value(json!({
             "id":"job","cmd":["true"],"cwd":"/","host":"local","owner":"owner",
-            "pane":"child","state":"exited","exit":0,"signal":null,"reason":null,
+            "pane":"child","state":"idle","exit":0,"signal":null,"reason":null,
             "started_ms":100,"ended_ms":200,"timeout_ms":null,"idle_timeout_ms":null
         }))
         .unwrap(),

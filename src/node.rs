@@ -538,6 +538,69 @@ impl Node<'_> {
     }
 }
 
+/// The caller holds the preparation gate. The host store validates the exact
+/// durable origin-terminal proof before forgetting a placement grant.
+pub(crate) fn expire_grant(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
+    ledger.with_lock("host", || {
+        let grants = ledger.child("placement-grants");
+        let Some(grant) = grants.read::<PlacementGrant>(&format!("{id}.json"))? else {
+            return Ok(true);
+        };
+        let Some(lifecycle) = grants.read::<GrantLifecycle>(&format!("{id}.lifecycle.json"))?
+        else {
+            return Ok(false);
+        };
+        if lifecycle.proof.grant != grant {
+            return Err(crate::unit_transport::conflict(
+                "grant completion identity changed",
+            ));
+        }
+        crate::work::validate_placement_completion(&lifecycle.proof)?;
+        if crate::jobs::completion_time(ledger, lifecycle.finished_ms, None, true)?
+            .is_none_or(|finished| now.saturating_sub(finished) <= crate::jobs::RECORD_KEEP_MS)
+        {
+            return Ok(false);
+        }
+        if !crate::work::references_released(ledger, id)?
+            || !crate::prepare::retention_ready(ledger, id, now)?
+        {
+            return Ok(false);
+        }
+        crate::jobs::remove(&grants.dir.join(format!("{id}.json")))?;
+        crate::jobs::remove(&grants.dir.join(format!("{id}.lifecycle.json")))?;
+        Ok(true)
+    })
+}
+
+pub(crate) fn expire_grants(ledger: &Ledger, now: u64) -> Result<()> {
+    let grants = ledger.child("placement-grants");
+    let entries = match std::fs::read_dir(&grants.dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".lifecycle.json") else {
+            continue;
+        };
+        if crate::jobs::validate_id(id).is_err() {
+            continue;
+        }
+        let result = ledger.child("preparation-receipts").with_lock(id, || {
+            if expire_grant(ledger, id, now)? {
+                crate::prepare::expire_record(ledger, id, now)?;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            eprintln!("dogsled placement expiry: {id}: {error}");
+        }
+    }
+    Ok(())
+}
+
 /// Observe the same lifecycle facts for publication and host-side close verification.
 pub fn observed_probe(ledger: &Ledger, shell: &dyn Shell, home: &str) -> Result<Probe> {
     let mut probe = probe::local(shell, home)?;

@@ -3263,7 +3263,7 @@ fn job_receipt(
 fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
     let rig = Rig::new("replay-after-prune");
     // The job ends long enough ago that the prune removes its record.
-    let ended = now() - 2 * 86_400_000;
+    let ended = now() - 31 * 86_400_000;
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"pruned","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
@@ -3286,7 +3286,10 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
     let out = rig.run(&["prune", "--yes", "jobs"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
-    assert!(stdout.contains("removed job pruned"), "{stdout}");
+    assert!(
+        stdout.contains("expired job pruned output or record"),
+        "{stdout}"
+    );
     assert!(!rig.dir.join("state/jobs/pruned.json").exists());
     assert!(rig.dir.join("state/launches/pruned.json").exists());
     // The replay returns the recorded result. It allocates nothing and dispatches nothing.
@@ -3327,7 +3330,7 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
 #[test]
 fn a_legacy_receipt_without_request_evidence_fails_closed_after_the_prune() {
     let rig = Rig::new("legacy-receipt-after-prune");
-    let ended = now() - 2 * 86_400_000;
+    let ended = now() - 31 * 86_400_000;
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"legacy","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
@@ -3378,7 +3381,7 @@ fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
         ("number", json!(7)),
     ] {
         let rig = Rig::new(&format!("receipt-without-pane-after-prune-{name}"));
-        let ended = now() - 2 * 86_400_000;
+        let ended = now() - 31 * 86_400_000;
         fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
         fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let job = json!({"id":"incomplete","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
@@ -3436,7 +3439,7 @@ fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
 fn a_conflicting_receipt_fails_closed_after_the_prune() {
     for (name, conflict) in [("command", "cmd"), ("owner", "owner")] {
         let rig = Rig::new(&format!("conflicting-receipt-after-prune-{name}"));
-        let ended = now() - 2 * 86_400_000;
+        let ended = now() - 31 * 86_400_000;
         fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
         fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let job = json!({"id":"conflicted","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",

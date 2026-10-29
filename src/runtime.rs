@@ -436,8 +436,28 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
         .find(|i| i.id == target || i.pane == target || i.name.as_deref() == Some(target));
     let item = if let Some(item) = item {
         item
+    } else if let Some(job) = crate::launch::retained_job(fleet.ledger, target)? {
+        Item {
+            id: job.id,
+            kind: "job".into(),
+            host: job.host,
+            pane: job.pane,
+            owner_pane: job.owner,
+            ..Item::default()
+        }
     } else {
-        let found = crate::inbox::resolve(fleet, target, host, now_ms())?;
+        // Execution IDs are immutable. Never reinterpret one as a replacement agent.
+        if target.starts_with("r-") {
+            return Err(Error::Refused {
+                code: Refusal::ResultUnavailable,
+                detail: jobs::RESULT_UNAVAILABLE.into(),
+            });
+        }
+        let found = crate::inbox::resolve(fleet, target, host, now_ms()).map_err(|error| {
+            if matches!(error.root(), Error::Invalid(detail) if detail.starts_with("no agent named or in pane")) {
+                Error::Refused { code: Refusal::ResultUnavailable, detail: jobs::RESULT_UNAVAILABLE.into() }
+            } else { error }
+        })?;
         Item {
             kind: "agent".into(),
             host: found.host.id.clone(),
