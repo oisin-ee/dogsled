@@ -762,6 +762,7 @@ fn closed_handoff_missing_both_refs_settles_and_leaves_the_board() {
         orphans: vec![],
         sweep: None,
         stopped_activity: std::collections::BTreeMap::new(),
+        holds: Vec::new(),
     };
     assert_eq!(crate::board::build(&status, None, 3).rows, []);
     repo.calls.lock().unwrap().clear();

@@ -212,6 +212,7 @@ mod tests {
 
     fn row(name: &str, pane: Option<&str>, repository: Option<&str>) -> board::Row {
         board::Row {
+            holds: Vec::new(),
             group: board::Group::Running,
             kind: "agent".into(),
             id: format!("r-{name}"),

@@ -21,6 +21,7 @@ mod error;
 mod facts;
 mod gate;
 mod herdr_socket;
+mod holds;
 mod hosts;
 mod inbox;
 mod integration;
