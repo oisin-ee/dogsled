@@ -101,11 +101,6 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     if lane == Lane::Handoff {
         return crate::done::handoff(ledger, &shell, now_ms());
     }
-    if lane == Lane::Retention {
-        // The job retention pass needs no fleet and no other lane. It runs on the service
-        // timer, so it needs no Stop event and no doctor run.
-        return crate::jobs::expire(ledger, now_ms());
-    }
     let fleet = if items::list(ledger)?.is_empty()
         && work::queue(ledger)?.is_empty()
         && !crate::inbox::pending(ledger)?
@@ -120,6 +115,11 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     } else {
         Fleet::discover(&shell, ledger, policy, home)?
     };
+    if lane == Lane::Retention {
+        // Retention owns its synchronization too; no other service lane is required.
+        crate::launch::release_owned(&fleet)?;
+        return crate::jobs::expire(ledger, now_ms());
+    }
     match lane {
         Lane::Watchdog => {
             let now = now_ms();

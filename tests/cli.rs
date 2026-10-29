@@ -39,6 +39,8 @@ mod profiles;
 mod remote_diagnostics;
 #[path = "cli/request_validity.rs"]
 mod request_validity;
+#[path = "cli/retention.rs"]
+mod retention;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/review_fixes.rs"]

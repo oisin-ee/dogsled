@@ -77,6 +77,14 @@ fn conflict(message: &str) -> Error {
 }
 
 impl PlacementProgress {
+    pub(crate) fn terminal_grant(&self) -> Option<&crate::node::PlacementGrant> {
+        match &self.phase {
+            PlacementPhase::Completed { saved, .. } => Some(&saved.prepared.grant),
+            PlacementPhase::PreparationFailed { failed } => Some(&failed.grant),
+            _ => None,
+        }
+    }
+
     pub(crate) fn expectation(
         &self,
         request: &Request,
@@ -135,6 +143,7 @@ pub(super) fn record(attempts: &Ledger, request: &Request) -> Result<()> {
         attempts.write(
             &file,
             &Attempt {
+                ordinary_release: None,
                 request: serde_json::to_value(request)?,
                 finished_ms: None,
                 placement: Some(PlacementProgress {
@@ -551,6 +560,12 @@ fn finish_failure(fleet: &Fleet, request: &Request, mut attempt: Attempt) -> Res
         return Err(conflict("unbound failure acknowledgement"));
     }
     let error = failed.failure.restore();
+    let grant = failed.grant.clone();
+    attempt
+        .placement
+        .as_mut()
+        .ok_or_else(|| conflict("missing placement progress"))?
+        .completion_ack = Some(false);
     jobs::finish_once(
         fleet.ledger,
         &mut attempt.finished_ms,
@@ -560,6 +575,7 @@ fn finish_failure(fleet: &Fleet, request: &Request, mut attempt: Attempt) -> Res
         .ledger
         .child("admissions")
         .write(&format!("{}.json", request.id), &attempt)?;
+    finish_grant(fleet, &attempt, &grant)?;
     Err(error)
 }
 
@@ -610,17 +626,48 @@ pub(crate) fn validate_completion(proof: &crate::node::GrantCompletion) -> Resul
     let progress = attempt
         .placement
         .ok_or_else(|| conflict("grant completion has no placement"))?;
-    let PlacementPhase::Completed {
-        saved,
-        acknowledgement,
-    } = progress.phase
-    else {
-        return Err(conflict("grant completion is not terminal"));
-    };
-    validate_saved(&request, &saved)?;
-    validate_ack(&saved, acknowledgement.as_ref())?;
-    if saved.prepared.grant != proof.grant {
-        return Err(conflict("grant completion identity changed"));
+    match progress.phase {
+        PlacementPhase::Completed {
+            saved,
+            acknowledgement,
+        } => {
+            validate_saved(&request, &saved)?;
+            validate_ack(&saved, acknowledgement.as_ref())?;
+            if saved.prepared.grant != proof.grant {
+                return Err(conflict("grant completion identity changed"));
+            }
+        }
+        PlacementPhase::PreparationFailed { failed } => {
+            if failed.grant != proof.grant
+                || failed.preparation.version != prepare::ENVELOPE_VERSION
+                || failed.preparation.request_id != request.id
+                || request.branch.as_ref() != Some(&failed.preparation.branch)
+                || request.base != failed.preparation.base
+                || failed.failure.request_id.as_deref() != Some(&request.id)
+            {
+                return Err(conflict("failed grant completion changed"));
+            }
+            let intent = failed
+                .disposition
+                .as_ref()
+                .ok_or_else(|| conflict("failed preparation has no disposition"))?;
+            let ack = failed
+                .acknowledgement
+                .as_ref()
+                .ok_or_else(|| conflict("failed preparation has no acknowledgement"))?;
+            if intent.outcome != disposition::Outcome::NotStarted
+                || intent.policy
+                    != (disposition::Policy::Prohibit {
+                        basis: disposition::Basis::PreparationFailed,
+                    })
+                || intent.binding.request_id != request.id
+                || intent.binding.prepared.is_some()
+            {
+                return Err(conflict("failed preparation disposition changed"));
+            }
+            prepare::validate_ack(intent, ack)?;
+        }
+        _ => return Err(conflict("grant completion is not terminal")),
     }
     Ok(())
 }

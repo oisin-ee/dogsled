@@ -101,6 +101,12 @@ const RULES: &[Rule] = &[
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
+        code: "ordinary_reference_release",
+        evidence: &[],
+        reason: "awaiting origin reference release; ordinary result is retained at the origin",
+        command: &["dogsled", "serve", "--once"],
+    },
+    Rule {
         code: "reference_release",
         evidence: &[],
         reason: "awaiting origin reference release acknowledgement",
@@ -445,7 +451,11 @@ pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<H
         }
         if matches!(
             code,
-            "placement" | "placement_grant" | "reference_release" | "launch_reference"
+            "placement"
+                | "placement_grant"
+                | "reference_release"
+                | "launch_reference"
+                | "ordinary_reference_release"
         ) {
             hold.command_host = origin.into();
         }
@@ -765,6 +775,20 @@ fn admissions(
             holds.push(hold);
         }
         if let Some(release) = value
+            .get("ordinary_release")
+            .filter(|release| !release.is_null())
+        {
+            holds.push(owned(
+                if release["acknowledgement"].is_null() {
+                    "ordinary_reference_release"
+                } else {
+                    "release_certificate"
+                },
+                format!("ordinary release certificate {id}"),
+                id,
+            ));
+        }
+        if let Some(release) = value
             .pointer("/unit/reference_release")
             .filter(|r| !r.is_null())
         {
@@ -806,6 +830,16 @@ fn releases(
         }
     }
     for (name, value) in launches {
+        if name.ends_with(".release.json") {
+            holds.push(owned(
+                "release_certificate",
+                format!(
+                    "ordinary launch references {}",
+                    name.trim_end_matches(".release.json")
+                ),
+                name.trim_end_matches(".release.json"),
+            ));
+        }
         if !name.ends_with(".progress.json") {
             continue;
         }
@@ -830,6 +864,11 @@ fn releases(
                 ));
             }
             None => holds.push(owned("unreadable", format!("launch {id}"), id)),
+            Some(value) if value.get("request").is_some() => holds.push(owned(
+                "ordinary_reference_release",
+                format!("ordinary launch references {id}"),
+                id,
+            )),
             _ => (),
         }
     }

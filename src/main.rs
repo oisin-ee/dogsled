@@ -549,11 +549,29 @@ fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool)
 }
 
 /// The host commands that act on one child pane.
+fn release_host_references(node: &Node<'_>, input: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(input)?;
+    if value["version"] == 2 {
+        print(
+            true,
+            &launch::release_ordinary(node.ledger, &serde_json::from_value(value)?)?,
+            String::new,
+        )
+    } else {
+        print(
+            true,
+            &node.release_references(&serde_json::from_value(value)?)?,
+            String::new,
+        )
+    }
+}
+
 fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     match cmd {
-        HostCommand::ReleaseReferences { input } => print(
+        HostCommand::ReleaseReferences { input } => release_host_references(node, &input)?,
+        HostCommand::ExecutionEvidence { id } => print(
             true,
-            &node.release_references(&serde_json::from_str(&input)?)?,
+            &launch::ordinary_evidence(node.ledger, &id)?,
             String::new,
         )?,
         HostCommand::ReferenceReleaseStatus { input } => print(
@@ -910,6 +928,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         | HostCommand::UnitReceipt { .. }
         | HostCommand::UnitReceipts { .. }
         | HostCommand::ReleaseReferences { .. }
+        | HostCommand::ExecutionEvidence { .. }
         | HostCommand::ReferenceReleaseStatus { .. }
         | HostCommand::Drop { .. }
         | HostCommand::RefreshBranches { .. }
