@@ -7,6 +7,7 @@ Status: proposed. Not approved for dispatch. Facts checked on 2026-10-29 at Dogs
 Each host keeps its items and its queue in one SQLite database in its state directory.
 A change writes only the rows that changed, in one transaction.
 The cross-host protocol, the kernel locks that guard each operation, and every other store stay as they are.
+No support for older binaries: no downgrade path, no compatibility files, and no old queue formats. The JSON files are imported once, then deleted.
 
 ## Why
 
@@ -29,11 +30,11 @@ The cross-host protocol, the kernel locks that guard each operation, and every o
 - Open one connection per store operation. Apply these settings on each open: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, and a busy timeout equal to the remaining `Budget` (`src/budget.rs`), so a busy database gives the same `Error::Deadline` as a busy kernel lock.
 - Writes use `BEGIN IMMEDIATE` ([SQLite transactions](https://sqlite.org/lang_transaction.html)). Reads use plain read transactions. Under WAL, readers do not block the writer.
 - The state directory must be on a local disk. WAL does not work over a network filesystem ([WAL](https://sqlite.org/wal.html)).
-- `PRAGMA user_version` holds the schema version. A binary that finds a newer version refuses every store operation, with the same `Refusal::QueueVersionUnsupported` style of error used now (`src/work.rs:149–178`). This replaces the `queue-format.json` sidecar.
+- `PRAGMA user_version` holds the schema version: 1 after step 1 (items), 2 after step 2 (tickets). A binary that finds a newer version than it knows refuses every store operation and changes nothing.
 
 ### Schema v1
 
-Each table keeps the full serde record as JSON text, so field defaults, `skip_serializing_if`, and old-record compatibility stay where they are now: on the Rust types. The columns that queries and uniqueness need are generated from that JSON, so they cannot drift from the record ([generated columns](https://sqlite.org/gencol.html)).
+Each table keeps the full serde record as JSON text, so the record shape stays owned by the Rust types and a new optional field needs no schema change. The columns that queries and uniqueness need are generated from that JSON, so they cannot drift from the record ([generated columns](https://sqlite.org/gencol.html)).
 
 ```sql
 CREATE TABLE items (
@@ -53,13 +54,6 @@ CREATE TABLE tickets (
   request_id  TEXT GENERATED ALWAYS AS (json_extract(record, '$.request.id')) STORED NOT NULL UNIQUE,
   state       TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) STORED NOT NULL
 );
-
-CREATE TABLE migrations (
-  collection  TEXT PRIMARY KEY,                 -- 'items' or 'queue'
-  state       TEXT NOT NULL CHECK (state IN ('imported', 'sealed')),
-  source_sha256 TEXT NOT NULL,                  -- the JSON file that was imported
-  at_ms       INTEGER NOT NULL
-);
 ```
 
 The writer confirms before coding that existing data has no duplicate item IDs or request IDs. `record` (`src/items.rs:218`) and `enqueue` (`src/work.rs:379`) refuse duplicates today, so a duplicate in a real file is a finding to report, not something to drop silently.
@@ -72,49 +66,33 @@ A new owner, `src/store.rs`, opens the database, applies the settings and migrat
 
 - `list` and `queue` read all rows in `seq` order and decode each `record`.
 - `change`, `record`, `close`, `set_reply_with`, `reconcile`, `save_queue`, and the other writers keep their kernel lock. Inside it they load the rows, apply the same closure, and in one transaction insert new records, update only records whose JSON changed, and delete removed ones (only `expire_requests` removes tickets today, `src/work.rs:225`).
-- `queue_records` keeps returning raw JSON values for its callers (`src/work.rs:347`, `:1496`). The array/envelope parsing moves into the import.
+- `queue_records` keeps returning raw JSON values for its callers (`src/work.rs:347`, `:1496`).
+- Step 2 deletes the old queue format code: `QueueEnvelope`, `QueueFormat`, the `queue-format.json` read and write, `Refusal::QueueVersionUnsupported`, and their tests (`src/work.rs:133–189`; `src/work_tests.rs` tests from `ff45c58`).
 
 Reads still decode the whole collection, as now. Indexed point reads are a later change, made when a caller needs one.
 
-### Migration and cutover
+### One-time import
 
-Each collection migrates on its own, under its own kernel lock. No step holds both `items` and `queue`, so the migration adds no new lock order.
+The import keeps the open children and queued tickets that exist when a host upgrades. It is part of the schema upgrade, not a separate mode.
 
-1. The process must hold the `service` lifetime lock, or be `dogsled serve` itself, which holds it for its whole run (`src/service.rs:139`). This makes sure no older service on the host is still using the JSON files.
-2. It takes the collection's kernel lock. Older binaries take the same lock for every write (all `save_queue` callers hold `queue`; all item writers hold `items`).
-3. If the collection is `imported` but not `sealed`, and the JSON file is not a tombstone, it deletes the imported rows and imports again. Before the tombstone, the JSON file is still the authority.
-4. It reads the JSON file with today's rules (an array; for the queue, also the version-1 envelope and the version check on `queue-format.json`), inserts every record in file order, and records `imported` with the file's SHA-256, in one transaction.
-5. It copies the JSON file to `<name>.pre-sqlite.json` and fsyncs it, as a backup.
-6. It replaces the JSON file with a tombstone, then marks the collection `sealed`.
+1. The first store open that finds `user_version` below the step's version runs the upgrade in one `BEGIN IMMEDIATE` transaction: create the table, insert every record from the JSON array in file order, set `user_version`. Concurrent opens wait on the write lock, then see the new version and skip.
+2. After the commit, it deletes the JSON file (for step 2, also `queue-format.json`).
+3. An open that finds the current version and a leftover JSON file (a crash between 1 and 2) deletes the file. The database is the only authority from the commit on.
 
-Tombstones make every older binary fail closed instead of starting from an empty collection. A missing file would be read as empty (`src/items.rs:215` `unwrap_or_default`), so the file must never be missing.
-
-| File | Tombstone | Older readers that refuse |
-|---|---|---|
-| `items.json` | `{"moved_to":"state.db","schema":1}` | Every older binary: an object does not decode as `Vec<Item>`. |
-| `queue.json` | `{"version":2,"moved_to":"state.db","tickets":[]}` | Array readers: decode error. Envelope readers: version 2 is newer than 1. |
-| `queue-format.json` | `{"version":2}` | Sidecar readers refuse before they read the queue (`src/work.rs:150`, test `a_newer_queue_sidecar_refuses_writes_without_changing_the_files`). |
-
-If a new binary finds a collection not `sealed` and cannot take the `service` lock (an older service is running), it refuses that collection's operations with an error that says to restart the dogsled service. It never reads or writes the JSON file. This keeps one code path for live state and no compatibility shim.
+The import reads only the array format that the current release writes. Any other content fails the upgrade with a clear error and leaves the file in place.
 
 ### Rollout
 
-- Stop the old service, install the new release, then start the new service. The first start migrates. README already asks for the same release on every host (`README.md:11`).
-- Canary on one host first. Before and after, record the timings from step 0 and the row counts against the JSON array lengths.
-- Hosts migrate independently. No host reads another host's files, so a mixed fleet works during rollout.
-
-### Rollback
-
-A downgrade after migration fails closed, by design. Decision D1 below chooses the way back.
+Stop the dogsled service on every host, install the new release, then start it. An older binary is not supported after the upgrade. Hosts do not read each other's state files, so the hosts can upgrade one at a time.
 
 ## Steps
 
 Each step is one writer unit. Step 2 starts after step 1 merges.
 
 0. **Measure the current cost.** Scout, no source changes. On a copy of the local state directory (`DOGSLED_STATE=<copy>`), time one item write and one ticket write with the current release. Record count, median, and p90 in this plan. No other evidence for a speed gain exists yet.
-1. **Store and items.** Add `rusqlite` with `bundled`; add `src/store.rs`; move `src/items.rs` onto it; migrate `items.json`. Move the direct `items.json` test writes onto a test helper in the store owner: `src/inbox.rs:1520–1524`, `src/sweep.rs:826`, `src/custody.rs:833–838`, the `loss_tests.rs` sites, and the `items.json` entry in `tests/cli/legacy_continue.rs:249–256`.
-2. **Queue.** Move the queue functions in `src/work.rs` onto the store; remove the `queue-format.json` write; migrate `queue.json` and its sidecar in one transaction. Move the direct `queue.json` writes in `src/work_tests.rs`, `src/done/tests.rs:1068`, and `tests/cli/legacy_continue.rs`.
-3. **Docs.** README state-directory section: `state.db`, the tombstones, the restart rule, and the rollback from D1.
+1. **Store and items.** Add `rusqlite` with `bundled`; add `src/store.rs`; move `src/items.rs` onto it; import `items.json`. Move the direct `items.json` test writes onto a test helper in the store owner: `src/inbox.rs:1520–1524`, `src/sweep.rs:826`, `src/custody.rs:833–838`, the `loss_tests.rs` sites, and the `items.json` entry in `tests/cli/legacy_continue.rs:249–256`.
+2. **Queue.** Move the queue functions in `src/work.rs` onto the store; import `queue.json`; delete the old queue format code listed under Store API. Move the direct `queue.json` writes in `src/work_tests.rs`, `src/done/tests.rs:1068`, and `tests/cli/legacy_continue.rs`.
+3. **Docs.** README state-directory section: `state.db` and the restart rule.
 
 ## Tests
 
@@ -122,12 +100,10 @@ Each unit adds tests that fail before its change.
 
 | Area | Case | Expected |
 |---|---|---|
-| Round trip | Current records, records from before optional fields, and records with fields this binary does not know | Same serde output as the JSON store. Old-record tests in `src/items.rs` tests still pass unchanged. |
+| Round trip | Current records | Same serde output as the JSON store. |
 | Row writes | One item change in a large collection | Only that row's `record` changes. Other rows keep their bytes. |
-| Migration | Array queue, envelope queue, no sidecar, newer sidecar | Imports match the files in order. A newer sidecar refuses and changes nothing. |
-| Crash | Stop after the import commit, after the backup, after the tombstone, before the seal (debug barrier like `launch_test_barrier`, `src/work.rs:1621`) | A rerun converges. No record is lost or duplicated. The JSON file is never missing. |
-| Old binaries | Decode each tombstone with the pre-change readers, kept as test fixtures | Each refuses. None returns an empty collection. |
-| Service lock | Collection unsealed while another process holds `service` | The new CLI refuses with the restart message and writes nothing. |
+| Import | Current `items.json` and `queue.json`; no file; a file that is not an array | Rows match the file in order and the file is gone; an empty table; the upgrade fails and the file stays. |
+| Crash | Stop after the import commit, before the delete (debug barrier like `launch_test_barrier`, `src/work.rs:1621`) | The next open deletes the file and imports nothing twice. |
 | Concurrency | Several `dogsled` processes enqueue and record at once | Every write lands. No `SQLITE_BUSY` reaches the caller inside the budget. |
 | Versions | `user_version` newer than this binary | Every store operation refuses. The file is unchanged. |
 
@@ -135,12 +111,7 @@ Acceptance for each unit: `cargo test`, `cargo clippy --all-targets -- -D warnin
 
 ## Order with R1
 
-R1 deletes finished items and tickets older than 30 days, each by its own store (`plans/lifecycle-cleanup.md`, section 7). It shrinks the files but does not remove the two-file queue write or the full rewrite per change. Decision D2 below sets the order.
-
-## Decisions
-
-- **D1 — Way back after migration.** Recommended: add `dogsled state export`, which writes the current rows back as the legacy JSON arrays and removes the tombstones, so an older release can start again. Alternative: no export; restore `*.pre-sqlite.json` by hand and accept that changes made after migration are lost.
-- **D2 — Order with R1.** Recommended: this plan first, so R1 is a `DELETE` in one transaction per store. Alternative: R1 first on the JSON files, and this plan after it.
+R1 deletes finished items and tickets older than 30 days, each by its own store (`plans/lifecycle-cleanup.md`, section 7). This plan goes first, so R1 becomes one `DELETE` per store in a transaction.
 
 ## Research note: dependency choice
 
