@@ -312,41 +312,163 @@ pub fn release(
 ) -> Result<Acknowledgement> {
     let id = id.ok_or_else(conflict)?;
     crate::jobs::validate_id(id)?;
-    ledger.child("preparation-receipts").with_lock(id, || {
+    let request = ledger.child("preparation-receipts").with_lock(id, || {
         let binding = binding(ledger, id)?.ok_or_else(conflict)?;
         if binding.claim.tree.path != path || binding.prepared.is_none() {
             return Err(conflict());
         }
-        let repository = binding.request.0.clone();
-        crate::worktree::with_lifecycle(shell, ledger, &repository, |guard| {
-            validate_tree(shell, guard, &binding)?;
+        Ok(Request {
+            version: VERSION,
+            binding,
+            policy: Policy::Prohibit {
+                basis: Basis::PlacementReturned,
+            },
+            outcome: Outcome::Unknown,
+        })
+    })?;
+    dispose(ledger, shell, &request)
+}
+
+/// Versioned host transaction for correlated transport. Unsupported or conflicting input
+/// refuses before repository observation. Captured expectations are compared, never replaced.
+pub fn dispose(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    request: &Request,
+) -> Result<Acknowledgement> {
+    if request.version != VERSION {
+        return Err(conflict());
+    }
+    let id = &request.binding.request_id;
+    crate::jobs::validate_id(id)?;
+    ledger.child("preparation-receipts").with_lock(id, || {
+        let saved = read(ledger, id)?;
+        if binding(ledger, id)?.as_ref() != Some(&request.binding)
+            || saved
+                .as_ref()
+                .is_some_and(|saved| saved.request != *request)
+        {
+            return Err(conflict());
+        }
+        if let Some(saved) = &saved {
+            let held = ledger.with_lock("preparations", || {
+                let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+                Ok(records
+                    .iter()
+                    .any(|record| record.request_id.as_deref() == Some(id)))
+            })?;
+            // The matching fence already captured validated host proof. A removed claim
+            // needs no current repository or launch observation to finish acknowledgement.
+            // A released receipt never removes even an identical recreated claim.
+            if saved.progress == Progress::Released || !held {
+                return apply(ledger, request);
+            }
+        }
+        crate::worktree::with_lifecycle(shell, ledger, &request.binding.request.0, |guard| {
+            validate_tree(shell, guard, &request.binding)?;
             ledger.child("launches").with_lock(id, || {
-                if crate::jobs::record(ledger, id)?.is_some()
-                    || ledger
-                        .child("launches")
-                        .read::<serde_json::Value>(&format!("{id}.json"))?
-                        .is_some()
-                    || ledger
-                        .child("launches")
-                        .read::<serde_json::Value>(&format!("{id}.progress.json"))?
-                        .is_some()
-                {
-                    return Err(conflict());
+                if saved.is_none() {
+                    validate_policy(ledger, shell, request)?;
                 }
-                apply(
-                    ledger,
-                    &Request {
-                        version: VERSION,
-                        binding,
-                        policy: Policy::Prohibit {
-                            basis: Basis::PlacementReturned,
-                        },
-                        outcome: Outcome::Unknown,
-                    },
-                )
+                apply(ledger, request)
             })
         })
     })
+}
+
+fn validate_policy(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    request: &Request,
+) -> Result<()> {
+    let binding = &request.binding;
+    let id = &binding.request_id;
+    let receipts = ledger.child("launches");
+    match &request.policy {
+        Policy::Prohibit {
+            basis: Basis::PlacementReturned,
+        } => {
+            if request.outcome != Outcome::Unknown
+                || binding.prepared.is_none()
+                || crate::jobs::record(ledger, id)?.is_some()
+                || receipts
+                    .read::<serde_json::Value>(&format!("{id}.json"))?
+                    .is_some()
+                || receipts
+                    .read::<serde_json::Value>(&format!("{id}.progress.json"))?
+                    .is_some()
+            {
+                return Err(conflict());
+            }
+        }
+        Policy::Prohibit {
+            basis: Basis::PreparationFailed,
+        } => {
+            if request.outcome != Outcome::NotStarted || binding.prepared.is_some() {
+                return Err(conflict());
+            }
+        }
+        Policy::Prohibit {
+            basis: Basis::UnitRefused { launch },
+        } => {
+            match_launch(binding, launch)?;
+            let saved = receipts
+                .read::<serde_json::Value>(&format!("{id}.json"))?
+                .ok_or_else(conflict)?;
+            if saved
+                .get("failed")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            {
+                return Err(conflict());
+            }
+            let execution = &launch.unit.as_ref().ok_or_else(conflict)?.execution;
+            let Some(crate::unit_reply::HostEvidence::Refused(evidence)) =
+                crate::launch::unit_receipt_locked(ledger, shell, execution)?
+            else {
+                return Err(conflict());
+            };
+            if request.outcome != Outcome::NotStarted || evidence.launch != **launch {
+                return Err(conflict());
+            }
+        }
+        Policy::Transfer { launch, pane, job } => {
+            match_launch(binding, launch)?;
+            let saved = receipts
+                .read::<serde_json::Value>(&format!("{id}.json"))?
+                .ok_or_else(conflict)?;
+            if request.outcome != Outcome::PossiblyExecuted || saved["pane"].as_str() != Some(pane)
+            {
+                return Err(conflict());
+            }
+            if let crate::work::Action::Job {
+                cmd,
+                timeout_ms,
+                idle_timeout_ms,
+                ..
+            } = &launch.action
+            {
+                let owner = job.as_ref().ok_or_else(conflict)?;
+                match_job(binding, launch, pane, owner)?;
+                let current = crate::jobs::record(ledger, id)?.ok_or_else(conflict)?;
+                if !same_job_owner(owner, &current) {
+                    return Err(conflict());
+                }
+                crate::work::correlate(ledger, launch, cmd, *timeout_ms, *idle_timeout_ms, &saved)?;
+            } else {
+                let (recorded, tree) = crate::launch::checkout_for_request(ledger, launch)?;
+                if job.is_some()
+                    || !recorded
+                    || tree.as_ref().is_none_or(|tree| {
+                        binding.claim.tree.drift(tree) == crate::cleanup::Drift::Identity
+                    })
+                {
+                    return Err(conflict());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Successful dispatch has already published the matching launch owner. The outer gates
@@ -447,6 +569,19 @@ fn match_job(
     Ok(())
 }
 
+fn same_job_owner(saved: &crate::jobs::Job, current: &crate::jobs::Job) -> bool {
+    saved.id == current.id
+        && saved.cmd == current.cmd
+        && saved.cwd == current.cwd
+        && saved.host == current.host
+        && saved.owner == current.owner
+        && saved.pane == current.pane
+        && saved.timeout_ms == current.timeout_ms
+        && saved.idle_timeout_ms == current.idle_timeout_ms
+        && saved.validity == current.validity
+        && saved.startup == current.startup
+}
+
 /// C2's final process-start boundary calls this under preparation/repository protection.
 pub fn allow_startup(ledger: &Ledger, job: &crate::jobs::Job) -> Result<()> {
     let saved = binding(ledger, &job.id)?;
@@ -475,17 +610,7 @@ pub fn allow_startup(ledger: &Ledger, job: &crate::jobs::Job) -> Result<()> {
         }) => {
             match_job(&binding, &launch, &pane, job)?;
             let owner = owner.ok_or_else(conflict)?;
-            if owner.id != job.id
-                || owner.cmd != job.cmd
-                || owner.cwd != job.cwd
-                || owner.host != job.host
-                || owner.owner != job.owner
-                || owner.pane != job.pane
-                || owner.timeout_ms != job.timeout_ms
-                || owner.idle_timeout_ms != job.idle_timeout_ms
-                || owner.validity != job.validity
-                || owner.startup != job.startup
-            {
+            if !same_job_owner(&owner, job) {
                 return Err(conflict());
             }
             let receipt = ledger
@@ -682,7 +807,10 @@ mod tests {
                 .map(std::fs::read)
                 .map(std::result::Result::ok)
                 .collect();
-            assert!(apply(&ledger, &changed).is_err(), "{mismatch}");
+            assert!(
+                dispose(&ledger, &crate::shell::Fake::new(), &changed).is_err(),
+                "{mismatch}"
+            );
             let after: Vec<_> = paths
                 .iter()
                 .map(std::fs::read)
@@ -767,7 +895,10 @@ mod tests {
                 .unwrap(),
             vec![other]
         );
-        assert_eq!(apply(&ledger, &request).unwrap(), ack);
+        assert_eq!(
+            dispose(&ledger, &crate::shell::Fake::new(), &request).unwrap(),
+            ack
+        );
         assert_eq!(
             std::fs::read(ledger.dir.join("preparation-receipts/a.json")).unwrap(),
             immutable

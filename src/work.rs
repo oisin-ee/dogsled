@@ -780,23 +780,35 @@ pub fn receive_launch(
             .iter()
             .any(|t| t["request"]["id"] == launch.id)
     {
-        match jobs::request_validity(ledger, &launch.id)? {
-            Some(saved) if validity.is_some_and(|incoming| saved != incoming) => {
-                return Err(Error::Invalid(format!(
-                    "job {} request validity changed",
-                    launch.id
-                )));
-            }
-            None if ledger
-                .child("launches")
-                .read::<Value>(&format!("{}.json", launch.id))?
-                .is_none() =>
-            {
-                jobs::check_validity(ledger, validity.as_ref())?;
-                jobs::record_request_validity(ledger, &launch.id, *validity)?;
-            }
-            _ => (),
-        }
+        jobs::validate_id(&launch.id)?;
+        ledger
+            .child("preparation-receipts")
+            .with_lock(&launch.id, || {
+                // Ingress can publish validity. Validate the disposition before that first write;
+                // a final correlated receipt remains a read-only replay instead.
+                if replay_launch(ledger, launch)?.is_some() {
+                    return Ok(());
+                }
+                crate::prepare::disposition::allow_launch(ledger, launch)?;
+                match jobs::request_validity(ledger, &launch.id)? {
+                    Some(saved) if validity.is_some_and(|incoming| saved != incoming) => {
+                        return Err(Error::Invalid(format!(
+                            "job {} request validity changed",
+                            launch.id
+                        )));
+                    }
+                    None if ledger
+                        .child("launches")
+                        .read::<Value>(&format!("{}.json", launch.id))?
+                        .is_none() =>
+                    {
+                        jobs::check_validity(ledger, validity.as_ref())?;
+                        jobs::record_request_validity(ledger, &launch.id, *validity)?;
+                    }
+                    _ => (),
+                }
+                Ok(())
+            })?;
     }
     self::launch(ledger, shell, launch, now, peer_validity)
 }

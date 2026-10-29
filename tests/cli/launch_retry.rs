@@ -180,6 +180,48 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
 }
 
 #[test]
+fn unsupported_preparation_disposition_refuses_job_ingress_without_writes() {
+    let (rig, repo) = place::place_rig("disposition-ingress");
+    let prepared = disposition_prepared(&rig, &repo, "ingress", "ingress", true);
+    let path = prepared["path"].as_str().unwrap();
+    assert_eq!(
+        rig.json(&[
+            "host",
+            "prepared",
+            "--path",
+            path,
+            "--request-id",
+            "ingress"
+        ])
+        .0,
+        0
+    );
+    let disposition = "state/preparation-receipts/ingress.disposition.json";
+    let mut unsupported = rig.read(disposition);
+    unsupported["request"]["version"] = json!(2);
+    rig.put(disposition, &unsupported);
+    let original = fs::read(rig.dir.join(disposition)).unwrap();
+    let herdr = rig.log("herdr.log");
+    let mut request = job_launch_request(&rig, "ingress", &["true"]);
+    request["cwd"] = json!(path);
+    let (code, error) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(fs::read(rig.dir.join(disposition)).unwrap(), original);
+    assert!(!rig.dir.join("state/job-validity/ingress.json").exists());
+    assert!(!rig.dir.join("state/job-validity-clock.json").exists());
+    assert!(!rig.dir.join("state/jobs/ingress.json").exists());
+    assert!(!rig.dir.join("state/launches/ingress.json").exists());
+    assert_eq!(rig.log("herdr.log"), herdr);
+}
+
+#[test]
 fn preparation_failure_is_durable_before_ownership_release() {
     let (rig, repo) = place::place_rig("disposition-failure");
     fs::write(rig.dir.join("setup-fails"), "").unwrap();
