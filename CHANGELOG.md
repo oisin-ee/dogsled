@@ -4,6 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- `dogsled stop <id>` ends a pending job that never started and prevents `dogsled exec` from running it later.
 - The workspace includes pi-todo, pi-prewalk, pi-tiers, pi-guardrails, and oisinpi, with their Rust crates and shared toolchains. Runtime behavior stays unchanged.
 
 ## 0.27.0 - 2026-10-28
