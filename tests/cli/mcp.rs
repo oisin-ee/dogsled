@@ -282,6 +282,7 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("inbox", &[]),
             expect("place", &[]),
             expect("read", &["target"]),
+            expect("retire_preparation", &["reason", "request_id"]),
             expect("run", &["cmd"]),
             expect("send", &["message", "target"]),
             expect("spawn", &[]),

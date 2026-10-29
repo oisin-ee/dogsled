@@ -459,7 +459,8 @@ fn cancellation(ledger: &Ledger, request: &Request) -> Result<Option<Cancellatio
 
 /// Every caller owns admission before checking this durable prohibition.
 pub(crate) fn admission_prohibited(ledger: &Ledger, request: &Request) -> Result<bool> {
-    Ok(cancellation(ledger, request)?.is_some())
+    Ok(crate::preparation_retirement::prohibited(ledger, request)?
+        || cancellation(ledger, request)?.is_some())
 }
 
 pub(crate) fn allow_admission(ledger: &Ledger, request: &Request) -> Result<()> {
@@ -778,6 +779,9 @@ fn completed_admission(request: &Request, admission: Option<&Value>) -> Result<O
 
 /// An admission-locked witness, saved before the existing provider settlement event.
 pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> {
+    if crate::preparation_retirement::prohibited(ledger, &ticket.request)? {
+        return Ok(false);
+    }
     let saved = if let Some(saved) = cancellation(ledger, &ticket.request)? {
         saved
     } else if ticket.state == "failed" {
@@ -785,6 +789,16 @@ pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> 
     } else {
         return Ok(false);
     };
+    if saved.intent.as_ref().is_some_and(|intent| {
+        matches!(
+            intent.policy,
+            crate::prepare::disposition::Policy::Prohibit {
+                basis: crate::prepare::disposition::Basis::Retired { .. }
+            }
+        )
+    }) {
+        return Ok(false);
+    }
     let current = ledger
         .child("admissions")
         .read::<Value>(&format!("{}.json", ticket.request.id))?;
@@ -2488,6 +2502,7 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     let reports = fleet.status(now)?;
     launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {
+        crate::preparation_retirement::recover(fleet)?;
         repair_cancellations(fleet)?;
         crate::unit_request::recover(fleet.ledger, now)?;
         admit(fleet, now)?;

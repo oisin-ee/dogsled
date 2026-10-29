@@ -29,6 +29,8 @@ mod mcp;
 mod place;
 #[path = "cli/placement.rs"]
 mod placement;
+#[path = "cli/preparation_retirement.rs"]
+mod preparation_retirement;
 #[path = "cli/profiles.rs"]
 mod profiles;
 #[path = "cli/remote_diagnostics.rs"]

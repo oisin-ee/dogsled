@@ -98,6 +98,17 @@ pub enum Command {
         #[arg(long)]
         cwd: String,
     },
+    /// Retire one historical preparation claim without settling its task.
+    RetirePreparation {
+        request_id: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        reason: String,
+        /// Explicit operator authority for historical claims without owner provenance.
+        #[arg(long)]
+        cleanup: bool,
+    },
     /// List cleanup candidates without changing them.
     Doctor {
         #[arg(long)]
