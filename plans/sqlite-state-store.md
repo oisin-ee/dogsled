@@ -7,11 +7,11 @@ Status: proposed. Not approved for dispatch. Facts checked on 2026-10-29 at Dogs
 Each host keeps its items and its queue in one SQLite database in its state directory.
 A change writes only the rows that changed, in one transaction.
 The cross-host protocol, the kernel locks that guard each operation, and every other store stay as they are.
-No support for older binaries: no downgrade path, no compatibility files, and no old queue formats. The JSON files are imported once, then deleted.
+The store starts empty. Nothing reads `items.json`, `queue.json`, or `queue-format.json` again.
 
 ## Why
 
-- **Whole-file rewrites.** Each item change reads, rewrites, and fsyncs all of `items.json` (`src/items.rs:127` `change`, and 5 other write sites in the same file). Each ticket change does the same for `queue.json` (`src/work.rs:180` `save_queue`). On the local host these files are 4.0 MB and 7.9 MB (measured 2026-10-29). The cost per change has not been measured. Step 0 measures it.
+- **Whole-file rewrites.** Each item change reads, rewrites, and fsyncs all of `items.json` (`src/items.rs:127` `change`, and 5 other write sites in the same file). Each ticket change does the same for `queue.json` (`src/work.rs:180` `save_queue`). On the local host these files are 4.0 MB and 7.9 MB.
 - **Two files for one fact.** `save_queue` writes `queue-format.json`, then `queue.json`, as two separate atomic renames (`src/work.rs:180–189`). A crash between them leaves the two files out of step.
 - **The storage is already well bounded.** Only `src/items.rs` and `src/work.rs` read or write these files in product code. Every `with_lock("queue")` is in `src/work.rs`. The one `with_lock("items")` outside `src/items.rs` is `src/inbox.rs:1214`. So the change can stay inside two owners.
 
@@ -71,28 +71,13 @@ A new owner, `src/store.rs`, opens the database, applies the settings and migrat
 
 Reads still decode the whole collection, as now. Indexed point reads are a later change, made when a caller needs one.
 
-### One-time import
-
-The import keeps the open children and queued tickets that exist when a host upgrades. It is part of the schema upgrade, not a separate mode.
-
-1. The first store open that finds `user_version` below the step's version runs the upgrade in one `BEGIN IMMEDIATE` transaction: create the table, insert every record from the JSON array in file order, set `user_version`. Concurrent opens wait on the write lock, then see the new version and skip.
-2. After the commit, it deletes the JSON file (for step 2, also `queue-format.json`).
-3. An open that finds the current version and a leftover JSON file (a crash between 1 and 2) deletes the file. The database is the only authority from the commit on.
-
-The import reads only the array format that the current release writes. Any other content fails the upgrade with a clear error and leaves the file in place.
-
-### Rollout
-
-Stop the dogsled service on every host, install the new release, then start it. An older binary is not supported after the upgrade. Hosts do not read each other's state files, so the hosts can upgrade one at a time.
-
 ## Steps
 
 Each step is one writer unit. Step 2 starts after step 1 merges.
 
-0. **Measure the current cost.** Scout, no source changes. On a copy of the local state directory (`DOGSLED_STATE=<copy>`), time one item write and one ticket write with the current release. Record count, median, and p90 in this plan. No other evidence for a speed gain exists yet.
-1. **Store and items.** Add `rusqlite` with `bundled`; add `src/store.rs`; move `src/items.rs` onto it; import `items.json`. Move the direct `items.json` test writes onto a test helper in the store owner: `src/inbox.rs:1520–1524`, `src/sweep.rs:826`, `src/custody.rs:833–838`, the `loss_tests.rs` sites, and the `items.json` entry in `tests/cli/legacy_continue.rs:249–256`.
-2. **Queue.** Move the queue functions in `src/work.rs` onto the store; import `queue.json`; delete the old queue format code listed under Store API. Move the direct `queue.json` writes in `src/work_tests.rs`, `src/done/tests.rs:1068`, and `tests/cli/legacy_continue.rs`.
-3. **Docs.** README state-directory section: `state.db` and the restart rule.
+1. **Store and items.** Add `rusqlite` with `bundled`; add `src/store.rs`; move `src/items.rs` onto it. Move the direct `items.json` test writes onto a test helper in the store owner: `src/inbox.rs:1520–1524`, `src/sweep.rs:826`, `src/custody.rs:833–838`, the `loss_tests.rs` sites, and the `items.json` entry in `tests/cli/legacy_continue.rs:249–256`.
+2. **Queue.** Move the queue functions in `src/work.rs` onto the store; delete the old queue format code listed under Store API. Move the direct `queue.json` writes in `src/work_tests.rs`, `src/done/tests.rs:1068`, and `tests/cli/legacy_continue.rs`.
+3. **Docs.** README state-directory section: `state.db`.
 
 ## Tests
 
@@ -102,8 +87,6 @@ Each unit adds tests that fail before its change.
 |---|---|---|
 | Round trip | Current records | Same serde output as the JSON store. |
 | Row writes | One item change in a large collection | Only that row's `record` changes. Other rows keep their bytes. |
-| Import | Current `items.json` and `queue.json`; no file; a file that is not an array | Rows match the file in order and the file is gone; an empty table; the upgrade fails and the file stays. |
-| Crash | Stop after the import commit, before the delete (debug barrier like `launch_test_barrier`, `src/work.rs:1621`) | The next open deletes the file and imports nothing twice. |
 | Concurrency | Several `dogsled` processes enqueue and record at once | Every write lands. No `SQLITE_BUSY` reaches the caller inside the budget. |
 | Versions | `user_version` newer than this binary | Every store operation refuses. The file is unchanged. |
 
