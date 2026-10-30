@@ -742,7 +742,24 @@ struct Cancellation {
     intent: Option<crate::prepare::disposition::Request>,
     acknowledgement: Option<crate::prepare::disposition::Acknowledgement>,
     error: Option<String>,
+    /// Release needs an operator. The release stays pending, and repair skips the
+    /// record until the evidence it was held on changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    held: Option<Held>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Held {
+    reason: String,
+    evidence: String,
+}
+
+const MISSING_IDENTITY: &str =
+    "missing historical preparation identity; release requires inspection";
+
+/// Release attempts per service pass. Each one can call a host, so a pass stays
+/// bounded however many cancellations are waiting.
+pub(crate) const REPAIR_BATCH: usize = 16;
 
 fn cancellation(ledger: &Ledger, request: &Request) -> Result<Option<Cancellation>> {
     let saved = ledger
@@ -957,6 +974,7 @@ fn cancellation_intent(
         intent,
         acknowledgement: None,
         error: pending.then(|| "preparation release pending".into()),
+        held: None,
     };
     ledger
         .child("cancellations")
@@ -997,6 +1015,17 @@ fn validate_cancellation_admission(request: &Request, admission: Option<&Value>)
 }
 
 fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
+    project_attempt(ledger, saved)?;
+    ledger.with_lock("queue", || {
+        let mut tickets = queue(ledger)?;
+        if project_ticket(&mut tickets, saved)? {
+            save_queue(ledger, &tickets)?;
+        }
+        Ok(())
+    })
+}
+
+fn project_attempt(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
     if let Some(finished) = saved.finished_ms {
         let attempts = ledger.child("admissions");
         let file = format!("{}.json", saved.ticket.request.id);
@@ -1008,36 +1037,39 @@ fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
             attempts.write(&file, &attempt)?;
         }
     }
-    ledger.with_lock("queue", || {
-        let mut tickets = queue(ledger)?;
-        let Some(ticket) = tickets.iter_mut().find(|t| t.id == saved.ticket.id) else {
-            return if saved.release == "pending" {
-                Err(crate::unit_transport::conflict(
-                    "cancelled ticket disappeared; release remains held",
-                ))
-            } else {
-                Ok(())
-            };
-        };
-        if serde_json::to_value(&ticket.request)? != serde_json::to_value(&saved.ticket.request)? {
-            return Err(crate::unit_transport::conflict(
-                "cancelled ticket request changed",
-            ));
-        }
-        if saved.ticket.state != "failed" {
-            ticket.error.clone_from(&saved.error);
-        }
-        ticket.state = if saved.ticket.state == "failed" {
-            "failed"
+    Ok(())
+}
+
+/// Applies one saved cancellation to its ticket. Returns whether the ticket changed.
+fn project_ticket(tickets: &mut [Ticket], saved: &Cancellation) -> Result<bool> {
+    let Some(ticket) = tickets.iter_mut().find(|t| t.id == saved.ticket.id) else {
+        return if saved.release == "pending" {
+            Err(crate::unit_transport::conflict(
+                "cancelled ticket disappeared; release remains held",
+            ))
         } else {
-            "cancelled"
-        }
-        .into();
-        if saved.release != "pending" && ticket.finished_ms.is_none() {
-            ticket.finished_ms = saved.finished_ms;
-        }
-        save_queue(ledger, &tickets)
-    })
+            Ok(false)
+        };
+    };
+    if serde_json::to_value(&ticket.request)? != serde_json::to_value(&saved.ticket.request)? {
+        return Err(crate::unit_transport::conflict(
+            "cancelled ticket request changed",
+        ));
+    }
+    let before = serde_json::to_value(&*ticket)?;
+    if saved.ticket.state != "failed" {
+        ticket.error.clone_from(&saved.error);
+    }
+    ticket.state = if saved.ticket.state == "failed" {
+        "failed"
+    } else {
+        "cancelled"
+    }
+    .into();
+    if saved.release != "pending" && ticket.finished_ms.is_none() {
+        ticket.finished_ms = saved.finished_ms;
+    }
+    Ok(serde_json::to_value(&*ticket)? != before)
 }
 
 pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
@@ -1141,6 +1173,9 @@ pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> 
         && saved.outcome == crate::prepare::disposition::Outcome::NotStarted)
 }
 
+/// One bounded pass. Released and held records cost no host call and no queue write.
+/// At most `REPAIR_BATCH` releases are attempted, least recently attempted first, and
+/// every changed ticket is saved in one queue write at the end.
 fn repair_cancellations(fleet: &Fleet) -> Result<()> {
     let directory = fleet.ledger.child("cancellations");
     let entries = match std::fs::read_dir(&directory.dir) {
@@ -1148,49 +1183,153 @@ fn repair_cancellations(fleet: &Fleet) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
+    let mut records = Vec::new();
     for entry in entries {
-        let path = entry?.path();
+        let entry = entry?;
+        let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let result = jobs::validate_id(id).and_then(|()| {
-            fleet.ledger.child("admissions").with_lock(id, || {
-                let saved = directory
-                    .read::<Cancellation>(&format!("{id}.json"))?
-                    .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
-                let mut saved = cancellation(fleet.ledger, &saved.ticket.request)?
-                    .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
-                if let Err(error) = project_cancellation(fleet.ledger, &saved) {
-                    saved.error = Some(error.to_string());
-                    directory.write(&format!("{id}.json"), &saved)?;
-                    return Err(error);
-                }
-                if saved.release != "pending" {
-                    return Ok(());
-                }
-                let result = release_cancelled(fleet, &mut saved);
-                if let Err(error) = result {
-                    saved.error = Some(error.to_string());
-                }
-                if saved.release != "pending" && saved.completion_version == Some(1) {
-                    jobs::finish_once(
-                        fleet.ledger,
-                        &mut saved.finished_ms,
-                        Some(saved.ticket.created_ms),
-                    )?;
-                }
-                directory.write(&format!("{id}.json"), &saved)?;
-                project_cancellation(fleet.ledger, &saved)
+        // Every attempt rewrites its record, so the oldest write was attempted last.
+        let attempted = entry.metadata().and_then(|m| m.modified()).ok();
+        records.push((attempted, id.to_owned()));
+    }
+    records.sort();
+    let mut tickets = queue(fleet.ledger)?;
+    let mut projected = Vec::new();
+    let mut attempts = 0;
+    for (_, id) in records {
+        let result = jobs::validate_id(&id).and_then(|()| {
+            fleet.ledger.child("admissions").with_lock(&id, || {
+                repair_cancellation(fleet, &id, &mut tickets, attempts < REPAIR_BATCH)
             })
         });
-        if let Err(error) = result {
-            eprintln!("dogsled cancellation {id}: {error}");
+        match result {
+            Ok(Repair::Unchanged) => (),
+            Ok(Repair::Project(saved)) => projected.push(saved),
+            Ok(Repair::Attempted(saved)) => {
+                attempts += 1;
+                projected.push(saved);
+            }
+            Err(error) => eprintln!("dogsled cancellation {id}: {error}"),
         }
     }
-    Ok(())
+    if projected.is_empty() {
+        return Ok(());
+    }
+    fleet.ledger.with_lock("queue", || {
+        let mut tickets = queue(fleet.ledger)?;
+        let mut changed = false;
+        for saved in &projected {
+            match project_ticket(&mut tickets, saved) {
+                Ok(projected) => changed |= projected,
+                Err(error) => {
+                    eprintln!("dogsled cancellation {}: {error}", saved.ticket.request.id);
+                }
+            }
+        }
+        if changed {
+            save_queue(fleet.ledger, &tickets)?;
+        }
+        Ok(())
+    })
+}
+
+enum Repair {
+    Unchanged,
+    Project(Box<Cancellation>),
+    Attempted(Box<Cancellation>),
+}
+
+/// The caller owns the request's admission lock. `tickets` is this pass's queue
+/// snapshot; the caller projects the returned record under the queue lock.
+fn repair_cancellation(
+    fleet: &Fleet,
+    id: &str,
+    tickets: &mut [Ticket],
+    may_attempt: bool,
+) -> Result<Repair> {
+    let directory = fleet.ledger.child("cancellations");
+    let file = format!("{id}.json");
+    let saved = directory
+        .read::<Cancellation>(&file)?
+        .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
+    let mut saved = cancellation(fleet.ledger, &saved.ticket.request)?
+        .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
+    let changes = match project_ticket(tickets, &saved) {
+        Ok(changes) => changes,
+        Err(error) => {
+            if saved.error.as_deref() != Some(error.to_string().as_str()) {
+                saved.error = Some(error.to_string());
+                directory.write(&file, &saved)?;
+            }
+            return Err(error);
+        }
+    };
+    let unchanged = if changes {
+        Repair::Project(Box::new(saved.clone()))
+    } else {
+        Repair::Unchanged
+    };
+    if saved.release != "pending" {
+        project_attempt(fleet.ledger, &saved)?;
+        return Ok(unchanged);
+    }
+    let evidence = held_evidence(fleet.ledger, id)?;
+    if !may_attempt
+        || saved
+            .held
+            .as_ref()
+            .is_some_and(|held| held.evidence == evidence)
+    {
+        return Ok(unchanged);
+    }
+    saved.held = None;
+    if let Err(error) = release_cancelled(fleet, &mut saved) {
+        saved.error = Some(error.to_string());
+    }
+    if saved.release == "pending" && identityless(&saved) {
+        saved.held = Some(Held {
+            reason: MISSING_IDENTITY.into(),
+            evidence,
+        });
+    }
+    if saved.release != "pending" && saved.completion_version == Some(1) {
+        jobs::finish_once(
+            fleet.ledger,
+            &mut saved.finished_ms,
+            Some(saved.ticket.created_ms),
+        )?;
+    }
+    directory.write(&file, &saved)?;
+    project_attempt(fleet.ledger, &saved)?;
+    project_ticket(tickets, &saved)?;
+    Ok(Repair::Attempted(Box::new(saved)))
+}
+
+/// No saved placement or preparation query, and no release proof: nothing can look
+/// up what to release. Only a request-scoped retirement settles it.
+fn identityless(saved: &Cancellation) -> bool {
+    saved.placement.is_none() && saved.preparation.is_none() && saved.acknowledgement.is_none()
+}
+
+/// Everything a held release can be retried on. A change to any of them retries it.
+fn held_evidence(ledger: &Ledger, id: &str) -> Result<String> {
+    let file = format!("{id}.json");
+    let evidence = [
+        "admissions",
+        "preparation-expectations",
+        "preparation-retirements",
+    ]
+    .into_iter()
+    .map(|store| ledger.child(store).read::<Value>(&file))
+    .collect::<Result<Vec<_>>>()?;
+    Ok(crate::unit_transport::digest_hex(&serde_json::to_vec(
+        &evidence,
+    )?))
 }
 
 fn release_cancelled(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
@@ -1251,10 +1390,13 @@ fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<(
         prepare::lookup(fleet, query)?
     } else if let Some(query) = &saved.preparation {
         prepare::lookup_preparation(fleet, query)?
+    } else if crate::preparation_retirement::released(fleet.ledger, request)? {
+        // The host acknowledged a request-scoped retirement: ownership is released.
+        saved.release = "retired".into();
+        saved.error = None;
+        return Ok(());
     } else {
-        return Err(crate::unit_transport::conflict(
-            "missing historical preparation identity; release requires inspection",
-        ));
+        return Err(crate::unit_transport::conflict(MISSING_IDENTITY));
     };
     let binding = match observed {
         LookupState::ReceiptOnly {
@@ -3048,7 +3190,6 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {
         crate::preparation_retirement::recover(fleet)?;
-        repair_cancellations(fleet)?;
         crate::unit_request::recover(fleet.ledger, now)?;
         admit(fleet, now)?;
         for ticket in queue(fleet.ledger)? {
@@ -3095,7 +3236,10 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
             update_ticket(fleet.ledger, &ticket.id, |t| t.notified = true)?;
         }
         Ok(())
-    })
+    })?;
+    // After admission and outside its lock: each record takes its own request lock,
+    // so release work never delays admission of unrelated tickets.
+    repair_cancellations(fleet)
 }
 
 pub fn job_host<'a>(fleet: &'a Fleet<'_>, id: &str, now: u64) -> Result<&'a Host> {

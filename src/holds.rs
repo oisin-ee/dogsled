@@ -95,6 +95,18 @@ const RULES: &[Rule] = &[
         command: &["dogsled", "cancel", "{id}"],
     },
     Rule {
+        code: "cancellation_held",
+        evidence: &[],
+        reason: "cancelled request saved no preparation identity; release stays held until its preparation is retired",
+        command: &[
+            "dogsled",
+            "retire-preparation",
+            "{id}",
+            "--reason",
+            "release held cancellation preparation",
+        ],
+    },
+    Rule {
         code: "validity",
         evidence: &[],
         reason: "immutable request validity evidence retained; age alone does not release ownership",
@@ -815,6 +827,9 @@ fn releases(
     for (name, value) in records(ledger, "cancellations")? {
         let id = name.trim_end_matches(".json");
         match value {
+            Some(value) if value["release"] == "pending" && value["held"].is_object() => {
+                holds.push(owned("cancellation_held", format!("cancellation {id}"), id));
+            }
             Some(value) if value["release"] == "pending" => {
                 let mut hold = owned("cancellation", format!("cancellation {id}"), id);
                 hold.command_argv = vec![

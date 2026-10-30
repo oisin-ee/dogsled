@@ -314,6 +314,119 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
     }
 }
 
+/// Production had 211 releases that could never resolve. Each service pass retried all
+/// of them before admission, so new work waited for hours.
+#[test]
+fn unreleasable_cancellations_are_held_and_never_starve_admission() {
+    use std::os::unix::fs::MetadataExt as _;
+    const HELD: usize = 40;
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
+    let cancellations = ledger.child("cancellations");
+    let tickets: Vec<_> = (0..HELD)
+        .map(|index| identityless_cancellation(&ledger, &format!("held-{index}")))
+        .collect();
+    crate::store::put_tickets(&ledger, &tickets).unwrap();
+    work::enqueue(&ledger, place_request(&ledger, "unrelated"), false, 100).unwrap();
+    ledger.write("host.json", &snapshot(100)).unwrap();
+    let shell = Fake::new();
+    let policy = Policy {
+        memory_reserve_bytes: 0,
+        ..Policy::default()
+    };
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local()],
+    };
+    let held = || {
+        (0..HELD)
+            .filter(|index| {
+                let saved: serde_json::Value = cancellations
+                    .read(&format!("held-{index}.json"))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(saved["release"], "pending", "a held release is never faked");
+                saved["held"].is_object()
+            })
+            .count()
+    };
+    let written = || {
+        (0..HELD)
+            .map(|index| {
+                std::fs::metadata(cancellations.dir.join(format!("held-{index}.json")))
+                    .unwrap()
+                    .ino()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    work::tick(&fleet, 100).unwrap();
+    let unrelated = work::queue(&ledger)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.request.id == "unrelated")
+        .unwrap();
+    assert_eq!(
+        unrelated.state, "admitted",
+        "admission runs in the same pass"
+    );
+    assert_eq!(
+        held(),
+        work::REPAIR_BATCH,
+        "one pass attempts a bounded batch"
+    );
+
+    for _ in 0..HELD.div_ceil(work::REPAIR_BATCH) {
+        work::tick(&fleet, 100).unwrap();
+    }
+    assert_eq!(held(), HELD);
+    let settled = written();
+    work::tick(&fleet, 100).unwrap();
+    assert_eq!(written(), settled, "unchanged evidence is not retried");
+    let holds = crate::holds::local(&ledger, "local", 100, 0).unwrap();
+    let reported = holds
+        .iter()
+        .filter(|h| h.code == "cancellation_held")
+        .count();
+    assert_eq!(reported, HELD);
+
+    ledger
+        .child("admissions")
+        .write("held-0.json", &json!({"request": null}))
+        .unwrap();
+    work::tick(&fleet, 100).unwrap();
+    let after = written();
+    assert_ne!(after[0], settled[0], "changed evidence is retried");
+    assert_eq!(after[1..], settled[1..]);
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+/// A failed branch request whose cancellation saved no preparation or placement
+/// query, as the production records did. Returns its failed ticket.
+fn identityless_cancellation(ledger: &Ledger, id: &str) -> serde_json::Value {
+    let mut request = place_request(ledger, id);
+    request.branch = Some("feat/held".into());
+    work::enqueue(ledger, request.clone(), false, 100).unwrap();
+    let mut ticket = serde_json::to_value(work::queue(ledger).unwrap().pop().unwrap()).unwrap();
+    ticket["state"] = json!("failed");
+    let admission = json!({
+        "request": request, "host": Host::local(), "launch": null, "error": "refused",
+    });
+    let file = format!("{id}.json");
+    ledger.child("admissions").write(&file, &admission).unwrap();
+    let saved = json!({
+        "version": 1, "completion_version": 1, "operation_id": new_id(),
+        "ticket": ticket, "admission": admission, "preparation": null, "placement": null,
+        "outcome": "not_started", "release": "pending", "intent": null,
+        "acknowledgement": null, "error": "preparation release pending",
+    });
+    ledger.child("cancellations").write(&file, &saved).unwrap();
+    ticket
+}
+
 fn service(ledger: &Ledger) -> std::fs::File {
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let lock = std::fs::OpenOptions::new()

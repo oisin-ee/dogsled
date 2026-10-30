@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.29.0 - 2026-10-29
+
+- Each host keeps its items and its queue in one SQLite database, `state.db`, in its state directory. A change writes only the rows that changed, in one transaction. Before, each change rewrote all of `items.json` or `queue.json`, which stalled tickets once those files grew to several megabytes.
+- The new store starts empty. It does not read `items.json`, `queue.json`, or `queue-format.json`. Open items and queued tickets from 0.28.1 are not carried over. Let queued work finish before you upgrade a host.
+- Dogsled expires released terminal lifecycle records. It keeps output for 24 hours and removes terminal metadata only after 30 days. Explicit prune no longer deletes job JSON at the output deadline.
+- Ordinary and agent reference releases use version 2 certificates, with an explicit variant for no binding. Version 1 release contracts are unchanged.
+- Recorded ordinary handoffs stay readable after their closure.
+- Cancelled requests that cannot be released no longer block the queue. Before, the service retried every one of them before each admission pass, so new work could wait for hours.
+  - A cancellation with no saved preparation identity is held. Its release stays pending. `dogsled status` and the board show it as `cancellation_held`, with `dogsled retire-preparation <request-id>` as the command that releases it. The service retries it only when its admission, preparation, or retirement records change.
+  - Admission runs first in each service pass. Cancellation repair runs after it, outside the admission lock, and tries at most 16 releases per pass. It saves all changed tickets in one queue write.
+
 ## 0.28.1 - 2026-10-29
 
 - The npm packages publish again. The 0.28.0 release built its binaries and GitHub release, but its npm job stopped before it published anything, so 0.28.0 is not on npm. `actions/setup-node` started pnpm caching on its own, because `package.json` names pnpm, and proto had not installed pnpm yet.
