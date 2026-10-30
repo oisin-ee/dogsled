@@ -137,10 +137,10 @@ pub fn ReviewView(
     });
     rsx! {
         document::Stylesheet { href: REVIEW_CSS }
-        section { class: if embedded { "rv rv-embedded" } else { "rv" }, aria_label: "Plan reviews",
+        section { aria_label: "Plan reviews",
             if !embedded && review_id.is_none() {
                 h2 { "Plans · Needs you: {reviews.len()}" }
-                nav { class: "rv-needs", aria_label: "Plans needing review",
+                nav { aria_label: "Plans needing review",
                     for item in reviews {
                         Button { variant: ButtonVariant::Outline,
                             key: "{item.id}", r#type: "button",
@@ -404,7 +404,7 @@ struct ReviewControls {
 #[component]
 fn ReviewDecisionActions(controls: ReviewControls) -> Element {
     rsx! {
-        div { class: "rv-actions rv-decisions",
+        div {
             Button { variant: ButtonVariant::Outline,
                 r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some() || !(controls.can_request)(),
                 onclick: move |_| controls.decide.call(false), "Request changes"
@@ -593,30 +593,30 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
         }
     });
     rsx! {
-        article { class: "rv-review",
-            if let Some(message) = error() { p { class: "error rv-error", role: "alert", "{message}" } }
+        article {
+            if let Some(message) = error() { p { role: "alert", "{message}" } }
             if value.decision.is_some() {
                 Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Review sent to the agent." } } }
             } else {
                 if embedded {
-                    header { class: "rv-decision-bar",
-                        div { class: "rv-bar-identity",
-                            span { class: "rv-filename", "{value.path}" }
-                            span { class: "rv-muted", "Revision {n}" }
+                    header {
+                        div {
+                            span { "{value.path}" }
+                            span { "Revision {n}" }
                         }
                         ReviewDecisionActions { controls }
                     }
                 }
-                div { class: "rv-layout",
-                    div { class: "rv-document", id: "review-document",
-                        div { class: "rv-paper",
+                div {
+                    div { id: "review-document",
+                        div {
                             if !embedded {
-                                div { class: "rv-path",
-                                    span { class: "rv-filename", "{value.path}" }
+                                div {
+                                    span { "{value.path}" }
                                     span { "Revision {n}" }
                                 }
                             }
-                            div { id: "review-plan", class: "rv-prose", tabindex: "0", aria_label: "Plan text",
+                            div { id: "review-plan", tabindex: "0", aria_label: "Plan text",
                                 onmounted: move |_| highlight_notes(&review.peek().annotations),
                                 onmouseup: move |_| select(), onkeyup: move |_| select(), dangerous_inner_html: rendered,
                             }
@@ -639,9 +639,9 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                     }
                     if show_diff() {
                         if let Some(diff) = diff() {
-                            pre { class: "rv-diff", tabindex: "0", aria_label: "Revision changes",
+                            pre { tabindex: "0", aria_label: "Revision changes",
                                 for (index, line) in diff.changes.iter().enumerate() {
-                                    div { key: "{index}", class: match line.kind { ChangeKind::Added => "added", ChangeKind::Removed => "removed", ChangeKind::Same => "same" },
+                                    div { key: "{index}",
                                         {format!("{} {} {} {}", match line.kind { ChangeKind::Added => "+", ChangeKind::Removed => "−", ChangeKind::Same => " " }, line.old.map_or(String::new(), |n| n.to_string()), line.new.map_or(String::new(), |n| n.to_string()), line.text)}
                                     }
                                 }
@@ -651,19 +651,19 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                 }
                         }
                     }
-                    aside { class: "rv-annotations", aria_label: "Your notes",
-                        h3 { span { "Your notes" } span { class: "rv-count", "{value.annotations.len()}" } }
-                        p { class: "rv-draft-hint", "Drafts. The lead gets them when you request changes." }
+                    aside { aria_label: "Your notes",
+                        h3 { span { "Your notes" } span { "{value.annotations.len()}" } }
+                        p { "Drafts. The lead gets them when you request changes." }
                     for annotation in value.annotations.iter().cloned() {
-                        div { class: "rv-annotation", key: "{annotation.id}",
-                            p { class: "rv-line", "Line {annotation.start_line}" }
+                        div { key: "{annotation.id}",
+                            p { "Line {annotation.start_line}" }
                             if annotation.end_line != annotation.start_line {
-                                p { class: "rv-line", "Through line {annotation.end_line}" }
+                                p { "Through line {annotation.end_line}" }
                             }
                             blockquote { "{annotation.quote}" }
                             p { "{annotation.comment}" }
                             Images { paths: annotation.images.clone() }
-                            div { class: "rv-actions",
+                            div {
                                 Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy() || editing().is_some(), onclick: {
                                     let annotation = annotation.clone(); move |_| { editing.set(Some(annotation.clone())); }
                                 }, "Edit" }
@@ -706,8 +706,8 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                     }
                 }
                 if !embedded {
-                    footer { class: "rv-footer",
-                        Collapsible { class: "rv-approval-notes",
+                    footer {
+                        Collapsible {
                             CollapsibleTrigger { "Approval notes (optional)" }
                             CollapsibleContent {
                                 Textarea { id: "review-notes", aria_label: "Approval notes", name: "notes", rows: "2", value: "{notes}", disabled: busy(),
@@ -718,7 +718,7 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                         ReviewDecisionActions { controls }
                     }
                 }
-                if busy() { p { class: "rv-saving", role: "status", "Saving…" } }
+                if busy() { p { role: "status", "Saving…" } }
             }
         }
     }
@@ -733,7 +733,7 @@ fn image_url(path: &str) -> String {
 
 #[component]
 fn Images(paths: Vec<String>) -> Element {
-    rsx! { div { class: "rv-images",
+    rsx! { div {
         for (index, path) in paths.iter().enumerate() {
             a { key: "{path}", href: image_url(path), target: "_blank", rel: "noopener noreferrer",
                 img { src: image_url(path), alt: "Annotation image {index + 1}" }
@@ -782,9 +782,9 @@ fn AnnotationEditor(
     let quote = annotation.quote.clone();
     let save = annotation.clone();
     rsx! {
-        div { id: "review-annotation", class: "rv-annotation-body",
+        div { id: "review-annotation",
                 onmounted: move |_| mounted.set(true),
-            div { class: "rv-popover-heading",
+            div {
                 DialogTitle { "Line {annotation.start_line}" }
                 Button { variant: ButtonVariant::Outline, r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "×" }
             }
@@ -793,14 +793,14 @@ fn AnnotationEditor(
                 oninput: move |event: FormEvent| comment.set(event.value()),
             }
             Input { id: "annotation-images", aria_label: "Add images (PNG, JPEG, WebP; up to 10 MiB each)", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading() }
-            DialogDescription { class: "rv-image-hint", "Paste, drop or add images." }
+            DialogDescription { "Paste, drop or add images." }
             Images { paths: images() }
             for (index, path) in images().iter().enumerate() {
                 Button { variant: ButtonVariant::Outline, key: "{path}-{index}", r#type: "button", disabled: busy || uploading(), onclick: move |_| { images.write().remove(index); }, "Remove image {index + 1}" }
             }
             if let Some(message) = error() { Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } } }
             if uploading() { Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Uploading images…" } } } }
-            div { class: "rv-actions",
+            div {
                 Button { variant: ButtonVariant::Outline, r#type: "button", disabled: draft.is_none() || busy || uploading(), title: if draft.is_none() { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
                     let Some(mut draft) = draft else { return; };
                     let message = quote_message(&quote, annotation.start_line, annotation.end_line);

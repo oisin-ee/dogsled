@@ -8,10 +8,12 @@ use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 use crate::agent_view::{AgentView, Draft};
 use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
+use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::button::{Button, ButtonVariant};
 use crate::components::item::{
     Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle, ItemVariant,
 };
+use crate::components::progress::Progress;
 use crate::components::scroll_area::ScrollArea;
 use crate::components::sheet::{
     Sheet, SheetContentClose, SheetDescription, SheetFooter, SheetHeader, SheetTitle,
@@ -42,14 +44,6 @@ pub enum InboxKind {
 }
 
 impl InboxKind {
-    pub fn css(self) -> &'static str {
-        match self {
-            Self::Prompt => "prompt",
-            Self::Question => "question",
-            Self::Review => "plan",
-            Self::UnseenWorker => "idle",
-        }
-    }
     pub fn tag(self) -> &'static str {
         match self {
             Self::Prompt => "Prompt",
@@ -279,26 +273,26 @@ pub fn App() -> Element {
         document::Stylesheet { href: COMPONENTS_THEME_CSS }
         document::Stylesheet { href: MAIN_CSS }
         document::Link { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" }
-        div { class: "app", onkeydown: move |event| {
+        div { onkeydown: move |event| {
                 if event.key() == Key::Escape { inbox_open.set(false); }
             },
-            header { class: "top-bar",
+            header {
                 h1 { a { href: "/", aria_label: "Homepage", "Dogsled" } }
                 Button { variant: ButtonVariant::Outline, r#type: "button",
                     aria_expanded: inbox_open(), aria_controls: "portal-inbox",
                     onclick: move |_| inbox_open.toggle(),
-                    "Inbox" b { class: if waiting { "waiting" } else { "" }, "{count}" }
+                    "Inbox" Badge { variant: if waiting { BadgeVariant::Destructive } else { BadgeVariant::Secondary }, "{count}" }
                 }
-                div { class: "shell-notices", role: "status",
+                div { role: "status",
                     if stream_paused() { span { "Live updates paused, retrying" } }
                     if let Some(message) = &state.error {
-                        span { class: "inbox-error", title: "{message}", "Inbox unavailable: {message}. Reload to retry." }
+                        span { title: "{message}", "Inbox unavailable: {message}. Reload to retry." }
                     }
                     if let Some(message) = agent_error() {
                         span { title: "{message}", "Herdr is not reachable. The board still works." }
                     }
                 }
-                div { class: "hosts", aria_label: "Host load",
+                div { aria_label: "Host load",
                     if let Some(view) = &view {
                         for host in &view.hosts {
                             {
@@ -306,10 +300,9 @@ pub fn App() -> Element {
                                 let load = busy.map_or(0.0, |busy| if host.cores == 0 { 0.0 } else { (busy / f64::from(host.cores) * 100.0).clamp(0.0, 100.0) });
                                 let value = busy.map_or_else(|| format!("—/{}", host.cores), |busy| format!("{busy:.0}/{}", host.cores));
                                 rsx! {
-                                    span { key: "{host.label}", class: "host-load", title: "{host.label}: {host.service}",
-                                        "{host.label}"
-                                        i { aria_hidden: true, style: "--host-load: {load}%", b {} }
-                                        span { "{value}" }
+                                    Badge { key: "{host.label}", variant: BadgeVariant::Outline, title: "{host.label}: {host.service}",
+                                        "{host.label} {value}"
+                                        Progress { value: Some(load), max: 100.0 }
                                     }
                                 }
                             }
@@ -328,7 +321,7 @@ pub fn App() -> Element {
                             RepoGroup { key: "{index}:{group.repository:?}", group, inbox: items.clone() }
                         }
                         if groups.finished_without_repository > 0 {
-                            p { class: "finished-branches", "{groups.finished_without_repository} finished branches have no repository — see Land and clean up" }
+                            p { "{groups.finished_without_repository} finished branches have no repository — see Land and clean up" }
                         }
                     },
                     None => rsx! { Skeleton { role: "status", aria_label: "Loading agents" } },
@@ -337,7 +330,7 @@ pub fn App() -> Element {
                 }
               }
             }
-            main { class: "centre",
+            main {
                 match selected() {
                     Some(pane) => {
                         let picked = selection().filter(|item| item.pane == pane);
@@ -347,7 +340,7 @@ pub fn App() -> Element {
                         rsx! { AgentView { key: "{pane}", pane, review, question } }
                     }
                     None => rsx! {
-                        section { class: "welcome",
+                        section {
                             if !items.is_empty() {
                                 h2 { "Waiting on you" }
                                 InboxList { items: items.clone(), elapsed_ms, inbox_open }
@@ -394,7 +387,7 @@ fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool
     let mut selected = use_context::<Signal<Option<String>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     rsx! {
-        div { class: "inbox-list",
+        div {
             for item in items {
                 {
                     let kind = item.selection.kind;
@@ -426,12 +419,12 @@ fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool
                                     }
                                 }
                             },
-                            ItemMedia { span { class: "inbox-kind {kind.css()}", "{kind.label()}" } }
+                            ItemMedia { Badge { variant: BadgeVariant::Outline, "{kind.label()}" } }
                             ItemContent {
                                 ItemTitle { "{item.title}" }
                                 ItemDescription { "{title}" if let Some(repository) = repository { " · {repository}" } }
                             }
-                            ItemActions { span { class: "inbox-age", "{age}" } }
+                            ItemActions { Badge { variant: BadgeVariant::Secondary, "{age}" } }
                         }
                     }
                 }

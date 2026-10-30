@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use crate::components::{
     aspect_ratio::AspectRatio,
-    badge::Badge,
+    badge::{Badge, BadgeVariant},
     button::{Button, ButtonVariant},
     card::{Card, CardContent, CardDescription, CardHeader, CardTitle},
     checkbox::Checkbox,
@@ -30,8 +30,6 @@ use crate::components::{
     scroll_area::ScrollArea,
     textarea::Textarea,
 };
-
-const QUESTION_CSS: Asset = asset!("/assets/question_form.css");
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
 /// set `DOGSLED_API` at compile time.
@@ -87,10 +85,9 @@ pub fn QuestionForm(
     let count = list.len();
 
     rsx! {
-        document::Stylesheet { href: QUESTION_CSS }
-        section { class: "qf",
+        section {
             if requested.is_none() {
-                h2 { class: "group-title", "Needs you: {count}" }
+                h2 { "Needs you: {count}" }
             }
             if let Some(message) = error() {
                 Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } }
@@ -111,8 +108,8 @@ pub fn QuestionForm(
                             variant: ButtonVariant::Ghost,
                             aria_current: open.then_some("true"),
                             onclick: move |_| opened.set(Some(id.clone())),
-                            span { class: "qf-title", "{title}" }
-                            span { class: "qf-meta", "{item.pane} · {age}" }
+                            span { "{title}" }
+                            span { "{item.pane} · {age}" }
                         }
                     }
                 }
@@ -263,7 +260,7 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
 
     rsx! {
         form {
-            class: "qf-form",
+
             onsubmit: move |event: FormEvent| {
                 // The page answers the form itself, so the browser must not
                 // send it.
@@ -283,7 +280,7 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                     }
                 });
             },
-            div { class: "qf-intro",
+            div {
                 if let Some(heading) = heading {
                     h2 { "{heading}" }
                 }
@@ -303,12 +300,12 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
             if let Some(message) = error() {
                 Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } }
             }
-            div { class: "qf-foot",
-                span { class: "qf-muted", "Answered {answered_count(&questions, &values.read())} of {total}" }
+            div {
+                span { "Answered {answered_count(&questions, &values.read())} of {total}" }
                 Button { r#type: "submit", disabled: busy(), "Send answers" }
             }
             Card { aria_label: "Reject interview", CardContent {
-                div { class: "qf-note",
+                div {
                     Label { html_for: "rejection-reason", "Reason for rejecting (optional)" }
                     Textarea {
                         id: "rejection-reason", name: "rejection-reason", rows: "2", value: "{rejection_reason}", disabled: busy(),
@@ -550,13 +547,11 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
     let position = media
         .as_ref()
         .map_or(MediaPosition::Above, |media| media.position());
-    // A multi question with many options reads better in two columns.
-    let multi_class = if multi { "qf-multi" } else { "" };
 
     let answers = rsx! {
         match question.kind {
             QuestionKind::Single | QuestionKind::Multi => rsx! {
-                div { class: "qf-options",
+                div {
                     if multi {
                         for (index, option) in options.into_iter().enumerate() {
                             ChoiceOption {
@@ -619,16 +614,16 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
             Card {
                 CardHeader {
                     CardTitle {
-                        span { class: "qf-number", "{number}" }
+                        span { "{number}" }
                         span { "{question.question}" }
                     }
                 }
                 CardContent {
                     if let Some(context) = question.context.clone() {
-                        p { class: "qf-context", "{context}" }
+                        p { "{context}" }
                     }
                     if let Some(content) = content {
-                        pre { class: "qf-content", "{content}" }
+                        pre { "{content}" }
                     }
                     if let Some(media) = media.clone() {
                         MediaView { media }
@@ -636,26 +631,29 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
                 }
             }
         } else {
-            section { class: "qf-field {weight} {multi_class}",
+            section {
                 role: "group",
                 "aria-labelledby": "{label}",
-                h2 { class: "qf-legend", id: "{label}",
-                    span { class: "qf-number", "{number}" }
+                h2 { id: "{label}",
+                    Badge { variant: BadgeVariant::Outline, "{number}" }
+                    if weight != "normal" {
+                        Badge { variant: if weight == "critical" { BadgeVariant::Destructive } else { BadgeVariant::Secondary }, "{weight}" }
+                    }
                     span { "{question.question}" }
                 }
                 if let Some(context) = question.context.clone() {
-                    p { class: "qf-context", "{context}" }
+                    p { "{context}" }
                 }
                 if let Some(content) = content {
-                    pre { class: "qf-content", "{content}" }
+                    pre { "{content}" }
                 }
-                div { class: "qf-body {position}",
+                div {
                     if position == MediaPosition::Above {
                         if let Some(media) = media.clone() {
                             MediaView { media }
                         }
                     }
-                    div { class: "qf-answers", {answers} }
+                    div { {answers} }
                     if position == MediaPosition::Below {
                         if let Some(media) = media.clone() {
                             MediaView { media }
@@ -676,7 +674,6 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
 /// question shows.
 #[component]
 fn MediaView(media: Media) -> Element {
-    let position = media.position();
     let body = rsx! {
         match &media {
             Media::Image { src, alt, caption, .. } => rsx! {
@@ -704,9 +701,11 @@ fn MediaView(media: Media) -> Element {
                         }
                         tbody {
                             for (index, row) in table.rows.iter().enumerate() {
-                                tr { class: if table.highlights.contains(&index) { "qf-hl" } else { "" },
+                                tr {
                                     for cell in row.iter() {
-                                        td { "{cell}" }
+                                        td {
+                                            if table.highlights.contains(&index) { mark { "{cell}" } } else { "{cell}" }
+                                        }
                                     }
                                 }
                             }
@@ -756,7 +755,7 @@ fn MediaView(media: Media) -> Element {
         }
     };
     rsx! {
-        div { class: "qf-media-wrap {position}", {body} }
+        div { {body} }
     }
 }
 
@@ -801,8 +800,8 @@ fn ChoiceOption(
     let note_id = format!("{group}-{label}-note");
 
     rsx! {
-        div { class: "qf-choice",
-            div { class: if checked { "qf-option checked" } else { "qf-option" },
+        div {
+            div {
                 if multi {
                     Checkbox {
                         id: "{control}",
@@ -812,22 +811,22 @@ fn ChoiceOption(
                         on_checked_change: move |_| choose(&mut values.write(), &choice_id, &pick, true),
                     }
                     Label { html_for: "{control}",
-                        span { class: "qf-option-label", "{label}" }
+                        span { "{label}" }
                     }
                 } else {
                     RadioItem { id: "{control}", value: label.clone(), index,
-                        span { class: "qf-option-label", "{label}" }
+                        span { "{label}" }
                     }
                 }
                 if recommended {
                     Badge { "Recommended" }
                 }
                 if let Some(content) = content {
-                    p { class: "qf-option-desc", "{content}" }
+                    p { "{content}" }
                 }
             }
             if checked {
-                div { class: "qf-note",
+                div {
                     Label { html_for: "{note_id}", if other { "Your answer" } else { "More context (optional)" } }
                     Textarea {
                         id: "{note_id}",

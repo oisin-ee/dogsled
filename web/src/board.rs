@@ -5,6 +5,7 @@ use portal_types::agents::AgentView;
 use portal_types::{BoardView, GroupView, RowView, TodoView};
 
 use crate::app::{InboxItem, InboxKind, InboxSelection};
+use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::button::{Button, ButtonVariant};
 use crate::components::tooltip::{Tooltip, TooltipContent, TooltipTrigger};
 
@@ -194,7 +195,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
         .sum::<usize>();
     let branches = group.to_land;
     rsx! {
-        section { class: "repo",
+        section {
             if let Some(repository) = group.repository {
                 h2 { title: "{repository}",
                     "{repository_name(&repository)}"
@@ -202,10 +203,10 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                 }
             }
             for (index, row) in group.rows.into_iter().enumerate() {
-                div { class: "nav-lead", key: "{index}:{row.pane:?}",
+                div { key: "{index}:{row.pane:?}",
                     NavigationAgent { row: row.clone(), inbox: inbox.clone() }
                     if !row.workers.is_empty() {
-                        div { class: "nav-workers",
+                        div {
                             for (index, worker) in row.workers.into_iter().enumerate() {
                                 NavigationAgent { key: "{index}:{worker.pane:?}", row: worker, inbox: inbox.clone() }
                             }
@@ -214,7 +215,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                 }
             }
             if branches > 0 {
-                div { class: "land",
+                div {
                     span { "To land ·" }
                     span { "{branches} " if branches == 1 { "branch" } else { "branches" } }
                 }
@@ -237,30 +238,30 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
     let is_selected = row.pane.is_some() && selected() == row.pane;
     let dot = if row.worker {
         if needs_owner {
-            "status-dot blocked"
+            BadgeVariant::Destructive
         } else {
-            "status-dot"
+            BadgeVariant::Outline
         }
     } else if tag.is_some() {
-        "status-dot blocked"
+        BadgeVariant::Destructive
     } else {
         match row.state.as_str() {
-            "working" | "running" => "status-dot working",
-            "done" | "closed" => "status-dot done",
-            _ => "status-dot",
+            "working" | "running" => BadgeVariant::Primary,
+            "done" | "closed" => BadgeVariant::Secondary,
+            _ => BadgeVariant::Outline,
         }
     };
     let body = rsx! {
-        span { class: dot, aria_hidden: true }
-        span { class: "nav-title", "{row.title}" }
+        Badge { variant: dot, aria_hidden: true, "●" }
+        span { "{row.title}" }
         if row.worker {
-            span { class: if needs_owner { "worker-status prompt" } else { "worker-status" },
+            Badge { variant: if needs_owner { BadgeVariant::Destructive } else { BadgeVariant::Secondary },
                 "{worker_status}"
             }
         } else {
-            span { class: "nav-meta", "{row.role}" if !row.host.is_empty() { " · {row.host}" } }
+            span { "{row.role}" if !row.host.is_empty() { " · {row.host}" } }
             if let Some(kind) = tag {
-                span { class: "nav-tag {kind.css()}", "{kind.tag()}" }
+                Badge { variant: BadgeVariant::Outline, "{kind.tag()}" }
             }
         }
     };
