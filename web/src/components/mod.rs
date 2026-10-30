@@ -20,4 +20,5 @@ pub mod sidebar;
 pub mod skeleton;
 pub mod tabs;
 pub mod textarea;
+pub mod toolbar;
 pub mod tooltip;

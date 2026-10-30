@@ -8,6 +8,7 @@ mod board;
 mod component_tests;
 pub mod components;
 mod conversations;
+mod notice;
 mod question_form;
 mod review_view;
 

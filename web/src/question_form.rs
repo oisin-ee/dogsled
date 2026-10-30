@@ -9,8 +9,11 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 mod tests;
 
+use std::time::Duration;
+
 use dioxus::prelude::*;
 use dioxus_primitives::checkbox::CheckboxState;
+use dioxus_sdk_time::sleep;
 use gloo_net::http::Request;
 use portal_types::questions::{
     AnswerBody, Media, MediaPosition, Pending, PendingList, Question, QuestionKind, Rejection,
@@ -18,18 +21,23 @@ use portal_types::questions::{
 };
 use serde_json::Value;
 
+use crate::app::clock_ms;
 use crate::components::{
     aspect_ratio::AspectRatio,
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonVariant},
     card::{Card, CardContent, CardDescription, CardHeader, CardTitle},
     checkbox::Checkbox,
-    item::{Item, ItemContent, ItemDescription, ItemVariant},
+    item::{
+        Item, ItemActions, ItemContent, ItemDescription, ItemFooter, ItemGroup, ItemMedia,
+        ItemSize, ItemTitle, ItemVariant,
+    },
     label::Label,
     radio_group::{RadioGroup, RadioItem},
     scroll_area::ScrollArea,
     textarea::Textarea,
 };
+use crate::notice::{Alert, Status};
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
 /// set `DOGSLED_API` at compile time.
@@ -39,7 +47,7 @@ const BASE: &str = match option_env!("DOGSLED_API") {
 };
 
 /// The time between two reads of the pending questions.
-const POLL_MS: u32 = 2000;
+const POLL: Duration = Duration::from_secs(2);
 
 /// The values the owner has chosen or typed, by question id.
 type Values = Signal<BTreeMap<String, Value>>;
@@ -53,14 +61,10 @@ pub fn QuestionForm(
     let mut pending = use_signal(Vec::<Pending>::new);
     let mut opened = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
-    let mut now = use_signal(|| 0_u64);
+    let mut now = use_signal(clock_ms);
 
-    // The page reads the waiting questions every two seconds. The wait runs in
-    // the browser, so the page needs no timer of its own.
+    // The page reads the waiting questions every two seconds.
     use_future(move || async move {
-        if let Some(ms) = browser_clock().await {
-            now.set(ms);
-        }
         loop {
             match fetch_pending().await {
                 Ok(list) => {
@@ -69,10 +73,8 @@ pub fn QuestionForm(
                 }
                 Err(message) => error.set(Some(message)),
             }
-            match sleep(POLL_MS).await {
-                Some(ms) => now.set(ms),
-                None => break,
-            }
+            sleep(POLL).await;
+            now.set(clock_ms());
         }
     });
 
@@ -85,17 +87,17 @@ pub fn QuestionForm(
     let count = list.len();
 
     rsx! {
-        section {
-            if requested.is_none() {
-                h2 { "Needs you: {count}" }
-            }
-            if let Some(message) = error() {
-                Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } }
-            }
-            if list.is_empty() {
-                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "No question waits." } } }
-            }
-            // An agent screen opens one form by id; only the standalone page lists them.
+        if requested.is_none() {
+            Item { ItemContent { ItemTitle { "Needs you: {count}" } } }
+        }
+        if let Some(message) = error() {
+            Alert { "{message}" }
+        }
+        if list.is_empty() {
+            Status { "No question waits." }
+        }
+        // An agent screen opens one form by id; only the standalone page lists them.
+        ItemGroup {
             for item in list.iter().filter(|_| requested.is_none()) {
                 {
                     let id = item.id.clone();
@@ -108,45 +110,27 @@ pub fn QuestionForm(
                             variant: ButtonVariant::Ghost,
                             aria_current: open.then_some("true"),
                             onclick: move |_| opened.set(Some(id.clone())),
-                            span { "{title}" }
-                            span { "{item.pane} · {age}" }
+                            "{title}"
+                            Badge { variant: BadgeVariant::Secondary, "{item.pane} · {age}" }
                         }
                     }
                 }
             }
-            if requested.is_some() && current.is_none() && error().is_none() {
-                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "This question is loading, answered, or no longer available." } } }
-            }
-            if let Some(form) = current {
-                AskForm {
-                    key: "{form.id}",
-                    pending: form,
-                    on_done: move |id: String| {
-                        pending.write().retain(|item| item.id != id);
-                        on_done.call(id);
-                    },
-                }
+        }
+        if requested.is_some() && current.is_none() && error().is_none() {
+            Status { "This question is loading, answered, or no longer available." }
+        }
+        if let Some(form) = current {
+            AskForm {
+                key: "{form.id}",
+                pending: form,
+                on_done: move |id: String| {
+                    pending.write().retain(|item| item.id != id);
+                    on_done.call(id);
+                },
             }
         }
     }
-}
-
-/// Wait for the given milliseconds, then give the browser's clock.
-///
-/// The page has no timer of its own, so the wait runs in the browser.
-async fn sleep(delay_ms: u32) -> Option<u64> {
-    let mut script = document::eval(&format!(
-        "await new Promise(resolve => setTimeout(resolve, {delay_ms})); dioxus.send(Math.floor(Date.now()));"
-    ));
-    let value = script.recv::<f64>().await.ok()?;
-    Some(value.max(0.0) as u64)
-}
-
-/// The browser's clock, in milliseconds.
-async fn browser_clock() -> Option<u64> {
-    let mut script = document::eval("dioxus.send(Math.floor(Date.now()));");
-    let value = script.recv::<f64>().await.ok()?;
-    Some(value.max(0.0) as u64)
 }
 
 /// The questions that wait for an answer.
@@ -260,7 +244,6 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
 
     rsx! {
         form {
-
             onsubmit: move |event: FormEvent| {
                 // The page answers the form itself, so the browser must not
                 // send it.
@@ -280,58 +263,74 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                     }
                 });
             },
-            div {
-                if let Some(heading) = heading {
-                    h2 { "{heading}" }
-                }
-                if let Some(description) = description {
-                    p { "{description}" }
-                }
-            }
-            for (index, question) in pending.questions.questions.iter().cloned().enumerate() {
-                QuestionField {
-                    key: "{question.id}",
-                    form: pending.id.clone(),
-                    number: index + 1,
-                    question,
-                    values,
-                }
-            }
-            if let Some(message) = error() {
-                Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } }
-            }
-            div {
-                span { "Answered {answered_count(&questions, &values.read())} of {total}" }
-                Button { r#type: "submit", disabled: busy(), "Send answers" }
-            }
-            Card { aria_label: "Reject interview", CardContent {
-                div {
-                    Label { html_for: "rejection-reason", "Reason for rejecting (optional)" }
-                    Textarea {
-                        id: "rejection-reason", name: "rejection-reason", rows: "2", value: "{rejection_reason}", disabled: busy(),
-                        placeholder: "Tell the agent why these questions do not help, or what you need instead",
-                        oninput: move |event: FormEvent| rejection_reason.set(event.value()),
+            ItemGroup {
+                if heading.is_some() || description.is_some() {
+                    Item {
+                        ItemContent {
+                            if let Some(heading) = heading {
+                                ItemTitle { "{heading}" }
+                            }
+                            if let Some(description) = description {
+                                ItemDescription { "{description}" }
+                            }
+                        }
                     }
                 }
-                Button {
-                    variant: ButtonVariant::Outline,
-                    r#type: "button", disabled: busy(),
-                    onclick: move |_| {
-                        if busy() { return; }
-                        busy.set(true);
-                        error.set(None);
-                        let id = reject_id.clone();
-                        let reason = rejection_reason();
-                        spawn(async move {
-                            match send_rejection(&id, reason).await {
-                                Ok(Sent::Saved | Sent::Closed) => on_done.call(id),
-                                Err(message) => { error.set(Some(message)); busy.set(false); }
-                            }
-                        });
-                    },
-                    "Reject questions"
+                for (index, question) in pending.questions.questions.iter().cloned().enumerate() {
+                    QuestionField {
+                        key: "{question.id}",
+                        form: pending.id.clone(),
+                        number: index + 1,
+                        question,
+                        values,
+                    }
                 }
-            } }
+                if let Some(message) = error() {
+                    Alert { "{message}" }
+                }
+                Item {
+                    ItemContent {
+                        ItemDescription { "Answered {answered_count(&questions, &values.read())} of {total}" }
+                    }
+                    ItemActions {
+                        Button { r#type: "submit", disabled: busy(), "Send answers" }
+                    }
+                }
+                Card { aria_label: "Reject interview",
+                    CardContent {
+                        Item {
+                            ItemContent {
+                                Label { html_for: "rejection-reason", "Reason for rejecting (optional)" }
+                                Textarea {
+                                    id: "rejection-reason", name: "rejection-reason", rows: "2", value: "{rejection_reason}", disabled: busy(),
+                                    placeholder: "Tell the agent why these questions do not help, or what you need instead",
+                                    oninput: move |event: FormEvent| rejection_reason.set(event.value()),
+                                }
+                            }
+                            ItemActions {
+                                Button {
+                                    variant: ButtonVariant::Outline,
+                                    r#type: "button", disabled: busy(),
+                                    onclick: move |_| {
+                                        if busy() { return; }
+                                        busy.set(true);
+                                        error.set(None);
+                                        let id = reject_id.clone();
+                                        let reason = rejection_reason();
+                                        spawn(async move {
+                                            match send_rejection(&id, reason).await {
+                                                Ok(Sent::Saved | Sent::Closed) => on_done.call(id),
+                                                Err(message) => { error.set(Some(message)); busy.set(false); }
+                                            }
+                                        });
+                                    },
+                                    "Reject questions"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -551,8 +550,8 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
     let answers = rsx! {
         match question.kind {
             QuestionKind::Single | QuestionKind::Multi => rsx! {
-                div {
-                    if multi {
+                if multi {
+                    ItemGroup {
                         for (index, option) in options.into_iter().enumerate() {
                             ChoiceOption {
                                 key: "{option_label(&option)}",
@@ -565,25 +564,25 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
                                 values,
                             }
                         }
-                    } else {
-                        RadioGroup {
-                            name: group.clone(),
-                            value: chosen(&values.read(), &id).into_iter().next(),
-                            on_value_change: {
-                                let id = id.clone();
-                                move |label: String| choose(&mut values.write(), &id, &label, false)
-                            },
-                            for (index, option) in options.into_iter().enumerate() {
-                                ChoiceOption {
-                                    key: "{option_label(&option)}",
-                                    group: group.clone(),
-                                    id: id.clone(),
-                                    index,
-                                    recommended: recommended.contains(&option_label(&option)),
-                                    option,
-                                    multi,
-                                    values,
-                                }
+                    }
+                } else {
+                    RadioGroup {
+                        name: group.clone(),
+                        value: chosen(&values.read(), &id).into_iter().next(),
+                        on_value_change: {
+                            let id = id.clone();
+                            move |label: String| choose(&mut values.write(), &id, &label, false)
+                        },
+                        for (index, option) in options.into_iter().enumerate() {
+                            ChoiceOption {
+                                key: "{option_label(&option)}",
+                                group: group.clone(),
+                                id: id.clone(),
+                                index,
+                                recommended: recommended.contains(&option_label(&option)),
+                                option,
+                                multi,
+                                values,
                             }
                         }
                     }
@@ -600,70 +599,49 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
                 }
             },
             QuestionKind::Image => rsx! {
-                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Image answers: not supported in the portal yet" } } }
+                Status { "Image answers: not supported in the portal yet" }
             },
             QuestionKind::Info => rsx! {},
             QuestionKind::Other(kind) => rsx! {
-                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Question type {kind}: not supported in the portal yet" } } }
+                Status { "Question type {kind}: not supported in the portal yet" }
             },
         }
     };
 
     rsx! {
-        if panel {
-            Card {
-                CardHeader {
-                    CardTitle {
-                        span { "{number}" }
-                        span { "{question.question}" }
-                    }
-                }
-                CardContent {
-                    if let Some(context) = question.context.clone() {
-                        p { "{context}" }
-                    }
-                    if let Some(content) = content {
-                        pre { "{content}" }
-                    }
-                    if let Some(media) = media.clone() {
-                        MediaView { media }
-                    }
-                }
-            }
-        } else {
-            section {
-                role: "group",
-                "aria-labelledby": "{label}",
-                h2 { id: "{label}",
+        Card {
+            role: if panel { None } else { Some("group") },
+            aria_labelledby: if panel { None } else { Some(label.clone()) },
+            CardHeader {
+                CardTitle { id: "{label}",
                     Badge { variant: BadgeVariant::Outline, "{number}" }
-                    if weight != "normal" {
+                    if !panel && weight != "normal" {
                         Badge { variant: if weight == "critical" { BadgeVariant::Destructive } else { BadgeVariant::Secondary }, "{weight}" }
                     }
-                    span { "{question.question}" }
+                    "{question.question}"
                 }
                 if let Some(context) = question.context.clone() {
-                    p { "{context}" }
+                    CardDescription { "{context}" }
                 }
+            }
+            CardContent {
                 if let Some(content) = content {
                     pre { "{content}" }
                 }
-                div {
+                if !panel {
                     if position == MediaPosition::Above {
                         if let Some(media) = media.clone() {
                             MediaView { media }
                         }
                     }
-                    div { {answers} }
-                    if position == MediaPosition::Below {
+                    {answers}
+                    if position != MediaPosition::Above {
                         if let Some(media) = media.clone() {
                             MediaView { media }
                         }
                     }
-                    if position == MediaPosition::Side {
-                        if let Some(media) = media.clone() {
-                            MediaView { media }
-                        }
-                    }
+                } else if let Some(media) = media.clone() {
+                    MediaView { media }
                 }
             }
         }
@@ -674,88 +652,87 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
 /// question shows.
 #[component]
 fn MediaView(media: Media) -> Element {
-    let body = rsx! {
+    rsx! {
         match &media {
             Media::Image { src, alt, caption, .. } => rsx! {
-                Card {
-                    CardContent {
-                    AspectRatio { ratio: 16.0 / 9.0, img { src: "{src}", alt: alt.clone().unwrap_or_default() } }
-                    if let Some(caption) = caption {
-                        CardDescription { "{caption}" }
+                Item { variant: ItemVariant::Outline,
+                    ItemContent {
+                        AspectRatio { ratio: 16.0 / 9.0, img { src: "{src}", alt: alt.clone().unwrap_or_default() } }
+                        if let Some(caption) = caption {
+                            ItemDescription { "{caption}" }
+                        }
                     }
-                }
                 }
             },
             Media::Table { table, caption, .. } => rsx! {
-                Card {
-                    CardContent {
-                    table {
-                        if !table.headers.is_empty() {
-                            thead {
-                                tr {
-                                    for header in table.headers.iter() {
-                                        th { scope: "col", "{header}" }
+                Item { variant: ItemVariant::Outline,
+                    ItemContent {
+                        ScrollArea {
+                            table {
+                                if !table.headers.is_empty() {
+                                    thead {
+                                        tr {
+                                            for header in table.headers.iter() {
+                                                th { scope: "col", "{header}" }
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                        tbody {
-                            for (index, row) in table.rows.iter().enumerate() {
-                                tr {
-                                    for cell in row.iter() {
-                                        td {
-                                            if table.highlights.contains(&index) { mark { "{cell}" } } else { "{cell}" }
+                                tbody {
+                                    for (index, row) in table.rows.iter().enumerate() {
+                                        tr {
+                                            for cell in row.iter() {
+                                                td {
+                                                    if table.highlights.contains(&index) { mark { "{cell}" } } else { "{cell}" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        if let Some(caption) = caption {
+                            ItemDescription { "{caption}" }
+                        }
                     }
-                    if let Some(caption) = caption {
-                        CardDescription { "{caption}" }
-                    }
-                }
                 }
             },
             Media::Chart { chart, caption, .. } => rsx! {
-                Card {
-                    CardContent {
-                    CardTitle { "Chart" }
-                    ScrollArea { pre { "{chart_source(chart)}" } }
-                    if let Some(caption) = caption {
-                        CardDescription { "{caption}" }
+                Item { variant: ItemVariant::Outline,
+                    ItemContent {
+                        ItemTitle { "Chart" }
+                        ScrollArea { pre { "{chart_source(chart)}" } }
+                        if let Some(caption) = caption {
+                            ItemDescription { "{caption}" }
+                        }
                     }
-                }
                 }
             },
             Media::Mermaid { source, caption, .. } => rsx! {
-                Card {
-                    CardContent {
-                    CardTitle { "Diagram" }
-                    ScrollArea { pre { "{source}" } }
-                    if let Some(caption) = caption {
-                        CardDescription { "{caption}" }
+                Item { variant: ItemVariant::Outline,
+                    ItemContent {
+                        ItemTitle { "Diagram" }
+                        ScrollArea { pre { "{source}" } }
+                        if let Some(caption) = caption {
+                            ItemDescription { "{caption}" }
+                        }
                     }
-                }
                 }
             },
             Media::Html { html, caption, .. } => rsx! {
-                Card {
-                    CardContent {
-                    AspectRatio { ratio: 16.0 / 9.0, iframe { srcdoc: "{html}", "sandbox": "", title: "HTML content" } }
-                    if let Some(caption) = caption {
-                        CardDescription { "{caption}" }
+                Item { variant: ItemVariant::Outline,
+                    ItemContent {
+                        AspectRatio { ratio: 16.0 / 9.0, iframe { srcdoc: "{html}", "sandbox": "", title: "HTML content" } }
+                        if let Some(caption) = caption {
+                            ItemDescription { "{caption}" }
+                        }
                     }
-                }
                 }
             },
             Media::Unknown(_) => rsx! {
-                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Media type {media.kind_name()}: not supported in the portal yet" } } }
+                Status { "Media type {media.kind_name()}: not supported in the portal yet" }
             },
         }
-    };
-    rsx! {
-        div { {body} }
     }
 }
 
@@ -800,9 +777,9 @@ fn ChoiceOption(
     let note_id = format!("{group}-{label}-note");
 
     rsx! {
-        div {
-            div {
-                if multi {
+        Item { size: ItemSize::Sm,
+            if multi {
+                ItemMedia {
                     Checkbox {
                         id: "{control}",
                         name: "{group}",
@@ -810,23 +787,25 @@ fn ChoiceOption(
                         checked: Some(if checked { CheckboxState::Checked } else { CheckboxState::Unchecked }),
                         on_checked_change: move |_| choose(&mut values.write(), &choice_id, &pick, true),
                     }
-                    Label { html_for: "{control}",
-                        span { "{label}" }
-                    }
-                } else {
-                    RadioItem { id: "{control}", value: label.clone(), index,
-                        span { "{label}" }
-                    }
                 }
-                if recommended {
-                    Badge { "Recommended" }
+            }
+            ItemContent {
+                ItemTitle {
+                    if multi {
+                        Label { html_for: "{control}", "{label}" }
+                    } else {
+                        RadioItem { id: "{control}", value: label.clone(), index, "{label}" }
+                    }
+                    if recommended {
+                        Badge { "Recommended" }
+                    }
                 }
                 if let Some(content) = content {
-                    p { "{content}" }
+                    ItemDescription { "{content}" }
                 }
             }
             if checked {
-                div {
+                ItemFooter {
                     Label { html_for: "{note_id}", if other { "Your answer" } else { "More context (optional)" } }
                     Textarea {
                         id: "{note_id}",

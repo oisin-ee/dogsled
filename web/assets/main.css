@@ -1,35 +1,28 @@
-/* Catppuccin Mocha, shared with src/sidebar/palette.rs and the approved v3 shell. */
-:root {
-  color-scheme: dark;
-  --base: #1e1e2e;
-  --mantle: #181825;
-  --crust: #11111b;
-  --surface0: #313244;
-  --surface1: #45475a;
-  --overlay0: #6c7086;
-  --overlay1: #7f849c;
-  --subtext0: #a6adc8;
-  --text: #cdd6f4;
-  --accent: #89b4fa;
-  --blue: var(--accent);
-  --green: #a6e3a1;
-  --yellow: #f9e2af;
-  --red: #f38ba8;
-  --teal: #94e2d5;
-  --mauve: #cba6f7;
-  --rule: #ffffff10;
-  --font-sans: Inter, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
-  --s0: var(--surface0);
-  --s1: var(--surface1);
-  --o1: var(--overlay1);
-  --sub: var(--subtext0);
+/* The page frame. Colors come from the library theme in dx-components-theme.css. */
+* {
+  box-sizing: border-box;
 }
-* { box-sizing: border-box; }
-html, body, #main { height: 100%; margin: 0; }
-html { background: var(--base); color: var(--text); scrollbar-color: var(--surface1) var(--base); }
-body { overflow: hidden; font: 14px/20px var(--font-sans); -webkit-font-smoothing: antialiased; }
-button, input, textarea { font: inherit; }
-button, textarea, input { caret-color: var(--accent); }
-button { color: inherit; }
-a { color: inherit; }
+html,
+body,
+#main {
+  height: 100%;
+  margin: 0;
+}
+html {
+  background: var(--primary-color);
+  color: var(--secondary-color-4);
+  color-scheme: light dark;
+}
+body {
+  overflow: hidden;
+  font: 14px/20px Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button,
+input,
+textarea {
+  font: inherit;
+}
+a {
+  color: inherit;
+}

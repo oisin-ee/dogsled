@@ -4761,6 +4761,7 @@ dependencies = [
  "dioxus",
  "dioxus-icons",
  "dioxus-primitives",
+ "dioxus-sdk-time",
  "dioxus-ssr",
  "futures-util",
  "gloo-net",

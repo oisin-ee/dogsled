@@ -6,8 +6,11 @@ use portal_types::{BoardView, GroupView, RowView, TodoView};
 
 use crate::app::{InboxItem, InboxKind, InboxSelection};
 use crate::components::badge::{Badge, BadgeVariant};
-use crate::components::button::{Button, ButtonVariant};
-use crate::components::tooltip::{Tooltip, TooltipContent, TooltipTrigger};
+use crate::components::item::{Item, ItemContent, ItemSize, ItemTitle, ItemVariant};
+use crate::components::sidebar::{
+    SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton,
+    SidebarMenuButtonSize, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubItem,
+};
 
 #[derive(Clone, Default, PartialEq)]
 pub struct Navigation {
@@ -195,29 +198,38 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
         .sum::<usize>();
     let branches = group.to_land;
     rsx! {
-        section {
+        SidebarGroup {
             if let Some(repository) = group.repository {
-                h2 { title: "{repository}",
-                    "{repository_name(&repository)}"
-                    span { "{count} " if count == 1 { "agent" } else { "agents" } }
+                SidebarGroupLabel { title: "{repository}",
+                    "{repository_name(&repository)} · {count} "
+                    if count == 1 { "agent" } else { "agents" }
                 }
             }
-            for (index, row) in group.rows.into_iter().enumerate() {
-                div { key: "{index}:{row.pane:?}",
-                    NavigationAgent { row: row.clone(), inbox: inbox.clone() }
-                    if !row.workers.is_empty() {
-                        div {
-                            for (index, worker) in row.workers.into_iter().enumerate() {
-                                NavigationAgent { key: "{index}:{worker.pane:?}", row: worker, inbox: inbox.clone() }
+            SidebarGroupContent {
+                SidebarMenu {
+                    for (index, row) in group.rows.into_iter().enumerate() {
+                        SidebarMenuItem { key: "{index}:{row.pane:?}",
+                            NavigationAgent { row: row.clone(), inbox: inbox.clone() }
+                            if !row.workers.is_empty() {
+                                SidebarMenuSub {
+                                    for (index, worker) in row.workers.into_iter().enumerate() {
+                                        SidebarMenuSubItem { key: "{index}:{worker.pane:?}",
+                                            NavigationAgent { row: worker, inbox: inbox.clone() }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-            if branches > 0 {
-                div {
-                    span { "To land ·" }
-                    span { "{branches} " if branches == 1 { "branch" } else { "branches" } }
+                    if branches > 0 {
+                        SidebarMenuItem {
+                            Item { variant: ItemVariant::Muted, size: ItemSize::Sm,
+                                ItemContent {
+                                    ItemTitle { "To land · {branches} " if branches == 1 { "branch" } else { "branches" } }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -251,49 +263,51 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
             _ => BadgeVariant::Outline,
         }
     };
+    let size = if row.worker {
+        SidebarMenuButtonSize::Sm
+    } else {
+        SidebarMenuButtonSize::Default
+    };
+    // The library ellipsizes the last `span` of a menu button, so the title goes last.
     let body = rsx! {
         Badge { variant: dot, aria_hidden: true, "●" }
-        span { "{row.title}" }
         if row.worker {
             Badge { variant: if needs_owner { BadgeVariant::Destructive } else { BadgeVariant::Secondary },
                 "{worker_status}"
             }
         } else {
-            span { "{row.role}" if !row.host.is_empty() { " · {row.host}" } }
+            Badge { variant: BadgeVariant::Secondary, "{row.role}" if !row.host.is_empty() { " · {row.host}" } }
             if let Some(kind) = tag {
                 Badge { variant: BadgeVariant::Outline, "{kind.tag()}" }
             }
         }
+        span { "{row.title}" }
     };
-    match row.pane {
-        Some(pane) => rsx! {
-            Tooltip {
-                TooltipTrigger {
-                    r#as: move |attributes: Vec<Attribute>| {
-                        let pane = pane.clone();
-                        rsx! {
-                            Button {
-                                variant: ButtonVariant::Ghost,
-                                attributes,
-                                aria_pressed: is_selected,
-                                onclick: move |_| {
-                                    selected.set(Some(pane.clone()));
-                                    selection.set(None);
-                                },
-                                {body.clone()}
-                            }
+    rsx! {
+        SidebarMenuButton {
+            is_active: is_selected,
+            size,
+            title: "{row.title}",
+            r#as: move |attributes: Vec<Attribute>| {
+                let body = body.clone();
+                match row.pane.clone() {
+                    Some(pane) => rsx! {
+                        button {
+                            r#type: "button",
+                            aria_current: is_selected.then_some("true"),
+                            onclick: move |_| {
+                                selected.set(Some(pane.clone()));
+                                selection.set(None);
+                            },
+                            ..attributes,
+                            {body}
                         }
                     },
+                    // A queued task or a job has no pane to open, so its row only shows state.
+                    None => rsx! { div { ..attributes, {body} } },
                 }
-                TooltipContent { "{row.title}" }
-            }
-        },
-        None => rsx! {
-            Tooltip {
-                TooltipTrigger { {body} }
-                TooltipContent { "{row.title}" }
-            }
-        },
+            },
+        }
     }
 }
 

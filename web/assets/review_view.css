@@ -1,5 +1,0 @@
-/* Annotation highlights: the browser highlight API and generated markup. */
-#review-plan::highlight(review-notes) { background: #f9e2af33; color: var(--text); text-decoration: underline 2px var(--yellow); }
-#review-plan::highlight(review-selection) { background: #89b4fa40; color: var(--text); text-decoration: underline 2px var(--blue, var(--accent)); }
-#review-plan .rv-annotated { background: #f9e2af33; text-decoration: underline 2px var(--yellow); text-underline-offset: 3px; }
-.rv-exact-highlights .rv-annotated { background: transparent; text-decoration: none; }
