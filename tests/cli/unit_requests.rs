@@ -1005,6 +1005,42 @@ fn serve(rig: &Rig) {
 }
 
 #[test]
+fn unprovable_committed_unit_holds_only_itself_and_peers_are_admitted() {
+    let rig = rig("unit-recover-unprovable", true);
+    let execution = prepare(&rig);
+    crash(&rig, &commit_input(&execution, 0), "committed");
+    // An older writer saved this admission without request validity.
+    let id = execution["requestId"].as_str().unwrap();
+    let file = format!("state/admissions/{id}.json");
+    let mut attempt = rig.read(&file);
+    attempt["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("validity");
+    rig.put(&file, &attempt);
+    fs::remove_file(rig.dir.join(format!("state/job-validity/{id}.json"))).ok();
+    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
+    rig.put("state/job-validity/peer-place.json", &rig.job_validity());
+    rig.put_tickets(&json!([{"id":"peer-ticket","request":{"id":"peer-place",
+        "validity":rig.job_validity(),"action":{"type":"place"},"host":"local",
+        "cwd":rig.dir.join("home"),"owner":"w1:p1"},"created_ms":now(),"state":"pending",
+        "waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null}]));
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    rig.snapshot("state/host.json", now(), 0.0, 2);
+    let out = rig.run(&["serve", "--once"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("dogsled unit recovery {id}")),
+        "{out:?}"
+    );
+    let tickets = rig.tickets();
+    assert_eq!(tickets.as_array().unwrap().len(), 1, "{tickets}");
+    assert_eq!(tickets[0]["id"], "peer-ticket");
+    assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
+    assert!(admission(&rig, &execution)["launch"].is_null());
+}
+
+#[test]
 fn service_recovers_commit_before_enqueue_once_without_abandoning_prepared() {
     let rig = rig("unit-commit-crash", true);
     let execution = prepare(&rig);

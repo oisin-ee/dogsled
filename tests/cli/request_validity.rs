@@ -289,6 +289,73 @@ fn rv_validity_boundaries_and_future_skew_are_exact() {
 }
 
 #[test]
+fn rv_job_reservation_publishes_authority_for_its_checkout() {
+    let rig = Rig::short("rv-job-checkout");
+    let created = clock(&rig);
+    set_clock(&rig, created);
+    rig.snapshot("state/host.json", created, 0.0, 8);
+    let created_arg = created.to_string();
+    // A remote job first reserves with the job protocol stamp.
+    let (code, reserved) = rig.json(&[
+        "host",
+        "reserve",
+        "--id",
+        "rv-job",
+        "--job-validity",
+        "2",
+        "--job-created-ms",
+        &created_arg,
+    ]);
+    assert_eq!(code, 0, "{reserved}");
+    assert_eq!(reserved["reserved"], true, "{reserved}");
+    assert_eq!(
+        rig.read("state/job-validity/rv-job.json")["created_ms"],
+        created
+    );
+    // Its checkout, for the same request, matches that authority.
+    let (code, checkout) = rig.json(&[
+        "host",
+        "checkout",
+        "--request-validity",
+        "1",
+        "--request-id",
+        "rv-job",
+        "--request-created-ms",
+        &created_arg,
+        "--path",
+        "missing",
+        "--origin",
+        "/absent",
+        "--host-label",
+        "local",
+    ]);
+    assert!(
+        !checkout.to_string().contains("VALIDITY") && !checkout.to_string().contains("validity"),
+        "{code}: {checkout}"
+    );
+    // A different creation time for the same id is still refused.
+    let other = (created - 1).to_string();
+    let (code, refused) = rig.json(&[
+        "host",
+        "checkout",
+        "--request-validity",
+        "1",
+        "--request-id",
+        "rv-job",
+        "--request-created-ms",
+        &other,
+        "--path",
+        "missing",
+        "--origin",
+        "/absent",
+        "--host-label",
+        "local",
+    ]);
+    assert_eq!(code, 2, "{refused}");
+    assert!(refused.to_string().contains("VALIDITY"), "{refused}");
+}
+
+#[test]
 fn rv_requestless_preparation_and_checkout_refuse() {
     let rig = Rig::short("rv-requestless");
     for args in [
@@ -1318,16 +1385,21 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
         let now = clock(&rig);
         set_clock(&rig, now);
         rig.snapshot("state/host.json", now, 0.0, 8);
+        // The request expired before it asked for capacity.
+        let expired = now - WINDOW_MS - 1;
         if held {
-            // A live hold for the same id.
+            // A live hold for the same id, taken after its request authority was published.
+            fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
+            rig.put(
+                "state/job-validity/job-1.json",
+                &json!({"version":1,"created_ms":expired}),
+            );
             rig.put(
                 "state/placements.json",
                 &json!([{"id":"job-1","created_ms":now}]),
             );
         }
         let before = fs::read(rig.dir.join("state/placements.json")).unwrap_or_default();
-        // The request expired before it asked for capacity.
-        let expired = now - WINDOW_MS - 1;
         let (code, error) = rig.json(&[
             "host",
             "reserve",

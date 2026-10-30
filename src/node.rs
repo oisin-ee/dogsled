@@ -474,13 +474,12 @@ impl Node<'_> {
         id: &str,
         now: u64,
         job_validity: Option<crate::jobs::Validity>,
-        nonjob: bool,
     ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
         self.ledger.with_lock("host", || {
-            if nonjob {
-                crate::jobs::receive_request_validity(self.ledger, id, job_validity)?;
-            }
+            // Publish request authority before the hold, for jobs too: a later checkout or
+            // launch for this id matches it, and never sees a hold without authority.
+            crate::jobs::receive_request_validity(self.ledger, id, job_validity)?;
             if self
                 .ledger
                 .child("placement-grants")
@@ -670,18 +669,11 @@ mod tests {
                 },
             )
             .unwrap();
+        // One request has one creation time; every replay carries the same stamp.
+        let validity = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         std::thread::scope(|scope| {
             let calls: Vec<_> = (0..4)
-                .map(|_| {
-                    scope.spawn(|| {
-                        node.reserve(
-                            "same",
-                            100,
-                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                            false,
-                        )
-                    })
-                })
+                .map(|_| scope.spawn(|| node.reserve("same", 100, validity)))
                 .collect();
             for call in calls {
                 assert!(call.join().unwrap().unwrap().reserved);
@@ -693,37 +685,24 @@ mod tests {
         assert_eq!(holds[0].created_ms, 100);
         // An existing hold is not new admission and does not need a fresh probe.
         assert!(
-            node.reserve(
-                "same",
-                100 + STALE_MS + 1,
-                Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                false
-            )
-            .unwrap()
-            .reserved
+            node.reserve("same", 100 + STALE_MS + 1, validity)
+                .unwrap()
+                .reserved
         );
         let holds: Vec<Reservation> = ledger.read("placements.json").unwrap().unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].created_ms, 100);
+        // Another request carries its own stamp.
+        let another = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         assert!(
             !node
-                .reserve(
-                    "another",
-                    100 + STALE_MS + 1,
-                    Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                    false
-                )
+                .reserve("another", 100 + STALE_MS + 1, another)
                 .unwrap()
                 .reserved
         );
         assert!(
             !node
-                .reserve(
-                    "same",
-                    100 + policy.reservation_ttl_ms,
-                    Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                    false
-                )
+                .reserve("same", 100 + policy.reservation_ttl_ms, validity)
                 .unwrap()
                 .reserved
         );

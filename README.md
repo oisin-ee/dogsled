@@ -19,7 +19,7 @@ mise use github:oisin-ee/dogsled@v0.28.0
 Pi (extension, tools, the `todo` tool, and skill), from npm:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.29.0
+pi install npm:@oisin-ee/pi-dogsled@0.29.1
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.

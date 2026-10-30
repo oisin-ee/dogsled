@@ -600,7 +600,7 @@ impl<'a> Fleet<'a> {
             return if let Some(envelope) = placement {
                 self.node().reserve_placement(envelope, now)
             } else {
-                self.node().reserve(id, now, validity, nonjob)
+                self.node().reserve(id, now, validity)
             };
         }
         if nonjob {

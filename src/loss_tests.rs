@@ -700,13 +700,13 @@ fn survey_continues_past_missing_repositories_and_scopes_agree() {
     ledger
         .write(
             "preparations.json",
-            &vec![crate::cleanup::Tree {
-                repo: repo.repo.display().to_string(),
-                path: repo.tree.display().to_string(),
-                branch: "feature".into(),
-                head: String::new(),
-                identity: None,
-            }],
+            &serde_json::json!([{
+                "repo": repo.repo.display().to_string(),
+                "path": repo.tree.display().to_string(),
+                "branch": "feature",
+                "head": "",
+                "request_id": "held-request",
+            }]),
         )
         .unwrap();
     let held = survey(&node, Scope::Prune, 100).unwrap();

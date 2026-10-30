@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.29.1 - 2026-10-30
+
+- Admission works again when one committed unit cannot be queued. Before, a unit request saved without request validity, for example by an older `dogsled mcp`, made the service's recovery step fail on every tick, so no request was admitted on that host. Now the service logs that request and holds it alone.
+- Remote jobs that need a checkout start again. Before, a job reservation took its hold without publishing the request's validity, so the following `host checkout` refused it as unprovable on every remote host.
+- A session's board, sidebar, and banner show only the resource holds that the session owns. Before, every hold without an owner pane appeared in every session as a blocked card. `dogsled board --all` and `dogsled status` still show every hold.
+- Every preparation claim must name its request. Dogsled no longer reads requestless claims or reports the `legacy_preparation` hold; status reports such a record as `unreadable`.
+
 ## 0.29.0 - 2026-10-29
 
 - Each host keeps its items and its queue in one SQLite database, `state.db`, in its state directory. A change writes only the rows that changed, in one transaction. Before, each change rewrote all of `items.json` or `queue.json`, which stalled tickets once those files grew to several megabytes.
