@@ -9,6 +9,13 @@ use portal_types::{BoardView, TodoStatusView, TodoView};
 use serde::de::DeserializeOwned;
 
 use crate::api;
+use crate::components::{
+    button::{Button, ButtonVariant},
+    input::Input,
+    skeleton::Skeleton,
+    tabs::{TabContent, TabList, TabTrigger, Tabs},
+    textarea::Textarea,
+};
 use crate::conversations::{Conversations, use_conversation};
 use crate::question_form::QuestionForm;
 use crate::review_view::ReviewView;
@@ -358,9 +365,38 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     let conversation_identity = identity.clone();
     let todos_identity = identity.clone();
     let branch_identity = identity.clone();
+    // The Pending tab is first when there is one, so the tab indexes stay
+    // contiguous for the arrow keys.
+    let first_tab = usize::from(pending.is_some());
+    let tab_value = match tab {
+        Tab::Pending => "pending",
+        Tab::Conversation => "conversation",
+        Tab::Todos => "todos",
+        Tab::Branch => "branch",
+    };
+    let tab_index = match tab {
+        Tab::Pending => 0,
+        Tab::Conversation => first_tab,
+        Tab::Todos => first_tab + 1,
+        Tab::Branch => first_tab + 2,
+    };
+    let choose_tab = {
+        let pending_identity = pending_identity.clone();
+        move |value: String| {
+            let chosen = match value.as_str() {
+                "pending" => (pending_identity.clone(), Tab::Pending),
+                "todos" => (todos_identity.clone(), Tab::Todos),
+                "branch" => (branch_identity.clone(), Tab::Branch),
+                _ => (conversation_identity.clone(), Tab::Conversation),
+            };
+            choice.set(Some(chosen));
+        }
+    };
 
     rsx! {
-        section { class: "av", aria_label: "Selected agent",
+        Tabs {
+            aria_label: "Selected agent", horizontal: true,
+            value: Some(tab_value.to_owned()), on_value_change: choose_tab,
             header { class: "av-header",
                 div { class: "av-identity",
                     h2 { "{title}" }
@@ -374,10 +410,11 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 }
                 div { class: "av-actions",
                     if !plan_open {
-                        button { r#type: "button", disabled,
+                        Button { variant: ButtonVariant::Outline, r#type: "button", disabled,
                             onclick: move |_| interrupt("ctrl+c".to_owned()), "Interrupt" }
                     }
-                    button {
+                    Button {
+                        variant: ButtonVariant::Outline,
                         r#type: "button", disabled,
                         onclick: move |_| {
                             let pane = focus_pane.clone();
@@ -391,24 +428,16 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                         "Open in Herdr"
                     }
                 }
-                nav { class: "av-tabs", aria_label: "Agent tabs",
+                TabList { aria_label: "Agent tabs",
                     if let Some(pending) = &pending {
-                        button { r#type: "button", class: if tab == Tab::Pending { "active" } else { "" },
-                            aria_current: if tab == Tab::Pending { "page" } else { "false" },
-                            onclick: move |_| choice.set(Some((pending_identity.clone(), Tab::Pending))),
+                        TabTrigger { value: "pending", index: 0usize,
                             span { class: "av-pending-dot", aria_hidden: "true" }
                             "{pending.label()}"
                         }
                     }
-                    button { r#type: "button", class: if tab == Tab::Conversation { "active" } else { "" },
-                        aria_current: if tab == Tab::Conversation { "page" } else { "false" },
-                        onclick: move |_| choice.set(Some((conversation_identity.clone(), Tab::Conversation))), "Conversation" }
-                    button { r#type: "button", class: if tab == Tab::Todos { "active" } else { "" },
-                        aria_current: if tab == Tab::Todos { "page" } else { "false" },
-                        onclick: move |_| choice.set(Some((todos_identity.clone(), Tab::Todos))), "Todos {todo_count}" }
-                    button { r#type: "button", class: if tab == Tab::Branch { "active" } else { "" },
-                        aria_current: if tab == Tab::Branch { "page" } else { "false" },
-                        onclick: move |_| choice.set(Some((branch_identity.clone(), Tab::Branch))), "Branch" }
+                    TabTrigger { value: "conversation", index: first_tab, "Conversation" }
+                    TabTrigger { value: "todos", index: first_tab + 1, "Todos {todo_count}" }
+                    TabTrigger { value: "branch", index: first_tab + 2, "Branch" }
                 }
             }
             if !metadata_loading() && !reachable() {
@@ -423,6 +452,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 p { class: "av-notice", role: "status", "Live updates paused. Checking every 5 seconds." }
             }
             if let Some(message) = action_error() { p { class: "error av-notice", role: "alert", "{message}" } }
+            TabContent { value: tab_value, index: tab_index,
             match tab {
                 Tab::Pending => match pending {
                     Some(RequestTab::Review(id)) => rsx! {
@@ -473,6 +503,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                         }
                     }
                 },
+            }
             }
         }
     }
@@ -571,7 +602,7 @@ fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool)
                 ).await;
             },
             div { class: "av-turns",
-                if loading { p { class: "av-muted", role: "status", "Loading conversation…" } }
+                if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
                 else if available && turns.is_empty() { p { class: "av-muted", "No conversation yet. Send a message to start." } }
                 for (index, turn) in turns.iter().enumerate() {
                     article { key: "{index}", class: match turn.role { Role::User => "av-turn av-user", Role::Assistant => "av-turn av-assistant" },
@@ -595,7 +626,7 @@ fn Composer(
     rsx! {
         form { class: "av-compose", onsubmit: move |event| { event.prevent_default(); on_send.call(()); },
             div { class: "av-compose-box",
-                textarea {
+                Textarea {
                     name: "message", aria_label: "Message this agent", rows: "3", value: "{draft}", disabled,
                     placeholder: "Message this agent",
                     oninput: move |event: FormEvent| draft.set(event.value()),
@@ -607,7 +638,7 @@ fn Composer(
                 }
                 div { class: "av-compose-footer",
                     span { class: "av-muted", "Enter sends · Shift+Enter adds a line · while it works, the message waits for the next turn" }
-                    button { r#type: "submit", class: "av-send", disabled: disabled || draft().trim().is_empty(),
+                    Button { r#type: "submit", disabled: disabled || draft().trim().is_empty(),
                         if busy { "Sending…" } else { "Send" }
                     }
                 }
@@ -650,20 +681,20 @@ fn BlockedPanel(
                 div { class: "av-keys", aria_label: "Prompt options and terminal keys",
                     if let Some(prompt) = prompt {
                         for option in prompt.options {
-                            button { key: "{option.key}", r#type: "button", disabled: disabled || !allowed_key(&option.key),
-                                onclick: move |_| on_key.call(option.key.clone()), "{option.key} · {option.label}" }
+                            Button { key: "{option.key}", variant: ButtonVariant::Outline, r#type: "button", disabled: disabled || !allowed_key(&option.key),
+                                onclick: { let key = option.key.clone(); move |_| on_key.call(key.clone()) }, "{option.key} · {option.label}" }
                         }
                     }
                     for &(key, label) in PANEL_KEYS {
-                        button { key: "terminal-{key}", r#type: "button", disabled,
+                        Button { key: "terminal-{key}", variant: ButtonVariant::Outline, r#type: "button", disabled,
                             aria_label: match key { "up" => "Arrow up", "down" => "Arrow down", _ => label },
                             onclick: move |_| on_key.call(key.to_owned()), "{label}" }
                     }
                 }
                 form { class: "av-reply", onsubmit: move |event| { event.prevent_default(); on_send.call(()); },
-                    input { r#type: "text", name: "reply", aria_label: "Reply to the prompt", placeholder: "Type a reply and press Enter",
+                    Input { r#type: "text", name: "reply", aria_label: "Reply to the prompt", placeholder: "Type a reply and press Enter",
                         value: "{draft}", disabled, oninput: move |event: FormEvent| draft.set(event.value()) }
-                    button { r#type: "submit", disabled: disabled || draft().trim().is_empty(), "Send" }
+                    Button { r#type: "submit", disabled: disabled || draft().trim().is_empty(), "Send" }
                 }
                 p { class: "av-muted", "Buttons are read from the agent's screen. Open in Herdr when none fits." }
             }

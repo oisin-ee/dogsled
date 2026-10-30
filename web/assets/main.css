@@ -40,23 +40,14 @@ code, pre, .mono { font-family: var(--font-mono); }
 .top-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 16px; padding: 0 16px; background: var(--crust); border-bottom: 1px solid var(--rule); min-width: 0; }
 .top-bar h1 { margin: 0; flex-shrink: 0; font-size: 15px; font-weight: 600; }
 .top-bar h1 a { text-decoration: none; }
-.shell-button { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--surface1); border-radius: 4px; background: transparent; font: 500 13px/18px var(--font-sans); white-space: nowrap; cursor: pointer; }
-.shell-button:hover, .shell-button.on { background: var(--surface0); }
-.inbox-toggle { flex-shrink: 0; }
-.inbox-toggle b { background: var(--surface1, #45475a); color: var(--subtext0, #a6adc8); border-radius: 4px; padding: 0 6px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.inbox-toggle b.waiting { background: var(--red); color: var(--crust); }
 .shell-notices { display: flex; flex-wrap: wrap; gap: 0 12px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--overlay1); }
 .hosts { margin-left: auto; display: flex; align-items: center; gap: 18px; color: var(--subtext0); font-size: 12px; font-variant-numeric: tabular-nums; overflow: auto; flex-shrink: 0; }
 .host-load { white-space: nowrap; }
 .host-load i { display: inline-block; width: 44px; height: 4px; background: var(--surface0); border-radius: 2px; margin: 0 6px 2px; vertical-align: middle; position: relative; }
 .host-load i b { position: absolute; inset: 0 auto 0 0; width: var(--host-load); background: var(--accent); border-radius: 2px; }
-.board { min-height: 0; overflow: auto; background: var(--mantle); border-right: 1px solid var(--rule); padding: 10px 8px; display: flex; flex-direction: column; gap: 10px; }
 .repo { flex-shrink: 0; }
 .repo h2 { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0; padding: 4px 8px; font-size: 13px; font-weight: 600; }
 .repo h2 span { font-size: 12px; font-weight: 400; color: var(--overlay1); white-space: nowrap; }
-.nav-agent { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 0 10px; width: 100%; padding: 5px 8px; border: 0; border-radius: 4px; text-align: left; font-size: 13px; line-height: 20px; background: transparent; }
-button.nav-agent { cursor: pointer; }
-button.nav-agent:hover, .nav-agent.selected { background: var(--surface0); }
 .nav-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-meta { grid-column: 2; font-size: 12px; color: var(--overlay1); }
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--overlay1); }
@@ -67,7 +58,6 @@ button.nav-agent:hover, .nav-agent.selected { background: var(--surface0); }
 .nav-tag.plan { background: #89b4fa26; color: var(--accent); }
 .nav-tag.question { background: #cba6f726; color: var(--mauve); }
 .nav-tag.prompt { background: #f9e2af26; color: var(--yellow); }
-.nav-agent.worker { grid-template-columns: 6px minmax(0, 1fr) auto; gap: 0 8px; padding: 1px 8px 1px 28px; font-size: 12px; line-height: 18px; }
 .worker .status-dot { width: 6px; height: 6px; background: var(--surface1); }
 .worker .nav-title { color: var(--overlay1); }
 .worker .status-dot.blocked { background: var(--yellow); }
@@ -83,17 +73,11 @@ button.nav-agent:hover, .nav-agent.selected { background: var(--surface0); }
 .inbox-panel { position: absolute; top: 44px; left: 116px; width: 520px; max-width: calc(100% - 24px); max-height: calc(100dvh - 60px); overflow: auto; padding: 8px; border: 1px solid var(--surface1); border-radius: 6px; background: var(--mantle); box-shadow: 0 16px 40px #000a; z-index: 5; }
 .inbox-panel h2 { display: flex; justify-content: space-between; gap: 12px; margin: 0; padding: 8px 10px; font-size: 13px; font-weight: 600; }
 .inbox-panel h2 span { color: var(--overlay1); font-weight: 400; }
-.inbox-item { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 12px; align-items: center; width: 100%; padding: 10px; border: 0; border-top: 1px solid #ffffff0d; border-radius: 4px; background: transparent; text-align: left; cursor: pointer; }
-.inbox-item:hover { background: var(--surface0); }
 .inbox-kind { font-size: 12px; font-weight: 600; }
 .inbox-kind.plan { color: var(--accent); }
 .inbox-kind.question { color: var(--mauve); }
 .inbox-kind.prompt, .inbox-kind.idle { color: var(--yellow); }
 .inbox-error { color: var(--yellow); }
-.inbox-description { min-width: 0; }
-.inbox-title { font-weight: 500; overflow-wrap: anywhere; }
-.inbox-agent { font-size: 12px; color: var(--subtext0); overflow-wrap: anywhere; }
-.inbox-age { font-size: 12px; color: var(--overlay1); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .inbox-empty { padding: 10px; color: var(--subtext0); }
 .inbox-foot { margin: 0; padding: 8px 10px 4px; font-size: 12px; color: var(--overlay1); }
 /* Pending documents own their internal scrolling, not the browser page. */

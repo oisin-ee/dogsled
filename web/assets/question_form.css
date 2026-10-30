@@ -1,8 +1,5 @@
 .qf { margin-bottom: 1rem; }
-.qf-item { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; width: 100%;
-  text-align: left; background: none; border: 0; border-radius: 4px; color: inherit;
-  font: inherit; padding: 0.3rem 0.4rem; cursor: pointer; }
-.qf-item:hover, .qf-item.open { background: var(--surface0); }
+  text-align: left; }
 .qf-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qf-meta, .qf-muted { color: var(--overlay1); font-size: 0.8rem; }
 
@@ -14,22 +11,21 @@
 .qf-intro p { margin: 0.25rem 0 0; color: var(--subtext0); }
 
 /* A question: a card with a number, the question, and the answer. */
-.qf-field, .qf-card { margin: 0; padding: 18px 20px; border: 1px solid var(--surface1);
+.qf-field { margin: 0; padding: 18px 20px; border: 1px solid var(--surface1);
   border-radius: 6px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .qf-field { min-inline-size: 0; }
 /* The heading of a card. */
-.qf-legend, .qf-heading { display: flex; gap: 10px; align-items: baseline;
+.qf-legend { display: flex; gap: 10px; align-items: baseline;
   margin: 0; padding: 0; font-size: 1rem; line-height: 1.4rem; font-weight: 600;
   color: inherit; overflow-wrap: anywhere; }
-.qf-heading { margin: 0; }
 .qf-number { color: var(--overlay1); font-weight: 500; flex: none; }
 .qf-context { margin: 0; color: var(--subtext0); font-size: 0.85rem; }
-.qf-field.critical, .qf-card.critical { border-color: rgba(137, 180, 250, 0.5); }
-.qf-field.critical .qf-legend, .qf-card.critical .qf-heading { color: var(--accent); }
+.qf-field.critical { border-color: rgba(137, 180, 250, 0.5); }
+.qf-field.critical .qf-legend { color: var(--accent); }
 .qf-field.minor { font-size: 0.85rem; }
 
 /* The options: rows with a border, so a choice reads as a thing to pick. */
-.qf-option { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem;
+.qf-option { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem;
   padding: 12px 14px; border: 1px solid var(--surface1); border-radius: 6px;
   cursor: pointer; }
 .qf-choice, .qf-note { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -41,8 +37,6 @@
 .qf-option.checked { border-color: var(--accent); background: rgba(137, 180, 250, 0.07); }
 .qf-option-label { font-weight: 500; }
 .qf-option-desc { flex-basis: 100%; margin: 0; color: var(--subtext0); font-size: 0.85rem; }
-.qf-badge { border-radius: 4px; padding: 1px 6px; font-size: 0.7rem; font-weight: 600;
-  color: var(--green); background: rgba(166, 227, 161, 0.12); }
 .qf-content { flex-basis: 100%; margin: 0.2rem 0; padding: 10px 12px; overflow-x: auto;
   white-space: pre-wrap; background: var(--crust); border-radius: 4px; font-size: 0.8rem; }
 .qf-form textarea { width: 100%; color: inherit; background: var(--crust);
@@ -71,15 +65,7 @@
 /* The footer: what is answered, and the button that sends it. */
 .qf-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .qf-foot .qf-muted { margin-right: auto; }
-.qf-submit { margin-top: 0; padding: 6px 12px; color: var(--crust);
-  background: var(--accent); border: 1px solid var(--accent); border-radius: 4px;
-  font: inherit; cursor: pointer; }
-.qf-submit:disabled { opacity: 0.5; cursor: default; }
 .qf-reject { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--surface1); padding-top: 18px; }
-.qf-reject-button { align-self: flex-start; border: 1px solid var(--surface1); border-radius: 4px;
-  padding: 6px 12px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
-.qf-reject-button:hover:not(:disabled) { background: var(--surface0); }
-.qf-reject-button:disabled { opacity: 0.5; cursor: default; }
 @media (max-width: 600px) {
   .qf-note, .qf-form textarea { font-size: 1rem; }
 }

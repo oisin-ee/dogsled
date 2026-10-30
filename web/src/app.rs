@@ -8,6 +8,13 @@ use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 use crate::agent_view::{AgentView, Draft};
 use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
+use crate::components::button::{Button, ButtonVariant};
+use crate::components::item::{
+    Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle,
+};
+use crate::components::scroll_area::ScrollArea;
+use crate::components::sidebar::{Sidebar, SidebarCollapsible, SidebarContent, SidebarProvider};
+use crate::components::skeleton::Skeleton;
 use crate::conversations::Conversations;
 
 const COMPONENTS_CSS: Asset = asset!("/assets/dx-components-theme.css");
@@ -274,7 +281,7 @@ pub fn App() -> Element {
             },
             header { class: "top-bar",
                 h1 { a { href: "/", aria_label: "Homepage", "Dogsled" } }
-                button { r#type: "button", class: if inbox_open() { "shell-button inbox-toggle on" } else { "shell-button inbox-toggle" },
+                Button { variant: ButtonVariant::Outline, r#type: "button",
                     aria_expanded: inbox_open(), aria_controls: "portal-inbox",
                     onclick: move |_| inbox_open.toggle(),
                     "Inbox" b { class: if waiting { "waiting" } else { "" }, "{count}" }
@@ -307,7 +314,10 @@ pub fn App() -> Element {
                     }
                 }
             }
-            nav { class: "board", aria_label: "Repositories and agents",
+            SidebarProvider {
+              Sidebar { collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
+                SidebarContent {
+                  ScrollArea {
                 if let Some(message) = board_error() { p { class: "error", "Board updates unavailable: {message}" } }
                 match groups {
                     Some(groups) => rsx! {
@@ -318,8 +328,11 @@ pub fn App() -> Element {
                             p { class: "finished-branches", "{groups.finished_without_repository} finished branches have no repository — see Land and clean up" }
                         }
                     },
-                    None => rsx! { p { class: "empty", "Loading agents…" } },
+                    None => rsx! { Skeleton { role: "status", aria_label: "Loading agents" } },
                 }
+                  }
+                }
+              }
             }
             main { class: "centre",
                 match selected() {
@@ -338,7 +351,7 @@ pub fn App() -> Element {
                             } else if state.error.is_some() {
                                 p { class: "error", "Inbox unavailable. Reload to retry." }
                             } else if state.snapshot.is_none() || view.is_none() {
-                                p { class: "empty", "Loading agents…" }
+                                Skeleton { role: "status", aria_label: "Loading agents" }
                             } else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
                                 h2 { "No agents are running" }
                                 p { class: "empty", "Start an agent with " code { "dogsled spawn" } "." }
@@ -355,7 +368,7 @@ pub fn App() -> Element {
                     h2 { "Inbox" span { "Everything waiting on you" } }
                     if let Some(message) = &state.error { p { class: "error", "Inbox unavailable: {message}. Reload to retry." } }
                     if state.snapshot.is_none() && state.error.is_none() {
-                        p { class: "empty", "Loading inbox…" }
+                        Skeleton { role: "status", aria_label: "Loading inbox" }
                     } else if state.count() == Some(0) && state.error.is_none() {
                         p { class: "inbox-empty", "Nothing is waiting on you." }
                     } else {
@@ -382,18 +395,35 @@ fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool
                     let repository = item.repository.as_deref().map(repository_name);
                     let age = age(item.age_ms.saturating_add(elapsed_ms));
                     rsx! {
-                        button { key: "{kind:?}:{item.selection.id}", class: "inbox-item", r#type: "button",
-                            onclick: move |_| {
-                                selected.set(Some(item.selection.pane.clone()));
-                                selection.set(Some(item.selection.clone()));
-                                inbox_open.set(false);
+                        Item {
+                            key: "{kind:?}:{item.selection.id}",
+                            role: "button",
+                            tabindex: "0",
+                            onclick: {
+                                let item = item.clone();
+                                move |_| {
+                                    selected.set(Some(item.selection.pane.clone()));
+                                    selection.set(Some(item.selection.clone()));
+                                    inbox_open.set(false);
+                                }
                             },
-                            span { class: "inbox-kind {kind.css()}", "{kind.label()}" }
-                            div { class: "inbox-description",
-                                div { class: "inbox-title", "{item.title}" }
-                                div { class: "inbox-agent", "{title}" if let Some(repository) = repository { " · {repository}" } }
+                            onkeydown: {
+                                let item = item.clone();
+                                move |event: KeyboardEvent| {
+                                    if matches!(event.key(), Key::Enter) || event.key() == Key::Character(" ".to_owned()) {
+                                        event.prevent_default();
+                                        selected.set(Some(item.selection.pane.clone()));
+                                        selection.set(Some(item.selection.clone()));
+                                        inbox_open.set(false);
+                                    }
+                                }
+                            },
+                            ItemMedia { span { class: "inbox-kind {kind.css()}", "{kind.label()}" } }
+                            ItemContent {
+                                ItemTitle { "{item.title}" }
+                                ItemDescription { "{title}" if let Some(repository) = repository { " · {repository}" } }
                             }
-                            span { class: "inbox-age", "{age}" }
+                            ItemActions { span { class: "inbox-age", "{age}" } }
                         }
                     }
                 }

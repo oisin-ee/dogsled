@@ -10,12 +10,23 @@ use std::collections::BTreeMap;
 mod tests;
 
 use dioxus::prelude::*;
+use dioxus_primitives::checkbox::CheckboxState;
 use gloo_net::http::Request;
 use portal_types::questions::{
     AnswerBody, Media, MediaPosition, Pending, PendingList, Question, QuestionKind, Rejection,
     ResponseItem,
 };
 use serde_json::Value;
+
+use crate::components::{
+    badge::Badge,
+    button::{Button, ButtonVariant},
+    card::{Card, CardContent, CardHeader, CardTitle},
+    checkbox::Checkbox,
+    label::Label,
+    radio_group::{RadioGroup, RadioItem},
+    textarea::Textarea,
+};
 
 const QUESTION_CSS: Asset = asset!("/assets/question_form.css");
 
@@ -92,9 +103,10 @@ pub fn QuestionForm(
                     let title = form_title(item);
                     let age = age(now().saturating_sub(item.created_ms));
                     rsx! {
-                        button {
+                        Button {
                             key: "{item.id}",
-                            class: if open { "qf-item open" } else { "qf-item" },
+                            variant: ButtonVariant::Ghost,
+                            aria_current: open.then_some("true"),
                             onclick: move |_| opened.set(Some(id.clone())),
                             span { class: "qf-title", "{title}" }
                             span { class: "qf-meta", "{item.pane} · {age}" }
@@ -290,19 +302,20 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
             }
             div { class: "qf-foot",
                 span { class: "qf-muted", "Answered {answered_count(&questions, &values.read())} of {total}" }
-                button { class: "qf-submit", r#type: "submit", disabled: busy(), "Send answers" }
+                Button { r#type: "submit", disabled: busy(), "Send answers" }
             }
             section { class: "qf-reject", aria_label: "Reject interview",
-                label { class: "qf-note",
-                    span { "Reason for rejecting (optional)" }
-                    textarea {
-                        name: "rejection-reason", rows: "2", value: "{rejection_reason}", disabled: busy(),
+                div { class: "qf-note",
+                    Label { html_for: "rejection-reason", "Reason for rejecting (optional)" }
+                    Textarea {
+                        id: "rejection-reason", name: "rejection-reason", rows: "2", value: "{rejection_reason}", disabled: busy(),
                         placeholder: "Tell the agent why these questions do not help, or what you need instead",
                         oninput: move |event: FormEvent| rejection_reason.set(event.value()),
                     }
                 }
-                button {
-                    class: "qf-reject-button", r#type: "button", disabled: busy(),
+                Button {
+                    variant: ButtonVariant::Outline,
+                    r#type: "button", disabled: busy(),
                     onclick: move |_| {
                         if busy() { return; }
                         busy.set(true);
@@ -541,21 +554,45 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
         match question.kind {
             QuestionKind::Single | QuestionKind::Multi => rsx! {
                 div { class: "qf-options",
-                    for option in options {
-                        ChoiceOption {
-                            key: "{option_label(&option)}",
-                            group: group.clone(),
-                            id: id.clone(),
-                            recommended: recommended.contains(&option_label(&option)),
-                            option,
-                            multi,
-                            values,
+                    if multi {
+                        for (index, option) in options.into_iter().enumerate() {
+                            ChoiceOption {
+                                key: "{option_label(&option)}",
+                                group: group.clone(),
+                                id: id.clone(),
+                                index,
+                                recommended: recommended.contains(&option_label(&option)),
+                                option,
+                                multi,
+                                values,
+                            }
+                        }
+                    } else {
+                        RadioGroup {
+                            name: group.clone(),
+                            value: chosen(&values.read(), &id).into_iter().next(),
+                            on_value_change: {
+                                let id = id.clone();
+                                move |label: String| choose(&mut values.write(), &id, &label, false)
+                            },
+                            for (index, option) in options.into_iter().enumerate() {
+                                ChoiceOption {
+                                    key: "{option_label(&option)}",
+                                    group: group.clone(),
+                                    id: id.clone(),
+                                    index,
+                                    recommended: recommended.contains(&option_label(&option)),
+                                    option,
+                                    multi,
+                                    values,
+                                }
+                            }
                         }
                     }
                 }
             },
             QuestionKind::Text => rsx! {
-                textarea {
+                Textarea {
                     name: "{group}",
                     rows: "3",
                     value: "{text}",
@@ -576,19 +613,23 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
 
     rsx! {
         if panel {
-            section { class: "qf-card {weight}",
-                h3 { class: "qf-heading",
-                    span { class: "qf-number", "{number}" }
-                    span { "{question.question}" }
+            Card {
+                CardHeader {
+                    CardTitle {
+                        span { class: "qf-number", "{number}" }
+                        span { "{question.question}" }
+                    }
                 }
-                if let Some(context) = question.context.clone() {
-                    p { class: "qf-context", "{context}" }
-                }
-                if let Some(content) = content {
-                    pre { class: "qf-content", "{content}" }
-                }
-                if let Some(media) = media.clone() {
-                    MediaView { media }
+                CardContent {
+                    if let Some(context) = question.context.clone() {
+                        p { class: "qf-context", "{context}" }
+                    }
+                    if let Some(content) = content {
+                        pre { class: "qf-content", "{content}" }
+                    }
+                    if let Some(media) = media.clone() {
+                        MediaView { media }
+                    }
                 }
             }
         } else {
@@ -723,6 +764,7 @@ fn chart_source(chart: &portal_types::questions::ChartMedia) -> String {
 fn ChoiceOption(
     group: String,
     id: String,
+    index: usize,
     option: Value,
     recommended: bool,
     multi: bool,
@@ -742,29 +784,40 @@ fn ChoiceOption(
         .unwrap_or_default()
         .to_owned();
     let other = label == "Other";
+    let control = format!("{group}-{label}-control");
+    let note_id = format!("{group}-{label}-note");
 
     rsx! {
         div { class: "qf-choice",
-            label { class: if checked { "qf-option checked" } else { "qf-option" },
-                input {
-                    r#type: if multi { "checkbox" } else { "radio" },
-                    name: "{group}",
-                    value: "{label}",
-                    checked,
-                    onchange: move |_| choose(&mut values.write(), &choice_id, &pick, multi),
+            div { class: if checked { "qf-option checked" } else { "qf-option" },
+                if multi {
+                    Checkbox {
+                        id: "{control}",
+                        name: "{group}",
+                        value: "{label}",
+                        checked: Some(if checked { CheckboxState::Checked } else { CheckboxState::Unchecked }),
+                        on_checked_change: move |_| choose(&mut values.write(), &choice_id, &pick, true),
+                    }
+                    Label { html_for: "{control}",
+                        span { class: "qf-option-label", "{label}" }
+                    }
+                } else {
+                    RadioItem { id: "{control}", value: label.clone(), index,
+                        span { class: "qf-option-label", "{label}" }
+                    }
                 }
-                span { class: "qf-option-label", "{label}" }
                 if recommended {
-                    span { class: "qf-badge", "Recommended" }
+                    Badge { "Recommended" }
                 }
                 if let Some(content) = content {
                     p { class: "qf-option-desc", "{content}" }
                 }
             }
             if checked {
-                label { class: "qf-note",
-                    span { if other { "Your answer" } else { "More context (optional)" } }
-                    textarea {
+                div { class: "qf-note",
+                    Label { html_for: "{note_id}", if other { "Your answer" } else { "More context (optional)" } }
+                    Textarea {
+                        id: "{note_id}",
                         name: "{group}-{label}-note",
                         rows: "2",
                         required: other,

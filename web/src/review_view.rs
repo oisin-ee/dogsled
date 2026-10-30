@@ -11,6 +11,14 @@ use pulldown_cmark::{Event, Parser, Tag, TagEnd, html};
 use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::agent_view::Draft;
+use crate::components::{
+    button::{Button, ButtonVariant},
+    collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger},
+    dialog::{Dialog, DialogDescription, DialogTitle},
+    input::Input,
+    label::Label,
+    textarea::Textarea,
+};
 
 const REVIEW_CSS: Asset = asset!("/assets/review_view.css");
 
@@ -132,10 +140,14 @@ pub fn ReviewView(
                 h2 { "Plans · Needs you: {reviews.len()}" }
                 nav { class: "rv-needs", aria_label: "Plans needing review",
                     for item in reviews {
-                        button {
+                        Button { variant: ButtonVariant::Outline,
                             key: "{item.id}", r#type: "button",
-                            class: if current.as_ref() == Some(&item.id) { "rv-item active" } else { "rv-item" },
-                            onclick: move |_| { selected.set(Some(item.pane.clone())); opened.set(Some(item.id.clone())); },
+                            aria_current: (current.as_ref() == Some(&item.id)).then_some("true"),
+                            onclick: {
+                                let pane = item.pane.clone();
+                                let id = item.id.clone();
+                                move |_| { selected.set(Some(pane.clone())); opened.set(Some(id.clone())); }
+                            },
                             "{item.path} · {item.pane}"
                         }
                     }
@@ -358,8 +370,6 @@ struct Selection {
     quote: String,
     start: usize,
     end: usize,
-    left: f64,
-    top: f64,
 }
 
 const SELECTION: &str = r#"
@@ -393,12 +403,12 @@ struct ReviewControls {
 fn ReviewDecisionActions(controls: ReviewControls) -> Element {
     rsx! {
         div { class: "rv-actions rv-decisions",
-            button {
+            Button { variant: ButtonVariant::Outline,
                 r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some() || !(controls.can_request)(),
                 onclick: move |_| controls.decide.call(false), "Request changes"
             }
-            button {
-                r#type: "button", class: "rv-primary", disabled: (controls.busy)() || (controls.editing)().is_some(),
+            Button {
+                r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some(),
                 onclick: move |_| controls.decide.call(true), "Approve plan"
             }
         }
@@ -422,9 +432,9 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
     let mut general = use_signal(|| review.peek().general.clone());
     let mut notes = use_signal(String::new);
     let mut busy = use_signal(|| false);
+    let uploading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut editing = use_signal(|| None::<Annotation>);
-    let mut anchor = use_signal(|| None::<(f64, f64)>);
     let mut show_diff = use_signal(|| false);
     let mut diff = use_signal(|| None::<DiffView>);
     // One queue owns all writes. A blur save must finish before a decision,
@@ -543,7 +553,6 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                     comment: String::new(),
                     images: vec![],
                 }));
-                anchor.set(Some((selection.left, selection.top)));
             }
             Ok(_) => {}
             Err(message) => error.set(Some(format!("Could not read the selection: {message}"))),
@@ -610,7 +619,7 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                                 onmouseup: move |_| select(), onkeyup: move |_| select(), dangerous_inner_html: rendered,
                             }
                             if value.revisions.len() > 1 {
-                    button {
+                    Button { variant: ButtonVariant::Outline,
                         r#type: "button", aria_expanded: show_diff(), disabled: busy(),
                         onclick: move |_| async move {
                             show_diff.toggle();
@@ -653,10 +662,10 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                             p { "{annotation.comment}" }
                             Images { paths: annotation.images.clone() }
                             div { class: "rv-actions",
-                                button { r#type: "button", disabled: busy() || editing().is_some(), onclick: {
-                                    let annotation = annotation.clone(); move |_| { anchor.set(None); editing.set(Some(annotation.clone())); }
+                                Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy() || editing().is_some(), onclick: {
+                                    let annotation = annotation.clone(); move |_| { editing.set(Some(annotation.clone())); }
                                 }, "Edit" }
-                                button { r#type: "button", disabled: busy() || editing().is_some(), onclick: move |_| {
+                                Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy() || editing().is_some(), onclick: move |_| {
                                     if busy() { return; }
                                     busy.set(true);
                                     actions.send(ReviewAction::DeleteAnnotation(annotation.id.clone()));
@@ -664,8 +673,8 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                             }
                         }
                     }
-                label { class: "rv-general-label", r#for: "review-general", "Note for the whole plan" }
-                textarea { id: "review-general", name: "general", rows: "3", value: "{general}", disabled: busy(),
+                Label { html_for: "review-general", "Note for the whole plan" }
+                Textarea { id: "review-general", name: "general", rows: "3", value: "{general}", disabled: busy(),
                     oninput: move |event: FormEvent| general.set(event.value()),
                     onblur: move |_| {
                         if general() != review.peek().general {
@@ -675,24 +684,33 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                 }
                     }
                 }
-                if let Some(annotation) = editing() {
-                    AnnotationEditor {
-                        key: "{annotation.id}-{annotation.start_line}-{annotation.end_line}", annotation, anchor: anchor(),
-                        busy: busy(),
-                        on_close: move |_| editing.set(None),
-                        on_save: move |annotation: Annotation| {
-                            if busy() { return; }
-                            busy.set(true);
-                            actions.send(ReviewAction::SaveAnnotation(annotation));
-                        },
+                Dialog {
+                    open: editing().is_some(),
+                    aria_label: "Annotate plan selection",
+                    on_open_change: move |open: bool| {
+                        if !open && !busy() && !uploading() { editing.set(None); }
+                    },
+                    if let Some(annotation) = editing() {
+                        AnnotationEditor {
+                            key: "{annotation.id}-{annotation.start_line}-{annotation.end_line}", annotation,
+                            busy: busy(), uploading,
+                            on_close: move |_| editing.set(None),
+                            on_save: move |annotation: Annotation| {
+                                if busy() { return; }
+                                busy.set(true);
+                                actions.send(ReviewAction::SaveAnnotation(annotation));
+                            },
+                        }
                     }
                 }
                 if !embedded {
                     footer { class: "rv-footer",
-                        details {
-                            summary { "Approval notes (optional)" }
-                            textarea { id: "review-notes", aria_label: "Approval notes", name: "notes", rows: "2", value: "{notes}", disabled: busy(),
-                                oninput: move |event: FormEvent| notes.set(event.value()),
+                        Collapsible { class: "rv-approval-notes",
+                            CollapsibleTrigger { "Approval notes (optional)" }
+                            CollapsibleContent {
+                                Textarea { id: "review-notes", aria_label: "Approval notes", name: "notes", rows: "2", value: "{notes}", disabled: busy(),
+                                    oninput: move |event: FormEvent| notes.set(event.value()),
+                                }
                             }
                         }
                         ReviewDecisionActions { controls }
@@ -725,15 +743,14 @@ fn Images(paths: Vec<String>) -> Element {
 #[component]
 fn AnnotationEditor(
     annotation: Annotation,
-    anchor: Option<(f64, f64)>,
     busy: bool,
+    mut uploading: Signal<bool>,
     on_save: EventHandler<Annotation>,
     on_close: EventHandler<()>,
 ) -> Element {
     let draft = try_use_context::<Draft>().map(|draft| draft.0);
     let mut comment = use_signal(|| annotation.comment.clone());
     let mut images = use_signal(|| annotation.images.clone());
-    let mut uploading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut mounted = use_signal(|| false);
     // The DOM component owns the listeners; AbortController removes them on unmount.
@@ -763,60 +780,36 @@ fn AnnotationEditor(
     let quote = annotation.quote.clone();
     let save = annotation.clone();
     rsx! {
-        section { id: "review-annotation", class: "rv-popover", role: "dialog", aria_label: "Annotate plan selection",
-            onmounted: move |_| {
-                mounted.set(true);
-                let position = serde_json::to_string(&anchor).unwrap_or_default();
-                document::eval(&format!(r#"
-                    const root = document.getElementById('review-annotation');
-                    const anchor = {position};
-                    const place = () => {{
-                        const rect = window.__reviewSelection?.getBoundingClientRect();
-                        const x = rect?.left ?? anchor?.[0] ?? (innerWidth - root.offsetWidth) / 2;
-                        const y = rect?.bottom ?? anchor?.[1] ?? 160;
-                        root.style.setProperty('--popover-left', `${{Math.max(12, Math.min(x, innerWidth - root.offsetWidth - 12))}}px`);
-                        root.style.setProperty('--popover-top', `${{Math.max(12, Math.min(y + 8, innerHeight - root.offsetHeight - 12))}}px`);
-                    }};
-                    place();
-                    const controller = new AbortController();
-                    window.addEventListener('resize', place, {{signal: controller.signal}});
-                    document.getElementById('review-document')?.addEventListener('scroll', place, {{signal: controller.signal}});
-                    const size = new ResizeObserver(place); size.observe(root);
-                    const removed = new MutationObserver(() => {{
-                        if (!root.isConnected) {{ controller.abort(); size.disconnect(); removed.disconnect(); }}
-                    }});
-                    removed.observe(document.body, {{childList: true, subtree: true}});
-                "#));
-            },
-            onkeydown: move |event: KeyboardEvent| { if event.key() == Key::Escape && !busy && !uploading() { on_close.call(()); } },
+        div { id: "review-annotation", class: "rv-annotation-body",
+                onmounted: move |_| mounted.set(true),
             div { class: "rv-popover-heading",
-                span { "Line {annotation.start_line}" }
-                button { r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "×" }
+                DialogTitle { "Line {annotation.start_line}" }
+                Button { variant: ButtonVariant::Outline, r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "×" }
             }
             blockquote { "{annotation.quote}" }
-            textarea { id: "annotation-comment", name: "comment", aria_label: "Note for the lead", placeholder: "Add a note for the lead", rows: "3", autofocus: true, value: "{comment}", disabled: busy,
+            Textarea { id: "annotation-comment", name: "comment", aria_label: "Note for the lead", placeholder: "Add a note for the lead", rows: "3", "autofocus": true, value: "{comment}", disabled: busy,
                 oninput: move |event: FormEvent| comment.set(event.value()),
             }
-            input { id: "annotation-images", class: "rv-file", aria_label: "Add images (PNG, JPEG, WebP; up to 10 MiB each)", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading() }
-            p { class: "rv-image-hint", "Paste, drop or add images." }
+            Input { id: "annotation-images", aria_label: "Add images (PNG, JPEG, WebP; up to 10 MiB each)", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading() }
+            DialogDescription { class: "rv-image-hint", "Paste, drop or add images." }
             Images { paths: images() }
             for (index, path) in images().iter().enumerate() {
-                button { key: "{path}-{index}", r#type: "button", disabled: busy || uploading(), onclick: move |_| { images.write().remove(index); }, "Remove image {index + 1}" }
+                Button { variant: ButtonVariant::Outline, key: "{path}-{index}", r#type: "button", disabled: busy || uploading(), onclick: move |_| { images.write().remove(index); }, "Remove image {index + 1}" }
             }
             if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
             if uploading() { p { role: "status", "Uploading images…" } }
             div { class: "rv-actions",
-                button { r#type: "button", disabled: draft.is_none() || busy || uploading(), title: if draft.is_none() { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
+                Button { variant: ButtonVariant::Outline, r#type: "button", disabled: draft.is_none() || busy || uploading(), title: if draft.is_none() { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
                     let Some(mut draft) = draft else { return; };
                     let message = quote_message(&quote, annotation.start_line, annotation.end_line);
                     let mut text = draft();
                     if !text.is_empty() { text.push_str("\n\n"); }
                     text.push_str(&message); draft.set(text); on_close.call(());
                 }, "Quote in message" }
-                button { r#type: "button", disabled: busy || uploading(), onclick: move |_| {
+                Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy || uploading(), onclick: move |_| {
                     document::eval("document.getElementById('annotation-images')?.click();");
                 }, "Add image" }
-                button { r#type: "button", class: "rv-primary", disabled: busy || uploading(), onclick: move |_| {
+                Button { r#type: "button", disabled: busy || uploading(), onclick: move |_| {
                     let mut value = save.clone(); value.comment = comment(); value.images = images(); on_save.call(value);
                 }, "Save note" }
             }
@@ -875,6 +868,45 @@ await new Promise(resolve => signal.addEventListener('abort', resolve, {once: tr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decision_controls_fixture(props: (bool, bool, bool)) -> Element {
+        let busy = use_signal(|| props.0);
+        let editing = use_signal(|| {
+            props.1.then(|| Annotation {
+                id: "note".into(),
+                revision: 1,
+                start_line: 1,
+                end_line: 1,
+                quote: "Plan".into(),
+                comment: String::new(),
+                images: vec![],
+            })
+        });
+        let can_request = use_memo(move || props.2);
+        let decide = use_callback(|_| {});
+        rsx! { ReviewDecisionActions { controls: ReviewControls { busy, editing, can_request, decide } } }
+    }
+
+    #[test]
+    fn official_decision_buttons_preserve_disabled_states() {
+        for (state, disabled) in [
+            ((false, false, true), 0),
+            ((false, false, false), 1),
+            ((true, false, true), 2),
+            ((false, true, true), 2),
+        ] {
+            let mut dom = VirtualDom::new_with_props(decision_controls_fixture, state);
+            dom.rebuild_in_place();
+            let html = dioxus_ssr::render(&dom);
+            assert_eq!(html.matches("<button").count(), 2, "{html}");
+            assert_eq!(html.matches(r#"type="button""#).count(), 2, "{html}");
+            assert_eq!(html.matches("disabled").count(), disabled, "{html}");
+            assert!(html.contains(r#"data-style="outline""#), "{html}");
+            assert!(html.contains(r#"data-style="primary""#), "{html}");
+            assert!(html.contains("Request changes"), "{html}");
+            assert!(html.contains("Approve plan"), "{html}");
+        }
+    }
 
     #[test]
     fn heading_list_and_code_have_source_line_ranges() {

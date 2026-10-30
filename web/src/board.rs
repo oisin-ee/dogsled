@@ -5,6 +5,8 @@ use portal_types::agents::AgentView;
 use portal_types::{BoardView, GroupView, RowView, TodoView};
 
 use crate::app::{InboxItem, InboxKind, InboxSelection};
+use crate::components::button::{Button, ButtonVariant};
+use crate::components::tooltip::{Tooltip, TooltipContent, TooltipTrigger};
 
 #[derive(Clone, Default, PartialEq)]
 pub struct Navigation {
@@ -233,12 +235,6 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
     let needs_owner = tag == Some(InboxKind::Prompt) || row.unseen;
     let worker_status = worker_status(&row, tag);
     let is_selected = row.pane.is_some() && selected() == row.pane;
-    let class = match (row.worker, is_selected) {
-        (true, true) => "nav-agent worker selected",
-        (true, false) => "nav-agent worker",
-        (false, true) => "nav-agent selected",
-        (false, false) => "nav-agent",
-    };
     let dot = if row.worker {
         if needs_owner {
             "status-dot blocked"
@@ -270,15 +266,33 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
     };
     match row.pane {
         Some(pane) => rsx! {
-            button { r#type: "button", class, title: "{row.title}", aria_pressed: is_selected,
-                onclick: move |_| {
-                    selected.set(Some(pane.clone()));
-                    selection.set(None);
-                },
-                {body}
+            Tooltip {
+                TooltipTrigger {
+                    r#as: move |attributes: Vec<Attribute>| {
+                        let pane = pane.clone();
+                        rsx! {
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                attributes,
+                                aria_pressed: is_selected,
+                                onclick: move |_| {
+                                    selected.set(Some(pane.clone()));
+                                    selection.set(None);
+                                },
+                                {body.clone()}
+                            }
+                        }
+                    },
+                }
+                TooltipContent { "{row.title}" }
             }
         },
-        None => rsx! { div { class, title: "{row.title}", {body} } },
+        None => rsx! {
+            Tooltip {
+                TooltipTrigger { {body} }
+                TooltipContent { "{row.title}" }
+            }
+        },
     }
 }
 
