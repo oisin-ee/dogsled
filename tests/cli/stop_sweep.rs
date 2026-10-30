@@ -68,7 +68,7 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
     let rig = Rig::new("holds");
     let claims = json!([
         {"repo":"/tmp/repo","path":"/tmp/held","branch":"feat/x","request_id":"request-held"},
-        {"repo":"/tmp/repo","path":"/tmp/legacy","branch":"feat/legacy"}
+        {"repo":"/tmp/repo","path":"/tmp/damaged","branch":"feat/damaged"}
     ]);
     rig.put("state/preparations.json", &claims);
     let (code, status) = rig.json(&["status"]);
@@ -90,11 +90,12 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
         held["next_command"],
         "dogsled retire-preparation request-held --host local --reason 'release reported historical preparation claim'"
     );
-    let legacy = holds
+    // A claim without its request is a damaged record, not a supported claim type.
+    let damaged = holds
         .iter()
-        .find(|h| h["code"] == "legacy_preparation")
+        .find(|h| h["resource"].as_str().unwrap().contains("/tmp/damaged"))
         .unwrap();
-    assert_eq!(legacy["next_command"], "dogsled doctor --host local");
+    assert_eq!(damaged["code"], "unreadable");
     let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
     assert!(human.contains("Resource holds:"), "{human}");
     assert!(

@@ -30,8 +30,7 @@ pub struct Prepared {
 struct Pending {
     #[serde(flatten)]
     tree: crate::cleanup::Tree,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    request_id: Option<String>,
+    request_id: String,
 }
 
 /// Refuse changed or missing authority before ingress can publish validity or dispatch.
@@ -942,10 +941,7 @@ fn lookup_receipt(
     let raw = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
     let raw_disposition = receipts.read::<serde_json::Value>(&format!("{id}.disposition.json"))?;
     let claims: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-    let held: Vec<_> = claims
-        .iter()
-        .filter(|p| p.request_id.as_ref() == Some(id))
-        .collect();
+    let held: Vec<_> = claims.iter().filter(|p| p.request_id == *id).collect();
     let Some(raw) = raw else {
         return Ok(
             if raw_disposition.is_some() || !held.is_empty() || expected_binding.is_some() {
@@ -1289,19 +1285,14 @@ pub(crate) fn retention_completion(
 
 pub(crate) fn held(ledger: &crate::ledger::Ledger, id: &str) -> Result<bool> {
     let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-    Ok(pending
-        .iter()
-        .any(|claim| claim.request_id.as_deref() == Some(id)))
+    Ok(pending.iter().any(|claim| claim.request_id == id))
 }
 
 /// The preparation gate is held by the admission or host expiry owner. An absent
 /// outcome is harmless only when no exact preparation claim remains.
 pub(crate) fn retention_ready(ledger: &crate::ledger::Ledger, id: &str, now: u64) -> Result<bool> {
     let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-    if pending
-        .iter()
-        .any(|claim| claim.request_id.as_deref() == Some(id))
-    {
+    if pending.iter().any(|claim| claim.request_id == id) {
         return Ok(false);
     }
     let receipts = ledger.child("preparation-receipts");
@@ -1567,11 +1558,11 @@ fn local_guarded(
         head: String::new(),
         identity: None,
     };
-    check_effect(ledger, request_id)?;
-    record(ledger, pending.clone(), request_id)?;
+    let id = check_effect(ledger, request_id)?;
+    record(ledger, pending.clone(), id)?;
     captured.intended = Some(Pending {
         tree: pending,
-        request_id: request_id.map(str::to_owned),
+        request_id: id.into(),
     });
     make(preparation, existing, branch, base, has_branch)
 }
@@ -1585,9 +1576,18 @@ fn check_delivery(
     crate::jobs::check_validity(ledger, validity.as_ref())
 }
 
-fn check_effect(ledger: &crate::ledger::Ledger, request_id: Option<&str>) -> Result<()> {
-    let id = request_id.ok_or_else(|| worktree::refuse("requestless preparation refused"))?;
-    crate::jobs::check_validity(ledger, crate::jobs::request_validity(ledger, id)?.as_ref())
+/// Returns the request id: every preparation effect and claim belongs to one request.
+fn check_effect<'a>(
+    ledger: &crate::ledger::Ledger,
+    request_id: Option<&'a str>,
+) -> Result<&'a str> {
+    let id = claim_id(request_id)?;
+    crate::jobs::check_validity(ledger, crate::jobs::request_validity(ledger, id)?.as_ref())?;
+    Ok(id)
+}
+
+fn claim_id(request_id: Option<&str>) -> Result<&str> {
+    request_id.ok_or_else(|| worktree::refuse("requestless preparation refused"))
 }
 
 struct Preparation<'a> {
@@ -1662,11 +1662,12 @@ fn make(
     let linked = guard
         .discover(shell, &path)?
         .ok_or_else(|| worktree::refuse("prepared checkout disappeared"))?;
+    let id = claim_id(request_id)?;
     let pending = Pending {
         tree: linked.tree(),
-        request_id: request_id.map(str::to_owned),
+        request_id: id.into(),
     };
-    record(ledger, pending.tree.clone(), request_id)?;
+    record(ledger, pending.tree.clone(), id)?;
     captured.checkout = Some(pending);
     crate::cleanup::remember(ledger, linked.tree())?;
     if created {
@@ -1709,17 +1710,16 @@ fn make(
 fn record(
     ledger: &crate::ledger::Ledger,
     pending: crate::cleanup::Tree,
-    request_id: Option<&str>,
+    request_id: &str,
 ) -> Result<()> {
     ledger.with_lock("preparations", || {
         let mut preparations: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
         preparations.retain(|record| {
-            !worktree::same(&record.tree.path, &pending.path)
-                || record.request_id.as_deref() != request_id
+            !worktree::same(&record.tree.path, &pending.path) || record.request_id != request_id
         });
         preparations.push(Pending {
             tree: pending,
-            request_id: request_id.map(str::to_owned),
+            request_id: request_id.into(),
         });
         ledger.write("preparations.json", &preparations)
     })
@@ -1774,10 +1774,7 @@ pub fn saved_tree(
     let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
     Ok(records
         .into_iter()
-        .find(|p| {
-            worktree::same(&p.tree.path, path)
-                && request.is_none_or(|id| p.request_id.as_deref() == Some(id))
-        })
+        .find(|p| worktree::same(&p.tree.path, path) && request.is_none_or(|id| p.request_id == id))
         .map(|p| p.tree))
 }
 
@@ -1788,7 +1785,7 @@ fn used(ledger: &crate::ledger::Ledger, claim: &disposition::Claim, resume: bool
         let matches: Vec<_> = records
             .iter()
             .enumerate()
-            .filter(|(_, record)| record.request_id.as_deref() == Some(&claim.request_id))
+            .filter(|(_, record)| record.request_id == claim.request_id)
             .collect();
         match matches.as_slice() {
             [(index, record)] if record.tree == claim.tree => {

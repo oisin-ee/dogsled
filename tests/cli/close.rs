@@ -545,15 +545,10 @@ fn inference_only_preparation_settlement_keeps_its_checkout_held() {
     panes(&rig, "idle", &tree);
     item(&rig, "local");
     let repo = rig.dir.join("home/repo");
-    let hold = |id: Option<&str>| {
-        let mut hold = json!({"repo":repo,"path":tree,"branch":"feat/x","head":""});
-        if let Some(id) = id {
-            hold["request_id"] = json!(id);
-        }
-        hold
-    };
+    let hold =
+        |id: &str| json!({"repo":repo,"path":tree,"branch":"feat/x","head":"","request_id":id});
     // Each request settled without releasing its hold: Herdr refused the start, Herdr refused
-    // the prepared workspace, and a legacy path-only record's checkout launched.
+    // the prepared workspace, and a started request's checkout launched.
     unfinished_launch(&rig, "refused", &tree, "w9:p1");
     rig.put(
         "state/launches/refused.json",
@@ -580,10 +575,10 @@ fn inference_only_preparation_settlement_keeps_its_checkout_held() {
         .push(json!({"pane_id":"w9:p3","workspace_id":"w9","terminal_id":"term_gone"}));
     rig.put("panes.json", &listed);
     let holds = json!([
-        hold(Some("refused")),
-        hold(Some("failed")),
-        hold(None),
-        hold(Some("live"))
+        hold("refused"),
+        hold("failed"),
+        hold("started"),
+        hold("live")
     ]);
     rig.put("state/preparations.json", &holds);
     let out = rig.run(&["close", "w2:p1"]);
@@ -621,7 +616,7 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
     );
     unfinished_launch(&rig, "own", &tree, "w2:p2");
     let before = rig.read("state/launches/own.progress.json");
-    let holds = json!([{"repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x","head":""}]);
+    let holds = json!([{"repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x","head":"","request_id":"own"}]);
     rig.put("state/preparations.json", &holds);
     rig.put_items(&json!([{
         "id":"remote-item","kind":"agent","host":"remote","pane":"w2:p2",

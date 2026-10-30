@@ -1118,14 +1118,15 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
     .unwrap();
     // Without an existing hold, the refusal changes no capacity record.
     let error = node
-        .reserve("expired", now, Some(expired), false)
+        .reserve("expired", now, Some(expired))
         .expect_err("an expired request is refused");
     assert!(error.to_string().contains("older than 30 days"), "{error}");
     assert!(
         !ledger.dir.join("placements.json").exists(),
         "the refused reservation wrote no capacity record"
     );
-    // With an existing hold, the refusal leaves the hold untouched.
+    // A hold is written only after its request authority is published.
+    crate::jobs::record_request_validity(&ledger, "expired", Some(expired)).unwrap();
     let holds = vec![crate::ledger::Reservation {
         id: "expired".into(),
         created_ms: now,
@@ -1133,7 +1134,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
     ledger.write("placements.json", &holds).unwrap();
     let before = std::fs::read(ledger.dir.join("placements.json")).unwrap();
     let error = node
-        .reserve("expired", now, Some(expired), false)
+        .reserve("expired", now, Some(expired))
         .expect_err("an expired request is refused");
     assert!(error.to_string().contains("older than 30 days"), "{error}");
     let after = std::fs::read(ledger.dir.join("placements.json")).unwrap();

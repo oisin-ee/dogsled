@@ -697,7 +697,7 @@ fn print_host_reservation(
         envelope.validate(id)?;
         node.reserve_placement(&envelope, now_ms())?
     } else {
-        node.reserve(id, now_ms(), validity, false)?
+        node.reserve(id, now_ms(), validity)?
     };
     print(true, &out, String::new)?;
     Ok(if out.reserved {
@@ -801,7 +801,7 @@ fn reserve_with_protocol(
         }
         if placement_replay.is_none() {
             let validity = request_created_ms.map(jobs::Validity::new);
-            let out = node.reserve(id, now_ms(), validity, true)?;
+            let out = node.reserve(id, now_ms(), validity)?;
             print(true, &out, String::new)?;
             return Ok(if out.reserved {
                 ExitCode::SUCCESS

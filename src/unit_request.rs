@@ -415,15 +415,25 @@ pub fn abandon(ledger: &Ledger, execution: &ExecutionRef) -> Result<NotStarted> 
 
 /// Invoked by the existing admission service. Never abandons a prepared request based on
 /// elapsed time, and never allocates another request or another ticket for a committed ID.
+/// One record's failure holds that request alone: the admission lane continues.
 pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
     let attempts = ledger.child("admissions");
     for file in records(&attempts)? {
         let Some(id) = file.strip_suffix(".json") else {
             continue;
         };
-        crate::jobs::validate_id(id)?;
+        if let Err(error) = recover_one(ledger, &attempts, &file, id, now) {
+            eprintln!("dogsled unit recovery {id}: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn recover_one(ledger: &Ledger, attempts: &Ledger, file: &str, id: &str, now: u64) -> Result<()> {
+    crate::jobs::validate_id(id)?;
+    {
         attempts.with_lock(id, || {
-            let Some(attempt) = attempts.read::<Attempt>(&file)? else {
+            let Some(attempt) = attempts.read::<Attempt>(file)? else {
                 return Ok(());
             };
             if attempt.unit.as_ref().is_some_and(|u| {
@@ -436,6 +446,7 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
             {
                 let request = serde_json::from_value(attempt.request)?;
                 match work::admission_prohibited(ledger, &request) {
+                    // A refused enqueue, such as unprovable validity, holds this request.
                     Ok(false) => {
                         work::enqueue(ledger, request, false, now)?;
                     }
@@ -446,9 +457,8 @@ pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
                 }
             }
             Ok(())
-        })?;
+        })
     }
-    Ok(())
 }
 
 fn settlement(unit: &Prepared) -> Result<Value> {
