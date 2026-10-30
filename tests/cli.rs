@@ -39,6 +39,8 @@ mod profiles;
 mod remote_diagnostics;
 #[path = "cli/request_validity.rs"]
 mod request_validity;
+#[path = "cli/retention.rs"]
+mod retention;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/review_fixes.rs"]
@@ -69,7 +71,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// The bound every real-process wait in these tests uses. A process that never ends fails
 /// its test on this bound instead of stalling the suite.
 /// This bound catches hangs and must exceed full-suite contention.
-pub(crate) const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
+pub(crate) fn outcome_identity(mut value: Value) -> Value {
+    value.as_object_mut().unwrap().remove("finished_ms");
+    value
+}
+
+const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The state the guard and its fallback share. A finished process has released its pid,
 /// and the host may then hand that pid to another process. A signal sent after that can
@@ -351,6 +358,8 @@ impl Drop for Background {
 #[derive(Debug)]
 pub(crate) struct Fifo {
     path: PathBuf,
+    /// Keep releases buffered even before the peer opens its reader.
+    _hold: fs::File,
 }
 
 impl Fifo {
@@ -364,7 +373,8 @@ impl Fifo {
                 .unwrap()
                 .success()
         );
-        Self { path }
+        let hold = open_fifo(&path);
+        Self { path, _hold: hold }
     }
 
     /// The path of this FIFO.
@@ -656,6 +666,7 @@ case "$*" in
     else
       printf '%s\n' '{"id":"remote-job","host":"8103","pane":"w9:p1","name":"worker"}'
     fi ;;
+  *'host placement-finished'*) printf 'true\n' ;;
   *'host jobs'*) cat "$RIG/jobs.json" ;;
   *'host job '*) cat "$RIG/job.json" ;;
   *'host logs'*) cat "$RIG/logs.json" ;;
@@ -697,7 +708,7 @@ with open(sys.argv[2]) as f:
     reply = json.load(f)
 grant = None
 if reply['reserved']:
-    grant = {'version': 2, 'envelope': {k: v for k, v in request.items() if k != 'expected_grant'},
+    grant = {'version': 3, 'envelope': {k: v for k, v in request.items() if k != 'expected_grant'},
              'reservation': {'id': request['reservation'], 'created_ms': 1},
              'headroom': {'host': request['host']['id'], 'headroom': 1.0, 'eligible': True,
                           'live_agents': 0, 'reasons': []}, 'materialized': True}
@@ -799,6 +810,27 @@ esac
         {
             cmd.args(["--preparation-protocol", "1"]);
         }
+        if args.windows(2).any(|w| w == ["host", "prepare"])
+            && args.contains(&"--request-id")
+            && !args.contains(&"--preparation-envelope-version")
+        {
+            cmd.args([
+                "--preparation-envelope-version",
+                "2",
+                "--request-created-ms",
+                &self.origin_ms.to_string(),
+            ]);
+        }
+        if args.windows(2).any(|w| w == ["host", "launch"])
+            && !args.contains(&"--request-validity")
+            && args
+                .windows(2)
+                .find(|w| w[0] == "--request")
+                .and_then(|w| serde_json::from_str::<Value>(w[1]).ok())
+                .is_some_and(|request| !request["validity"].is_null())
+        {
+            cmd.args(["--request-validity", "1"]);
+        }
         self.rig_env(&mut cmd);
         cmd
     }
@@ -897,7 +929,7 @@ esac
         // Busy fraction that reproduces the old load rule's verdict for this load. The zero
         // tick counters let a Linux `serve --once` derive a busy sample from one real reading.
         let busy = (load / (1.5 * f64::from(cores))).min(1.0);
-        self.put(path, &json!({"placement_replay":2,"sampled_ms":sampled,"probe":{
+        self.put(path, &json!({"placement_replay":3,"request_validity":1,"sampled_ms":sampled,"probe":{
             "host":"local","label":"local","load1":load,"cores":cores,"busy":busy,
             "cpu_ticks":{"busy":0,"total":0},
             "memory":{"used_bytes":1_073_741_824_u64,"total_bytes":8_589_934_592_u64},
@@ -919,6 +951,91 @@ esac
             "state/done.json",
             &json!({terminal: {"pane":pane,"after":seq - 1,"sealed":seq,"marked_ms":1}}),
         );
+    }
+    fn database(&self) -> rusqlite::Connection {
+        fs::create_dir_all(self.dir.join("state")).unwrap();
+        let mut connection = rusqlite::Connection::open(self.dir.join("state/state.db")).unwrap();
+        connection.busy_timeout(Duration::from_secs(30)).unwrap();
+        let initialization = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join("state/state-db.lock"))
+            .unwrap();
+        initialization.lock().unwrap();
+        connection
+            .query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let version: u32 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        if version == 0 {
+            tx.execute_batch("\nCREATE TABLE items (\n    seq INTEGER PRIMARY KEY,\n    record TEXT NOT NULL CHECK (json_valid(record)),\n    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,\n    host TEXT GENERATED ALWAYS AS (json_extract(record, '$.host')) STORED NOT NULL,\n    pane TEXT GENERATED ALWAYS AS (json_extract(record, '$.pane')) STORED NOT NULL,\n    closed_ms INTEGER GENERATED ALWAYS AS (json_extract(record, '$.closed_ms')) STORED\n);\nCREATE INDEX items_open_pane ON items (host, pane) WHERE closed_ms IS NULL;\nCREATE TABLE tickets (\n    seq INTEGER PRIMARY KEY,\n    record TEXT NOT NULL CHECK (json_valid(record)),\n    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,\n    request_id TEXT GENERATED ALWAYS AS (json_extract(record, '$.request.id')) STORED NOT NULL UNIQUE,\n    state TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) STORED NOT NULL\n);\nPRAGMA user_version = 1;\n").unwrap();
+        }
+        tx.commit().unwrap();
+        initialization.unlock().unwrap();
+        connection
+    }
+    fn items(&self) -> Value {
+        self.records("SELECT record FROM items ORDER BY seq")
+    }
+    fn tickets(&self) -> Value {
+        self.records("SELECT record FROM tickets ORDER BY seq")
+    }
+    fn records(&self, sql: &str) -> Value {
+        let path = self.dir.join("state/state.db");
+        if !path.try_exists().unwrap() {
+            return json!([]);
+        }
+        let mut connection =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        connection.busy_timeout(Duration::from_secs(30)).unwrap();
+        let tx = connection.transaction().unwrap();
+        let version: u32 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        if version == 0 {
+            return json!([]);
+        }
+        let mut statement = tx.prepare(sql).unwrap();
+        let records = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap();
+        Value::Array(
+            records
+                .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+                .collect(),
+        )
+    }
+    fn put_items(&self, value: &Value) {
+        self.replace_records(
+            "DELETE FROM items",
+            "INSERT INTO items (record) VALUES (?1)",
+            value,
+        );
+    }
+    fn put_tickets(&self, value: &Value) {
+        self.replace_records(
+            "DELETE FROM tickets",
+            "INSERT INTO tickets (record) VALUES (?1)",
+            value,
+        );
+    }
+    fn replace_records(&self, delete: &str, insert: &str, value: &Value) {
+        let mut connection = self.database();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(delete, []).unwrap();
+        for record in value.as_array().unwrap() {
+            tx.execute(insert, [serde_json::to_string(record).unwrap()])
+                .unwrap();
+        }
+        tx.commit().unwrap();
     }
     fn read(&self, path: &str) -> Value {
         serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap()
@@ -1350,7 +1467,7 @@ fn full_is_exit_one_with_durable_queue() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["queued"], true);
     assert!(value["ticket"].is_string());
-    assert_eq!(rig.read("state/queue.json")[0]["state"], "pending");
+    assert_eq!(rig.tickets()[0]["state"], "pending");
     rig.snapshot("state/host.json", 0, 0.0, 2);
     assert_eq!(rig.json(&["place"]).0, 1);
 }
@@ -1384,10 +1501,7 @@ fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
         &json!({"result":{"agents":[{"pane_id":"w1:p8"}]}}),
     );
     assert_eq!(rig.json(&["place"]).0, 1);
-    let queued = rig.read("state/queue.json")[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let queued = rig.tickets()[0]["id"].as_str().unwrap().to_owned();
     assert!(rig.run(&["cancel", &queued]).status.success());
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(
@@ -1485,11 +1599,15 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         .split_once("' --budget-ms")
         .unwrap()
         .0;
+    // `shell::quote` writes an embedded `'` as `'\''`, for example in a host name.
     assert_eq!(
         serde_json::from_str::<Value>(&replay.replace("'\\''", "'")).unwrap(),
         expected_replay
     );
-    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
+    let created = grant["envelope"]["request"]["validity"]["created_ms"]
+        .as_u64()
+        .unwrap();
+    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-envelope-version 2 --request-created-ms {created} --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
     let releases: Vec<_> = ssh
         .lines()
         .filter(|line| line.contains("host prepared "))

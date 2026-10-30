@@ -16,6 +16,9 @@ pub struct Status {
     pub sweep: Option<crate::sweep::Report>,
     #[serde(default)]
     pub stopped_activity: std::collections::BTreeMap<String, String>,
+    /// Resource ownership is independent of task state and completion.
+    #[serde(default)]
+    pub holds: Vec<crate::holds::Hold>,
 }
 
 pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
@@ -29,7 +32,29 @@ pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
         orphans: crate::sweep::list(fleet.ledger)?,
         sweep: crate::sweep::latest(fleet.ledger)?,
         stopped_activity: std::collections::BTreeMap::new(),
+        holds: Vec::new(),
     };
+    status.holds = status
+        .hosts
+        .iter()
+        .flat_map(|host| host.holds.clone())
+        .collect();
+    status.holds.extend(crate::holds::owner(&status));
+    // Prefer the owner-side projection when the execution host reports the same branch.
+    status.holds.retain(|hold| {
+        hold.code != "retained_branch"
+            || !status.items.iter().any(|item| {
+                hold.request_id.as_deref() == Some(item.id.as_str())
+                    && (item.dropped_ms.is_some()
+                        || item.branch.as_ref().is_some_and(|branch| branch.landed))
+            })
+    });
+    status.holds.reverse();
+    let mut resources = std::collections::BTreeSet::new();
+    status.holds.retain(|hold| {
+        resources.insert((hold.host.clone(), hold.code.clone(), hold.resource.clone()))
+    });
+    status.holds.reverse();
     status.stopped_activity =
         crate::watchdog::stopped_activity(fleet.ledger, &status, crate::ledger::now_ms())?;
     Ok(status)
@@ -57,6 +82,14 @@ struct ReservationAttempt {
     host: String,
 }
 
+/// Admission expiry has already proved completion and released every dependant.
+pub(crate) fn expire_selection(ledger: &crate::ledger::Ledger, id: &str) -> Result<()> {
+    let selections = ledger.child("placement-attempts");
+    selections.with_lock(id, || {
+        crate::jobs::remove(&selections.dir.join(format!("{id}.json")))
+    })
+}
+
 /// A placement for a job request. The request's own creation time rides with the
 /// reservation, so the host checks the age before it holds capacity.
 pub fn place_with(
@@ -70,15 +103,36 @@ pub fn place_with(
     crate::jobs::validate_id(id)?;
     let selections = fleet.ledger.child("placement-attempts");
     selections.with_lock(id, || {
-        if let Some(request) = placement {
+        if let Some(request) = placement
+            && matches!(request.action, crate::work::Action::Place)
+        {
             return place_recorded(fleet, request, now);
         }
-        place_locked(fleet, host, id, now, &selections, validity)
+        let nonjob = placement
+            .is_some_and(|request| !matches!(request.action, crate::work::Action::Job { .. }));
+        crate::jobs::check_validity(fleet.ledger, validity.as_ref())?;
+        place_locked(fleet, host, id, now, &selections, validity, nonjob)
     })
 }
 
 /// The caller holds admission before entering selection. Only a correlated definitive
 /// refusal permits another candidate; an ambiguous reply retains the pending envelope.
+fn reserve_recorded(
+    fleet: &Fleet,
+    request: &crate::work::Request,
+    transport: &crate::node::PlacementReplay,
+    now: u64,
+) -> Result<crate::node::ReserveOutcome> {
+    fleet.reserve(
+        &transport.envelope.host,
+        &request.id,
+        now,
+        None,
+        Some(transport),
+        true,
+    )
+}
+
 fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Result<Placement> {
     use crate::work::{Attempt, PlacementPhase};
     let attempts = fleet.ledger.child("admissions");
@@ -145,7 +199,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
             }
         };
         let envelope = &transport.envelope;
-        let outcome = fleet.reserve(&envelope.host, &request.id, now, None, Some(&transport))?;
+        let outcome = reserve_recorded(fleet, request, &transport, now)?;
         let reply = outcome.placement.ok_or_else(|| {
             crate::unit_transport::conflict(
                 "peer lacks placement replay evidence; no preparation authorized",
@@ -185,6 +239,7 @@ fn place_locked(
     now: u64,
     selections: &crate::ledger::Ledger,
     validity: Option<crate::jobs::Validity>,
+    nonjob: bool,
 ) -> Result<Placement> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
     let file = format!("{id}.json");
@@ -213,7 +268,9 @@ fn place_locked(
     // refusal comes before any reservation, so no capacity is held for it.
     if validity.is_some() {
         let speaks = |r: &HostReport| {
-            r.host.is_local() || r.job_validity == Some(crate::jobs::VALIDITY_PROTOCOL_VERSION)
+            nonjob
+                || r.host.is_local()
+                || r.job_validity == Some(crate::jobs::VALIDITY_PROTOCOL_VERSION)
         };
         // A request pinned to a peer without the protocol is refused there and then. It
         // never moves to another host.
@@ -258,7 +315,7 @@ fn place_locked(
                 host: host.id.clone(),
             }),
         )?;
-        let outcome = fleet.reserve(host, id, now, validity, None)?;
+        let outcome = fleet.reserve(host, id, now, validity, None, nonjob)?;
         if outcome.reserved {
             let prepared = Prepared::default();
             return Ok(Placement::Placed {
@@ -546,7 +603,7 @@ fn item_lines(status: &Status, lines: &mut Vec<String>) {
 }
 
 pub fn render(status: &Status) -> String {
-    let mut lines = Vec::new();
+    let mut lines = crate::holds::render(&status.holds);
     if let Some(sweep) = &status.sweep {
         lines.push(format!(
             "Last cleanup: {} ms (started {} ms)",

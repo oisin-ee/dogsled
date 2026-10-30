@@ -16,13 +16,10 @@ fn worker(rig: &Rig, tree: &Path, state: &str) {
             "pane_id":"w2:p1","workspace_id":"w2","agent":"pi","agent_status":state,"cwd":tree
         }]}}),
     );
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
-            "name":"worker","created_ms":1,"closed_ms":null
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"i1","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
+        "name":"worker","created_ms":1,"closed_ms":null
+    }]));
 }
 
 fn done(rig: &Rig) -> Output {
@@ -30,6 +27,22 @@ fn done(rig: &Rig) -> Output {
         .env("HERDR_PANE_ID", "w2:p1")
         .output()
         .unwrap()
+}
+
+#[test]
+fn p3_dirty_done_still_refuses() {
+    let (rig, tree) = close_rig("p3-dirty-done");
+    worker(&rig, &tree, "working");
+    fs::write(tree.join("draft"), b"unfinished\n").unwrap();
+    let before = git(&tree, &["status", "--porcelain"]);
+    let out = done(&rig);
+    assert!(!out.status.success());
+    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(!rig.dir.join("state/preservation-operations").exists());
+    assert_eq!(git(&tree, &["for-each-ref", "refs/dogsled/recovery/"]), "");
+    assert_eq!(before, git(&tree, &["status", "--porcelain"]));
+    assert!(rig.items()[0]["reply"].is_null());
+    assert!(tree.exists());
 }
 
 #[test]
@@ -106,7 +119,7 @@ fn done_hands_off_a_held_detached_checkout_without_inventing_a_branch() {
         branches,
         "the handoff must not invent or delete a branch for a detached checkout"
     );
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
 }
 
 /// The teardown ran after the handoff's loss check and left a commit that no ref holds. The
@@ -154,7 +167,7 @@ fn a_teardown_commit_in_the_handoff_keeps_the_checkout_its_lock_panes_and_item()
     );
     let repo = rig.dir.join("home/repo");
     assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("locked agent:worktree"));
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
 #[test]
@@ -214,12 +227,12 @@ fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
 fn unprovable_disappeared_child_does_not_block_the_next_handoff() {
     let (rig, tree) = close_rig("done-unprovable-first");
     worker(&rig, &tree, "idle");
-    let mut items = rig.read("state/items.json");
+    let mut items = rig.items();
     items.as_array_mut().unwrap().push(json!({
         "id":"missing","kind":"agent","host":"local","pane":"w9:p1",
         "owner_pane":"w1:p1","name":"disappeared","created_ms":1,"closed_ms":null
     }));
-    rig.put("state/items.json", &items);
+    rig.put_items(&items);
     // Herdr lost the child agent, but its non-repository shell pane remains.
     let mut panes = rig.read("panes.json");
     panes["result"]["panes"]
@@ -260,7 +273,7 @@ fn unprovable_disappeared_child_does_not_block_the_next_handoff() {
         "{journal}"
     );
     assert!(!tree.exists());
-    let items = rig.read("state/items.json");
+    let items = rig.items();
     assert!(items[0]["closed_ms"].is_u64(), "{items}");
     assert!(items[1]["closed_ms"].is_null(), "{items}");
     let marks = rig.read("state/done.json");
@@ -277,7 +290,7 @@ fn unprovable_disappeared_child_does_not_block_the_next_handoff() {
 fn done_refuses_a_queued_ticket_before_writing() {
     let (rig, tree) = close_rig("done-queued");
     worker(&rig, &tree, "working");
-    rig.put("state/queue.json", &json!([{
+    rig.put_tickets(&json!([{
         "id":"q","state":"pending","created_ms":1,"waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null,
         "request":{"id":"q","action":{"type":"place"},"host":null,"branch":null,"base":null,"cwd":tree,"repository":null,"workspace":null,"workspace_name":null,"owner":"w2:p1"}
     }]));
@@ -433,6 +446,19 @@ fn a_recorded_final_handoff_publishes_done_and_keeps_the_raw_terminal_state() {
         }}),
     );
     rig.snapshot("state/host.json", now(), 0.0, 8);
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let published = published_lifecycle(&rig, "w2:p1");
+    assert_eq!(published["state"], "idle", "{published}");
+    assert_eq!(published["lifecycle"], "done", "{published}");
+    assert_eq!(published["handoff"], "recorded", "{published}");
+
+    // Closing an ordinary child must not turn its saved handoff into an expired unit.
+    assert!(rig.items()[0]["closed_ms"].is_number());
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),

@@ -53,7 +53,7 @@ fn cli_preserves_known_causes_and_never_peer_text() {
         assert!(error["error"].as_str().unwrap().contains(cause), "{error}");
         assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
         assert!(!error.to_string().contains("TASK_SECRET"));
-        assert!(!rig.dir.join("state/queue.json").exists());
+        assert_eq!(rig.tickets(), json!([]));
         let admission = fs::read_dir(rig.dir.join("state/admissions"))
             .unwrap()
             .flatten()
@@ -551,7 +551,7 @@ setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; chmod 555
         assert!(!error.to_string().contains(private), "{error}");
     }
     assert!(!rig.log("ssh.log").contains("host launch"));
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
 }
 
 #[test]
@@ -579,7 +579,7 @@ fn malformed_unknown_and_secret_envelopes_never_import_peer_text() {
         assert!(!error.to_string().contains("SECRET_SENTINEL"),"{error}");
         assert!(!error.to_string().contains("TASK_SECRET"),"{error}");
         assert!(!error.to_string().contains("\\u001b"),"{error}");
-        assert!(!rig.dir.join("state/queue.json").exists());
+        assert_eq!(rig.tickets(), json!([]));
     }
 }
 
@@ -610,7 +610,7 @@ fn parse_errors_do_not_format_launch_payloads_or_echo_remote_output() {
     assert!(error["diagnostic"]["request_id"].is_string());
     assert!(!error.to_string().contains("TASK_SECRET"));
     assert!(!error.to_string().contains("PAYLOAD_SECRET"));
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
 }
 
 #[test]
@@ -638,7 +638,7 @@ fn remote_deadline_keeps_operation_and_correlation_without_launch_payload() {
     assert!(error["diagnostic"]["request_id"].is_string());
     assert_eq!(error["diagnostic"]["status"], 2);
     assert!(!error.to_string().contains("TASK_SECRET"));
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
 }
 
 #[test]
@@ -674,7 +674,7 @@ fn remote_checkout_causes_and_legacy_clone_code_keep_the_diagnostic() {
         assert!(error["diagnostic"]["request_id"].is_string());
         assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
         assert!(!rig.log("ssh.log").contains("host prepare"));
-        assert!(!rig.dir.join("state/queue.json").exists());
+        assert_eq!(rig.tickets(), json!([]));
     }
 }
 
@@ -789,6 +789,12 @@ fn checkout_identity_and_clone_failures_never_show_credential_origins() {
         let (code, error) = rig.json(&[
             "host",
             "checkout",
+            "--request-validity",
+            "1",
+            "--request-id",
+            "checkout-diagnostic",
+            "--request-created-ms",
+            &rig.origin_ms.to_string(),
             "--path",
             "repo",
             "--origin",
@@ -1059,7 +1065,7 @@ fn advance(rig: &Rig) -> Value {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    rig.read("state/queue.json")[0].clone()
+    rig.tickets()[0].clone()
 }
 
 #[test]
@@ -1095,7 +1101,7 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !rig.dir.join("state/queue.json").exists() {
+    while rig.tickets().as_array().unwrap().is_empty() {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();

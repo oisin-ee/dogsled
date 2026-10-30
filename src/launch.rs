@@ -24,6 +24,10 @@ fn with_pane<T>(ledger: &Ledger, pane: &str, f: impl FnOnce() -> Result<T>) -> R
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Progress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closed_ms: Option<u64>,
     request: Launch,
     pane: Option<String>,
     terminal: Option<String>,
@@ -49,10 +53,24 @@ struct Progress {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PreflightRefusal {
     LineBudget { bytes: usize },
+    Validity { detail: String },
 }
 
 impl Progress {
     fn preflight_failure(&self) -> Result<Option<&str>> {
+        if let Some(PreflightRefusal::Validity { detail }) = &self.preflight_refusal {
+            if self.attempted
+                || self.confirmed
+                || self.terminal_receipt.is_some()
+                || self.stopped.is_some()
+                || self.error.as_ref() != Some(detail)
+            {
+                return Err(crate::worktree::refuse(
+                    "inconsistent validity refusal provenance",
+                ));
+            }
+            return Ok(Some(detail));
+        }
         let Some(PreflightRefusal::LineBudget { bytes }) = self.preflight_refusal else {
             return Ok(None);
         };
@@ -77,6 +95,746 @@ impl Progress {
         }
         Ok(self.error.as_deref())
     }
+}
+
+/// R1 asks the launch owner, never startup confirmation, for completion evidence.
+pub(crate) fn retention_completion(ledger: &Ledger, id: &str) -> Result<Option<u64>> {
+    crate::jobs::validate_id(id)?;
+    let Some(progress) = ledger
+        .child("launches")
+        .read::<Progress>(&format!("{id}.progress.json"))?
+    else {
+        return Ok(None);
+    };
+    if progress.request.id != id {
+        return Err(crate::worktree::refuse(
+            "launch completion identity changed",
+        ));
+    }
+    if let Some(stopped) = &progress.stopped
+        && (stopped.launch != progress.request
+            || !progress.confirmed
+            || !progress.attempted
+            || progress.terminal_receipt.is_some())
+    {
+        return Err(crate::worktree::refuse(
+            "stopped completion provenance changed",
+        ));
+    }
+    if let Some(receipt) = &progress.terminal_receipt {
+        let seed = progress
+            .request
+            .unit
+            .as_ref()
+            .ok_or_else(|| crate::worktree::refuse("terminal seed missing"))?;
+        crate::unit_transport::validate_seed(seed, id, &progress.request.owner)?;
+        if !progress.confirmed
+            || !progress.attempted
+            || receipt.ack.execution != seed.execution
+            || receipt.ack.unit_ref != seed.binding.contract
+            || receipt.ack.digest != seed.exported.digest
+        {
+            return Err(crate::worktree::refuse(
+                "terminal completion provenance changed",
+            ));
+        }
+    }
+    let terminal = progress.preflight_failure()?.is_some()
+        || progress.stopped.is_some()
+        || progress.terminal_receipt.is_some()
+        || (progress.confirmed && progress.closed_ms.is_some())
+        || refused_before_start(ledger, &progress.request)?;
+    crate::jobs::completion_time(
+        ledger,
+        progress.finished_ms,
+        progress.request.validity.map(|v| v.created_ms),
+        terminal,
+    )
+}
+
+pub(crate) fn execution_closed(ledger: &Ledger, item: &crate::items::Item) -> Result<()> {
+    let receipts = ledger.child("launches");
+    let Some(closed) = item.closed_ms.filter(|_| item.resource_closed_ms.is_none()) else {
+        return Ok(());
+    };
+    receipts.with_lock(&item.id, || {
+        let file = format!("{}.progress.json", item.id);
+        let Some(mut progress) = receipts.read::<Progress>(&file)? else {
+            return Ok(());
+        };
+        if progress.request.id != item.id
+            || progress.request.host != item.host
+            || progress.pane.as_ref() != Some(&item.pane)
+            || !progress.confirmed
+        {
+            return Ok(());
+        }
+        if progress.closed_ms.is_some_and(|saved| saved != closed) {
+            return Err(crate::worktree::refuse(
+                "closed execution provenance changed",
+            ));
+        }
+        if progress.closed_ms.is_none() {
+            progress.closed_ms = Some(closed);
+            if progress.finished_ms.is_none() {
+                progress.finished_ms = Some(closed);
+            }
+            receipts.write(&file, &progress)?;
+        }
+        Ok(())
+    })
+}
+
+/// Version two releases ordinary execution references without inventing a task binding.
+/// Version-one seeded certificates retain their original contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrdinaryRelease {
+    pub version: u32,
+    pub origin_host: String,
+    pub execution: crate::unit_transport::ExecutionRef,
+    pub launch: Launch,
+    pub binding: OrdinaryBinding,
+    pub terminal_evidence: OrdinaryTerminal,
+    pub custody_revision: u64,
+    pub released_references: std::collections::BTreeSet<ReleasedReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OrdinaryBinding {
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OrdinaryTerminal {
+    Job {
+        job: Box<crate::jobs::Job>,
+    },
+    Agent {
+        pane: String,
+        terminal: String,
+        closed_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrdinaryReleaseAck {
+    pub certificate: OrdinaryRelease,
+    pub accepted_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinaryReleaseIntent {
+    pub certificate: OrdinaryRelease,
+    pub acknowledgement: Option<OrdinaryReleaseAck>,
+    /// Saved at the origin before reference release, independently of owner reads.
+    pub result: String,
+}
+
+impl OrdinaryRelease {
+    pub fn validate(&self) -> Result<()> {
+        use ReleasedReference::{Custody, Execution, Recovery};
+        crate::jobs::validate_id(&self.launch.id)?;
+        if self.version != 2
+            || self.launch.unit.is_some()
+            || self.origin_host.is_empty()
+            || self.launch.owner_host.as_deref() != Some(self.origin_host.as_str())
+            || self.execution.executor != "dogsled"
+            || self.execution.request_id != self.launch.id
+            || self.execution.owner_id != self.launch.owner
+            || self.released_references != [Execution, Recovery, Custody].into_iter().collect()
+        {
+            return Err(crate::unit_transport::conflict(
+                "ordinary reference release identity mismatch",
+            ));
+        }
+        match (&self.launch.action, &self.terminal_evidence) {
+            (
+                Action::Job {
+                    cmd,
+                    timeout_ms,
+                    idle_timeout_ms,
+                    ..
+                },
+                OrdinaryTerminal::Job { job },
+            ) if crate::jobs::terminal(job)
+                && job.id == self.launch.id
+                && job.host == self.launch.host
+                && job.cwd == self.launch.cwd
+                && job.owner == self.launch.owner
+                && &job.cmd == cmd
+                && &job.timeout_ms == timeout_ms
+                && &job.idle_timeout_ms == idle_timeout_ms =>
+            {
+                Ok(())
+            }
+            (Action::Agent { .. }, OrdinaryTerminal::Agent { pane, terminal, .. })
+                if !pane.is_empty() && !terminal.is_empty() =>
+            {
+                Ok(())
+            }
+            _ => Err(crate::unit_transport::conflict(
+                "ordinary terminal evidence mismatch",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinaryEvidence {
+    pub launch: Launch,
+    pub terminal_evidence: OrdinaryTerminal,
+}
+
+/// Retained immutable job references preserve precise expiry without permanent tombstones.
+pub(crate) fn retained_job(ledger: &Ledger, id: &str) -> Result<Option<crate::jobs::Job>> {
+    let launches = ledger.child("launches");
+    if let Some(release) = launches.read::<OrdinaryReleaseAck>(&format!("{id}.release.json"))? {
+        release.certificate.validate()?;
+        if release.certificate.launch.id != id {
+            return Err(crate::unit_transport::conflict(
+                "retained job identity changed",
+            ));
+        }
+        if let OrdinaryTerminal::Job { job } = release.certificate.terminal_evidence {
+            return Ok(Some(*job));
+        }
+    }
+    if let Some(receipt) = launches.read::<Value>(&format!("{id}.json"))?
+        && let Some(value) = receipt.get("terminal_job")
+    {
+        let job: crate::jobs::Job = serde_json::from_value(value.clone())?;
+        if job.id == id
+            && receipt["id"] == job.id
+            && receipt["host"] == job.host
+            && crate::jobs::terminal(&job)
+        {
+            return Ok(Some(job));
+        }
+    }
+    if let Some(attempt) = ledger
+        .child("admissions")
+        .read::<work::Attempt>(&format!("{id}.json"))?
+        && let Some(release) = attempt.ordinary_release
+    {
+        release.certificate.validate()?;
+        if release.certificate.launch.id != id {
+            return Err(crate::unit_transport::conflict(
+                "retained job identity changed",
+            ));
+        }
+        if let OrdinaryTerminal::Job { job } = release.certificate.terminal_evidence {
+            return Ok(Some(*job));
+        }
+    }
+    Ok(None)
+}
+
+/// The request lock owns terminal evidence and release acceptance.
+fn ordinary_evidence_locked(ledger: &Ledger, id: &str) -> Result<OrdinaryEvidence> {
+    let launches = ledger.child("launches");
+    if let Some(mut progress) = launches.read::<Progress>(&format!("{id}.progress.json"))? {
+        if progress.closed_ms.is_none()
+            && progress.request.unit.is_none()
+            && let Some(mark) = crate::done::list(ledger)?.into_iter().find(|mark| {
+                mark.item.as_deref() == Some(id)
+                    && progress.pane.as_ref() == Some(&mark.pane)
+                    && mark.closed_ms.is_some()
+                    && mark.sealed.is_some()
+                    && mark.native_done
+                    && mark.reply.is_some()
+            })
+        {
+            progress.closed_ms = mark.closed_ms;
+            progress.finished_ms = progress.finished_ms.or(mark.closed_ms);
+            launches.write(&format!("{id}.progress.json"), &progress)?;
+        }
+        if progress.request.unit.is_some() || retention_completion(ledger, id)?.is_none() {
+            return Err(crate::unit_transport::conflict(
+                "ordinary execution is not terminal",
+            ));
+        }
+        let closed_ms = progress
+            .closed_ms
+            .ok_or_else(|| crate::unit_transport::conflict("ordinary agent closure missing"))?;
+        return Ok(OrdinaryEvidence {
+            launch: progress.request,
+            terminal_evidence: OrdinaryTerminal::Agent {
+                pane: progress
+                    .pane
+                    .ok_or_else(|| crate::unit_transport::conflict("ordinary pane missing"))?,
+                terminal: progress
+                    .terminal
+                    .ok_or_else(|| crate::unit_transport::conflict("ordinary terminal missing"))?,
+                closed_ms,
+            },
+        });
+    }
+    let receipt = launches
+        .read::<Value>(&format!("{id}.json"))?
+        .ok_or_else(|| crate::unit_transport::conflict("ordinary launch receipt missing"))?;
+    let launch: Launch = serde_json::from_value(receipt["launch"].clone())?;
+    let mut job = match crate::jobs::record(ledger, id)? {
+        Some(job) => job,
+        None => serde_json::from_value(receipt["terminal_job"].clone())?,
+    };
+    if !crate::jobs::terminal(&job) || job.id != id || receipt["pane"] != job.pane {
+        return Err(crate::unit_transport::conflict(
+            "ordinary job terminal proof missing",
+        ));
+    }
+    // Output expiry is not an execution transition. It must not change release identity.
+    job.output_expired = false;
+    Ok(OrdinaryEvidence {
+        launch,
+        terminal_evidence: OrdinaryTerminal::Job { job: Box::new(job) },
+    })
+}
+
+pub fn ordinary_evidence(ledger: &Ledger, id: &str) -> Result<OrdinaryEvidence> {
+    crate::jobs::validate_id(id)?;
+    ledger
+        .child("launches")
+        .with_lock(id, || ordinary_evidence_locked(ledger, id))
+}
+
+pub fn release_ordinary(
+    ledger: &Ledger,
+    certificate: &OrdinaryRelease,
+) -> Result<OrdinaryReleaseAck> {
+    certificate.validate()?;
+    let id = &certificate.launch.id;
+    let launches = ledger.child("launches");
+    launches.with_lock(id, || {
+        let file = format!("{id}.release.json");
+        if let Some(saved) = launches.read::<OrdinaryReleaseAck>(&file)? {
+            return if saved.certificate == *certificate {
+                Ok(saved)
+            } else {
+                Err(crate::unit_transport::conflict(
+                    "ordinary reference release changed",
+                ))
+            };
+        }
+        let evidence = ordinary_evidence_locked(ledger, id)?;
+        if evidence.launch != certificate.launch
+            || evidence.terminal_evidence != certificate.terminal_evidence
+        {
+            return Err(crate::unit_transport::conflict(
+                "ordinary release does not match host evidence",
+            ));
+        }
+        let ack = OrdinaryReleaseAck {
+            certificate: certificate.clone(),
+            accepted_ms: crate::jobs::advance_clock(ledger, crate::ledger::now_ms())?,
+        };
+        launches.write(&file, &ack)?;
+        Ok(ack)
+    })
+}
+
+fn ordinary_certificate(
+    launch: &Launch,
+    terminal_evidence: OrdinaryTerminal,
+    custody_revision: u64,
+) -> Result<OrdinaryRelease> {
+    let certificate = OrdinaryRelease {
+        version: 2,
+        origin_host: crate::inbox::hostname(),
+        execution: crate::unit_transport::ExecutionRef {
+            executor: "dogsled".into(),
+            owner_id: launch.owner.clone(),
+            request_id: launch.id.clone(),
+        },
+        launch: launch.clone(),
+        binding: OrdinaryBinding::None,
+        terminal_evidence,
+        custody_revision,
+        released_references: [
+            ReleasedReference::Execution,
+            ReleasedReference::Recovery,
+            ReleasedReference::Custody,
+        ]
+        .into_iter()
+        .collect(),
+    };
+    certificate.validate()?;
+    Ok(certificate)
+}
+
+/// Capture intent and result at the origin before the RPC. Retry the identical
+/// certificate after a lost reply; no custody/items lock crosses transport.
+pub(crate) fn release_owned(fleet: &crate::hosts::Fleet) -> Result<()> {
+    for job in crate::jobs::list(fleet.ledger)?
+        .iter()
+        .filter(|job| crate::jobs::terminal(job))
+    {
+        crate::items::job_finished(fleet.ledger, job)?;
+    }
+    for item in crate::items::list(fleet.ledger)? {
+        if item.closed_ms.is_none()
+            || item.resource_closed_ms.is_some()
+            || item.recovery.is_some()
+            || (item.dropped_ms.is_none()
+                && item.branch.as_ref().is_some_and(|branch| !branch.landed))
+        {
+            continue;
+        }
+        let result = release_owned_item(fleet, &item);
+        if let Err(error) = result {
+            eprintln!(
+                "dogsled ordinary reference release {}: awaiting origin reference release: {error}",
+                item.id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) -> Result<()> {
+    let attempts = fleet.ledger.child("admissions");
+    let file = format!("{}.json", item.id);
+    let Some(attempt) = attempts.read::<work::Attempt>(&file)? else {
+        return Ok(());
+    };
+    if attempt.unit.is_some() || attempt.placement.is_some() {
+        return Ok(());
+    }
+    let Some(launch) = attempt.launch else {
+        return Ok(());
+    };
+    let host = fleet.find(&item.host)?;
+    let intent = if let Some(intent) = attempt.ordinary_release {
+        intent
+    } else {
+        if item.kind != "job" && (!item.native_done || item.reply.is_none()) {
+            return Ok(());
+        }
+        let evidence = fleet.ordinary_evidence(host, &item.id)?;
+        if evidence.launch != launch {
+            return Err(crate::unit_transport::conflict(
+                "origin execution evidence changed",
+            ));
+        }
+        let retained = if item.kind == "job" {
+            crate::watchdog::item_tail(fleet, item, host)?
+        } else {
+            item.reply
+                .as_ref()
+                .map_or(String::new(), |reply| reply.text.clone())
+        };
+        attempts.with_lock(&item.id, || {
+            crate::custody::locked(fleet.ledger, &item.id, |custody| {
+                let mut attempt = attempts.read::<work::Attempt>(&file)?.ok_or_else(|| {
+                    crate::unit_transport::conflict("origin admission disappeared")
+                })?;
+                if attempt.launch.as_ref() != Some(&launch) {
+                    return Err(crate::unit_transport::conflict("origin launch changed"));
+                }
+                if let Some(saved) = attempt.ordinary_release {
+                    return Ok(saved);
+                }
+                let certificate = ordinary_certificate(
+                    &launch,
+                    evidence.terminal_evidence,
+                    custody.map_or(0, |custody| custody.revision),
+                )?;
+                let intent = OrdinaryReleaseIntent {
+                    certificate,
+                    acknowledgement: None,
+                    result: retained,
+                };
+                attempt.ordinary_release = Some(intent.clone());
+                attempts.write(&file, &attempt)?;
+                Ok(intent)
+            })
+        })?
+    };
+    if intent.acknowledgement.is_some() {
+        return Ok(());
+    }
+    let acknowledgement = fleet.release_ordinary(host, &intent.certificate)?;
+    attempts.with_lock(&item.id, || {
+        let mut attempt = attempts
+            .read::<work::Attempt>(&file)?
+            .ok_or_else(|| crate::unit_transport::conflict("origin admission disappeared"))?;
+        let saved = attempt
+            .ordinary_release
+            .as_mut()
+            .ok_or_else(|| crate::unit_transport::conflict("origin release intent disappeared"))?;
+        if saved.certificate != intent.certificate
+            || acknowledgement.certificate != intent.certificate
+        {
+            return Err(crate::unit_transport::conflict(
+                "ordinary release acknowledgement changed",
+            ));
+        }
+        saved.acknowledgement = Some(acknowledgement);
+        if attempt.finished_ms.is_none() {
+            attempt.finished_ms = item.closed_ms;
+        }
+        attempts.write(&file, &attempt)
+    })
+}
+
+/// Retained launch identity remains an ownership fence until explicit release.
+pub(crate) fn retained_execution(ledger: &Ledger, id: &str) -> Result<bool> {
+    let Some(progress) = ledger
+        .child("launches")
+        .read::<Progress>(&format!("{id}.progress.json"))?
+    else {
+        return Ok(false);
+    };
+    Ok((progress.origin_release.is_none()
+        && ledger
+            .child("launches")
+            .read::<OrdinaryReleaseAck>(&format!("{id}.release.json"))?
+            .is_none())
+        || retention_completion(ledger, id)?.is_none())
+}
+
+fn ordinary_retention_completion(
+    ledger: &Ledger,
+    id: &str,
+    release: &OrdinaryReleaseAck,
+    now: u64,
+) -> Result<Option<u64>> {
+    let launches = ledger.child("launches");
+    if release.accepted_ms > now {
+        return Ok(None);
+    }
+    if launches.dir.join(format!("{id}.json")).exists()
+        || launches.dir.join(format!("{id}.progress.json")).exists()
+    {
+        let evidence = ordinary_evidence_locked(ledger, id)?;
+        if evidence.launch != release.certificate.launch
+            || evidence.terminal_evidence != release.certificate.terminal_evidence
+        {
+            return Err(crate::unit_transport::conflict(
+                "ordinary retention evidence changed",
+            ));
+        }
+    }
+    let ended = match &release.certificate.terminal_evidence {
+        OrdinaryTerminal::Job { job } => job.ended_ms,
+        OrdinaryTerminal::Agent { closed_ms, .. } => Some(*closed_ms),
+    };
+    crate::jobs::completion_time(
+        ledger,
+        ended,
+        release.certificate.launch.validity.map(|v| v.created_ms),
+        true,
+    )
+}
+
+fn seeded_retention_completion(
+    ledger: &Ledger,
+    id: &str,
+    progress: &Progress,
+    now: u64,
+) -> Result<Option<u64>> {
+    let launches = ledger.child("launches");
+    let Some(release) = &progress.origin_release else {
+        return Ok(None);
+    };
+    release.certificate.validate()?;
+    if release.certificate.launch != progress.request || release.accepted_ms > now {
+        return Ok(None);
+    }
+    let evidence = if let Some(receipt) = &progress.terminal_receipt {
+        crate::unit_reply::HostEvidence::Returned(Box::new(receipt.clone()))
+    } else if let Some(stopped) = &progress.stopped {
+        crate::unit_reply::HostEvidence::Stopped(Box::new(stopped.clone()))
+    } else if let Some(receipt) = launches.read::<Value>(&format!("{id}.json"))? {
+        let Some(failed) = receipt["failed"].as_str() else {
+            return Ok(None);
+        };
+        crate::unit_reply::HostEvidence::Refused(Box::new(crate::unit_reply::Refusal {
+            kind: crate::unit_reply::RefusalKind::Refused,
+            launch: progress.request.clone(),
+            failed: failed.into(),
+        }))
+    } else {
+        // The accepted certificate remains authoritative after payload deletion.
+        release.certificate.terminal_evidence.clone()
+    };
+    if evidence != release.certificate.terminal_evidence {
+        return Ok(None);
+    }
+    retention_completion(ledger, id)
+}
+
+/// The preparation gate is held outside this request lock, matching dispatch.
+/// Payloads go first; durable seed and progress go last. Locks are never unlinked.
+pub(crate) fn expire_request(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
+    let launches = ledger.child("launches");
+    ledger.with_lock("custody", || {
+        ledger.with_lock("done", || {
+            launches.with_lock(id, || {
+                let progress = launches.read::<Progress>(&format!("{id}.progress.json"))?;
+                let ordinary =
+                    launches.read::<OrdinaryReleaseAck>(&format!("{id}.release.json"))?;
+                let finished = if let Some(release) = &ordinary {
+                    release.certificate.validate()?;
+                    if progress.is_none() && !launches.dir.join(format!("{id}.json")).exists() {
+                        if now.saturating_sub(release.accepted_ms) > crate::jobs::RECORD_KEEP_MS
+                            && work::references_released(ledger, id)?
+                        {
+                            crate::jobs::remove(&launches.dir.join(format!("{id}.release.json")))?;
+                        }
+                        return Ok(true);
+                    }
+                    ordinary_retention_completion(ledger, id, release, now)?
+                } else if let Some(progress) = &progress {
+                    seeded_retention_completion(ledger, id, progress, now)?
+                } else {
+                    return Ok(!launches.dir.join(format!("{id}.json")).exists());
+                };
+                if finished.is_none_or(|finished| {
+                    now.saturating_sub(finished) <= crate::jobs::RECORD_KEEP_MS
+                }) || !work::references_released(ledger, id)?
+                {
+                    return Ok(false);
+                }
+                if let Some(progress) = &progress {
+                    let (panes, terminals) =
+                        crate::cleanup::pane_snapshot(&crate::shell::System::default())?;
+                    if let Some(pane) = &progress.pane
+                        && panes.iter().any(|current| current.pane_id == *pane)
+                        && (progress.terminal.is_none()
+                            || terminals.get(pane) == progress.terminal.as_ref())
+                    {
+                        return Ok(false);
+                    }
+                }
+                for item in crate::items::list(ledger)?
+                    .iter()
+                    .filter(|item| item.id == id)
+                {
+                    if !crate::items::retention_ready(ledger, item, now)? {
+                        return Ok(false);
+                    }
+                }
+                if crate::done::list(ledger)?
+                    .iter()
+                    .any(|mark| mark.item.as_deref() == Some(id))
+                {
+                    return Ok(false);
+                }
+                if !work::references_released(ledger, id)? {
+                    return Ok(false);
+                }
+                remove_family(&launches, id)
+            })
+        })
+    })
+}
+
+fn remove_family(launches: &Ledger, id: &str) -> Result<bool> {
+    let sessions = launches.dir.join(format!("{id}.sessions"));
+    let mut transcripts = Vec::new();
+    match std::fs::symlink_metadata(&sessions) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Ok(false);
+            }
+            for entry in std::fs::read_dir(&sessions)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file()
+                    || entry.path().extension().is_none_or(|ext| ext != "jsonl")
+                {
+                    return Ok(false);
+                }
+                transcripts.push(entry.path());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    let payloads = [
+        "task.md",
+        "contract.md",
+        "continuations.json",
+        "json",
+        "unit.json",
+        "progress.json",
+    ];
+    for extension in payloads {
+        match std::fs::symlink_metadata(launches.dir.join(format!("{id}.{extension}"))) {
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Ok(false);
+            }
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for transcript in transcripts {
+        crate::jobs::remove(&transcript)?;
+    }
+    if sessions.is_dir() {
+        std::fs::remove_dir(&sessions)?;
+    }
+    for extension in payloads {
+        crate::jobs::remove(&launches.dir.join(format!("{id}.{extension}")))?;
+    }
+    Ok(true)
+}
+
+/// Host-only families need no origin admission on this machine. Each launch keeps
+/// its original request lock and uses the same deletion operation as admissions.
+pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
+    let launches = ledger.child("launches");
+    let entries = match std::fs::read_dir(&launches.dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(id) = name
+            .strip_suffix(".progress.json")
+            .or_else(|| name.strip_suffix(".release.json"))
+            .or_else(|| name.strip_suffix(".reference-release.json"))
+            && crate::jobs::validate_id(id).is_ok()
+        {
+            ids.insert(id.to_owned());
+        }
+    }
+    for id in ids {
+        let result = ledger.child("admissions").with_lock(&id, || {
+            ledger.child("preparation-receipts").with_lock(&id, || {
+                if !crate::prepare::retention_ready(ledger, &id, now)? {
+                    return Ok(());
+                }
+                if expire_request(ledger, &id, now)? {
+                    crate::prepare::expire_record(ledger, &id, now)?;
+                    let file = format!("{id}.reference-release.json");
+                    if let Some(release) = launches.read::<ReferenceReleaseAck>(&file)? {
+                        release.certificate.validate()?;
+                        if now.saturating_sub(release.accepted_ms) > crate::jobs::RECORD_KEEP_MS
+                            && !launches.dir.join(format!("{id}.progress.json")).exists()
+                            && work::references_released(ledger, &id)?
+                        {
+                            crate::jobs::remove(&launches.dir.join(file))?;
+                        }
+                    }
+                }
+                crate::custody::locked(ledger, &id, |_| {
+                    crate::custody::forget_released(ledger, &id)
+                })
+            })
+        });
+        if let Err(error) = result {
+            eprintln!("dogsled launch expiry: {id}: {error}");
+        }
+    }
+    Ok(())
 }
 
 /// The versioned assertion made by the origin after its provider explicitly releases
@@ -170,6 +928,19 @@ pub fn release_references(
     crate::jobs::validate_id(&certificate.execution.request_id)?;
     let launches = ledger.child("launches");
     launches.with_lock(&certificate.execution.request_id, || {
+        let release_file = format!(
+            "{}.reference-release.json",
+            certificate.execution.request_id
+        );
+        if let Some(saved) = launches.read::<ReferenceReleaseAck>(&release_file)? {
+            return if saved.certificate == *certificate {
+                Ok(saved)
+            } else {
+                Err(crate::unit_transport::conflict(
+                    "origin reference release changed",
+                ))
+            };
+        }
         let file = format!("{}.progress.json", certificate.execution.request_id);
         let mut progress = launches
             .read::<Progress>(&file)?
@@ -185,6 +956,7 @@ pub fn release_references(
                     "origin reference release changed",
                 ));
             }
+            launches.write(&release_file, saved)?;
             return Ok(saved.clone());
         }
         let final_receipt: Option<Value> =
@@ -227,10 +999,11 @@ pub fn release_references(
         }
         let acknowledgement = ReferenceReleaseAck {
             certificate: certificate.clone(),
-            accepted_ms: crate::ledger::now_ms(),
+            accepted_ms: crate::jobs::advance_clock(ledger, crate::ledger::now_ms())?,
         };
         progress.origin_release = Some(acknowledgement.clone());
         launches.write(&file, &progress)?;
+        launches.write(&release_file, &acknowledgement)?;
         Ok(acknowledgement)
     })
 }
@@ -242,6 +1015,10 @@ pub fn reference_release_status(
 ) -> Result<Value> {
     crate::jobs::validate_id(&execution.request_id)?;
     ledger.child("launches").with_lock(&execution.request_id, || {
+        if let Some(release) = ledger.child("launches").read::<ReferenceReleaseAck>(&format!("{}.reference-release.json", execution.request_id))? {
+            if release.certificate.execution != *execution { return Err(crate::unit_transport::conflict("host execution mismatch")); }
+            return Ok(json!({"acknowledgement":release,"retryable":false}));
+        }
         let progress = ledger.child("launches").read::<Progress>(&format!("{}.progress.json", execution.request_id))?
             .ok_or_else(|| crate::unit_transport::conflict("unknown host launch"))?;
         if progress.request.unit.as_ref().map(|seed| &seed.execution) != Some(execution) {
@@ -304,8 +1081,40 @@ fn start_while_busy(
     pane: &str,
     terminal: &str,
     window: std::time::Duration,
+    request: &Launch,
 ) -> Result<()> {
     let began = std::time::Instant::now();
+    start_with_busy_wait(
+        ledger,
+        shell,
+        args,
+        pane,
+        terminal,
+        &BusyWait {
+            window,
+            elapsed: &|| began.elapsed(),
+            pause: &std::thread::sleep,
+        },
+        request,
+    )
+}
+
+/// Keep the monotonic clock and pause together so tests can drive retry events.
+struct BusyWait<'a> {
+    window: std::time::Duration,
+    elapsed: &'a dyn Fn() -> std::time::Duration,
+    pause: &'a dyn Fn(std::time::Duration),
+}
+
+fn start_with_busy_wait(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    args: &[String],
+    pane: &str,
+    terminal: &str,
+    wait: &BusyWait<'_>,
+    request: &Launch,
+) -> Result<()> {
     let mut pause = BUSY_FIRST_PAUSE;
     let mut retry = false;
     loop {
@@ -318,7 +1127,7 @@ fn start_while_busy(
             .map_err(|_| {
                 Error::Launch(format!(
                     "{pane} was still not an available shell when the command deadline passed after {:.1}s; the pane stays open",
-                    began.elapsed().as_secs_f32()
+                    (wait.elapsed)().as_secs_f32()
                 ))
             })?;
         if retry {
@@ -329,11 +1138,12 @@ fn start_while_busy(
                 ))
             })?;
         }
+        work::check_launch_validity(ledger, request)?;
         retry = true;
         match shell.run_setup_ok("herdr", args) {
             Err(error) if is_busy(&error) => {
-                let elapsed = began.elapsed();
-                let Some(left) = window.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
+                let elapsed = (wait.elapsed)();
+                let Some(left) = wait.window.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
                     return Err(Error::Launch(format!(
                         "{pane} was still not an available shell after {:.1}s; the pane stays open: {error}",
                         elapsed.as_secs_f32()
@@ -345,7 +1155,7 @@ fn start_while_busy(
                     .with_limit("agent start", remaining)
                     .and_then(|left| shell.budget().with_limit("agent start", left))
                     .unwrap_or_default();
-                std::thread::sleep(pause.min(left).min(remaining));
+                (wait.pause)(pause.min(left).min(remaining));
                 pause = (pause * 2).min(BUSY_MAX_PAUSE);
             }
             other => return other.map(drop),
@@ -499,6 +1309,17 @@ pub fn execution(
                     )));
                 }
             }
+        }
+        // Closure is not evidence of a unit launch: ordinary handoffs close items too.
+        if let Some(id) = item
+            && ledger
+                .child("admissions")
+                .read::<work::Attempt>(&format!("{id}.json"))?
+                .is_some_and(|attempt| attempt.unit.is_some())
+        {
+            return Err(crate::unit_transport::conflict(
+                "result unavailable: expired or unknown",
+            ));
         }
         return Ok(Execution::Plain);
     };
@@ -736,6 +1557,7 @@ pub fn agent_guarded(
 ) -> Result<Value> {
     let receipts = ledger.child("launches");
     receipts.with_lock(&request.id, || {
+        retention_completion(ledger, &request.id)?;
         let file = format!("{}.json", request.id);
         let progress_file = format!("{}.progress.json", request.id);
         let saved = receipts.read::<Progress>(&progress_file)?;
@@ -761,9 +1583,11 @@ pub fn agent_guarded(
             )?;
             return Err(Error::Invalid(failed.into()));
         }
-        let mut progress = match saved {
-            Some(progress) => progress,
-            None => allocate(&receipts, shell, request, &progress_file, checkout)?,
+        let mut progress = if let Some(progress) = saved {
+            progress
+        } else {
+            work::check_launch_validity(ledger, request)?;
+            allocate(ledger, shell, request, &progress_file, checkout)?
         };
         let pane = progress.pane.clone().ok_or_else(|| {
             Error::Invalid(format!(
@@ -781,7 +1605,7 @@ pub fn agent_guarded(
                         .terminal
                         .as_deref()
                         .map(|terminal| (pane.as_str(), terminal));
-                    return Err(refused(&receipts, shell, &file, owned, error)?);
+                    return Err(refused(ledger, shell, &file, owned, error)?);
                 }
                 Ok(())
             })?;
@@ -802,7 +1626,7 @@ pub fn agent_guarded(
 /// close only its still-owned idle shell, whether allocated or prepared. Unknown or occupied panes
 /// survive the final refusal. Any other error passes through unchanged.
 fn refused(
-    receipts: &Ledger,
+    ledger: &Ledger,
     shell: &dyn Shell,
     file: &str,
     pane: Option<(&str, &str)>,
@@ -817,7 +1641,17 @@ fn refused(
     if !code.is_some_and(|code| REFUSALS.contains(&code.as_str())) {
         return Ok(error);
     }
+    let receipts = ledger.child("launches");
     let failed = error.to_string();
+    let progress_file = file.replace(".json", ".progress.json");
+    if let Some(mut progress) = receipts.read::<Progress>(&progress_file)? {
+        crate::jobs::finish_once(
+            ledger,
+            &mut progress.finished_ms,
+            progress.request.validity.map(|v| v.created_ms),
+        )?;
+        receipts.write(&progress_file, &progress)?;
+    }
     receipts.write(
         file,
         &Receipt::Refused {
@@ -897,12 +1731,13 @@ fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<(
 }
 
 fn allocate(
-    receipts: &Ledger,
+    ledger: &Ledger,
     shell: &dyn Shell,
     request: &Launch,
     file: &str,
     checkout: Option<&crate::cleanup::Tree>,
 ) -> Result<Progress> {
+    let receipts = ledger.child("launches");
     let Action::Agent {
         kind,
         name,
@@ -925,7 +1760,7 @@ fn allocate(
     let argv = work::agent_argv(
         kind,
         name,
-        &seed_args(request, receipts),
+        &seed_args(request, &receipts),
         &work::Files::at(&receipts.dir, &request.id),
         profile.as_ref(),
     )?;
@@ -951,6 +1786,8 @@ fn allocate(
         }
     }
     let mut progress = Progress {
+        finished_ms: None,
+        closed_ms: None,
         request: request.clone(),
         pane: None,
         terminal: request.terminal.clone(),
@@ -969,6 +1806,11 @@ fn allocate(
         progress.pane.clone_from(&request.pane);
         progress.error = Some(error.to_string());
         progress.preflight_refusal = Some(PreflightRefusal::LineBudget { bytes });
+        crate::jobs::finish_once(
+            ledger,
+            &mut progress.finished_ms,
+            request.validity.map(|v| v.created_ms),
+        )?;
         receipts.write(file, &progress)?;
         crate::unit_request::crash_point("preflight-refusal-persisted");
         receipts.write(
@@ -979,6 +1821,7 @@ fn allocate(
         )?;
         return Err(error);
     }
+    work::check_launch_validity(ledger, request)?;
     receipts.write(file, &progress)?;
     let (pane, terminal) = work::pane(shell, request)?;
     progress.pane = Some(pane.clone());
@@ -986,6 +1829,43 @@ fn allocate(
     progress.terminal = terminal;
     receipts.write(file, &progress)?;
     Ok(progress)
+}
+
+fn validity_refused(
+    ledger: &Ledger,
+    progress: &mut Progress,
+    file: &str,
+    error: &Error,
+) -> Result<()> {
+    let receipts = ledger.child("launches");
+    progress.attempted = false;
+    progress.error = Some(error.to_string());
+    progress.preflight_refusal = Some(PreflightRefusal::Validity {
+        detail: error.to_string(),
+    });
+    crate::jobs::finish_once(
+        ledger,
+        &mut progress.finished_ms,
+        progress.request.validity.map(|v| v.created_ms),
+    )?;
+    receipts.write(file, progress)?;
+    receipts.write(
+        &format!("{}.json", progress.request.id),
+        &Receipt::Refused {
+            failed: error.to_string(),
+        },
+    )
+}
+
+fn finish_progress(ledger: &Ledger, progress: &mut Progress) -> Result<()> {
+    crate::jobs::finish_once(
+        ledger,
+        &mut progress.finished_ms,
+        progress.request.validity.map(|v| v.created_ms),
+    )?;
+    ledger
+        .child("launches")
+        .write(&format!("{}.progress.json", progress.request.id), progress)
 }
 
 fn start_or_reconcile(
@@ -1049,6 +1929,7 @@ fn start_or_reconcile(
         ledger.child("launches").write(file, progress)?;
         return Err(error);
     }
+    work::check_launch_validity(ledger, request)?;
     // Native agent.start owns shell readiness and its atomic busy refusal. An eager
     // process snapshot here rejects startup before that supported boundary can run.
     let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
@@ -1074,7 +1955,13 @@ fn start_or_reconcile(
     )?);
     progress.attempted = true;
     receipts.write(file, progress)?;
-    if let Err(error) = start_while_busy(ledger, shell, &args, pane, &current, busy_window()) {
+    if let Err(error) =
+        start_while_busy(ledger, shell, &args, pane, &current, busy_window(), request)
+    {
+        if matches!(error.root(), Error::Refused { .. }) {
+            validity_refused(ledger, progress, file, &error)?;
+            return Err(error);
+        }
         if matches!(error, Error::Launch(_)) {
             // Herdr never typed into the pane, so the launch may be tried again.
             progress.attempted = false;
@@ -1298,7 +2185,7 @@ pub fn terminal_ack(
             .ok_or_else(|| crate::unit_transport::conflict("worker transcript unavailable"))?;
         let receipt = crate::unit_reply::capture(ledger, &progress.request, seed, ack, path)?;
         progress.terminal_receipt = Some(receipt.clone());
-        receipts.write(&file, &progress)?;
+        finish_progress(ledger, &mut progress)?;
         Ok(receipt)
     })
 }
@@ -1476,10 +2363,7 @@ pub(crate) fn unit_receipt_locked(
         };
         let mut progress = progress;
         progress.stopped = Some(stopped.clone());
-        receipts.write(
-            &format!("{}.progress.json", execution.request_id),
-            &progress,
-        )?;
+        finish_progress(ledger, &mut progress)?;
         Ok(Some(HostEvidence::Stopped(Box::new(stopped))))
     })()
 }

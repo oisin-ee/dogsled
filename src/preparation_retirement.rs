@@ -168,6 +168,23 @@ pub fn prohibited(ledger: &Ledger, request: &crate::work::Request) -> Result<boo
     Ok(true)
 }
 
+/// Whether the host acknowledged this request's retirement, which releases its
+/// preparation ownership. A changed request is a conflict, never a release.
+pub fn released(ledger: &Ledger, request: &crate::work::Request) -> Result<bool> {
+    if !prohibited(ledger, request)? {
+        return Ok(false);
+    }
+    let intent = ledger
+        .child("preparation-retirements")
+        .read::<Intent>(&format!("{}.json", request.id))?
+        .ok_or_else(|| conflict("retirement record disappeared"))?;
+    let Some(ack) = &intent.acknowledgement else {
+        return Ok(false);
+    };
+    crate::prepare::validate_ack(&intent.disposition, ack)?;
+    Ok(true)
+}
+
 /// CLI alone may pass cleanup=true. MCP deliberately has no override argument.
 pub fn retire(
     fleet: &Fleet,

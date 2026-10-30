@@ -625,6 +625,53 @@ pub fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> R
     Ok(())
 }
 
+/// Only a closed native handoff with released references is expendable.
+pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
+    let marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+    if !marks.values().any(|mark| {
+        mark.closed_ms
+            .is_some_and(|closed| now.saturating_sub(closed) > crate::jobs::RECORD_KEEP_MS)
+    }) {
+        return Ok(());
+    }
+    let (panes, _) = crate::cleanup::pane_snapshot(&crate::shell::System::default())?;
+    ledger.with_lock("custody", || {
+        ledger.with_lock("handoff", || {
+            ledger.with_lock("done", || {
+                let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+                let mut expired = Vec::new();
+                for (key, mark) in &marks {
+                    let Some(closed) = mark.closed_ms else {
+                        continue;
+                    };
+                    let Some(id) = mark.item.as_deref() else {
+                        continue;
+                    };
+                    if !panes.iter().any(|pane| pane.pane_id == mark.pane)
+                        && now.saturating_sub(closed) > crate::jobs::RECORD_KEEP_MS
+                        && closed >= mark.marked_ms
+                        && mark.sealed.is_some()
+                        && mark.native_done
+                        && mark.reply.as_ref().is_some_and(|reply| reply.done)
+                        && (mark.dropped_ms.is_some()
+                            || mark.branch.as_ref().is_none_or(|branch| branch.landed))
+                        && crate::work::references_released(ledger, id)?
+                        && !crate::items::retained(ledger, id, now)?
+                        && !crate::launch::retained_execution(ledger, id)?
+                    {
+                        expired.push(key.clone());
+                    }
+                }
+                if expired.is_empty() {
+                    return Ok(());
+                }
+                marks.retain(|key, _| !expired.contains(key));
+                ledger.write(FILE, &marks)
+            })
+        })
+    })
+}
+
 pub fn list(ledger: &Ledger) -> Result<Vec<Mark>> {
     Ok(ledger
         .read::<Marks>(FILE)?

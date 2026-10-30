@@ -1,6 +1,12 @@
 use super::*;
 use serde_json::json;
 
+fn capable_snapshot(current: &Snapshot) -> String {
+    let mut value = serde_json::to_value(current).unwrap();
+    value["request_validity"] = json!(1);
+    value.to_string()
+}
+
 fn missing_pane_snapshot(peer: &Host) -> Snapshot {
     let mut current = snapshot(100);
     current.probe.host = peer.id.clone();
@@ -33,10 +39,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
         };
         let remote = |args: &[String]| format!("ssh {}", fleet.remote_argv(&peer, args).join(" "));
         let mut current = missing_pane_snapshot(&peer);
-        shell.on(
-            &remote(&["snapshot".into()]),
-            &serde_json::to_string(&current).unwrap(),
-        );
+        shell.on(&remote(&["snapshot".into()]), &capable_snapshot(&current));
         let request = Request {
             action: Action::Agent {
                 kind: "pi".into(),
@@ -44,7 +47,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
                 message: "go".into(),
                 profile: None,
             },
-            ..pinned("late-child", "peer")
+            ..pinned(&ledger, "late-child", "peer")
         };
         let queued_at = 100 + owner_skew;
         work::enqueue(&ledger, request.clone(), false, queued_at).unwrap();
@@ -56,12 +59,9 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
         // This snapshot permits admission but still predates the pane's creation.
         current.sampled_ms = 11_000;
         current.probe.disk_free_percent = 99.0;
-        shell.on(
-            &remote(&["snapshot".into()]),
-            &serde_json::to_string(&current).unwrap(),
-        );
+        shell.on(&remote(&["snapshot".into()]), &capable_snapshot(&current));
         let launch: work::Launch = serde_json::from_value(json!({
-            "id":request.id,"action":request.action,"host":"peer","cwd":"/",
+            "id":request.id,"validity":request.validity,"action":request.action,"host":"peer","cwd":"/",
             "owner":"owner","pane":null,"workspace":null,"workspace_name":null
         }))
         .unwrap();
@@ -73,6 +73,8 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
                 crate::prepare::disposition::VERSION.to_string(),
                 "--request".into(),
                 serde_json::to_string(&launch).unwrap(),
+                "--request-validity".into(),
+                "1".into(),
             ]),
             &receipt.to_string(),
         );
@@ -150,7 +152,7 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
     current.jobs.push(
         serde_json::from_value(json!({
             "id":"job","cmd":["true"],"cwd":"/","host":"local","owner":"owner",
-            "pane":"child","state":"exited","exit":0,"signal":null,"reason":null,
+            "pane":"child","state":"idle","exit":0,"signal":null,"reason":null,
             "started_ms":100,"ended_ms":200,"timeout_ms":null,"idle_timeout_ms":null
         }))
         .unwrap(),

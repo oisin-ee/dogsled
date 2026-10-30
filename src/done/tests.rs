@@ -762,6 +762,7 @@ fn closed_handoff_missing_both_refs_settles_and_leaves_the_board() {
         orphans: vec![],
         sweep: None,
         stopped_activity: std::collections::BTreeMap::new(),
+        holds: Vec::new(),
     };
     assert_eq!(crate::board::build(&status, None, 3).rows, []);
     repo.calls.lock().unwrap().clear();
@@ -1064,7 +1065,7 @@ fn done_refuses_open_children_and_pending_or_admitting_tickets() {
         let shell = Fake::new();
         shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w2:p1","agent":"pi","agent_status":"working","agent_session":{"kind":"path","value":"session"}}]}}"#);
         if let Some(state) = queued {
-            ledger.write("queue.json", &json!([{
+            crate::store::put_tickets(&ledger, &json!([{
                 "id":"q","state":state,"created_ms":1,"waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null,
                 "request":{"id":"q","action":{"type":"place"},"host":null,"branch":null,"base":null,"cwd":"/tmp","repository":null,"workspace":null,"workspace_name":null,"owner":"w2:p1"}
             }])).unwrap();

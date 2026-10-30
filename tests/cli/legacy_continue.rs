@@ -65,11 +65,13 @@ fn continuation_ignores_the_ambient_default_branch() {
         "[init]\n\tdefaultBranch = master\n",
     )
     .unwrap();
+    // Exercise one bound continuation under the ambient setting, not the entire
+    // fence matrix with its two intentional lock deadlines in one child wait.
     let mut command = isolated(std::env::current_exe().unwrap());
     command
         .args([
             "--exact",
-            "legacy_continue::legacy_continuation_checks_fence_before_done_and_launch_locks",
+            "legacy_continue::legacy_continuation_with_transfer_fence",
             "--nocapture",
         ])
         .env("HOME", &home)
@@ -188,9 +190,17 @@ fn assert_continuation_gate_order(rig: &Rig, id: &str, case: &str) {
 }
 
 #[test]
+fn legacy_continuation_with_transfer_fence() {
+    let (rig, _) = bound_legacy("legacy-fence-transfer");
+    let (code, sent) = continue_from(&rig, "w1:p1", "continue");
+    assert_eq!(code, 0, "{sent}");
+    assert_eq!(continue_from(&rig, "w1:p1", "continue"), (0, sent));
+    assert_eq!(inbox(&rig).as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
     for case in [
-        "transfer",
         "prohibit",
         "identity",
         "historical",
@@ -235,24 +245,17 @@ fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
             "preparation-lock" | "repository-lock" => {
                 assert_continuation_gate_order(&rig, &id, case);
             }
-            _ => {
-                let (code, sent) = continue_from(&rig, "w1:p1", "continue");
-                assert_eq!(code, 0, "{sent}");
-                assert_eq!(continue_from(&rig, "w1:p1", "continue"), (0, sent));
-                assert_eq!(inbox(&rig).as_array().unwrap().len(), 1);
-            }
+            _ => unreachable!("unknown continuation fence case"),
         }
     }
 }
 
 /// The immutable records of request `id` that continuation must never rewrite.
-const IMMUTABLE: [&str; 6] = [
+const IMMUTABLE: [&str; 4] = [
     "admissions/{id}.json",
     "launches/{id}.progress.json",
     "launches/{id}.unit.json",
     "launches/{id}.json",
-    "queue.json",
-    "items.json",
 ];
 
 fn request_id(execution: &Value) -> String {
@@ -260,12 +263,15 @@ fn request_id(execution: &Value) -> String {
 }
 
 fn immutable(rig: &Rig, id: &str) -> Vec<Vec<u8>> {
-    IMMUTABLE
+    let mut records: Vec<_> = IMMUTABLE
         .iter()
         .map(|path| {
             fs::read(rig.dir.join("state").join(path.replace("{id}", id))).unwrap_or_default()
         })
-        .collect()
+        .collect();
+    records.push(serde_json::to_vec(&rig.items()).unwrap());
+    records.push(serde_json::to_vec(&rig.tickets()).unwrap());
+    records
 }
 
 /// The execution-owned continuation receipts of request `id`, as raw bytes.
@@ -615,9 +621,9 @@ fn mismatched_launch_evidence_refuses_with_no_change() {
                 "competing"
             }
             "item" => {
-                let mut items = rig.read("state/items.json");
+                let mut items = rig.items();
                 items[0]["closed_ms"] = json!(1);
-                rig.put("state/items.json", &items);
+                rig.put_items(&items);
                 "closed, missing, or competing"
             }
             "terminal" => {

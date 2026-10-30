@@ -18,7 +18,7 @@ vcs:
   sync: true
   hooks:
     pre-commit:
-      - env -u GIT_DIR moon run :#precommit --affected --status staged
+      - env -u GIT_DIR proto run moon -- run :#precommit --affected --status staged
 pipeline:
   syncProjects: false
   logRunningCommand: true

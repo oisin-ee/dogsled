@@ -83,6 +83,8 @@ pub enum Progress {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
     pub request: Request,
     pub progress: Progress,
 }
@@ -223,10 +225,28 @@ fn matches_binding(ledger: &Ledger, request: &Request) -> Result<bool> {
         if audit.request_id != *id || request.binding.claim.request_id != *id {
             return Ok(false);
         }
-        let current = ledger
-            .child("preparation-receipts")
-            .read::<serde_json::Value>(&format!("{id}.json"))?;
-        return Ok(current == *provenance);
+        let receipts = ledger.child("preparation-receipts");
+        let current = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
+        if current == *provenance {
+            return Ok(true);
+        }
+        // Completion may add only the timestamp proved by this exact released fence.
+        let released = receipts.read::<Receipt>(&file(id))?;
+        if let Some(released) = released
+            && released.request == *request
+            && released.progress == Progress::Released
+            && let Some(finished) = released.finished_ms
+            && crate::jobs::completion_time(ledger, Some(finished), None, true)?.is_some()
+            && let Some(expected) = provenance.as_ref().and_then(serde_json::Value::as_object)
+            && expected
+                .get("finished_ms")
+                .is_none_or(serde_json::Value::is_null)
+        {
+            let mut completed = expected.clone();
+            completed.insert("finished_ms".into(), finished.into());
+            return Ok(current.as_ref().and_then(serde_json::Value::as_object) == Some(&completed));
+        }
+        return Ok(false);
     }
     Ok(binding(ledger, &request.binding.request_id)?.as_ref() == Some(&request.binding))
 }
@@ -333,12 +353,25 @@ pub(super) fn require_binding(ledger: &Ledger, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn retention_completion(ledger: &Ledger, id: &str) -> Result<Option<u64>> {
+    let Some(receipt) = read(ledger, id)? else {
+        return Ok(None);
+    };
+    crate::jobs::completion_time(
+        ledger,
+        receipt.finished_ms,
+        None,
+        receipt.progress == Progress::Released,
+    )
+}
+
 fn read(ledger: &Ledger, id: &str) -> Result<Option<Receipt>> {
     let receipt = ledger
         .child("preparation-receipts")
         .read::<Receipt>(&file(id))?;
     if let Some(receipt) = &receipt
-        && (receipt.request.version != VERSION
+        && ((receipt.finished_ms.is_some() && receipt.progress != Progress::Released)
+            || receipt.request.version != VERSION
             || receipt.request.binding.request_id != id
             || !matches_binding(ledger, &receipt.request)?)
     {
@@ -476,6 +509,7 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
             receipts.write(
                 &file(id),
                 &Receipt {
+                    finished_ms: None,
                     request: request.clone(),
                     progress: Progress::Fenced,
                 },
@@ -484,19 +518,29 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
         crate::unit_request::crash_point("preparation-fenced");
         super::used(ledger, &request.binding.claim, existing.is_some())?;
         crate::unit_request::crash_point("preparation-claim-released");
+        let mut finished_ms = existing.as_ref().and_then(|receipt| receipt.finished_ms);
+        crate::jobs::finish_once(ledger, &mut finished_ms, None)?;
         receipts.write(
             &file(id),
             &Receipt {
+                finished_ms,
                 request: request.clone(),
                 progress: Progress::Released,
             },
         )?;
+        if retention_completion(ledger, id)? != finished_ms {
+            return Err(conflict());
+        }
     } else {
         // A released receipt cannot authorize removal of a recreated claim.
         let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
         if pending.iter().any(|p| p.request_id.as_deref() == Some(id)) {
             return Err(conflict());
         }
+    }
+    // Recover only the timestamp already proved by release, never the replay time.
+    if let Some(finished) = read(ledger, id)?.and_then(|receipt| receipt.finished_ms) {
+        finish_preparation(ledger, request, finished)?;
     }
     Ok(Acknowledgement {
         version: VERSION,
@@ -505,6 +549,33 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
         outcome: request.outcome.clone(),
         released: true,
     })
+}
+
+fn finish_preparation(ledger: &Ledger, request: &Request, finished: u64) -> Result<()> {
+    let receipts = ledger.child("preparation-receipts");
+    let file = format!("{}.json", request.binding.request_id);
+    let Some(mut preparation) = receipts.read::<serde_json::Value>(&file)? else {
+        // Identified legacy claims can retire without inventing an outcome receipt.
+        return if matches!(
+            request.policy,
+            Policy::Prohibit {
+                basis: Basis::Retired { .. }
+            }
+        ) {
+            Ok(())
+        } else {
+            Err(conflict())
+        };
+    };
+    let fields = preparation.as_object_mut().ok_or_else(conflict)?;
+    match fields.get("finished_ms").filter(|value| !value.is_null()) {
+        None => {
+            fields.insert("finished_ms".into(), finished.into());
+            receipts.write(&file, &preparation)
+        }
+        Some(value) if value.as_u64() == Some(finished) => Ok(()),
+        Some(_) => Err(conflict()),
+    }
 }
 
 pub(super) fn failure_guarded(
@@ -1123,6 +1194,8 @@ mod tests {
             .write(
                 "a.json",
                 &super::super::PreparationReceipt {
+                    finished_ms: None,
+                    validity: None,
                     version: Some(VERSION),
                     request: request.binding.request.clone(),
                     prepared: request.binding.prepared.clone(),
@@ -1177,6 +1250,7 @@ mod tests {
                         .write(
                             "a.disposition.json",
                             &Receipt {
+                                finished_ms: None,
                                 request: previous,
                                 progress: Progress::Fenced,
                             },
@@ -1229,6 +1303,7 @@ mod tests {
             .write(
                 "a.disposition.json",
                 &Receipt {
+                    finished_ms: None,
                     request: request.clone(),
                     progress: Progress::Fenced,
                 },
@@ -1259,6 +1334,8 @@ mod tests {
             .write(
                 "a.json",
                 &super::super::PreparationReceipt {
+                    finished_ms: None,
+                    validity: None,
                     version: Some(VERSION),
                     request: request.binding.request.clone(),
                     prepared: request.binding.prepared.clone(),
@@ -1267,7 +1344,11 @@ mod tests {
                 },
             )
             .unwrap();
-        let immutable = std::fs::read(ledger.dir.join("preparation-receipts/a.json")).unwrap();
+        let immutable: serde_json::Value = ledger
+            .child("preparation-receipts")
+            .read("a.json")
+            .unwrap()
+            .unwrap();
         let first = request.binding.claim.pending();
         let mut other = first.clone();
         other.request_id = Some("b".into());
@@ -1288,10 +1369,14 @@ mod tests {
             dispose(&ledger, &crate::shell::Fake::new(), &request).unwrap(),
             ack
         );
-        assert_eq!(
-            std::fs::read(ledger.dir.join("preparation-receipts/a.json")).unwrap(),
-            immutable
-        );
+        let mut settled: serde_json::Value = ledger
+            .child("preparation-receipts")
+            .read("a.json")
+            .unwrap()
+            .unwrap();
+        assert!(settled["finished_ms"].as_u64().is_some());
+        settled.as_object_mut().unwrap().remove("finished_ms");
+        assert_eq!(settled, immutable);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 }

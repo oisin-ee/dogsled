@@ -440,7 +440,8 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
     let (rig, repo) = place::place_rig("disposition-prohibited");
     let prepared = disposition_prepared(&rig, &repo, "recover-one", "fenced", true);
     let path = prepared["path"].as_str().unwrap();
-    let receipt = fs::read(rig.dir.join("state/preparation-receipts/recover-one.json")).unwrap();
+    let mut receipt = rig.read("state/preparation-receipts/recover-one.json");
+    receipt.as_object_mut().unwrap().remove("finished_ms");
     let (code, ack) = rig.json(&[
         "host",
         "prepared",
@@ -483,10 +484,10 @@ fn prohibited_preparation_cannot_replay_into_new_startup() {
     assert_eq!(rig.log("herdr.log"), calls);
     assert_eq!(rig.log("setup.log"), setup);
     assert_eq!(rig.read("state/preparations.json"), json!([]));
-    assert_eq!(
-        fs::read(rig.dir.join("state/preparation-receipts/recover-one.json")).unwrap(),
-        receipt
-    );
+    let mut completed = rig.read("state/preparation-receipts/recover-one.json");
+    assert!(completed["finished_ms"].is_u64());
+    completed.as_object_mut().unwrap().remove("finished_ms");
+    assert_eq!(completed, receipt);
     assert!(
         !rig.dir
             .join("state/launches/recover-one.progress.json")
@@ -508,7 +509,7 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
             .find(|p| p["request_id"] == "b")
             .unwrap()
             .clone();
-        let outcome = fs::read(rig.dir.join("state/preparation-receipts/a.json")).unwrap();
+        let outcome = rig.read("state/preparation-receipts/a.json");
         let args = ["host", "prepared", "--input", &rig.disposition_request("a")];
         let out = rig
             .cmd(&args)
@@ -537,10 +538,10 @@ fn disposition_recovers_fence_before_release_and_release_before_ack() {
         assert_eq!(released["request"], fence["request"]);
         assert_eq!(released["progress"], "released");
         assert_eq!(rig.read("state/preparations.json"), json!([other]));
-        assert_eq!(
-            fs::read(rig.dir.join("state/preparation-receipts/a.json")).unwrap(),
-            outcome
-        );
+        let mut completed = rig.read("state/preparation-receipts/a.json");
+        assert!(completed["finished_ms"].is_u64());
+        completed.as_object_mut().unwrap().remove("finished_ms");
+        assert_eq!(completed, outcome);
     }
 }
 
@@ -674,10 +675,12 @@ fn over_budget_agent_refusal_releases_preparation_before_dispatch_and_on_replay(
             "{out:?}"
         );
         assert_eq!(rig.read("state/preparations.json"), json!([]));
-        assert_eq!(
-            rig.read("state/preparation-receipts/recover-one.json"),
-            outcome
-        );
+        let mut completed = rig.read("state/preparation-receipts/recover-one.json");
+        assert!(completed["finished_ms"].is_u64());
+        completed.as_object_mut().unwrap().remove("finished_ms");
+        let mut outcome = outcome;
+        outcome.as_object_mut().unwrap().remove("finished_ms");
+        assert_eq!(completed, outcome);
         assert_eq!(
             rig.read("state/preparation-receipts/recover-one.disposition.json")["progress"],
             "released"
@@ -855,6 +858,8 @@ fn unsupported_preparation_disposition_refuses_job_ingress_without_writes() {
     unsupported["request"]["version"] = json!(2);
     rig.put(disposition, &unsupported);
     let original = fs::read(rig.dir.join(disposition)).unwrap();
+    let authority = rig.read("state/job-validity/ingress.json");
+    let clock = rig.read("state/job-validity-clock.json");
     let herdr = rig.log("herdr.log");
     let mut request = job_launch_request(&rig, "ingress", &["true"]);
     request["cwd"] = json!(path);
@@ -868,8 +873,8 @@ fn unsupported_preparation_disposition_refuses_job_ingress_without_writes() {
     ]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(fs::read(rig.dir.join(disposition)).unwrap(), original);
-    assert!(!rig.dir.join("state/job-validity/ingress.json").exists());
-    assert!(!rig.dir.join("state/job-validity-clock.json").exists());
+    assert_eq!(rig.read("state/job-validity/ingress.json"), authority);
+    assert_eq!(rig.read("state/job-validity-clock.json"), clock);
     assert!(!rig.dir.join("state/jobs/ingress.json").exists());
     assert!(!rig.dir.join("state/launches/ingress.json").exists());
     assert_eq!(rig.log("herdr.log"), herdr);
@@ -939,6 +944,11 @@ fn repository_lifecycle_lock(repo: &Path) -> fs::File {
     lock
 }
 
+/// A contender must reach its repository lock wait before this budget ends. Process start and
+/// the git calls before that wait share the budget, so it allows for a loaded machine. The
+/// contender still gives up on the held lock and reports it.
+const CONTENDER_BUDGET_MS: &str = "8000";
+
 fn lifecycle_git_barrier(rig: &Rig) -> Fifo {
     let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
     rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'tab create'*|'workspace create'*) printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w8:p1\",\"terminal_id\":\"term_tree\"}}}' ;;\n  'pane run'*) printf '{}\\n' ;;"));
@@ -976,7 +986,7 @@ fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "prepare",
                 "--repo",
@@ -992,7 +1002,7 @@ fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "launch",
                 "--job-validity",
@@ -1383,7 +1393,7 @@ fn repository_lock_precedes_launch_and_store_locks() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "prepare",
                 "--repo",
@@ -1399,7 +1409,7 @@ fn repository_lock_precedes_launch_and_store_locks() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "launch",
                 "--request",
@@ -1634,7 +1644,7 @@ fn handoff_reconciles_removal_before_closed_mark_save() {
     assert_eq!(code, 0, "{launched}");
     assert!(launched["checkout"]["identity"].is_object(), "{launched}");
     let reply = json!({"seq":10,"text":"sealed native reply","captured_ms":2,"done":true});
-    rig.put("state/items.json", &json!([{"id":"c1-handoff","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1","name":"worker","created_ms":1,"closed_ms":null}]));
+    rig.put_items(&json!([{"id":"c1-handoff","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1","name":"worker","created_ms":1,"closed_ms":null}]));
     let mark_key = json!(["c1-handoff", "w2:p1", null]).to_string();
     rig.put(
         "state/done.json",
@@ -1647,7 +1657,7 @@ fn handoff_reconciles_removal_before_closed_mark_save() {
     let (code, removed) = rig.json(&["host", "close", "w2:p1"]);
     assert_eq!(code, 0, "{removed}");
     assert!(!tree.exists());
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_null());
+    assert!(rig.items()[0]["closed_ms"].is_null());
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -1660,7 +1670,7 @@ fn handoff_reconciles_removal_before_closed_mark_save() {
     assert_eq!(mark["reply"], reply);
     assert_eq!(mark["sealed"], 10);
     assert_eq!(mark["native_done"], true);
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_u64());
+    assert!(rig.items()[0]["closed_ms"].is_u64());
     assert_eq!(rig.log("hook.log").lines().count(), 1);
 }
 
@@ -1701,12 +1711,24 @@ fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() 
     );
     let (code, result) = remote_agent(&rig, None);
     assert_eq!(code, 1, "{result}");
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     assert_eq!(
         ticket["wait_reason"],
         "netcup: reservation raced with another request"
     );
     let (_, board) = rig.json(&["board", "--all"]);
+    assert_ne!(ticket["id"], ticket["request"]["id"], "{ticket}");
+    assert_eq!(board["rows"].as_array().unwrap().len(), 1, "{board}");
+    assert_eq!(board["rows"][0]["id"], ticket["id"], "{board}");
+    assert!(
+        board["rows"][0]["holds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hold| hold["code"] == "validity"
+                && hold["request_id"] == ticket["request"]["id"]),
+        "{board}"
+    );
     assert_eq!(board["hosts"][1]["eligible"], true, "{board}");
     assert_eq!(
         board["rows"][0]["activity"],
@@ -1729,7 +1751,7 @@ fn unpinned_refusal_keeps_one_line_per_host() {
     }}));
     let (code, queued) = rig.json(&["agent", "--name", "worker", "--message", "go"]);
     assert_eq!(code, 1, "{queued}");
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     let lines: Vec<_> = ticket["wait_reason"].as_str().unwrap().lines().collect();
     assert_eq!(lines.len(), 2, "{ticket}");
     assert!(lines[0].starts_with("local: "), "{ticket}");
@@ -1743,9 +1765,9 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     rig.snapshot("state/host.json", now(), 20.0, 8);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     assert_eq!(remote_agent(&rig, None).0, 1);
-    let mut queue = rig.read("state/queue.json");
+    let mut queue = rig.tickets();
     queue[0].as_object_mut().unwrap().remove("wait_reason");
-    rig.put("state/queue.json", &queue);
+    rig.put_tickets(&queue);
     let (_, board) = rig.json(&["board", "--all"]);
     assert_eq!(
         board["rows"][0]["activity"], "for a host with room",
@@ -1774,7 +1796,7 @@ fn ssh_failure_before_launch_retries_reservation_checkout_and_preparation() {
         ));
         let (code, result) = remote_agent(&rig, Some(&repo));
         assert_eq!(code, 1, "{step}: {result}");
-        let ticket = rig.read("state/queue.json")[0].clone();
+        let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["state"], "pending", "{step}: {ticket}");
         assert_eq!(ticket["retry"]["attempts"], 1, "{step}: {ticket}");
         let ticket = advance(&rig);
@@ -1869,16 +1891,19 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
         );
         let (code, result) = remote_agent(&rig, None);
         assert_eq!(code, 2, "{case}: {result}");
-        assert!(!rig.dir.join("state/queue.json").exists(), "{case}");
+        assert_eq!(rig.tickets(), json!([]), "{case}");
     }
     let rig = Rig::new("queued-invalid");
     rig.snapshot("state/host.json", now(), 0.0, 8);
     let repo = rig.dir.join("home/repo");
     repository(&repo);
+    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
     rig.put(
-        "state/queue.json",
-        &json!([{
-            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},
+        "state/job-validity/invalid-request.json",
+        &rig.job_validity(),
+    );
+    rig.put_tickets(&json!([{
+            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
                 "workspace":null,"workspace_name":null,"owner":"w1:p1"},
@@ -1907,10 +1932,13 @@ fn queued_placement_validates_branch_under_symlinked_temp_root() {
     assert_ne!(repo, repo.canonicalize().unwrap());
     rig.snapshot("state/host.json", now(), 0.0, 8);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
     rig.put(
-        "state/queue.json",
-        &json!([{
-            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},
+        "state/job-validity/invalid-request.json",
+        &rig.job_validity(),
+    );
+    rig.put_tickets(&json!([{
+            "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
                 "workspace":null,"workspace_name":null,"owner":"w1:p1"},
@@ -1969,7 +1997,10 @@ fn terminal_ssh_categories_never_enter_the_retry_queue() {
             );
             let (code, error) = remote_agent(&rig, Some(&repo));
             assert_eq!(code, 2, "{step}/{case}: {error}");
-            assert!(!rig.dir.join("state/queue.json").exists(), "{step}/{case}");
+            assert!(
+                rig.tickets().as_array().unwrap().is_empty(),
+                "{step}/{case}"
+            );
             assert!(!error.to_string().contains("private"), "{error}");
             assert_eq!(
                 rig.log("ssh.log").matches(&format!("host {step}")).count(),
@@ -2136,7 +2167,7 @@ fn lost_successful_reservation_reply_reuses_one_hold_on_the_selected_host() {
     );
     let (code, queued) = remote_agent(&rig, None);
     assert_eq!(code, 1, "{queued}");
-    assert_eq!(rig.read("state/queue.json")[0]["retry"]["attempts"], 1);
+    assert_eq!(rig.tickets()[0]["retry"]["attempts"], 1);
     let before = rig.read("peer-state/placements.json");
     assert_eq!(before.as_array().unwrap().len(), 1);
     // Replay must not be new admission, even when a fresh status has no headroom.
@@ -2225,7 +2256,7 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
     rig.script("ssh", &script);
     let (code, queued) = remote_agent(&rig, Some(&repo));
     assert_eq!(code, 1, "{queued}");
-    assert_eq!(rig.read("state/queue.json")[0]["retry"]["attempts"], 1);
+    assert_eq!(rig.tickets()[0]["retry"]["attempts"], 1);
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(rig.log("setup.log").lines().count(), 1);
@@ -2240,17 +2271,15 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
 
 fn advance(rig: &Rig) -> Value {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    let next = rig.read("state/queue.json")[0]["retry"]["next_ms"]
-        .as_u64()
-        .unwrap();
-    fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
+    let next = rig.tickets()[0]["retry"]["next_ms"].as_u64().unwrap();
+    fs::write(rig.dir.join("clock"), next.max(rig.origin_ms).to_string()).unwrap();
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    rig.read("state/queue.json")[0].clone()
+    rig.tickets()[0].clone()
 }
 
 #[test]
@@ -2282,9 +2311,9 @@ fn branch_retry_keeps_preparation_host_and_terminal_across_service_restart() {
     // A repeated preparation would now refuse an already-open workspace.
     fs::write(rig.dir.join("already-open"), "").unwrap();
     // A service restart during admission resumes only the saved launch.
-    let mut queue = rig.read("state/queue.json");
+    let mut queue = rig.tickets();
     queue[0]["state"] = json!("admitting");
-    rig.put("state/queue.json", &queue);
+    rig.put_tickets(&queue);
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     let log = rig.log("herdr.log");
@@ -2296,11 +2325,11 @@ fn branch_retry_keeps_preparation_host_and_terminal_across_service_restart() {
         rig.read("state/placements.json").as_array().unwrap().len(),
         1
     );
-    assert_eq!(rig.read("state/items.json").as_array().unwrap().len(), 1);
+    assert_eq!(rig.items().as_array().unwrap().len(), 1);
 }
 
 fn host_request(rig: &Rig) -> Value {
-    json!({"id":"recover-one","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":rig.dir.join("home"),"pane":null,"workspace":"w1","workspace_name":"caller","owner":"parent"})
+    json!({"id":"recover-one","validity":rig.job_validity(),"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":rig.dir.join("home"),"pane":null,"workspace":"w1","workspace_name":"caller","owner":"parent"})
 }
 
 pub(super) const NPM_FAILURE: &str =
@@ -2383,7 +2412,7 @@ fn cli_spawn_error_and_progress_include_the_child_startup_failure() {
         queued["retrying"].as_str().unwrap().contains(NPM_FAILURE),
         "{queued}"
     );
-    let ticket = rig.read("state/queue.json")[0].clone();
+    let ticket = rig.tickets()[0].clone();
     let id = ticket["request"]["id"].as_str().unwrap();
     let progress = rig.read(&format!("state/launches/{id}.progress.json"));
     assert!(
@@ -2752,7 +2781,7 @@ fn a_refused_start_is_not_retried_by_the_service() {
             .contains("agent_name_taken")
     );
     // No ticket waits to retry it.
-    assert!(!rig.dir.join("state/queue.json").exists());
+    assert_eq!(rig.tickets(), json!([]));
     assert_eq!(rig.log("herdr.log").matches("agent start w ").count(), 1);
 }
 
@@ -2942,7 +2971,7 @@ fn interrupted_job_admission_preserves_running_record_without_relaunch() {
         "pane":"w2:p1","state":"running","exit":null,"signal":null,"reason":null,"started_ms":123,"ended_ms":null,
         "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});
     rig.put("state/jobs/interrupted-job.json", &job);
-    rig.put("state/queue.json", &json!([{"id":"interrupted-ticket","request":request,"created_ms":100,"state":"admitting",
+    rig.put_tickets(&json!([{"id":"interrupted-ticket","request":request,"created_ms":100,"state":"admitting",
         "waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":100}}]));
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "failed", "{ticket}");
@@ -3236,7 +3265,7 @@ fn job_receipt(
 fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
     let rig = Rig::new("replay-after-prune");
     // The job ends long enough ago that the prune removes its record.
-    let ended = now() - 2 * 86_400_000;
+    let ended = now() - 31 * 86_400_000;
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"pruned","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
@@ -3259,7 +3288,10 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
     let out = rig.run(&["prune", "--yes", "jobs"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
-    assert!(stdout.contains("removed job pruned"), "{stdout}");
+    assert!(
+        stdout.contains("expired job pruned output or record"),
+        "{stdout}"
+    );
     assert!(!rig.dir.join("state/jobs/pruned.json").exists());
     assert!(rig.dir.join("state/launches/pruned.json").exists());
     // The replay returns the recorded result. It allocates nothing and dispatches nothing.
@@ -3300,7 +3332,7 @@ fn a_matching_receipt_replays_after_the_prune_removed_the_job_record() {
 #[test]
 fn a_legacy_receipt_without_request_evidence_fails_closed_after_the_prune() {
     let rig = Rig::new("legacy-receipt-after-prune");
-    let ended = now() - 2 * 86_400_000;
+    let ended = now() - 31 * 86_400_000;
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     let job = json!({"id":"legacy","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
@@ -3351,7 +3383,7 @@ fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
         ("number", json!(7)),
     ] {
         let rig = Rig::new(&format!("receipt-without-pane-after-prune-{name}"));
-        let ended = now() - 2 * 86_400_000;
+        let ended = now() - 31 * 86_400_000;
         fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
         fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let job = json!({"id":"incomplete","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
@@ -3409,7 +3441,7 @@ fn a_receipt_without_a_pane_fails_closed_after_the_prune() {
 fn a_conflicting_receipt_fails_closed_after_the_prune() {
     for (name, conflict) in [("command", "cmd"), ("owner", "owner")] {
         let rig = Rig::new(&format!("conflicting-receipt-after-prune-{name}"));
-        let ended = now() - 2 * 86_400_000;
+        let ended = now() - 31 * 86_400_000;
         fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
         fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let job = json!({"id":"conflicted","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",

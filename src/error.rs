@@ -15,6 +15,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("SQLite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error("config {path}: {source}")]
     Config {
         path: String,
@@ -87,6 +89,8 @@ pub enum Refusal {
     CloneFailed,
     /// No retained job is known on this host.
     UnknownJob,
+    /// All bounded result identity has expired, or the result was never known.
+    ResultUnavailable,
     /// A job request carries no usable validity evidence.
     JobValidityUnprovable,
     /// A job request is older than the validity window.
@@ -97,8 +101,6 @@ pub enum Refusal {
     JobClockUnavailable,
     /// The peer does not speak the job validity protocol.
     JobValidityUnsupported,
-    /// The shared queue uses a schema newer than this binary can safely write.
-    QueueVersionUnsupported,
 }
 
 impl Refusal {
@@ -110,12 +112,12 @@ impl Refusal {
             Self::SignalConflict => "SIGNAL_CONFLICT",
             Self::CloneFailed => "CLONE_FAILED",
             Self::UnknownJob => "UNKNOWN_JOB",
+            Self::ResultUnavailable => "RESULT_UNAVAILABLE",
             Self::JobValidityUnprovable => "JOB_VALIDITY_UNPROVABLE",
             Self::JobExpired => "JOB_EXPIRED",
             Self::JobFromFuture => "JOB_FROM_FUTURE",
             Self::JobClockUnavailable => "JOB_CLOCK_UNAVAILABLE",
             Self::JobValidityUnsupported => "JOB_VALIDITY_UNSUPPORTED",
-            Self::QueueVersionUnsupported => "QUEUE_VERSION_UNSUPPORTED",
         }
     }
 
@@ -127,12 +129,12 @@ impl Refusal {
             Self::SignalConflict,
             Self::CloneFailed,
             Self::UnknownJob,
+            Self::ResultUnavailable,
             Self::JobValidityUnprovable,
             Self::JobExpired,
             Self::JobFromFuture,
             Self::JobClockUnavailable,
             Self::JobValidityUnsupported,
-            Self::QueueVersionUnsupported,
         ]
         .into_iter()
         .find(|r| r.code() == code)
@@ -149,6 +151,7 @@ impl Refusal {
             Self::SignalConflict => "the turn already has a conflicting signal or done handoff",
             Self::CloneFailed => "the peer could not clone the repository",
             Self::UnknownJob => "unknown job",
+            Self::ResultUnavailable => crate::jobs::RESULT_UNAVAILABLE,
             Self::JobValidityUnprovable => {
                 "job request validity is unprovable; new execution refused"
             }
@@ -159,9 +162,6 @@ impl Refusal {
             Self::JobClockUnavailable => "job validity clock is unavailable; new execution refused",
             Self::JobValidityUnsupported => {
                 "this host does not support job request validity: host too old for job startup ownership; upgrade it; new execution refused"
-            }
-            Self::QueueVersionUnsupported => {
-                "queue format version is newer than this binary supports; write refused"
             }
         }
     }

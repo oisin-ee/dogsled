@@ -538,6 +538,10 @@ pub enum HostCommand {
         #[arg(long)]
         input: String,
     },
+    /// Read exact ordinary execution-host terminal identity for release.
+    ExecutionEvidence {
+        id: String,
+    },
     /// Read origin release status without inferring it from host or origin silence.
     ReferenceReleaseStatus {
         #[arg(long)]
@@ -570,6 +574,9 @@ pub enum HostCommand {
         /// Correlated stopped-orphan episode; the host verifies its current session and turn.
         #[arg(long, conflicts_with_all = ["pushed", "landed", "writer"])]
         stopped_orphan: Option<String>,
+        /// Stable origin item identity for host-owned preservation replay.
+        #[arg(long, conflicts_with_all = ["pushed", "landed", "writer"])]
+        preservation_request: Option<String>,
         /// Legacy transport spelling for an owned handoff: require done and keep its branch.
         #[arg(long)]
         landed: bool,
@@ -577,6 +584,8 @@ pub enum HostCommand {
         writer: bool,
     },
     Launch {
+        #[arg(long)]
+        request_validity: Option<u32>,
         #[arg(long)]
         request: String,
         #[arg(long)]
@@ -599,11 +608,21 @@ pub enum HostCommand {
     },
     Checkout {
         #[arg(long)]
+        request_validity: Option<u32>,
+        #[arg(long)]
+        request_id: Option<String>,
+        #[arg(long)]
+        request_created_ms: Option<u64>,
+        #[arg(long)]
         path: String,
         #[arg(long)]
         origin: String,
         #[arg(long)]
         host_label: String,
+    },
+    PlacementFinished {
+        #[arg(long)]
+        input: String,
     },
     Reserve {
         #[arg(long)]
@@ -613,6 +632,11 @@ pub enum HostCommand {
         placement_replay: Option<String>,
         #[arg(long)]
         preparation_protocol: Option<u32>,
+        /// Non-job validity capability; required for agent and placement reservations.
+        #[arg(long)]
+        request_validity: Option<u32>,
+        #[arg(long)]
+        request_created_ms: Option<u64>,
         /// The job validity protocol the caller speaks. A job reservation carries it.
         #[arg(long)]
         job_validity: Option<u32>,
@@ -635,6 +659,10 @@ pub enum HostCommand {
         preparation_protocol: u32,
     },
     Prepare {
+        #[arg(long)]
+        request_created_ms: Option<u64>,
+        #[arg(long)]
+        preparation_envelope_version: Option<u32>,
         #[arg(long)]
         preparation_protocol: Option<u32>,
         #[arg(long)]

@@ -303,6 +303,53 @@ pub fn get(ledger: &Ledger, item: &str) -> Result<Option<Custody>> {
         .find(|custody| custody.item == item))
 }
 
+/// Called under custody after positive owner expiry. History is not a permanent tombstone.
+pub(crate) fn forget_released(ledger: &Ledger, id: &str) -> Result<()> {
+    if crate::items::list(ledger)?.iter().any(|item| item.id == id)
+        || crate::done::list(ledger)?
+            .iter()
+            .any(|mark| mark.item.as_deref() == Some(id))
+        || [
+            "admissions",
+            "preparation-receipts",
+            "placement-grants",
+            "preparation-retirements",
+        ]
+        .iter()
+        .any(|directory| {
+            ledger
+                .child(directory)
+                .dir
+                .join(format!("{id}.json"))
+                .exists()
+        })
+        || [
+            "json",
+            "progress.json",
+            "release.json",
+            "reference-release.json",
+            "unit.json",
+        ]
+        .iter()
+        .any(|extension| {
+            ledger
+                .child("launches")
+                .dir
+                .join(format!("{id}.{extension}"))
+                .exists()
+        })
+    {
+        return Ok(());
+    }
+    let mut records = list(ledger)?;
+    let before = records.len();
+    records.retain(|record| record.item != id);
+    if before != records.len() {
+        ledger.write(FILE, &records)?;
+    }
+    Ok(())
+}
+
 /// Run `check` on the custody of `item` while the custody lock is held, so a claim cannot
 /// move the custody between the check and the write the caller makes inside it.
 pub fn locked<T>(
@@ -415,6 +462,24 @@ fn claim_locked(
     // A repeat claim by the current custodian changes nothing.
     if record.held_by(&request.pane, request.session.as_deref()) {
         return Ok(ClaimOutcome::Held { custody: record });
+    }
+    // Released execution references cannot be reacquired while a host expires them.
+    if ledger
+        .child("admissions")
+        .read::<serde_json::Value>(&format!("{}.json", item.id))?
+        .is_some_and(|attempt| {
+            ["/ordinary_release", "/unit/reference_release"]
+                .iter()
+                .any(|path| {
+                    attempt
+                        .pointer(path)
+                        .is_some_and(|release| !release.is_null())
+                })
+        })
+    {
+        return Err(ClaimError::Host(crate::unit_transport::conflict(
+            "execution references were permanently released",
+        )));
     }
     // The claim must name the revision it read.
     if record.revision != request.expected_revision {
@@ -830,14 +895,11 @@ mod tests {
             }
         });
         admissions.write("child.json", &unit).unwrap();
-        let items_before = std::fs::read(ledger.dir.join("items.json")).unwrap();
+        let items_before = crate::store::items(&ledger).unwrap();
         let unit_before = std::fs::read(admissions.dir.join("child.json")).unwrap();
         let shell = shell_without_owner();
         claim(&ledger, &request(&host(), 0), &shell).unwrap();
-        assert_eq!(
-            std::fs::read(ledger.dir.join("items.json")).unwrap(),
-            items_before
-        );
+        assert_eq!(crate::store::items(&ledger).unwrap(), items_before);
         assert_eq!(
             std::fs::read(admissions.dir.join("child.json")).unwrap(),
             unit_before

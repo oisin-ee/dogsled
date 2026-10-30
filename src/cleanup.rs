@@ -1540,6 +1540,15 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = pane_holds(usage, seen, decider);
+    if !matches!(
+        decider,
+        Decider::Close {
+            guard: crate::close::Guard::Clean | crate::close::Guard::StoppedOrphan { .. }
+        }
+    ) && let Some(reason) = crate::preservation::hold(node.ledger, tree)?
+    {
+        held.push(reason);
+    }
     // Reload under the final repository-protected check too, not just the survey.
     // Corrupt Job evidence propagates an error and cannot authorize removal.
     held.extend(
@@ -1595,10 +1604,10 @@ fn held(
             }
         )
     {
-        for item in items
-            .iter()
-            .filter(|i| seen.panes.iter().any(|p| p.pane_id == i.owner_pane))
-        {
+        for item in items.iter().filter(|i| {
+            seen.panes.iter().any(|p| p.pane_id == i.owner_pane)
+                && caller.pane.as_deref() != Some(i.owner_pane.as_str())
+        }) {
             held.push(format!("not landed by its owner {}", item.owner_pane));
         }
     }
@@ -2002,22 +2011,11 @@ fn drop_registration(node: &Node<'_>, path: &str) -> Result<String> {
 
 fn remove_job(node: &Node<'_>, id: &str, now: u64) -> Result<String> {
     crate::jobs::validate_id(id)?;
-    let store = crate::jobs::store(node.ledger);
-    store.with_lock(id, || {
-        let job = crate::jobs::get(node.ledger, id)?;
-        if !crate::jobs::terminal(&job) || job.ended_ms.is_none_or(|t| now.saturating_sub(t) <= DAY)
-        {
-            return Err(Error::Invalid(format!("refuse {id}: job is not expired")));
-        }
-        for extension in ["log", "stop", "json"] {
-            match std::fs::remove_file(store.dir.join(format!("{id}.{extension}"))) {
-                Ok(()) => (),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(format!("removed job {id} and log"))
-    })
+    let now = crate::jobs::advance_clock(node.ledger, now)?;
+    if crate::jobs::expire_one(node.ledger, id, now)? == crate::jobs::Expiry::Keep {
+        return Err(Error::Invalid(format!("refuse {id}: job is not expired")));
+    }
+    Ok(format!("expired job {id} output or record"))
 }
 
 /// Delete a branch the plan found integrated or pushed, at the planned commit.

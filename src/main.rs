@@ -21,6 +21,7 @@ mod error;
 mod facts;
 mod gate;
 mod herdr_socket;
+mod holds;
 mod hosts;
 mod inbox;
 mod integration;
@@ -48,6 +49,7 @@ mod runtime;
 mod service;
 mod shell;
 mod sidebar;
+mod store;
 mod sweep;
 mod transcript;
 mod unit_reply;
@@ -547,11 +549,29 @@ fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool)
 }
 
 /// The host commands that act on one child pane.
+fn release_host_references(node: &Node<'_>, input: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(input)?;
+    if value["version"] == 2 {
+        print(
+            true,
+            &launch::release_ordinary(node.ledger, &serde_json::from_value(value)?)?,
+            String::new,
+        )
+    } else {
+        print(
+            true,
+            &node.release_references(&serde_json::from_value(value)?)?,
+            String::new,
+        )
+    }
+}
+
 fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     match cmd {
-        HostCommand::ReleaseReferences { input } => print(
+        HostCommand::ReleaseReferences { input } => release_host_references(node, &input)?,
+        HostCommand::ExecutionEvidence { id } => print(
             true,
-            &node.release_references(&serde_json::from_str(&input)?)?,
+            &launch::ordinary_evidence(node.ledger, &id)?,
             String::new,
         )?,
         HostCommand::ReferenceReleaseStatus { input } => print(
@@ -592,26 +612,36 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             pane,
             pushed,
             stopped_orphan,
+            preservation_request,
             landed,
             writer,
         } => {
-            let closed = if let Some(episode) = stopped_orphan {
-                close::stopped_orphan(
-                    node.shell,
-                    node.ledger,
-                    &pane,
-                    &close::Caller::default(),
-                    &serde_json::from_str(&episode)?,
-                )?
-            } else {
-                close::local(
-                    node.shell,
-                    node.ledger,
-                    &pane,
-                    &close::Caller::default(),
-                    close::Guard::from_flags(pushed, landed, writer),
-                )?
-            };
+            let episode = stopped_orphan
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let request = preservation_request
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let mode = episode.as_ref().map_or_else(
+                || close::Guard::from_flags(pushed, landed, writer),
+                |episode| close::Guard::StoppedOrphan { episode },
+            );
+            let closed = close::with_request(
+                node.shell,
+                node.ledger,
+                &pane,
+                &close::Caller::default(),
+                close::Options {
+                    guard: mode,
+                    request: request.as_ref(),
+                },
+                |closed| {
+                    items::saved_close(node.ledger, hosts::LOCAL, &closed)?;
+                    Ok(closed)
+                },
+            )?;
             print(true, &closed, String::new)?;
         }
         HostCommand::Parent { pane } => {
@@ -639,10 +669,16 @@ fn print_host_launch(
     request: &str,
     validity: Option<u32>,
     preparation_protocol: Option<u32>,
+    request_validity: Option<u32>,
 ) -> Result<()> {
     prepare::require_protocol(preparation_protocol)?;
     let launch: work::Launch = serde_json::from_str(request)?;
-    let result = work::receive_launch(node.ledger, node.shell, &launch, now_ms(), validity)?;
+    let protocol = if matches!(launch.action, work::Action::Job { .. }) {
+        validity
+    } else {
+        request_validity
+    };
+    let result = work::receive_launch(node.ledger, node.shell, &launch, now_ms(), protocol)?;
     print(
         true,
         &prepare::launch_response(node.ledger, &launch, result)?,
@@ -661,7 +697,7 @@ fn print_host_reservation(
         envelope.validate(id)?;
         node.reserve_placement(&envelope, now_ms())?
     } else {
-        node.reserve(id, now_ms(), validity)?
+        node.reserve(id, now_ms(), validity, false)?
     };
     print(true, &out, String::new)?;
     Ok(if out.reserved {
@@ -713,6 +749,8 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             print(true, &dispose_preparation(node, &request)?, String::new)?;
         }
         HostCommand::Prepare {
+            preparation_envelope_version,
+            request_created_ms,
             preparation_protocol,
             placement_replay,
             repo,
@@ -725,19 +763,118 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
                 .as_deref()
                 .map(serde_json::from_str)
                 .transpose()?;
-            let prepared = prepare::on_host(
-                node,
-                &repo,
-                &branch,
-                base.as_deref(),
-                request_id.as_deref(),
-                placement.as_ref(),
-            )?;
+            let envelope = prepare::Envelope {
+                version: preparation_envelope_version.unwrap_or_default(),
+                validity: request_created_ms.map(jobs::Validity::new),
+                request_id: request_id.ok_or_else(|| {
+                    Error::Invalid(
+                        "request validity is unprovable; requestless preparation refused".into(),
+                    )
+                })?,
+                repo,
+                branch,
+                base,
+            };
+            let prepared = prepare::on_host(node, &envelope, placement.as_ref())?;
             print(true, &prepared, String::new)?;
         }
         _ => return Err(Error::Invalid("not a preparation command".into())),
     }
     Ok(())
+}
+
+fn reserve_with_protocol(
+    node: &Node<'_>,
+    id: &str,
+    placement_replay: Option<&str>,
+    (job_validity, job_created_ms): (Option<u32>, Option<u64>),
+    (request_validity, request_created_ms): (Option<u32>, Option<u64>),
+) -> Result<ExitCode> {
+    if request_validity.is_some() {
+        if request_validity != Some(jobs::REQUEST_VALIDITY_PROTOCOL_VERSION)
+            || job_validity.is_some()
+            || job_created_ms.is_some()
+        {
+            return Err(Error::Invalid(
+                "unsupported non-job request validity protocol".into(),
+            ));
+        }
+        if placement_replay.is_none() {
+            let validity = request_created_ms.map(jobs::Validity::new);
+            let out = node.reserve(id, now_ms(), validity, true)?;
+            print(true, &out, String::new)?;
+            return Ok(if out.reserved {
+                ExitCode::SUCCESS
+            } else {
+                Error::Full.exit_code()
+            });
+        }
+    }
+    let validity = reservation_validity(job_validity, job_created_ms)?;
+    print_host_reservation(node, id, placement_replay, validity)
+}
+
+fn checkout_authority(
+    protocol: Option<u32>,
+    id: Option<&str>,
+    created_ms: Option<u64>,
+) -> Result<Option<(&str, jobs::Validity)>> {
+    if protocol != Some(jobs::REQUEST_VALIDITY_PROTOCOL_VERSION) {
+        return Err(Error::Invalid(
+            "unsupported non-job request validity protocol".into(),
+        ));
+    }
+    Ok(id.zip(created_ms.map(jobs::Validity::new)))
+}
+
+fn print_checkout(
+    node: &Node<'_>,
+    path: &str,
+    origin: &str,
+    host_label: &str,
+    request_validity: Option<u32>,
+    (request_id, request_created_ms): (Option<&str>, Option<u64>),
+) -> Result<()> {
+    let authority = checkout_authority(request_validity, request_id, request_created_ms)?;
+    print(
+        true,
+        &checkout::local(
+            node.shell,
+            node.home,
+            host_label,
+            path,
+            origin,
+            node.ledger,
+            authority,
+        )?,
+        String::new,
+    )?;
+    Ok(())
+}
+
+fn print_tail(node: &Node<'_>, kind: &str, id: &str) -> Result<()> {
+    let tail = if kind == "job" {
+        watchdog::job_tail(node.ledger, id)?
+    } else {
+        watchdog::pane_tail(node.shell, id)?
+    };
+    print(true, &tail, String::new)
+}
+
+fn print_host_recovery(node: &Node<'_>, command: &cli::RecoveryCommand) -> Result<()> {
+    print(
+        true,
+        &runtime::recovery_local(node.shell, node.ledger, command)?,
+        String::new,
+    )
+}
+
+fn print_placement_finished(node: &Node<'_>, input: &str) -> Result<()> {
+    print(
+        true,
+        &node.finish_placement(&serde_json::from_str(input)?)?,
+        String::new,
+    )
 }
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
@@ -749,15 +886,16 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             request,
             job_validity,
             preparation_protocol,
-        } => print_host_launch(node, &request, job_validity, preparation_protocol)?,
+            request_validity,
+        } => print_host_launch(
+            node,
+            &request,
+            job_validity,
+            preparation_protocol,
+            request_validity,
+        )?,
         HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
-        HostCommand::Recovery { command } => {
-            print(
-                true,
-                &runtime::recovery_local(node.shell, node.ledger, &command)?,
-                String::new,
-            )?;
-        }
+        HostCommand::Recovery { command } => print_host_recovery(node, &command)?,
         HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
         HostCommand::Logs { id, offset } => {
             print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;
@@ -770,25 +908,27 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             path,
             origin,
             host_label,
-        } => print(
-            true,
-            &checkout::local(node.shell, node.home, &host_label, &path, &origin)?,
-            String::new,
-        )?,
-        HostCommand::Tail { kind, id } => {
-            let tail = if kind == "job" {
-                watchdog::job_tail(node.ledger, &id)?
-            } else {
-                watchdog::pane_tail(node.shell, &id)?
-            };
-            print(true, &tail, String::new)?;
+            request_validity,
+            request_id,
+            request_created_ms,
+        } => {
+            print_checkout(
+                node,
+                &path,
+                &origin,
+                &host_label,
+                request_validity,
+                (request_id.as_deref(), request_created_ms),
+            )?;
         }
+        HostCommand::Tail { kind, id } => print_tail(node, &kind, &id)?,
         HostCommand::Doctor => print(true, &cleanup::doctor(node, now_ms())?, String::new)?,
         HostCommand::Reply { .. }
         | HostCommand::Close { .. }
         | HostCommand::UnitReceipt { .. }
         | HostCommand::UnitReceipts { .. }
         | HostCommand::ReleaseReferences { .. }
+        | HostCommand::ExecutionEvidence { .. }
         | HostCommand::ReferenceReleaseStatus { .. }
         | HostCommand::Drop { .. }
         | HostCommand::RefreshBranches { .. }
@@ -807,6 +947,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             &quota::store(node.ledger, std::io::stdin().lock())?,
             String::new,
         )?,
+        HostCommand::PlacementFinished { input } => print_placement_finished(node, &input)?,
         HostCommand::Reserve {
             id,
             placement_replay,
@@ -814,14 +955,21 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             thresholds,
             job_validity,
             job_created_ms,
+            request_validity,
+            request_created_ms,
         } => {
             prepare::require_protocol(preparation_protocol)?;
             let node = Node {
                 thresholds: thresholds.over(node.thresholds),
                 ..*node
             };
-            let validity = reservation_validity(job_validity, job_created_ms)?;
-            return print_host_reservation(&node, &id, placement_replay.as_deref(), validity);
+            return reserve_with_protocol(
+                &node,
+                &id,
+                placement_replay.as_deref(),
+                (job_validity, job_created_ms),
+                (request_validity, request_created_ms),
+            );
         }
         cmd @ (HostCommand::PreparationLookup { .. }
         | HostCommand::Prepared { .. }

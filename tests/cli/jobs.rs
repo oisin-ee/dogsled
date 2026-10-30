@@ -500,7 +500,7 @@ fn nonterminal_job_holds_survive_failed_ticket_and_missing_pane() {
         rig.put("state/jobs/startup.json", &job);
         rig.put("panes.json", &json!({"result":{"panes":[]}}));
         let request = startup_request(&rig, &tree);
-        rig.put("state/queue.json", &json!([{"request":request,"id":"startup","state":"failed","created_ms":rig.now_ms(),"waiting":false,"waiting_until_ms":null,"notified":true,"result":null,"error":"dispatch failed"}]));
+        rig.put_tickets(&json!([{"request":request,"id":"startup","state":"failed","created_ms":rig.now_ms(),"waiting":false,"waiting_until_ms":null,"notified":true,"result":null,"error":"dispatch failed"}]));
         let out = rig.run(&["prune", "--yes", "worktrees"]);
         let text = String::from_utf8_lossy(&out.stdout);
         assert_eq!(tree.exists(), state != "idle", "{state}: {text}");
@@ -626,11 +626,13 @@ fn prune_old_job(state: &str, reversed: bool, kept: bool) {
     let out = rig.run(&["prune", "--yes", "jobs"]);
     assert!(out.status.success(), "{out:?}");
     let record = rig.dir.join("state/jobs/old.json");
-    assert_eq!(record.exists(), kept, "{out:?}");
-    assert_eq!(rig.dir.join("state/jobs/old.log").exists(), kept);
-    if kept {
-        assert_eq!(rig.read("state/jobs/old.json"), job);
+    // A terminal job releases its checkout after a day, not its thirty-day record.
+    assert!(record.exists(), "{out:?}");
+    assert!(rig.dir.join("state/jobs/old.log").exists());
+    if !kept {
+        job["output_expired"] = json!(true);
     }
+    assert_eq!(rig.read("state/jobs/old.json"), job);
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(tree.exists(), kept, "{out:?}");
@@ -648,7 +650,7 @@ fn prune_old_job_with_reversed_time_keeps_record_and_checkout() {
 }
 
 #[test]
-fn prune_old_job_with_terminal_evidence_removes_record() {
+fn prune_old_job_with_terminal_evidence_expires_output_but_keeps_record() {
     prune_old_job("idle", false, false);
 }
 
@@ -671,6 +673,46 @@ fn serve(rig: &Rig) {
 /// The job's log, when it is still there.
 fn log_of(rig: &Rig, id: &str) -> Option<String> {
     fs::read_to_string(rig.dir.join(format!("state/jobs/{id}.log"))).ok()
+}
+
+#[test]
+fn stop_ends_a_pending_job_that_never_started() {
+    let rig = Rig::new("stop-pending-job");
+    let marker = rig.dir.join("marker");
+    let command = format!("touch {}", marker.display());
+    rig.claim("pending", &["sh", "-c", &command]);
+
+    let output = rig.run(&["stop", "pending"]);
+    assert!(output.status.success(), "{output:?}");
+    let stopped = rig.read("state/jobs/pending.json");
+    assert_eq!(stopped["state"], "blocked");
+    assert_eq!(stopped["reason"], "stopped");
+    assert!(stopped["ended_ms"].as_u64().is_some());
+    assert!(stopped["started_ms"].is_null());
+    assert!(stopped["exit"].is_null());
+    assert!(stopped["signal"].is_null());
+    assert_eq!(rig.read("state/jobs/pending.stop"), json!(true));
+
+    let output = rig.run(&["exec", "pending", "--", "sh", "-c", &command]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("job already ended"),
+        "{output:?}"
+    );
+    assert!(!marker.exists());
+    assert_eq!(rig.read("state/jobs/pending.json"), stopped);
+
+    // A started job must let its capture loop stop the process and record its end.
+    rig.claim("started", &["sh", "-c", &command]);
+    let mut started = rig.read("state/jobs/started.json");
+    started["state"] = json!("working");
+    started["started_ms"] = json!(100);
+    rig.put("state/jobs/started.json", &started);
+    let output = rig.run(&["stop", "started"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(rig.read("state/jobs/started.json"), started);
+    assert!(started["ended_ms"].is_null());
+    assert_eq!(rig.read("state/jobs/started.stop"), json!(true));
 }
 
 /// A wrapper runs nothing when its claim is missing, corrupt, for another command, already
@@ -915,7 +957,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     let log = rig.log(&format!("state/jobs/{id}.log"));
     assert!(log.contains("hi\n") && log.contains("err\n"));
     assert_eq!(rig.log("job-output"), log);
-    assert_eq!(rig.read("state/items.json")[0]["owner_pane"], "w1:p1");
+    assert_eq!(rig.items()[0]["owner_pane"], "w1:p1");
     let herdr = rig.log("herdr.log");
     assert!(herdr.contains("tab create --workspace w1"));
     assert!(herdr.contains("--source custom:dogsled --agent dogsled-job --state working"));
@@ -940,7 +982,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     );
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.read("state/host.json")["jobs"][0]["exit"], 3);
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_number());
+    assert!(rig.items()[0]["closed_ms"].is_number());
 }
 
 #[test]
@@ -1144,16 +1186,13 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
         "{log}"
     );
     assert!(!log.contains("agent prompt"), "{log}");
-    assert_eq!(rig.read("state/items.json")[0]["kind"], "agent");
-    assert_eq!(
-        rig.read("state/items.json")[0]["launch_confirmed_ms"],
-        confirmed
-    );
+    assert_eq!(rig.items()[0]["kind"], "agent");
+    assert_eq!(rig.items()[0]["launch_confirmed_ms"], confirmed);
     assert_eq!(
         rig.json(&["track", "local", "w3:p1", "--name", "other"]).0,
         0
     );
-    assert_eq!(rig.read("state/items.json").as_array().unwrap().len(), 2);
+    assert_eq!(rig.items().as_array().unwrap().len(), 2);
     assert!(
         String::from_utf8(rig.run(&["status"]).stdout)
             .unwrap()
@@ -1183,8 +1222,8 @@ fn concurrent_item_and_queue_writers_keep_every_record() {
             handle.join().unwrap();
         }
     });
-    assert_eq!(rig.read("state/items.json").as_array().unwrap().len(), 8);
-    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 8);
+    assert_eq!(rig.items().as_array().unwrap().len(), 8);
+    assert_eq!(rig.tickets().as_array().unwrap().len(), 8);
 }
 
 #[test]
@@ -1210,7 +1249,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
             .code(),
         Some(124)
     );
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets.as_array().unwrap().len(), 3);
     assert_eq!(rig.json(&["items"]).1["queue"][2]["waiting"], false);
     assert_eq!(
@@ -1231,7 +1270,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
         "agent_status":"working","terminal_id":"term_owner"}]}});
     rig.put("agents.json", &owner);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let tickets = rig.read("state/queue.json");
+    let tickets = rig.tickets();
     assert_eq!(tickets[0]["id"], first["ticket"]);
     assert_eq!(tickets[0]["state"], "admitted");
     assert_eq!(tickets[1]["state"], "cancelled");
@@ -1241,7 +1280,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     // Once it reads its inbox, the notice arrives there, while the owner still works.
     assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/queue.json")[0]["notified"], true);
+    assert_eq!(rig.tickets()[0]["notified"], true);
     let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert!(
         claimed[0]["text"].as_str().unwrap().starts_with(&format!(
@@ -1273,9 +1312,9 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
     snapshot["jobs"] = json!([job]);
     rig.put("remote.json", &snapshot);
     rig.put("logs.json", &json!({"bytes":[],"next":0,"done":true}));
-    fs::write(rig.dir.join("state/items.json"), serde_json::to_vec(&json!([{
+    rig.put_items(&json!([{
         "id":"remote-job","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","created_ms":0,"closed_ms":null,"name":null
-    }])).unwrap()).unwrap();
+    }]));
     assert_eq!(
         rig.run(&["wait", "remote-job", "--max", "30s"])
             .status
@@ -1317,9 +1356,16 @@ case "$1" in
 esac
 "#,
     );
+    let created = rig.origin_ms.to_string();
     let args = [
         "host",
         "checkout",
+        "--request-validity",
+        "1",
+        "--request-id",
+        "checkout-request",
+        "--request-created-ms",
+        &created,
         "--path",
         "repo",
         "--origin",
@@ -1355,6 +1401,12 @@ esac
     let (code, error) = rig.json(&[
         "host",
         "checkout",
+        "--request-validity",
+        "1",
+        "--request-id",
+        "missing-checkout",
+        "--request-created-ms",
+        &created,
         "--path",
         "missing",
         "--origin",
@@ -1630,13 +1682,10 @@ fn expired_item_rig(name: &str) -> Rig {
     serve(&rig);
     assert!(!rig.dir.join("state/jobs/aged.json").exists());
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"aged","kind":"job","host":"local","pane":"w2:p1",
-            "owner_pane":"w1:p1","created_ms":ended,"closed_ms":ended,"name":null
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"aged","kind":"job","host":"local","pane":"w2:p1",
+        "owner_pane":"w1:p1","created_ms":ended,"closed_ms":ended,"name":null
+    }]));
     rig
 }
 
@@ -1698,13 +1747,10 @@ fn remote_expired_item_rig(name: &str) -> Rig {
         env!("CARGO_BIN_EXE_dogsled")
     );
     rig.script("ssh", &script.replace("case \"$*\" in", &remote));
-    rig.put(
-        "state/items.json",
-        &json!([{
-            "id":"aged","kind":"job","host":"8103","pane":"w9:p1",
-            "owner_pane":"w1:p1","created_ms":0,"closed_ms":1,"name":null
-        }]),
-    );
+    rig.put_items(&json!([{
+        "id":"aged","kind":"job","host":"8103","pane":"w9:p1",
+        "owner_pane":"w1:p1","created_ms":0,"closed_ms":1,"name":null
+    }]));
     rig
 }
 
