@@ -13,6 +13,9 @@ use crate::components::item::{
     Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle,
 };
 use crate::components::scroll_area::ScrollArea;
+use crate::components::sheet::{
+    Sheet, SheetContentClose, SheetDescription, SheetFooter, SheetHeader, SheetTitle,
+};
 use crate::components::sidebar::{Sidebar, SidebarCollapsible, SidebarContent, SidebarProvider};
 use crate::components::skeleton::Skeleton;
 use crate::conversations::Conversations;
@@ -363,19 +366,24 @@ pub fn App() -> Element {
                     },
                 }
             }
-            if inbox_open() {
-                section { class: "inbox-panel", id: "portal-inbox", aria_label: "Inbox",
-                    h2 { "Inbox" span { "Everything waiting on you" } }
-                    if let Some(message) = &state.error { p { class: "error", "Inbox unavailable: {message}. Reload to retry." } }
-                    if state.snapshot.is_none() && state.error.is_none() {
-                        Skeleton { role: "status", aria_label: "Loading inbox" }
-                    } else if state.count() == Some(0) && state.error.is_none() {
-                        p { class: "inbox-empty", "Nothing is waiting on you." }
-                    } else {
-                        InboxList { items, elapsed_ms, inbox_open }
-                    }
-                    p { class: "inbox-foot", "Selecting an item opens that agent with the item in front." }
+            Sheet {
+                open: Some(inbox_open()),
+                on_open_change: move |open: bool| inbox_open.set(open),
+                id: "portal-inbox",
+                SheetContentClose {}
+                SheetHeader {
+                    SheetTitle { "Inbox" }
+                    SheetDescription { "Everything waiting on you" }
                 }
+                if let Some(message) = &state.error { p { "Inbox unavailable: {message}. Reload to retry." } }
+                if state.snapshot.is_none() && state.error.is_none() {
+                    Skeleton { role: "status", aria_label: "Loading inbox" }
+                } else if state.count() == Some(0) && state.error.is_none() {
+                    p { "Nothing is waiting on you." }
+                } else {
+                    InboxList { items, elapsed_ms, inbox_open }
+                }
+                SheetFooter { "Selecting an item opens that agent with the item in front." }
             }
         }
     }

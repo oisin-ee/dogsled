@@ -65,7 +65,6 @@
 /* The footer: what is answered, and the button that sends it. */
 .qf-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .qf-foot .qf-muted { margin-right: auto; }
-.qf-reject { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--surface1); padding-top: 18px; }
 @media (max-width: 600px) {
   .qf-note, .qf-form textarea { font-size: 1rem; }
 }

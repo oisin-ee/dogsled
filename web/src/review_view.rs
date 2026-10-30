@@ -17,6 +17,7 @@ use crate::components::{
     dialog::{Dialog, DialogDescription, DialogTitle},
     input::Input,
     label::Label,
+    skeleton::Skeleton,
     textarea::Textarea,
 };
 
@@ -160,7 +161,7 @@ pub fn ReviewView(
                     on_done: move |id: String| list.write().retain(|item| item.id != id),
                 }
             } else if loading() {
-                p { role: "status", "Loading plans…" }
+                Skeleton { role: "status", aria_label: "Loading plans" }
             } else {
                 p { class: "rv-muted", "Select a plan above, or an agent with an open plan." }
             }

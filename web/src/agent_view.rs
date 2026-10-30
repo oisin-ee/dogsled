@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 use crate::api;
 use crate::components::{
     button::{Button, ButtonVariant},
+    card::{Card, CardContent, CardHeader, CardTitle},
     input::Input,
+    scroll_area::ScrollArea,
     skeleton::Skeleton,
     tabs::{TabContent, TabList, TabTrigger, Tabs},
     textarea::Textarea,
@@ -581,11 +583,9 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
 
 #[component]
 fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool) -> Element {
-    rsx! {
-        section {
-            id: "agent-conversation", class: "av-conversation", aria_label: "Conversation", tabindex: "0",
-            onmounted: move |_| async move {
-                let _ = document::eval(
+    use_effect(move || {
+        spawn(async move {
+            let _ = document::eval(
                     "const el = document.getElementById('agent-conversation');
                      if (el) {
                        el.dataset.follow = 'true';
@@ -600,7 +600,11 @@ fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool)
                        observer.observe(el, {childList: true, subtree: true, characterData: true});
                      }"
                 ).await;
-            },
+        });
+    });
+    rsx! {
+        ScrollArea {
+            id: "agent-conversation", aria_label: "Conversation", tabindex: "0",
             div { class: "av-turns",
                 if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
                 else if available && turns.is_empty() { p { class: "av-muted", "No conversation yet. Send a message to start." } }
@@ -705,8 +709,9 @@ fn BlockedPanel(
 #[component]
 fn Todos(todos: Vec<TodoView>) -> Element {
     rsx! {
-        section { class: "av-details", aria_label: "Agent todos",
-            h3 { "Todos" }
+        Card { aria_label: "Agent todos",
+          CardHeader { CardTitle { "Todos" } }
+          CardContent {
             if todos.is_empty() { p { class: "av-muted", "No todos are recorded for this agent." } }
             for todo in todos {
                 div { key: "{todo.session}", class: "av-todo",
@@ -735,6 +740,7 @@ fn Todos(todos: Vec<TodoView>) -> Element {
                     }
                 }
             }
+          }
         }
     }
 }

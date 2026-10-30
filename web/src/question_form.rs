@@ -304,7 +304,7 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                 span { class: "qf-muted", "Answered {answered_count(&questions, &values.read())} of {total}" }
                 Button { r#type: "submit", disabled: busy(), "Send answers" }
             }
-            section { class: "qf-reject", aria_label: "Reject interview",
+            Card { aria_label: "Reject interview", CardContent {
                 div { class: "qf-note",
                     Label { html_for: "rejection-reason", "Reason for rejecting (optional)" }
                     Textarea {
@@ -331,7 +331,7 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                     },
                     "Reject questions"
                 }
-            }
+            } }
         }
     }
 }
