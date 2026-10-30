@@ -10,7 +10,7 @@ use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
 use crate::components::button::{Button, ButtonVariant};
 use crate::components::item::{
-    Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle,
+    Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle, ItemVariant,
 };
 use crate::components::scroll_area::ScrollArea;
 use crate::components::sheet::{
@@ -321,7 +321,7 @@ pub fn App() -> Element {
               Sidebar { collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
                 SidebarContent {
                   ScrollArea {
-                if let Some(message) = board_error() { p { class: "error", "Board updates unavailable: {message}" } }
+                if let Some(message) = board_error() { Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "Board updates unavailable: {message}" } } } }
                 match groups {
                     Some(groups) => rsx! {
                         for (index, group) in groups.repos.into_iter().enumerate() {
@@ -352,15 +352,15 @@ pub fn App() -> Element {
                                 h2 { "Waiting on you" }
                                 InboxList { items: items.clone(), elapsed_ms, inbox_open }
                             } else if state.error.is_some() {
-                                p { class: "error", "Inbox unavailable. Reload to retry." }
+                                Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "Inbox unavailable. Reload to retry." } } }
                             } else if state.snapshot.is_none() || view.is_none() {
                                 Skeleton { role: "status", aria_label: "Loading agents" }
                             } else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
                                 h2 { "No agents are running" }
-                                p { class: "empty", "Start an agent with " code { "dogsled spawn" } "." }
+                                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Start an agent with " code { "dogsled spawn" } "." } } }
                             } else {
                                 h2 { "Select an agent" }
-                                p { class: "empty", "Choose an agent in the navigation to open its work." }
+                                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Choose an agent in the navigation to open its work." } } }
                             }
                         }
                     },

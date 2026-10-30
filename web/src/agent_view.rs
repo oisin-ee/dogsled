@@ -10,9 +10,11 @@ use serde::de::DeserializeOwned;
 
 use crate::api;
 use crate::components::{
+    accordion::{Accordion, AccordionContent, AccordionItem, AccordionTrigger},
     button::{Button, ButtonVariant},
     card::{Card, CardContent, CardHeader, CardTitle},
     input::Input,
+    item::{Item, ItemContent, ItemDescription, ItemVariant},
     scroll_area::ScrollArea,
     skeleton::Skeleton,
     tabs::{TabContent, TabList, TabTrigger, Tabs},
@@ -443,7 +445,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 }
             }
             if !metadata_loading() && !reachable() {
-                p { class: "av-notice", role: "status", "Herdr is not reachable. The board and retained conversation still work; messages do not." }
+                Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Herdr is not reachable. The board and retained conversation still work; messages do not." } } }
             }
             if let Some(message) = metadata_error() { p { class: "error av-notice", role: "alert", "{message}" } }
             if let Some(message) = screen_error() { p { class: "error av-notice", role: "alert", "{message}" } }
@@ -451,7 +453,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
             if let Some(message) = pending_error() { p { class: "error av-notice", role: "alert", "{message}" } }
             if let Some(message) = board_error() { p { class: "error av-notice", role: "alert", "{message}" } }
             if stream_error().is_some() {
-                p { class: "av-notice", role: "status", "Live updates paused. Checking every 5 seconds." }
+                Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Live updates paused. Checking every 5 seconds." } } }
             }
             if let Some(message) = action_error() { p { class: "error av-notice", role: "alert", "{message}" } }
             TabContent { value: tab_value, index: tab_index,
@@ -497,11 +499,11 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                     section { class: "av-details", aria_label: "Branch",
                         h3 { "Branch" }
                         if let Some(branch) = branch { p { class: "av-mono", "{branch}" } }
-                        else { p { class: "av-muted", "No branch is recorded for this agent." } }
+                        else { Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "No branch is recorded for this agent." } } } }
                         if let Some(row) = row {
                             if !row.activity.is_empty() { p { "{row.activity}" } }
                             if let Some(ahead) = row.ahead { p { "{ahead} commits ahead" } }
-                            if row.dirty { p { class: "av-notice", "The worktree has uncommitted changes." } }
+                            if row.dirty { Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "The worktree has uncommitted changes." } } } }
                         }
                     }
                 },
@@ -607,7 +609,7 @@ fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool)
             id: "agent-conversation", aria_label: "Conversation", tabindex: "0",
             div { class: "av-turns",
                 if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
-                else if available && turns.is_empty() { p { class: "av-muted", "No conversation yet. Send a message to start." } }
+                else if available && turns.is_empty() { Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "No conversation yet. Send a message to start." } } } }
                 for (index, turn) in turns.iter().enumerate() {
                     article { key: "{index}", class: match turn.role { Role::User => "av-turn av-user", Role::Assistant => "av-turn av-assistant" },
                         h3 { match turn.role { Role::User => "You", Role::Assistant => "Agent" } }
@@ -680,7 +682,7 @@ fn BlockedPanel(
                             "{text}"
                         }
                     },
-                    None => rsx! { p { class: "av-muted", role: "status", "Agent screen is not available yet." } },
+                    None => rsx! { Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Agent screen is not available yet." } } } },
                 }
                 div { class: "av-keys", aria_label: "Prompt options and terminal keys",
                     if let Some(prompt) = prompt {
@@ -700,7 +702,7 @@ fn BlockedPanel(
                         value: "{draft}", disabled, oninput: move |event: FormEvent| draft.set(event.value()) }
                     Button { r#type: "submit", disabled: disabled || draft().trim().is_empty(), "Send" }
                 }
-                p { class: "av-muted", "Buttons are read from the agent's screen. Open in Herdr when none fits." }
+                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Buttons are read from the agent's screen. Open in Herdr when none fits." } } }
             }
         }
     }
@@ -712,28 +714,32 @@ fn Todos(todos: Vec<TodoView>) -> Element {
         Card { aria_label: "Agent todos",
           CardHeader { CardTitle { "Todos" } }
           CardContent {
-            if todos.is_empty() { p { class: "av-muted", "No todos are recorded for this agent." } }
+            if todos.is_empty() { Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "No todos are recorded for this agent." } } } }
             for todo in todos {
                 div { key: "{todo.session}", class: "av-todo",
                     h4 { "{todo.current}" }
-                    for section in todo.sections {
-                        section { class: "av-todo-section",
-                            h5 { "{status_label(section.status)} · {section.count}" }
+                    Accordion { allow_multiple_open: true, horizontal: false,
+                        for (position, section) in todo.sections.into_iter().enumerate() {
+                            AccordionItem { key: "{position}", index: position, default_open: true,
+                                AccordionTrigger { "{status_label(section.status)} · {section.count}" }
+                                AccordionContent {
                             ul { role: "list",
                                 for item in section.items {
                                     li { class: status_class(item.status),
                                         "{item.text}"
-                                        if let Some(description) = item.description { p { class: "av-muted", "{description}" } }
+                                        if let Some(description) = item.description { Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "{description}" } } } }
                                         if !item.children.is_empty() {
                                             ul { role: "list",
                                                 for child in item.children {
                                                     li { class: status_class(child.status), "{child.text}"
-                                                        if let Some(description) = child.description { p { class: "av-muted", "{description}" } }
+                                                        if let Some(description) = child.description { Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "{description}" } } } }
                                                     }
                                                 }
                                             }
                                         }
                                     }
+                                }
+                            }
                                 }
                             }
                         }

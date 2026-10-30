@@ -19,12 +19,15 @@ use portal_types::questions::{
 use serde_json::Value;
 
 use crate::components::{
+    aspect_ratio::AspectRatio,
     badge::Badge,
     button::{Button, ButtonVariant},
-    card::{Card, CardContent, CardHeader, CardTitle},
+    card::{Card, CardContent, CardDescription, CardHeader, CardTitle},
     checkbox::Checkbox,
+    item::{Item, ItemContent, ItemDescription, ItemVariant},
     label::Label,
     radio_group::{RadioGroup, RadioItem},
+    scroll_area::ScrollArea,
     textarea::Textarea,
 };
 
@@ -90,10 +93,10 @@ pub fn QuestionForm(
                 h2 { class: "group-title", "Needs you: {count}" }
             }
             if let Some(message) = error() {
-                p { class: "error", "{message}" }
+                Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } }
             }
             if list.is_empty() {
-                p { class: "empty", "No question waits." }
+                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "No question waits." } } }
             }
             // An agent screen opens one form by id; only the standalone page lists them.
             for item in list.iter().filter(|_| requested.is_none()) {
@@ -115,7 +118,7 @@ pub fn QuestionForm(
                 }
             }
             if requested.is_some() && current.is_none() && error().is_none() {
-                p { class: "empty", "This question is loading, answered, or no longer available." }
+                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "This question is loading, answered, or no longer available." } } }
             }
             if let Some(form) = current {
                 AskForm {
@@ -298,7 +301,7 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                 }
             }
             if let Some(message) = error() {
-                p { class: "error", "{message}" }
+                Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } }
             }
             div { class: "qf-foot",
                 span { class: "qf-muted", "Answered {answered_count(&questions, &values.read())} of {total}" }
@@ -602,11 +605,11 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
                 }
             },
             QuestionKind::Image => rsx! {
-                p { class: "qf-muted", "Image answers: not supported in the portal yet" }
+                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Image answers: not supported in the portal yet" } } }
             },
             QuestionKind::Info => rsx! {},
             QuestionKind::Other(kind) => rsx! {
-                p { class: "qf-muted", "Question type {kind}: not supported in the portal yet" }
+                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Question type {kind}: not supported in the portal yet" } } }
             },
         }
     };
@@ -677,15 +680,18 @@ fn MediaView(media: Media) -> Element {
     let body = rsx! {
         match &media {
             Media::Image { src, alt, caption, .. } => rsx! {
-                figure { class: "qf-media qf-image",
-                    img { src: "{src}", alt: alt.clone().unwrap_or_default() }
+                Card {
+                    CardContent {
+                    AspectRatio { ratio: 16.0 / 9.0, img { src: "{src}", alt: alt.clone().unwrap_or_default() } }
                     if let Some(caption) = caption {
-                        figcaption { "{caption}" }
+                        CardDescription { "{caption}" }
                     }
+                }
                 }
             },
             Media::Table { table, caption, .. } => rsx! {
-                figure { class: "qf-media qf-table",
+                Card {
+                    CardContent {
                     table {
                         if !table.headers.is_empty() {
                             thead {
@@ -707,38 +713,45 @@ fn MediaView(media: Media) -> Element {
                         }
                     }
                     if let Some(caption) = caption {
-                        figcaption { "{caption}" }
+                        CardDescription { "{caption}" }
                     }
+                }
                 }
             },
             Media::Chart { chart, caption, .. } => rsx! {
-                figure { class: "qf-media qf-chart",
-                    p { class: "qf-media-label", "Chart" }
-                    pre { class: "qf-content", "{chart_source(chart)}" }
+                Card {
+                    CardContent {
+                    CardTitle { "Chart" }
+                    ScrollArea { pre { "{chart_source(chart)}" } }
                     if let Some(caption) = caption {
-                        figcaption { "{caption}" }
+                        CardDescription { "{caption}" }
                     }
+                }
                 }
             },
             Media::Mermaid { source, caption, .. } => rsx! {
-                figure { class: "qf-media qf-mermaid",
-                    p { class: "qf-media-label", "Diagram" }
-                    pre { class: "qf-content", "{source}" }
+                Card {
+                    CardContent {
+                    CardTitle { "Diagram" }
+                    ScrollArea { pre { "{source}" } }
                     if let Some(caption) = caption {
-                        figcaption { "{caption}" }
+                        CardDescription { "{caption}" }
                     }
+                }
                 }
             },
             Media::Html { html, caption, .. } => rsx! {
-                figure { class: "qf-media qf-html",
-                    iframe { srcdoc: "{html}", "sandbox": "", title: "HTML content" }
+                Card {
+                    CardContent {
+                    AspectRatio { ratio: 16.0 / 9.0, iframe { srcdoc: "{html}", "sandbox": "", title: "HTML content" } }
                     if let Some(caption) = caption {
-                        figcaption { "{caption}" }
+                        CardDescription { "{caption}" }
                     }
+                }
                 }
             },
             Media::Unknown(_) => rsx! {
-                p { class: "qf-muted", "Media type {media.kind_name()}: not supported in the portal yet" }
+                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Media type {media.kind_name()}: not supported in the portal yet" } } }
             },
         }
     };

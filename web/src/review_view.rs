@@ -16,6 +16,7 @@ use crate::components::{
     collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger},
     dialog::{Dialog, DialogDescription, DialogTitle},
     input::Input,
+    item::{Item, ItemContent, ItemDescription, ItemVariant},
     label::Label,
     skeleton::Skeleton,
     textarea::Textarea,
@@ -154,7 +155,7 @@ pub fn ReviewView(
                     }
                 }
             }
-            if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
+            if let Some(message) = error() { Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } } }
             if let Some(id) = current {
                 ReviewLoader {
                     key: "{id}", id, tick: tick(), embedded,
@@ -163,7 +164,7 @@ pub fn ReviewView(
             } else if loading() {
                 Skeleton { role: "status", aria_label: "Loading plans" }
             } else {
-                p { class: "rv-muted", "Select a plan above, or an agent with an open plan." }
+                Item { variant: ItemVariant::Muted, ItemContent { ItemDescription { "Select a plan above, or an agent with an open plan." } } }
             }
         }
     }
@@ -183,14 +184,14 @@ fn ReviewLoader(id: String, tick: u64, embedded: bool, on_done: EventHandler<Str
         }
     }));
     rsx! {
-        if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
+        if let Some(message) = error() { Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } } }
         if let Some(value) = review() {
             if value.decision.is_some() {
-                p { role: "status", "This review is closed." }
+                Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "This review is closed." } } }
             } else {
                 ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, on_done }
             }
-        } else { p { role: "status", "Loading plan…" } }
+        } else { Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Loading plan…" } } } }
     }
 }
 
@@ -595,7 +596,7 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
         article { class: "rv-review",
             if let Some(message) = error() { p { class: "error rv-error", role: "alert", "{message}" } }
             if value.decision.is_some() {
-                p { role: "status", "Review sent to the agent." }
+                Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Review sent to the agent." } } }
             } else {
                 if embedded {
                     header { class: "rv-decision-bar",
@@ -797,8 +798,8 @@ fn AnnotationEditor(
             for (index, path) in images().iter().enumerate() {
                 Button { variant: ButtonVariant::Outline, key: "{path}-{index}", r#type: "button", disabled: busy || uploading(), onclick: move |_| { images.write().remove(index); }, "Remove image {index + 1}" }
             }
-            if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
-            if uploading() { p { role: "status", "Uploading images…" } }
+            if let Some(message) = error() { Item { variant: ItemVariant::Outline, role: "alert", ItemContent { ItemDescription { "{message}" } } } }
+            if uploading() { Item { variant: ItemVariant::Muted, role: "status", ItemContent { ItemDescription { "Uploading images…" } } } }
             div { class: "rv-actions",
                 Button { variant: ButtonVariant::Outline, r#type: "button", disabled: draft.is_none() || busy || uploading(), title: if draft.is_none() { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
                     let Some(mut draft) = draft else { return; };
