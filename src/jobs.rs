@@ -104,8 +104,10 @@ fn receive_nonjob_locked(
     if ingress.read::<Value>(&file)?.is_some() {
         return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
     }
+    if crate::admissions::exists(ledger, id)? {
+        return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+    }
     for directory in [
-        "admissions",
         "launches",
         "preparation-receipts",
         "placement-grants",
@@ -125,9 +127,7 @@ fn receive_nonjob_locked(
             .child("launches")
             .read::<Value>(&format!("{id}.progress.json"))?
             .is_some()
-        || crate::work::queue_records(ledger)?
-            .iter()
-            .any(|ticket| ticket["request"]["id"] == id)
+        || crate::work::queued_request(ledger, id)?
     {
         return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
     }
@@ -205,31 +205,33 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
         note(&value, "/started_ms");
         note(&value, "/ended_ms");
     }
+    let admissions = crate::admissions::values(ledger)?;
+    let mut records = admissions.clone();
     for directory in [
         "launches",
-        "admissions",
         "preparation-receipts",
         "placement-grants",
         "preparation-expectations",
         "preparation-retirements",
         "cancellations",
     ] {
-        for value in json_files(&ledger.child(directory).dir)? {
-            note(&value, "/request/validity/created_ms");
-            note(&value, "/validity/created_ms");
-            note(&value, "/launch/validity/created_ms");
-            note(&value, "/preparation/validity/created_ms");
-            note(&value, "/envelope/request/validity/created_ms");
-            note(&value, "/finished_ms");
-            note(&value, "/recorded_ms");
-            note(&value, "/accepted_ms");
-            note(&value, "/terminal_job/ended_ms");
-            note(&value, "/certificate/terminal_evidence/job/ended_ms");
-            note(&value, "/certificate/terminal_evidence/closed_ms");
-            note(&value, "/origin_release/accepted_ms");
-        }
+        records.extend(json_files(&ledger.child(directory).dir)?);
     }
-    for value in json_files(&ledger.child("admissions").dir)? {
+    for value in records {
+        note(&value, "/request/validity/created_ms");
+        note(&value, "/validity/created_ms");
+        note(&value, "/launch/validity/created_ms");
+        note(&value, "/preparation/validity/created_ms");
+        note(&value, "/envelope/request/validity/created_ms");
+        note(&value, "/finished_ms");
+        note(&value, "/recorded_ms");
+        note(&value, "/accepted_ms");
+        note(&value, "/terminal_job/ended_ms");
+        note(&value, "/certificate/terminal_evidence/job/ended_ms");
+        note(&value, "/certificate/terminal_evidence/closed_ms");
+        note(&value, "/origin_release/accepted_ms");
+    }
+    for value in admissions {
         note(&value, "/request/action/validity/created_ms");
         note(&value, "/launch/action/validity/created_ms");
     }

@@ -973,69 +973,90 @@ esac
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         if version == 0 {
-            tx.execute_batch("\nCREATE TABLE items (\n    seq INTEGER PRIMARY KEY,\n    record TEXT NOT NULL CHECK (json_valid(record)),\n    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,\n    host TEXT GENERATED ALWAYS AS (json_extract(record, '$.host')) STORED NOT NULL,\n    pane TEXT GENERATED ALWAYS AS (json_extract(record, '$.pane')) STORED NOT NULL,\n    closed_ms INTEGER GENERATED ALWAYS AS (json_extract(record, '$.closed_ms')) STORED\n);\nCREATE INDEX items_open_pane ON items (host, pane) WHERE closed_ms IS NULL;\nCREATE TABLE tickets (\n    seq INTEGER PRIMARY KEY,\n    record TEXT NOT NULL CHECK (json_valid(record)),\n    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,\n    request_id TEXT GENERATED ALWAYS AS (json_extract(record, '$.request.id')) STORED NOT NULL UNIQUE,\n    state TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) STORED NOT NULL\n);\nPRAGMA user_version = 1;\n").unwrap();
+            let schema = self.run(&["state", "schema"]);
+            assert!(schema.status.success(), "{schema:?}");
+            tx.execute_batch(&format!(
+                "{}PRAGMA user_version = 2;",
+                String::from_utf8(schema.stdout).unwrap()
+            ))
+            .unwrap();
         }
         tx.commit().unwrap();
         initialization.unlock().unwrap();
         connection
     }
     fn items(&self) -> Value {
-        self.records("SELECT record FROM items ORDER BY seq")
+        self.state(&["items"])
     }
     fn tickets(&self) -> Value {
-        self.records("SELECT record FROM tickets ORDER BY seq")
+        self.state(&["tickets"])
     }
-    fn records(&self, sql: &str) -> Value {
-        let path = self.dir.join("state/state.db");
-        if !path.try_exists().unwrap() {
-            return json!([]);
-        }
-        let mut connection =
-            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
-        connection.busy_timeout(Duration::from_secs(30)).unwrap();
-        let tx = connection.transaction().unwrap();
-        let version: u32 = tx
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+    /// The admission stored for request `id`, or null.
+    fn admission(&self, id: &str) -> Value {
+        self.state(&["admission", id])
+    }
+    fn delete_admission(&self, id: &str) {
+        self.state(&["admission", id, "--delete"]);
+    }
+    fn admission_ids(&self) -> Vec<String> {
+        self.admissions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attempt| attempt["request"]["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    /// Run `dogsled state` with `args`, and return its JSON output.
+    fn state(&self, args: &[&str]) -> Value {
+        let out = self
+            .cmd(&[&["state"], args].concat())
+            .arg("--json")
+            .output()
             .unwrap();
-        if version == 0 {
-            return json!([]);
-        }
-        let mut statement = tx.prepare(sql).unwrap();
-        let records = statement
-            .query_map([], |row| row.get::<_, String>(0))
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    }
+    /// Make every later admission update fail, as a storage failure would.
+    fn refuse_admission_writes(&self) {
+        self.database()
+            .execute_batch(
+                "CREATE TRIGGER refuse_admission_writes BEFORE UPDATE ON admissions
+                 BEGIN SELECT RAISE(ABORT, 'admission write refused'); END;",
+            )
             .unwrap();
-        Value::Array(
-            records
-                .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
-                .collect(),
+    }
+    fn has_admission(&self, id: &str) -> bool {
+        !self.admission(id).is_null()
+    }
+    /// Every stored admission, oldest first.
+    fn admissions(&self) -> Value {
+        self.state(&["admissions"])
+    }
+    fn put_admission(&self, id: &str, value: &Value) {
+        self.put_state(&["state", "admission", id, "--put"], value);
+    }
+    /// Run `dogsled` with `args`, with `value` as its JSON input.
+    fn put_state(&self, args: &[&str], value: &Value) {
+        let mut child = self
+            .cmd(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            value.to_string().as_bytes(),
         )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
     }
     fn put_items(&self, value: &Value) {
-        self.replace_records(
-            "DELETE FROM items",
-            "INSERT INTO items (record) VALUES (?1)",
-            value,
-        );
+        self.put_state(&["state", "items", "--put"], value);
     }
     fn put_tickets(&self, value: &Value) {
-        self.replace_records(
-            "DELETE FROM tickets",
-            "INSERT INTO tickets (record) VALUES (?1)",
-            value,
-        );
-    }
-    fn replace_records(&self, delete: &str, insert: &str, value: &Value) {
-        let mut connection = self.database();
-        let tx = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .unwrap();
-        tx.execute(delete, []).unwrap();
-        for record in value.as_array().unwrap() {
-            tx.execute(insert, [serde_json::to_string(record).unwrap()])
-                .unwrap();
-        }
-        tx.commit().unwrap();
+        self.put_state(&["state", "tickets", "--put"], value);
     }
     fn read(&self, path: &str) -> Value {
         serde_json::from_slice(&fs::read(self.dir.join(path)).unwrap()).unwrap()
@@ -1519,6 +1540,35 @@ fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     }
 }
 
+/// A unit admission for `w1:p1` whose origin saved a reference release that the host has
+/// not acknowledged.
+pub(crate) fn released_admission(id: &str, origin: &str) -> Value {
+    let execution = json!({"executor":"dogsled","ownerId":"w1:p1","requestId":id});
+    let unit_ref =
+        json!({"sessionId":"session-1","unitId":"u-1","revision":1,"contractEntryId":"entry-1"});
+    let digest = "0".repeat(64);
+    let mut request = place_request(id);
+    request["owner_host"] = json!(origin);
+    json!({"request":request,"launch":null,"error":null,"result":{},"unit":{
+        "origin":unit_ref,"execution":execution,"placement":{},"tool_call_id":"call-1",
+        "committed":null,"abandoned":null,"reference_release":{"certificate":{
+            "version":2,"origin_host":origin,"execution":execution,
+            "binding":{"contract":unit_ref,"execution":execution,"exportDigest":digest},
+            "launch":{"id":id,"action":{"type":"place"},"host":"worker","cwd":"/","pane":"w2:p1",
+                "workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":origin},
+            "terminal_evidence":{"ack":{"execution":execution,"unitRef":unit_ref,"digest":digest,
+                "sealEntryId":"seal","sessionLeafId":"leaf"},"sessionId":"session-1",
+                "replyEntryId":"reply","text":"FINAL"},
+            "custody_revision":0,"released_references":["execution"]},
+            "acknowledgement":null,"reason":null}}})
+}
+
+/// A minimal valid request to place work for `w1:p1`.
+pub(crate) fn place_request(id: &str) -> Value {
+    json!({"id":id,"action":{"type":"place"},"host":null,"branch":null,"base":null,"cwd":"/",
+        "repository":null,"workspace":null,"workspace_name":null,"owner":"w1:p1"})
+}
+
 fn repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
     assert!(
@@ -1588,7 +1638,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())),
         "{id}"
     );
-    let admission = rig.read(&format!("state/admissions/{id}.json"));
+    let admission = rig.admission(id);
     let grant = &admission["placement"]["saved"]["prepared"]["grant"];
     let mut expected_replay = grant["envelope"].clone();
     expected_replay["expected_grant"] = grant.clone();

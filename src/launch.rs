@@ -315,9 +315,7 @@ pub(crate) fn retained_job(ledger: &Ledger, id: &str) -> Result<Option<crate::jo
             return Ok(Some(job));
         }
     }
-    if let Some(attempt) = ledger
-        .child("admissions")
-        .read::<work::Attempt>(&format!("{id}.json"))?
+    if let Some(attempt) = crate::admissions::get_as::<work::Attempt>(ledger, id)?
         && let Some(release) = attempt.ordinary_release
     {
         release.certificate.validate()?;
@@ -495,9 +493,7 @@ pub(crate) fn release_owned(fleet: &crate::hosts::Fleet) -> Result<()> {
 }
 
 fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) -> Result<()> {
-    let attempts = fleet.ledger.child("admissions");
-    let file = format!("{}.json", item.id);
-    let Some(attempt) = attempts.read::<work::Attempt>(&file)? else {
+    let Some(attempt) = crate::admissions::get(fleet.ledger, &item.id)? else {
         return Ok(());
     };
     if attempt.unit.is_some() || attempt.placement.is_some() {
@@ -526,11 +522,12 @@ fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) ->
                 .as_ref()
                 .map_or(String::new(), |reply| reply.text.clone())
         };
-        attempts.with_lock(&item.id, || {
+        crate::admissions::lock(fleet.ledger, &item.id, || {
             crate::custody::locked(fleet.ledger, &item.id, |custody| {
-                let mut attempt = attempts.read::<work::Attempt>(&file)?.ok_or_else(|| {
-                    crate::unit_transport::conflict("origin admission disappeared")
-                })?;
+                let mut attempt =
+                    crate::admissions::get(fleet.ledger, &item.id)?.ok_or_else(|| {
+                        crate::unit_transport::conflict("origin admission disappeared")
+                    })?;
                 if attempt.launch.as_ref() != Some(&launch) {
                     return Err(crate::unit_transport::conflict("origin launch changed"));
                 }
@@ -548,7 +545,7 @@ fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) ->
                     result: retained,
                 };
                 attempt.ordinary_release = Some(intent.clone());
-                attempts.write(&file, &attempt)?;
+                crate::admissions::put(fleet.ledger, &item.id, &attempt)?;
                 Ok(intent)
             })
         })?
@@ -557,9 +554,8 @@ fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) ->
         return Ok(());
     }
     let acknowledgement = fleet.release_ordinary(host, &intent.certificate)?;
-    attempts.with_lock(&item.id, || {
-        let mut attempt = attempts
-            .read::<work::Attempt>(&file)?
+    crate::admissions::lock(fleet.ledger, &item.id, || {
+        let mut attempt = crate::admissions::get(fleet.ledger, &item.id)?
             .ok_or_else(|| crate::unit_transport::conflict("origin admission disappeared"))?;
         let saved = attempt
             .ordinary_release
@@ -576,7 +572,7 @@ fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) ->
         if attempt.finished_ms.is_none() {
             attempt.finished_ms = item.closed_ms;
         }
-        attempts.write(&file, &attempt)
+        crate::admissions::put(fleet.ledger, &item.id, &attempt)
     })
 }
 
@@ -807,7 +803,7 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
         }
     }
     for id in ids {
-        let result = ledger.child("admissions").with_lock(&id, || {
+        let result = crate::admissions::lock(ledger, &id, || {
             ledger.child("preparation-receipts").with_lock(&id, || {
                 if !crate::prepare::retention_ready(ledger, &id, now)? {
                     return Ok(());
@@ -1312,9 +1308,7 @@ pub fn execution(
         }
         // Closure is not evidence of a unit launch: ordinary handoffs close items too.
         if let Some(id) = item
-            && ledger
-                .child("admissions")
-                .read::<work::Attempt>(&format!("{id}.json"))?
+            && crate::admissions::get_as::<work::Attempt>(ledger, id)?
                 .is_some_and(|attempt| attempt.unit.is_some())
         {
             return Err(crate::unit_transport::conflict(

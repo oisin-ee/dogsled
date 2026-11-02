@@ -1251,10 +1251,8 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
     stopped_orphan(&rig, &tree);
     fs::write(tree.join("dirty"), b"unsettled work\n").unwrap();
     let id = execution["requestId"].as_str().unwrap();
-    let path = format!("state/admissions/{id}.json");
-    let attempt = source.read(&path);
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
-    rig.put(&path, &attempt);
+    let attempt = source.admission(id);
+    rig.put_admission(id, &attempt);
     fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
     for suffix in [".json", ".progress.json", ".unit.json"] {
         let file = format!("state/launches/{id}{suffix}");
@@ -1280,7 +1278,7 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
     assert!(item["reply"].is_null());
     for _ in 0..2 {
         serve(&rig);
-        let saved = rig.read(&path);
+        let saved = rig.admission(id);
         assert_eq!(saved, attempt);
         assert!(saved["unit"]["returned"].is_null());
         assert!(saved["unit"]["stopped"].is_null());

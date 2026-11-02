@@ -134,11 +134,8 @@ fn reserve_recorded(
 }
 
 fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Result<Placement> {
-    use crate::work::{Attempt, PlacementPhase};
-    let attempts = fleet.ledger.child("admissions");
-    let file = format!("{}.json", request.id);
-    let mut attempt = attempts
-        .read::<Attempt>(&file)?
+    use crate::work::PlacementPhase;
+    let mut attempt = crate::admissions::get(fleet.ledger, &request.id)?
         .ok_or_else(|| crate::unit_transport::conflict("placement admission is missing"))?;
     if attempt.request != serde_json::to_value(request)? {
         return Err(crate::unit_transport::conflict("placement request changed"));
@@ -146,7 +143,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
     if fleet
         .ledger
         .child("placement-attempts")
-        .read::<serde_json::Value>(&file)?
+        .read::<serde_json::Value>(&format!("{}.json", request.id))?
         .is_some_and(|v| !v.is_null())
     {
         return Err(crate::unit_transport::conflict(
@@ -192,7 +189,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
                 .phase = PlacementPhase::SelectionPending {
                 envelope: envelope.clone(),
             };
-            attempts.write(&file, &attempt)?;
+            crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
             crate::node::PlacementReplay {
                 envelope,
                 expected_grant: None,
@@ -212,7 +209,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
         if let Some(grant) = reply.grant {
             progress.phase = PlacementPhase::HostSelected { grant };
             attempt.host = Some(envelope.host.clone());
-            attempts.write(&file, &attempt)?;
+            crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
             return Ok(Placement::Placed {
                 host: envelope.host.clone(),
                 reservation: envelope.reservation.clone(),
@@ -223,7 +220,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
         // that this candidate finished, rather than silently replacing an expectation.
         progress.declined.push(reply);
         progress.phase = PlacementPhase::Recorded;
-        attempts.write(&file, &attempt)?;
+        crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
         if let Some(report) = reports.iter_mut().find(|r| r.host.id == envelope.host.id) {
             report.headroom = outcome.headroom;
         }

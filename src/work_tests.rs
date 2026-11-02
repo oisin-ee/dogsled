@@ -393,10 +393,9 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
         .count();
     assert_eq!(reported, HELD);
 
-    ledger
-        .child("admissions")
-        .write("held-0.json", &json!({"request": null}))
-        .unwrap();
+    let mut changed = crate::admissions::get(&ledger, "held-0").unwrap().unwrap();
+    changed.error = Some("changed evidence".into());
+    crate::admissions::put(&ledger, "held-0", &changed).unwrap();
     work::tick(&fleet, 100).unwrap();
     let after = written();
     assert_ne!(after[0], settled[0], "changed evidence is retried");
@@ -415,15 +414,17 @@ fn identityless_cancellation(ledger: &Ledger, id: &str) -> serde_json::Value {
     let admission = json!({
         "request": request, "host": Host::local(), "launch": null, "error": "refused",
     });
-    let file = format!("{id}.json");
-    ledger.child("admissions").write(&file, &admission).unwrap();
+    crate::admissions::put_value(ledger, id, &admission).unwrap();
     let saved = json!({
         "version": 1, "completion_version": 1, "operation_id": new_id(),
         "ticket": ticket, "admission": admission, "preparation": null, "placement": null,
         "outcome": "not_started", "release": "pending", "intent": null,
         "acknowledgement": null, "error": "preparation release pending",
     });
-    ledger.child("cancellations").write(&file, &saved).unwrap();
+    ledger
+        .child("cancellations")
+        .write(&format!("{id}.json"), &saved)
+        .unwrap();
     ticket
 }
 
@@ -621,9 +622,8 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
     ledger.write("host.json", &snapshot(100)).unwrap();
     let request = place_request(&ledger, "captured-placement");
     assert!(work::perform(&fleet, &request, 100).unwrap().is_some());
-    let admission = ledger.child("admissions");
-    let before = std::fs::read(admission.dir.join("captured-placement.json")).unwrap();
-    let saved: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    let before = crate::admissions::value(&ledger, "captured-placement").unwrap();
+    let saved = before.clone().unwrap();
     assert_eq!(saved["request"], serde_json::to_value(&request).unwrap());
     assert_eq!(saved["placement"]["phase"], "completed");
     assert_eq!(
@@ -637,7 +637,7 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
         let changed: Request = serde_json::from_value(changed).unwrap();
         assert!(work::perform(&fleet, &changed, 101).is_err(), "{field}");
         assert_eq!(
-            std::fs::read(admission.dir.join("captured-placement.json")).unwrap(),
+            crate::admissions::value(&ledger, "captured-placement").unwrap(),
             before
         );
         assert_eq!(
@@ -654,7 +654,7 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
     };
     assert!(work::perform(&redirected, &request, 101).is_err());
     assert_eq!(
-        std::fs::read(admission.dir.join("captured-placement.json")).unwrap(),
+        crate::admissions::value(&ledger, "captured-placement").unwrap(),
         before
     );
     assert_eq!(
@@ -718,20 +718,18 @@ fn placement_admission_never_downgrades_missing_or_newer_progress() {
         hosts: vec![Host::local()],
     };
     let request = place_request(&ledger, "no-downgrade");
-    let admissions = ledger.child("admissions");
     for progress in [
         json!(null),
         json!({"version":4,"phase":"recorded","declined":[]}),
     ] {
         let record =
             json!({"request":request,"host":null,"launch":null,"error":null,"placement":progress});
-        admissions.write("no-downgrade.json", &record).unwrap();
+        crate::admissions::put_value(&ledger, "no-downgrade", &record).unwrap();
+        let saved = crate::admissions::value(&ledger, "no-downgrade").unwrap();
         assert!(work::perform(&fleet, &request, 100).is_err());
         assert_eq!(
-            admissions
-                .read::<serde_json::Value>("no-downgrade.json")
-                .unwrap(),
-            Some(record)
+            crate::admissions::value(&ledger, "no-downgrade").unwrap(),
+            saved
         );
         assert!(!ledger.dir.join("placements.json").exists());
         assert!(

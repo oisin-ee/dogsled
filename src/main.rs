@@ -1,6 +1,7 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
 mod activity;
+mod admissions;
 mod backoff;
 mod board;
 mod budget;
@@ -45,12 +46,14 @@ mod probe;
 mod profiles;
 mod quota;
 mod repository;
+mod rows;
 mod runtime;
 mod service;
 mod shell;
 mod sidebar;
 mod store;
 mod sweep;
+mod tables;
 mod transcript;
 mod unit_reply;
 mod unit_request;
@@ -63,7 +66,7 @@ mod work_tests;
 mod worktree;
 
 use clap::Parser;
-use cli::{Cli, Command, HookCommand, HostCommand, InboxCommand};
+use cli::{Cli, Command, HookCommand, HostCommand, InboxCommand, StateCommand};
 use error::{Error, Result};
 use ledger::{Ledger, now_ms};
 use node::Node;
@@ -477,6 +480,14 @@ fn hook(
 
 /// Recovery needs no Herdr discovery for local operations.
 fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    if let Command::State(cmd) = cli.command {
+        let ledger = Ledger {
+            budget,
+            ..Ledger::new(ledger::default_dir())
+        };
+        state(cmd, &ledger)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let Command::Recovery {
         ref command,
         ref host,
@@ -875,6 +886,45 @@ fn print_placement_finished(node: &Node<'_>, input: &str) -> Result<()> {
         &node.finish_placement(&serde_json::from_str(input)?)?,
         String::new,
     )
+}
+
+fn state(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
+    match cmd {
+        StateCommand::Schema => println!("{}", store::schema()),
+        StateCommand::Admissions => print(true, &admissions::values(ledger)?, String::new)?,
+        StateCommand::Items { put: true } => {
+            let items: Vec<items::Item> = serde_json::from_reader(std::io::stdin().lock())?;
+            store::write(ledger, |tx| {
+                tx.execute("DELETE FROM items", [])?;
+                tables::sync_items(tx, &items)
+            })?;
+        }
+        StateCommand::Items { put: false } => {
+            print(true, &store::read(ledger, tables::items)?, String::new)?;
+        }
+        StateCommand::Tickets { put: true } => {
+            let tickets: Vec<work::Ticket> = serde_json::from_reader(std::io::stdin().lock())?;
+            store::write(ledger, |tx| {
+                tx.execute("DELETE FROM tickets", [])?;
+                tables::sync_tickets(tx, &tickets)
+            })?;
+        }
+        StateCommand::Tickets { put: false } => {
+            print(true, &store::read(ledger, tables::tickets)?, String::new)?;
+        }
+        StateCommand::Admission { id, put, delete } => {
+            jobs::validate_id(&id)?;
+            if put {
+                let attempt: serde_json::Value = serde_json::from_reader(std::io::stdin().lock())?;
+                admissions::put_value(ledger, &id, &attempt)?;
+            } else if delete {
+                admissions::remove(ledger, &id)?;
+            } else {
+                print(true, &admissions::value(ledger, &id)?, String::new)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {

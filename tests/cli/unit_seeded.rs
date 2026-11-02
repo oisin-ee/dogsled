@@ -191,7 +191,7 @@ fn r1c_lost_release_ack_replays_without_reopening_references() {
     ));
     let mut attempt = admission(&rig, &execution);
     attempt["host"] = json!({"id":"peer","label":"netcup","target":"dev@peer"});
-    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    rig.put_admission(id, &attempt);
     fs::create_dir_all(rig.dir.join("peer-state/launches")).unwrap();
     for suffix in ["progress.json", "unit.json", "json"] {
         let file = format!("{id}.{suffix}");
@@ -287,7 +287,7 @@ fn committed_native_refusal_settles_once_without_start_or_acceptance() {
     rig.put(&path, &progress);
     let mut attempt = admission(&rig, &execution);
     attempt["launch"]["action"]["name"] = progress["request"]["action"]["name"].clone();
-    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    rig.put_admission(id, &attempt);
     let (code, events) = rig.json(&["unit", "settlements"]);
     assert_eq!(code, 0, "{events}");
     assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
@@ -365,7 +365,7 @@ fn refusal_requires_final_consistent_host_provenance() {
             _ => unreachable!(),
         }
         rig.put(&file, &progress);
-        rig.put(&format!("state/admissions/{id}.json"), &attempt);
+        rig.put_admission(id, &attempt);
         let _ = rig.json(&["unit", "settlements"]);
         assert!(
             admission(&rig, &execution)["unit"]["abandoned"].is_null(),
@@ -645,7 +645,7 @@ fn remote_refusal_correlates_full_launch_and_rejects_contradictions() {
     let mut attempt = admission(&rig, &execution);
     attempt["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
     attempt["launch"]["host"] = json!("8103");
-    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    rig.put_admission(id, &attempt);
     let receipt = json!({"kind":"refused","launch":attempt["launch"],"failed":"native refusal"});
     rig.script(
         "ssh",
@@ -732,6 +732,12 @@ fn rejected_refresh(rig: &Rig, args: &[&str], id: &str, reason: &str) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+fn merge_admissions(target: &Rig, source: &Rig) {
+    for id in source.admission_ids() {
+        target.put_admission(&id, &source.admission(&id));
+    }
+}
+
 fn merge_records(target: &Rig, source: &Rig, directory: &str) {
     for entry in fs::read_dir(source.dir.join(directory)).unwrap() {
         let entry = entry.unwrap();
@@ -754,8 +760,8 @@ fn invalid_evidence_is_request_scoped_and_other_owners_can_receive_and_ack() {
     let remote_id = remote["requestId"].as_str().unwrap();
     let healthy_id = healthy["requestId"].as_str().unwrap();
     assert!(local_id < healthy_id && remote_id < healthy_id);
-    merge_records(&rig, &remote_rig, "state/admissions");
-    merge_records(&rig, &healthy_rig, "state/admissions");
+    merge_admissions(&rig, &remote_rig);
+    merge_admissions(&rig, &healthy_rig);
     merge_records(&rig, &healthy_rig, "state/launches");
     let progress_file = format!("state/launches/{local_id}.progress.json");
     let mut progress = rig.read(&progress_file);
@@ -764,7 +770,7 @@ fn invalid_evidence_is_request_scoped_and_other_owners_can_receive_and_ack() {
     let mut attempt = admission(&rig, &remote);
     attempt["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
     attempt["launch"]["host"] = json!("8103");
-    rig.put(&format!("state/admissions/{remote_id}.json"), &attempt);
+    rig.put_admission(remote_id, &attempt);
     let mut wrong = json!({"kind":"refused","launch":attempt["launch"],"failed":"native refusal"});
     wrong["launch"]["host"] = json!("wrong-host");
     remote_reply(&rig, remote_id, &wrong);
@@ -858,7 +864,7 @@ fn invalid_host_evidence_never_falls_back_to_cached_return_projection() {
     let id = execution["requestId"].as_str().unwrap();
     let saved = admission(&rig, &execution);
     let mut items = rig.items();
-    items[0]["reply"] = Value::Null;
+    items[0].as_object_mut().unwrap().remove("reply");
     rig.put_items(&items);
     let progress_file = format!("state/launches/{id}.progress.json");
     let mut progress = rig.read(&progress_file);
@@ -870,7 +876,7 @@ fn invalid_host_evidence_never_falls_back_to_cached_return_projection() {
     assert_eq!(admission(&rig, &execution), saved);
     let mut remote = saved;
     remote["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
-    rig.put(&format!("state/admissions/{id}.json"), &remote);
+    rig.put_admission(id, &remote);
     rig.script("ssh", "#!/bin/sh\nprintf 'malformed evidence'\n");
     rejected_refresh(&rig, &["unit", "settlements"], id, "unexpected output");
     assert_eq!(rig.items(), items);
@@ -900,9 +906,10 @@ fn refresh_storage_read_and_write_failures_are_not_request_rejections() {
                 attempt["launch"]["host"] = json!("8103");
                 let mut remote = remote;
                 remote["launch"] = attempt["launch"].clone();
-                rig.put(&format!("state/admissions/{id}.json"), &attempt);
+                rig.put_admission(id, &attempt);
                 remote_reply(&rig, id, &remote);
-                rig.script("ssh", &format!("#!/bin/sh\ncat \"$RIG/remote-receipt.json\"\nmkdir -p \"$RIG/state/admissions/.{id}.json.r-1-$PPID-0.tmp\"\n"));
+                rig.script("ssh", "#!/bin/sh\ncat \"$RIG/remote-receipt.json\"\n");
+                rig.refuse_admission_writes();
                 fs::write(rig.dir.join("clock"), "1").unwrap();
             }
             _ => unreachable!(),
@@ -1273,7 +1280,7 @@ fn receipt_before_item_registration_restores_exact_reply_after_finish_replays() 
     rig.put_items(&json!([]));
     let mut attempt = admission(&rig, &execution);
     attempt["result"] = Value::Null;
-    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    rig.put_admission(id, &attempt);
     let (code, state) = operation(&rig, "observe", &execution_input(&execution));
     assert_eq!(code, 0, "{state}");
     let event = state["settlement"].clone();
@@ -1326,13 +1333,7 @@ fn terminal_projection_recovers_each_persistence_boundary_and_legacy_write_order
         let mut attempt = admission(&rig, &execution);
         attempt["unit"]["returned"] = Value::Null;
         attempt["unit"]["terminal_receipt"] = Value::Null;
-        rig.put(
-            &format!(
-                "state/admissions/{}.json",
-                execution["requestId"].as_str().unwrap()
-            ),
-            &attempt,
-        );
+        rig.put_admission(execution["requestId"].as_str().unwrap(), &attempt);
         replay_keeps_notification(&rig, &execution, &event, &notified);
     }
 }
@@ -1579,7 +1580,7 @@ fn place_remote(rig: &Rig, execution: &Value) -> Value {
     attempt["host"] = json!({"id":"8103","label":"remote","target":"remote-host"});
     attempt["launch"]["host"] = json!("8103");
     let id = execution["requestId"].as_str().unwrap();
-    rig.put(&format!("state/admissions/{id}.json"), &attempt);
+    rig.put_admission(id, &attempt);
     attempt
 }
 
@@ -1590,14 +1591,14 @@ fn settlements_reads_only_the_callers_unacknowledged_remote_units() {
     let (code, other) = commit_as(&other_rig, "other-owner", "other-call");
     assert_eq!(code, 2, "{other}");
     let (acked_rig, acked, _) = refused_unit("scope-acked");
-    merge_records(&rig, &other_rig, "state/admissions");
-    merge_records(&rig, &acked_rig, "state/admissions");
+    merge_admissions(&rig, &other_rig);
+    merge_admissions(&rig, &acked_rig);
     let own_attempt = place_remote(&rig, &own);
     place_remote(&rig, &other);
     let mut acked_attempt = place_remote(&rig, &acked);
     acked_attempt["unit"]["settlement_ack"] = json!("already-acknowledged");
     let acked_id = acked["requestId"].as_str().unwrap();
-    rig.put(&format!("state/admissions/{acked_id}.json"), &acked_attempt);
+    rig.put_admission(acked_id, &acked_attempt);
     remote_reply(
         &rig,
         own["requestId"].as_str().unwrap(),
@@ -1632,7 +1633,7 @@ fn settlements_reads_only_the_callers_unacknowledged_remote_units() {
 fn observe_reads_only_its_own_execution() {
     let (rig, first, _) = refused_unit("observe-first");
     let (second_rig, second, _) = refused_unit("observe-second");
-    merge_records(&rig, &second_rig, "state/admissions");
+    merge_admissions(&rig, &second_rig);
     let attempt = place_remote(&rig, &first);
     place_remote(&rig, &second);
     remote_reply(
@@ -2029,13 +2030,7 @@ fn remote_refused(rig: &Rig, execution: &Value, id: &str, target: &str) -> Value
     let mut attempt = admission(rig, execution);
     attempt["host"] = json!({"id":id,"label":target,"target":target});
     attempt["launch"]["host"] = json!(id);
-    rig.put(
-        &format!(
-            "state/admissions/{}.json",
-            execution["requestId"].as_str().unwrap()
-        ),
-        &attempt,
-    );
+    rig.put_admission(execution["requestId"].as_str().unwrap(), &attempt);
     json!({"kind":"refused","launch":attempt["launch"],"failed":"native refusal"})
 }
 
@@ -2069,7 +2064,7 @@ fn receipt_calls(rig: &Rig) -> usize {
 fn refresh_reads_every_unit_on_one_remote_host_with_one_ssh() {
     let (rig, first, _) = refused_unit("batch-one-host");
     let (other, second, _) = refused_unit("batch-one-host-second");
-    merge_records(&rig, &other, "state/admissions");
+    merge_admissions(&rig, &other);
     let receipts: Vec<_> = [&first, &second]
         .into_iter()
         .map(|execution| {
@@ -2099,7 +2094,7 @@ fn refresh_reads_every_unit_on_one_remote_host_with_one_ssh() {
 fn refresh_makes_one_ssh_per_host_and_a_failed_host_skips_only_its_units() {
     let (rig, failing, _) = refused_unit("batch-two-hosts");
     let (other, healthy, _) = refused_unit("batch-two-hosts-healthy");
-    merge_records(&rig, &other, "state/admissions");
+    merge_admissions(&rig, &other);
     remote_refused(&rig, &failing, "8103", "host-a");
     let refusal = remote_refused(&rig, &healthy, "8104", "host-b");
     rig.put("remote-receipt.json", &json!([entry(&healthy, &refusal)]));

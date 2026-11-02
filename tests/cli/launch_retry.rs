@@ -2264,7 +2264,7 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
     assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 2);
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 2);
     let id = ticket["request"]["id"].as_str().unwrap();
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(id);
     assert_eq!(attempt["launch"]["terminal"], "term_tree");
     assert_eq!(attempt["launch"]["pane"], "w8:p1");
 }
@@ -2952,7 +2952,7 @@ fn remote_retry_keeps_selected_host_and_skips_checkout_and_prepare() {
     assert_eq!(log.matches("host launch").count(), 2);
     assert!(!rig.log("herdr.log").contains("agent start"));
     let request_id = ticket["request"]["id"].as_str().unwrap();
-    let attempt = rig.read(&format!("state/admissions/{request_id}.json"));
+    let attempt = rig.admission(request_id);
     assert_eq!(attempt["launch"]["terminal"], "term_remote");
 }
 
@@ -2964,9 +2964,8 @@ fn interrupted_job_admission_preserves_running_record_without_relaunch() {
         "cwd":rig.dir.join("home"),"repository":null,"workspace":"w1","workspace_name":"caller","owner":"w1:p1"});
     let launch = json!({"id":"interrupted-job","action":action,"host":"local","cwd":rig.dir.join("home"),
         "pane":null,"workspace":"w1","workspace_name":"caller","owner":"w1:p1"});
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    rig.put("state/admissions/interrupted-job.json", &json!({"request":request,"host":{"id":"local","label":"local"},"launch":launch,"error":null}));
+    rig.put_admission("interrupted-job", &json!({"request":request,"host":{"id":"local","label":"local"},"launch":launch,"error":null}));
     let job = json!({"id":"interrupted-job","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"running","exit":null,"signal":null,"reason":null,"started_ms":123,"ended_ms":null,
         "timeout_ms":null,"idle_timeout_ms":null,"validity":rig.job_validity()});

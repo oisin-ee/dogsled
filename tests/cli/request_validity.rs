@@ -510,11 +510,17 @@ fn rv_clock_bootstrap_includes_nonjob_records() {
         let now = clock(&rig);
         set_clock(&rig, now);
         let newest = now + WINDOW_MS + 1;
-        fs::create_dir_all(rig.dir.join(format!("state/{directory}"))).unwrap();
-        rig.put(
-            &format!("state/{directory}/historical.json"),
-            &json!({"finished_ms":newest}),
-        );
+        let record = json!({"finished_ms":newest});
+        if directory == "admissions" {
+            rig.put_admission(
+                "historical",
+                &json!({"request":place_request("historical"),"launch":null,"error":null,
+                    "finished_ms":newest}),
+            );
+        } else {
+            fs::create_dir_all(rig.dir.join(format!("state/{directory}"))).unwrap();
+            rig.put(&format!("state/{directory}/historical.json"), &record);
+        }
         let (code, error) = rv_launch(&rig, &rv_wire(&rig, now));
         assert_eq!(code, 2, "{error}");
         assert_eq!(validity_clock(&rig)["high_water_ms"], newest);
@@ -549,7 +555,7 @@ fn rv_finished_ms_is_write_once_and_not_startup_time() {
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(ticket["finished_ms"], now, "{ticket}");
     assert!(rig.read(&format!("state/launches/{id}.progress.json"))["finished_ms"].is_null());
-    assert!(rig.read(&format!("state/admissions/{id}.json"))["finished_ms"].is_null());
+    assert!(rig.admission(&id)["finished_ms"].is_null());
     set_clock(&rig, now + 1000);
     assert!(
         rig.run(&["serve", "--once", "--interval", "1"])
@@ -640,27 +646,30 @@ fn rv_completed_placement_replays_with_immutable_completion_proof() {
         "main",
     ]);
     assert_eq!(code, 0, "{result}");
-    let id = result["request_id"].as_str().unwrap();
-    let admission = format!("state/admissions/{id}.json");
+    let id = result["request_id"].as_str().unwrap().to_owned();
+    let id = id.as_str();
     let grant = format!("state/placement-grants/{id}.json");
     let lifecycle = format!("state/placement-grants/{id}.lifecycle.json");
     let prepared = format!("state/preparation-receipts/{id}.json");
-    for file in [&admission, &lifecycle, &prepared] {
+    assert_eq!(rig.admission(id)["finished_ms"], now);
+    for file in [&lifecycle, &prepared] {
         assert_eq!(rig.read(file)["finished_ms"], now, "{file}");
     }
     assert!(rig.read(&grant)["finished_ms"].is_null());
-    let before: Vec<_> = [&admission, &grant, &lifecycle, &prepared]
+    let admission = rig.admission(id);
+    let before: Vec<_> = [&grant, &lifecycle, &prepared]
         .into_iter()
         .map(|file| fs::read(rig.dir.join(file)).unwrap())
         .collect();
     let calls = rig.log("herdr.log");
     set_clock(&rig, now + WINDOW_MS + 1);
     assert_eq!(rig.json(&["place", "--resume", id]), (0, result));
-    let after: Vec<_> = [&admission, &grant, &lifecycle, &prepared]
+    let after: Vec<_> = [&grant, &lifecycle, &prepared]
         .into_iter()
         .map(|file| fs::read(rig.dir.join(file)).unwrap())
         .collect();
     assert_eq!(after, before);
+    assert_eq!(rig.admission(id), admission);
     assert_eq!(
         rig.log("herdr.log").replace("machine list --json\n", ""),
         calls.replace("machine list --json\n", "")
@@ -1176,7 +1185,7 @@ fn the_cli_stamps_one_creation_time_through_the_queue_and_the_claim() {
     let created = job["validity"]["created_ms"].as_u64().unwrap();
     assert_eq!(created, now, "{job}");
     // The admission and the receipt name the same time.
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(&id);
     assert_eq!(
         attempt["request"]["action"]["validity"]["created_ms"], created,
         "{attempt}"

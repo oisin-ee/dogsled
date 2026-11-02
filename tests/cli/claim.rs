@@ -22,9 +22,8 @@ pub(super) fn returned(rig: &Rig) -> Value {
     let export = super::unit_requests::exported(0);
     let execution = json!({"executor":"dogsled","ownerId":"w9:p9","requestId":ID});
     let binding = json!({"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]});
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
-    rig.put(&format!("state/admissions/{ID}.json"), &json!({
-        "request":{},"launch":null,"error":null,"unit":{
+    rig.put_admission(ID, &json!({
+        "request":place_request(ID),"launch":null,"error":null,"unit":{
             "origin":export["contract"]["ref"],"execution":execution,"placement":{},
             "tool_call_id":"call-1","abandoned":null,
             "committed":{"execution":execution,"binding":binding,"exported":export},
@@ -154,7 +153,7 @@ fn accept_after_claim_writes_receipt_and_leaves_item_open() {
     assert_eq!(receipt["claimId"], claim["claimId"]);
     assert_eq!(receipt["execution"], execution);
     assert_eq!(receipt["applied"], true);
-    let saved = rig.read(&format!("state/admissions/{ID}.json"));
+    let saved = rig.admission(ID);
     assert_eq!(saved["unit"]["reviews"][0]["reviewId"], receipt["reviewId"]);
     assert_eq!(rig.items(), items);
     let (code, replay) = rig.json(&args);
@@ -169,7 +168,7 @@ fn accept_from_a_replacement_session_is_refused() {
     returned(&rig);
     let (code, claim) = rig.json(&["claim", ID]);
     assert_eq!(code, 0, "{claim}");
-    let before = fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap();
+    let before = rig.admission(ID);
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[
@@ -182,10 +181,7 @@ fn accept_from_a_replacement_session_is_refused() {
         receipt["error"].as_str().unwrap().contains("session"),
         "{receipt}"
     );
-    assert_eq!(
-        fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap(),
-        before
-    );
+    assert_eq!(rig.admission(ID), before);
 }
 
 #[test]
@@ -198,17 +194,14 @@ fn accept_with_a_sessionless_claim_is_refused() {
     custody[0]["custodian_session"] = Value::Null;
     custody[0]["claims"][0]["claimant_session"] = Value::Null;
     rig.put("state/custody.json", &custody);
-    let before = fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap();
+    let before = rig.admission(ID);
     let (code, receipt) = rig.json(&["accept", ID, "--result", "res-1", "--evidence", "reviewed"]);
     assert_eq!(code, 2, "{receipt}");
     assert!(
         receipt["error"].as_str().unwrap().contains("session"),
         "{receipt}"
     );
-    assert_eq!(
-        fs::read(rig.dir.join(format!("state/admissions/{ID}.json"))).unwrap(),
-        before
-    );
+    assert_eq!(rig.admission(ID), before);
 }
 
 #[test]

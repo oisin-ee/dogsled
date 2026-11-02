@@ -559,10 +559,9 @@ fn inference_only_preparation_settlement_keeps_its_checkout_held() {
         "state/launches/started.json",
         &json!({"host":"local","name":"worker","pane":"w9:p2"}),
     );
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
-    rig.put(
-        "state/admissions/failed.json",
-        &json!({"request":{},"host":{"id":"local","label":"local"},"launch":null,
+    rig.put_admission(
+        "failed",
+        &json!({"request":place_request("failed"),"host":{"id":"local","label":"local"},"launch":null,
             "error":"Herdr workspace w2 already shows the checkout; a child may own it"}),
     );
     // A launch with no final receipt whose own terminal still runs in its pane is unresolved,

@@ -609,12 +609,19 @@ fn p3_replacement_or_head_drift_never_adopts_new_work() {
     }
 }
 
+/// A minimal admission that preservation must leave untouched.
+fn original_admission() -> Value {
+    json!({"request":{"id":"original","action":{"type":"place"},"host":null,"branch":null,
+        "base":null,"cwd":"/","repository":null,"workspace":null,"workspace_name":null,
+        "owner":"w1:p1"},"launch":null,"error":null})
+}
+
 fn protected_state(rig: &Rig) -> Vec<(PathBuf, Vec<u8>)> {
+    rig.put_admission("original", &original_admission());
     [
         "preparations.json",
         "preparation-receipts/original.json",
         "preparation-receipts/original.disposition.json",
-        "admissions/original.json",
         "placement-grants/original.json",
         "launches/original.json",
         "tasks/original.json",
@@ -681,6 +688,7 @@ fn p2_list_and_show_survive_original_checkout_removal() {
     assert_eq!(code, 0, "{result}");
     assert_eq!(fs::read(restored.join("file")).unwrap(), b"raw\0\xff\n");
     assert_protected(&state);
+    assert_eq!(rig.admission("original"), original_admission());
 }
 
 fn restore(rig: &Rig, repo: &Path, snapshot: &Value, to: &Path, extra: &[&str]) -> (i32, Value) {
@@ -727,6 +735,7 @@ fn p2_restore_preserves_index_worktree_and_raw_bytes() {
     assert_eq!(fs::read(repo.join("file")).unwrap(), b"raw\0\xff\n");
     assert_eq!(git(&to, &["rev-parse", "HEAD"]), snapshot["head"]["commit"]);
     assert_protected(&state);
+    assert_eq!(rig.admission("original"), original_admission());
 }
 
 #[test]

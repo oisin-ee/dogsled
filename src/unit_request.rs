@@ -1,6 +1,7 @@
 //! Unit requests extend admissions, not task state. The admission lock owns commitment,
 //! abandonment, and launch transitions. The service repairs the commit/enqueue crash gap.
 
+use crate::admissions;
 use crate::error::{Error, Result};
 use crate::hosts::Fleet;
 use crate::ledger::Ledger;
@@ -60,26 +61,6 @@ fn owner() -> Result<String> {
         .ok_or_else(|| conflict("HERDR_PANE_ID is required"))
 }
 
-fn records(ledger: &Ledger) -> Result<Vec<String>> {
-    let entries = match std::fs::read_dir(&ledger.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut files = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.path().extension().is_some_and(|ext| ext == "json") {
-                files.push(name);
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
 pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Result<ExecutionRef> {
     crate::unit_transport::validate_origin(&input.origin)?;
     if tool_call_id.is_empty() {
@@ -89,16 +70,13 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
         return Err(conflict("base requires branch"));
     }
     let owner = owner()?;
-    let attempts = fleet.ledger.child("admissions");
     let lock = format!(
         "owner-{}",
         crate::unit_transport::digest_hex(owner.as_bytes())
     );
-    attempts.with_lock(&lock, || {
-        for file in records(&attempts)? {
-            if let Some(attempt) = attempts.read::<Attempt>(&file)?
-                && let Some(unit) = attempt.unit
-                && unit.execution.owner_id == owner
+    admissions::lock(fleet.ledger, &lock, || {
+        for attempt in admissions::owned(fleet.ledger, &owner)? {
+            if let Some(unit) = attempt.unit
                 && unit.origin == input.origin
             {
                 if unit.placement != input.placement {
@@ -157,16 +135,15 @@ pub fn prepare(fleet: &Fleet, input: PrepareInput, tool_call_id: String) -> Resu
                 reference_release: None,
             }),
         };
-        attempts.write(&format!("{}.json", execution.request_id), &attempt)?;
+        admissions::put(fleet.ledger, &execution.request_id, &attempt)?;
         Ok(execution)
     })
 }
 
 /// Read the record and check that it belongs to `execution`. It authorizes nobody.
-fn correlate(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
+fn correlate(ledger: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
     crate::jobs::validate_id(&execution.request_id)?;
-    let attempt = attempts
-        .read::<Attempt>(&format!("{}.json", execution.request_id))?
+    let attempt = admissions::get(ledger, &execution.request_id)?
         .ok_or_else(|| conflict("unknown prepared request"))?;
     let unit = attempt
         .unit
@@ -179,11 +156,11 @@ fn correlate(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
 }
 
 /// Commit and abandonment belong to the origin owner alone.
-fn load(attempts: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
+fn load(ledger: &Ledger, execution: &ExecutionRef) -> Result<Attempt> {
     if execution.executor != "dogsled" || execution.owner_id != owner()? {
         return Err(conflict("execution owner does not match caller"));
     }
-    correlate(attempts, execution)
+    correlate(ledger, execution)
 }
 
 /// The caller as custody knows it: its pane and its harness session.
@@ -230,9 +207,8 @@ fn commit_using(
     start: fn(&Fleet, Request) -> Result<Value>,
 ) -> Result<Value> {
     crate::jobs::validate_id(&input.execution.request_id)?;
-    let attempts = fleet.ledger.child("admissions");
-    attempts.with_lock(&input.execution.request_id, || {
-        let mut attempt = load(&attempts, &input.execution)?;
+    admissions::lock(fleet.ledger, &input.execution.request_id, || {
+        let mut attempt = load(fleet.ledger, &input.execution)?;
         let unit = attempt
             .unit
             .as_mut()
@@ -266,7 +242,7 @@ fn commit_using(
             .map_err(|error| Error::Invalid(format!("PROFILE_INVALID: {error}")))?;
             attempt.request = serde_json::to_value(request)?;
             unit.committed = Some(input.clone());
-            attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+            admissions::put(fleet.ledger, &input.execution.request_id, &attempt)?;
             crash_point("committed");
         }
         let request: Request = serde_json::from_value(attempt.request.clone())?;
@@ -278,7 +254,7 @@ fn commit_using(
         // The synchronous CLI uses perform_locked; MCP only persists the ticket.
         let result = start(fleet, request);
         crash_point("started");
-        let current = load(&attempts, &input.execution)?;
+        let current = load(fleet.ledger, &input.execution)?;
         match result {
             Ok(_) => receipt(fleet.ledger, &current)?
                 .ok_or_else(|| conflict("start produced no receipt")),
@@ -332,7 +308,7 @@ fn receipt(ledger: &Ledger, attempt: &Attempt) -> Result<Option<Value>> {
 }
 
 pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
-    let attempt = load(&ledger.child("admissions"), execution)?;
+    let attempt = load(ledger, execution)?;
     let unit = attempt
         .unit
         .as_ref()
@@ -386,9 +362,8 @@ pub fn observe(ledger: &Ledger, execution: &ExecutionRef) -> Result<Value> {
 
 pub fn abandon(ledger: &Ledger, execution: &ExecutionRef) -> Result<NotStarted> {
     crate::jobs::validate_id(&execution.request_id)?;
-    let attempts = ledger.child("admissions");
-    attempts.with_lock(&execution.request_id, || {
-        let mut attempt = load(&attempts, execution)?;
+    admissions::lock(ledger, &execution.request_id, || {
+        let mut attempt = load(ledger, execution)?;
         let unit = attempt
             .unit
             .as_mut()
@@ -408,7 +383,7 @@ pub fn abandon(ledger: &Ledger, execution: &ExecutionRef) -> Result<NotStarted> 
                 },
             })
             .clone();
-        attempts.write(&format!("{}.json", execution.request_id), &attempt)?;
+        admissions::put(ledger, &execution.request_id, &attempt)?;
         Ok(event)
     })
 }
@@ -417,23 +392,23 @@ pub fn abandon(ledger: &Ledger, execution: &ExecutionRef) -> Result<NotStarted> 
 /// elapsed time, and never allocates another request or another ticket for a committed ID.
 /// One record's failure holds that request alone: the admission lane continues.
 pub fn recover(ledger: &Ledger, now: u64) -> Result<()> {
-    let attempts = ledger.child("admissions");
-    for file in records(&attempts)? {
-        let Some(id) = file.strip_suffix(".json") else {
+    for stored in admissions::all(ledger)? {
+        let Some(unit) = stored.unit.as_ref() else {
             continue;
         };
-        if let Err(error) = recover_one(ledger, &attempts, &file, id, now) {
+        let id = unit.execution.request_id.clone();
+        if let Err(error) = recover_one(ledger, &id, now) {
             eprintln!("dogsled unit recovery {id}: {error}");
         }
     }
     Ok(())
 }
 
-fn recover_one(ledger: &Ledger, attempts: &Ledger, file: &str, id: &str, now: u64) -> Result<()> {
+fn recover_one(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
     crate::jobs::validate_id(id)?;
     {
-        attempts.with_lock(id, || {
-            let Some(attempt) = attempts.read::<Attempt>(file)? else {
+        admissions::lock(ledger, id, || {
+            let Some(attempt) = admissions::get(ledger, id)? else {
                 return Ok(());
             };
             if attempt.unit.as_ref().is_some_and(|u| {
@@ -473,17 +448,23 @@ fn settlement(unit: &Prepared) -> Result<Value> {
 
 /// Filter eligible terminal units. The caller must also validate a saved no-launch witness
 /// and prohibition under admission; terminal ticket state alone proves nothing.
+/// Whether the attempt alone still allows a not-started event. Every condition that
+/// refuses only ever becomes true later, never false, except a missing commitment.
+fn unsettled(attempt: &Attempt) -> bool {
+    attempt.unit.as_ref().is_some_and(|unit| {
+        unit.committed.is_some()
+            && unit.abandoned.is_none()
+            && unit.returned.is_none()
+            && unit.stopped.is_none()
+            && unit.terminal_receipt.is_none()
+            && attempt.launch.is_none()
+            && attempt.result.is_none()
+    })
+}
+
 fn unlaunched(attempt: &Attempt, ticket: &work::Ticket) -> Option<String> {
     let unit = attempt.unit.as_ref()?;
-    if unit.committed.is_none()
-        || unit.abandoned.is_some()
-        || unit.returned.is_some()
-        || unit.stopped.is_some()
-        || unit.terminal_receipt.is_some()
-        || attempt.launch.is_some()
-        || attempt.result.is_some()
-        || ticket.request.id != unit.execution.request_id
-    {
+    if !unsettled(attempt) || ticket.request.id != unit.execution.request_id {
         return None;
     }
     match ticket.state.as_str() {
@@ -513,24 +494,28 @@ pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
     {
         return Ok(());
     }
-    let attempts = ledger.child("admissions");
-    for ticket in tickets
-        .iter()
-        .filter(|t| matches!(t.state.as_str(), "failed" | "cancelled"))
-    {
+    // Most failed or cancelled tickets were settled long ago. Only attempts that can still
+    // get a not-started event reach the lock; the locked path rereads both records.
+    let open: std::collections::BTreeSet<String> = admissions::all(ledger)?
+        .into_iter()
+        .filter(unsettled)
+        .filter_map(|attempt| attempt.unit.map(|unit| unit.execution.request_id))
+        .collect();
+    for ticket in tickets.iter().filter(|t| {
+        matches!(t.state.as_str(), "failed" | "cancelled") && open.contains(&t.request.id)
+    }) {
         let id = &ticket.request.id;
-        let file = format!("{id}.json");
         if crate::jobs::validate_id(id).is_err() {
             continue;
         }
-        attempts.with_lock(id, || {
-            let Some(mut attempt) = attempts.read::<Attempt>(&file)? else {
+        admissions::lock(ledger, id, || {
+            let Some(mut attempt) = admissions::get(ledger, id)? else {
                 return Ok(());
             };
             if resource_only(&attempt, &resource_closed) {
                 return Ok(());
             }
-            let Some(current) = work::queue(ledger)?.into_iter().find(|t| t.id == ticket.id) else {
+            let Some(current) = work::queued(ledger, &ticket.id)? else {
                 return Ok(());
             };
             if serde_json::to_value(&current.request)? != attempt.request
@@ -551,7 +536,7 @@ pub fn settle_unlaunched(ledger: &Ledger) -> Result<()> {
                 execution: unit.execution.clone(),
                 result: NotStartedResult::NotStarted { reason },
             });
-            attempts.write(&file, &attempt)
+            admissions::put(ledger, id, &attempt)
         })?;
     }
     Ok(())
@@ -566,6 +551,17 @@ pub enum Scope<'a> {
 }
 
 impl Scope<'_> {
+    /// The stored attempts this scope can include, read with one indexed query.
+    fn attempts(self, ledger: &Ledger) -> Result<Vec<Attempt>> {
+        match self {
+            Self::All => admissions::all(ledger),
+            Self::Owner(owner) => admissions::owned(ledger, owner),
+            Self::Execution(execution) => Ok(admissions::get(ledger, &execution.request_id)?
+                .into_iter()
+                .collect()),
+        }
+    }
+
     fn includes(self, execution: &ExecutionRef) -> bool {
         match self {
             Self::All => true,
@@ -617,12 +613,8 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
     retry_reference_releases(fleet, scope)?;
     settle_unlaunched(fleet.ledger)?;
     let resource_closed = resource_closed_items(fleet.ledger)?;
-    let attempts = fleet.ledger.child("admissions");
     let mut remote: Vec<(crate::hosts::Host, Vec<Pending>)> = Vec::new();
-    for file in records(&attempts)? {
-        let Some(attempt) = attempts.read::<Attempt>(&file)? else {
-            continue;
-        };
+    for attempt in scope.attempts(fleet.ledger)? {
         let Some(unit) = attempt.unit.as_ref() else {
             continue;
         };
@@ -633,7 +625,7 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
             continue;
         };
         let pending = Pending {
-            file,
+            request: unit.execution.request_id.clone(),
             execution: unit.execution.clone(),
             saved: unit.terminal_receipt.clone(),
         };
@@ -721,7 +713,7 @@ pub fn refresh(fleet: &Fleet, scope: Scope<'_>) -> Result<()> {
 
 /// One committed unit whose host evidence `refresh` reads.
 struct Pending {
-    file: String,
+    request: String,
     execution: ExecutionRef,
     saved: Option<crate::unit_reply::Receipt>,
 }
@@ -752,13 +744,13 @@ fn settle(
     };
     let imported = match receipt {
         crate::unit_reply::HostEvidence::Returned(receipt) => {
-            import_receipt(ledger, &unit.file, *receipt)
+            import_receipt(ledger, &unit.request, *receipt)
         }
         crate::unit_reply::HostEvidence::Refused(receipt) => {
-            import_refusal(ledger, &unit.file, *receipt)
+            import_refusal(ledger, &unit.request, *receipt)
         }
         crate::unit_reply::HostEvidence::Stopped(stopped) => {
-            import_stopped(ledger, &unit.file, *stopped)
+            import_stopped(ledger, &unit.request, *stopped)
         }
     };
     match imported {
@@ -774,17 +766,19 @@ fn settle(
     }
 }
 
-fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refusal) -> Result<()> {
-    let attempts = ledger.child("admissions");
+fn import_refusal(
+    ledger: &Ledger,
+    request: &str,
+    receipt: crate::unit_reply::Refusal,
+) -> Result<()> {
     let id = &receipt.launch.id;
     crate::jobs::validate_id(id)?;
-    if file != format!("{id}.json") {
+    if request != id.as_str() {
         return Err(conflict("refusal belongs to another admission"));
     }
-    attempts.with_lock(id, || {
-        let mut current = attempts
-            .read::<Attempt>(file)?
-            .ok_or_else(|| conflict("admission disappeared"))?;
+    admissions::lock(ledger, id, || {
+        let mut current =
+            admissions::get(ledger, request)?.ok_or_else(|| conflict("admission disappeared"))?;
         if current.launch.as_ref() != Some(&receipt.launch)
             || current
                 .host
@@ -832,7 +826,7 @@ fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refus
         }
         if unit.abandoned.is_none() {
             unit.abandoned = Some(event);
-            attempts.write(file, &current)?;
+            admissions::put(ledger, request, &current)?;
         }
         crash_point("refusal-settlement-persisted");
         Ok(())
@@ -842,17 +836,19 @@ fn import_refusal(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Refus
 /// Import the host's proof that a confirmed worker stopped without a sealed reply. The checks
 /// match `import_refusal`, except that the launch was confirmed, so the admission may hold a
 /// result. Returned or refusal evidence already saved contradicts it.
-fn import_stopped(ledger: &Ledger, file: &str, stopped: crate::unit_reply::Stopped) -> Result<()> {
-    let attempts = ledger.child("admissions");
+fn import_stopped(
+    ledger: &Ledger,
+    request: &str,
+    stopped: crate::unit_reply::Stopped,
+) -> Result<()> {
     let id = &stopped.launch.id;
     crate::jobs::validate_id(id)?;
-    if file != format!("{id}.json") {
+    if request != id.as_str() {
         return Err(conflict("stop belongs to another admission"));
     }
-    attempts.with_lock(id, || {
-        let mut current = attempts
-            .read::<Attempt>(file)?
-            .ok_or_else(|| conflict("admission disappeared"))?;
+    admissions::lock(ledger, id, || {
+        let mut current =
+            admissions::get(ledger, request)?.ok_or_else(|| conflict("admission disappeared"))?;
         if current.launch.as_ref() != Some(&stopped.launch)
             || current
                 .host
@@ -899,19 +895,21 @@ fn import_stopped(ledger: &Ledger, file: &str, stopped: crate::unit_reply::Stopp
         }
         if unit.stopped.is_none() {
             unit.stopped = Some(event);
-            attempts.write(file, &current)?;
+            admissions::put(ledger, request, &current)?;
         }
         Ok(())
     })
 }
 
-fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Receipt) -> Result<()> {
-    let attempts = ledger.child("admissions");
+fn import_receipt(
+    ledger: &Ledger,
+    request: &str,
+    receipt: crate::unit_reply::Receipt,
+) -> Result<()> {
     let id = receipt.ack.execution.request_id.clone();
-    attempts.with_lock(&id, || {
-        let mut current = attempts
-            .read::<Attempt>(file)?
-            .ok_or_else(|| conflict("admission disappeared"))?;
+    admissions::lock(ledger, &id, || {
+        let mut current =
+            admissions::get(ledger, request)?.ok_or_else(|| conflict("admission disappeared"))?;
         let unit = current
             .unit
             .as_mut()
@@ -952,7 +950,7 @@ fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Recei
         if unit.returned.is_none() || unit.terminal_receipt.is_none() {
             unit.returned = Some(event);
             unit.terminal_receipt = Some(receipt.clone());
-            attempts.write(file, &current)?;
+            admissions::put(ledger, request, &current)?;
         }
         crash_point("settlement-persisted");
         // This projection is replayable even if finish() has not registered the item yet.
@@ -980,21 +978,16 @@ fn import_receipt(ledger: &Ledger, file: &str, receipt: crate::unit_reply::Recei
 
 pub fn managed_returned(ledger: &Ledger, id: &str) -> Result<Option<bool>> {
     crate::jobs::validate_id(id)?;
-    Ok(ledger
-        .child("admissions")
-        .read::<Attempt>(&format!("{id}.json"))?
+    Ok(admissions::get(ledger, id)?
         .and_then(|a| a.unit)
         .map(|u| u.returned.is_some()))
 }
 
 fn pending_preparations(ledger: &Ledger) -> Result<Value> {
     let owner = owner()?;
-    let attempts = ledger.child("admissions");
     let mut pending = Vec::new();
-    for file in records(&attempts)? {
-        if let Some(attempt) = attempts.read::<Attempt>(&file)?
-            && let Some(unit) = attempt.unit
-            && unit.execution.owner_id == owner
+    for attempt in admissions::owned(ledger, &owner)? {
+        if let Some(unit) = attempt.unit
             && unit.committed.is_none()
             && unit.abandoned.is_none()
         {
@@ -1008,26 +1001,31 @@ pub fn settlements(fleet: &Fleet) -> Result<Value> {
     let owner = owner()?;
     let (pane, session) = caller(fleet)?;
     refresh(fleet, Scope::Owner(&owner))?;
-    let attempts = fleet.ledger.child("admissions");
     let mut pending = Vec::new();
     let mut inherited = Vec::new();
-    for file in records(&attempts)? {
-        if let Some(attempt) = attempts.read::<Attempt>(&file)?
-            && let Some(unit) = attempt.unit
+    // A claimed item belongs to its custodian, never to the origin owner.
+    let claimed: Vec<_> = crate::custody::list(fleet.ledger)?
+        .into_iter()
+        .filter(|custody| custody.latest_claim().is_some())
+        .collect();
+    for attempt in admissions::unsettled(fleet.ledger, &owner)? {
+        if let Some(unit) = attempt.unit
+            && !claimed
+                .iter()
+                .any(|custody| custody.item == unit.execution.request_id)
         {
-            let custody = crate::custody::get(fleet.ledger, &unit.execution.request_id)?;
-            if custody.as_ref().is_some_and(|c| c.latest_claim().is_some()) {
-                if let Some((claim, revision)) =
-                    claim_of(custody.as_ref(), &pane, session.as_deref())
-                {
-                    inherited.push((unit, claim, revision));
-                }
-            } else if unit.execution.owner_id == owner && unit.settlement_ack.is_none() {
-                let event = settlement(&unit)?;
-                if !event.is_null() {
-                    pending.push(event);
-                }
+            let event = settlement(&unit)?;
+            if !event.is_null() {
+                pending.push(event);
             }
+        }
+    }
+    for custody in &claimed {
+        if let Some((claim, revision)) = claim_of(Some(custody), &pane, session.as_deref())
+            && let Some(unit) =
+                admissions::get(fleet.ledger, &custody.item)?.and_then(|attempt| attempt.unit)
+        {
+            inherited.push((unit, claim, revision));
         }
     }
     // The custodian reads what the origin owner never acknowledged and what it did.
@@ -1038,8 +1036,7 @@ pub fn settlements(fleet: &Fleet) -> Result<Value> {
         if unit.custody_acks.contains(&claim) {
             continue;
         }
-        let unit = attempts
-            .read::<Attempt>(&format!("{}.json", unit.execution.request_id))?
+        let unit = admissions::get(fleet.ledger, &unit.execution.request_id)?
             .and_then(|attempt| attempt.unit)
             .unwrap_or(unit);
         let event = settlement(&unit)?;
@@ -1071,14 +1068,16 @@ fn release_references(
         return Err(conflict("reference release belongs to another origin host"));
     }
     let execution = &certificate.execution;
-    let attempts = fleet.ledger.child("admissions");
-    attempts.with_lock(&execution.request_id, || {
-        let mut attempt = load(&attempts, execution)?;
+    admissions::lock(fleet.ledger, &execution.request_id, || {
+        let mut attempt = load(fleet.ledger, execution)?;
         if attempt.launch.as_ref() != Some(&certificate.launch) || attempt.host.is_none() {
             return Err(conflict("release does not match origin launch"));
         }
         crate::custody::locked(fleet.ledger, &execution.request_id, |custody| {
-            let unit = attempt.unit.as_mut().ok_or_else(|| conflict("not a unit request"))?;
+            let unit = attempt
+                .unit
+                .as_mut()
+                .ok_or_else(|| conflict("not a unit request"))?;
             if let Some(saved) = &unit.reference_release {
                 return if saved.certificate == *certificate {
                     Ok(())
@@ -1113,10 +1112,11 @@ fn release_references(
                 return Err(conflict("release does not match origin terminal evidence"));
             }
             unit.reference_release = Some(ReferenceReleaseIntent {
-                certificate: certificate.clone(), acknowledgement: None,
+                certificate: certificate.clone(),
+                acknowledgement: None,
                 reason: Some("awaiting origin reference release".into()),
             });
-            attempts.write(&format!("{}.json", execution.request_id), &attempt)
+            admissions::put(fleet.ledger, &execution.request_id, &attempt)
         })
     })?;
     synchronize_release(fleet, execution)
@@ -1125,9 +1125,8 @@ fn release_references(
 /// The RPC holds no admission, custody, or items lock. A lost reply leaves the exact
 /// intent durable, and a retry sends it unchanged without reopening any reference.
 fn synchronize_release(fleet: &Fleet, execution: &ExecutionRef) -> Result<Value> {
-    let attempts = fleet.ledger.child("admissions");
-    let (host, intent) = attempts.with_lock(&execution.request_id, || {
-        let attempt = correlate(&attempts, execution)?;
+    let (host, intent) = admissions::lock(fleet.ledger, &execution.request_id, || {
+        let attempt = correlate(fleet.ledger, execution)?;
         let intent = attempt
             .unit
             .as_ref()
@@ -1143,8 +1142,8 @@ fn synchronize_release(fleet: &Fleet, execution: &ExecutionRef) -> Result<Value>
         return Ok(json!(intent));
     }
     let response = fleet.release_references(&host, &intent.certificate);
-    attempts.with_lock(&execution.request_id, || {
-        let mut attempt = correlate(&attempts, execution)?;
+    admissions::lock(fleet.ledger, &execution.request_id, || {
+        let mut attempt = correlate(fleet.ledger, execution)?;
         let saved = attempt
             .unit
             .as_mut()
@@ -1176,18 +1175,14 @@ fn synchronize_release(fleet: &Fleet, execution: &ExecutionRef) -> Result<Value>
             Err(_) => (),
         }
         let result = json!(saved);
-        attempts.write(&format!("{}.json", execution.request_id), &attempt)?;
+        admissions::put(fleet.ledger, &execution.request_id, &attempt)?;
         Ok(result)
     })
 }
 
 fn retry_reference_releases(fleet: &Fleet, scope: Scope<'_>) -> Result<Value> {
-    let attempts = fleet.ledger.child("admissions");
     let mut results = Vec::new();
-    for file in records(&attempts)? {
-        let Some(attempt) = attempts.read::<Attempt>(&file)? else {
-            continue;
-        };
+    for attempt in scope.attempts(fleet.ledger)? {
         let Some(unit) = attempt.unit.as_ref() else {
             continue;
         };
@@ -1212,19 +1207,18 @@ fn retry_reference_releases(fleet: &Fleet, scope: Scope<'_>) -> Result<Value> {
 
 fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -> Result<Value> {
     crate::jobs::validate_id(&input.execution.request_id)?;
-    let attempts = fleet.ledger.child("admissions");
     let Some(reference) = &input.custody else {
         // A legacy acknowledgement carries no custody reference, so it may only speak for
         // an item whose custody never moved. The check and the write hold the custody
         // lock, so a claim cannot slip in between them.
-        return attempts.with_lock(&input.execution.request_id, || {
+        return admissions::lock(fleet.ledger, &input.execution.request_id, || {
             crate::custody::locked(fleet.ledger, &input.execution.request_id, |custody| {
                 if custody.is_some_and(|record| !record.is_unclaimed()) {
                     return Err(conflict(
                         "custody was claimed; the acknowledgement must carry the custody reference",
                     ));
                 }
-                let mut attempt = load(&attempts, &input.execution)?;
+                let mut attempt = load(fleet.ledger, &input.execution)?;
                 let unit = attempt
                     .unit
                     .as_mut()
@@ -1240,14 +1234,14 @@ fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -
                 if applied {
                     crate::jobs::finish_once(fleet.ledger, &mut attempt.finished_ms, None)?;
                 }
-                attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+                admissions::put(fleet.ledger, &input.execution.request_id, &attempt)?;
                 Ok(json!({"applied":applied}))
             })
         });
     };
     let (pane, session) = caller(fleet)?;
-    attempts.with_lock(&input.execution.request_id, || {
-        let mut attempt = correlate(&attempts, &input.execution)?;
+    admissions::lock(fleet.ledger, &input.execution.request_id, || {
+        let mut attempt = correlate(fleet.ledger, &input.execution)?;
         let event = settlement(
             attempt
                 .unit
@@ -1280,7 +1274,7 @@ fn ack_settlement(fleet: &Fleet, input: &crate::unit_transport::SettlementAck) -
             if applied {
                 unit.custody_acks.push(reference.claim_id.clone());
                 crate::jobs::finish_once(fleet.ledger, &mut attempt.finished_ms, None)?;
-                attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+                admissions::put(fleet.ledger, &input.execution.request_id, &attempt)?;
             }
             Ok(json!({"applied":applied}))
         })
@@ -1308,9 +1302,8 @@ fn record_review_as(
 ) -> Result<Value> {
     use crate::unit_transport::ReturnedResult;
     crate::jobs::validate_id(&input.execution.request_id)?;
-    let attempts = fleet.ledger.child("admissions");
-    attempts.with_lock(&input.execution.request_id, || {
-        let mut attempt = correlate(&attempts, &input.execution)?;
+    admissions::lock(fleet.ledger, &input.execution.request_id, || {
+        let mut attempt = correlate(fleet.ledger, &input.execution)?;
         let unit = attempt
             .unit
             .as_ref()
@@ -1343,7 +1336,7 @@ fn record_review_as(
                 return Err(conflict("a different review is already recorded"));
             }
             unit.reviews.push(input.clone());
-            attempts.write(&format!("{}.json", input.execution.request_id), &attempt)?;
+            admissions::put(fleet.ledger, &input.execution.request_id, &attempt)?;
             Ok(json!({"applied":true}))
         })
     })
@@ -1443,13 +1436,12 @@ mod stopped_tests {
             unit["stopped"] = json!({"version":1,"eventId":format!("{ID}-stopped"),"binding":binding,
                 "result":{"kind":"stopped","reason":"worker pane closed without a final reply"}});
         }
-        let attempt: Attempt =
-            serde_json::from_value(json!({"request":{},"launch":null,"error":null,"unit":unit}))
-                .unwrap();
-        ledger
-            .child("admissions")
-            .write(&format!("{ID}.json"), &attempt)
-            .unwrap();
+        let attempt: Attempt = serde_json::from_value(
+            json!({"request":crate::admissions::fixtures::request(ID, "w1:p1", None),
+                "launch":null,"error":null,"unit":unit}),
+        )
+        .unwrap();
+        admissions::put(&ledger, ID, &attempt).unwrap();
         let receipt = crate::unit_reply::Receipt {
             ack: crate::unit_transport::TerminalAck {
                 execution: serde_json::from_value(execution).unwrap(),
@@ -1467,21 +1459,19 @@ mod stopped_tests {
 
     #[test]
     fn returned_receipt_after_stop_is_rejected_and_the_record_is_unchanged() {
-        let file = format!("{ID}.json");
         // Control: the same receipt imports when no stop is saved.
         let (ledger, receipt) = admission(false);
-        import_receipt(&ledger, &file, receipt).unwrap();
-        let attempt: Attempt = ledger.child("admissions").read(&file).unwrap().unwrap();
+        import_receipt(&ledger, ID, receipt).unwrap();
+        let attempt = admissions::get(&ledger, ID).unwrap().unwrap();
         assert!(attempt.unit.unwrap().returned.is_some());
         std::fs::remove_dir_all(&ledger.dir).ok();
 
         let (ledger, receipt) = admission(true);
-        let path = ledger.child("admissions").dir.join(&file);
-        let before = std::fs::read(&path).unwrap();
-        let error = import_receipt(&ledger, &file, receipt).unwrap_err();
+        let before = admissions::value(&ledger, ID).unwrap();
+        let error = import_receipt(&ledger, ID, receipt).unwrap_err();
         assert!(matches!(error, Error::Invalid(_)), "{error}");
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        let attempt: Attempt = ledger.child("admissions").read(&file).unwrap().unwrap();
+        assert_eq!(admissions::value(&ledger, ID).unwrap(), before);
+        let attempt = admissions::get(&ledger, ID).unwrap().unwrap();
         let unit = attempt.unit.unwrap();
         assert!(unit.returned.is_none() && unit.terminal_receipt.is_none());
         assert_eq!(
@@ -1518,11 +1508,7 @@ mod stopped_tests {
     }
 
     fn review(ledger: &Ledger, evidence: &str) -> crate::unit_transport::Review {
-        let attempt: Attempt = ledger
-            .child("admissions")
-            .read(&format!("{ID}.json"))
-            .unwrap()
-            .unwrap();
+        let attempt = admissions::get(ledger, ID).unwrap().unwrap();
         let unit = attempt.unit.unwrap();
         let Some(crate::unit_transport::ReturnedResult::Returned { evidence: saved }) =
             unit.returned.map(|event| event.result)
@@ -1543,23 +1529,21 @@ mod stopped_tests {
     #[test]
     fn a_review_is_idempotent_conflicts_are_refused_and_it_survives_restart() {
         let (ledger, receipt) = admission(false);
-        let file = format!("{ID}.json");
-        import_receipt(&ledger, &file, receipt).unwrap();
+        import_receipt(&ledger, ID, receipt).unwrap();
         claimed(&ledger, &crate::inbox::hostname(), "s2", 1);
         let (shell, policy) = (crate::shell::Fake::new(), crate::config::Policy::default());
         let fleet = fleet(&ledger, &shell, &policy);
-        let path = ledger.child("admissions").dir.join(&file);
-        let before: Attempt = ledger.child("admissions").read(&file).unwrap().unwrap();
+        let before = admissions::get(&ledger, ID).unwrap().unwrap();
         let first = review(&ledger, "accepted");
         let record = |input| record_review_as(&fleet, "w2:p1", Some("s2"), input);
         assert_eq!(record(&first).unwrap()["applied"], true);
         assert_eq!(record(&first).unwrap()["applied"], false);
-        let saved = std::fs::read(&path).unwrap();
+        let saved = admissions::value(&ledger, ID).unwrap();
         assert!(record(&review(&ledger, "different")).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        assert_eq!(admissions::value(&ledger, ID).unwrap(), saved);
         // A new read of the ledger, as after a restart, holds the receipt and nothing else.
         let after = Ledger::new(ledger.dir.clone());
-        let attempt: Attempt = after.child("admissions").read(&file).unwrap().unwrap();
+        let attempt = admissions::get(&after, ID).unwrap().unwrap();
         let unit = attempt.unit.unwrap();
         assert_eq!(unit.reviews, vec![first]);
         let old = before.unit.unwrap();
@@ -1590,7 +1574,7 @@ mod stopped_tests {
         std::fs::remove_dir_all(&ledger.dir).ok();
 
         let (ledger, receipt) = admission(false);
-        import_receipt(&ledger, &format!("{ID}.json"), receipt).unwrap();
+        import_receipt(&ledger, ID, receipt).unwrap();
         let fleet = fleet(&ledger, &shell, &policy);
         input = review(&ledger, "x");
         let attempt = |pane: &str, session: Option<&str>, input: &crate::unit_transport::Review| {

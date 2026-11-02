@@ -135,9 +135,7 @@ fn authority(
     if item.owner_pane != pane || item.owner_session.as_deref() != Some(session) {
         return Err(conflict("retirement caller is not the recorded owner"));
     }
-    let admission = ledger
-        .child("admissions")
-        .read::<Value>(&format!("{id}.json"))?
+    let admission = crate::admissions::get_as::<Value>(ledger, id)?
         .ok_or_else(|| conflict("missing origin host provenance"))?;
     if admission["request"]["owner_host"].as_str() != Some(actor.host.as_str()) {
         return Err(conflict("retirement owner host changed"));
@@ -197,7 +195,7 @@ pub fn retire(
     if reason.trim().is_empty() {
         return Err(conflict("retirement requires a nonempty reason"));
     }
-    fleet.ledger.child("admissions").with_lock(id, || {
+    crate::admissions::lock(fleet.ledger, id, || {
         let store = fleet.ledger.child("preparation-retirements");
         let file = format!("{id}.json");
         let mut intent = if let Some(saved) = store.read::<Intent>(&file)? {
@@ -212,7 +210,7 @@ pub fn retire(
             }
             saved
         } else {
-            let admission = fleet.ledger.child("admissions").read::<Value>(&file)?;
+            let admission = crate::admissions::value(fleet.ledger, id)?;
             let expected_request = admission.as_ref().and_then(|a| a.get("request")).cloned();
             let host = select_host(fleet, admission.as_ref(), selected)?;
             let (actor, captured_authority) =
@@ -370,10 +368,7 @@ fn validate_origin(
 
 fn finish(fleet: &Fleet, intent: &mut Intent) -> Result<()> {
     let captured = audit(intent)?.clone();
-    let current = fleet
-        .ledger
-        .child("admissions")
-        .read::<Value>(&format!("{}.json", captured.request_id))?
+    let current = crate::admissions::value(fleet.ledger, &captured.request_id)?
         .and_then(|a| a.get("request").cloned());
     if current != intent.request {
         return Err(conflict("retirement originating request changed"));
@@ -432,7 +427,7 @@ pub fn recover(fleet: &Fleet) -> Result<()> {
         if crate::jobs::validate_id(id).is_err() {
             continue;
         }
-        let repaired = fleet.ledger.child("admissions").with_lock(id, || {
+        let repaired = crate::admissions::lock(fleet.ledger, id, || {
             let Some(mut saved) = store.read::<Intent>(&file)? else {
                 return Ok(());
             };

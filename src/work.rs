@@ -132,14 +132,20 @@ pub struct Ticket {
 
 pub(crate) fn queue_records(ledger: &Ledger) -> Result<Vec<Value>> {
     crate::store::read(ledger, |tx| {
-        crate::store::rows(tx, crate::store::Table::Tickets)
+        crate::tables::tickets(tx)?
+            .into_iter()
+            .map(|ticket| Ok(serde_json::to_value(ticket)?))
+            .collect()
     })
 }
 
+/// Whether a ticket was queued for request `id`.
+pub(crate) fn queued_request(ledger: &Ledger, id: &str) -> Result<bool> {
+    crate::store::read(ledger, |tx| crate::tables::queued_request(tx, id))
+}
+
 fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
-    crate::store::write(ledger, |tx| {
-        crate::store::sync(tx, crate::store::Table::Tickets, tickets)
-    })
+    crate::store::write(ledger, |tx| crate::tables::sync_tickets(tx, tickets))
 }
 
 /// Job tickets expire only with a conclusively terminal local job record. Missing
@@ -209,11 +215,7 @@ fn expire_request_sidecars(ledger: &Ledger, now: u64, tickets: &[Ticket]) -> Res
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let admission_owner = ledger
-            .child("admissions")
-            .dir
-            .join(format!("{id}.json"))
-            .exists();
+        let admission_owner = crate::admissions::exists(ledger, id)?;
         if admission_owner
             || [
                 "preparation-receipts",
@@ -306,10 +308,7 @@ pub(crate) fn references_released(ledger: &Ledger, id: &str) -> Result<bool> {
     {
         return Ok(false);
     }
-    let Some(attempt) = ledger
-        .child("admissions")
-        .read::<Attempt>(&format!("{id}.json"))?
-    else {
+    let Some(attempt) = crate::admissions::get_as::<Attempt>(ledger, id)? else {
         return host_references_released(ledger, id);
     };
     let request: Request = serde_json::from_value(attempt.request.clone())?;
@@ -449,26 +448,13 @@ pub(crate) fn job_finished(ledger: &Ledger, job: &Job) -> Result<()> {
 }
 
 fn expire_admissions(ledger: &Ledger, now: u64) -> Result<()> {
-    let attempts = ledger.child("admissions");
-    let entries = match std::fs::read_dir(&attempts.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        let Some(id) = path
-            .file_stem()
-            .and_then(|id| id.to_str())
-            .filter(|_| path.extension().is_some_and(|ext| ext == "json"))
-        else {
-            continue;
-        };
+    for id in crate::admissions::ids(ledger)? {
+        let id = id.as_str();
         if jobs::validate_id(id).is_err() {
             continue;
         }
         let outcome = (|| {
-            let Some(attempt) = attempts.read::<Attempt>(&format!("{id}.json"))? else {
+            let Some(attempt) = crate::admissions::get(ledger, id)? else {
                 return Ok(());
             };
             let request: Request = serde_json::from_value(attempt.request)?;
@@ -477,8 +463,8 @@ fn expire_admissions(ledger: &Ledger, now: u64) -> Result<()> {
                 "owner-{}",
                 crate::unit_transport::digest_hex(request.owner.as_bytes())
             );
-            attempts.with_lock(&owner, || {
-                attempts.with_lock(id, || expire_admission(ledger, id, now))
+            crate::admissions::lock(ledger, &owner, || {
+                crate::admissions::lock(ledger, id, || expire_admission(ledger, id, now))
             })
         })();
         if let Err(error) = outcome {
@@ -525,7 +511,7 @@ fn expire_admission(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
             tickets.retain(|ticket| ticket.request.id != id);
             save_queue(ledger, &tickets)?;
             jobs::remove(&ledger.child("cancellations").dir.join(format!("{id}.json")))?;
-            jobs::remove(&ledger.child("admissions").dir.join(format!("{id}.json")))
+            crate::admissions::remove(ledger, id)
         })?;
         crate::custody::locked(ledger, id, |_| crate::custody::forget_released(ledger, id))
     })
@@ -546,19 +532,29 @@ pub(crate) fn ticket_completion(ledger: &Ledger, ticket: &Ticket) -> Result<Opti
 }
 
 pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
-    let mut tickets: Vec<Ticket> = queue_records(ledger)?
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<std::result::Result<_, _>>()?;
+    let mut tickets = crate::store::read(ledger, crate::tables::tickets)?;
     for ticket in &mut tickets {
-        if ticket
-            .waiting_until_ms
-            .is_some_and(|end| crate::ledger::now_ms() >= end)
-        {
-            ticket.waiting = false;
-        }
+        end_expired_wait(ticket);
     }
     Ok(tickets)
+}
+
+/// One ticket, read fresh by id, as `queue` would return it.
+pub(crate) fn queued(ledger: &Ledger, id: &str) -> Result<Option<Ticket>> {
+    let ticket = crate::store::read(ledger, |tx| crate::tables::ticket(tx, id))?;
+    Ok(ticket.map(|mut ticket| {
+        end_expired_wait(&mut ticket);
+        ticket
+    }))
+}
+
+fn end_expired_wait(ticket: &mut Ticket) {
+    if ticket
+        .waiting_until_ms
+        .is_some_and(|end| crate::ledger::now_ms() >= end)
+    {
+        ticket.waiting = false;
+    }
 }
 
 /// Inline evidence is transport only. After ingress, the immutable sidecar is the
@@ -589,9 +585,7 @@ pub(crate) fn launch_validity(ledger: &Ledger, launch: &Launch) -> Result<Option
 
 fn record_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
     if let Action::Job { validity, .. } = &request.action
-        && !queue_records(ledger)?
-            .iter()
-            .any(|t| t["request"]["id"] == request.id)
+        && !queued_request(ledger, &request.id)?
     {
         if jobs::request_validity(ledger, &request.id)?.is_none() {
             jobs::check_validity(ledger, validity.as_ref())?;
@@ -794,9 +788,7 @@ pub(crate) fn allow_admission(ledger: &Ledger, request: &Request) -> Result<()> 
 }
 
 fn capture_cancellation(ledger: &Ledger, ticket: &Ticket) -> Result<Cancellation> {
-    let admission = ledger
-        .child("admissions")
-        .read::<Value>(&format!("{}.json", ticket.request.id))?;
+    let admission = crate::admissions::get_as::<Value>(ledger, &ticket.request.id)?;
     capture_cancellation_from(ledger, ticket, admission)
 }
 
@@ -1027,14 +1019,13 @@ fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
 
 fn project_attempt(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
     if let Some(finished) = saved.finished_ms {
-        let attempts = ledger.child("admissions");
-        let file = format!("{}.json", saved.ticket.request.id);
-        if let Some(mut attempt) = attempts.read::<Attempt>(&file)?
+        let id = &saved.ticket.request.id;
+        if let Some(mut attempt) = crate::admissions::get(ledger, id)?
             && attempt.unit.is_none()
             && attempt.finished_ms.is_none()
         {
             attempt.finished_ms = Some(finished);
-            attempts.write(&file, &attempt)?;
+            crate::admissions::put(ledger, id, &attempt)?;
         }
     }
     Ok(())
@@ -1080,12 +1071,18 @@ pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
             .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
     })?;
     launch_test_barrier("CANCEL_BEFORE_ADMISSION")?;
-    ledger.child("admissions").with_lock(&original.request.id, || {
+    crate::admissions::lock(ledger, &original.request.id, || {
         launch_test_barrier("CANCEL_ENTERED_ADMISSION")?;
-        let ticket = ledger.with_lock("queue", || queue(ledger)?.into_iter().find(|t| t.id == id)
-            .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}"))))?;
+        let ticket = ledger.with_lock("queue", || {
+            queue(ledger)?
+                .into_iter()
+                .find(|t| t.id == id)
+                .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
+        })?;
         if serde_json::to_value(&original.request)? != serde_json::to_value(&ticket.request)? {
-            return Err(crate::unit_transport::conflict("ticket changed while cancelling"));
+            return Err(crate::unit_transport::conflict(
+                "ticket changed while cancelling",
+            ));
         }
         if ticket.state == "admitted" {
             return Ok(json!({"status":"too_late","ticket":id,"result":ticket.result}));
@@ -1093,28 +1090,48 @@ pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
         if !matches!(ticket.state.as_str(), "pending" | "admitting" | "cancelled") {
             return Err(Error::Invalid(format!("ticket {id} is {}", ticket.state)));
         }
-        let admission = ledger.child("admissions").read::<Value>(&format!("{}.json", ticket.request.id))?;
+        let admission = crate::admissions::get_as::<Value>(ledger, &ticket.request.id)?;
         if let Err(error) = validate_cancellation_admission(&ticket.request, admission.as_ref()) {
             let mut saved = capture_cancellation_from(ledger, &ticket, admission)?;
             saved.release = "pending".into();
             saved.intent = None;
             saved.error = Some(error.to_string());
-            ledger.child("cancellations").write(&format!("{}.json", ticket.request.id), &saved)?;
+            ledger
+                .child("cancellations")
+                .write(&format!("{}.json", ticket.request.id), &saved)?;
             project_cancellation(ledger, &saved)?;
             return Err(error);
         }
         if !admission_prohibited(ledger, &ticket.request)?
-            && let Some(result) = completed_admission(&ticket.request, admission.as_ref())? {
+            && let Some(result) = completed_admission(&ticket.request, admission.as_ref())?
+        {
             // A saved placement result is final to the caller, but admission still owns
             // its unacknowledged release and must keep replaying the original journal.
-            let release_pending = admission.as_ref().and_then(|a| a.pointer("/placement/phase")).and_then(Value::as_str) == Some("result_saved");
-            update_ticket(ledger, id, |t| { t.state = if release_pending { "pending" } else { "admitted" }.into(); t.result = Some(result.clone()); t.error = release_pending.then(|| "placement release pending".into()); t.diagnostic = None; t.wait_reason = None; })?;
+            let release_pending = admission
+                .as_ref()
+                .and_then(|a| a.pointer("/placement/phase"))
+                .and_then(Value::as_str)
+                == Some("result_saved");
+            update_ticket(ledger, id, |t| {
+                t.state = if release_pending {
+                    "pending"
+                } else {
+                    "admitted"
+                }
+                .into();
+                t.result = Some(result.clone());
+                t.error = release_pending.then(|| "placement release pending".into());
+                t.diagnostic = None;
+                t.wait_reason = None;
+            })?;
             return Ok(json!({"status":"too_late","ticket":id,"result":result}));
         }
         let saved = capture_cancellation_from(ledger, &ticket, admission)?;
         project_cancellation(ledger, &saved)?;
-        Ok(json!({"cancelled":id,"status":"cancelled","operation_id":saved.operation_id,
-            "future_admission":"prohibited","outcome":saved.outcome,"release":saved.release,"error":saved.error}))
+        Ok(
+            json!({"cancelled":id,"status":"cancelled","operation_id":saved.operation_id,
+            "future_admission":"prohibited","outcome":saved.outcome,"release":saved.release,"error":saved.error}),
+        )
     })
 }
 
@@ -1160,9 +1177,7 @@ pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> 
     }) {
         return Ok(false);
     }
-    let current = ledger
-        .child("admissions")
-        .read::<Value>(&format!("{}.json", ticket.request.id))?;
+    let current = crate::admissions::get_as::<Value>(ledger, &ticket.request.id)?;
     let matches = ["request", "host", "launch", "result", "placement"]
         .iter()
         .all(|field| {
@@ -1203,7 +1218,7 @@ fn repair_cancellations(fleet: &Fleet) -> Result<()> {
     let mut attempts = 0;
     for (_, id) in records {
         let result = jobs::validate_id(&id).and_then(|()| {
-            fleet.ledger.child("admissions").with_lock(&id, || {
+            crate::admissions::lock(fleet.ledger, &id, || {
                 repair_cancellation(fleet, &id, &mut tickets, attempts < REPAIR_BATCH)
             })
         });
@@ -1319,14 +1334,10 @@ fn identityless(saved: &Cancellation) -> bool {
 /// Everything a held release can be retried on. A change to any of them retries it.
 fn held_evidence(ledger: &Ledger, id: &str) -> Result<String> {
     let file = format!("{id}.json");
-    let evidence = [
-        "admissions",
-        "preparation-expectations",
-        "preparation-retirements",
-    ]
-    .into_iter()
-    .map(|store| ledger.child(store).read::<Value>(&file))
-    .collect::<Result<Vec<_>>>()?;
+    let mut evidence = vec![crate::admissions::value(ledger, id)?];
+    for store in ["preparation-expectations", "preparation-retirements"] {
+        evidence.push(ledger.child(store).read::<Value>(&file)?);
+    }
     Ok(crate::unit_transport::digest_hex(&serde_json::to_vec(
         &evidence,
     )?))
@@ -1334,10 +1345,7 @@ fn held_evidence(ledger: &Ledger, id: &str) -> Result<String> {
 
 fn release_cancelled(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
     let request = &saved.ticket.request;
-    let attempt = fleet
-        .ledger
-        .child("admissions")
-        .read::<Value>(&format!("{}.json", request.id))?;
+    let attempt = crate::admissions::value(fleet.ledger, &request.id)?;
     for field in ["request", "host", "launch", "result", "placement"] {
         if attempt.as_ref().map(|a| &a[field]) != saved.admission.as_ref().map(|a| &a[field]) {
             return Err(crate::unit_transport::conflict(
@@ -1881,9 +1889,7 @@ pub fn receive_launch(
 ) -> Result<Value> {
     if let Action::Job { validity, .. } = &launch.action
         && peer_validity == Some(jobs::VALIDITY_PROTOCOL_VERSION)
-        && !queue_records(ledger)?
-            .iter()
-            .any(|t| t["request"]["id"] == launch.id)
+        && !queued_request(ledger, &launch.id)?
     {
         jobs::validate_id(&launch.id)?;
         ledger
@@ -2378,11 +2384,10 @@ pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
 pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     record_request_validity(fleet.ledger, request)?;
     launch_test_barrier("PLACEMENT_BEFORE_ADMISSION")?;
-    let attempts = fleet.ledger.child("admissions");
-    attempts.with_lock(&request.id, || {
+    crate::admissions::lock(fleet.ledger, &request.id, || {
         allow_admission(fleet.ledger, request)?;
-        if !placement::reserved(&attempts, request)? && waits_behind(fleet, request)? {
-            placement::record(&attempts, request)?;
+        if !placement::reserved(fleet.ledger, request)? && waits_behind(fleet, request)? {
+            placement::record(fleet.ledger, request)?;
             return Ok(None);
         }
         perform_locked(fleet, request, now)
@@ -2441,18 +2446,16 @@ pub(crate) struct Attempt {
 #[cfg(test)]
 pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
-    let attempts = fleet.ledger.child("admissions");
-    attempts.with_lock(&request.id, || perform_locked(fleet, request, now))
+    crate::admissions::lock(fleet.ledger, &request.id, || {
+        perform_locked(fleet, request, now)
+    })
 }
 
 /// The caller owns the request's admission lock. Commit uses this path so the lock is
 /// never reacquired while `runtime::start` enters admission.
 pub(crate) fn admission_completion(ledger: &Ledger, id: &str) -> Result<Option<u64>> {
     jobs::validate_id(id)?;
-    let Some(attempt) = ledger
-        .child("admissions")
-        .read::<Attempt>(&format!("{id}.json"))?
-    else {
+    let Some(attempt) = crate::admissions::get_as::<Attempt>(ledger, id)? else {
         return Ok(None);
     };
     if attempt.finished_ms.is_none() {
@@ -2501,10 +2504,7 @@ pub(crate) fn admission_completion(ledger: &Ledger, id: &str) -> Result<Option<u
 
 fn retained_admission(fleet: &Fleet, request: &Request) -> Result<Option<Value>> {
     if !matches!(request.action, Action::Job { .. }) {
-        let attempt = fleet
-            .ledger
-            .child("admissions")
-            .read::<Attempt>(&format!("{}.json", request.id))?;
+        let attempt = crate::admissions::get(fleet.ledger, &request.id)?;
         if let Some(attempt) = attempt {
             if attempt.request != serde_json::to_value(request)? {
                 return Err(crate::unit_transport::conflict("admission request changed"));
@@ -2557,9 +2557,8 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
     }
     let restored = restored_request(fleet.ledger, request)?;
     let request = &restored;
-    let attempts = fleet.ledger.child("admissions");
-    let file = format!("{}.json", request.id);
-    if let Some(mut attempt) = attempts.read::<Attempt>(&file)? {
+    let id = request.id.as_str();
+    if let Some(mut attempt) = crate::admissions::get(fleet.ledger, id)? {
         if attempt.request != serde_json::to_value(request)? {
             return Err(Error::Invalid(format!(
                 "request {} changed after placement",
@@ -2613,44 +2612,38 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
                     Err(error) => {
                         attempt.error = Some(error.to_string());
                         attempt.diagnostic = error.diagnostic().cloned();
-                        attempts.write(&file, &attempt)?;
+                        crate::admissions::put(fleet.ledger, id, &attempt)?;
                         return Err(prelaunch_error(error));
                     }
                 };
                 attempt.launch = Some(launch);
                 attempt.error = None;
                 attempt.diagnostic = None;
-                attempts.write(&file, &attempt)?;
+                crate::admissions::put(fleet.ledger, id, &attempt)?;
             }
             let launch = attempt
                 .launch
                 .as_ref()
                 .ok_or_else(|| Error::Invalid("missing prepared launch".into()))?;
             let result = finish(fleet, request, &host, launch, now)?;
-            save_result(&attempts, &file, attempt, &result)?;
+            save_result(fleet.ledger, id, attempt, &result)?;
             return Ok(Some(result));
         }
         if attempt.unit.is_none() {
             return Err(Error::Invalid("admission has no selected host".into()));
         }
     }
-    begin(fleet, request, &attempts, &file, now)
+    begin(fleet, request, now)
 }
 
-fn save_result(attempts: &Ledger, file: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
+fn save_result(ledger: &Ledger, id: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
     attempt.result = Some(result.clone());
-    attempts.write(file, &attempt)?;
+    crate::admissions::put(ledger, id, &attempt)?;
     crate::unit_request::crash_point("admission-result-saved");
     Ok(())
 }
 
-fn begin(
-    fleet: &Fleet,
-    request: &Request,
-    attempts: &Ledger,
-    file: &str,
-    now: u64,
-) -> Result<Option<Value>> {
+fn begin(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     let placed = placement(fleet, request, request.host.as_deref(), now)?;
     let Placement::Placed { host, .. } = placed else {
         return Ok(None);
@@ -2664,24 +2657,24 @@ fn begin(
         launch: None,
         error: None,
         diagnostic: None,
-        unit: attempts.read::<Attempt>(file)?.and_then(|a| a.unit),
+        unit: crate::admissions::get(fleet.ledger, &request.id)?.and_then(|a| a.unit),
         result: None,
     };
-    attempts.write(file, &attempt)?;
+    crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
     let prepared = prepare_launch(fleet, request, &host);
     let launch_request = match prepared {
         Ok(launch) => launch,
         Err(error) => {
             attempt.error = Some(error.to_string());
             attempt.diagnostic = error.diagnostic().cloned();
-            attempts.write(file, &attempt)?;
+            crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
             return Err(prelaunch_error(error));
         }
     };
     attempt.launch = Some(launch_request.clone());
-    attempts.write(file, &attempt)?;
+    crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
     let result = finish(fleet, request, &host, &launch_request, now)?;
-    save_result(attempts, file, attempt, &result)?;
+    save_result(fleet.ledger, &request.id, attempt, &result)?;
     Ok(Some(result))
 }
 
@@ -2774,10 +2767,7 @@ fn prepared_launch(
     } else {
         request.cwd.clone()
     };
-    let unit = fleet
-        .ledger
-        .child("admissions")
-        .read::<Attempt>(&format!("{}.json", request.id))?
+    let unit = crate::admissions::get(fleet.ledger, &request.id)?
         .and_then(|a| a.unit)
         .and_then(|u| u.committed)
         .map(crate::unit_transport::seed_from_commit);
@@ -3005,102 +2995,113 @@ fn report_admission_failure(ledger: &Ledger, ticket: &Ticket, error: &Error) -> 
     Ok(())
 }
 
+/// A ticket left admitting by a stopped service. Work that can resume safely goes back to
+/// pending; any other ticket fails and names the host to inspect.
+fn interrupted_admission(ledger: &Ledger, ticket: &Ticket) -> Result<Ticket> {
+    let saved = crate::admissions::get(ledger, &ticket.request.id)?;
+    let recoverable = (matches!(ticket.request.action, Action::Place)
+        && saved.as_ref().is_some_and(|a| {
+            a.placement
+                .as_ref()
+                .is_some_and(|p| p.version == crate::node::PLACEMENT_VERSION)
+        }))
+        || matches!(ticket.request.action, Action::Agent { .. })
+            && saved.as_ref().is_some_and(|a| {
+                a.launch.is_some()
+                    || (a.unit.is_some() && a.host.is_none())
+                    || (ticket.retry.attempts > 0
+                        && a.error.is_some()
+                        && a.host.as_ref().is_some_and(|h| !h.is_local()))
+            });
+    update_ticket(ledger, &ticket.id, |t| {
+        t.state = if recoverable { "pending" } else { "failed" }.into();
+        t.diagnostic = saved.as_ref().and_then(|a| a.diagnostic.clone());
+        let message =
+            "service stopped during admission; inspect the selected host before resubmitting";
+        t.error = Some(t.diagnostic.as_ref().map_or_else(
+            || message.into(),
+            |diagnostic| format!("{message}; {diagnostic}"),
+        ));
+    })
+}
+
 fn admit(fleet: &Fleet, now: u64) -> Result<()> {
     // Hosts that had no room for an earlier ticket in this pass. A later ticket that can use
     // only these hosts waits, so it cannot pass an earlier one; any other ticket is still served.
     let mut full: Vec<String> = Vec::new();
     for ticket in queue(fleet.ledger)? {
         let expected_request = serde_json::to_value(&ticket.request)?;
-        let result = fleet.ledger.child("admissions").with_lock(&ticket.request.id, || {
-        let Some(mut ticket) = queue(fleet.ledger)?.into_iter().find(|t| t.id == ticket.id) else { return Ok(()); };
-        if serde_json::to_value(&ticket.request)? != expected_request { return Err(crate::unit_transport::conflict("queued request changed before admission")); }
-        if let Some(saved) = cancellation(fleet.ledger, &ticket.request)? {
-            project_cancellation(fleet.ledger, &saved)?;
-            return Ok(());
-        }
-        if ticket.state == "admitting" {
-            let saved = fleet
-                .ledger
-                .child("admissions")
-                .read::<Attempt>(&format!("{}.json", ticket.request.id))?;
-            let recoverable = (matches!(ticket.request.action, Action::Place)
-                && saved.as_ref().is_some_and(|a| {
-                    a.placement
-                        .as_ref()
-                        .is_some_and(|p| p.version == crate::node::PLACEMENT_VERSION)
-                }))
-                || matches!(ticket.request.action, Action::Agent { .. })
-                    && saved.as_ref().is_some_and(|a| {
-                        a.launch.is_some()
-                            || (a.unit.is_some() && a.host.is_none())
-                            || (ticket.retry.attempts > 0
-                                && a.error.is_some()
-                                && a.host.as_ref().is_some_and(|h| !h.is_local()))
-                    });
-            ticket = update_ticket(fleet.ledger, &ticket.id, |t| {
-                t.state = if recoverable { "pending" } else { "failed" }.into();
-                t.diagnostic = saved.as_ref().and_then(|a| a.diagnostic.clone());
-                let message = "service stopped during admission; inspect the selected host before resubmitting";
-                t.error = Some(t.diagnostic.as_ref().map_or_else(
-                    || message.into(),
-                    |diagnostic| format!("{message}; {diagnostic}"),
+        let result = crate::admissions::lock(fleet.ledger, &ticket.request.id, || {
+            let Some(mut ticket) = queue(fleet.ledger)?.into_iter().find(|t| t.id == ticket.id)
+            else {
+                return Ok(());
+            };
+            if serde_json::to_value(&ticket.request)? != expected_request {
+                return Err(crate::unit_transport::conflict(
+                    "queued request changed before admission",
                 ));
+            }
+            if let Some(saved) = cancellation(fleet.ledger, &ticket.request)? {
+                project_cancellation(fleet.ledger, &saved)?;
+                return Ok(());
+            }
+            if ticket.state == "admitting" {
+                ticket = interrupted_admission(fleet.ledger, &ticket)?;
+            }
+            if ticket.state != "pending" || !ticket.retry.ready(now) {
+                return Ok(());
+            }
+            let hosts = candidates(fleet, &ticket.request);
+            if hosts.iter().all(|h| full.contains(h)) {
+                return Ok(());
+            }
+            let claimed = update_ticket(fleet.ledger, &ticket.id, |t| {
+                if t.state == "pending" {
+                    t.state = "admitting".into();
+                }
             })?;
-        }
-        if ticket.state != "pending" || !ticket.retry.ready(now) {
-            return Ok(());
-        }
-        let hosts = candidates(fleet, &ticket.request);
-        if hosts.iter().all(|h| full.contains(h)) {
-            return Ok(());
-        }
-        let claimed = update_ticket(fleet.ledger, &ticket.id, |t| {
-            if t.state == "pending" {
-                t.state = "admitting".into();
+            if claimed.state != "admitting" {
+                return Ok(());
             }
-        })?;
-        if claimed.state != "admitting" {
-            return Ok(());
-        }
-        // No store lock spans SSH, cloning, hooks, or agent readiness.
-        let outcome = perform_locked(fleet, &claimed.request, now);
-        launch_test_barrier("BEFORE_FINALIZATION")?;
-        let no_room = matches!(&outcome, Ok(None));
-        update_ticket(fleet.ledger, &ticket.id, |t| match outcome {
-            Ok(Some(result)) if result["status"] == "pending_release" => {
-                t.state = "pending".into();
-                t.result = Some(result);
-                t.error = Some("placement release pending; resume the original request".into());
+            // No store lock spans SSH, cloning, hooks, or agent readiness.
+            let outcome = perform_locked(fleet, &claimed.request, now);
+            launch_test_barrier("BEFORE_FINALIZATION")?;
+            let no_room = matches!(&outcome, Ok(None));
+            update_ticket(fleet.ledger, &ticket.id, |t| match outcome {
+                Ok(Some(result)) if result["status"] == "pending_release" => {
+                    t.state = "pending".into();
+                    t.result = Some(result);
+                    t.error = Some("placement release pending; resume the original request".into());
+                }
+                Ok(Some(result)) => {
+                    t.state = "admitted".into();
+                    t.result = Some(result);
+                    t.wait_reason = None;
+                    t.error = None;
+                    t.diagnostic = None;
+                }
+                Ok(None) => t.state = "pending".into(),
+                // A refused request fails at once; a failed launch, SSH, or Herdr call is retried.
+                Err(error @ Error::Launch(_)) if t.retry.attempts + 1 < LAUNCH_TRIES => {
+                    t.state = "pending".into();
+                    t.retry.fail(now, &t.id);
+                    t.error = Some(format!("attempt {}: {error}", t.retry.attempts));
+                    t.diagnostic = error.diagnostic().cloned();
+                }
+                Err(error) => {
+                    t.state = "failed".into();
+                    t.diagnostic = error.diagnostic().cloned();
+                    t.error = Some(if t.retry.attempts > 0 {
+                        format!("{error} (after {} attempts)", t.retry.attempts + 1)
+                    } else {
+                        error.to_string()
+                    });
+                }
+            })?;
+            if no_room {
+                full.extend(hosts);
             }
-            Ok(Some(result)) => {
-                t.state = "admitted".into();
-                t.result = Some(result);
-                t.wait_reason = None;
-                t.error = None;
-                t.diagnostic = None;
-            }
-            Ok(None) => t.state = "pending".into(),
-            // A refused request fails at once; a failed launch, SSH, or Herdr call is retried.
-            Err(error @ Error::Launch(_)) if t.retry.attempts + 1 < LAUNCH_TRIES => {
-                t.state = "pending".into();
-                t.retry.fail(now, &t.id);
-                t.error = Some(format!("attempt {}: {error}", t.retry.attempts));
-                t.diagnostic = error.diagnostic().cloned();
-            }
-            Err(error) => {
-                t.state = "failed".into();
-                t.diagnostic = error.diagnostic().cloned();
-                t.error = Some(if t.retry.attempts > 0 {
-                    format!("{error} (after {} attempts)", t.retry.attempts + 1)
-                } else {
-                    error.to_string()
-                });
-            }
-        })?;
-        if no_room {
-            full.extend(hosts);
-        }
-        Ok(())
+            Ok(())
         });
         if let Err(error) = result {
             report_admission_failure(fleet.ledger, &ticket, &error)?;
@@ -3137,15 +3138,14 @@ fn transient_ssh(error: &Error) -> bool {
 
 /// Owner-specific closure evidence remains distinct from unit settlement and resources.
 fn reconcile_finished(ledger: &Ledger) -> Result<()> {
-    let attempts = ledger.child("admissions");
     for item in items::list(ledger)? {
         let Some(closed) = item.closed_ms.filter(|_| item.resource_closed_ms.is_none()) else {
             continue;
         };
         jobs::validate_id(&item.id)?;
-        attempts.with_lock(&item.id, || {
-            let file = format!("{}.json", item.id);
-            let Some(mut attempt) = attempts.read::<Attempt>(&file)? else {
+        crate::admissions::lock(ledger, &item.id, || {
+            let id = item.id.as_str();
+            let Some(mut attempt) = crate::admissions::get(ledger, id)? else {
                 return Ok(());
             };
             if attempt.unit.is_some() || attempt.placement.is_some() {
@@ -3174,7 +3174,7 @@ fn reconcile_finished(ledger: &Ledger) -> Result<()> {
             }
             if attempt.finished_ms.is_none() {
                 attempt.finished_ms = Some(closed);
-                attempts.write(&file, &attempt)?;
+                crate::admissions::put(ledger, id, &attempt)?;
             }
             crate::launch::execution_closed(ledger, &item)?;
             Ok(())
@@ -3200,11 +3200,8 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
                 continue;
             }
             let result = ticket.result.as_ref();
-            let selected = fleet
-                .ledger
-                .child("admissions")
-                .read::<Attempt>(&format!("{}.json", ticket.request.id))?
-                .and_then(|a| a.host);
+            let selected =
+                crate::admissions::get(fleet.ledger, &ticket.request.id)?.and_then(|a| a.host);
             let host = result
                 .and_then(|r| r["host"].as_str().or_else(|| r["host"]["id"].as_str()))
                 .or_else(|| selected.as_ref().map(|h| h.label.as_str()))

@@ -46,11 +46,10 @@ fn bound_legacy(name: &str) -> (Rig, Value) {
     let mut result = rig.read(&final_file);
     result["checkout"] = tree;
     rig.put(&final_file, &result);
-    let file = format!("state/admissions/{id}.json");
-    let mut admission = rig.read(&file);
+    let mut admission = rig.admission(&id);
     admission["launch"] = launch.clone();
     admission["result"] = result;
-    rig.put(&file, &admission);
+    rig.put_admission(&id, &admission);
     rig.put(&format!("state/preparation-receipts/{id}.disposition.json"),
         &json!({"request":{"version":1,"binding":binding,"policy":{"kind":"transfer","launch":launch,"pane":"w2:p1","job":null},"outcome":"possibly_executed"},"progress":"released"}));
     (rig, execution)
@@ -102,13 +101,12 @@ fn historical_continuation_does_not_mint_checkout_identity() {
         .unwrap()
         .remove("preparation");
     rig.put(&file, &progress);
-    let file = format!("state/admissions/{id}.json");
-    let mut admission = rig.read(&file);
+    let mut admission = rig.admission(&id);
     admission["launch"]
         .as_object_mut()
         .unwrap()
         .remove("preparation");
-    rig.put(&file, &admission);
+    rig.put_admission(&id, &admission);
     let marker = rig.dir.join("home/.git/dogsled-checkout-id");
     fs::remove_file(&marker).unwrap();
     assert_continue_refused(&rig, &id, "w1:p1", "historical preparation has no identity");
@@ -251,8 +249,7 @@ fn legacy_continuation_checks_fence_before_done_and_launch_locks() {
 }
 
 /// The immutable records of request `id` that continuation must never rewrite.
-const IMMUTABLE: [&str; 4] = [
-    "admissions/{id}.json",
+const IMMUTABLE: [&str; 3] = [
     "launches/{id}.progress.json",
     "launches/{id}.unit.json",
     "launches/{id}.json",
@@ -269,6 +266,7 @@ fn immutable(rig: &Rig, id: &str) -> Vec<Vec<u8>> {
             fs::read(rig.dir.join("state").join(path.replace("{id}", id))).unwrap_or_default()
         })
         .collect();
+    records.push(serde_json::to_vec(&rig.admission(id)).unwrap());
     records.push(serde_json::to_vec(&rig.items()).unwrap());
     records.push(serde_json::to_vec(&rig.tickets()).unwrap());
     records
@@ -403,8 +401,7 @@ fn legacy_unreturned(name: &str) -> (Rig, Value, Value) {
         .remove("owner_host")
         .unwrap();
     rig.put(&file, &progress);
-    let file = format!("state/admissions/{id}.json");
-    let mut admission = rig.read(&file);
+    let mut admission = rig.admission(&id);
     for key in ["request", "launch"] {
         admission[key]
             .as_object_mut()
@@ -413,7 +410,7 @@ fn legacy_unreturned(name: &str) -> (Rig, Value, Value) {
             .unwrap();
     }
     assert_eq!(admission["launch"], progress["request"]);
-    rig.put(&file, &admission);
+    rig.put_admission(&id, &admission);
     owner_agent(&rig, "w1:p1", "term_owner", &origin_session());
     worker_state(&rig, "idle");
     (rig, execution, input)
@@ -457,7 +454,7 @@ fn the_origin_host_owner_continues_a_legacy_worker_without_any_relaunch() {
     assert_eq!(immutable(&rig, &id), records);
     let progress = rig.read(&format!("state/launches/{id}.progress.json"));
     assert!(progress["request"].get("owner_host").is_none());
-    let admission = rig.read(&format!("state/admissions/{id}.json"));
+    let admission = rig.admission(&id);
     assert!(admission["request"].get("owner_host").is_none());
     assert!(admission["launch"].get("owner_host").is_none());
     // The command only read Herdr: no start, close, pane, or worktree operation, and no peer.
@@ -534,9 +531,9 @@ fn another_pane_or_a_replaced_owner_session_cannot_continue() {
 
 #[test]
 fn missing_corrupt_or_contradictory_admission_refuses_with_no_change() {
-    let cases: [(&str, &str); 10] = [
+    // The admissions table refuses a malformed record, so none can be stored to read back.
+    let cases: [(&str, &str); 9] = [
         ("missing", "no original admission"),
-        ("corrupt", ""),
         ("launch", "saved launch does not equal"),
         ("digest", "export digest does not match"),
         (
@@ -552,12 +549,10 @@ fn missing_corrupt_or_contradictory_admission_refuses_with_no_change() {
     for (case, expected) in cases {
         let (rig, execution, _) = legacy_unreturned(&format!("legacy-admission-{case}"));
         let id = request_id(&execution);
-        let file = format!("state/admissions/{id}.json");
-        let mut admission = rig.read(&file);
+        let mut admission = rig.admission(&id);
         match case {
             // A copied seed and launch record without the original admission.
-            "missing" => fs::remove_file(rig.dir.join(&file)).unwrap(),
-            "corrupt" => fs::write(rig.dir.join(&file), "{").unwrap(),
+            "missing" => rig.delete_admission(&id),
             "launch" => admission["launch"]["cwd"] = json!("/elsewhere"),
             "digest" => {
                 admission["unit"]["committed"]["exported"]["digest"] = json!("0".repeat(64));
@@ -571,8 +566,8 @@ fn missing_corrupt_or_contradictory_admission_refuses_with_no_change() {
             "request" => admission["request"]["owner_host"] = json!("Oisin's MacBook Pro"),
             _ => admission["result"]["pane"] = json!("w9:p9"),
         }
-        if !matches!(case, "missing" | "corrupt") {
-            rig.put(&file, &admission);
+        if case != "missing" {
+            rig.put_admission(&id, &admission);
         }
         assert_continue_refused(&rig, &id, "w1:p1", expected);
         assert!(!rig.log("herdr.log").contains("pane close"), "{case}");

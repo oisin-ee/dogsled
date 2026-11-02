@@ -80,10 +80,7 @@ pub(super) fn execution_input(execution: &Value) -> Value {
 }
 
 pub(super) fn admission(rig: &Rig, execution: &Value) -> Value {
-    rig.read(&format!(
-        "state/admissions/{}.json",
-        execution["requestId"].as_str().unwrap()
-    ))
+    rig.admission(execution["requestId"].as_str().unwrap())
 }
 
 fn no_launch(rig: &Rig) {
@@ -257,28 +254,23 @@ fn cancel_before_admission_fences_every_replay() {
 
 #[test]
 fn terminal_ticket_without_no_launch_proof_stays_unresolved() {
-    for case in ["legacy", "missing", "corrupt", "launch", "mismatch", "ack"] {
+    // The admissions table refuses a malformed record, so none can be stored to read back.
+    for case in ["legacy", "missing", "launch", "mismatch", "ack"] {
         let (rig, execution, _) = committed_queued(&format!("cancel-no-proof-{case}"));
         set_ticket(&rig, "cancelled", Value::Null);
-        let file = format!(
-            "state/admissions/{}.json",
-            execution["requestId"].as_str().unwrap()
-        );
+        let id = execution["requestId"].as_str().unwrap().to_owned();
         if case == "missing" {
-            fs::remove_file(rig.dir.join(&file)).unwrap();
-        }
-        if case == "corrupt" {
-            fs::write(rig.dir.join(&file), "{corrupt").unwrap();
+            rig.delete_admission(&id);
         }
         if case == "launch" {
-            let mut attempt = rig.read(&file);
+            let mut attempt = rig.admission(&id);
             attempt["launch"] = json!({"id":execution["requestId"],"action":attempt["request"]["action"],"host":"local","cwd":"/tmp","pane":null,"workspace":null,"workspace_name":null,"owner":"w1:p1"});
-            rig.put(&file, &attempt);
+            rig.put_admission(&id, &attempt);
         }
         if case == "mismatch" {
-            let mut attempt = rig.read(&file);
+            let mut attempt = rig.admission(&id);
             attempt["request"]["cwd"] = json!("/changed");
-            rig.put(&file, &attempt);
+            rig.put_admission(&id, &attempt);
         }
         if case == "ack" {
             fs::create_dir_all(rig.dir.join("state/cancellations")).unwrap();
@@ -289,7 +281,7 @@ fn terminal_ticket_without_no_launch_proof_stays_unresolved() {
             let intent = json!({"version":1,"binding":binding,"policy":policy,"outcome":"unknown"});
             let ack = json!({"version":1,"binding":binding,"policy":policy,"outcome":"unknown","released":true});
             rig.put(&format!("state/cancellations/{}.json", execution["requestId"].as_str().unwrap()),
-                &json!({"version":1,"operation_id":"cancel-ack","ticket":ticket,"admission":rig.read(&file),
+                &json!({"version":1,"operation_id":"cancel-ack","ticket":ticket,"admission":rig.admission(&id),
                     "preparation":null,"placement":null,"outcome":"unknown","release":"acknowledged",
                     "intent":intent,"acknowledgement":ack,"error":null}));
         }
@@ -556,7 +548,6 @@ fn cancellation_launch_fixture(name: &str) -> (Rig, Value, String, Value) {
     let (rig, execution, ticket) = remotely_prepared_queued(name);
     set_ticket(&rig, "pending", Value::Null);
     let id = execution["requestId"].as_str().unwrap();
-    let file = format!("state/admissions/{id}.json");
     let mut attempt = admission(&rig, &execution);
     let receipt = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
     let commit = &attempt["unit"]["committed"];
@@ -567,7 +558,7 @@ fn cancellation_launch_fixture(name: &str) -> (Rig, Value, String, Value) {
         "owner":request["owner"],"owner_host":request["owner_host"],"preparation_protocol":1,"preparation":receipt["binding"],
         "unit":{"version":1,"execution":commit["execution"],"binding":commit["binding"],"exported":commit["exported"]}});
     attempt["launch"] = launch.clone();
-    rig.put(&file, &attempt);
+    rig.put_admission(id, &attempt);
     (rig, execution, ticket, launch)
 }
 
@@ -898,13 +889,10 @@ fn unfinished_or_possibly_launched_tickets_never_settle() {
     assert_eq!(state["phase"], "queued");
     assert!(state["settlement"].is_null());
     // A failure after a launch request was saved may have reached the host.
-    let path = format!(
-        "state/admissions/{}.json",
-        execution["requestId"].as_str().unwrap()
-    );
-    let mut attempt = rig.read(&path);
+    let id = execution["requestId"].as_str().unwrap().to_owned();
+    let mut attempt = rig.admission(&id);
     attempt["launch"] = json!({"id":execution["requestId"],"action":{"type":"agent","kind":"pi","name":"n","message":"m"},"host":"local","cwd":"/tmp","pane":null,"workspace":null,"workspace_name":null,"owner":"w1:p1"});
-    rig.put(&path, &attempt);
+    rig.put_admission(&id, &attempt);
     set_ticket(&rig, "failed", json!("startup response lost"));
     let (_, state) = operation(&rig, "observe", &execution_input(&execution));
     assert_eq!(state["phase"], "unresolved");
@@ -1011,13 +999,12 @@ fn unprovable_committed_unit_holds_only_itself_and_peers_are_admitted() {
     crash(&rig, &commit_input(&execution, 0), "committed");
     // An older writer saved this admission without request validity.
     let id = execution["requestId"].as_str().unwrap();
-    let file = format!("state/admissions/{id}.json");
-    let mut attempt = rig.read(&file);
+    let mut attempt = rig.admission(id);
     attempt["request"]
         .as_object_mut()
         .unwrap()
         .remove("validity");
-    rig.put(&file, &attempt);
+    rig.put_admission(id, &attempt);
     fs::remove_file(rig.dir.join(format!("state/job-validity/{id}.json"))).ok();
     fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
     rig.put("state/job-validity/peer-place.json", &rig.job_validity());
@@ -1400,10 +1387,9 @@ fn settled(name: &str, kind: &str) -> (Rig, Value) {
         "stopped"
     };
     unit[key] = returned_event(&execution, kind);
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
-    rig.put(
-        &format!("state/admissions/{ID}.json"),
-        &json!({"request":{},"launch":null,"error":null,"unit":unit}),
+    rig.put_admission(
+        ID,
+        &json!({"request":place_request(ID),"launch":null,"error":null,"unit":unit}),
     );
     (rig, execution)
 }
@@ -1451,8 +1437,7 @@ fn a_claimant_receives_the_unchanged_event_in_a_custody_envelope() {
     let (rig, execution) = settled("unit-custody-delivery", "returned");
     claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
     live_session(&rig, "w2:p1", "s2");
-    let path = format!("state/admissions/{ID}.json");
-    let before = fs::read(rig.dir.join(&path)).unwrap();
+    let before = rig.admission(ID);
     let (code, pending) = as_pane(&rig, "w2:p1", &["unit", "settlements"]);
     assert_eq!(code, 0, "{pending}");
     assert_eq!(
@@ -1460,7 +1445,7 @@ fn a_claimant_receives_the_unchanged_event_in_a_custody_envelope() {
         json!([{"version":1,"custody":reference(1, "w2:p1"),
             "settlement":returned_event(&execution, "returned")}])
     );
-    assert_eq!(fs::read(rig.dir.join(&path)).unwrap(), before);
+    assert_eq!(rig.admission(ID), before);
     // The previous custodian no longer receives it.
     assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
 }
@@ -1493,7 +1478,7 @@ fn delivery_and_ack_refuse_a_caller_that_is_not_the_live_custodian() {
     // A stale revision is refused.
     claimed(&rig, &host, "w2:p1", Some("s2"), 2);
     assert_eq!(attempt("w2:p1").1, 2);
-    let saved = rig.read(&format!("state/admissions/{ID}.json"));
+    let saved = rig.admission(ID);
     assert!(saved["unit"]["custody_acks"].is_null(), "{saved}");
 }
 
@@ -1542,14 +1527,13 @@ fn a_new_custodian_gets_acknowledged_evidence_once_and_duplicate_acks_are_harmle
         json!([])
     );
     // The historical owner acknowledgement is kept.
-    let saved = rig.read(&format!("state/admissions/{ID}.json"));
+    let saved = rig.admission(ID);
     assert_eq!(saved["unit"]["settlement_ack"], format!("{ID}-returned"));
 }
 
 #[test]
 fn a_custody_less_ack_is_refused_once_custody_is_claimed() {
     let (rig, execution) = settled("unit-custody-legacy-ack", "returned");
-    let path = format!("state/admissions/{ID}.json");
     let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")});
     // Before any claim the legacy acknowledgement still works.
     assert_eq!(
@@ -1559,13 +1543,13 @@ fn a_custody_less_ack_is_refused_once_custody_is_claimed() {
     let (rig, execution) = settled("unit-custody-legacy-claimed", "returned");
     claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
     live_session(&rig, "w2:p1", "s2");
-    let before = fs::read(rig.dir.join(&path)).unwrap();
+    let before = rig.admission(ID);
     // The origin owner passes the owner check, but custody has moved.
     let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")}).to_string();
     let (code, _) = rig.json(&["unit", "ack-settlement", "--input", &legacy]);
     assert_eq!(code, 2);
-    assert_eq!(fs::read(rig.dir.join(&path)).unwrap(), before);
-    let saved = rig.read(&path);
+    assert_eq!(rig.admission(ID), before);
+    let saved = rig.admission(ID);
     assert!(saved["unit"]["settlement_ack"].is_null(), "{saved}");
     // The live custodian still acknowledges with its custody reference.
     let input = ack(&execution, "returned", &reference(1, "w2:p1"));
