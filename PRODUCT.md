@@ -38,7 +38,7 @@ Dogsled exists to remove cruft. A closed agent whose branch sits in "to land" fo
 
 ## Brand Commitments
 
-- Colours come from Herdr's theme, the same source as `src/sidebar/palette.rs` (Catppuccin Mocha today).
+- The portal's palette is not pinned to Herdr's theme (owner, 2026-11-02). The portal follows the dark agent console recorded in `.impeccable/surfaces/web.md`. The Herdr sidebar keeps `src/sidebar/palette.rs`.
 - Dogsled vocabulary: to land, attention, running, waiting, needs you, unit, lead, worker, host, pane.
 
 ## Evidence on Hand
@@ -54,5 +54,5 @@ Dogsled exists to remove cruft. A closed agent whose branch sits in "to land" fo
 3. Act where you look: answer, approve, message or land without leaving the item.
 4. Degrade visibly: when Herdr or a stream is down, say what still works and disable what does not.
 5. No cruft. Finished work is landed or removed; the screen never normalises leftovers with archive or "older" buckets.
-6. A blocked agent's request is that agent's screen. A plan review (Plannotator style) or an interview (pi-interview style) fills the agent's main area while it waits; the conversation becomes a tab. The Inbox button lists every waiting item and opens its agent with the item in front.
+6. A blocked agent's request is that agent's screen. A plan review (Plannotator style) or an interview (pi-interview style) fills the agent's main area while it waits; the conversation becomes a tab. The inbox is always on screen: it lists every waiting item, and selecting one opens its agent with the item in front.
 7. The owner works with leads, not their workers. Workers sit under their lead, muted, with muted status. A worker is raised only when it idles and its lead has not picked it up.

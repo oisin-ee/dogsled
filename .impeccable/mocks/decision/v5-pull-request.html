@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Pull Request</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--hdr:#1F2328;--canvas:#FFFFFF;--subtle:#F6F8FA;--border:#D1D9E0;--muted-b:#E5E9ED;--fg:#1F2328;--muted:#59636E;--accent:#0969DA;--ok:#1A7F37;--okfill:#1F883D;--att:#9A6700;--attbg:#FFF8C5;--done:#8250DF;--danger:#D1242F}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden}
+body{font:14px/1.5 "Mona Sans",-apple-system,"Segoe UI","Noto Sans",sans-serif;color:var(--fg);background:var(--canvas);display:grid;grid-template:56px 1fr/300px 250px 1fr 300px;font-variant-numeric:tabular-nums}
+::selection{background:#B6E3FF}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+.mono,code,pre,.tool{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+header{grid-column:1/-1;background:var(--hdr);color:#fff;display:flex;align-items:center;gap:16px;padding:0 20px}
+.mark{font-weight:700;font-size:16px}
+.hosts{margin-left:auto;display:flex;gap:18px;font-size:12px;color:#D1D9E0;align-items:center}
+.meter{display:inline-flex;width:60px;height:8px;border-radius:4px;background:#3D444D;margin:0 6px;overflow:hidden;vertical-align:middle}.meter i{background:#3FB950}
+.col{min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--border)}
+.ch{display:flex;align-items:center;justify-content:space-between;height:48px;padding:0 16px;border-bottom:1px solid var(--border);font-weight:600;background:var(--subtle)}
+.counter{font-size:12px;font-weight:600;line-height:18px;padding:0 7px;border-radius:9px;background:#D1D9E080}
+.counter.att{background:var(--att);color:#fff}
+.scroll{overflow:auto;min-height:0;flex:1}
+.nt{display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid var(--muted-b);cursor:pointer}
+.nt:hover{background:var(--subtle)}
+.nt svg{color:var(--att);margin-top:2px}
+.nt .r{font-size:12px;color:var(--muted)}.nt .t{font-weight:600;line-height:1.3}
+.nt time{margin-left:auto;font-size:12px;color:var(--muted);white-space:nowrap}
+.btns{display:flex;gap:6px;margin-top:8px}
+.btn{height:28px;padding:0 12px;border-radius:6px;background:var(--subtle);box-shadow:inset 0 0 0 1px var(--border);font-size:12px;font-weight:500}
+.btn.p{background:var(--okfill);color:#fff;box-shadow:none}
+.rp{display:flex;justify-content:space-between;padding:12px 16px 4px;font-size:12px;font-weight:600;color:var(--muted)}
+.ld{display:flex;gap:8px;padding:7px 16px;cursor:pointer;line-height:1.3}
+.ld:hover{background:var(--subtle)}
+.ld.sel{background:#DDF4FF;box-shadow:inset 2px 0 var(--accent)}
+.ld svg{margin-top:1px}.ld .m{font-size:12px;color:var(--muted)}
+.wk{display:flex;gap:6px;align-items:center;padding:2px 16px 2px 40px;font-size:12px;color:var(--muted)}
+.wk span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.g{color:var(--ok)}.a{color:var(--att)}.d{color:var(--done)}.u{color:var(--muted)}
+.conv{min-width:0}
+.top{padding:14px 24px 12px;border-bottom:1px solid var(--border)}
+.top h1{font-size:20px;font-weight:600;line-height:1.3}
+.top .s{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:13px;color:var(--muted)}
+.state{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 10px;border-radius:12px;background:var(--okfill);color:#fff;font-size:12px;font-weight:600}
+.state svg{width:14px;height:14px}
+.top .acts{float:right;display:flex;gap:6px}
+.ib{display:grid;place-items:center;width:32px;height:32px;border-radius:6px;background:var(--subtle);box-shadow:inset 0 0 0 1px var(--border)}
+.tl{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;justify-content:flex-end;padding:16px 24px 8px;position:relative}
+.ev{position:relative;padding-left:40px;margin-bottom:14px}
+.ev::before{content:"";position:absolute;left:15px;top:-14px;bottom:-14px;width:2px;background:var(--muted-b)}
+.av{position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;z-index:1}
+.box{border:1px solid var(--border);border-radius:6px;background:#fff}
+.bh{display:flex;gap:6px;padding:6px 12px;background:var(--subtle);border-bottom:1px solid var(--border);border-radius:6px 6px 0 0;font-size:13px;color:var(--muted)}
+.bh b{color:var(--fg);font-weight:600}
+.bb{padding:10px 14px}
+.md{line-height:1.55}.md h3{font-size:16px;font-weight:600;padding-bottom:4px;border-bottom:1px solid var(--muted-b);margin-bottom:8px}
+.md p+*,.md ol+*{margin-top:8px}.md ol{padding-left:22px}
+.md code{font-size:85%;background:#818B981F;border-radius:6px;padding:.2em .4em}
+.md pre{background:var(--subtle);border-radius:6px;padding:12px 14px;font-size:12px;line-height:1.5}
+.md pre code{background:none;padding:0;font-size:12px}.kw{color:#CF222E}.nu{color:#0550AE}.cm{color:#59636E}
+.md table{border-collapse:collapse;font-size:13px}.md td,.md th{border:1px solid var(--border);padding:4px 12px;text-align:left}.md th{font-weight:600;background:var(--subtle)}
+.sm{position:relative;padding-left:40px;margin-bottom:12px;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.sm::before{content:"";position:absolute;left:15px;top:-12px;bottom:-12px;width:2px;background:var(--muted-b)}
+.badge{position:absolute;left:4px;width:24px;height:24px;border-radius:50%;background:var(--subtle);box-shadow:0 0 0 2px #fff;display:grid;place-items:center;z-index:1}
+.badge svg{width:14px;height:14px}
+.tool{font-size:12px;color:var(--fg)}
+.composer{display:flex;align-items:flex-end;gap:6px;margin:0 24px 16px;padding:6px;border-radius:6px;box-shadow:inset 0 0 0 1px var(--border);background:#fff}
+.composer textarea{flex:1;border:0;resize:none;font:inherit;height:32px;padding:5px 4px;outline:none}
+.send{display:grid;place-items:center;width:32px;height:32px;border-radius:6px;background:var(--okfill);color:#fff}
+.sb{padding:0 16px;overflow:auto;min-height:0}
+.sbh{display:flex;justify-content:space-between;padding:14px 0 6px;font-size:12px;font-weight:600;color:var(--muted)}
+.prog{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:8px}
+.prog span{flex:1;height:8px;border-radius:4px;background:var(--muted-b);overflow:hidden}.prog span i{display:block;height:100%;width:87.5%;background:var(--okfill)}
+.task{display:flex;gap:8px;padding:4px 0;line-height:1.35}
+.cb{width:14px;height:14px;border-radius:3px;box-shadow:inset 0 0 0 1px #818B98;flex:none;margin-top:3px}
+.task.done{color:var(--muted)}.task.done .cb{background:var(--accent);box-shadow:none}
+.task.now .cb{box-shadow:inset 0 0 0 4px var(--okfill)}
+.sep{border-top:1px solid var(--muted-b);margin-top:10px}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></symbol>
+<symbol id="dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/></symbol>
+<symbol id="pause" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></symbol>
+<symbol id="check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
+<symbol id="term" viewBox="0 0 24 24"><path d="m5 8 4 4-4 4M12 17h7"/></symbol>
+<symbol id="merge" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="clip" viewBox="0 0 24 24"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l8.6-8.6A4 4 0 1 1 18 8.8l-8.6 8.6a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+</defs></svg>
+<header><span class="mark">dogsled</span>
+ <div class="hosts"><span>local<span class="meter"><i style="width:33%"></i></span>4/12</span><span>netcup<span class="meter"><i style="width:25%"></i></span>4/16</span><span>momokaya-2<span class="meter"><i style="width:14%"></i></span>1/7</span></div></header>
+<section class="col"><div class="ch">Waiting on you <span class="counter att">5</span></div>
+ <div class="scroll">
+  <div class="nt"><svg class="i"><use href="#bell"/></svg><div><p class="r">oisin-ee/dogsled · prompt</p><p class="t">Allow git push to origin?</p><div class="btns"><button class="btn">y</button><button class="btn">n</button><button class="btn">esc</button></div></div><time>1m</time></div>
+  <div class="nt"><svg class="i"><use href="#bell"/></svg><div><p class="r">oisin-ee/dogsled · plan review</p><p class="t">Typed SQLite state store, revision 3</p></div><time>8m</time></div>
+  <div class="nt"><svg class="i"><use href="#bell"/></svg><div><p class="r">oisin-ee/rondo · 2 questions</p><p class="t">Before the iOS gate</p></div><time>12m</time></div>
+  <div class="nt"><svg class="i"><use href="#bell"/></svg><div><p class="r">oisin-ee/dogsled · idle worker</p><p class="t">Prune stale Herdr panes</p></div><time>18h</time></div>
+  <div class="nt"><svg class="i" style="color:var(--done)"><use href="#merge"/></svg><div><p class="r">oisin-ee/rt100k · to land</p><p class="t">review/schwab-auth-transport-fix</p><div class="btns"><button class="btn p">Land</button><button class="btn">Prune</button></div></div><time>2d</time></div>
+ </div></section>
+<section class="col"><div class="ch">Agents <span class="counter">7</span></div>
+ <div class="scroll">
+  <p class="rp"><span>oisin-ee/dogsled</span></p>
+  <div class="ld sel"><svg class="i g"><use href="#dot"/></svg><div><p>Review d0a1246, release 0.29.3</p><p class="m">28 of 32 tasks</p></div></div>
+  <p class="wk"><svg class="i g" style="width:12px;height:12px"><use href="#dot"/></svg><span>Fix placement retry</span>netcup</p>
+  <p class="wk"><svg class="i d" style="width:12px;height:12px"><use href="#check"/></svg><span>Review d0a1246</span>done</p>
+  <div class="ld"><svg class="i a"><use href="#dot"/></svg><div><p>Move state into typed SQLite</p><p class="m">Plan waiting · 75 of 78</p></div></div>
+  <div class="ld"><svg class="i u"><use href="#pause"/></svg><div><p>Find why Herdr panes linger</p><p class="m">Idle 40m</p></div></div>
+  <div class="ld"><svg class="i u"><use href="#pause"/></svg><div><p>Replace portal controls</p><p class="m">Idle 2h</p></div></div>
+  <p class="rp"><span>oisin-ee/rondo</span></p>
+  <div class="ld"><svg class="i a"><use href="#dot"/></svg><div><p>Build the iOS screens</p><p class="m">2 questions · 6 of 14</p></div></div>
+  <p class="rp"><span>oisin-ee/rt100k</span></p>
+  <div class="ld"><svg class="i g"><use href="#dot"/></svg><div><p>Verify the Schwab auth fixtures</p><p class="m">11 of 19 tasks</p></div></div>
+  <p class="rp"><span>markussep/grabcrft</span></p>
+  <div class="ld"><svg class="i u"><use href="#pause"/></svg><div><p>Milestone 3 plan</p><p class="m">154 of 176 tasks</p></div></div>
+ </div></section>
+<section class="col conv">
+ <div class="top"><div class="acts"><button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div>
+  <h1>Review d0a1246, merge both fixes, release 0.29.3</h1>
+  <p class="s"><span class="state"><svg class="i"><use href="#dot"/></svg>Running</span>lead · pi · claude-opus on local · <span class="mono">main</span></p></div>
+ <div class="tl">
+  <div class="ev"><span class="av" style="background:#0969DA">O</span><div class="box"><p class="bh"><b>oisin</b> asked 6 minutes ago</p><p class="bb">Review d0a1246, merge both fixes, then cut 0.29.3.</p></div></div>
+  <div class="ev"><span class="av" style="background:#8250DF">π</span><div class="box"><p class="bh"><b>lead</b> replied 2 minutes ago</p><div class="bb md"><h3>Review of <code>d0a1246</code></h3><p>Both fixes hold. <strong>Prune order:</strong> <code>cleanup::prune</code> now closes the pane first. <strong>Placement retry</strong> is bounded:</p>
+   <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(<span class="nu">3</span>) {
+    <span class="kw">if</span> place(&amp;host).<span class="kw">await</span>.is_ok() { <span class="kw">break</span>; }
+    sleep(delay).<span class="kw">await</span>; <span class="cm">// 250 ms, 500 ms, 1 s</span>
+}</code></pre>
+   <table><tr><th>Gate</th><th>Result</th></tr><tr><td><code>moon run :lint</code></td><td>passed</td></tr><tr><td><code>moon run :test</code></td><td>958 → 960 passed</td></tr></table></div></div></div>
+  <p class="sm"><span class="badge"><svg class="i"><use href="#term"/></svg></span><span class="tool">git merge --no-ff fix/prune-order fix/placement-retry</span></p>
+  <p class="sm"><span class="badge" style="background:#DAFBE1;color:var(--ok)"><svg class="i"><use href="#dot"/></svg></span>Running <code class="tool">moon run :check</code> on netcup</p>
+ </div>
+ <form class="composer"><button type="button" class="ib" aria-label="Attach image"><svg class="i"><use href="#clip"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#up"/></svg></button></form>
+</section>
+<aside class="col" style="border:0"><div class="sb">
+ <p class="sbh"><span>Tasks</span><span>28 of 32</span></p>
+ <p class="prog"><span><i></i></span></p>
+ <div class="task now"><i class="cb"></i><div>Release 0.29.3<p style="font-size:12px;color:var(--muted)">Tag v0.29.3 and push · writer · netcup</p></div></div>
+ <div class="task"><i class="cb"></i>Publish release notes</div>
+ <div class="task"><i class="cb"></i>Bump the dotfiles pin after the GitHub release</div>
+ <div class="task"><i class="cb"></i>Close #212 with the release link</div>
+ <div class="task done"><i class="cb"></i>Merge fix/placement-retry</div>
+ <div class="task done"><i class="cb"></i>Merge fix/prune-order</div>
+ <div class="task done"><i class="cb"></i>Review d0a1246</div>
+ <p class="sbh sep"><span>25 more completed · 3 abandoned</span></p>
+ <p class="sbh sep"><span>Workers</span><span>2</span></p>
+ <p class="task"><svg class="i g"><use href="#dot"/></svg>writer · netcup · Fix placement retry</p>
+ <p class="task"><svg class="i d"><use href="#check"/></svg>reviewer · local · done</p>
+ <p class="sbh sep"><span>Branch</span></p>
+ <p class="task mono" style="font-size:12px">main · 2 ahead of origin</p>
+</div></aside>
+</body></html>

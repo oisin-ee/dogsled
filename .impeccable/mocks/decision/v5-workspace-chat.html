@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Workspace Chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+:root{--aub:#3F0E40;--aub2:#350D36;--aubhi:#552555;--side:#CFC3CF;--sel:#1164A3;--ink:#1D1C1D;--sec:#616061;--rule:#DDDDDD;--soft:#F8F8F8;--link:#1264A3;--badge:#CD2553;--green:#2BAC76;--yellow:#ECB22E}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden}
+body{font:15px/1.46 Lato,system-ui,sans-serif;color:var(--ink);background:var(--aub2);display:grid;grid-template:44px 1fr/268px 1fr 360px;font-variant-numeric:tabular-nums}
+::selection{background:#CCE4F7}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+code,pre,.mono{font-family:Monaco,Menlo,Consolas,"Courier New",monospace}
+header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;color:#fff}
+.mark{font-weight:900;font-size:16px;width:236px}
+.hosts{margin-left:auto;display:flex;gap:18px;font-size:13px;color:#E8DDE8;align-items:center}
+.pill{display:inline-flex;gap:2px;margin:0 6px;vertical-align:middle}.pill i{width:5px;height:12px;border-radius:1px;background:#ffffff33}.pill i.on{background:var(--green)}
+.side{background:var(--aub);color:var(--side);border-radius:8px 0 0 0;overflow:auto;min-height:0;padding:10px 0 16px}
+.sec{display:flex;align-items:center;gap:6px;padding:12px 16px 4px;font-size:14px;color:var(--side)}
+.sec svg{width:12px;height:12px}
+.ch{display:flex;align-items:center;gap:8px;padding:4px 16px 4px 24px;font-size:15px;cursor:pointer;min-height:28px}
+.ch:hover{background:var(--aubhi)}
+.ch .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ch.unread{color:#fff;font-weight:900}
+.ch.sel{background:var(--sel);color:#fff;font-weight:700;border-radius:6px;margin:0 8px;padding-left:16px}
+.pres{width:9px;height:9px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--side);flex:none}.pres.on{background:var(--green);box-shadow:none}.pres.you{background:var(--yellow);box-shadow:none}
+.bd{background:var(--badge);color:#fff;font-size:12px;font-weight:700;border-radius:9px;padding:0 7px;line-height:18px}
+.th{padding:2px 16px 2px 42px;font-size:13px;color:#B9A9B9;display:flex;gap:6px;align-items:center}
+.th span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.main{background:#fff;display:flex;flex-direction:column;min-height:0;min-width:0;border-right:1px solid var(--rule)}
+.mh{display:flex;align-items:center;gap:10px;height:56px;padding:0 20px;border-bottom:1px solid var(--rule)}
+.mh h1{font-size:18px;font-weight:900}.mh p{font-size:13px;color:var(--sec)}
+.ib{display:grid;place-items:center;width:32px;height:32px;border-radius:6px;color:var(--sec)}.ib:hover{background:var(--soft)}
+.msgs{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;justify-content:flex-end;padding:12px 0}
+.msg{display:flex;gap:10px;padding:8px 20px}.msg:hover{background:var(--soft)}
+.av{width:36px;height:36px;border-radius:6px;flex:none;display:grid;place-items:center;color:#fff;font-weight:900}
+.who{font-weight:900}.who time{font-weight:400;font-size:12px;color:var(--sec);margin-left:6px}
+.md{line-height:1.5;max-width:680px}.md h3{font-size:16px;font-weight:900;margin:2px 0}
+.md p+*,.md ol+*{margin-top:6px}.md ol{padding-left:22px}
+.md code{font-size:12px;color:#C01343;background:#1D1C1D0A;border:1px solid #1D1C1D21;border-radius:3px;padding:1px 3px}
+.md pre{font-size:12px;line-height:1.55;background:#F8F8F8;border:1px solid #1D1C1D21;border-radius:4px;padding:8px 12px}
+.md pre code{color:var(--ink);background:none;border:0;padding:0}.kw{color:#7A3E9D;font-weight:700}.cm{color:#8A8A8A}
+.md table{border-collapse:collapse;font-size:14px}.md td,.md th{padding:3px 20px 3px 0;border-bottom:1px solid var(--rule);text-align:left}.md th{font-weight:700}
+.tool{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--sec);margin-top:6px}
+.live{display:flex;align-items:center;gap:8px;padding:4px 20px 4px 66px;font-size:13px;color:var(--sec)}
+.composer{margin:0 20px 16px;border-radius:8px;box-shadow:inset 0 0 0 1px #8D8D8D;display:flex;align-items:flex-end;gap:6px;padding:6px}
+.composer textarea{flex:1;border:0;resize:none;font:inherit;height:32px;padding:5px 4px;outline:none}
+.send{display:grid;place-items:center;width:32px;height:32px;border-radius:5px;background:#007A5A;color:#fff}
+.pane{background:#fff;display:flex;flex-direction:column;min-height:0}
+.ph{display:flex;align-items:center;justify-content:space-between;height:56px;padding:0 18px;border-bottom:1px solid var(--rule);font-size:16px;font-weight:900}
+.ask{flex:none;max-height:440px;overflow:auto;border-bottom:1px solid var(--rule)}
+.it{display:flex;gap:10px;padding:10px 18px;border-bottom:1px solid #EEE;cursor:pointer}.it:hover{background:var(--soft)}
+.it .k{font-size:12px;font-weight:700;color:var(--badge)}.it .t{font-weight:700;line-height:1.3}.it .m{font-size:13px;color:var(--sec)}
+.it time{margin-left:auto;font-size:12px;color:var(--sec)}
+.btns{display:flex;gap:6px;margin-top:6px}.btns button{height:28px;min-width:36px;padding:0 10px;border-radius:5px;box-shadow:inset 0 0 0 1px #BBB;font-size:13px;font-weight:700}
+.btns .p{background:#007A5A;color:#fff;box-shadow:none}
+.todo{overflow:auto;min-height:0;flex:1;padding:4px 18px 12px}
+.tdh{display:flex;justify-content:space-between;font-size:13px;font-weight:700;color:var(--sec);margin:12px 0 4px}
+.td{display:flex;gap:10px;padding:4px 0;line-height:1.35;font-size:14px}
+.cb{width:16px;height:16px;border-radius:4px;box-shadow:inset 0 0 0 1.5px #8D8D8D;flex:none;margin-top:2px}
+.td.now .cb{background:var(--green);box-shadow:none}.td.done{color:var(--sec)}.td.done .cb{background:var(--sel);box-shadow:none}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="caret" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="term" viewBox="0 0 24 24"><path d="m5 8 4 4-4 4M12 17h7"/></symbol>
+<symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4Z"/></symbol>
+</defs></svg>
+<header><span class="mark">Dogsled</span>
+ <div class="hosts"><span>local<span class="pill"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>4/12</span><span>netcup<span class="pill"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>4/16</span><span>momokaya-2<span class="pill"><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i></span>1/7</span></div></header>
+<nav class="side">
+ <p class="sec"><svg class="i"><use href="#caret"/></svg>dogsled</p>
+ <a class="ch sel"><i class="pres on"></i><span class="t">review-d0a1246-release</span></a>
+ <p class="th"><i class="pres on" style="width:7px;height:7px"></i><span>Fix placement retry · netcup</span></p>
+ <p class="th"><i class="pres" style="width:7px;height:7px"></i><span>Review d0a1246 · done</span></p>
+ <a class="ch unread"><i class="pres you"></i><span class="t">typed-sqlite-state</span><span class="bd">1</span></a>
+ <a class="ch unread"><i class="pres"></i><span class="t">herdr-pane-pruning</span><span class="bd">1</span></a>
+ <a class="ch"><i class="pres"></i><span class="t">portal-controls</span></a>
+ <p class="sec"><svg class="i"><use href="#caret"/></svg>rondo</p>
+ <a class="ch unread"><i class="pres you"></i><span class="t">ios-screens</span><span class="bd">2</span></a>
+ <p class="sec"><svg class="i"><use href="#caret"/></svg>rt100k</p>
+ <a class="ch unread"><i class="pres on"></i><span class="t">schwab-auth-fixtures</span><span class="bd">1</span></a>
+ <p class="sec"><svg class="i"><use href="#caret"/></svg>grabcrft</p>
+ <a class="ch"><i class="pres"></i><span class="t">milestone-3-plan</span></a>
+</nav>
+<section class="main">
+ <div class="mh"><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p>Working · lead · pi · claude-opus · local · main</p></div><span style="flex:1"></span><button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div>
+ <div class="msgs">
+  <div class="msg"><span class="av" style="background:#1164A3">O</span><div><p class="who">oisin<time>13:21</time></p><p>Review d0a1246, merge both fixes, then cut 0.29.3.</p></div></div>
+  <div class="msg"><span class="av" style="background:#4A154B">L</span><div><p class="who">lead<time>13:25</time></p><article class="md"><h3>Review of <code>d0a1246</code></h3><p>Both fixes hold. Two notes:</p><ol><li><strong>Prune order.</strong> <code>cleanup::prune</code> now closes the pane before it removes the worktree.</li><li><strong>Placement retry.</strong> Bounded at three attempts:</li></ol>
+   <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(3) {
+    <span class="kw">if</span> place(&amp;host).<span class="kw">await</span>.is_ok() { <span class="kw">break</span>; }
+    sleep(delay).<span class="kw">await</span>; <span class="cm">// 250 ms, 500 ms, 1 s</span>
+}</code></pre>
+   <table><tr><th>Gate</th><th>Result</th></tr><tr><td><code>moon run :lint</code></td><td>passed</td></tr><tr><td><code>moon run :test</code></td><td>958 → 960 passed</td></tr></table></article>
+   <p class="tool"><svg class="i"><use href="#term"/></svg><span class="mono">git merge --no-ff fix/prune-order fix/placement-retry</span></p></div></div>
+  <p class="live"><i class="pres on"></i>Running moon run :check on netcup</p>
+ </div>
+ <form class="composer"><button type="button" class="ib" aria-label="Attach image"><svg class="i"><use href="#plus"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#send"/></svg></button></form>
+</section>
+<aside class="pane"><div class="ph">Waiting on you <span class="bd">5</span></div>
+ <div class="ask">
+  <div class="it"><div><p class="k">Prompt · dogsled</p><p class="t">Allow git push to origin?</p><p class="m">Writer on netcup</p><div class="btns"><button>y</button><button>n</button><button>esc</button></div></div><time>1m</time></div>
+  <div class="it"><div><p class="k">Plan review · dogsled</p><p class="t">Typed SQLite state store, revision 3</p></div><time>8m</time></div>
+  <div class="it"><div><p class="k">2 questions · rondo</p><p class="t">Before the iOS gate</p></div><time>12m</time></div>
+  <div class="it"><div><p class="k">Idle worker · dogsled</p><p class="t">Prune stale Herdr panes</p></div><time>18h</time></div>
+  <div class="it"><div><p class="k">To land · rt100k</p><p class="t">review/schwab-auth-transport-fix</p><div class="btns"><button class="p">Land</button><button>Prune</button></div></div><time>2d</time></div>
+ </div>
+ <div class="todo"><p class="tdh"><span>Todos</span><span>28 of 32</span></p>
+  <div class="td now"><i class="cb"></i><div>Release 0.29.3<p style="font-size:13px;color:var(--sec)">Tag v0.29.3 and push · writer · netcup</p></div></div>
+  <div class="td"><i class="cb"></i>Publish release notes</div>
+  <div class="td"><i class="cb"></i>Bump the dotfiles pin after the GitHub release</div>
+  <div class="td"><i class="cb"></i>Close #212 with the release link</div>
+  <div class="td done"><i class="cb"></i>Merge fix/placement-retry</div>
+  <div class="td done"><i class="cb"></i>Merge fix/prune-order</div>
+ </div></aside>
+</body></html>
