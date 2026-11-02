@@ -850,76 +850,101 @@ fn readable(
     (usable, trees, evidence)
 }
 
-/// Automatic removal needs recorded child ownership, not just safe Git content. Discovery
-/// can create a generation marker for any checkout, so a marker alone proves no ownership.
-fn sweep_hold(ledger: &Ledger, tree: &Tree) -> Result<Option<&'static str>> {
-    let items = crate::items::list(ledger)?;
-    let marks = crate::done::list(ledger)?;
-    let registered: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
-    let mut closed = false;
-    for request in crate::launch::requests(ledger)? {
-        if !matches!(request.action, crate::work::Action::Agent { .. }) {
-            continue;
-        }
-        let (_, captured) = crate::launch::checkout_for_request(ledger, &request)?;
-        let Some(captured) = captured.filter(|captured| {
-            captured.identity.as_ref().is_some_and(|identity| {
-                identity.common != identity.gitdir && !identity.generation.is_empty()
-            }) && crate::worktree::same(&captured.repo, &tree.repo)
-                && captured.branch == tree.branch
-                && (tree.path.is_empty()
-                    || (crate::worktree::same(&captured.path, &tree.path)
-                        && captured.identity == tree.identity))
-        }) else {
-            continue;
-        };
-        let item = items.iter().find(|item| {
-            item.id == request.id && item.host == crate::hosts::LOCAL && item.kind == "agent"
-        });
-        let ended = item.map_or_else(
-            || {
-                marks.iter().any(|mark| {
-                    mark.item.as_deref() == Some(request.id.as_str())
-                        && request.pane.as_deref() == Some(mark.pane.as_str())
-                        && mark.closed_ms.is_some()
-                })
-            },
-            |item| item.closed_ms.is_some(),
-        );
-        if !ended {
-            return Ok(Some("recorded child is not closed"));
-        }
-        closed |= registered
-            .iter()
-            .chain(
-                request
-                    .preparation
-                    .iter()
-                    .map(|binding| &binding.claim.tree),
-            )
-            .any(|saved| {
-                saved.identity == captured.identity
-                    && crate::worktree::same(&saved.repo, &captured.repo)
-                    && crate::worktree::same(&saved.path, &captured.path)
-                    && saved.branch == captured.branch
+/// Ownership evidence is loaded once per survey, then shared by all candidate lookups.
+struct Ownership {
+    items: Vec<crate::items::Item>,
+    marks: Vec<crate::done::Mark>,
+    registered: Vec<Tree>,
+    requests: Vec<(crate::work::Launch, Option<Tree>)>,
+}
+
+impl Ownership {
+    fn load(ledger: &Ledger) -> Result<Self> {
+        let items = crate::items::list(ledger)?;
+        let marks = crate::done::list(ledger)?;
+        let registered = ledger.read("worktrees.json")?.unwrap_or_default();
+        let requests = crate::launch::requests(ledger)?
+            .into_iter()
+            .filter(|request| matches!(request.action, crate::work::Action::Agent { .. }))
+            .map(|request| {
+                let (_, captured) = crate::launch::checkout_for_request(ledger, &request)?;
+                Ok((request, captured))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            items,
+            marks,
+            registered,
+            requests,
+        })
+    }
+
+    /// Automatic removal needs recorded child ownership, not just safe Git content. Discovery
+    /// can create a generation marker for any checkout, so a marker alone proves no ownership.
+    fn sweep_hold(&self, tree: &Tree) -> Option<&'static str> {
+        let mut closed = false;
+        for (request, captured) in &self.requests {
+            let Some(captured) = captured.as_ref().filter(|captured| {
+                captured.identity.as_ref().is_some_and(|identity| {
+                    identity.common != identity.gitdir && !identity.generation.is_empty()
+                }) && crate::worktree::same(&captured.repo, &tree.repo)
+                    && captured.branch == tree.branch
+                    && (tree.path.is_empty()
+                        || (crate::worktree::same(&captured.path, &tree.path)
+                            && captured.identity == tree.identity))
+            }) else {
+                continue;
+            };
+            let item = self.items.iter().find(|item| {
+                item.id == request.id && item.host == crate::hosts::LOCAL && item.kind == "agent"
             });
-    }
-    if tree.path.is_empty() {
-        for item in items.iter().filter(|item| {
-            item.host == crate::hosts::LOCAL
-                && item.kind == "agent"
-                && item.branch.as_ref().is_some_and(|branch| {
-                    crate::worktree::same(&branch.repo, &tree.repo) && branch.name == tree.branch
-                })
-        }) {
-            if item.closed_ms.is_none() {
-                return Ok(Some("recorded child is not closed"));
+            let ended = item.map_or_else(
+                || {
+                    self.marks.iter().any(|mark| {
+                        mark.item.as_deref() == Some(request.id.as_str())
+                            && request.pane.as_deref() == Some(mark.pane.as_str())
+                            && mark.closed_ms.is_some()
+                    })
+                },
+                |item| item.closed_ms.is_some(),
+            );
+            if !ended {
+                return Some("recorded child is not closed");
             }
-            closed = true;
+            closed |= self
+                .registered
+                .iter()
+                .chain(
+                    request
+                        .preparation
+                        .iter()
+                        .map(|binding| &binding.claim.tree),
+                )
+                .any(|saved| {
+                    saved.identity == captured.identity
+                        && crate::worktree::same(&saved.repo, &captured.repo)
+                        && crate::worktree::same(&saved.path, &captured.path)
+                        && saved.branch == captured.branch
+                });
         }
+        if tree.path.is_empty() {
+            for item in self.items.iter().filter(|item| {
+                item.host == crate::hosts::LOCAL
+                    && item.kind == "agent"
+                    && item.branch.as_ref().is_some_and(|branch| {
+                        crate::worktree::same(&branch.repo, &tree.repo)
+                            && branch.name == tree.branch
+                    })
+            }) {
+                if item.closed_ms.is_none() {
+                    return Some("recorded child is not closed");
+                }
+                closed = true;
+            }
+        }
+        (!closed)
+            .then_some("not a recorded checkout or branch of a closed child; use dogsled prune")
     }
-    Ok((!closed)
-        .then_some("not a recorded checkout or branch of a closed child; use dogsled prune"))
 }
 
 /// The cleanup plan for `scope`. In `Sweep` scope a worktree that cannot be checked is skipped,
@@ -932,12 +957,13 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     let repos = repositories(node, &seen.panes, &seen.workspaces, &mut plan)?;
     let (repos, trees, evidence) = readable(node, repos, &mut plan);
     seen.evidence = evidence;
+    let ownership = (scope == Scope::Sweep)
+        .then(|| Ownership::load(node.ledger))
+        .transpose()?;
     let mut closing = Closing::default();
     let found = parallel(&trees, |tree| {
         let mut found = disposition(node, tree, &seen)?;
-        if scope == Scope::Sweep
-            && let Some(reason) = sweep_hold(node.ledger, tree)?
-        {
+        if let Some(reason) = ownership.as_ref().and_then(|owned| owned.sweep_hold(tree)) {
             found.removable = false;
             found.detail.push_str("; held: ");
             found.detail.push_str(reason);
@@ -1003,10 +1029,10 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
             ));
         }
     }
-    if scope == Scope::Sweep {
+    if let Some(ownership) = &ownership {
         for candidate in plan.entries.iter_mut().filter(|e| e.class == "branches") {
             if let Some(tree) = &candidate.tree
-                && let Some(reason) = sweep_hold(node.ledger, tree)?
+                && let Some(reason) = ownership.sweep_hold(tree)
             {
                 candidate.removable = false;
                 candidate.detail.push_str("; held: ");
@@ -1999,7 +2025,7 @@ fn remove_tree(
     scope: Scope,
 ) -> Result<Outcome> {
     if scope == Scope::Sweep
-        && let Some(reason) = sweep_hold(node.ledger, tree)?
+        && let Some(reason) = Ownership::load(node.ledger)?.sweep_hold(tree)
     {
         return Ok(Outcome::Skipped(format!("refuse {}: {reason}", tree.path)));
     }
@@ -2404,7 +2430,7 @@ fn apply_scoped(
 fn remove_branch(node: &Node<'_>, tree: &Tree, scope: Scope) -> Result<Outcome> {
     crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&tree.repo), |_| {
         if scope == Scope::Sweep
-            && let Some(reason) = sweep_hold(node.ledger, tree)?
+            && let Some(reason) = Ownership::load(node.ledger)?.sweep_hold(tree)
         {
             return Ok(Outcome::Skipped(format!(
                 "refuse {}: {reason}",
