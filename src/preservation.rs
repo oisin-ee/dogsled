@@ -176,6 +176,9 @@ pub enum Stage {
 /// Kept by this store, not item retention. Incomplete operations must never expire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
+    /// The original ledger key stays stable when an origin request is adopted.
+    #[serde(skip)]
+    file: String,
     pub id: String,
     pub expectation: CloseExpectation,
     pub initial_id: String,
@@ -203,7 +206,29 @@ pub fn operation(
     request: Option<&CloseRequest>,
 ) -> crate::error::Result<Option<Operation>> {
     let name = operation_file(pane, request).map_err(close_error)?;
-    ledger.child("preservation-operations").read(&name)
+    if let Some(saved) = read_operation(ledger, &name)? {
+        if saved.expectation.request.as_ref() != request {
+            return Err(saved.refusal("preservation close request changed"));
+        }
+        return Ok(Some(saved));
+    }
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    let name = operation_file(pane, None).map_err(close_error)?;
+    Ok(read_operation(ledger, &name)?
+        .filter(|saved| saved.expectation.pane == pane && saved.accepts_request(Some(request))))
+}
+
+fn read_operation(
+    ledger: &crate::ledger::Ledger,
+    name: &str,
+) -> crate::error::Result<Option<Operation>> {
+    let saved: Option<Operation> = ledger.child("preservation-operations").read(name)?;
+    Ok(saved.map(|mut saved| {
+        saved.file = name.into();
+        saved
+    }))
 }
 
 pub fn operations(ledger: &crate::ledger::Ledger) -> crate::error::Result<Vec<Operation>> {
@@ -224,8 +249,7 @@ pub fn operations(ledger: &crate::ledger::Ledger) -> crate::error::Result<Vec<Op
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| crate::worktree::refuse("unreadable preservation record name"))?;
-            let operation = store
-                .read(name)?
+            let operation = read_operation(ledger, name)?
                 .ok_or_else(|| crate::worktree::refuse("preservation operation disappeared"))?;
             operations.push(operation);
         }
@@ -265,27 +289,53 @@ fn close_error(error: Error) -> crate::error::Error {
 }
 
 impl Operation {
+    fn accepts_request(&self, request: Option<&CloseRequest>) -> bool {
+        self.expectation.request.as_ref() == request
+            || (self.expectation.request.is_none()
+                && !matches!(self.stage, Stage::Removed | Stage::Finished)
+                && request.is_some_and(|request| {
+                    self.expectation.launch.as_deref() == Some(request.item.as_str())
+                }))
+    }
+
+    /// Only a request naming this exact launch can bind a requestless operation.
+    pub(crate) fn matches_expectation(&self, expectation: &CloseExpectation) -> bool {
+        if !self.accepts_request(expectation.request.as_ref()) {
+            return false;
+        }
+        let mut adopted = self.expectation.clone();
+        adopted.request.clone_from(&expectation.request);
+        adopted == *expectation
+    }
+
     pub fn begin(
         ledger: &crate::ledger::Ledger,
         expectation: CloseExpectation,
     ) -> crate::error::Result<Self> {
         if pending_for(ledger, &expectation.tree)?
             .iter()
-            .any(|operation| operation.expectation != expectation)
+            .any(|operation| !operation.matches_expectation(&expectation))
         {
             return Err(crate::worktree::refuse(
                 "another unfinished preservation operation owns this checkout; inspect its recovery before retrying",
             ));
         }
-        if let Some(saved) = operation(ledger, &expectation.pane, expectation.request.as_ref())? {
-            if saved.expectation != expectation {
+        if let Some(mut saved) = operation(ledger, &expectation.pane, expectation.request.as_ref())?
+        {
+            if !saved.matches_expectation(&expectation) {
                 return Err(crate::worktree::refuse(
                     "preservation close expectation changed",
                 ));
             }
+            if saved.expectation.request != expectation.request {
+                saved.expectation.request = expectation.request;
+                saved.save(ledger)?;
+            }
             return Ok(saved);
         }
         let operation = Self {
+            file: operation_file(&expectation.pane, expectation.request.as_ref())
+                .map_err(close_error)?,
             id: random_id().map_err(close_error)?,
             expectation,
             initial_id: random_id().map_err(close_error)?,
@@ -301,9 +351,9 @@ impl Operation {
     }
 
     pub fn save(&self, ledger: &crate::ledger::Ledger) -> crate::error::Result<()> {
-        let name = operation_file(&self.expectation.pane, self.expectation.request.as_ref())
-            .map_err(close_error)?;
-        ledger.child("preservation-operations").write(&name, self)
+        ledger
+            .child("preservation-operations")
+            .write(&self.file, self)
     }
 
     pub fn advance(
@@ -355,18 +405,20 @@ impl Operation {
                 self.refusal("normalization was interrupted; checkout may be partially normalized")
             );
         }
-        if !matches!(
-            self.stage,
-            Stage::Intent | Stage::Captured | Stage::Removed | Stage::Finished
-        ) {
-            return Err(self.refusal(
-                "close interrupted after teardown; hook will not be rerun automatically",
-            ));
-        }
         Ok(())
     }
 
     fn context(&self, predecessors: Vec<String>) -> RecoveryContext {
+        // Adoption binds the operation without changing its immutable capture context.
+        if let Some(context) = self
+            .initial
+            .as_ref()
+            .and_then(|saved| saved.context.as_ref())
+        {
+            let mut context = context.clone();
+            context.predecessors = predecessors;
+            return context;
+        }
         RecoveryContext {
             operation: self.id.clone(),
             pane: self.expectation.pane.clone(),

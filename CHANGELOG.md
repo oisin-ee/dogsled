@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.29.3 - 2026-11-02
+
+- `dogsled close` resumes an interrupted preservation close after completed teardown, final capture, or normalization without repeating completed effects. A matching origin request can resume a requestless close for the same launch. Other identity changes still refuse the retry. Unknown teardown outcomes and interrupted normalization still retain the checkout.
+- Automatic cleanup removes only recorded checkouts and branches of closed children. Checkout identity must match the recorded Git directories and generation. Worktrees and branches that Dogsled did not create stay intact, even when clean and pushed. Explicit `dogsled prune` keeps its existing behavior.
+
 ## 0.29.2 - 2026-11-02
 
 - The web portal builds its controls from the official Dioxus components and runs no hand-written scripts. Before, it used hand-written markup and `document::eval` scripts. Timers, conversation scrolling, image upload, and the marking of annotated passages are now Rust.
