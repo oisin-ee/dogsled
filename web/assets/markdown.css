@@ -1,0 +1,240 @@
+/* Keep Markdown above late-loaded component sheets without styling controls. */
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) {
+  min-width: 0;
+  color: var(--console-text);
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  > :first-child {
+  margin-top: 0;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  > :last-child {
+  margin-bottom: 0;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.5em 0 0.5em;
+  color: var(--console-text);
+  font-weight: 600;
+  text-wrap: pretty;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) h1 {
+  font-size: 1.5rem;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) h2 {
+  font-size: 1.25rem;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) h3 {
+  font-size: 1.125rem;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(h4, h5, h6) {
+  font-size: 1rem;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(p, ul, ol, blockquote, pre, table) {
+  margin: 0.75em 0;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) p {
+  text-wrap: pretty;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(ul, ol) {
+  padding-left: 1.5em;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) ul {
+  list-style: disc;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) ol {
+  list-style: decimal;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) li + li {
+  margin-top: 0.25em;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  li
+  > :is(ul, ol) {
+  margin-block: 0.25em;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  li:has(> input[type="checkbox"]) {
+  list-style: none;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  input[type="checkbox"] {
+  width: 1em;
+  height: 1em;
+  margin: 0 0.5em 0 -1.5em;
+  accent-color: var(--console-running);
+  vertical-align: middle;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) del {
+  color: var(--console-muted);
+  text-decoration: line-through;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) blockquote {
+  padding-left: 1em;
+  border-left: 1px solid var(--console-line);
+  color: var(--console-muted);
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) a {
+  color: var(--console-text);
+  text-decoration: underline;
+  text-decoration-color: var(--console-accent);
+  text-underline-offset: 0.2em;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) a:hover {
+  text-decoration-color: currentColor;
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(code, pre) {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.875em;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--console-raised);
+  color: var(--console-text);
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) pre {
+  max-width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--console-line);
+  border-radius: 6px;
+  background: var(--console-raised);
+  color: var(--console-text);
+  line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-wrap: normal;
+  scrollbar-color: var(--console-dim) var(--console-raised);
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) table {
+  display: block;
+  max-width: 100%;
+  width: 100%;
+  border-collapse: collapse;
+  overflow-x: auto;
+  scrollbar-color: var(--console-dim) var(--console-bg);
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(th, td) {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--console-line);
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) img {
+  max-width: 100%;
+  height: auto;
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) hr {
+  margin-block: 1.5em;
+  border: 0;
+  border-top: 1px solid var(--console-line);
+}
+
+.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) mark {
+  background: var(--console-waiting);
+  color: var(--console-bg);
+}
+
+/* syntect scopes use separate prefixed classes for each scope atom. */
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  .syn-comment {
+  color: var(--console-muted);
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(.syn-keyword, .syn-storage) {
+  color: color-mix(in srgb, var(--console-accent) 55%, var(--console-text));
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(.syn-string, .syn-markup.syn-inserted) {
+  color: var(--console-running);
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(.syn-constant, .syn-entity.syn-name, .syn-support.syn-function) {
+  color: var(--console-waiting);
+}
+
+.console-provider
+  .console-shell
+  :is(.conversation-turns > article > div, #review-plan)
+  :is(.syn-invalid, .syn-markup.syn-deleted) {
+  color: var(--console-muted);
+  text-decoration: underline wavy var(--console-waiting);
+}

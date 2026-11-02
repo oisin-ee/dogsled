@@ -16,7 +16,7 @@ use portal_types::reviews::{
     Annotation, AnnotationsBody, ApproveBody, Attachment, ChangeKind, DiffView, GeneralBody,
     Review, ReviewList, ReviewSummary,
 };
-use pulldown_cmark::{CowStr, Event, Parser, Tag, TagEnd, html};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use serde::de::DeserializeOwned;
 
 use crate::agent_view::Draft;
@@ -222,6 +222,7 @@ fn block(tag: &Tag<'_>) -> bool {
             | Tag::List(_)
             | Tag::Item
             | Tag::HtmlBlock
+            | Tag::Table(_)
     )
 }
 
@@ -243,9 +244,22 @@ pub(crate) fn render_markdown(source: &str) -> String {
     render_plan(source, &[])
 }
 
+/// Keep the original escaped events until an entire fence can be highlighted safely.
+struct Fence<'a> {
+    info: String,
+    text: String,
+    escaped: Vec<Event<'a>>,
+    marked: bool,
+}
+
 fn render_plan(source: &str, annotations: &[Annotation]) -> String {
-    let parsed: Vec<_> = Parser::new(source).into_offset_iter().collect();
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let parsed: Vec<_> = Parser::new_ext(source, options)
+        .into_offset_iter()
+        .collect();
     let mut marks = quoted_ranges(source, &parsed, annotations);
+    let mut fence: Option<Fence<'_>> = None;
     let events = parsed
         .into_iter()
         .enumerate()
@@ -253,6 +267,14 @@ fn render_plan(source: &str, annotations: &[Annotation]) -> String {
             let ranges = marks.remove(&index).unwrap_or_default();
             match event {
                 Event::Start(tag) if block(&tag) => {
+                    if let Tag::CodeBlock(CodeBlockKind::Fenced(info)) = &tag {
+                        fence = Some(Fence {
+                            info: info.to_string(),
+                            text: String::new(),
+                            escaped: Vec::new(),
+                            marked: false,
+                        });
+                    }
                     let (start, end) = lines(source, range);
                     let mut opening = String::new();
                     if matches!(tag, Tag::HtmlBlock) {
@@ -267,6 +289,27 @@ fn render_plan(source: &str, annotations: &[Annotation]) -> String {
                         );
                     }
                     vec![Event::Html(opening.into())]
+                }
+                Event::Text(text) if fence.is_some() => {
+                    if let Some(fence) = &mut fence {
+                        fence.text.push_str(&text);
+                        fence.marked |= !ranges.is_empty();
+                        fence.escaped.extend(marked(text, &ranges));
+                    }
+                    Vec::new()
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    let mut pieces = match fence.take() {
+                        Some(fence) => {
+                            let highlighted = (!fence.marked)
+                                .then(|| crate::highlight::fenced(&fence.info, &fence.text))
+                                .flatten();
+                            highlighted.map_or(fence.escaped, |html| vec![Event::Html(html.into())])
+                        }
+                        None => Vec::new(),
+                    };
+                    pieces.push(Event::End(TagEnd::CodeBlock));
+                    pieces
                 }
                 Event::End(TagEnd::HtmlBlock) => vec![Event::Html("</pre>".into())],
                 Event::Rule => {
@@ -345,6 +388,7 @@ fn block_end(tag: &TagEnd) -> bool {
             | TagEnd::List(_)
             | TagEnd::Item
             | TagEnd::HtmlBlock
+            | TagEnd::Table
     )
 }
 
@@ -1088,6 +1132,128 @@ mod tests {
         assert!(rendered.contains("<li data-start-line=\"4\" data-end-line=\"4\">"));
         assert!(rendered.contains("<pre data-start-line=\"6\" data-end-line=\"8\">"));
         assert!(rendered.contains("<code class=\"language-rust\">"));
+    }
+
+    #[test]
+    fn chat_and_plans_render_gfm_with_highlighted_fences() {
+        let source = "# Heading\n\n- list with `inline`\n\n```rust\nfn main() {}\n```\n\n```toml\n[package]\nname = \"web\"\n```\n\n| Name | Value |\n| --- | --- |\n| web | yes |\n\n~~struck~~\n\n- [x] done\n- [ ] pending\n";
+        let rendered = render_markdown(source);
+        assert_eq!(rendered, render_plan(source, &[]));
+        for element in [
+            "<h1 ",
+            "<ul ",
+            "<li ",
+            "<code>inline</code>",
+            "<code class=\"language-rust\"><span class=\"syn-",
+            "<code class=\"language-toml\"><span class=\"syn-",
+            "<table data-start-line=\"14\" data-end-line=\"16\">",
+            "<thead>",
+            "<th>Name</th>",
+            "<td>web</td>",
+            "<del>struck</del>",
+            "<input disabled=\"\" type=\"checkbox\" checked=\"\"/>",
+            "<input disabled=\"\" type=\"checkbox\"/>",
+        ] {
+            assert!(rendered.contains(element), "Missing {element}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn unknown_missing_and_indented_code_stays_escaped() {
+        for source in [
+            "```not-a-real-language\n<script>alert(1)</script>\n```\n",
+            "```\n<script>alert(1)</script>\n```\n",
+            "    <script>alert(1)</script>\n",
+        ] {
+            let rendered = render_markdown(source);
+            assert!(
+                rendered.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("<script>"), "{rendered}");
+            assert!(!rendered.contains("syn-"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn highlighted_fences_escape_scripts_and_do_not_enable_raw_html() {
+        let source = "```rust\nlet text = \"<script>alert(1)</script>\";\n```\n\n<script>alert(2)</script>\n\nOutside <b>raw</b> text.\n";
+        let rendered = render_markdown(source);
+        assert!(rendered.contains("syn-"), "{rendered}");
+        assert!(
+            rendered.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("&lt;script&gt;alert(2)&lt;/script&gt;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Outside &lt;b&gt;raw&lt;/b&gt; text."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("<script>"), "{rendered}");
+        assert!(!rendered.contains("<b>"), "{rendered}");
+    }
+
+    #[test]
+    fn a_marked_fence_keeps_escaped_annotations_without_syntax_spans() {
+        let annotation = Annotation {
+            id: "code".into(),
+            revision: 1,
+            start_line: 2,
+            end_line: 3,
+            quote: "café // <script>".into(),
+            comment: String::new(),
+            images: vec![],
+        };
+        let source = "```rust\n// café\n// <script>\n```\n";
+        let rendered = render_plan(source, &[annotation]);
+        assert!(rendered.contains("<pre data-start-line=\"1\" data-end-line=\"4\">"));
+        assert!(
+            rendered.contains("<mark>café\n// &lt;script&gt;</mark>"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("syn-"), "{rendered}");
+        assert!(!rendered.contains("<script>"), "{rendered}");
+    }
+
+    #[test]
+    fn table_annotations_do_not_consume_the_following_block() {
+        let annotation = Annotation {
+            id: "cell".into(),
+            revision: 1,
+            start_line: 1,
+            end_line: 3,
+            quote: "cell".into(),
+            comment: String::new(),
+            images: vec![],
+        };
+        let rendered = render_plan("| Title |\n| --- |\n| cell |\n\ncell\n", &[annotation]);
+        assert!(
+            rendered.contains("<td><mark>cell</mark></td>"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("<p data-start-line=\"5\" data-end-line=\"5\">cell</p>"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn consecutive_and_unclosed_fences_keep_their_own_text() {
+        let source = "```rust title=first\nfn first() {}\n```\n\n```unknown\nplain\n```\n\n```toml\n[package]\nname = \"web\"";
+        let rendered = render_markdown(source);
+        assert!(rendered.contains("syn-function"), "{rendered}");
+        assert!(
+            rendered.contains("<code class=\"language-unknown\">plain\n</code>"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("<code class=\"language-toml\"><span class=\"syn-"),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("</code></pre>").count(), 3, "{rendered}");
     }
 
     #[test]

@@ -32,6 +32,7 @@ const RETRY: Duration = Duration::from_secs(2);
 
 const COMPONENTS_CSS: Asset = asset!("/assets/dx-components-theme.css");
 const CONSOLE_CSS: Asset = asset!("/assets/console.css");
+const MARKDOWN_CSS: Asset = asset!("/assets/markdown.css");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LeadPanel {
@@ -327,6 +328,7 @@ pub fn App() -> Element {
     rsx! {
         document::Stylesheet { href: COMPONENTS_CSS }
         document::Stylesheet { href: CONSOLE_CSS }
+        document::Stylesheet { href: MARKDOWN_CSS }
         SidebarProvider { class: "console-provider",
         Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
             on_value_change: move |value: String| panel.set(match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, _ => LeadPanel::Chat }),

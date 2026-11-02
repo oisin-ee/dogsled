@@ -14,6 +14,8 @@ futures-util = { version = "0.3", default-features = false }
 gloo-net = { version = "0.6", default-features = false, features = ["http", "eventsource", "json"] }
 portal-types = { path = "../portal-types" }
 pulldown-cmark = { version = "0.13.5", default-features = false, features = ["html"] }
+syntect = { version = "=5.3.0", default-features = false, features = ["html", "regex-fancy"] }
+two-face = { version = "=0.5.2", default-features = false, features = ["syntect-fancy"] }
 web-sys = { version = "0.3", features = ["ClipboardEvent", "DataTransfer", "Element", "File", "FileList", "Location", "Range", "Selection", "UrlSearchParams", "Window"] }
 serde = "1.0.229"
 js-sys = "0.3"
