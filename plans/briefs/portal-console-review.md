@@ -1,6 +1,6 @@
 # Portal console: plan review, questions and key prompts
 
-Owner: lead (pane wWH:p36). Base: `origin/plan/portal-console` at the SHA in the spawn (after unit 4 merges). Profile: writer. Unit 5 of `plans/portal-redesign.md`.
+Owner: lead (pane wWH:p36). Base: `origin/plan/portal-console` at `4dc16b9` (unit 4 merged). Profile: writer. Unit 5 of `plans/portal-redesign.md`.
 
 ## Outcome
 
@@ -64,6 +64,12 @@ Find code by name, because unit 4 moves the lines in `review_view.rs`.
 4. **Below 1100px,** the header tabs become `Plan` / `Changes` / `Notes N`, and the notes margin becomes the `Notes` tab.
 5. **`AnnotationEditor` dialog:** a console panel surface with no shadow and icon controls where they fit.
 6. **Questions:** the form fills the centre column at the 640px measure under the lead header, with the form title and age. Number each question block. Use official `RadioGroup`/`Checkbox` rows, give recommended options an indigo `Recommended` badge, and keep the Other field. `MediaView` blocks stay inside the measure. A pinned bar at the bottom shows a muted `n of m answered` and `Send answers` (primary). No helper text.
+
+   Live faults seen at the base (screenshot `/tmp/console-verify4/console-1440x900-md.png`, pane `wR0:pY`):
+   - Question and option `content` whose `lang` is `md` or `markdown` shows as raw Markdown in a `pre` (`QuestionField`, `ChoiceOption`). Render it with `crate::review_view::render_markdown` in its own `div`, as `Conversation` does. Keep `pre` for other languages.
+   - Option labels are centred and wrap under the radio. Align them left, next to the control.
+   - The `Recommended` badge is clipped ("ecommende"). It must show in full.
+   - The question cards overflow the column on the right.
 7. **Key prompt** (`BlockedPanel` in `agent_view.rs`):
    - the question as the heading;
    - the agent screen `pre` in JetBrains Mono on the panel colour, with a 8px radius and its own scroll;
