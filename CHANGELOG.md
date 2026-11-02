@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.30.0 - 2026-11-02
 
 - Store launch receipts, progress, releases, seeds, and continuation receipts in typed SQLite tables.
 - Web questions, reviews, attachment metadata, inboxes, outboxes, boards, sidebar preferences, and todo publications use typed SQLite tables. Pi publishes todo snapshots through the CLI. Credential files and agent-readable image artifacts stay as files.
