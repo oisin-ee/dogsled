@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- `dogsled close` resumes an interrupted preservation close after completed teardown, final capture, or normalization without repeating completed effects. A matching origin request can resume a requestless close for the same launch. Other identity changes still refuse the retry. Unknown teardown outcomes and interrupted normalization still retain the checkout.
+
 ## 0.29.2 - 2026-11-02
 
 - The web portal builds its controls from the official Dioxus components and runs no hand-written scripts. Before, it used hand-written markup and `document::eval` scripts. Timers, conversation scrolling, image upload, and the marking of annotated passages are now Rust.
