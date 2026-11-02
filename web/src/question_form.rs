@@ -29,8 +29,8 @@ use crate::components::{
     card::{Card, CardContent, CardDescription, CardHeader, CardTitle},
     checkbox::Checkbox,
     item::{
-        Item, ItemActions, ItemContent, ItemDescription, ItemFooter, ItemGroup, ItemMedia,
-        ItemSize, ItemTitle, ItemVariant,
+        Item, ItemActions, ItemContent, ItemDescription, ItemFooter, ItemGroup, ItemSize,
+        ItemTitle, ItemVariant,
     },
     label::Label,
     radio_group::{RadioGroup, RadioItem},
@@ -123,6 +123,7 @@ pub fn QuestionForm(
         if let Some(form) = current {
             AskForm {
                 key: "{form.id}",
+                elapsed_ms: now().saturating_sub(form.created_ms),
                 pending: form,
                 on_done: move |id: String| {
                     pending.write().retain(|item| item.id != id);
@@ -225,7 +226,11 @@ fn age(ms: u64) -> String {
 }
 
 #[component]
-fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
+pub(crate) fn AskForm(
+    pending: Pending,
+    #[props(default)] elapsed_ms: u64,
+    on_done: EventHandler<String>,
+) -> Element {
     let values: Values = use_signal(|| initial_values(&pending.questions.questions));
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -233,7 +238,8 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
     let reject_id = pending.id.clone();
     let id = pending.id.clone();
     let questions = pending.questions.questions.clone();
-    let heading = pending.questions.title.clone();
+    let heading = form_title(&pending);
+    let age = age(elapsed_ms);
     let description = pending.questions.description.clone();
     let total = pending
         .questions
@@ -243,7 +249,7 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
         .count();
 
     rsx! {
-        form {
+        form { class: "question-form",
             onsubmit: move |event: FormEvent| {
                 // The page answers the form itself, so the browser must not
                 // send it.
@@ -263,18 +269,12 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                     }
                 });
             },
-            ItemGroup {
-                if heading.is_some() || description.is_some() {
-                    Item {
-                        ItemContent {
-                            if let Some(heading) = heading {
-                                ItemTitle { "{heading}" }
-                            }
-                            if let Some(description) = description {
-                                ItemDescription { "{description}" }
-                            }
-                        }
-                    }
+            div { class: "question-body console-scroll",
+            div { class: "question-measure",
+                header { class: "question-heading",
+                    h2 { "{heading}" }
+                    p { class: "question-age", "{age}" }
+                    if let Some(description) = description { p { "{description}" } }
                 }
                 for (index, question) in pending.questions.questions.iter().cloned().enumerate() {
                     QuestionField {
@@ -285,25 +285,13 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                         values,
                     }
                 }
-                if let Some(message) = error() {
-                    Alert { "{message}" }
-                }
-                Item {
-                    ItemContent {
-                        ItemDescription { "Answered {answered_count(&questions, &values.read())} of {total}" }
-                    }
-                    ItemActions {
-                        Button { r#type: "submit", disabled: busy(), "Send answers" }
-                    }
-                }
-                Card { aria_label: "Reject interview",
+                Card { class: "question-rejection", aria_label: "Reject interview",
                     CardContent {
                         Item {
                             ItemContent {
                                 Label { html_for: "rejection-reason", "Reason for rejecting (optional)" }
                                 Textarea {
                                     id: "rejection-reason", name: "rejection-reason", rows: "2", value: "{rejection_reason}", disabled: busy(),
-                                    placeholder: "Tell the agent why these questions do not help, or what you need instead",
                                     oninput: move |event: FormEvent| rejection_reason.set(event.value()),
                                 }
                             }
@@ -329,6 +317,14 @@ fn AskForm(pending: Pending, on_done: EventHandler<String>) -> Element {
                             }
                         }
                     }
+                }
+            }
+            }
+            footer { class: "question-decision",
+                if let Some(message) = error() { Alert { "{message}" } }
+                div { class: "question-decision-controls",
+                    p { "{answered_count(&questions, &values.read())} of {total} answered" }
+                    Button { class: "send-button", r#type: "submit", disabled: busy(), "Send answers" }
                 }
             }
         }
@@ -442,6 +438,21 @@ fn content_text(content: &Value) -> String {
     }
 }
 
+/// Question and option content share the same safe Markdown renderer as plans.
+#[component]
+fn ContentBlock(content: Value) -> Element {
+    let source = content_text(&content);
+    let markdown = matches!(
+        content.get("lang").and_then(Value::as_str),
+        Some("md" | "markdown")
+    ) && content.get("showSource").and_then(Value::as_bool) != Some(true);
+    rsx! {
+        if markdown {
+            div { class: "question-markdown", dangerous_inner_html: crate::review_view::render_markdown(&source) }
+        } else { pre { class: "question-code", "{source}" } }
+    }
+}
+
 /// Every choice question offers a writable alternative, even when its author did not.
 fn choice_options(question: &Question) -> Vec<Value> {
     let mut options = question.options.clone().unwrap_or_default();
@@ -527,7 +538,7 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
     };
     let recommended = recommended_labels(&question);
     let options = choice_options(&question);
-    let content = question.content.as_ref().map(content_text);
+    let content = question.content.clone();
     let id = question.id.clone();
     let text = values
         .read()
@@ -591,6 +602,7 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
             QuestionKind::Text => rsx! {
                 Textarea {
                     name: "{group}",
+                    aria_labelledby: label.clone(),
                     rows: "3",
                     value: "{text}",
                     oninput: move |event: FormEvent| {
@@ -609,7 +621,7 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
     };
 
     rsx! {
-        Card {
+        Card { class: "question-block",
             role: if panel { None } else { Some("group") },
             aria_labelledby: if panel { None } else { Some(label.clone()) },
             CardHeader {
@@ -625,9 +637,7 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
                 }
             }
             CardContent {
-                if let Some(content) = content {
-                    pre { "{content}" }
-                }
+                if let Some(content) = content { ContentBlock { content } }
                 if !panel {
                     if position == MediaPosition::Above {
                         if let Some(media) = media.clone() {
@@ -760,7 +770,7 @@ fn ChoiceOption(
     mut values: Values,
 ) -> Element {
     let label = option_label(&option);
-    let content = option.get("content").map(content_text);
+    let content = option.get("content").cloned();
     let checked = chosen(&values.read(), &id).contains(&label);
     let pick = label.clone();
     let choice_id = id.clone();
@@ -777,32 +787,23 @@ fn ChoiceOption(
     let note_id = format!("{group}-{label}-note");
 
     rsx! {
-        Item { size: ItemSize::Sm,
-            if multi {
-                ItemMedia {
-                    Checkbox {
-                        id: "{control}",
-                        name: "{group}",
-                        value: "{label}",
+        Item { class: "question-option", size: ItemSize::Sm,
+            div { class: "question-option-row",
+                if multi {
+                    Checkbox { id: "{control}", name: "{group}", value: "{label}",
                         checked: Some(if checked { CheckboxState::Checked } else { CheckboxState::Unchecked }),
                         on_checked_change: move |_| choose(&mut values.write(), &choice_id, &pick, true),
                     }
+                    Label { html_for: "{control}", "{label}" }
+                } else {
+                    RadioItem { id: "{control}", value: label.clone(), index,
+                        span { "{label}" }
+                    }
                 }
+                if recommended { Badge { class: "recommended-badge", "Recommended" } }
             }
-            ItemContent {
-                ItemTitle {
-                    if multi {
-                        Label { html_for: "{control}", "{label}" }
-                    } else {
-                        RadioItem { id: "{control}", value: label.clone(), index, "{label}" }
-                    }
-                    if recommended {
-                        Badge { "Recommended" }
-                    }
-                }
-                if let Some(content) = content {
-                    ItemDescription { "{content}" }
-                }
+            if let Some(content) = content {
+                div { class: "question-option-content", ContentBlock { content } }
             }
             if checked {
                 ItemFooter {
@@ -813,7 +814,6 @@ fn ChoiceOption(
                         rows: "2",
                         required: other,
                         value: "{note}",
-                        placeholder: if other { "Write your own answer" } else { "Explain your choice or add another idea" },
                         oninput: move |event: FormEvent| set_note(&mut values.write(), &id, &note_label, event.value()),
                     }
                 }

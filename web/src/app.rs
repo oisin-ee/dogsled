@@ -329,6 +329,7 @@ pub fn App() -> Element {
         document::Stylesheet { href: COMPONENTS_CSS }
         document::Stylesheet { href: CONSOLE_CSS }
         document::Stylesheet { href: MARKDOWN_CSS }
+        document::Stylesheet { href: asset!("/assets/review.css") }
         SidebarProvider { class: "console-provider",
         Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
             on_value_change: move |value: String| panel.set(match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, _ => LeadPanel::Chat }),
