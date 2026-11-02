@@ -486,6 +486,26 @@ fn summary(host: &HostReport) -> String {
     )
 }
 
+fn lane_failures(host: &HostReport) -> impl Iterator<Item = String> + '_ {
+    host.service_lanes.iter().filter_map(|lane| {
+        let error = lane.error.as_deref()?;
+        let since = lane
+            .since_ms
+            .and_then(|ms| chrono::DateTime::from_timestamp_millis(i64::try_from(ms).ok()?))
+            .map_or_else(
+                || "unknown".into(),
+                |time| time.format("%H:%M UTC").to_string(),
+            );
+        Some(format!(
+            "{} service: {} lane failing since {since} (x{}): {}",
+            one_line(&host.host.label),
+            one_line(&lane.lane),
+            lane.repeats,
+            one_line(error)
+        ))
+    })
+}
+
 /// The fleet brief for `status --brief`: every host, the counts, and the last pass's findings.
 pub fn brief(status: &Status) -> String {
     let mut rows = fleet(status);
@@ -512,6 +532,7 @@ pub fn fleet(status: &Status) -> Vec<String> {
         }
         row.push_str(&summary(host));
     }
+    rows.extend(status.hosts.iter().flat_map(lane_failures));
     let finished = status
         .items
         .iter()
@@ -640,6 +661,7 @@ pub fn render(status: &Status) -> String {
     }
     for host in &status.hosts {
         lines.push(summary(host));
+        lines.extend(lane_failures(host));
         if let Some(reason) = host
             .headroom
             .as_ref()

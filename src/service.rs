@@ -34,6 +34,62 @@ const LANES: [Lane; 7] = [
     Lane::Quota,
 ];
 
+impl Lane {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Watchdog => "watchdog",
+            Self::Admission => "admission",
+            Self::Children => "children",
+            Self::Handoff => "handoff",
+            Self::Inbox => "inbox",
+            Self::Retention => "retention",
+            Self::Quota => "quota",
+        }
+    }
+}
+
+#[derive(Default)]
+struct LaneDiagnostics {
+    unrecorded: std::collections::BTreeMap<&'static str, (Option<String>, String)>,
+}
+
+impl LaneDiagnostics {
+    fn record(&mut self, ledger: &Ledger, lane: Lane, result: Result<()>) {
+        let error = result.err().map(|error| error.to_string());
+        match crate::store::write(ledger, |tx| {
+            crate::tables::record_lane(tx, lane.name(), error.as_deref(), now_ms())
+        }) {
+            Ok(changed) => {
+                self.unrecorded.remove(lane.name());
+                if changed {
+                    if let Some(error) = error {
+                        eprintln!("dogsled service lane {}: {error}", lane.name());
+                    } else {
+                        eprintln!("dogsled service lane {}: recovered", lane.name());
+                    }
+                }
+            }
+            Err(recording_error) => {
+                let current = (error, recording_error.to_string());
+                let previous = self.unrecorded.get(lane.name());
+                if previous.map(|old| &old.0) != Some(&current.0)
+                    && let Some(error) = &current.0
+                {
+                    eprintln!("dogsled service lane {}: {error}", lane.name());
+                }
+                if previous.map(|old| &old.1) != Some(&current.1) {
+                    eprintln!(
+                        "dogsled service lane {}: cannot record lane status: {}",
+                        lane.name(),
+                        current.1
+                    );
+                }
+                self.unrecorded.insert(lane.name(), current);
+            }
+        }
+    }
+}
+
 enum Event {
     Finished(usize, Result<()>),
     Sweep,
@@ -152,6 +208,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut requested = false;
     let mut workers: [Option<std::thread::JoinHandle<()>>; LANES.len()] = Default::default();
     let mut completed = [false; LANES.len()];
+    let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
     loop {
         // The socket only reduces latency. Recover pending requests on every publication
@@ -219,9 +276,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                             .map_err(|_| Error::Invalid("service action worker failed".into()))?;
                     }
                     completed[lane] = true;
-                    if let Err(error) = result {
-                        eprintln!("dogsled service lane {:?}: {error}", LANES[lane]);
-                    }
+                    diagnostics.record(node.ledger, LANES[lane], result);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {

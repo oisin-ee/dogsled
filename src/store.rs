@@ -13,6 +13,7 @@ const VERSION: i64 = 2;
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
     format!("{}{}", crate::tables::SCHEMA, crate::admissions::SCHEMA)
+        + crate::tables::SERVICE_LANES_SCHEMA
 }
 
 fn create(connection: &Connection) -> Result<()> {
