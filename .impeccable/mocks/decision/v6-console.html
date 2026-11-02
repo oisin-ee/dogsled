@@ -1,26 +1,31 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Console, two sidebars</title>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Console</title>
+<meta name="viewport" content="width=device-width">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+/* Wide (>=1400px): inbox | agents | conversation | todos.
+   Medium (1100-1399px): todos fold into a tab beside the conversation.
+   Narrow (800-1099px): agents fold into a tab too. The inbox sidebar never folds. */
 :root{--bg:#0E0F11;--p1:#141518;--p2:#1B1C20;--line:#26272C;--fg:#E6E6E9;--fg2:#9A9DA6;--fg3:#62656E;--acc:#5E6AD2;--you:#F2C94C;--run:#4CB782}
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{width:100vw;height:100vh;overflow:hidden}
-body{font:13px/1.5 Inter,system-ui,sans-serif;color:var(--fg);background:var(--bg);display:grid;grid-template:44px minmax(0,1fr)/280px 248px minmax(0,1fr) 300px;font-variant-numeric:tabular-nums}
+html,body{height:100vh;overflow:hidden}
+body{min-width:800px;font:13px/1.5 Inter,system-ui,sans-serif;color:var(--fg);background:var(--bg);font-variant-numeric:tabular-nums;
+ display:grid;grid-template-rows:44px 52px minmax(0,1fr) auto;grid-template-columns:280px 248px minmax(0,1fr) 300px}
 svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
 button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 code,pre,.mono{font-family:"JetBrains Mono",ui-monospace,monospace}
-header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid var(--line)}
+header{grid-column:1/-1;grid-row:1;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid var(--line)}
 .mark{font-weight:600;font-size:14px}
-.hosts{margin-left:auto;display:flex;gap:18px;font-size:12px;color:var(--fg2);align-items:center}
+.hosts{margin-left:auto;display:flex;gap:18px;font-size:12px;color:var(--fg2);align-items:center;white-space:nowrap}
 .bar{display:inline-block;width:48px;height:4px;border-radius:2px;background:var(--line);margin:0 6px;vertical-align:middle;overflow:hidden}.bar i{display:block;height:100%;background:var(--run)}
-.col{display:flex;flex-direction:column;min-height:0;min-width:0;border-right:1px solid var(--line)}
+.col{display:flex;flex-direction:column;min-height:0;min-width:0}
 .ch{flex:none;display:flex;align-items:center;gap:8px;height:52px;padding:0 16px;border-bottom:1px solid var(--line);font-weight:600}
 .ch .n{margin-left:auto;font-size:12px;font-weight:500;color:var(--fg2)}
-.ch .badge{margin-left:auto;font-size:12px;font-weight:600;line-height:18px;padding:0 7px;border-radius:9px;background:var(--you);color:var(--bg)}
+.badge{margin-left:auto;font-size:12px;font-weight:600;line-height:18px;padding:0 7px;border-radius:9px;background:var(--you);color:var(--bg)}
 .scroll{flex:1;min-height:0;overflow:auto}
-/* inbox */
-.inbox{background:var(--p1)}
+/* inbox sidebar */
+.inbox{grid-column:1;grid-row:2/5;background:var(--p1);border-right:1px solid var(--line)}
 .it{display:block;padding:12px 16px;border-bottom:1px solid var(--line);cursor:pointer}
 .it:hover{background:var(--p2)}
 .it .k{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--you)}
@@ -29,8 +34,8 @@ header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;
 .it .m{font-size:12px;color:var(--fg2)}
 .btns{display:flex;gap:6px;margin-top:8px}
 .btns button{height:24px;min-width:32px;padding:0 9px;border-radius:5px;background:#26272C;font-size:12px;font-weight:500}
-.btns .p{background:var(--acc);color:#fff}
-/* agents */
+/* agents sidebar */
+.agents{grid-column:2;grid-row:2/5;border-right:1px solid var(--line)}
 .agents .scroll{padding:4px 8px 8px}
 .rp{display:flex;justify-content:space-between;padding:12px 8px 4px;font-size:12px;font-weight:500;color:var(--fg3)}
 .ld{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer}
@@ -39,12 +44,18 @@ header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;
 .st{width:8px;height:8px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--fg3);flex:none}.st.run{background:var(--run);box-shadow:none}.st.you{background:var(--you);box-shadow:none}
 .wk{display:flex;gap:8px;align-items:center;padding:3px 8px 3px 24px;font-size:12px;color:var(--fg2)}.wk span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wk .st{width:6px;height:6px}
-/* conversation */
-.main .ch{font-weight:400}
-.main .ch>div{flex:1;min-width:0}
+.land{display:flex;gap:8px;align-items:center;padding:4px 8px;font-size:12px;color:var(--fg3)}.land svg.i{width:14px;height:14px}
+/* conversation: header, messages and composer sit directly in the page grid */
+.main{display:contents}
+.main>.ch{grid-column:3;grid-row:2;font-weight:400;gap:10px}
+.main>.ch>div:first-child{flex:1;min-width:0}
 .main h1{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.main .ch p{font-size:12px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ib{display:grid;place-items:center;width:30px;height:30px;border-radius:6px;color:var(--fg2);border:1px solid var(--line);flex:none}
-.msgs{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:16px 0}
+.seg{display:none;flex:none;padding:2px;border-radius:7px;background:var(--p1);border:1px solid var(--line)}
+.seg button{display:flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:5px;font-size:12px;font-weight:500;color:var(--fg2)}
+.seg button[aria-selected=true]{background:#26272C;color:var(--fg)}
+.seg small{font-size:11px;color:var(--fg3)}
+.msgs{grid-column:3;grid-row:3;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:16px;padding:16px 0}
 .msgs>:first-child{margin-top:auto}
 .msgs>*{width:min(640px,calc(100% - 48px));margin-left:auto;margin-right:auto}
 .me{align-self:flex-end;width:auto!important;max-width:min(440px,80%);margin-right:24px!important;background:var(--p2);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
@@ -56,18 +67,38 @@ header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;
 .md table{border-collapse:collapse;font-size:13px}.md th{text-align:left;color:var(--fg2);font-weight:500}.md td,.md th{padding:4px 24px 4px 0;border-bottom:1px solid var(--line)}
 .tool{font-size:12px;color:var(--fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .live{display:flex;align-items:center;gap:8px;color:var(--fg2)}
-.composer{flex:none;display:flex;align-items:flex-end;gap:6px;margin:0 24px 16px;padding:6px;border-radius:10px;background:var(--p1);border:1px solid var(--line)}
+.composer{grid-column:3;grid-row:4;display:flex;align-items:flex-end;gap:6px;margin:0 24px 16px;padding:6px;border-radius:10px;background:var(--p1);border:1px solid var(--line)}
 .composer textarea{flex:1;border:0;resize:none;font:inherit;font-size:14px;color:var(--fg);background:none;height:30px;padding:5px 4px;outline:none;caret-color:var(--acc)}
 .send{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;background:var(--acc);color:#fff}
 /* todos */
-aside{border-right:0}
+.todo-col{grid-column:4;grid-row:2/5;border-left:1px solid var(--line)}
 .todos{padding:4px 16px 12px}
 .sec{display:flex;justify-content:space-between;font-size:12px;color:var(--fg3);margin:14px 0 4px}
 .td{display:flex;gap:10px;padding:5px 0;line-height:1.4}
 .cb{width:14px;height:14px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--fg3);flex:none;margin-top:3px}
 .td.now .cb{box-shadow:inset 0 0 0 1.5px var(--you),inset 0 0 0 3.5px var(--bg);background:var(--you)}
 .td.done{color:var(--fg3)}.td.done .cb{background:var(--acc);box-shadow:none}
-</style></head><body>
+
+@media (max-width:1399px){
+ body{grid-template-columns:280px 248px minmax(0,1fr)}
+ .seg{display:flex}.seg .t-agents{display:none}
+ .todo-col{grid-column:3;grid-row:3;border-left:0}
+ .todo-col>.ch{display:none}
+ .todos{max-width:640px;width:100%;margin:0 auto;padding:12px 24px}
+ body:not([data-tab=todos]) .todo-col{display:none}
+ body[data-tab=todos] .msgs{display:none}
+}
+@media (max-width:1099px){
+ body{grid-template-columns:280px minmax(0,1fr)}
+ .seg .t-agents{display:flex}
+ .agents{grid-column:2;grid-row:3/5;border-right:0}
+ .agents>.ch{display:none}
+ .agents .scroll{padding:4px 16px 8px}
+ body:not([data-tab=agents]) .agents{display:none}
+ body[data-tab=agents] .msgs,body[data-tab=agents] .composer{display:none}
+ .main>.ch,.msgs,.composer,.todo-col{grid-column:2}
+}
+</style></head><body data-tab="chat">
 <svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="doc" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol>
 <symbol id="ask" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
@@ -83,17 +114,16 @@ aside{border-right:0}
  <div class="hosts"><span>local<span class="bar"><i style="width:33%"></i></span>4/12</span><span>netcup<span class="bar"><i style="width:25%"></i></span>4/16</span><span>momokaya-2<span class="bar"><i style="width:14%"></i></span>1/7</span></div></header>
 
 <section class="col inbox" aria-label="Waiting on you">
- <div class="ch">Waiting on you<span class="badge">5</span></div>
+ <div class="ch">Waiting on you<span class="badge">4</span></div>
  <div class="scroll">
   <div class="it"><p class="k"><svg class="i"><use href="#key"/></svg>Prompt<time>1m</time></p><p class="t">Allow git push to origin?</p><p class="m">Writer on netcup · dogsled</p><div class="btns"><button>y</button><button>n</button><button>esc</button></div></div>
   <div class="it"><p class="k"><svg class="i"><use href="#doc"/></svg>Plan review<time>8m</time></p><p class="t">Typed SQLite state store, revision 3</p><p class="m">dogsled</p></div>
   <div class="it"><p class="k"><svg class="i"><use href="#ask"/></svg>2 questions<time>12m</time></p><p class="t">Before the iOS gate</p><p class="m">rondo-lead · rondo</p></div>
   <div class="it"><p class="k"><svg class="i"><use href="#moon"/></svg>Idle worker<time>18h</time></p><p class="t">Prune stale Herdr panes</p><p class="m">Unseen · dogsled</p></div>
-  <div class="it"><p class="k"><svg class="i"><use href="#merge"/></svg>To land<time>2d</time></p><p class="t mono" style="font-size:12.5px">review/schwab-auth-transport-fix</p><p class="m">+3, never merged · rt100k</p><div class="btns"><button class="p">Land</button><button>Prune</button></div></div>
  </div>
 </section>
 
-<nav class="col agents" aria-label="Agents">
+<nav class="col agents" aria-label="Agents" id="tab-agents" role="tabpanel">
  <div class="ch">Agents<span class="n">7</span></div>
  <div class="scroll">
   <p class="rp"><span>dogsled</span><span>4</span></p>
@@ -107,14 +137,17 @@ aside{border-right:0}
   <div class="ld"><i class="st you"></i><span>Build the iOS screens</span><small>6/14</small></div>
   <p class="rp"><span>rt100k</span><span>1</span></p>
   <div class="ld"><i class="st run"></i><span>Verify the Schwab auth fixtures</span><small>11/19</small></div>
+  <p class="land"><svg class="i"><use href="#merge"/></svg>1 branch to land</p>
   <p class="rp"><span>grabcrft</span><span>1</span></p>
   <div class="ld"><i class="st"></i><span>Milestone 3 plan</span><small>idle</small></div>
  </div>
 </nav>
 
-<section class="col main" aria-label="Conversation">
- <div class="ch"><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p>Working · lead · pi · claude-opus · local · main</p></div><button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div>
- <div class="msgs">
+<section class="main" aria-label="Conversation">
+ <div class="ch"><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p>Working · lead · pi · claude-opus · local · main</p></div>
+  <div class="seg" role="tablist" aria-label="Lead view"><button role="tab" class="t-agents" data-t="agents" aria-controls="tab-agents">Agents<small>7</small></button><button role="tab" data-t="chat" aria-controls="tab-chat">Chat</button><button role="tab" data-t="todos" aria-controls="tab-todos">Todos<small>28/32</small></button></div>
+  <button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div>
+ <div class="msgs" id="tab-chat" role="tabpanel">
   <p class="me">Review d0a1246, merge both fixes, then cut 0.29.3.</p>
   <article class="md"><h3>Review of <code>d0a1246</code></h3><p>Both fixes hold. <strong>Prune order:</strong> <code>cleanup::prune</code> now closes the pane first. <strong>Placement retry</strong> is bounded:</p>
    <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(<span class="nu">3</span>) {
@@ -128,8 +161,8 @@ aside{border-right:0}
  <form class="composer"><button type="button" class="ib" style="border:0" aria-label="Attach image"><svg class="i"><use href="#clip"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#up"/></svg></button></form>
 </section>
 
-<aside class="col" aria-label="Todos"><div class="ch">Todos<span class="n">28 of 32</span></div>
- <div class="scroll todos">
+<aside class="col todo-col" aria-label="Todos" id="tab-todos" role="tabpanel"><div class="ch">Todos<span class="n">28 of 32</span></div>
+ <div class="scroll"><div class="todos">
   <div class="td now"><i class="cb"></i><div>Release 0.29.3<p style="font-size:12px;color:var(--fg2)">Tag v0.29.3 and push · writer · netcup</p></div></div>
   <div class="td"><i class="cb"></i>Publish release notes</div>
   <div class="td"><i class="cb"></i>Bump the dotfiles pin after the GitHub release</div>
@@ -139,5 +172,11 @@ aside{border-right:0}
   <div class="td done"><i class="cb"></i>Merge fix/prune-order</div>
   <div class="td done"><i class="cb"></i>Review d0a1246</div>
   <p class="sec"><span>Abandoned</span><span>3</span></p>
- </div></aside>
+ </div></div></aside>
+<script>
+// Sketch only: ?tab=agents|chat|todos picks the open tab for screenshots.
+const tab = new URLSearchParams(location.search).get('tab') || 'chat';
+document.body.dataset.tab = tab;
+for (const b of document.querySelectorAll('.seg button')) b.setAttribute('aria-selected', String(b.dataset.t === tab));
+</script>
 </body></html>

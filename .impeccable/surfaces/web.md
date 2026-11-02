@@ -7,7 +7,7 @@ related_targets: []
 
 # Portal main screen
 
-Mode: Operate. Surface: the `dogsled web` main screen at 1280×800 and up (designed at 1440×900), on a desktop monitor beside Herdr.
+Mode: Operate. Surface: the `dogsled web` main screen from 800px wide (designed at 1440×900), on a desktop monitor beside Herdr. Phones are deferred.
 
 ## Brief
 
@@ -21,6 +21,8 @@ Mode: Operate. Surface: the `dogsled web` main screen at 1280×800 and up (desig
 - The palette is not pinned to Herdr's theme (owner, 2026-11-02).
 - Layout steer (owner, 2026-11-02): no inbox strip across the top. Inbox and agents are two left sidebars, as in the Pull Request sketch.
 - A plan review opens over everything right of the inbox sidebar (owner, 2026-11-02). The inbox stays visible and usable.
+- Branches to land are not inbox items; agents land them (owner, 2026-11-02). The agents list shows a muted per-repository count.
+- Smaller screens use tabs (owner, 2026-11-02). The inbox sidebar never folds.
 
 ## Direction contract
 
@@ -30,9 +32,9 @@ OWN-WORLD: Near-black ground #0E0F11 with two raised panels (#141518, #1B1C20) a
 
 STORY: The owner returns, reads the inbox sidebar first, clears an item in place (keys, Land, Prune) or opens its agent, then reads the lead's conversation and todo progress and sends a message.
 
-FIRST VIEWPORT: 44px top bar (Dogsled, host load bars). Below it four columns, each with a 52px header row aligned across the screen: 280px inbox sidebar on the raised panel ("Waiting on you" and a yellow count; one row per item: kind icon, kind, age, title, agent · repository, inline actions), 248px agents sidebar (repository → lead → muted workers), conversation (title, state, role · harness · model · host · branch, icon actions; messages newest at bottom, 640px measure; composer pinned at the bottom with attach and send icons only), 300px todos column (in progress, pending, completed, abandoned). A plan review replaces the agents, conversation and todos columns: plan at a 680px measure, 300px notes margin, decision bar pinned at the bottom; the opened inbox row carries a yellow left edge.
+FIRST VIEWPORT: 44px top bar (Dogsled, host load bars). Below it four columns, each with a 52px header row aligned across the screen: 280px inbox sidebar on the raised panel ("Waiting on you" and a yellow count; one row per item: kind icon, kind, age, title, agent · repository, inline actions), 248px agents sidebar (repository → lead → muted workers), conversation (title, state, role · harness · model · host · branch, icon actions; messages newest at bottom, 640px measure; composer pinned at the bottom with attach and send icons only), 300px todos column (in progress, pending, completed, abandoned). A plan review replaces the agents, conversation and todos columns: plan at a 680px measure, 300px notes margin, decision bar pinned at the bottom; the opened inbox row carries a yellow left edge. Smaller screens: at 1100–1399px the todos fold into a segmented `Chat` / `Todos` control in the conversation header; at 800–1099px the agents fold in too (`Agents` / `Chat` / `Todos`), and the review's notes margin becomes a `Notes` tab.
 
-FORM: The category standard (standing exit, chosen on safer re-roll 1); bar: Linear, Cursor, Conductor. seed:e4107608a77f64a0. Sketches: `.impeccable/mocks/decision/v6-console.html` (main screen) and `v6-console-review.html` (plan review open). `v5-canon.html` is the card as chosen, before the layout steer.
+FORM: The category standard (standing exit, chosen on safer re-roll 1); bar: Linear, Cursor, Conductor. seed:e4107608a77f64a0. Sketches: `.impeccable/mocks/decision/v6-console.html` (main screen) and `v6-console-review.html` (plan review open); `?tab=` picks the open tab. `v5-canon.html` is the card as chosen, before the layout steer.
 
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
 

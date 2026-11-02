@@ -21,7 +21,7 @@ Success: in one glance the owner sees what waits for them, acts on it in place, 
 The first screen serves five jobs:
 
 1. Answer what needs the owner: agent questions (`interview`), plan reviews (`submit_plan`), and blocked agents (key prompts).
-2. Land finished branches ("to land").
+2. See branches still to land. Agents land their own branches (owner, 2026-11-02), so these are not inbox items. The agents list shows a count per repository.
 3. Watch and steer running agents: read the conversation and send a message.
 4. Follow each lead's todo progress per repository.
 5. Check host capacity on `local`, `netcup` and `momokaya-2`.
