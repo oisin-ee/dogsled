@@ -44,7 +44,7 @@ Below the top bar are four columns. Each column starts with a 52px header row, a
 1. **Top bar, 44px.** `Dogsled` and the host load of `local`, `netcup`, `momokaya-2` (bar and `busy/cores`). A stream outage shows "Live updates paused, retrying" here.
 2. **Inbox sidebar, 280px, far left, raised panel.** "Waiting on you" with a yellow count. One row per item: kind icon, kind, age, title, `agent · repository`, and inline actions (key buttons for a prompt). The list scrolls vertically; the header and count stay. Selecting a row opens its agent with the item in front, and the open row gets a yellow left edge.
 3. **Agents sidebar, 248px.** Repository, then each lead (status dot, title, todo progress), then its workers indented and muted. A worker is raised only when the owner must act. A repository with closed branches not yet landed shows a muted line such as "1 branch to land" (the existing per-repository count in `web/src/board.rs`).
-4. **Conversation, centre (about 610px at 1440).** Header: title, state, `role · harness · model · host · branch`, and icon buttons for Interrupt and Open in Herdr. Messages sit newest at the bottom at a 640px maximum measure: owner messages as right-aligned bubbles, agent turns as rendered Markdown, tool calls as one mono line each, and a live status line. The composer is pinned below.
+4. **Conversation, centre (about 610px at 1440).** Header: title, state, `role · harness · model · host · branch`, and icon buttons for Interrupt and Open in Herdr. Messages sit newest at the bottom at a 640px maximum measure: owner messages as right-aligned bubbles, agent turns as rendered Markdown, tool calls as one mono line each, and a live status line. The composer is pinned below: an attach icon (images through `POST /api/attachments`, shown as thumbnails above the field), the field and a send icon.
 5. **Todos, 300px, right.** The selected lead's todos: in progress (with its worker), pending, completed (latest first, count), abandoned (count).
 
 ### Smaller screens
@@ -84,7 +84,7 @@ No server change is needed. Branches to land are not inbox items: agents land th
 - Keep `pulldown-cmark` (0.13.5, already in `web/Cargo.toml`). Turn on its GitHub-flavoured extensions for tables, strikethrough and task lists. Confirm the option names against the 0.13.5 documentation in the implementing unit.
 - Keep the existing safety rules in `render_markdown`: raw HTML stays text and unsafe links are dropped.
 - Style headings, lists, inline code, code blocks and tables in the conversation stylesheet.
-- Syntax highlighting in code blocks needs a maintained Rust library that builds for `wasm32-unknown-unknown`. None is chosen yet; research it before the conversation unit.
+- Syntax highlighting: `syntect` 5.3.0 (`html`, `regex-fancy`, no defaults) with the `two-face` 0.5.2 grammar set (`syntect-fancy`, no defaults). It is the only candidate with no C toolchain that covers rust, bash, toml, json, yaml, typescript, diff, markdown, python and sql. Tree-sitter options (syntastica, arborium, tree-sitter-highlight, inkjet) compile C grammars; giallo needs Oniguruma. Output is CSS classes with a `syn-` prefix, coloured in `markdown.css`. The grammar data is about 937 KiB before compression; unit 4 measures the real bundle change.
 
 ## Components
 
@@ -108,11 +108,12 @@ Briefs are in `plans/briefs/portal-console-*.md`.
 5. **Plan review and questions** (writer). The review over everything right of the inbox sidebar, the `Notes` tab below 1100px, questions and key prompts in the centre column, and `review.css`. Owns the `ReviewView` components in `web/src/review_view.rs` and `web/src/question_form.rs`.
 6. **Finish** (lead and reviewer). `impeccable detect --json web/`, the finish review against the sketches, and `DESIGN.md`.
 
-Unit 3 starts after 1. Units 4 and 5 start after 3 merges; 4 also needs 2.
+Unit 3 starts after 1. Unit 4 starts after 3 merges and uses 2. Unit 5 starts after 4 merges, because both edit `web/src/review_view.rs`.
 
 ## Open decisions
 
-None. Unit 2 chooses the code-highlighting library.
+- **Tool lines.** Transcript turns carry only `role` and `text` (`portal-types/src/agents.rs:57`), so the conversation cannot show tool calls as mono lines yet. That needs a transcript change on the server and is not in units 3 to 5.
+- **Attachments to remote agents.** The composer attach control reuses `POST /api/attachments` and sends the stored paths as a "Reference images:" block, as review change requests already do. The files are stored on the portal host, so an agent on another host cannot open them.
 
 ## Verification
 
