@@ -332,6 +332,39 @@ pub enum Command {
     /// Internal local operations used by peers over SSH.
     #[command(subcommand, hide = true)]
     Host(HostCommand),
+    /// Inspect or repair this host's `state.db` records as JSON.
+    #[command(subcommand, hide = true)]
+    State(StateCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StateCommand {
+    /// Print the SQL schema of `state.db`.
+    Schema,
+    /// Print every admission, oldest first.
+    Admissions,
+    /// Print every item, oldest first.
+    Items {
+        /// Replace every item with the JSON list read from stdin.
+        #[arg(long)]
+        put: bool,
+    },
+    /// Print every queued ticket, oldest first.
+    Tickets {
+        /// Replace every ticket with the JSON list read from stdin.
+        #[arg(long)]
+        put: bool,
+    },
+    /// Print one admission, or null.
+    Admission {
+        id: String,
+        /// Replace the admission with the JSON attempt read from stdin.
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        /// Delete the admission.
+        #[arg(long)]
+        delete: bool,
+    },
 }
 
 #[derive(Debug, Args)]

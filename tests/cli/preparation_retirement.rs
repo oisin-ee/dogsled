@@ -427,10 +427,9 @@ fn retired_resource_leaves_unit_unresolved() {
     let request = json!({"id":"a","action":{"type":"agent","kind":"pi","name":"worker","message":"task"},"host":"local","branch":"retire","base":"main","cwd":rig.dir.join("home"),"repository":null,"workspace":"w1","workspace_name":"caller","owner":"w1:p1"});
     let execution = json!({"executor":"dogsled","ownerId":"w1:p1","requestId":"a"});
     let unit = json!({"origin":unit_requests::exported(0)["contract"]["ref"],"execution":execution,"placement":{},"tool_call_id":"call","abandoned":null,"committed":unit_requests::commit_input(&execution, 0)});
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
-    rig.put("state/admissions/a.json", &json!({"request":request,"host":{"id":"local","label":"local"},"launch":null,"error":null,"unit":unit}));
+    rig.put_admission("a", &json!({"request":request,"host":{"id":"local","label":"local"},"launch":null,"error":null,"unit":unit}));
     rig.put_tickets(&json!([{"id":"ticket","request":request,"created_ms":rig.origin_ms,"state":"failed","waiting":false,"notified":false}]));
-    let before = rig.read("state/admissions/a.json");
+    let before = rig.admission("a");
     let (code, result) = retire(&rig, "a");
     assert_eq!(code, 0, "{result}");
     retired(&result);
@@ -439,11 +438,8 @@ fn retired_resource_leaves_unit_unresolved() {
             fs::remove_file(rig.dir.join("state/preparation-retirements/a.json")).unwrap();
         }
         service(&rig);
-        assert_eq!(rig.read("state/admissions/a.json"), before);
-        assert_eq!(
-            rig.read("state/admissions/a.json")["unit"]["abandoned"],
-            Value::Null
-        );
+        assert_eq!(rig.admission("a"), before);
+        assert_eq!(rig.admission("a")["unit"]["abandoned"], Value::Null);
         let (code, observed) =
             unit_requests::operation(&rig, "observe", &unit_requests::execution_input(&execution));
         assert_eq!(code, 0, "{observed}");

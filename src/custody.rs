@@ -309,8 +309,8 @@ pub(crate) fn forget_released(ledger: &Ledger, id: &str) -> Result<()> {
         || crate::done::list(ledger)?
             .iter()
             .any(|mark| mark.item.as_deref() == Some(id))
+        || crate::admissions::exists(ledger, id)?
         || [
-            "admissions",
             "preparation-receipts",
             "placement-grants",
             "preparation-retirements",
@@ -464,19 +464,15 @@ fn claim_locked(
         return Ok(ClaimOutcome::Held { custody: record });
     }
     // Released execution references cannot be reacquired while a host expires them.
-    if ledger
-        .child("admissions")
-        .read::<serde_json::Value>(&format!("{}.json", item.id))?
-        .is_some_and(|attempt| {
-            ["/ordinary_release", "/unit/reference_release"]
-                .iter()
-                .any(|path| {
-                    attempt
-                        .pointer(path)
-                        .is_some_and(|release| !release.is_null())
-                })
-        })
-    {
+    if crate::admissions::value(ledger, &item.id)?.is_some_and(|attempt| {
+        ["/ordinary_release", "/unit/reference_release"]
+            .iter()
+            .any(|path| {
+                attempt
+                    .pointer(path)
+                    .is_some_and(|release| !release.is_null())
+            })
+    }) {
         return Err(ClaimError::Host(crate::unit_transport::conflict(
             "execution references were permanently released",
         )));
@@ -880,28 +876,23 @@ mod tests {
 
     #[test]
     fn the_origin_the_reply_and_the_result_stay_identical_after_a_claim() {
+        use crate::admissions::fixtures;
         let ledger = ledger();
         let item = item(&ledger, Some("owner-session"));
         ensure(&ledger, &item).unwrap();
         // The unit result evidence the owner recorded for the child.
-        let admissions = ledger.child("admissions");
-        let unit = serde_json::json!({
-            "request": {"id": "child"},
-            "launch": null,
-            "error": null,
-            "unit": {
-                "execution": {"request_id": "r-1", "owner_id": "o-1"},
-                "result_id": "result-1"
-            }
-        });
-        admissions.write("child.json", &unit).unwrap();
+        let unit = crate::work::Attempt {
+            unit: Some(fixtures::unit("child", "o-1")),
+            ..fixtures::attempt(&fixtures::request("child", "o-1", None))
+        };
+        crate::admissions::put(&ledger, "child", &unit).unwrap();
         let items_before = crate::store::items(&ledger).unwrap();
-        let unit_before = std::fs::read(admissions.dir.join("child.json")).unwrap();
+        let unit_before = crate::admissions::value(&ledger, "child").unwrap();
         let shell = shell_without_owner();
         claim(&ledger, &request(&host(), 0), &shell).unwrap();
         assert_eq!(crate::store::items(&ledger).unwrap(), items_before);
         assert_eq!(
-            std::fs::read(admissions.dir.join("child.json")).unwrap(),
+            crate::admissions::value(&ledger, "child").unwrap(),
             unit_before
         );
         let recorded = crate::items::list(&ledger).unwrap();

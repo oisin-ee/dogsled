@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Admissions move from one JSON file per request into typed tables in `state.db`: one `admissions` row per request, with child tables for job arguments, declined placements, custody acknowledgements, and reviews. Each field Dogsled reads is its own column. Peer protocol messages, such as commit inputs, receipts, and release certificates, are kept as the exact bytes exchanged, because their digests and replay depend on them.
+- `dogsled unit settlements`, which every Pi session runs every 10 seconds, reads only the caller's unsettled units, through an index. Before, it read every admission file several times per call and reread the whole queue for each failed or cancelled ticket, so about 11 sessions kept about 11 cores busy.
+- `state.db` is now schema version 2. A host with an older `state.db` starts again with an empty store. Admission files and older store contents are not read. Let queued work finish before you upgrade a host.
+- Items and queued tickets are typed tables too, with each field in its own column.
+
 ## 0.29.3 - 2026-11-02
 
 - `dogsled close` resumes an interrupted preservation close after completed teardown, final capture, or normalization without repeating completed effects. A matching origin request can resume a requestless close for the same launch. Other identity changes still refuse the retry. Unknown teardown outcomes and interrupted normalization still retain the checkout.

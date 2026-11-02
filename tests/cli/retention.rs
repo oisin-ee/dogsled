@@ -135,8 +135,8 @@ fn r1a_settled_placement_family_expires_without_reallocation() {
     let id = result["request_id"].as_str().unwrap();
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
+    assert!(!rig.has_admission(id));
     for path in [
-        format!("admissions/{id}.json"),
         format!("placement-grants/{id}.json"),
         format!("placement-grants/{id}.lifecycle.json"),
         format!("preparation-receipts/{id}.json"),
@@ -310,7 +310,7 @@ fn r1c_released_seeded_family_expires_but_live_or_symlinked_evidence_stays() {
             retained,
             "{held}: {}\nadmission: {}\nprogress: {}\nitems:{}",
             rig.log("retention-output"),
-            rig.log(&format!("state/admissions/{id}.json")),
+            rig.admission(id),
             rig.log(&format!("state/launches/{id}.progress.json")),
             rig.items()
         );
@@ -324,7 +324,7 @@ fn r1c_released_seeded_family_expires_but_live_or_symlinked_evidence_stays() {
         assert_eq!(fs::read_to_string(unrelated).unwrap(), "untouched");
         assert!(rig.dir.join(format!("state/launches/{id}.lock")).exists());
         if !retained {
-            assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
+            assert!(!rig.has_admission(id));
             assert_eq!(
                 unit_requests::operation(&rig, "observe", &json!({"execution":execution})).0,
                 2
@@ -481,7 +481,7 @@ fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() 
         std::thread::sleep(Duration::from_millis(10));
     }
     serve(&rig);
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(id);
     assert_eq!(
         attempt["ordinary_release"]["certificate"]["binding"],
         json!({"kind":"none"}),
@@ -495,7 +495,7 @@ fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() 
     clock(&rig, finished + WINDOW + 1);
     serve(&rig);
     assert!(!rig.dir.join(format!("state/launches/{id}.json")).exists());
-    assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(!rig.has_admission(id));
     assert_eq!(rig.items(), json!([]));
 }
 
@@ -527,11 +527,11 @@ fn r1a_failed_placement_expires_after_exact_origin_and_host_completion() {
             .exists(),
         "{}\nadmission:{}\npreparation:{}\nlifecycle:{}",
         rig.log("retention-output"),
-        rig.log(&format!("state/admissions/{id}.json")),
+        rig.admission(id),
         rig.log(&format!("state/preparation-receipts/{id}.json")),
         rig.log(&format!("state/placement-grants/{id}.lifecycle.json"))
     );
-    assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(!rig.has_admission(id));
     assert!(
         !rig.dir
             .join(format!("state/placement-grants/{id}.json"))
@@ -560,10 +560,10 @@ fn r1a_abandoned_acknowledged_unit_expires_without_recovery_reenqueue() {
         .unwrap();
     clock(&rig, finished + WINDOW);
     serve(&rig);
-    assert!(rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(rig.has_admission(id));
     clock(&rig, finished + WINDOW + 1);
     serve(&rig);
-    assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(!rig.has_admission(id));
     assert_eq!(
         rig.json(&[
             "unit",

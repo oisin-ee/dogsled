@@ -54,12 +54,7 @@ fn cli_preserves_known_causes_and_never_peer_text() {
         assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
         assert!(!error.to_string().contains("TASK_SECRET"));
         assert_eq!(rig.tickets(), json!([]));
-        let admission = fs::read_dir(rig.dir.join("state/admissions"))
-            .unwrap()
-            .flatten()
-            .find(|f| f.path().extension().is_some_and(|e| e == "json"))
-            .unwrap();
-        let attempt: Value = serde_json::from_slice(&fs::read(admission.path()).unwrap()).unwrap();
+        let attempt = rig.admissions()[0].clone();
         assert_eq!(attempt["diagnostic"], error["diagnostic"]);
         assert_eq!(attempt["host"]["label"], "netcup");
         assert!(!rig.log("ssh.log").contains("host launch"));
@@ -466,12 +461,7 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
     assert!(!error.to_string().contains("TASK_SECRET"), "{error}");
     // The cause is the caller's own base, not the peer's text.
     assert!(!error.to_string().contains("PRIVATE_SENTINEL"), "{error}");
-    let admission = fs::read_dir(rig.dir.join("state/admissions"))
-        .unwrap()
-        .flatten()
-        .find(|f| f.path().extension().is_some_and(|e| e == "json"))
-        .unwrap();
-    let attempt: Value = serde_json::from_slice(&fs::read(admission.path()).unwrap()).unwrap();
+    let attempt = rig.admissions()[0].clone();
     assert!(
         attempt["error"]
             .as_str()
@@ -1167,7 +1157,7 @@ fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
     assert!(error.contains("netcup"), "{ticket}");
     assert!(!error.contains("PRIVATE_SENTINEL"), "{ticket}");
     let id = ticket["request"]["id"].as_str().unwrap();
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(id);
     assert!(
         attempt["error"]
             .as_str()
@@ -1214,7 +1204,7 @@ fn queued_failure_keeps_cause_in_ticket_admission_and_owner_inbox() {
     assert_eq!(ticket["retry"]["attempts"], 0);
     assert_eq!(ticket["diagnostic"]["cause"], "base_unavailable");
     let id = ticket["request"]["id"].as_str().unwrap();
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(id);
     assert_eq!(attempt["diagnostic"], ticket["diagnostic"]);
     let inbox = rig.read("state/inbox/term_owner.json");
     let text = inbox[0]["text"].as_str().unwrap();

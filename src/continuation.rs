@@ -66,10 +66,8 @@ pub fn legacy(
         "legacy-{}-",
         &digest_hex(json!([id, owner, kind, text]).to_string().as_bytes())[..24]
     );
-    let sent = ledger.child("admissions").with_lock(&id, || {
-        let expected = ledger
-            .child("admissions")
-            .read::<Attempt>(&format!("{id}.json"))?
+    let sent = crate::admissions::lock(ledger, &id, || {
+        let expected = crate::admissions::get_as::<Attempt>(ledger, &id)?
             .and_then(|attempt| attempt.launch)
             .ok_or_else(|| {
                 conflict("this host has no original admission or saved launch to continue")
@@ -459,9 +457,7 @@ fn pi_session(agent: &Agent) -> Result<String> {
 /// and return the session ID of the owner that committed it.
 fn admission(ledger: &Ledger, id: &str, owner: &str, pane: &str, launch: &Value) -> Result<String> {
     let invalid = |detail: &str| conflict(&format!("admission {id}: {detail}"));
-    let raw = ledger
-        .child("admissions")
-        .read::<Value>(&format!("{id}.json"))?
+    let raw = crate::admissions::get_as::<Value>(ledger, id)?
         .ok_or_else(|| invalid("this host has no original admission"))?;
     let attempt: Attempt = serde_json::from_value(raw.clone())?;
     let unit = attempt

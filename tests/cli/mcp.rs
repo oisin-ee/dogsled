@@ -220,7 +220,7 @@ fn p2_recovery_tools_share_the_runtime() {
 #[test]
 fn mcp_place_resume_replays_original_request_and_rejects_overrides() {
     let (rig, _, id) = place::interrupted_placement("placement-result-saved");
-    let original = rig.read(&format!("state/admissions/{id}.json"));
+    let original = rig.admission(&id);
     let mut client = Client::start(&rig);
     for field in ["host", "branch", "base", "cwd"] {
         let mut args = json!({"resume":id});
@@ -228,7 +228,7 @@ fn mcp_place_resume_replays_original_request_and_rejects_overrides() {
         let (error, failed) = client.call("place", &args);
         assert!(failed, "{field}: {error}");
         assert!(error.as_str().unwrap().contains(&id), "{error}");
-        assert_eq!(rig.read(&format!("state/admissions/{id}.json")), original);
+        assert_eq!(rig.admission(&id), original);
     }
     let (result, failed) = client.call("place", &json!({"resume":id}));
     assert!(!failed, "{result}");
@@ -259,7 +259,7 @@ fn review_plain_preparation_error_contains_resumable_request_id() {
         .split(':')
         .next()
         .unwrap();
-    let original = rig.read(&format!("state/admissions/{id}.json"));
+    let original = rig.admission(id);
     assert_eq!(original["request"]["id"], id);
     let grant = rig.read(&format!("state/placement-grants/{id}.json"));
     let (again, failed) = client.call("place", &json!({"resume":id}));

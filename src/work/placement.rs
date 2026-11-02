@@ -134,14 +134,14 @@ impl PlacementProgress {
     }
 }
 
-pub(super) fn record(attempts: &Ledger, request: &Request) -> Result<()> {
+pub(super) fn record(ledger: &Ledger, request: &Request) -> Result<()> {
     if !matches!(request.action, Action::Place) {
         return Ok(());
     }
-    let file = format!("{}.json", request.id);
-    if attempts.read::<Attempt>(&file)?.is_none() {
-        attempts.write(
-            &file,
+    if !crate::admissions::exists(ledger, &request.id)? {
+        crate::admissions::put(
+            ledger,
+            &request.id,
             &Attempt {
                 ordinary_release: None,
                 request: serde_json::to_value(request)?,
@@ -164,11 +164,11 @@ pub(super) fn record(attempts: &Ledger, request: &Request) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn reserved(attempts: &Ledger, request: &Request) -> Result<bool> {
+pub(super) fn reserved(ledger: &Ledger, request: &Request) -> Result<bool> {
     if !matches!(request.action, Action::Place) {
         return Ok(false);
     }
-    let Some(attempt) = attempts.read::<Attempt>(&format!("{}.json", request.id))? else {
+    let Some(attempt) = crate::admissions::get(ledger, &request.id)? else {
         return Ok(false);
     };
     if attempt.request != serde_json::to_value(request)? {
@@ -184,9 +184,7 @@ pub(super) fn reserved(attempts: &Ledger, request: &Request) -> Result<bool> {
 
 pub(crate) fn resume(ledger: &Ledger, id: &str) -> Result<Request> {
     jobs::validate_id(id)?;
-    let attempt = ledger
-        .child("admissions")
-        .read::<Attempt>(&format!("{id}.json"))?
+    let attempt = crate::admissions::get_as::<Attempt>(ledger, id)?
         .ok_or_else(|| conflict(&format!("unknown placement request {id}")))?;
     let request: Request = serde_json::from_value(attempt.request)?;
     if request.id != id || !matches!(request.action, Action::Place) {
@@ -341,8 +339,6 @@ fn prepare_selected(
     transport: Option<&crate::node::PlacementReplay>,
     selected_now: bool,
 ) -> Result<PlacementPhase> {
-    let attempts = fleet.ledger.child("admissions");
-    let file = format!("{}.json", request.id);
     Ok({
         if attempt.launch.is_some() {
             return Err(conflict(
@@ -388,7 +384,7 @@ fn prepare_selected(
                 grant: grant.clone(),
                 preparation: preparation.clone(),
             };
-            attempts.write(&file, attempt)?;
+            crate::admissions::put(fleet.ledger, &request.id, attempt)?;
             crate::checkout::ensure(fleet, host, repo, request).map_err(prelaunch_error)?;
             // A replay carries the same acknowledged grant, never a capacity request.
             let replay = transport.ok_or_else(|| conflict("missing acknowledged grant"))?;
@@ -571,10 +567,7 @@ fn finish_failure(fleet: &Fleet, request: &Request, mut attempt: Attempt) -> Res
         &mut attempt.finished_ms,
         request.validity.map(|v| v.created_ms),
     )?;
-    fleet
-        .ledger
-        .child("admissions")
-        .write(&format!("{}.json", request.id), &attempt)?;
+    crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
     finish_grant(fleet, &attempt, &grant)?;
     Err(error)
 }
@@ -738,10 +731,7 @@ fn finish_grant(
         )?
     };
     admission["placement"]["completion_ack"] = serde_json::json!(true);
-    fleet
-        .ledger
-        .child("admissions")
-        .write(&format!("{}.json", grant.envelope.reservation), &admission)?;
+    crate::admissions::put_value(fleet.ledger, &grant.envelope.reservation, &admission)?;
     Ok(())
 }
 
@@ -774,10 +764,7 @@ fn save_phase(
         .as_mut()
         .ok_or_else(|| conflict("missing placement progress"))?
         .phase = phase;
-    fleet
-        .ledger
-        .child("admissions")
-        .write(&format!("{}.json", request.id), attempt)?;
+    crate::admissions::put(fleet.ledger, &request.id, attempt)?;
     if let PlacementPhase::Completed { saved, .. } = &attempt
         .placement
         .as_ref()
@@ -791,13 +778,10 @@ fn save_phase(
 }
 
 pub(super) fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
-    let attempts = fleet.ledger.child("admissions");
-    let file = format!("{}.json", request.id);
-    record(&attempts, request)?;
+    record(fleet.ledger, request)?;
     let mut selected_now = false;
     loop {
-        let mut attempt = attempts
-            .read::<Attempt>(&file)?
+        let mut attempt = crate::admissions::get(fleet.ledger, &request.id)?
             .ok_or_else(|| conflict("placement admission disappeared"))?;
         let transport = observe(fleet, request, &attempt)?;
         let progress = attempt

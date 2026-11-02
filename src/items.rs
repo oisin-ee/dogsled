@@ -131,9 +131,7 @@ fn change(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>)) -> Result<()> {
     ledger.with_lock("items", || {
         let mut items = list(ledger)?;
         f(&mut items);
-        crate::store::write(ledger, |tx| {
-            crate::store::sync(tx, crate::store::Table::Items, &items)
-        })
+        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))
     })
 }
 
@@ -163,15 +161,11 @@ pub fn set_reply_with(ledger: &Ledger, id: &str, reply: Reply, native_done: bool
                 return Ok(());
             }
             item.native_done = true;
-            return crate::store::write(ledger, |tx| {
-                crate::store::sync(tx, crate::store::Table::Items, &items)
-            });
+            return crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items));
         }
         item.reply = Some(reply);
         item.native_done |= native_done;
-        crate::store::write(ledger, |tx| {
-            crate::store::sync(tx, crate::store::Table::Items, &items)
-        })
+        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))
     })
 }
 
@@ -300,9 +294,7 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
             if expired.is_empty() {
                 return Ok(());
             }
-            crate::store::write(ledger, |tx| {
-                crate::store::sync(tx, crate::store::Table::Items, &kept)
-            })?;
+            crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &kept))?;
             for id in expired {
                 crate::custody::forget_released(ledger, &id)?;
             }
@@ -312,9 +304,7 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
 }
 
 pub fn list(ledger: &Ledger) -> Result<Vec<Item>> {
-    crate::store::read(ledger, |tx| {
-        crate::store::rows(tx, crate::store::Table::Items)
-    })
+    crate::store::read(ledger, crate::tables::items)
 }
 
 pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
@@ -324,9 +314,7 @@ pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
             i.id == item.id || (i.closed_ms.is_none() && i.host == item.host && i.pane == item.pane)
         }) {
             items.push(item);
-            crate::store::write(ledger, |tx| {
-                crate::store::sync(tx, crate::store::Table::Items, &items)
-            })?;
+            crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))?;
         }
         Ok(())
     })
@@ -403,9 +391,7 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
             item.signal = None;
             count += 1;
         }
-        crate::store::write(ledger, |tx| {
-            crate::store::sync(tx, crate::store::Table::Items, &items)
-        })?;
+        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))?;
         Ok(count)
     })
 }
@@ -635,9 +621,7 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
                 item.signal = None;
             }
         }
-        crate::store::write(ledger, |tx| {
-            crate::store::sync(tx, crate::store::Table::Items, &items)
-        })
+        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))
     })
 }
 

@@ -124,18 +124,15 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
 #[test]
 fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
     let rig = Rig::new("hold-stores");
-    for directory in [
-        "admissions",
-        "placement-grants",
-        "job-validity",
-        "cancellations",
-    ] {
+    for directory in ["placement-grants", "job-validity", "cancellations"] {
         fs::create_dir_all(rig.dir.join("state").join(directory)).unwrap();
     }
-    let request = json!({"id":"place-held","owner":"w1:p1","owner_host":"origin"});
-    rig.put(
-        "state/admissions/place-held.json",
-        &json!({"request":request,"placement":{"phase":"result_saved"}}),
+    let mut request = place_request("place-held");
+    request["owner_host"] = json!("origin");
+    rig.put_admission(
+        "place-held",
+        &json!({"request":request,"launch":null,"error":null,
+            "placement":{"version":4,"phase":"recorded","declined":[]}}),
     );
     rig.put(
         "state/placement-grants/place-held.json",
@@ -152,7 +149,10 @@ fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
             {"id":"expired-capacity","created_ms":0}
         ]),
     );
-    rig.put("state/admissions/release-held.json", &json!({"request":{"owner":"w1:p1","owner_host":"origin"},"result":{},"unit":{"reference_release":{"acknowledgement":null}}}));
+    rig.put_admission(
+        "release-held",
+        &released_admission("release-held", "origin"),
+    );
     rig.put(
         "state/cancellations/cancel-held.json",
         &json!({"release":"pending","ticket":{"id":"ticket-held","request":{"owner":"w1:p1"}}}),
@@ -204,8 +204,8 @@ fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
         "dogsled drop branch-held --host local"
     );
     assert_eq!(
-        rig.read("state/admissions/place-held.json")["placement"]["phase"],
-        "result_saved"
+        rig.admission("place-held")["placement"]["phase"],
+        "recorded"
     );
     let (_, board) = rig.json(&["board", "--owner", "w1:p1"]);
     assert!(

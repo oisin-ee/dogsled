@@ -370,6 +370,13 @@ impl Hold {
 
 /// Read atomic records only: no execution locks, clock refresh or reconciliation.
 fn records(ledger: &Ledger, directory: &str) -> Result<Vec<(String, Option<Value>)>> {
+    if directory == "admissions" {
+        // Admissions live in state.db; holds name each by its request id.
+        return Ok(crate::admissions::entries(ledger)?
+            .into_iter()
+            .map(|(id, value)| (format!("{id}.json"), Some(value)))
+            .collect());
+    }
     let store = ledger.child(directory);
     let entries = match std::fs::read_dir(&store.dir) {
         Ok(entries) => entries,
@@ -1114,16 +1121,13 @@ mod tests {
     }
 
     fn assert_reported_reason(reason: &str, code: &str) {
+        use crate::admissions::fixtures;
         let ledger = fixture();
-        ledger
-            .child("admissions")
-            .write(
-                "held.json",
-                &serde_json::json!({
-                    "request":{"owner":"w1:p1", "owner_host":"origin"}, "error":reason
-                }),
-            )
-            .unwrap();
+        let attempt = crate::work::Attempt {
+            error: Some(reason.into()),
+            ..fixtures::attempt(&fixtures::request("held", "w1:p1", Some("origin")))
+        };
+        crate::admissions::put(&ledger, "held", &attempt).unwrap();
         let before = saved_files(&ledger.dir);
         let holds = local(&ledger, "worker", 100, 90).unwrap();
         let hold = holds.iter().find(|hold| hold.code == code).unwrap();
@@ -1358,15 +1362,8 @@ mod tests {
     fn origin_reference_holds_name_the_existing_commands_on_the_origin() {
         let ledger = fixture();
         let request = serde_json::json!({"owner":"w1:p1","owner_host":"origin","unit":{}});
-        ledger
-            .child("admissions")
-            .write(
-                "held.json",
-                &serde_json::json!({
-                    "request":request,"unit":{"reference_release":{"acknowledgement":null}}
-                }),
-            )
-            .unwrap();
+        let attempt = crate::admissions::fixtures::released("held", "w1:p1", "origin");
+        crate::admissions::put(&ledger, "held", &attempt).unwrap();
         ledger
             .child("launches")
             .write(

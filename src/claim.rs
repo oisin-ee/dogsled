@@ -200,9 +200,7 @@ fn receipt(item: &str, outcome: &'static str, custody: &custody::Custody) -> Cla
 
 /// The execution of the unit request the item records.
 fn execution(fleet: &Fleet<'_>, item: &str) -> Result<ExecutionRef> {
-    let attempts = fleet.ledger.child("admissions");
-    let attempt: crate::work::Attempt = attempts
-        .read(&format!("{item}.json"))?
+    let attempt = crate::admissions::get(fleet.ledger, item)?
         .ok_or_else(|| Error::Invalid(format!("{item} has no unit request")))?;
     attempt
         .unit
