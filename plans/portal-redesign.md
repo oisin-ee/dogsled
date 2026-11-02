@@ -113,6 +113,8 @@ Unit 3 starts after 1. Unit 4 starts after 3 merges and uses 2. Unit 5 starts af
 ## Open decisions
 
 - **Tool lines.** Transcript turns carry only `role` and `text` (`portal-types/src/agents.rs:57`), so the conversation cannot show tool calls as mono lines yet. That needs a transcript change on the server and is not in units 3 to 5.
+- **Model and host in the lead header.** `AgentView` (`portal-types/src/agents.rs:22`) has `agent` (the harness) but no model or host, so the header shows `role · harness · branch`, and the host only for workers (from `RowView.host`). Showing the model needs the server to report it.
+- **Completed todo order.** Todos carry no completion time, so "latest first" reverses the server's order. That order is an estimate.
 - **Attachments to remote agents.** The composer attach control reuses `POST /api/attachments` and sends the stored paths as a "Reference images:" block, as review change requests already do. The files are stored on the portal host, so an agent on another host cannot open them.
 
 ## Verification
