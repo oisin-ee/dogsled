@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Automatic cleanup removes only recorded checkouts and branches of closed children. Checkout identity must match the recorded Git directories and generation. Worktrees and branches that Dogsled did not create stay intact, even when clean and pushed. Explicit `dogsled prune` keeps its existing behavior.
+
 ## 0.29.1 - 2026-10-30
 
 - Admission works again when one committed unit cannot be queued. Before, a unit request saved without request validity, for example by an older `dogsled mcp`, made the service's recovery step fail on every tick, so no request was admitted on that host. Now the service logs that request and holds it alone.
