@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.29.3 - 2026-11-02
 
 - `dogsled close` resumes an interrupted preservation close after completed teardown, final capture, or normalization without repeating completed effects. A matching origin request can resume a requestless close for the same launch. Other identity changes still refuse the retry. Unknown teardown outcomes and interrupted normalization still retain the checkout.
 - Automatic cleanup removes only recorded checkouts and branches of closed children. Checkout identity must match the recorded Git directories and generation. Worktrees and branches that Dogsled did not create stay intact, even when clean and pushed. Explicit `dogsled prune` keeps its existing behavior.
