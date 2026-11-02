@@ -4,6 +4,7 @@ Status: approved by the owner on 2026-11-02 ("go"). Implementation is in progres
 This revision replaces the 2026-10-27 layout (top bar, 288px navigation, Inbox popover, tabbed agent screen).
 Product context: `PRODUCT.md`. Surface brief and direction contract: `.impeccable/surfaces/web.md`.
 Sketches: `.impeccable/mocks/decision/v6-console.html` (main screen) and `v6-console-review.html` (plan review open). `?tab=` in the sketch URL picks the open tab.
+Wireframe: `plans/portal-redesign.squig.json`, one Squig canvas with one variation per frame: `wide-main`, `wide-review`, `wide-empty`, `medium-chat`, `medium-todos`, `narrow-chat`, `narrow-agents` and `narrow-review`. Open it with `pnpm squig serve <absolute path>` from a Squig checkout.
 Screenshots: `v6-console.png` (wide, 1440×900), `v6-console-medium*.png` (1280×800), `v6-console-narrow*.png` (1024×768), `v6-console-review.png` and `v6-console-review-narrow*.png`.
 The owner chose the dark console card (`v5-canon.html`), then on 2026-11-02:
 - moved the inbox from a top strip into a second left sidebar, as in the Pull Request card;
@@ -96,7 +97,7 @@ The owner rejected the plain upstream look (2026-11-02), so the console adds por
 
 Overrides target the components' own classes and data attributes. Icons come from `dioxus-icons`.
 
-## Units (draft, for approval)
+## Units
 
 Briefs are in `plans/briefs/portal-console-*.md`.
 
@@ -111,7 +112,7 @@ Unit 3 starts after 1. Units 4 and 5 start after 3 merges; 4 also needs 2.
 
 ## Open decisions
 
-None. The code-highlighting library is research inside unit 3.
+None. Unit 2 chooses the code-highlighting library.
 
 ## Verification
 
