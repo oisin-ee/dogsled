@@ -1,6 +1,6 @@
 # Portal redesign: the main screen
 
-Status: direction chosen by the owner on 2026-11-02. Implementation is not approved yet.
+Status: approved by the owner on 2026-11-02 ("go"). Implementation is in progress on branch `plan/portal-console`.
 This revision replaces the 2026-10-27 layout (top bar, 288px navigation, Inbox popover, tabbed agent screen).
 Product context: `PRODUCT.md`. Surface brief and direction contract: `.impeccable/surfaces/web.md`.
 Sketches: `.impeccable/mocks/decision/v6-console.html` (main screen) and `v6-console-review.html` (plan review open). `?tab=` in the sketch URL picks the open tab.
@@ -16,10 +16,11 @@ Other sketches from the round stay in `.impeccable/mocks/decision/` (`v4-*`, `v5
 
 The running portal (`127.0.0.1:7465`, screenshot from the owner on 2026-11-02) has these problems:
 
-- The whole document scrolls, so the top bar scrolls away. `web/assets/main.css:29-39` sets `body { overflow: hidden }` and a `100dvh` grid, yet the page does not show that dark theme. The served build or its stylesheets do not match the source.
-- The inbox is a button with a popover. The owner cannot see waiting items without opening it.
-- Todos and the branch are tabs behind the conversation.
-- Each turn is a bordered card headed "Agent". Markdown is parsed with `Parser::new` and no options (`web/src/review_view.rs:232`), so tables, strikethrough and task lists do not parse.
+- The whole document scrolls, so the header scrolls away. Since the component migration (2026-11-02) the page frame uses only the upstream components theme and browser defaults (`web/assets/dx-components-theme.css`, loaded at `web/src/app.rs:268`). Nothing fixes the frame to the viewport; `web/assets/main.css` was removed.
+- The inbox is a `Sheet` behind an Inbox button (`web/src/app.rs`). The owner cannot see waiting items without opening it.
+- Todos and the branch are tabs behind the conversation (`web/src/agent_view.rs:483-485`).
+- Markdown is parsed with `Parser::new` and no options (`web/src/review_view.rs:247`), so tables, strikethrough and task lists do not parse.
+- The composer carries helper text ("Enter sends · Shift+Enter adds a line · …", `web/src/agent_view.rs:679`) and a text Send button.
 
 ## Owner requirements
 
@@ -86,18 +87,27 @@ No server change is needed. Branches to land are not inbox items: agents land th
 
 ## Components
 
-Keep the official Dioxus components from `plans/dioxus-components.md`. Restyle them through the theme stylesheets (`web/assets/components-theme.css`, `dx-components-theme.css` stays generated and unchanged). No hand-built replacements.
+Keep the official Dioxus components in `web/src/components/` (from `plans/dioxus-components.md`): `SidebarProvider`, `Sidebar`, `Item`, `Tabs`, `Textarea`, `Button`, `Badge`, `ScrollArea`, `Progress` and the rest. No hand-built controls, and the component files stay as installed.
+The owner rejected the plain upstream look (2026-11-02), so the console adds portal stylesheets loaded after `dx-components-theme.css`:
+
+- `web/assets/console.css`: the theme variables set to the console palette and fonts, the fixed page grid and its three widths, and the shell, conversation layout and todos.
+- `web/assets/markdown.css`: rendered Markdown and code colours.
+- `web/assets/review.css`: the plan review and question layouts.
+
+Overrides target the components' own classes and data attributes. Icons come from `dioxus-icons`.
 
 ## Units (draft, for approval)
 
-1. **Wireframe.** Save the layout as a Squig canvas at `plans/portal-redesign.squig.json` (wide 1440×900, medium 1280×800 and narrow 1024×768, with the empty-inbox and plan-review states).
-2. **Shell.** Diagnose why the served portal scrolls and ignores `main.css`, then build the fixed grid with its three widths, tokens, top bar, inbox sidebar, agents sidebar and the header tabs (`web/src/app.rs`, `web/src/board.rs`, `web/assets/main.css`).
-3. **Conversation.** Markdown options and styles, message layout, tool lines, status line and the icon-only composer (`web/src/agent_view.rs`, `web/src/review_view.rs` `render_markdown`, `web/assets/agent_view.css`).
-4. **Todos column.** Move todos out of the old tab into the right column, and into the `Todos` tab below 1400px.
-5. **Pending items.** The plan review over everything right of the inbox sidebar (with the `Notes` tab below 1100px), and questions and key prompts in the centre column (`web/src/review_view.rs`, `web/src/question_form.rs`).
-6. **Finish.** `impeccable detect --json web/`, the finish review against the sketch, and `DESIGN.md`.
+Briefs are in `plans/briefs/portal-console-*.md`.
 
-Units 2 to 5 depend on 1. Unit 3 depends on the highlighting research.
+1. **Wireframe** (lead). The Squig canvas `plans/portal-redesign.squig.json`: wide 1440×900, medium 1280×800 and narrow 1024×768, with the empty-inbox and plan-review states.
+2. **Highlighting choice** (selection-lead, read-only). One wasm-ready Rust highlighter for fenced code (`portal-console-highlighting.md`).
+3. **Main screen** (writer). `console.css`, the fixed grid and its three widths, the top bar, the inbox sidebar (replaces the `Sheet` and the Inbox button), the agents sidebar, and the lead panel: header with tabs, conversation, icon-only composer and the todos column. Owns `web/src/app.rs`, `web/src/board.rs`, `web/src/agent_view.rs` and `web/assets/console.css`.
+4. **Markdown** (writer). Parser options, the chosen highlighter, message styles and `markdown.css`. Owns the render functions in `web/src/review_view.rs`, the `Conversation` component in `web/src/agent_view.rs`, and `web/Cargo.toml`.
+5. **Plan review and questions** (writer). The review over everything right of the inbox sidebar, the `Notes` tab below 1100px, questions and key prompts in the centre column, and `review.css`. Owns the `ReviewView` components in `web/src/review_view.rs` and `web/src/question_form.rs`.
+6. **Finish** (lead and reviewer). `impeccable detect --json web/`, the finish review against the sketches, and `DESIGN.md`.
+
+Unit 3 starts after 1. Units 4 and 5 start after 3 merges; 4 also needs 2.
 
 ## Open decisions
 
