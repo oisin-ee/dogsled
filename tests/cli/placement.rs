@@ -28,7 +28,7 @@ fn repository(rig: &Rig) -> (PathBuf, PathBuf) {
 /// Herdr's view of the repository: which checkout each open workspace shows.
 fn shown(rig: &Rig, repo: &Path, main: Option<&str>, tree: &Path, linked: Option<&str>) {
     rig.put(
-        "worktrees.json",
+        "herdr-worktrees",
         &json!({"result":{"worktrees":[
             {"path":repo,"open_workspace_id":main,"is_linked_worktree":false},
             {"path":tree,"open_workspace_id":linked,"is_linked_worktree":true}

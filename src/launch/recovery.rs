@@ -9,39 +9,20 @@ use crate::shell::Shell;
 #[path = "recovery_tests.rs"]
 mod tests;
 
-pub(super) fn candidates(receipts: &Ledger, pane: Option<&str>) -> Result<Vec<(String, Progress)>> {
-    let entries = match std::fs::read_dir(&receipts.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut found = Vec::new();
-    for entry in entries {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        let Some(id) = name.strip_suffix(".progress.json") else {
-            continue;
-        };
-        let Some(progress) = receipts.read::<Progress>(&name)? else {
-            continue;
-        };
-        if pane.is_none_or(|pane| progress.pane.as_deref() == Some(pane)) {
-            crate::jobs::validate_id(id)?;
-            found.push((id.to_owned(), progress));
-        }
-    }
-    Ok(found)
+pub(super) fn candidates(ledger: &Ledger, pane: Option<&str>) -> Result<Vec<(String, Progress)>> {
+    crate::launch_store::candidates(ledger, pane)
 }
 
 /// Launch history identifies child panes even after terminal ownership changes.
 /// Board placement needs this ledger-only fact, not cleanup eligibility.
 pub fn launched(ledger: &Ledger, pane: &str) -> Result<bool> {
-    Ok(!candidates(&ledger.child("launches"), Some(pane))?.is_empty())
+    Ok(!candidates(ledger, Some(pane))?.is_empty())
 }
 
 /// Every recorded launch request on this host. Each names the pane that asked for it and the
 /// directory it started in, so a prepared worktree's launch names the agent that created it.
 pub fn requests(ledger: &Ledger) -> Result<Vec<crate::work::Launch>> {
-    Ok(candidates(&ledger.child("launches"), None)?
+    Ok(candidates(ledger, None)?
         .into_iter()
         .map(|(_, progress)| progress.request)
         .collect())
@@ -80,15 +61,14 @@ fn owned_candidates(
     shell: &dyn Shell,
     pane: &str,
 ) -> Result<Vec<(String, Progress)>> {
-    let receipts = ledger.child("launches");
-    let found = candidates(&receipts, Some(pane))?;
+    let found = candidates(ledger, Some(pane))?;
     if found.is_empty() {
         return Ok(found);
     }
     let current = terminal(shell, pane).ok();
     let mut owned = Vec::new();
     for (id, progress) in found {
-        let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+        let receipt = crate::launch_store::receipt_as::<Receipt>(ledger, &id)?;
         if owns_pane(&progress, receipt.as_ref(), current.as_deref()) {
             owned.push((id, progress));
         }
@@ -135,14 +115,13 @@ impl Survey {
         terminals: &std::collections::BTreeMap<String, String>,
         agents: &[crate::probe::Agent],
     ) -> Result<Self> {
-        let receipts = ledger.child("launches");
         let items = crate::items::list(ledger)?;
         let mut survey = Self {
             states: std::collections::BTreeMap::new(),
             pending_paths: Vec::new(),
         };
-        for (id, progress) in candidates(&receipts, None)? {
-            let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+        for (id, progress) in candidates(ledger, None)? {
+            let receipt = crate::launch_store::receipt_as::<Receipt>(ledger, &id)?;
             if receipt.is_none() && super::pending(&progress, agents) {
                 survey.pending_paths.push(progress.request.cwd.clone());
             }
@@ -203,7 +182,6 @@ impl Survey {
 /// Final launches must still own the idle shell. Successful records prevent recordless
 /// age-based cleanup; unresolved ownership also prevents closing by another shell rule.
 pub fn final_pane(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<PaneLaunch> {
-    let receipts = ledger.child("launches");
     let found = owned_candidates(ledger, shell, pane)?;
     if found.is_empty() {
         return Ok(PaneLaunch::Unrecorded);
@@ -211,7 +189,7 @@ pub fn final_pane(ledger: &Ledger, shell: &dyn Shell, pane: &str) -> Result<Pane
     let [(id, progress)] = found.as_slice() else {
         return Ok(PaneLaunch::Unresolved);
     };
-    let receipt = receipts.read::<Receipt>(&format!("{id}.json"))?;
+    let receipt = crate::launch_store::receipt_as::<Receipt>(ledger, id)?;
     if matches!(receipt, Some(Receipt::Started(_))) {
         return Ok(PaneLaunch::Started);
     }
@@ -248,20 +226,19 @@ fn close(
     pane: &str,
     eligible: fn(&Progress, Option<&Receipt>) -> bool,
 ) -> Result<bool> {
-    let receipts = ledger.child("launches");
-    let found = candidates(&receipts, Some(pane))?;
+    let found = candidates(ledger, Some(pane))?;
     let mut selected = None;
     for (id, progress) in &found {
         if eligible(
             progress,
-            receipts.read::<Receipt>(&format!("{id}.json"))?.as_ref(),
+            crate::launch_store::receipt_as::<Receipt>(ledger, id)?.as_ref(),
         ) {
             selected = Some((id, progress));
         }
     }
     let Some((id, original)) = selected else {
         for (id, _) in &found {
-            if receipts.read::<Receipt>(&format!("{id}.json"))?.is_none() {
+            if crate::launch_store::receipt_as::<Receipt>(ledger, id)?.is_none() {
                 return Err(Error::Invalid(format!(
                     "{pane}: unresolved launch is not eligible for recovery; nothing was closed"
                 )));
@@ -288,7 +265,7 @@ fn close_selected(
     let receipts = ledger.child("launches");
     receipts.with_lock(id, || {
         with_pane(ledger, pane, || {
-            let found = candidates(&receipts, Some(pane))?;
+            let found = candidates(ledger, Some(pane))?;
             let [(current_id, progress)] = found.as_slice() else {
                 return Err(Error::Invalid(format!("{pane}: launch ownership changed; nothing was closed")));
             };
@@ -296,7 +273,7 @@ fn close_selected(
                 || progress.request != original.request
                 || progress.request.id != id
                 || progress.terminal != original.terminal
-                || !eligible(progress, receipts.read::<Receipt>(&format!("{id}.json"))?.as_ref())
+                || !eligible(progress, crate::launch_store::receipt_as::<Receipt>(ledger, id)?.as_ref())
             {
                 return Err(Error::Invalid(format!("{pane}: launch changed; nothing was closed")));
             }

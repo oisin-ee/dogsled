@@ -1,13 +1,4 @@
-//! The portal's plan reviews: the plan an agent submits, the revisions of it,
-//! the owner's annotations, and the decision that goes back to the agent.
-//!
-//! Every review is one file in the portal's own state directory. The file is
-//! the only source of truth, so the reviews survive a restart and a request
-//! never reads half a review.
-//!
-//! A decision stays undelivered until the session that owns the review takes
-//! it. A session that was not listening gets the decision when it comes back,
-//! so a decision never gets lost.
+//! Durable plan reviews and decision delivery. Raw image artifacts remain agent-readable files.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -47,8 +38,7 @@ const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const DECISION_CHANNEL: usize = 64;
 /// The stream sends a comment this often, so an idle connection stays open.
 const KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(15);
-/// The name of the lock that guards the review files.
-const REVIEW_LOCK: &str = "reviews";
+use crate::web_store::reviews as records;
 /// The digits of a hex number.
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -70,10 +60,10 @@ pub fn routes() -> Router<AppState> {
 
 /// A review and the delivery state of its decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Record {
-    review: Review,
+pub(crate) struct Record {
+    pub(crate) review: Review,
     /// Whether the session that owns the review took the decision.
-    delivered: bool,
+    pub(crate) delivered: bool,
 }
 
 /// A decision on its way to a session.
@@ -83,14 +73,9 @@ struct Delivery {
     event: DecisionEvent,
 }
 
-/// The ledger of the reviews.
-fn reviews(web: &Ledger) -> Ledger {
-    web.child("reviews")
-}
-
-/// The directory the images live in.
-fn attachments(web: &Ledger) -> PathBuf {
-    web.child("attachments").dir
+/// Raw images are outside-process artifacts read by agents, not database records.
+fn attachments(ledger: &Ledger) -> PathBuf {
+    ledger.dir.join("web").join("attachments")
 }
 
 /// The decisions the server pushes to the sessions that listen.
@@ -218,8 +203,8 @@ async fn annotations(
     let owned = id.clone();
     let web = state.web.clone();
     let changed = blocking(move || {
-        web.with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&web, &owned)? else {
+        crate::store::write(&web, |tx| {
+            let Some(mut record) = records::get(tx, &owned)? else {
                 return Ok(None);
             };
             let revision = record.review.revisions.last().map_or(1, |last| last.n);
@@ -235,7 +220,7 @@ async fn annotations(
                     annotation
                 })
                 .collect();
-            save(&web, &record)?;
+            records::put(tx, &record)?;
             Ok(Some(record.review))
         })
     })
@@ -256,12 +241,12 @@ async fn general(
     let owned = id.clone();
     let web = state.web.clone();
     let changed = blocking(move || {
-        web.with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&web, &owned)? else {
+        crate::store::write(&web, |tx| {
+            let Some(mut record) = records::get(tx, &owned)? else {
                 return Ok(None);
             };
             record.review.general.clone_from(&body.general);
-            save(&web, &record)?;
+            records::put(tx, &record)?;
             Ok(Some(record.review))
         })
     })
@@ -283,15 +268,15 @@ async fn approve(
     let owned = id.clone();
     let web = state.web.clone();
     let decided = blocking(move || {
-        web.with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&web, &owned)? else {
+        crate::store::write(&web, |tx| {
+            let Some(mut record) = records::get(tx, &owned)? else {
                 return Ok(None);
             };
             record.review.decision = Some(Decision::Approved {
                 notes: notes.clone(),
             });
             record.delivered = false;
-            save(&web, &record)?;
+            records::put(tx, &record)?;
             Ok(Some(record.review))
         })
     })
@@ -317,8 +302,8 @@ async fn request_changes(
     let owned = id.clone();
     let web = state.web.clone();
     let decided = blocking(move || {
-        web.with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&web, &owned)? else {
+        crate::store::write(&web, |tx| {
+            let Some(mut record) = records::get(tx, &owned)? else {
                 return Ok(None);
             };
             let message = change_request(&record.review);
@@ -326,7 +311,7 @@ async fn request_changes(
                 message: message.clone(),
             });
             record.delivered = false;
-            save(&web, &record)?;
+            records::put(tx, &record)?;
             Ok(Some(record.review))
         })
     })
@@ -380,8 +365,13 @@ async fn attachment_file(
     let owned = name.clone();
     let web = state.web.clone();
     let bytes = blocking(move || {
-        let path = attachments(&web).join(&owned);
-        fs::read(&path).map_err(Error::from)
+        let attachment = crate::store::read(&web, |tx| records::attachment(tx, &owned))?;
+        let Some(attachment) = attachment else {
+            return Err(Error::Io(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )));
+        };
+        fs::read(&attachment.path).map_err(Error::from)
     })
     .await;
     match bytes {
@@ -431,7 +421,7 @@ async fn ack(
 /// Submit through the same locked store as the HTTP endpoint.
 pub(crate) async fn submit_plan(web: &Ledger, body: SubmitBody) -> Result<Submitted> {
     let web = web.clone();
-    blocking(move || web.with_lock(REVIEW_LOCK, || submit_locked(&web, &body))).await
+    blocking(move || crate::store::write(&web, |tx| submit_locked(tx, &body))).await
 }
 
 /// Replay pending decisions, then follow live decisions without a subscribe/read race.
@@ -469,12 +459,12 @@ pub(crate) async fn wait_for_decision(
 pub(crate) async fn acknowledge(web: &Ledger, owned: String) -> Result<Option<bool>> {
     let web = web.clone();
     blocking(move || {
-        web.with_lock(REVIEW_LOCK, || {
-            let Some(mut record) = load(&web, &owned)? else {
+        crate::store::write(&web, |tx| {
+            let Some(mut record) = records::get(tx, &owned)? else {
                 return Ok(None);
             };
             record.delivered = true;
-            save(&web, &record)?;
+            records::put(tx, &record)?;
             Ok(Some(record.delivered))
         })
     })
@@ -482,43 +472,38 @@ pub(crate) async fn acknowledge(web: &Ledger, owned: String) -> Result<Option<bo
 }
 
 /// The plan of a session, with the revision it adds.
-fn submit_locked(web: &Ledger, body: &SubmitBody) -> Result<Submitted> {
-    let mut records = load_all(web)?;
+fn submit_locked(tx: &rusqlite::Transaction<'_>, body: &SubmitBody) -> Result<Submitted> {
+    let mut open = records::select(
+        tx,
+        "session = ?1 AND path = ?2 AND decision IS NULL",
+        &[&body.session, &body.path],
+    )?;
     let now = ledger::now_ms();
-    // The open review of the same session and path takes the new revision.
-    let open = records
-        .iter()
-        .enumerate()
-        .filter(|(_, record)| is_open(record, body))
-        .max_by_key(|(_, record)| latest_ms(record))
-        .map(|(index, _)| index);
-    let Some(index) = open else {
-        let review = Review {
-            id: random_id(),
-            pane: body.pane.clone(),
-            session: body.session.clone(),
-            cwd: body.cwd.clone(),
-            path: body.path.clone(),
-            revisions: vec![Revision {
-                n: 1,
-                content: body.content.clone(),
-                submitted_ms: now,
-            }],
-            annotations: Vec::new(),
-            general: String::new(),
-            decision: None,
-        };
+    let Some(record) = open.first_mut() else {
         let record = Record {
-            review,
+            review: Review {
+                id: random_id(),
+                pane: body.pane.clone(),
+                session: body.session.clone(),
+                cwd: body.cwd.clone(),
+                path: body.path.clone(),
+                revisions: vec![Revision {
+                    n: 1,
+                    content: body.content.clone(),
+                    submitted_ms: now,
+                }],
+                annotations: Vec::new(),
+                general: String::new(),
+                decision: None,
+            },
             delivered: false,
         };
-        save(web, &record)?;
+        records::put(tx, &record)?;
         return Ok(Submitted {
-            id: record.review.id.clone(),
+            id: record.review.id,
             revision: 1,
         });
     };
-    let record = &mut records[index];
     let revision = record.review.revisions.last().map_or(0, |last| last.n) + 1;
     let annotations = reanchor(&record.review, &body.content, revision);
     record.review.pane.clone_from(&body.pane);
@@ -529,18 +514,11 @@ fn submit_locked(web: &Ledger, body: &SubmitBody) -> Result<Submitted> {
         submitted_ms: now,
     });
     record.review.annotations = annotations;
-    save(web, record)?;
+    records::put(tx, record)?;
     Ok(Submitted {
         id: record.review.id.clone(),
         revision,
     })
-}
-
-/// Whether the review takes the plan of this submission.
-fn is_open(record: &Record, body: &SubmitBody) -> bool {
-    record.review.session == body.session
-        && record.review.path == body.path
-        && record.review.decision.is_none()
 }
 
 /// The time of the latest revision of a review.
@@ -742,15 +720,16 @@ fn decision_event(review: &Review) -> DecisionEvent {
 
 /// The decisions of a session that the session did not take yet.
 fn replay_events(web: &Ledger, session: &str) -> Result<Vec<DecisionEvent>> {
-    Ok(load_all(web)?
+    crate::store::read(web, |tx| {
+        Ok(records::select(
+            tx,
+            "session = ?1 AND decision IS NOT NULL AND delivered = 0",
+            &[session],
+        )?
         .iter()
-        .filter(|record| {
-            record.review.session == session
-                && record.review.decision.is_some()
-                && !record.delivered
-        })
         .map(|record| decision_event(&record.review))
         .collect())
+    })
 }
 
 /// The decisions that arrive while the session listens.
@@ -802,48 +781,23 @@ fn summary(record: &Record) -> ReviewSummary {
 
 /// Pending reviews for the portal inbox, from the same durable store.
 pub(super) fn pending(web: &Ledger) -> Result<Vec<Review>> {
-    Ok(load_all(web)?
-        .into_iter()
-        .filter(|record| record.review.decision.is_none())
-        .map(|record| record.review)
-        .collect())
+    crate::store::read(web, |tx| {
+        Ok(records::select(tx, "decision IS NULL", &[])?
+            .into_iter()
+            .map(|record| record.review)
+            .collect())
+    })
 }
 
-/// Read every review the portal holds.
 fn load_all(web: &Ledger) -> Result<Vec<Record>> {
-    let dir = reviews(web).dir;
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-            continue;
-        };
-        if !extension.eq_ignore_ascii_case("json") {
-            continue;
-        }
-        let bytes = fs::read(&path)?;
-        records.push(serde_json::from_slice(&bytes)?);
-    }
-    Ok(records)
+    crate::store::read(web, |tx| records::select(tx, "1", &[]))
 }
 
-/// Read one review.
 fn load(web: &Ledger, id: &str) -> Result<Option<Record>> {
     if !valid_id(id) {
         return Ok(None);
     }
-    reviews(web).read(&format!("{id}.json"))
-}
-
-/// Write one review.
-fn save(web: &Ledger, record: &Record) -> Result<()> {
-    reviews(web).write(&format!("{}.json", record.review.id), record)
+    crate::store::read(web, |tx| records::get(tx, id))
 }
 
 /// Write an image, readable by its owner only.
@@ -856,7 +810,18 @@ fn write_attachment(web: &Ledger, name: &str, bytes: &[u8]) -> Result<()> {
     let mut file = options.open(&path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    Ok(())
+    crate::store::write(web, |tx| {
+        records::put_attachment(
+            tx,
+            &records::Attachment {
+                name: name.into(),
+                path: path.display().to_string(),
+                media_type: image_type(name).into(),
+                size: bytes.len() as u64,
+                created_ms: ledger::now_ms(),
+            },
+        )
+    })
 }
 
 /// The extension of an image, from its first bytes.
@@ -885,7 +850,7 @@ fn image_type(name: &str) -> &'static str {
 }
 
 /// Whether a review id is one this server made.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
@@ -1040,7 +1005,7 @@ mod tests {
         let (_sender, receiver) = tokio::sync::watch::channel(String::new());
         let web =
             Ledger::new(std::env::temp_dir().join(format!("dogsled-reviews-{}", ledger::new_id())))
-                .child("web");
+                .clone();
         AppState::new(
             receiver,
             PORT,

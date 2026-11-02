@@ -148,14 +148,14 @@ impl Drop for Client {
 #[test]
 fn mcp_retirement_requires_live_custody_and_has_no_cleanup_override() {
     let (rig, _) = preparation_retirement::prepared("mcp-retirement", "a");
-    let original = rig.read("state/preparations.json");
+    let original = rig.preparations();
     let mut client = Client::start(&rig);
     let (refusal, error) = client.call(
         "retire_preparation",
         &json!({"request_id":"a","reason":"audit"}),
     );
     assert!(error, "{refusal}");
-    assert_eq!(rig.read("state/preparations.json"), original);
+    assert_eq!(rig.preparations(), original);
     let tools = client.request("tools/list", &json!({}));
     let tool = tools["tools"]
         .as_array()
@@ -171,14 +171,14 @@ fn mcp_retirement_requires_live_custody_and_has_no_cleanup_override() {
         .unwrap()
         .trim()
         .to_owned();
-    rig.put("state/custody.json", &json!([{"item":"a","host":host,"owner_pane":"w1:p1","owner_session":"owner-session","custodian_pane":"w1:p1","custodian_session":"owner-session","revision":4,"claims":[]}]));
+    rig.put_state(&["state", "custody", "--put"], &json!([{"item":"a","host":host,"owner_pane":"w1:p1","owner_session":"owner-session","custodian_pane":"w1:p1","custodian_session":"owner-session","revision":4,"claims":[]}]));
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_session":{"kind":"id","value":"reused-session"}}]}}));
     let (refused, error) = client.call(
         "retire_preparation",
         &json!({"request_id":"a","reason":"audit"}),
     );
     assert!(error, "{refused}");
-    assert_eq!(rig.read("state/preparations.json"), original);
+    assert_eq!(rig.preparations(), original);
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_session":{"kind":"id","value":"owner-session"}}]}}));
     let (result, error) = client.call(
         "retire_preparation",
@@ -188,7 +188,7 @@ fn mcp_retirement_requires_live_custody_and_has_no_cleanup_override() {
     assert_eq!(result["status"], "retired");
     assert_eq!(result["task"], "unresolved");
     assert_eq!(result["audit"]["authority"]["record"]["revision"], 4);
-    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(rig.preparations(), json!([]));
     let (duplicate, error) = client.call(
         "retire_preparation",
         &json!({"request_id":"a","reason":"audit"}),
@@ -261,7 +261,7 @@ fn review_plain_preparation_error_contains_resumable_request_id() {
         .unwrap();
     let original = rig.admission(id);
     assert_eq!(original["request"]["id"], id);
-    let grant = rig.read(&format!("state/placement-grants/{id}.json"));
+    let grant = rig.preparation_record("state", "grant", id).read();
     let (again, failed) = client.call("place", &json!({"resume":id}));
     assert!(failed, "{again}");
     assert!(again.as_str().unwrap().contains(id), "{again}");
@@ -271,14 +271,8 @@ fn review_plain_preparation_error_contains_resumable_request_id() {
             .unwrap()
             .contains("unknown placement request")
     );
-    assert_eq!(
-        rig.read(&format!("state/placement-grants/{id}.json")),
-        grant
-    );
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(rig.preparation_record("state", "grant", id).read(), grant);
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
     assert!(!rig.log("herdr.log").contains("worktree open"));
     assert!(!rig.dir.join("setup.log").exists());
 }
@@ -286,7 +280,7 @@ fn review_plain_preparation_error_contains_resumable_request_id() {
 #[test]
 fn mcp_place_initial_and_resume_share_branchless_result() {
     let rig = Rig::short("mcp-place-resume");
-    rig.snapshot("state/host.json", rig.origin_ms, 0.0, 8);
+    rig.snapshot("state", rig.origin_ms, 0.0, 8);
     let mut client = Client::start(&rig);
     let (result, failed) = client.call("place", &json!({"host":"local"}));
     assert!(!failed, "{result}");
@@ -296,10 +290,7 @@ fn mcp_place_initial_and_resume_share_branchless_result() {
     assert_eq!(result, replayed);
     assert!(result["path"].is_null());
     assert!(result["pane_id"].is_null());
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -402,7 +393,7 @@ fn p3_close_and_read_keep_the_same_recovery_without_task_completion() {
     let item = &rig.items()[0];
     assert_ne!(item["native_done"], true);
     assert!(item["reply"].is_null());
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
 }
 
 #[test]
@@ -490,8 +481,7 @@ fn mcp_send_writes_one_inbox_record_from_the_callers_pane() {
         {"pane_id":"w1:p2","agent":"claude","agent_status":"idle","name":"worker","terminal_id":"term_work"}
     ]);
     rig.put("agents.json", &json!({"result":{"agents":listed}}));
-    rig.put(
-        "state/host.json",
+    rig.put_host(
         &json!({"sampled_ms":now(),"probe":{"host":"local","label":"local","load1":0.0,"cores":8,
             "memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":50.0,
             "agents":{"total":2,"by_status":{}},"reservations":[],"panes":[],"agent_panes":[
@@ -517,7 +507,7 @@ fn mcp_send_writes_one_inbox_record_from_the_callers_pane() {
     );
     assert!(!error, "{sent}");
     assert_eq!(sent["pane"], "w1:p2");
-    let inbox = rig.read("state/inbox/term_work.json");
+    let inbox = rig.inbox("term_work");
     assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
     assert_eq!(inbox[0]["from"]["pane"], "w1:p1");
     assert_eq!(inbox[0]["from"]["name"], "lead");
@@ -539,7 +529,7 @@ fn mcp_send_writes_one_inbox_record_from_the_callers_pane() {
 fn mcp_spawn_with_capacity_hands_startup_to_the_service() {
     for fails in [false, true] {
         let rig = Rig::new(&format!("mcp-startup-handoff-{fails}"));
-        rig.snapshot("state/host.json", now(), 0.0, 8);
+        rig.snapshot("state", now(), 0.0, 8);
         // Admission behavior is independent of the CI runner's real probe load/disk.
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
         if fails {
@@ -575,7 +565,7 @@ fn mcp_spawn_with_capacity_hands_startup_to_the_service() {
                 "{ticket}"
             );
             let id = ticket["request"]["id"].as_str().unwrap();
-            let progress = rig.read(&format!("state/launches/{id}.progress.json"));
+            let progress = rig.launch_progress(id);
             assert!(
                 progress["error"]
                     .as_str()
@@ -630,7 +620,7 @@ fn mcp_prepared_spawn_with_capacity_queues_idempotently_before_startup() {
 #[test]
 fn mcp_spawn_returns_queued_at_once_when_every_host_is_full() {
     let rig = Rig::new("mcp-full");
-    rig.snapshot("state/host.json", now(), 9999.0, 1);
+    rig.snapshot("state", now(), 9999.0, 1);
     let mut client = Client::start(&rig);
     let started = Instant::now();
     let (result, error) = client.call(

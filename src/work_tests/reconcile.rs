@@ -157,7 +157,7 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
         }))
         .unwrap(),
     );
-    ledger.write("host.json", &current).unwrap();
+    crate::host_store::put_snapshot(&ledger, &current).unwrap();
     items::record(
         &ledger,
         Item {
@@ -201,7 +201,7 @@ fn a_running_job_stays_open_until_a_sample_after_its_launch_lacks_its_pane() {
         }))
         .unwrap(),
     );
-    ledger.write("host.json", &current).unwrap();
+    crate::host_store::put_snapshot(&ledger, &current).unwrap();
     items::record(
         &ledger,
         Item {

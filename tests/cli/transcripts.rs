@@ -27,7 +27,7 @@ fn session_ids_resolve_unique_documented_paths_and_ambiguous_ids_stay_unstalled(
         };
         assert!(run().status.success());
         assert_eq!(
-            rig.read("state/host.json")["probe"]["agent_panes"][0]["transcript"],
+            rig.host()["probe"]["agent_panes"][0]["transcript"],
             json!(path)
         );
         let duplicate = if agent == "claude" {
@@ -40,7 +40,7 @@ fn session_ids_resolve_unique_documented_paths_and_ambiguous_ids_stay_unstalled(
         fs::create_dir_all(duplicate.parent().unwrap()).unwrap();
         fs::write(duplicate, "copy\n").unwrap();
         assert!(run().status.success());
-        let pane = &rig.read("state/host.json")["probe"]["agent_panes"][0];
+        let pane = &rig.host()["probe"]["agent_panes"][0];
         assert!(pane["transcript"].is_null());
         assert!(pane["stalled_since_ms"].is_null());
     }

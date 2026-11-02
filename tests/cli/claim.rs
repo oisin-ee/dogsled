@@ -56,7 +56,7 @@ fn claim_with_an_unreadable_agent_list_is_refused() {
         receipt["error"].as_str().unwrap().contains("unproven"),
         "{receipt}"
     );
-    assert!(!rig.dir.join("state/custody.json").exists());
+    assert_eq!(rig.state(&["custody"]), json!([]));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn claim_from_an_agent_without_a_session_is_refused() {
         receipt["error"].as_str().unwrap().contains("unproven"),
         "{receipt}"
     );
-    assert!(!rig.dir.join("state/custody.json").exists());
+    assert_eq!(rig.state(&["custody"]), json!([]));
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn claim_without_an_agent_in_the_caller_pane_is_refused() {
         receipt["error"].as_str().unwrap().contains("unproven"),
         "{receipt}"
     );
-    assert!(!rig.dir.join("state/custody.json").exists());
+    assert_eq!(rig.state(&["custody"]), json!([]));
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn claiming_a_non_orphan_is_refused() {
         receipt["error"].as_str().unwrap().contains("not_orphan"),
         "{receipt}"
     );
-    assert!(!rig.dir.join("state/custody.json").exists());
+    assert_eq!(rig.state(&["custody"]), json!([]));
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn stale_revision_is_refused() {
             .contains("revision_conflict"),
         "{receipt}"
     );
-    assert!(!rig.dir.join("state/custody.json").exists());
+    assert_eq!(rig.state(&["custody"]), json!([]));
 }
 
 #[test]
@@ -120,15 +120,12 @@ fn repeat_claim_by_custodian_is_idempotent() {
     let rig = rig("claim-repeat", "w9:p9");
     let (code, first) = rig.json(&["claim", ID]);
     assert_eq!(code, 0, "{first}");
-    let before = fs::read(rig.dir.join("state/custody.json")).unwrap();
+    let before = rig.state(&["custody"]);
     let (code, again) = rig.json(&["claim", ID, "--revision", "0"]);
     assert_eq!(code, 0, "{again}");
     assert_eq!(again["outcome"], "held");
     assert_eq!(again["claimId"], first["claimId"]);
-    assert_eq!(
-        fs::read(rig.dir.join("state/custody.json")).unwrap(),
-        before
-    );
+    assert_eq!(rig.state(&["custody"]), before);
 }
 
 #[test]
@@ -190,10 +187,10 @@ fn accept_with_a_sessionless_claim_is_refused() {
     returned(&rig);
     let (code, claim) = rig.json(&["claim", ID]);
     assert_eq!(code, 0, "{claim}");
-    let mut custody = rig.read("state/custody.json");
+    let mut custody = rig.state(&["custody"]);
     custody[0]["custodian_session"] = Value::Null;
     custody[0]["claims"][0]["claimant_session"] = Value::Null;
-    rig.put("state/custody.json", &custody);
+    rig.put_state(&["state", "custody", "--put"], &custody);
     let before = rig.admission(ID);
     let (code, receipt) = rig.json(&["accept", ID, "--result", "res-1", "--evidence", "reviewed"]);
     assert_eq!(code, 2, "{receipt}");

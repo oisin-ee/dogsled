@@ -61,6 +61,12 @@ fn git(path: &Path, args: &[&str]) -> String {
         "user.name=t".into(),
         "-c".into(),
         "user.email=t@t".into(),
+        // Background auto-maintenance can still hold a lock file in a repository while
+        // a later local clone copies its object directory.
+        "-c".into(),
+        "maintenance.auto=false".into(),
+        "-c".into(),
+        "gc.auto=0".into(),
     ];
     words.extend(args.iter().map(|s| (*s).into()));
     let out = System.run("git", &words).unwrap();
@@ -198,9 +204,11 @@ fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
             .any(|field| field.starts_with("prunable"))
     );
     let ledger = Ledger::new(repo.root.join("state"));
-    ledger
-        .write("repositories.json", &vec![repo.repo.display().to_string()])
-        .unwrap();
+    crate::host_store::put_repositories(
+        &ledger,
+        &vec![repo.repo.display().to_string()].into_iter().collect(),
+    )
+    .unwrap();
     let cleanup = crate::config::Cleanup::default();
     let node = crate::node::Node {
         shell: &System,
@@ -361,6 +369,12 @@ fn held_tracked_deletions_are_lossless_and_cleanup_removes_them_without_force() 
         closed_child(&ledger, &registered(&repo, &ledger));
         let loss = repo.assess();
         assert!(loss.loses_nothing() && loss.landed());
+        let ledger = Ledger::new(repo.root.join("state"));
+        crate::host_store::put_repositories(
+            &ledger,
+            &vec![repo.repo.display().to_string()].into_iter().collect(),
+        )
+        .unwrap();
         let cleanup = crate::config::Cleanup::default();
         let node = crate::node::Node {
             shell: &System,
@@ -591,7 +605,7 @@ fn prune_and_sweep_have_identical_idle_pane_candidates_at_the_fifteen_minute_bou
         },
         jobs: vec![],
     };
-    ledger.write("host.json", &snapshot).unwrap();
+    crate::host_store::put_snapshot(&ledger, &snapshot).unwrap();
     let shell = ShellPanes {
         home: repo.root.display().to_string(),
     };
@@ -624,12 +638,13 @@ fn survey_continues_past_missing_repositories_and_scopes_follow_ownership() {
     let repo = Repo::new();
     let ledger = Ledger::new(repo.root.join("state"));
     let missing = repo.root.join("missing").display().to_string();
-    ledger
-        .write(
-            "repositories.json",
-            &vec![repo.repo.display().to_string(), missing.clone()],
-        )
-        .unwrap();
+    crate::host_store::put_repositories(
+        &ledger,
+        &vec![repo.repo.display().to_string(), missing.clone()]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
     git(&repo.repo, &["branch", "unused"]);
     let cleanup = crate::config::Cleanup::default();
     let node = crate::node::Node {
@@ -677,7 +692,7 @@ fn survey_continues_past_missing_repositories_and_scopes_follow_ownership() {
         assert!(plan.entries.iter().any(|e| e.class == "repositories"
             && e.id == missing
             && e.removable
-            && e.detail.contains("repositories.json")));
+            && e.detail.contains("repository and worktree tables")));
     }
     // With closed-child provenance, the same two entries agree again.
     closed_child(&ledger, &registered(&repo, &ledger));
@@ -700,12 +715,13 @@ fn survey_continues_past_missing_repositories_and_scopes_follow_ownership() {
         },
     )
     .unwrap();
-    ledger
-        .write(
-            "repositories.json",
-            &vec![repo.repo.display().to_string(), missing],
-        )
-        .unwrap();
+    crate::host_store::put_repositories(
+        &ledger,
+        &vec![repo.repo.display().to_string(), missing]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
     let prune = survey(&node, Scope::Prune, 100).unwrap();
     let sweep = survey(&node, Scope::Sweep, 100).unwrap();
     assert_eq!(decisions(&prune), decisions(&sweep));
@@ -716,9 +732,11 @@ fn survey_continues_past_missing_repositories_and_scopes_follow_ownership() {
 fn dirty_worktree_reports_content_until_pending_preparation_holds_it() {
     let repo = Repo::new();
     let ledger = Ledger::new(repo.root.join("state"));
-    ledger
-        .write("repositories.json", &vec![repo.repo.display().to_string()])
-        .unwrap();
+    crate::host_store::put_repositories(
+        &ledger,
+        &vec![repo.repo.display().to_string()].into_iter().collect(),
+    )
+    .unwrap();
     let cleanup = crate::config::Cleanup::default();
     let node = crate::node::Node {
         shell: &System,
@@ -755,18 +773,18 @@ fn dirty_worktree_reports_content_until_pending_preparation_holds_it() {
             .contains("landed_dirty")
     );
     // A preparation is a hold, not a different loss definition.
-    ledger
-        .write(
-            "preparations.json",
-            &serde_json::json!([{
-                "repo": repo.repo.display().to_string(),
-                "path": repo.tree.display().to_string(),
-                "branch": "feature",
-                "head": "",
-                "request_id": "held-request",
-            }]),
-        )
-        .unwrap();
+    crate::preparation_store::put_pending(
+        &ledger,
+        &serde_json::from_value::<Vec<crate::prepare::Pending>>(serde_json::json!([{
+            "repo": repo.repo.display().to_string(),
+            "path": repo.tree.display().to_string(),
+            "branch": "feature",
+            "head": "",
+            "request_id": "held-request",
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
     let held = survey(&node, Scope::Prune, 100).unwrap();
     let entry = held.entries.iter().find(ours).unwrap();
     assert_ne!(entry.kind.as_deref(), Some("landed_dirty"));
@@ -788,9 +806,11 @@ fn gone_upstream_with_local_work_stays_but_integrated_branch_is_deleted() {
         &["worktree", "remove", repo.tree.to_str().unwrap()],
     );
     let ledger = Ledger::new(repo.root.join("state"));
-    ledger
-        .write("repositories.json", &vec![repo.repo.display().to_string()])
-        .unwrap();
+    crate::host_store::put_repositories(
+        &ledger,
+        &vec![repo.repo.display().to_string()].into_iter().collect(),
+    )
+    .unwrap();
     let cleanup = crate::config::Cleanup::default();
     let node = crate::node::Node {
         shell: &System,
@@ -835,9 +855,11 @@ impl Landed {
         repo.commit();
         git(&repo.tree, &["push", "-q", "-u", "origin", "feature"]);
         let ledger = Ledger::new(repo.root.join("state"));
-        ledger
-            .write("repositories.json", &vec![repo.repo.display().to_string()])
-            .unwrap();
+        crate::host_store::put_repositories(
+            &ledger,
+            &vec![repo.repo.display().to_string()].into_iter().collect(),
+        )
+        .unwrap();
         Self {
             repo,
             ledger,
@@ -1028,7 +1050,7 @@ fn shell_idle_for(fixture: &Landed, minutes: u64) {
         },
         jobs: vec![],
     };
-    fixture.ledger.write("host.json", &snapshot).unwrap();
+    crate::host_store::put_snapshot(&fixture.ledger, &snapshot).unwrap();
 }
 
 #[test]
@@ -1201,9 +1223,11 @@ fn worktree_whose_git_file_is_gone_is_held_and_removal_refuses_before_unlocking(
     std::fs::write(repo.tree.join("generated"), "output\n").unwrap();
     std::fs::remove_file(repo.tree.join(".git")).unwrap();
     let ledger = Ledger::new(repo.root.join("state"));
-    ledger
-        .write("repositories.json", &vec![repo.repo.display().to_string()])
-        .unwrap();
+    crate::host_store::put_repositories(
+        &ledger,
+        &vec![repo.repo.display().to_string()].into_iter().collect(),
+    )
+    .unwrap();
     let cleanup = crate::config::Cleanup::default();
     let node = crate::node::Node {
         shell: &System,
@@ -1335,8 +1359,7 @@ fn registered(repo: &Repo, ledger: &Ledger) -> crate::cleanup::Tree {
             .tree())
     })
     .unwrap();
-    ledger
-        .write("repositories.json", &vec![tree.repo.clone()])
+    crate::host_store::put_repositories(ledger, &vec![tree.repo.clone()].into_iter().collect())
         .unwrap();
     crate::cleanup::remember(ledger, tree.clone()).unwrap();
     tree
@@ -1360,15 +1383,15 @@ fn closed_child(ledger: &Ledger, tree: &crate::cleanup::Tree) {
     )
     .unwrap();
     let result = serde_json::json!({"checkout":tree});
-    let launches = ledger.child("launches");
-    launches.write("sweep-child.progress.json", &serde_json::json!({
+    crate::launch_store::put_progress_value(ledger, "sweep-child", &serde_json::json!({
         "request":{"id":"sweep-child","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
             "host":"local","cwd":tree.path,"pane":"closed-child","terminal":"closed-terminal",
             "workspace":null,"workspace_name":null,"owner":"parent"},
         "pane":"closed-child","terminal":"closed-terminal","attempted":true,"confirmed":true,
         "result":result,"error":null
-    })).unwrap();
-    launches.write("sweep-child.json", &result).unwrap();
+    }))
+    .unwrap();
+    crate::launch_store::put_receipt(ledger, "sweep-child", &result).unwrap();
 }
 
 fn fixture_plan(node: &crate::node::Node<'_>, scope: Scope, repo: &Repo) -> crate::cleanup::Plan {
@@ -1380,8 +1403,8 @@ fn fixture_plan(node: &crate::node::Node<'_>, scope: Scope, repo: &Repo) -> crat
 }
 
 fn recorded(ledger: &Ledger) -> Vec<crate::cleanup::Tree> {
-    ledger
-        .read::<Vec<crate::cleanup::Tree>>("worktrees.json")
+    crate::host_store::trees(ledger)
+        .map(Some)
         .unwrap()
         .unwrap_or_default()
 }
@@ -1691,16 +1714,17 @@ fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
     let fixture = lifecycle_fixture(false);
     let captured = recorded(&fixture.ledger)[0].clone();
     if saved_identity {
-        fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+        crate::launch_store::put_progress_value(&fixture.ledger, "c1-old", &serde_json::json!({
             "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
             "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
             "result":{"checkout":captured},"error":null
         })).unwrap();
-        fixture
-            .ledger
-            .child("launches")
-            .write("c1-old.json", &serde_json::json!({"checkout": captured}))
-            .unwrap();
+        crate::launch_store::put_receipt(
+            &fixture.ledger,
+            "c1-old",
+            &serde_json::json!({"checkout": captured}),
+        )
+        .unwrap();
         git(
             &fixture.repo.tree,
             &["commit", "-q", "--allow-empty", "-m", "work before close"],
@@ -1716,10 +1740,7 @@ fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
                 .join("dogsled-checkout-id"),
         )
         .unwrap();
-        fixture
-            .ledger
-            .write("worktrees.json", &Vec::<crate::cleanup::Tree>::new())
-            .unwrap();
+        crate::host_store::put_trees(&fixture.ledger, &Vec::<crate::cleanup::Tree>::new()).unwrap();
     }
     let request_head = git(&fixture.repo.tree, &["rev-parse", "HEAD"]);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -1769,16 +1790,17 @@ fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
 
 fn save_close_checkout(fixture: &Landed) {
     let captured = recorded(&fixture.ledger)[0].clone();
-    fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+    crate::launch_store::put_progress_value(&fixture.ledger, "c1-old", &serde_json::json!({
         "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
         "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
         "result":{"checkout":captured},"error":null
     })).unwrap();
-    fixture
-        .ledger
-        .child("launches")
-        .write("c1-old.json", &serde_json::json!({"checkout": captured}))
-        .unwrap();
+    crate::launch_store::put_receipt(
+        &fixture.ledger,
+        "c1-old",
+        &serde_json::json!({"checkout": captured}),
+    )
+    .unwrap();
 }
 
 fn another_checkout(fixture: &Landed) -> PathBuf {
@@ -1942,10 +1964,7 @@ fn unmark_checkout(fixture: &Landed) -> PathBuf {
         .gitdir
         .join("dogsled-checkout-id");
     std::fs::remove_file(&marker).unwrap();
-    fixture
-        .ledger
-        .write("worktrees.json", &Vec::<crate::cleanup::Tree>::new())
-        .unwrap();
+    crate::host_store::put_trees(&fixture.ledger, &Vec::<crate::cleanup::Tree>::new()).unwrap();
     marker
 }
 
@@ -2211,11 +2230,12 @@ fn symlinked_home_preserves_identity_through_prune_and_close() {
                 .unwrap(),
         );
         identity.common = home.join(".git");
-        fixture.ledger.write("worktrees.json", &vec![tree]).unwrap();
-        fixture
-            .ledger
-            .write("repositories.json", &vec![home.display().to_string()])
-            .unwrap();
+        crate::host_store::put_trees(&fixture.ledger, &[tree]).unwrap();
+        crate::host_store::put_repositories(
+            &fixture.ledger,
+            &vec![home.display().to_string()].into_iter().collect(),
+        )
+        .unwrap();
         if close {
             save_close_checkout(&fixture);
             let shell = LifecycleShell::new(&path, || {});
@@ -2870,11 +2890,7 @@ fn gone_checkout_does_not_reconcile_a_reused_pane_or_item() {
             "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
             "result":{"checkout":captured},"error":null
         });
-        fixture
-            .ledger
-            .child("launches")
-            .write("c1-old.progress.json", &progress)
-            .unwrap();
+        crate::launch_store::put_progress_value(&fixture.ledger, "c1-old", &progress).unwrap();
         crate::store::put_items(&fixture.ledger, &serde_json::json!([{
             "id":if replace_item {"c1-new"} else {"c1-old"},"kind":"agent","host":"local","pane":"placed-shell","owner_pane":"parent","name":"worker","created_ms":1,"closed_ms":null
         }])).unwrap();
@@ -2911,7 +2927,7 @@ fn gone_checkout_does_not_reconcile_a_reused_pane_or_item() {
 fn handoff_skips_unproven_owner_and_closes_the_next_mark() {
     let fixture = lifecycle_fixture(false);
     let captured = recorded(&fixture.ledger)[0].clone();
-    fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+    crate::launch_store::put_progress_value(&fixture.ledger, "c1-old", &serde_json::json!({
         "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
         "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
         "result":{"checkout":captured},"error":null
@@ -2920,12 +2936,12 @@ fn handoff_skips_unproven_owner_and_closes_the_next_mark() {
         {"id":"a-missing","kind":"agent","host":"local","pane":"gone-child","owner_pane":"parent","created_ms":1,"closed_ms":null},
         {"id":"c1-old","kind":"agent","host":"local","pane":"placed-shell","owner_pane":"parent","created_ms":1,"closed_ms":null}
     ])).unwrap();
-    fixture.ledger.write("done.json", &serde_json::json!({
+    crate::host_store::put_marks(&fixture.ledger, &serde_json::from_value(serde_json::json!({
         "[\"a-missing\",\"gone-child\",null]":{"pane":"gone-child","item":"a-missing","sealed":10,"marked_ms":1,"native_done":true,
             "reply":{"seq":10,"text":"unproven checkout","captured_ms":2,"done":true}},
         "[\"c1-old\",\"placed-shell\",null]":{"pane":"placed-shell","item":"c1-old","sealed":10,"marked_ms":1,"native_done":true,
             "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}}
-    })).unwrap();
+    })).unwrap()).unwrap();
     external_remove(&fixture.repo);
     let shell = LifecycleShell::new(&fixture.repo.tree, || {});
     shell.open.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2934,8 +2950,22 @@ fn handoff_skips_unproven_owner_and_closes_the_next_mark() {
     assert!(items[0].closed_ms.is_none());
     assert_eq!(items[1].closed_ms, Some(100));
     let marks = crate::done::list(&fixture.ledger).unwrap();
-    assert!(marks[0].closed_ms.is_none());
-    assert_eq!(marks[1].closed_ms, Some(100));
+    assert!(
+        marks
+            .iter()
+            .find(|mark| mark.item.as_deref() == Some("a-missing"))
+            .unwrap()
+            .closed_ms
+            .is_none()
+    );
+    assert_eq!(
+        marks
+            .iter()
+            .find(|mark| mark.item.as_deref() == Some("c1-old"))
+            .unwrap()
+            .closed_ms,
+        Some(100)
+    );
 }
 
 #[test]
@@ -2949,7 +2979,7 @@ fn saved_close_never_recreates_checkout_identity() {
             .unwrap()
             .gitdir
             .join("dogsled-checkout-id");
-        fixture.ledger.child("launches").write("c1-old.progress.json", &serde_json::json!({
+        crate::launch_store::put_progress_value(&fixture.ledger, "c1-old", &serde_json::json!({
             "request":{"id":"c1-old","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"local","cwd":fixture.repo.tree,"pane":"placed-shell","terminal":"c1-original","workspace":null,"workspace_name":null,"owner":"parent"},
             "pane":"placed-shell","terminal":"c1-original","attempted":true,"confirmed":true,
             "result":{"checkout":captured},"error":null
@@ -3265,12 +3295,17 @@ fn sealed_disappeared_handoff(fixture: &Landed) {
         }]),
     )
     .unwrap();
-    fixture.ledger.write("done.json", &serde_json::json!({
-        "[\"c1-old\",\"placed-shell\",null]":{
-            "pane":"placed-shell","item":"c1-old","sealed":10,"marked_ms":1,"native_done":true,
-            "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}
-        }
-    })).unwrap();
+    crate::host_store::put_marks(
+        &fixture.ledger,
+        &serde_json::from_value(serde_json::json!({
+            "[\"c1-old\",\"placed-shell\",null]":{
+                "pane":"placed-shell","item":"c1-old","sealed":10,"marked_ms":1,"native_done":true,
+                "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -3285,13 +3320,11 @@ fn disappeared_handoff_preserves_replacement_or_unidentified_shell_in_same_check
         let captured = recorded(&fixture.ledger)[0].clone();
         sealed_disappeared_handoff(&fixture);
         if saved.is_none() {
-            let receipts = fixture.ledger.child("launches");
-            let mut progress = receipts
-                .read::<serde_json::Value>("c1-old.progress.json")
+            let mut progress = crate::launch_store::progress_value(&fixture.ledger, "c1-old")
                 .unwrap()
                 .unwrap();
             progress["terminal"] = serde_json::Value::Null;
-            receipts.write("c1-old.progress.json", &progress).unwrap();
+            crate::launch_store::put_progress_value(&fixture.ledger, "c1-old", &progress).unwrap();
         }
         let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
         shell.terminal = current.into();

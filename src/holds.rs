@@ -377,6 +377,45 @@ fn records(ledger: &Ledger, directory: &str) -> Result<Vec<(String, Option<Value
             .map(|(id, value)| (format!("{id}.json"), Some(value)))
             .collect());
     }
+    macro_rules! records {
+        ($module:ident, $suffix:literal) => {{
+            let mut records = Vec::new();
+            for id in crate::preparation_store::$module::ids(ledger)? {
+                records.push((
+                    format!("{id}{}", $suffix),
+                    crate::preparation_store::$module::value(ledger, &id)?,
+                ));
+            }
+            records
+        }};
+    }
+    if directory == "placement-grants" {
+        let mut records = records!(grants, ".json");
+        records.extend(records!(lifecycles, ".lifecycle.json"));
+        return Ok(records);
+    }
+    if directory == "preparation-receipts" {
+        let mut records = records!(receipts, ".json");
+        records.extend(records!(dispositions, ".disposition.json"));
+        return Ok(records);
+    }
+    if directory == "job-validity" {
+        return crate::job_store::validities(ledger)?
+            .into_iter()
+            .map(|(id, value)| Ok((format!("{id}.json"), Some(serde_json::to_value(value)?))))
+            .collect();
+    }
+    if directory == "cancellations" {
+        return crate::job_store::cancellations(ledger)?
+            .into_iter()
+            .map(|saved| {
+                Ok((
+                    format!("{}.json", saved.ticket.request.id),
+                    Some(serde_json::to_value(saved)?),
+                ))
+            })
+            .collect();
+    }
     let store = ledger.child(directory);
     let entries = match std::fs::read_dir(&store.dir) {
         Ok(entries) => entries,
@@ -413,7 +452,7 @@ fn text<'a>(value: &'a Value, path: &str) -> &'a str {
 pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<Hold>> {
     let mut holds = Vec::new();
     let admissions = records(ledger, "admissions")?;
-    let launches = records(ledger, "launches")?;
+    let launches = crate::launch_store::progress_entries(ledger)?;
     let grants = records(ledger, "placement-grants")?;
     let tickets = crate::work::queue(ledger)?;
     let jobs = crate::jobs::list(ledger)?;
@@ -516,9 +555,7 @@ fn notification_holds(
     ledger: &Ledger,
     owned: &impl Fn(&str, String, &str) -> Hold,
 ) -> Result<Vec<Hold>> {
-    let failures: BTreeMap<String, String> = ledger
-        .read("notification-failures.json")?
-        .unwrap_or_default();
+    let failures = crate::inbox::notification_failures(ledger)?;
     Ok(failures
         .into_iter()
         .map(|(id, reason)| {
@@ -534,7 +571,12 @@ fn completion_holds(
 ) -> Result<Vec<Hold>> {
     let mut holds = Vec::new();
     // Do not call the owners' retention predicates: those can initialize the clock.
-    let clock = ledger.read::<Value>("job-validity-clock.json");
+    let clock = crate::jobs::recorded_clock(ledger).and_then(|clock| {
+        clock
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(Into::into)
+    });
     let effective = clock
         .as_ref()
         .ok()
@@ -547,10 +589,13 @@ fn completion_holds(
         "launches",
         "placement-grants",
     ] {
-        for (name, value) in records(ledger, directory)? {
-            if (directory == "launches" && !name.ends_with(".progress.json"))
-                || (directory == "placement-grants" && !name.ends_with(".lifecycle.json"))
-            {
+        let saved = if directory == "launches" {
+            crate::launch_store::progress_entries(ledger)?
+        } else {
+            records(ledger, directory)?
+        };
+        for (name, value) in saved {
+            if directory == "placement-grants" && !name.ends_with(".lifecycle.json") {
                 continue;
             }
             let Some(value) = value else { continue };
@@ -589,7 +634,11 @@ fn completion_holds(
 
 fn preservation_holds(ledger: &Ledger, host: &str) -> Result<Vec<Hold>> {
     let mut holds = Vec::new();
-    for (name, value) in records(ledger, "preservation-operations")? {
+    for (name, value) in crate::preservation::operations(ledger)?
+        .into_iter()
+        .map(|operation| Ok((operation.id.clone(), Some(serde_json::to_value(operation)?))))
+        .collect::<Result<Vec<_>>>()?
+    {
         let Some(value) = value else {
             holds.push(report(
                 "unreadable",
@@ -653,7 +702,10 @@ fn preservation_holds(ledger: &Ledger, host: &str) -> Result<Vec<Hold>> {
 
 fn preparations(ledger: &Ledger, owned: &impl Fn(&str, String, &str) -> Hold) -> Result<Vec<Hold>> {
     let mut holds = Vec::new();
-    let preparations: Vec<Value> = ledger.read("preparations.json")?.unwrap_or_default();
+    let preparations: Vec<Value> = crate::preparation_store::pending(ledger)?
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<_, _>>()?;
     for claim in preparations {
         let resource = format!("preparation claim for {}", text(&claim, "/path"));
         // Every claim names its request. One without it is a damaged record.
@@ -661,11 +713,8 @@ fn preparations(ledger: &Ledger, owned: &impl Fn(&str, String, &str) -> Hold) ->
             holds.push(owned("unreadable", resource, "unrecorded"));
             continue;
         };
-        let disposition = crate::jobs::validate_id(id).and_then(|()| {
-            ledger
-                .child("preparation-receipts")
-                .read::<crate::prepare::disposition::Receipt>(&format!("{id}.disposition.json"))
-        });
+        let disposition = crate::jobs::validate_id(id)
+            .and_then(|()| crate::preparation_store::dispositions::get(ledger, id));
         let code = match &disposition {
             Err(_) => "unreadable",
             Ok(Some(_)) => "preparation_fenced",
@@ -842,21 +891,14 @@ fn releases(
             _ => (),
         }
     }
-    for (name, value) in launches {
-        if name.ends_with(".release.json") {
-            holds.push(owned(
-                "release_certificate",
-                format!(
-                    "ordinary launch references {}",
-                    name.trim_end_matches(".release.json")
-                ),
-                name.trim_end_matches(".release.json"),
-            ));
-        }
-        if !name.ends_with(".progress.json") {
-            continue;
-        }
-        let id = name.trim_end_matches(".progress.json");
+    for id in crate::launch_store::release_ids(ledger)? {
+        holds.push(owned(
+            "release_certificate",
+            format!("ordinary launch references {id}"),
+            &id,
+        ));
+    }
+    for (id, value) in launches {
         if let Some(reason) = value.as_ref().and_then(|v| v["error"].as_str()) {
             holds.push(owned("admission", format!("launch refusal {id}"), id).with_reason(reason));
         }
@@ -894,7 +936,7 @@ fn checkouts(
     launches: &[(String, Option<Value>)],
 ) -> Result<Vec<Hold>> {
     let mut holds = Vec::new();
-    let trees: Vec<crate::cleanup::Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
+    let trees: Vec<crate::cleanup::Tree> = crate::host_store::trees(ledger)?;
     let requests: Vec<crate::work::Launch> = launches
         .iter()
         .filter_map(|(_, value)| {
@@ -980,7 +1022,7 @@ fn jobs_and_closures(
             holds.push(hold);
         }
     }
-    let landing: BTreeMap<String, String> = ledger.read("landing.json")?.unwrap_or_default();
+    let landing: BTreeMap<String, String> = crate::host_store::landing(ledger)?;
     for (id, reason) in landing {
         let mut hold = owned("preservation", format!("closure {id}"), &id).with_reason(&reason);
         // The origin item supplies the child pane and exact close command below.
@@ -1107,12 +1149,19 @@ mod tests {
         Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
     }
 
+    /// The bytes of every file under `path`, after this thread closes its cached store
+    /// connections, so SQLite checkpoints and removes its WAL files as a closed process does.
     fn saved_files(path: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+        crate::store::release();
+        files_under(path)
+    }
+
+    fn files_under(path: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                files.extend(saved_files(&path));
+                files.extend(files_under(&path));
             } else {
                 files.insert(path.clone(), std::fs::read(path).unwrap());
             }
@@ -1242,12 +1291,16 @@ mod tests {
     #[test]
     fn finished_time_gaps_and_contradictions_remain_read_only_holds() {
         let ledger = fixture();
-        ledger
-            .write(
-                "job-validity-clock.json",
-                &serde_json::json!({"version":1,"high_water_ms":100}),
+        crate::store::write(&ledger, |tx| {
+            crate::job_store::put_clock(
+                tx,
+                &crate::jobs::Clock {
+                    version: 1,
+                    high_water_ms: 100,
+                },
             )
-            .unwrap();
+        })
+        .unwrap();
         for (id, evidence) in [
             ("missing", serde_json::json!({})),
             ("future", serde_json::json!({"finished_ms":101})),
@@ -1258,17 +1311,36 @@ mod tests {
             ),
             ("plausible", serde_json::json!({"finished_ms":100})),
         ] {
-            ledger
-                .child("preparation-receipts")
-                .write(&format!("{id}.json"), &evidence)
+            let mut record = serde_json::json!({"request":["/repo","branch",null],"prepared":null});
+            for (name, value) in evidence.as_object().unwrap() {
+                record[name] = value.clone();
+            }
+            if id == "malformed" {
+                assert!(
+                    serde_json::from_value::<crate::prepare::PreparationReceipt>(record).is_err()
+                );
+                assert!(
+                    crate::preparation_store::receipts::get(&ledger, id)
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                if id == "before-creation" {
+                    record["validity"]["version"] = serde_json::json!(1);
+                }
+                crate::preparation_store::receipts::put(
+                    &ledger,
+                    id,
+                    &serde_json::from_value(record).unwrap(),
+                )
                 .unwrap();
+            }
         }
         let before = saved_files(&ledger.dir);
         let holds = local(&ledger, "worker", 100, 90).unwrap();
         for (id, code) in [
             ("missing", "completion_missing"),
             ("future", "completion_invalid"),
-            ("malformed", "completion_invalid"),
             ("before-creation", "completion_invalid"),
         ] {
             let hold = holds
@@ -1299,11 +1371,16 @@ mod tests {
             ("normalizing", None, "preservation_pending"),
         ] {
             let ledger = fixture();
-            ledger.child("preservation-operations").write("operation.json", &serde_json::json!({
-                "id":"operation", "stage":stage, "blocker":blocker,
-                "expectation":{"pane":"w2:p1","caller":{"pane":"w1:p1"},"tree":{"path":"/tmp/checkout","repo":"/tmp/repo"}},
-                "initial":{"id":"snapshot"}
+            let operation = serde_json::from_value(serde_json::json!({
+                "id":"operation", "initial_id":"snapshot", "stage":stage, "blocker":blocker,
+                "expectation":{"pane":"w2:p1","owners":[],"mode":{"kind":"owner"},"caller":{"pane":"w1:p1"},"tree":{"path":"/tmp/checkout","repo":"/tmp/repo","branch":"feature"}},
+                "initial":{"id":"snapshot","ref_name":"refs/dogsled/recovery/snapshot","commit":"commit","head":{"kind":"detached","commit":"head"},"index_tree":"index","worktree_tree":"working","raw_worktree_bytes":true,"created_ms":1,"ignored_files_captured":false}
             })).unwrap();
+            crate::host_store::put_operations(
+                &ledger,
+                &BTreeMap::from([("operation".into(), operation)]),
+            )
+            .unwrap();
             let before = saved_files(&ledger.dir);
             let holds = local(&ledger, "worker", 100, 90).unwrap();
             let hold = holds.iter().find(|hold| hold.code == code).unwrap();
@@ -1329,21 +1406,27 @@ mod tests {
     #[test]
     fn unsaved_work_and_child_event_failures_are_not_hidden_in_generic_holds() {
         let ledger = fixture();
-        ledger
-            .write(
-                "landing.json",
-                &serde_json::json!({"child":"the teardown left unsaved work; checkout kept"}),
+        crate::host_store::put_landing(
+            &ledger,
+            &serde_json::from_value(
+                serde_json::json!({"child":"the teardown left unsaved work; checkout kept"}),
             )
-            .unwrap();
-        ledger
-            .write(
-                "notification-failures.json",
-                &serde_json::json!({
-                    "reply-child-1":"child notification undelivered: subject expired or missing",
-                    "reply-child-2":"child notification superseded: subject or custody changed"
-                }),
+            .unwrap(),
+        )
+        .unwrap();
+        crate::store::write(&ledger, |tx| {
+            crate::web_store::inbox::put_failure(
+                tx,
+                "reply-child-1",
+                "child notification undelivered: subject expired or missing",
+            )?;
+            crate::web_store::inbox::put_failure(
+                tx,
+                "reply-child-2",
+                "child notification superseded: subject or custody changed",
             )
-            .unwrap();
+        })
+        .unwrap();
         let before = saved_files(&ledger.dir);
         let holds = local(&ledger, "worker", 100, 90).unwrap();
         for code in [
@@ -1361,18 +1444,28 @@ mod tests {
     #[test]
     fn origin_reference_holds_name_the_existing_commands_on_the_origin() {
         let ledger = fixture();
-        let request = serde_json::json!({"owner":"w1:p1","owner_host":"origin","unit":{}});
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../crates/todo-core/tests/fixtures/unit-exports.json"
+        ))
+        .unwrap();
+        let mut exported: Value =
+            serde_json::from_str(fixtures[0]["canonical"].as_str().unwrap()).unwrap();
+        exported["digest"] = fixtures[0]["digest"].clone();
+        let execution =
+            serde_json::json!({"executor":"dogsled","ownerId":"w1:p1","requestId":"held"});
+        let unit = serde_json::json!({"version":1,"execution":execution,"binding":{"contract":exported["contract"]["ref"],"execution":execution,"exportDigest":exported["digest"]},"exported":exported});
+        let request = serde_json::json!({"id":"held","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},"host":"worker","cwd":"/","owner":"w1:p1","owner_host":"origin","unit":unit});
         let attempt = crate::admissions::fixtures::released("held", "w1:p1", "origin");
         crate::admissions::put(&ledger, "held", &attempt).unwrap();
-        ledger
-            .child("launches")
-            .write(
-                "held.progress.json",
-                &serde_json::json!({
-                    "request":request,"origin_release":null
-                }),
-            )
-            .unwrap();
+        crate::launch_store::put_progress_value(
+            &ledger,
+            "held",
+            &serde_json::json!({
+                "request":request,"origin_release":null,"pane":null,"terminal":null,
+                "attempted":false,"confirmed":false,"result":{},"error":null
+            }),
+        )
+        .unwrap();
         let before = saved_files(&ledger.dir);
         let holds = local(&ledger, "worker", 100, 90).unwrap();
         for (code, command) in [

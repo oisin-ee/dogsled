@@ -12,7 +12,7 @@
 //! order.
 //!
 //! Replay protection belongs to the unit execution, not to the inbox, which prunes final
-//! records after 24 hours. `launches/<request>.continuations.json` keeps one receipt per
+//! records after 24 hours. The typed continuation table keeps one receipt per
 //! continuation series (request, owner, kind, and text). The receipt is written before the
 //! input exists and names the exact done mark it continues. It is never removed, so the
 //! series can never continue another mark.
@@ -179,8 +179,7 @@ fn with_continuation_gates<T>(
         if authority.historical {
             return Err(worktree::refuse("historical preparation has no identity; continuation remains held"));
         }
-        let fence = ledger.child("preparation-receipts")
-            .read::<disposition::Receipt>(&format!("{}.disposition.json", launch.id))?;
+        let fence = crate::preparation_store::dispositions::get(ledger, &launch.id)?;
         if let Some(fence) = fence {
             if fence.progress != disposition::Progress::Released
                 || fence.request.version != disposition::VERSION
@@ -199,8 +198,7 @@ fn with_continuation_gates<T>(
         }
         // Final launch results are immutable. Correlation to admission and progress stays
         // inside the existing legacy launch guard, after its own native refusal checks.
-        let captured = ledger.child("launches")
-            .read::<serde_json::Value>(&format!("{}.json", launch.id))?
+        let captured = crate::launch_store::receipt(ledger, &launch.id)?
             .and_then(|result| result.get("checkout").cloned())
             .map(serde_json::from_value::<crate::cleanup::Tree>)
             .transpose()?;
@@ -223,19 +221,11 @@ fn with_continuation_gates<T>(
     })
 }
 
-/// The receipts file of request `id`: one receipt per continuation series. It belongs to the
-/// unit execution, beside its launch record. No path removes or rewrites `launches/` files
-/// other than their own writers, and nothing prunes them. Only the holder of the
-/// `launches/<id>` lock reads or writes this file.
-fn receipts_file(id: &str) -> String {
-    format!("{id}.continuations.json")
-}
-
+/// The typed receipts of request `id`, ordered by continuation series. The launch
+/// resource lock covers the outside worker and input delivery; SQLite transactions
+/// publish each receipt update atomically.
 fn receipts(ledger: &Ledger, id: &str) -> Result<BTreeMap<String, Receipt>> {
-    Ok(ledger
-        .child("launches")
-        .read(&receipts_file(id))?
-        .unwrap_or_default())
+    crate::launch_store::continuations(ledger, id)
 }
 
 /// Store `receipt`. `from` is the phase the stored receipt must have now: `None` for a new
@@ -255,7 +245,7 @@ fn write(ledger: &Ledger, id: &str, receipt: &Receipt, from: Option<Phase>) -> R
         _ => return Err(conflict("the continuation receipt changed")),
     }
     all.insert(receipt.request.series.clone(), receipt.clone());
-    ledger.child("launches").write(&receipts_file(id), &all)
+    crate::launch_store::put_continuations(ledger, id, &all)
 }
 
 /// Finish a prepared continuation while its done mark is in place: store the input, record
@@ -376,7 +366,7 @@ fn record_id(series: &str, mark: &Mark) -> String {
 /// What a continuation proved: the request, its owner and session, and the worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Continuation {
+pub(crate) struct Continuation {
     request: String,
     series: String,
     owner: Sender,
@@ -413,16 +403,16 @@ impl Worker {
 /// continues, the record it sends, and how far it got. Only `phase` ever changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Receipt {
-    request: Continuation,
-    mark: Mark,
-    sent: Sent,
-    phase: Phase,
+pub(crate) struct Receipt {
+    pub(crate) request: Continuation,
+    pub(crate) mark: Mark,
+    pub(crate) sent: Sent,
+    pub(crate) phase: Phase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Phase {
+pub(crate) enum Phase {
     /// The intent is durable. The input may or may not be in the inbox yet; the mark is in
     /// place.
     Prepared,

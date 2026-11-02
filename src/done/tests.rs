@@ -534,9 +534,7 @@ fn mark_at() -> Mark {
 }
 
 fn put(ledger: &Ledger, mark: Mark) {
-    ledger
-        .write(FILE, &Marks::from([(key(&mark), mark)]))
-        .unwrap();
+    crate::host_store::put_marks(ledger, &Marks::from([(key(&mark), mark)])).unwrap();
 }
 
 #[derive(Debug)]
@@ -1007,35 +1005,6 @@ fn an_overlapping_branch_refresh_cannot_erase_a_terminal_seal() {
 }
 
 #[test]
-fn legacy_migration_retains_missing_marks_and_rekeys_restored_panes_once() {
-    let ledger = ledger();
-    ledger
-        .write(
-            FILE,
-            &json!({
-                "old_terminal":{"pane":"w2:p1","after":10,"sealed":12,"marked_ms":1},
-                "missing_terminal":{"pane":"w9:p1","after":20,"marked_ms":2}
-            }),
-        )
-        .unwrap();
-    let mut restored = agent("idle");
-    restored.terminal_id = Some("new".into());
-    assert!(
-        finished(&ledger, &[restored.clone()])
-            .unwrap()
-            .contains("w2:p1")
-    );
-    let first: Marks = ledger.read(FILE).unwrap().unwrap();
-    assert_eq!(first.len(), 2);
-    assert!(!first.contains_key("old_terminal"));
-    assert!(first.contains_key("missing_terminal"));
-    // A mark from before the native `done` provenance existed has none.
-    assert!(first.values().all(|mark| !mark.native_done));
-    finished(&ledger, &[restored]).unwrap();
-    assert_eq!(first, ledger.read(FILE).unwrap().unwrap());
-}
-
-#[test]
 fn done_refuses_every_nonworking_state_without_recording() {
     for state in ["idle", "done", "blocked", "unknown"] {
         let ledger = ledger();
@@ -1054,7 +1023,7 @@ fn done_refuses_every_nonworking_state_without_recording() {
                 .to_string()
                 .contains("call done during the turn")
         );
-        assert!(!ledger.dir.join(FILE).exists());
+        assert_eq!(crate::host_store::marks(&ledger).unwrap(), BTreeMap::new());
     }
 }
 
@@ -1086,6 +1055,6 @@ fn done_refuses_open_children_and_pending_or_admitting_tickets() {
                 .to_string()
                 .contains("still owns open work")
         );
-        assert!(!ledger.dir.join(FILE).exists());
+        assert_eq!(crate::host_store::marks(&ledger).unwrap(), BTreeMap::new());
     }
 }

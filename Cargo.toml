@@ -11,7 +11,7 @@ repository = "https://github.com/oisin-ee/dogsled"
 [workspace.dependencies]
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 # `js` converts through serde-wasm-bindgen instead of JSON strings.
 tsify = { version = "0.5.8", default-features = false, features = ["js"] }
 # Must equal the wasm-bindgen CLI version in `.prototools`.
@@ -158,7 +158,7 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 sha2 = "0.11.1"
 similar = "3.2.1"
 signal-hook = "0.4.5"

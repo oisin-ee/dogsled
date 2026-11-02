@@ -172,11 +172,7 @@ impl Ledger {
     }
 
     pub fn reservations(&self, now: u64, ttl: u64) -> Result<Vec<Reservation>> {
-        let all: Vec<Reservation> = self.read("placements.json")?.unwrap_or_default();
-        Ok(all
-            .into_iter()
-            .filter(|r| now.saturating_sub(r.created_ms) < ttl)
-            .collect())
+        crate::job_store::live_reservations(self, now, ttl)
     }
 
     /// Append one JSON line. When the file's first line carries a `ts_ms`
@@ -234,15 +230,14 @@ mod tests {
     #[test]
     fn reservation_expiry_uses_injected_time() {
         let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
-        ledger
-            .write(
-                "placements.json",
-                &vec![Reservation {
-                    id: "one".into(),
-                    created_ms: 100,
-                }],
-            )
-            .unwrap();
+        crate::job_store::put_reservations(
+            &ledger,
+            &[Reservation {
+                id: "one".into(),
+                created_ms: 100,
+            }],
+        )
+        .unwrap();
         let ttl = crate::config::Policy::default().reservation_ttl_ms;
         assert_eq!(ttl, 90_000);
         assert_eq!(ledger.reservations(90_099, ttl).unwrap().len(), 1);

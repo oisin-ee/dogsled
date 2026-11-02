@@ -12,7 +12,7 @@ teardown = [
 "#;
 
 /// A real repository with a `dogsled.toml` teardown and a locked linked worktree on `feat/x`.
-/// Fake Herdr serves `panes.json` and `worktrees.json`, which shows the worktree in workspace w2.
+/// Fake Herdr serves `panes.json` and `herdr-worktrees`, which shows the worktree in workspace w2.
 pub(super) fn close_rig(name: &str) -> (Rig, PathBuf) {
     let rig = Rig::short(name);
     let repo = rig.dir.join("home/repo");
@@ -37,7 +37,7 @@ pub(super) fn close_rig(name: &str) -> (Rig, PathBuf) {
     );
     let tree = repo.join(".worktrees/x").canonicalize().unwrap();
     rig.put(
-        "worktrees.json",
+        "herdr-worktrees",
         &json!({"result":{"worktrees":[
             {"path":repo.canonicalize().unwrap(),"open_workspace_id":"w1","is_linked_worktree":false},
             {"path":tree,"open_workspace_id":"w2","is_linked_worktree":true}
@@ -52,12 +52,12 @@ case "$*" in
   'machine list --json') cat "$RIG/machines.json" ;;
   'agent list') cat "$RIG/agents.json" ;;
   'pane list') cat "$RIG/panes.json" ;;
-  'worktree list --cwd'*) cat "$RIG/worktrees.json" ;;
+  'worktree list --cwd'*) cat "$RIG/herdr-worktrees" ;;
   'workspace list') cat "$RIG/workspaces.json" ;;
   'workspace close w2')
     if test -f "$RIG/panes-after.json"; then cp "$RIG/panes-after.json" "$RIG/panes.json"
     else printf '%s\n' '{"result":{"panes":[]}}' > "$RIG/panes.json"; fi
-    sed 's/"w2"/null/' "$RIG/worktrees.json" > "$RIG/worktrees.next" && mv "$RIG/worktrees.next" "$RIG/worktrees.json"
+    sed 's/"w2"/null/' "$RIG/herdr-worktrees" > "$RIG/worktrees.next" && mv "$RIG/worktrees.next" "$RIG/herdr-worktrees"
     printf '{}\n' ;;
   'workspace close'*|'pane close'*) printf '{}\n' ;;
   'pane process-info'*)
@@ -112,7 +112,7 @@ fn item(rig: &Rig, host: &str) {
 }
 
 fn registered(rig: &Rig) -> Vec<Value> {
-    rig.read("state/worktrees.json")
+    rig.state(&["worktrees"])
         .as_array()
         .unwrap()
         .iter()
@@ -145,8 +145,8 @@ fn close_runs_teardown_removes_the_worktree_and_deletes_an_integrated_branch() {
     item(&rig, "local");
     let repo = rig.dir.join("home/repo").canonicalize().unwrap();
     let other = json!({"repo":repo,"path":repo.join(".worktrees/other"),"branch":"other"});
-    rig.put(
-        "state/worktrees.json",
+    rig.put_state(
+        &["state", "worktrees", "--put"],
         &json!([{"repo":repo,"path":tree,"branch":"feat/x"}, other]),
     );
     let (code, closed) = rig.json(&["close", "w2:p1"]);
@@ -171,7 +171,7 @@ fn close_runs_teardown_removes_the_worktree_and_deletes_an_integrated_branch() {
 fn close_finishes_a_child_tab_in_the_callers_workspace_but_not_the_callers_worktree() {
     let (rig, tree) = close_rig("close-own-workspace");
     rig.put(
-        "worktrees.json",
+        "herdr-worktrees",
         &json!({"result":{"worktrees":[{"path":tree,"open_workspace_id":null}]}}),
     );
     rig.put(
@@ -359,9 +359,7 @@ fn a_teardown_file_no_ref_holds_keeps_the_checkout_its_lock_panes_and_item() {
 
 /// A launch receipt with no result, as an interrupted or failed launch leaves it.
 pub(super) fn unfinished_launch(rig: &Rig, id: &str, tree: &Path, pane: &str) {
-    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
-    rig.put(
-        &format!("state/launches/{id}.progress.json"),
+    rig.put_launch_progress(id,
         &json!({"request":{"id":id,"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
             "host":"local","cwd":tree,"pane":null,"workspace":"w2","workspace_name":"x","owner":"w1:p1"},
             "pane":pane,"terminal":"term_gone","attempted":true,"confirmed":false,
@@ -383,9 +381,9 @@ fn host_stopped_orphan_flag_cannot_override_launch_progress() {
         );
         unfinished_launch(&rig, "pending", &tree, "w2:p1");
         if progress == "allocated" {
-            let mut record = rig.read("state/launches/pending.progress.json");
+            let mut record = rig.launch_progress("pending");
             record["attempted"] = json!(false);
-            rig.put("state/launches/pending.progress.json", &record);
+            rig.put_launch_progress("pending", &record);
         } else if progress == "ambiguous" {
             unfinished_launch(&rig, "competing", &tree, "w2:p1");
         }
@@ -428,11 +426,11 @@ fn host_stopped_orphan_close_fails_closed_when_lifecycle_facts_cannot_be_read() 
         );
         match source {
             "launch" => {
-                fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
-                fs::write(rig.dir.join("state/launches/bad.progress.json"), "{").unwrap();
+                rig.refuse_launch_record("bad", "progress", &json!({}));
+                continue;
             }
-            "snapshot" => fs::write(rig.dir.join("state/host.json"), "{").unwrap(),
-            "done" => fs::write(rig.dir.join("state/done.json"), "{").unwrap(),
+            "snapshot" => rig.fault_host_store("host", false),
+            "done" => rig.fault_host_store("done", false),
             "probe" => fs::write(rig.dir.join("agents.json"), "{").unwrap(),
             _ => unreachable!(),
         }
@@ -510,7 +508,8 @@ fn a_settled_preparation_no_longer_holds_its_landed_checkout() {
     ]);
     assert_eq!(code, 0, "{prepared}");
     assert_eq!(
-        rig.read("state/preparations.json")
+        rig.preparation_record("state", "claims", "")
+            .read()
             .as_array()
             .unwrap()
             .len(),
@@ -524,9 +523,10 @@ fn a_settled_preparation_no_longer_holds_its_landed_checkout() {
     ]);
     assert_eq!(code, 0, "{ack}");
     assert_eq!(ack["released"], true);
-    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(rig.preparations(), json!([]));
     assert_eq!(
-        rig.read("state/preparation-receipts/settled.disposition.json")["progress"],
+        rig.preparation_record("state", "disposition", "settled")
+            .read()["progress"],
         "released"
     );
     advance_main(&rig);
@@ -550,13 +550,13 @@ fn inference_only_preparation_settlement_keeps_its_checkout_held() {
     // Each request settled without releasing its hold: Herdr refused the start, Herdr refused
     // the prepared workspace, and a started request's checkout launched.
     unfinished_launch(&rig, "refused", &tree, "w9:p1");
-    rig.put(
-        "state/launches/refused.json",
+    rig.put_launch(
+        "refused",
         &json!({"failed":"herdr agent start: agent_pane_busy"}),
     );
     unfinished_launch(&rig, "started", &tree, "w9:p2");
-    rig.put(
-        "state/launches/started.json",
+    rig.put_launch(
+        "started",
         &json!({"host":"local","name":"worker","pane":"w9:p2"}),
     );
     rig.put_admission(
@@ -579,15 +579,15 @@ fn inference_only_preparation_settlement_keeps_its_checkout_held() {
         hold("started"),
         hold("live")
     ]);
-    rig.put("state/preparations.json", &holds);
+    rig.preparation_record("state", "claims", "").put(&holds);
     let out = rig.run(&["close", "w2:p1"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("pending preparation or launch"), "{stderr}");
     assert!(tree.exists());
     // Even a final launch cannot replace the missing preparation disposition.
-    rig.put(
-        "state/launches/live.json",
+    rig.put_launch(
+        "live",
         &json!({"host":"local","name":"worker","pane":"w9:p3"}),
     );
     let (code, error) = rig.json(&["close", "w2:p1"]);
@@ -600,7 +600,7 @@ fn inference_only_preparation_settlement_keeps_its_checkout_held() {
         "{error}"
     );
     assert!(tree.exists());
-    assert_eq!(rig.read("state/preparations.json"), holds);
+    assert_eq!(rig.preparations(), holds);
 }
 
 #[test]
@@ -614,9 +614,9 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
         ]}}),
     );
     unfinished_launch(&rig, "own", &tree, "w2:p2");
-    let before = rig.read("state/launches/own.progress.json");
+    let before = rig.launch_progress("own");
     let holds = json!([{"repo":rig.dir.join("home/repo"),"path":tree,"branch":"feat/x","head":"","request_id":"own"}]);
-    rig.put("state/preparations.json", &holds);
+    rig.preparation_record("state", "claims", "").put(&holds);
     rig.put_items(&json!([{
         "id":"remote-item","kind":"agent","host":"remote","pane":"w2:p2",
         "owner_pane":"w1:p1","created_ms":1
@@ -625,13 +625,13 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["pane_closed"], true);
     assert!(result["worktree"].is_null());
-    assert_eq!(rig.read("state/preparations.json"), holds);
+    assert_eq!(rig.preparations(), holds);
     assert!(rig.items()[0]["closed_ms"].is_null());
     assert!(tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
     assert!(!rig.dir.join("hook.log").exists());
-    assert_eq!(rig.read("state/launches/own.progress.json"), before);
-    assert!(!rig.dir.join("state/launches/own.json").exists());
+    assert_eq!(rig.launch_progress("own"), before);
+    assert!(rig.launch_record("own", "receipt").is_null());
     assert!(!rig.log("herdr.log").contains("agent start"));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     let request = before["request"].to_string();
@@ -644,7 +644,7 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
         &request,
     ]);
     assert_eq!(code, 2);
-    assert_eq!(rig.read("state/launches/own.progress.json"), before);
+    assert_eq!(rig.launch_progress("own"), before);
     assert!(!rig.log("herdr.log").contains("agent start"));
     assert!(!rig.log("herdr.log").contains("tab create"));
     rig.put(
@@ -665,7 +665,7 @@ fn explicit_close_retires_only_the_unfinished_launch_pane_without_inventing_a_re
         .0,
         2
     );
-    assert_eq!(rig.read("state/launches/own.progress.json"), before);
+    assert_eq!(rig.launch_progress("own"), before);
     assert!(!rig.log("herdr.log").contains("agent start"));
 }
 
@@ -702,7 +702,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
             "foreign-pgid" => rig.put("process-info.json", &json!({"result":{"process_info":{
                 "shell_pid":10,"foreground_process_group_id":99,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]
             }}})),
-            "malformed" => fs::write(rig.dir.join("state/launches/bad.progress.json"), "{").unwrap(),
+            "malformed" => { rig.refuse_launch_record("bad", "progress", &json!({})); continue; },
             "close-fails" => {
                 let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
                 rig.script("herdr", &script.replace("'workspace close'*|'pane close'*) printf '{}\\n' ;;", "'pane close'*) exit 2 ;;\n  'workspace close'*) printf '{}\\n' ;;"));
@@ -711,7 +711,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
             _ => (),
         }
         rig.put("panes.json", &json!({"result":{"panes":[pane]}}));
-        let before = rig.read("state/launches/own.progress.json");
+        let before = rig.launch_progress("own");
         let args = if conflict == "automatic" {
             vec!["host", "close", "w2:p2", "--pushed"]
         } else {
@@ -724,7 +724,7 @@ fn interrupted_launch_recovery_refuses_ambiguous_or_changed_ownership() {
             assert!(!rig.log("herdr.log").contains("pane close"));
         }
         assert!(!rig.log("herdr.log").contains("workspace close"));
-        assert_eq!(rig.read("state/launches/own.progress.json"), before);
+        assert_eq!(rig.launch_progress("own"), before);
     }
 }
 
@@ -740,16 +740,16 @@ fn final_unattempted_launch_recovers_but_confirmed_unreceipted_launch_cannot_fal
             }]}}),
         );
         unfinished_launch(&rig, "own", &repo, "w2:p2");
-        let mut progress = rig.read("state/launches/own.progress.json");
+        let mut progress = rig.launch_progress("own");
         progress["attempted"] = json!(confirmed);
         progress["confirmed"] = json!(confirmed);
-        rig.put("state/launches/own.progress.json", &progress);
+        rig.put_launch_progress("own", &progress);
         let out = rig.run(&["close", "w2:p2"]);
         assert_eq!(out.status.success(), !confirmed, "{out:?}");
         assert_eq!(rig.log("herdr.log").contains("pane close"), !confirmed);
         assert!(tree.exists());
-        assert_eq!(rig.read("state/launches/own.progress.json"), progress);
-        assert!(!rig.dir.join("state/launches/own.json").exists());
+        assert_eq!(rig.launch_progress("own"), progress);
+        assert!(rig.launch_record("own", "receipt").is_null());
     }
 }
 
@@ -783,7 +783,7 @@ fn close_shuts_the_anchor_after_its_last_child_only_when_idle() {
     fs::write(repo.join(".git/agent-worktree-anchor"), "w5\n").unwrap();
     let anchored = |rig: &Rig| {
         rig.put(
-            "worktrees.json",
+            "herdr-worktrees",
             &json!({"result":{"worktrees":[
                 {"path":repo,"open_workspace_id":"w5","is_linked_worktree":false},
                 {"path":tree,"open_workspace_id":"w2","is_linked_worktree":true}
@@ -858,8 +858,7 @@ fn prune_tries_every_entry_and_reports_each_failure() {
         &["update-ref", "refs/remotes/origin/main", ahead.trim()],
     );
     let gone = repo.join(".worktrees/gone");
-    rig.put(
-        "state/worktrees.json",
+    rig.put_state(&["state", "worktrees", "--put"],
         &json!([{"repo":repo,"path":tree,"branch":"feat/x"},{"repo":repo,"path":gone,"branch":"gone"}]),
     );
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
@@ -910,7 +909,7 @@ fn doctor_lists_each_linked_worktree_once_and_never_the_main_checkout() {
     // The same repository is registered under its path and through a symlink.
     let link = rig.dir.join("home/link");
     std::os::unix::fs::symlink(&repo, &link).unwrap();
-    rig.put("state/repositories.json", &json!([repo, link]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo, link]));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     let (_, plan) = rig.json(&["doctor"]);
     let trees: Vec<_> = plan["entries"]
@@ -1098,7 +1097,7 @@ fn doctor_removes_a_worktree_with_no_commits_without_an_age_rule() {
 fn doctor_finds_integrated_and_pushed_branches_without_a_worktree_and_prune_deletes_them() {
     let (rig, _) = close_rig("close-branches");
     let repo = rig.dir.join("home/repo");
-    rig.put("state/repositories.json", &json!([repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo]));
     let branch = |name: &str| {
         let path = rig.dir.join(format!("home/{name}"));
         git(
@@ -1198,12 +1197,12 @@ fn detached_rig(name: &str) -> (Rig, PathBuf) {
     git(&detached, &["add", "work"]);
     git(&detached, &["commit", "-q", "-m", "detached work"]);
     // Herdr shows the detached checkout in its own workspace, as any agent checkout.
-    let mut worktrees = rig.read("worktrees.json");
+    let mut worktrees = rig.read("herdr-worktrees");
     worktrees["result"]["worktrees"]
         .as_array_mut()
         .unwrap()
         .push(json!({"path":detached,"open_workspace_id":"w3","is_linked_worktree":true}));
-    rig.put("worktrees.json", &worktrees);
+    rig.put("herdr-worktrees", &worktrees);
     (rig, detached)
 }
 
@@ -1336,7 +1335,7 @@ fn close_saves_a_dirty_detached_checkout_before_removal() {
 fn doctor_lists_a_detached_worktree_and_prune_removes_it_once_a_remote_holds_its_head() {
     let (rig, _) = close_rig("close-detached");
     let repo = rig.dir.join("home/repo");
-    rig.put("state/repositories.json", &json!([repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo]));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     git(
         &repo,

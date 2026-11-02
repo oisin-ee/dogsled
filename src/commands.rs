@@ -75,19 +75,9 @@ pub enum Placement {
     },
 }
 
-/// Persist selection before reservation so an ambiguous SSH reply repeats the same host and
-/// reservation ID. The host owns same-ID reservation replay under its admission lock.
-#[derive(Debug, serde::Deserialize, Serialize)]
-struct ReservationAttempt {
-    host: String,
-}
-
 /// Admission expiry has already proved completion and released every dependant.
 pub(crate) fn expire_selection(ledger: &crate::ledger::Ledger, id: &str) -> Result<()> {
-    let selections = ledger.child("placement-attempts");
-    selections.with_lock(id, || {
-        crate::jobs::remove(&selections.dir.join(format!("{id}.json")))
-    })
+    crate::job_store::put_selection(ledger, id, None)
 }
 
 /// A placement for a job request. The request's own creation time rides with the
@@ -101,6 +91,7 @@ pub fn place_with(
     placement: Option<&crate::work::Request>,
 ) -> Result<Placement> {
     crate::jobs::validate_id(id)?;
+    // Selection spans an external host reservation; its lock is not a file-store lock.
     let selections = fleet.ledger.child("placement-attempts");
     selections.with_lock(id, || {
         if let Some(request) = placement
@@ -111,7 +102,7 @@ pub fn place_with(
         let nonjob = placement
             .is_some_and(|request| !matches!(request.action, crate::work::Action::Job { .. }));
         crate::jobs::check_validity(fleet.ledger, validity.as_ref())?;
-        place_locked(fleet, host, id, now, &selections, validity, nonjob)
+        place_locked(fleet, host, id, now, validity, nonjob)
     })
 }
 
@@ -140,12 +131,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
     if attempt.request != serde_json::to_value(request)? {
         return Err(crate::unit_transport::conflict("placement request changed"));
     }
-    if fleet
-        .ledger
-        .child("placement-attempts")
-        .read::<serde_json::Value>(&format!("{}.json", request.id))?
-        .is_some_and(|v| !v.is_null())
-    {
+    if crate::job_store::selection(fleet.ledger, &request.id)?.is_some() {
         return Err(crate::unit_transport::conflict(
             "historical selection has no placement replay evidence",
         ));
@@ -234,17 +220,13 @@ fn place_locked(
     host: Option<&str>,
     id: &str,
     now: u64,
-    selections: &crate::ledger::Ledger,
     validity: Option<crate::jobs::Validity>,
     nonjob: bool,
 ) -> Result<Placement> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
-    let file = format!("{id}.json");
-    let saved = selections
-        .read::<Option<ReservationAttempt>>(&file)?
-        .flatten();
+    let saved = crate::job_store::selection(fleet.ledger, id)?;
     if let Some(saved) = &saved {
-        let selected = fleet.find(&saved.host)?;
+        let selected = fleet.find(saved)?;
         if pinned.is_some_and(|h| h.id != selected.id) {
             return Err(crate::unit_transport::conflict("reservation host changed"));
         }
@@ -253,7 +235,7 @@ fn place_locked(
     // admission lock can replay a live hold or admit the same ID again after it expires.
     let pinned = saved
         .as_ref()
-        .map(|s| fleet.find(&s.host))
+        .map(|s| fleet.find(s))
         .transpose()?
         .or(pinned);
     let mut reports = fleet.status(now)?;
@@ -300,18 +282,13 @@ fn place_locked(
         .filter_map(|r| r.headroom.clone())
         .collect();
     let replay = saved.is_some();
-    let mut retry_host = saved.map(|s| s.host);
+    let mut retry_host = saved;
     while let Some(selected) = retry_host
         .take()
         .or_else(|| plan::choose(&candidates).map(|c| c.host.clone()))
     {
         let host = fleet.find(&selected)?;
-        selections.write(
-            &file,
-            &Some(ReservationAttempt {
-                host: host.id.clone(),
-            }),
-        )?;
+        crate::job_store::put_selection(fleet.ledger, id, Some(&host.id))?;
         let outcome = fleet.reserve(host, id, now, validity, None, nonjob)?;
         if outcome.reserved {
             let prepared = Prepared::default();
@@ -330,7 +307,7 @@ fn place_locked(
             break;
         }
         candidates.retain(|c| c.host != host.id);
-        selections.write(&file, &Option::<ReservationAttempt>::None)?;
+        crate::job_store::put_selection(fleet.ledger, id, None)?;
     }
     full(reports, pinned)
 }

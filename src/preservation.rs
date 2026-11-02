@@ -176,9 +176,9 @@ pub enum Stage {
 /// Kept by this store, not item retention. Incomplete operations must never expire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
-    /// The original ledger key stays stable when an origin request is adopted.
+    /// The original store key stays stable when an origin request is adopted.
     #[serde(skip)]
-    file: String,
+    pub(crate) key: String,
     pub id: String,
     pub expectation: CloseExpectation,
     pub initial_id: String,
@@ -190,14 +190,14 @@ pub struct Operation {
     pub result: Option<crate::close::Closed>,
 }
 
-fn operation_file(pane: &str, request: Option<&CloseRequest>) -> Result<String> {
+fn operation_key(pane: &str, request: Option<&CloseRequest>) -> Result<String> {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(serde_json::to_vec(&(pane, request))?);
     let key = digest.iter().fold(String::new(), |mut key, byte| {
         let _ = write!(key, "{byte:02x}");
         key
     });
-    Ok(format!("{key}.json"))
+    Ok(key)
 }
 
 pub fn operation(
@@ -205,8 +205,8 @@ pub fn operation(
     pane: &str,
     request: Option<&CloseRequest>,
 ) -> crate::error::Result<Option<Operation>> {
-    let name = operation_file(pane, request).map_err(close_error)?;
-    if let Some(saved) = read_operation(ledger, &name)? {
+    let key = operation_key(pane, request).map_err(close_error)?;
+    if let Some(saved) = read_operation(ledger, &key)? {
         if saved.expectation.request.as_ref() != request {
             return Err(saved.refusal("preservation close request changed"));
         }
@@ -215,46 +215,31 @@ pub fn operation(
     let Some(request) = request else {
         return Ok(None);
     };
-    let name = operation_file(pane, None).map_err(close_error)?;
-    Ok(read_operation(ledger, &name)?
+    let key = operation_key(pane, None).map_err(close_error)?;
+    Ok(read_operation(ledger, &key)?
         .filter(|saved| saved.expectation.pane == pane && saved.accepts_request(Some(request))))
 }
 
 fn read_operation(
     ledger: &crate::ledger::Ledger,
-    name: &str,
+    key: &str,
 ) -> crate::error::Result<Option<Operation>> {
-    let saved: Option<Operation> = ledger.child("preservation-operations").read(name)?;
-    Ok(saved.map(|mut saved| {
-        saved.file = name.into();
-        saved
-    }))
+    Ok(crate::host_store::operations(ledger)?
+        .remove(key)
+        .map(|mut saved| {
+            saved.key = key.into();
+            saved
+        }))
 }
 
 pub fn operations(ledger: &crate::ledger::Ledger) -> crate::error::Result<Vec<Operation>> {
-    let store = ledger.child("preservation-operations");
-    let entries = match fs::read_dir(&store.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut operations = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "json")
-        {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| crate::worktree::refuse("unreadable preservation record name"))?;
-            let operation = read_operation(ledger, name)?
-                .ok_or_else(|| crate::worktree::refuse("preservation operation disappeared"))?;
-            operations.push(operation);
-        }
-    }
-    Ok(operations)
+    Ok(crate::host_store::operations(ledger)?
+        .into_iter()
+        .map(|(key, mut operation)| {
+            operation.key = key;
+            operation
+        })
+        .collect())
 }
 
 pub fn pending_for(
@@ -334,7 +319,7 @@ impl Operation {
             return Ok(saved);
         }
         let operation = Self {
-            file: operation_file(&expectation.pane, expectation.request.as_ref())
+            key: operation_key(&expectation.pane, expectation.request.as_ref())
                 .map_err(close_error)?,
             id: random_id().map_err(close_error)?,
             expectation,
@@ -351,9 +336,11 @@ impl Operation {
     }
 
     pub fn save(&self, ledger: &crate::ledger::Ledger) -> crate::error::Result<()> {
-        ledger
-            .child("preservation-operations")
-            .write(&self.file, self)
+        crate::store::write(ledger, |tx| {
+            let mut operations = crate::host_store::operations_rows(tx)?;
+            operations.insert(self.key.clone(), self.clone());
+            crate::host_store::replace_operations(tx, &operations)
+        })
     }
 
     pub fn advance(

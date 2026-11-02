@@ -22,7 +22,7 @@ fn set_clock(rig: &Rig, at: u64) {
 
 /// The validity clock this host keeps, and its high-water time.
 fn validity_clock(rig: &Rig) -> Value {
-    rig.read("state/job-validity-clock.json")
+    rig.clock()
 }
 
 /// A job request issued at `created_ms`, as the origin records it.
@@ -44,7 +44,7 @@ fn stripped_queued_job(rig: &Rig, remote: bool) -> String {
     let now = clock(rig);
     set_clock(rig, now);
     rig.config("free_core_fraction_min = 2\n");
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     if remote {
         rig.peer();
         let mut snapshot = rig.read("remote.json");
@@ -77,11 +77,8 @@ fn an_old_queue_writer_cannot_erase_job_validity() {
     assert!(rig.run(&["serve", "--once"]).status.success());
     let tickets = rig.tickets();
     assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
-    let job = rig.read(&format!("state/jobs/{id}.json"));
-    assert_eq!(
-        job["validity"],
-        rig.read(&format!("state/job-validity/{id}.json"))
-    );
+    let job = rig.job(&id);
+    assert_eq!(job["validity"], rig.validity(&id));
 }
 
 #[test]
@@ -91,10 +88,7 @@ fn a_queued_job_without_its_sidecar_refuses_even_with_inline_validity() {
     let mut tickets = rig.tickets();
     tickets[0]["request"]["action"]["validity"] = rig.job_validity();
     rig.put_tickets(&tickets);
-    let sidecar = rig.dir.join(format!("state/job-validity/{id}.json"));
-    if sidecar.exists() {
-        fs::remove_file(sidecar).unwrap();
-    }
+    rig.delete_validity(&id);
     assert!(rig.run(&["serve", "--once"]).status.success());
     let tickets = rig.tickets();
     assert_eq!(tickets[0]["state"], "failed", "{tickets}");
@@ -104,7 +98,7 @@ fn a_queued_job_without_its_sidecar_refuses_even_with_inline_validity() {
             .unwrap()
             .contains("validity is unprovable")
     );
-    assert!(!rig.dir.join(format!("state/jobs/{id}.json")).exists());
+    assert!(rig.job(&id).is_null());
     assert!(!rig.log("herdr.log").contains("pane run"));
 }
 
@@ -125,11 +119,8 @@ fn remote_dispatch_forwards_sidecar_validity_after_an_old_queue_rewrite() {
     assert!(rig.run(&["serve", "--once"]).status.success());
     let tickets = rig.tickets();
     assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
-    let job = rig.read(&format!("peer-state/jobs/{id}.json"));
-    assert_eq!(
-        job["validity"],
-        rig.read(&format!("state/job-validity/{id}.json"))
-    );
+    let job = rig.peer_state(&["job", &id]);
+    assert_eq!(job["validity"], rig.validity(&id));
     assert!(rig.log("ssh.log").contains("--job-validity"));
 }
 
@@ -140,7 +131,7 @@ fn rv_agent_and_place_stamp_once_at_origin() {
         let created = clock(&rig);
         set_clock(&rig, created);
         rig.config("free_core_fraction_min = 2\n");
-        rig.snapshot("state/host.json", created, 0.0, 8);
+        rig.snapshot("state", created, 0.0, 8);
         let args = if action == "agent" {
             vec!["agent", "--name", "rv-child", "--message", "test validity"]
         } else {
@@ -155,10 +146,7 @@ fn rv_agent_and_place_stamp_once_at_origin() {
             json!({"version":1,"created_ms":created})
         );
         let id = request["id"].as_str().unwrap();
-        assert_eq!(
-            rig.read(&format!("state/job-validity/{id}.json")),
-            request["validity"]
-        );
+        assert_eq!(rig.validity(id), request["validity"]);
     }
 }
 
@@ -192,8 +180,7 @@ fn rv_no_effects(rig: &Rig) {
         assert!(!calls.contains(effect), "{calls}");
     }
     assert!(
-        !rig.dir
-            .join("state/preparation-receipts/rv-agent.json")
+        !rig.preparation_record("state", "receipt", "rv-agent")
             .exists()
     );
 }
@@ -205,7 +192,7 @@ fn rv_missing_or_changed_authority_never_repairs_from_inline_data() {
         let created = clock(&rig);
         set_clock(&rig, created);
         rig.config("free_core_fraction_min = 2\n");
-        rig.snapshot("state/host.json", created, 0.0, 8);
+        rig.snapshot("state", created, 0.0, 8);
         assert_eq!(
             rig.json(&["agent", "--name", "worker", "--message", "go"])
                 .0,
@@ -213,13 +200,12 @@ fn rv_missing_or_changed_authority_never_repairs_from_inline_data() {
         );
         let tickets = rig.tickets();
         let id = tickets[0]["request"]["id"].as_str().unwrap();
-        let file = format!("state/job-validity/{id}.json");
         if changed {
-            rig.put(&file, &json!({"version":1,"created_ms":created + 1}));
+            rig.put_validity(id, &json!({"version":1,"created_ms":created + 1}));
         } else {
-            fs::remove_file(rig.dir.join(&file)).unwrap();
+            rig.delete_validity(id);
         }
-        let before = fs::read(rig.dir.join(&file)).ok();
+        let before = rig.validity(id);
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
         assert!(
             rig.run(&["serve", "--once", "--interval", "1"])
@@ -227,7 +213,7 @@ fn rv_missing_or_changed_authority_never_repairs_from_inline_data() {
                 .success()
         );
         assert_eq!(rig.tickets()[0]["state"], "failed");
-        assert_eq!(fs::read(rig.dir.join(&file)).ok(), before);
+        assert_eq!(rig.validity(id), before);
         rv_no_effects(&rig);
     }
 }
@@ -239,7 +225,7 @@ fn rv_expired_agent_and_place_refuse_at_origin_and_host() {
         let created = clock(&rig);
         set_clock(&rig, created);
         rig.config("free_core_fraction_min = 2\n");
-        rig.snapshot("state/host.json", created, 0.0, 8);
+        rig.snapshot("state", created, 0.0, 8);
         let args = if action == "agent" {
             vec!["agent", "--name", "worker", "--message", "go"]
         } else {
@@ -248,7 +234,7 @@ fn rv_expired_agent_and_place_refuse_at_origin_and_host() {
         assert_eq!(rig.json(&args).0, 1);
         set_clock(&rig, created + WINDOW_MS + 1);
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-        rig.snapshot("state/host.json", clock(&rig), 0.0, 8);
+        rig.snapshot("state", clock(&rig), 0.0, 8);
         assert!(
             rig.run(&["serve", "--once", "--interval", "1"])
                 .status
@@ -272,16 +258,13 @@ fn rv_validity_boundaries_and_future_skew_are_exact() {
         let rig = Rig::short("rv-boundary");
         let now = clock(&rig);
         set_clock(&rig, now);
-        rig.snapshot("state/host.json", now, 0.0, 8);
+        rig.snapshot("state", now, 0.0, 8);
         let created = if future { now + offset } else { now - offset };
         let request = rv_wire(&rig, created);
         let (code, result) = rv_launch(&rig, &request);
         assert_eq!(code, if valid { 0 } else { 2 }, "{result}");
         if valid {
-            assert_eq!(
-                rig.read("state/job-validity/rv-agent.json"),
-                request["validity"]
-            );
+            assert_eq!(rig.validity("rv-agent"), request["validity"]);
         } else {
             rv_no_effects(&rig);
         }
@@ -293,7 +276,7 @@ fn rv_job_reservation_publishes_authority_for_its_checkout() {
     let rig = Rig::short("rv-job-checkout");
     let created = clock(&rig);
     set_clock(&rig, created);
-    rig.snapshot("state/host.json", created, 0.0, 8);
+    rig.snapshot("state", created, 0.0, 8);
     let created_arg = created.to_string();
     // A remote job first reserves with the job protocol stamp.
     let (code, reserved) = rig.json(&[
@@ -308,10 +291,7 @@ fn rv_job_reservation_publishes_authority_for_its_checkout() {
     ]);
     assert_eq!(code, 0, "{reserved}");
     assert_eq!(reserved["reserved"], true, "{reserved}");
-    assert_eq!(
-        rig.read("state/job-validity/rv-job.json")["created_ms"],
-        created
-    );
+    assert_eq!(rig.validity("rv-job")["created_ms"], created);
     // Its checkout, for the same request, matches that authority.
     let (code, checkout) = rig.json(&[
         "host",
@@ -374,7 +354,7 @@ fn rv_requestless_preparation_and_checkout_refuse() {
         assert_eq!(rig.json(&args).0, 2);
     }
     assert!(!rig.dir.join("home/missing").exists());
-    assert!(!rig.dir.join("state/preparation-receipts").exists());
+    assert_eq!(rig.state(&["preparation", "receipt"]), json!([]));
     rv_no_effects(&rig);
 }
 
@@ -388,11 +368,11 @@ fn rv_expiry_during_busy_retry_prevents_another_start() {
         "later",
         &json!({"version":1,"high_water_ms":created + WINDOW_MS + 1}),
     );
-    rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'agent start'*) cp \"$RIG/later\" \"$DOGSLED_STATE/job-validity-clock.json\"; echo '{\"error\":{\"code\":\"agent_pane_busy\"}}' >&2; exit 1 ;;"));
+    rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'agent start'*) \"$RIG_DOGSLED\" state clock --put < \"$RIG/later\"; echo '{\"error\":{\"code\":\"agent_pane_busy\"}}' >&2; exit 1 ;;"));
     let (code, error) = rv_launch(&rig, &rv_wire(&rig, created));
     assert_eq!(code, 2, "{error}");
     assert_eq!(rig.log("herdr.log").matches("agent start").count(), 1);
-    let progress = rig.read("state/launches/rv-agent.progress.json");
+    let progress = rig.launch_progress("rv-agent");
     assert_eq!(progress["request"]["validity"]["created_ms"], created);
     assert!(
         progress["error"]
@@ -411,14 +391,11 @@ fn rv_expired_retained_receipts_replay_without_execution() {
     let request = rv_wire(&rig, created);
     let (code, result) = rv_launch(&rig, &request);
     assert_eq!(code, 0, "{result}");
-    let before = fs::read(rig.dir.join("state/launches/rv-agent.progress.json")).unwrap();
+    let before = rig.launch_record("rv-agent", "progress");
     let calls = rig.log("herdr.log");
     set_clock(&rig, created + WINDOW_MS + 1);
     assert_eq!(rv_launch(&rig, &request), (0, result));
-    assert_eq!(
-        fs::read(rig.dir.join("state/launches/rv-agent.progress.json")).unwrap(),
-        before
-    );
+    assert_eq!(rig.launch_record("rv-agent", "progress"), before);
     assert_eq!(rig.log("herdr.log"), calls);
 }
 
@@ -517,9 +494,10 @@ fn rv_clock_bootstrap_includes_nonjob_records() {
                 &json!({"request":place_request("historical"),"launch":null,"error":null,
                     "finished_ms":newest}),
             );
+        } else if directory == "launches" {
+            rig.put_launch("historical", &record);
         } else {
-            fs::create_dir_all(rig.dir.join(format!("state/{directory}"))).unwrap();
-            rig.put(&format!("state/{directory}/historical.json"), &record);
+            rig.preparation_record("state", "receipt", "historical").put(&json!({"request":["/repo","branch",null],"prepared":null,"finished_ms":newest}));
         }
         let (code, error) = rv_launch(&rig, &rv_wire(&rig, now));
         assert_eq!(code, 2, "{error}");
@@ -534,7 +512,7 @@ fn rv_finished_ms_is_write_once_and_not_startup_time() {
     let now = clock(&rig);
     set_clock(&rig, now);
     rig.config("free_core_fraction_min = 2\n");
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     assert_eq!(
         rig.json(&["agent", "--name", "worker", "--message", "go"])
             .0,
@@ -554,7 +532,7 @@ fn rv_finished_ms_is_write_once_and_not_startup_time() {
     let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
     assert_eq!(ticket["finished_ms"], now, "{ticket}");
-    assert!(rig.read(&format!("state/launches/{id}.progress.json"))["finished_ms"].is_null());
+    assert!(rig.launch_progress(&id)["finished_ms"].is_null());
     assert!(rig.admission(&id)["finished_ms"].is_null());
     set_clock(&rig, now + 1000);
     assert!(
@@ -574,7 +552,7 @@ fn expired_after_preparation(name: &str) -> (Rig, Value, String) {
         &json!({"version":1,"high_water_ms":now + WINDOW_MS + 1}),
     );
     let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
-    rig.script("herdr", &script.replace("    touch \"$RIG/anchor\"", "    cp \"$RIG/expired-preparation-clock\" \"$DOGSLED_STATE/job-validity-clock.json\"; touch \"$RIG/anchor\""));
+    rig.script("herdr", &script.replace("    touch \"$RIG/anchor\"", "    \"$RIG_DOGSLED\" state clock --put < \"$RIG/expired-preparation-clock\"; touch \"$RIG/anchor\""));
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -591,7 +569,7 @@ fn expired_after_preparation(name: &str) -> (Rig, Value, String) {
         "go",
     ]);
     assert_eq!(code, 2, "{error}");
-    let claims = rig.read("state/preparations.json");
+    let claims = rig.preparations();
     let id = claims[0]["request_id"].as_str().unwrap().to_owned();
     (rig, error, id)
 }
@@ -607,8 +585,8 @@ fn rv_expiry_during_preparation_prevents_agent_start() {
         "{error}"
     );
     assert!(!rig.log("herdr.log").contains("agent start"));
-    assert!(rig.read(&format!("state/preparation-receipts/{id}.json"))["finished_ms"].is_null());
-    assert!(!rig.dir.join(format!("state/launches/{id}.json")).exists());
+    assert!(rig.preparation_record("state", "receipt", &id).read()["finished_ms"].is_null());
+    assert!(rig.launch_record(&id, "receipt").is_null());
 }
 
 #[test]
@@ -619,14 +597,10 @@ fn rv_expired_refusal_preserves_actionable_ownership() {
         detail.contains(&id) && detail.contains("held") && detail.contains("retirement"),
         "{error}"
     );
-    let claims = rig.read("state/preparations.json");
+    let claims = rig.preparations();
     assert_eq!(claims.as_array().unwrap().len(), 1);
     assert_eq!(claims[0]["request_id"], id);
-    assert!(
-        !rig.dir
-            .join(format!("state/preparation-receipts/{id}.disposition.json"))
-            .exists()
-    );
+    assert!(!rig.preparation_record("state", "disposition", &id).exists());
 }
 
 #[test]
@@ -648,25 +622,25 @@ fn rv_completed_placement_replays_with_immutable_completion_proof() {
     assert_eq!(code, 0, "{result}");
     let id = result["request_id"].as_str().unwrap().to_owned();
     let id = id.as_str();
-    let grant = format!("state/placement-grants/{id}.json");
-    let lifecycle = format!("state/placement-grants/{id}.lifecycle.json");
-    let prepared = format!("state/preparation-receipts/{id}.json");
+    let grant = rig.preparation_record("state", "grant", id);
+    let lifecycle = rig.preparation_record("state", "lifecycle", id);
+    let prepared = rig.preparation_record("state", "receipt", id);
     assert_eq!(rig.admission(id)["finished_ms"], now);
     for file in [&lifecycle, &prepared] {
-        assert_eq!(rig.read(file)["finished_ms"], now, "{file}");
+        assert_eq!(file.read()["finished_ms"], now, "{}", file.id);
     }
-    assert!(rig.read(&grant)["finished_ms"].is_null());
+    assert!(grant.read()["finished_ms"].is_null());
     let admission = rig.admission(id);
     let before: Vec<_> = [&grant, &lifecycle, &prepared]
         .into_iter()
-        .map(|file| fs::read(rig.dir.join(file)).unwrap())
+        .map(PreparationRecord::read)
         .collect();
     let calls = rig.log("herdr.log");
     set_clock(&rig, now + WINDOW_MS + 1);
     assert_eq!(rig.json(&["place", "--resume", id]), (0, result));
     let after: Vec<_> = [&grant, &lifecycle, &prepared]
         .into_iter()
-        .map(|file| fs::read(rig.dir.join(file)).unwrap())
+        .map(PreparationRecord::read)
         .collect();
     assert_eq!(after, before);
     assert_eq!(rig.admission(id), admission);
@@ -688,7 +662,7 @@ fn one_timestamp_survives_the_queue_admission_claim_and_receipt() {
     let rig = Rig::new("validity-one-timestamp");
     let created = clock(&rig);
     set_clock(&rig, created);
-    rig.snapshot("state/host.json", created, 0.0, 8);
+    rig.snapshot("state", created, 0.0, 8);
     let request = request_at(&rig, created);
     let (code, error) = rig.json(&[
         "host",
@@ -700,10 +674,10 @@ fn one_timestamp_survives_the_queue_admission_claim_and_receipt() {
     ]);
     assert_eq!(code, 0, "{error}");
     // The claim keeps the request's own creation time.
-    let job = rig.read("state/jobs/job-1.json");
+    let job = rig.job("job-1");
     assert_eq!(job["validity"]["created_ms"], created, "{job}");
     // The receipt keeps the same time, so a replay correlates to the same request.
-    let receipt = rig.read("state/launches/job-1.json");
+    let receipt = rig.launch("job-1");
     assert_eq!(
         receipt["request"]["validity"]["created_ms"], created,
         "{receipt}"
@@ -720,10 +694,7 @@ fn one_timestamp_survives_the_queue_admission_claim_and_receipt() {
         &changed.to_string(),
     ]);
     assert_eq!(code, 0, "{error}");
-    assert_eq!(
-        rig.read("state/jobs/job-2.json")["validity"]["created_ms"],
-        created + 1
-    );
+    assert_eq!(rig.job("job-2")["validity"]["created_ms"], created + 1);
 }
 
 /// The exact boundaries: 30 days is still valid, 30 days and one millisecond is not.
@@ -746,7 +717,7 @@ fn the_age_and_skew_boundaries_are_exact() {
             now - offset as u64
         };
         set_clock(&rig, now);
-        rig.snapshot("state/host.json", now, 0.0, 8);
+        rig.snapshot("state", now, 0.0, 8);
         let request = request_at(&rig, created);
         let (code, error) = rig.json(&[
             "host",
@@ -758,14 +729,11 @@ fn the_age_and_skew_boundaries_are_exact() {
         ]);
         if allowed {
             assert_eq!(code, 0, "{offset}: {error}");
-            assert!(rig.dir.join("state/jobs/job-1.json").exists(), "{offset}");
+            assert!(!rig.job("job-1").is_null(), "{offset}");
         } else {
             assert_eq!(code, 2, "{offset}: {error}");
-            assert!(!rig.dir.join("state/jobs/job-1.json").exists(), "{offset}");
-            assert!(
-                !rig.dir.join("state/launches/job-1.json").exists(),
-                "{offset}"
-            );
+            assert!(rig.job("job-1").is_null(), "{offset}");
+            assert!(rig.launch_record("job-1", "receipt").is_null(), "{offset}");
             // The refusal has no execution effect: no pane, no dispatch.
             let herdr = rig.log("herdr.log");
             assert!(!herdr.contains("pane run"), "{offset}: {herdr}");
@@ -780,7 +748,7 @@ fn a_request_without_validity_evidence_never_starts_new_execution() {
     let rig = Rig::new("validity-unprovable");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     let mut request = request_at(&rig, now);
     request["action"]
         .as_object_mut()
@@ -796,8 +764,8 @@ fn a_request_without_validity_evidence_never_starts_new_execution() {
     ]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(refusal_code(&error), "JOB_VALIDITY_UNPROVABLE", "{error}");
-    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
-    assert!(!rig.dir.join("state/launches/job-1.json").exists());
+    assert!(rig.job("job-1").is_null());
+    assert!(rig.launch_record("job-1", "receipt").is_null());
     let herdr = rig.log("herdr.log");
     assert!(!herdr.contains("pane run"), "{herdr}");
     assert!(!herdr.contains("tab create"), "{herdr}");
@@ -810,8 +778,8 @@ fn a_corrupt_validity_clock_refuses_execution() {
     let rig = Rig::new("validity-corrupt-clock");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
-    fs::write(rig.dir.join("state/job-validity-clock.json"), "not json").unwrap();
+    rig.snapshot("state", now, 0.0, 8);
+    rig.put_clock(&json!({"version":99,"high_water_ms":now}));
     let request = request_at(&rig, now);
     let (code, error) = rig.json(&[
         "host",
@@ -823,7 +791,7 @@ fn a_corrupt_validity_clock_refuses_execution() {
     ]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(refusal_code(&error), "JOB_CLOCK_UNAVAILABLE", "{error}");
-    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
+    assert!(rig.job("job-1").is_null());
     assert!(!rig.log("herdr.log").contains("pane run"));
 }
 
@@ -834,9 +802,9 @@ fn a_validity_clock_that_cannot_be_written_refuses_execution() {
     let rig = Rig::new("validity-unwritable-clock");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
-    // A directory where the clock file belongs cannot be replaced by a file.
-    fs::create_dir_all(rig.dir.join("state/job-validity-clock.json")).unwrap();
+    rig.snapshot("state", now, 0.0, 8);
+    // A database-owned fault refuses only clock writes.
+    assert!(rig.run(&["state", "refuse-clock-writes"]).status.success());
     let request = request_at(&rig, now);
     let (code, error) = rig.json(&[
         "host",
@@ -848,7 +816,7 @@ fn a_validity_clock_that_cannot_be_written_refuses_execution() {
     ]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(refusal_code(&error), "JOB_CLOCK_UNAVAILABLE", "{error}");
-    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
+    assert!(rig.job("job-1").is_null());
     assert!(!rig.log("herdr.log").contains("pane run"));
 }
 
@@ -859,7 +827,7 @@ fn expiry_survives_a_restart_and_a_clock_rollback() {
     let rig = Rig::new("validity-rollback");
     let created = clock(&rig);
     set_clock(&rig, created);
-    rig.snapshot("state/host.json", created, 0.0, 8);
+    rig.snapshot("state", created, 0.0, 8);
     // 31 days later the request is expired.
     let later = created + WINDOW_MS + 1;
     set_clock(&rig, later);
@@ -889,7 +857,7 @@ fn expiry_survives_a_restart_and_a_clock_rollback() {
     ]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(refusal_code(&error), "JOB_EXPIRED", "{error}");
-    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
+    assert!(rig.job("job-1").is_null());
     assert!(!rig.log("herdr.log").contains("pane run"));
 }
 
@@ -900,7 +868,7 @@ fn expiry_survives_the_deletion_of_the_record_and_the_receipt() {
     let rig = Rig::new("validity-after-deletion");
     let created = clock(&rig);
     set_clock(&rig, created);
-    rig.snapshot("state/host.json", created, 0.0, 8);
+    rig.snapshot("state", created, 0.0, 8);
     let request = request_at(&rig, created);
     let (code, error) = rig.json(&[
         "host",
@@ -912,9 +880,11 @@ fn expiry_survives_the_deletion_of_the_record_and_the_receipt() {
     ]);
     assert_eq!(code, 0, "{error}");
     let before = rig.log("herdr.log").matches("pane run").count();
+    // Prune runs only after the execution wrapper records a terminal result.
+    assert!(rig.run(&["wait", "job-1"]).status.success());
     // The prune removed both the record and the receipt.
-    fs::remove_file(rig.dir.join("state/jobs/job-1.json")).unwrap();
-    fs::remove_file(rig.dir.join("state/launches/job-1.json")).unwrap();
+    rig.delete_job("job-1");
+    rig.delete_launch_record("job-1", "receipt");
     // 31 days later the same request is refused.
     let later = created + WINDOW_MS + 1;
     set_clock(&rig, later);
@@ -928,7 +898,7 @@ fn expiry_survives_the_deletion_of_the_record_and_the_receipt() {
     ]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(refusal_code(&error), "JOB_EXPIRED", "{error}");
-    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
+    assert!(rig.job("job-1").is_null());
     assert_eq!(rig.log("herdr.log").matches("pane run").count(), before);
 }
 
@@ -942,15 +912,15 @@ fn a_missing_clock_starts_at_the_newest_local_record() {
     // It stays inside the skew, so the request itself is not from the future.
     let ahead = now + 60_000;
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    rig.put(
-        "state/jobs/old.json",
+    rig.put_job(
+        "old",
         &json!({"id":"old","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local",
             "owner":"w1:p1","pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
             "started_ms":ahead,"ended_ms":ahead,"timeout_ms":null,"idle_timeout_ms":null,
             "validity":{"version":1,"created_ms":ahead}}),
     );
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     let request = request_at(&rig, ahead);
     let (code, error) = rig.json(&[
         "host",
@@ -972,7 +942,7 @@ fn a_running_job_survives_the_age_expiry() {
     let rig = Rig::new("validity-running-job");
     let created = clock(&rig);
     set_clock(&rig, created);
-    rig.snapshot("state/host.json", created, 0.0, 8);
+    rig.snapshot("state", created, 0.0, 8);
     let request = request_at(&rig, created);
     let (code, error) = rig.json(&[
         "host",
@@ -985,13 +955,13 @@ fn a_running_job_survives_the_age_expiry() {
     assert_eq!(code, 0, "{error}");
     // Host dispatch is asynchronous. Establish completion before changing the clock.
     let deadline = Instant::now() + PROCESS_DEADLINE;
-    while rig.read("state/jobs/job-1.json")["ended_ms"].is_null() {
+    while rig.job("job-1")["ended_ms"].is_null() {
         assert!(Instant::now() < deadline, "finite job did not finish");
         std::thread::yield_now();
     }
     // Long after the window, the record is still there and still readable.
     set_clock(&rig, created + 2 * WINDOW_MS);
-    let job = rig.read("state/jobs/job-1.json");
+    let job = rig.job("job-1");
     assert_eq!(job["exit"], 0, "{job}");
     assert_eq!(rig.json(&["ps", "--all"]).1[0]["exit"], 0);
 }
@@ -1003,7 +973,7 @@ fn an_expired_request_with_a_matching_receipt_replays_the_saved_result() {
     let rig = Rig::new("validity-replay");
     let created = clock(&rig);
     set_clock(&rig, created);
-    rig.snapshot("state/host.json", created, 0.0, 8);
+    rig.snapshot("state", created, 0.0, 8);
     let request = request_at(&rig, created);
     let (code, error) = rig.json(&[
         "host",
@@ -1014,7 +984,7 @@ fn an_expired_request_with_a_matching_receipt_replays_the_saved_result() {
         &request.to_string(),
     ]);
     assert_eq!(code, 0, "{error}");
-    let receipt = rig.read("state/launches/job-1.json");
+    let receipt = rig.launch("job-1");
     let before = rig.log("herdr.log").matches("pane run").count();
     // The request expires.
     set_clock(&rig, created + WINDOW_MS + 1);
@@ -1040,7 +1010,7 @@ fn a_new_caller_refuses_an_old_peer_without_a_fallback() {
     rig.peer();
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     // The peer reports no validity protocol.
     rig.snapshot("remote.json", now, 0.0, 8);
     let out = rig.run(&["run", "--host", "netcup", "--", "true"]);
@@ -1075,15 +1045,15 @@ fn an_old_caller_refuses_a_new_peer_without_a_fallback() {
     let rig = Rig::new("validity-old-caller");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     // The caller speaks no validity protocol.
     let request = request_at(&rig, now);
     let (code, error) = rig.json(&["host", "launch", "--request", &request.to_string()]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(refusal_code(&error), "JOB_VALIDITY_UNSUPPORTED", "{error}");
     // The peer created no claim and no pane.
-    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
-    assert!(!rig.dir.join("state/launches/job-1.json").exists());
+    assert!(rig.job("job-1").is_null());
+    assert!(rig.launch_record("job-1", "receipt").is_null());
     let herdr = rig.log("herdr.log");
     assert!(!herdr.contains("pane run"), "{herdr}");
     assert!(!herdr.contains("tab create"), "{herdr}");
@@ -1112,7 +1082,7 @@ fn a_wrapper_refuses_an_expired_claim() {
     assert!(!marker.exists());
     assert!(!rig.dir.join("state/jobs/expired.log").exists());
     // The claim is unchanged: it never started and never ended.
-    let job = rig.read("state/jobs/expired.json");
+    let job = rig.job("expired");
     assert!(job["started_ms"].is_null(), "{job}");
     assert!(job["ended_ms"].is_null(), "{job}");
 }
@@ -1126,9 +1096,9 @@ fn a_wrapper_refuses_a_claim_without_validity_evidence() {
     let marker = rig.dir.join("marker");
     let command = format!("touch {}", marker.display());
     rig.claim("no-evidence", &["sh", "-c", &command]);
-    let mut job = rig.read("state/jobs/no-evidence.json");
+    let mut job = rig.job("no-evidence");
     job.as_object_mut().unwrap().remove("validity");
-    rig.put("state/jobs/no-evidence.json", &job);
+    rig.put_job("no-evidence", &job);
     let out = rig.run(&[
         "exec",
         "--job-validity",
@@ -1151,7 +1121,7 @@ fn the_queue_refuses_an_expired_request() {
     let rig = Rig::new("validity-queue");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     // The request is already expired.
     let mut request = request_at(&rig, now - WINDOW_MS - 1);
     request["id"] = json!("old-job");
@@ -1167,7 +1137,7 @@ fn the_queue_refuses_an_expired_request() {
     assert_eq!(refusal_code(&error), "JOB_EXPIRED", "{error}");
     // Nothing entered the queue, and no claim exists.
     assert_eq!(rig.tickets(), json!([]));
-    assert!(!rig.dir.join("state/jobs/old-job.json").exists());
+    assert!(rig.job("old-job").is_null());
 }
 
 /// The CLI stamps the request's own creation time once, and a retry keeps it
@@ -1177,11 +1147,11 @@ fn the_cli_stamps_one_creation_time_through_the_queue_and_the_claim() {
     let rig = Rig::new("validity-cli-issuance");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     let (code, result) = rig.json(&["run", "--", "true"]);
     assert_eq!(code, 0, "{result}");
     let id = result["id"].as_str().unwrap().to_owned();
-    let job = rig.read(&format!("state/jobs/{id}.json"));
+    let job = rig.job(&id);
     let created = job["validity"]["created_ms"].as_u64().unwrap();
     assert_eq!(created, now, "{job}");
     // The admission and the receipt name the same time.
@@ -1190,7 +1160,7 @@ fn the_cli_stamps_one_creation_time_through_the_queue_and_the_claim() {
         attempt["request"]["action"]["validity"]["created_ms"], created,
         "{attempt}"
     );
-    let receipt = rig.read(&format!("state/launches/{id}.json"));
+    let receipt = rig.launch(&id);
     assert_eq!(
         receipt["request"]["validity"]["created_ms"], created,
         "{receipt}"
@@ -1207,7 +1177,7 @@ fn the_mcp_path_stamps_one_creation_time() {
     let rig = Rig::new("validity-mcp-issuance");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     let mut child = rig
         .cmd(&["mcp"])
         .stdin(Stdio::piped())
@@ -1245,7 +1215,7 @@ fn the_mcp_path_stamps_one_creation_time() {
     let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!(text));
     let id = value["id"].as_str().unwrap_or_default().to_owned();
     assert!(!id.is_empty(), "{value}");
-    let job = rig.read(&format!("state/jobs/{id}.json"));
+    let job = rig.job(&id);
     assert_eq!(job["validity"]["created_ms"], now, "{job}");
     let _ = child.kill();
     let _ = child.wait();
@@ -1266,7 +1236,7 @@ fn a_wrapper_that_expires_during_the_pane_report_starts_no_process() {
         "herdr",
         &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
             "  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\\n' ;;",
-            "  'pane report-agent'*) cp \"$RIG/later\" \"$DOGSLED_STATE/job-validity-clock.json\"; printf '{}\\n' ;;\n  'agent start'*|'agent prompt'*|'pane report-metadata'*) printf '{}\\n' ;;",
+            "  'pane report-agent'*) \"$RIG_DOGSLED\" state clock --put < \"$RIG/later\"; printf '{}\\n' ;;\n  'agent start'*|'agent prompt'*|'pane report-metadata'*) printf '{}\\n' ;;",
         ),
     );
     // The host's effective time moves past the validity window while the report runs.
@@ -1289,7 +1259,7 @@ fn a_wrapper_that_expires_during_the_pane_report_starts_no_process() {
     assert!(!marker.exists());
     assert!(!rig.dir.join("state/jobs/crossing.log").exists());
     // The claim is not terminal: it never ended, and it carries no result.
-    let job = rig.read("state/jobs/crossing.json");
+    let job = rig.job("crossing");
     assert!(job["ended_ms"].is_null(), "{job}");
     assert!(job["exit"].is_null(), "{job}");
     assert!(job["reason"].is_null(), "{job}");
@@ -1304,7 +1274,7 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
     let rig = Rig::new("validity-launch-allocation-expiry");
     let now = clock(&rig);
     set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
+    rig.snapshot("state", now, 0.0, 8);
     // The worktree this launch would run in, and the preparation it would release.
     let tree = rig.dir.join("tree");
     let repo = rig.dir.join("home");
@@ -1328,9 +1298,8 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
         "0123456789abcdef0123456789abcdef\n",
     )
     .unwrap();
-    rig.put("worktrees.json", &json!({"result":{"worktrees":[]}}));
-    rig.put(
-        "state/preparations.json",
+    rig.put("herdr-worktrees", &json!({"result":{"worktrees":[]}}));
+    rig.preparation_record("state", "claims", "").put(
         &json!([{
             "repo": repo,
             "path": tree,
@@ -1344,10 +1313,10 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
         "herdr",
         &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
             "  'tab create'*|'workspace create'*) printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\"}}}' ;;",
-            "  'tab create'*|'workspace create'*) cp \"$RIG/later\" \"$DOGSLED_STATE/job-validity-clock.json\"; printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\"}}}' ;;",
+            "  'tab create'*|'workspace create'*) \"$RIG_DOGSLED\" state clock --put < \"$RIG/later\"; printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w2:p1\",\"terminal_id\":\"term_child\"}}}' ;;",
         ),
     );
-    let mut captured = rig.read("state/preparations.json")[0].clone();
+    let mut captured = rig.preparations()[0].clone();
     captured.as_object_mut().unwrap().remove("request_id");
     rig.preparation_outcome(
         "job-1",
@@ -1362,7 +1331,8 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
     );
     let mut request = request_at(&rig, now);
     request["cwd"] = json!(tree);
-    request["preparation"] = rig.read("state/preparation-receipts/job-1.json")["binding"].clone();
+    request["preparation"] =
+        rig.preparation_record("state", "receipt", "job-1").read()["binding"].clone();
     request["preparation_protocol"] = json!(1);
     let (code, error) = rig.json(&[
         "host",
@@ -1377,9 +1347,9 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
     // Nothing was dispatched, and no receipt was written.
     let herdr = rig.log("herdr.log");
     assert!(!herdr.contains("pane run"), "{herdr}");
-    assert!(!rig.dir.join("state/launches/job-1.json").exists());
+    assert!(rig.launch_record("job-1", "receipt").is_null());
     // The preparation was not released.
-    let preparations = rig.read("state/preparations.json");
+    let preparations = rig.preparations();
     assert_eq!(preparations.as_array().unwrap().len(), 1, "{preparations}");
     // The pane this attempt allocated was retired.
     assert!(herdr.contains("pane close w2:p1"), "{herdr}");
@@ -1393,22 +1363,16 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
         let rig = Rig::new(&format!("validity-reservation-{held}"));
         let now = clock(&rig);
         set_clock(&rig, now);
-        rig.snapshot("state/host.json", now, 0.0, 8);
+        rig.snapshot("state", now, 0.0, 8);
         // The request expired before it asked for capacity.
         let expired = now - WINDOW_MS - 1;
         if held {
             // A live hold for the same id, taken after its request authority was published.
-            fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
-            rig.put(
-                "state/job-validity/job-1.json",
-                &json!({"version":1,"created_ms":expired}),
-            );
-            rig.put(
-                "state/placements.json",
-                &json!([{"id":"job-1","created_ms":now}]),
-            );
+
+            rig.put_validity("job-1", &json!({"version":1,"created_ms":expired}));
+            rig.put_reservations(&json!([{"id":"job-1","created_ms":now}]));
         }
-        let before = fs::read(rig.dir.join("state/placements.json")).unwrap_or_default();
+        let before = rig.reservations();
         let (code, error) = rig.json(&[
             "host",
             "reserve",
@@ -1422,7 +1386,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
         assert_eq!(code, 2, "{held}: {error}");
         assert_eq!(refusal_code(&error), "JOB_EXPIRED", "{held}: {error}");
         // The capacity record is byte-identical: the refusal changed nothing.
-        let after = fs::read(rig.dir.join("state/placements.json")).unwrap_or_default();
+        let after = rig.reservations();
         assert_eq!(after, before, "{held}");
     }
 }
@@ -1430,29 +1394,17 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
 /// A missing clock with a corrupt local record refuses execution. The bootstrap cannot
 /// account for a record it cannot read, so it must not start the clock behind it.
 #[test]
-fn a_missing_clock_with_a_corrupt_record_refuses_execution() {
-    let rig = Rig::new("validity-bootstrap-corrupt-record");
-    let now = clock(&rig);
-    set_clock(&rig, now);
-    rig.snapshot("state/host.json", now, 0.0, 8);
-    // A local record that cannot be parsed.
-    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    fs::write(rig.dir.join("state/jobs/broken.json"), "not json").unwrap();
-    // The clock file is missing, so the bootstrap has to read every record.
-    assert!(!rig.dir.join("state/job-validity-clock.json").exists());
-    let request = request_at(&rig, now);
-    let (code, error) = rig.json(&[
-        "host",
-        "launch",
-        "--job-validity",
-        "2",
-        "--request",
-        &request.to_string(),
-    ]);
-    assert_eq!(code, 2, "{error}");
-    assert_eq!(refusal_code(&error), "JOB_CLOCK_UNAVAILABLE", "{error}");
-    // No clock was written, no claim exists, and nothing was dispatched.
-    assert!(!rig.dir.join("state/job-validity-clock.json").exists());
-    assert!(!rig.dir.join("state/jobs/job-1.json").exists());
+fn malformed_job_and_clock_inputs_refuse_before_storage() {
+    let rig = Rig::new("validity-malformed-records");
+    for args in [
+        vec!["state", "job", "broken", "--put"],
+        vec!["state", "clock", "--put"],
+    ] {
+        let out = rig.write_state(&args, &json!("not a record"));
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+    }
+    assert!(rig.clock().is_null());
+    assert!(rig.job("broken").is_null());
+    assert!(rig.job("job-1").is_null());
     assert!(!rig.log("herdr.log").contains("pane run"));
 }
