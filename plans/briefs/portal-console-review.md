@@ -54,7 +54,7 @@ Find code by name, because unit 4 moves the lines in `review_view.rs`.
    - the comment;
    - Pencil and Trash icon buttons (`dioxus-icons` lucide) with `aria-label`s.
 
-   Annotated passages in the plan get a faint yellow underline. With no notes, the margin says "Select text in the plan to add a note."
+   Annotated passages (`mark`) are styled by `markdown.css` (unit 4). With no notes, the margin says "Select text in the plan to add a note."
 3. **Decision bar,** pinned under the plan and notes. It holds:
    - the `Note for the whole plan` field: an `aria-label` and no placeholder;
    - `Request changes`, secondary;

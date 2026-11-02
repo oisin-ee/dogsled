@@ -84,7 +84,7 @@ No server change is needed. Branches to land are not inbox items: agents land th
 - Keep `pulldown-cmark` (0.13.5, already in `web/Cargo.toml`). Turn on its GitHub-flavoured extensions for tables, strikethrough and task lists. Confirm the option names against the 0.13.5 documentation in the implementing unit.
 - Keep the existing safety rules in `render_markdown`: raw HTML stays text and unsafe links are dropped.
 - Style headings, lists, inline code, code blocks and tables in the conversation stylesheet.
-- Syntax highlighting: `syntect` 5.3.0 (`html`, `regex-fancy`, no defaults) with the `two-face` 0.5.2 grammar set (`syntect-fancy`, no defaults). It is the only candidate with no C toolchain that covers rust, bash, toml, json, yaml, typescript, diff, markdown, python and sql. Tree-sitter options (syntastica, arborium, tree-sitter-highlight, inkjet) compile C grammars; giallo needs Oniguruma. Output is CSS classes with a `syn-` prefix, coloured in `markdown.css`. The grammar data is about 937 KiB before compression; unit 4 measures the real bundle change.
+- Syntax highlighting: `syntect` 5.3.0 (`html`, `regex-fancy`, no defaults) with the `two-face` 0.5.2 grammar set (`syntect-fancy`, no defaults). It is the only candidate with no C toolchain that covers rust, bash, toml, json, yaml, typescript, diff, markdown, python and sql. Tree-sitter options (syntastica, arborium, tree-sitter-highlight, inkjet) compile C grammars; giallo needs Oniguruma. Output is CSS classes with a `syn-` prefix, coloured in `markdown.css`. Measured cost (unit 4): the release `.wasm` grows from 3,984,587 to 6,173,363 bytes (brotli 0.75 MB to 1.85 MB, gzip 1.0 MB to 2.3 MB). The grammar dump is already compressed, so transfer compression saves little.
 
 ## Components
 
@@ -115,6 +115,7 @@ Unit 3 starts after 1. Unit 4 starts after 3 merges and uses 2. Unit 5 starts af
 - **Tool lines.** Transcript turns carry only `role` and `text` (`portal-types/src/agents.rs:57`), so the conversation cannot show tool calls as mono lines yet. That needs a transcript change on the server and is not in units 3 to 5.
 - **Model and host in the lead header.** `AgentView` (`portal-types/src/agents.rs:22`) has `agent` (the harness) but no model or host, so the header shows `role · harness · branch`, and the host only for workers (from `RowView.host`). Showing the model needs the server to report it.
 - **Completed todo order.** Todos carry no completion time, so "latest first" reverses the server's order. That order is an estimate.
+- **Highlighter bundle cost.** Highlighting adds about 1.1 MB (brotli) to the bundle the portal serves over loopback. The owner can keep it or ask for a smaller grammar set; syntect's own set is about 360 KiB but has no TOML or TypeScript.
 - **Attachments to remote agents.** The composer attach control reuses `POST /api/attachments` and sends the stored paths as a "Reference images:" block, as review change requests already do. The files are stored on the portal host, so an agent on another host cannot open them.
 
 ## Verification
@@ -126,3 +127,4 @@ Unit 3 starts after 1. Unit 4 starts after 3 merges and uses 2. Unit 5 starts af
 - A Markdown fixture with a heading, list, inline code, fenced code and a table renders each element.
 - The composer contains no visible text apart from what the owner types.
 - With Herdr unreachable, the composer and key buttons are disabled.
+- Build each worktree's bundle with its own Cargo target directory. `#[css_module]` class names hash the absolute CSS path (`manganis-core` 0.7.10 `create_module_hash`), so a target directory shared with another worktree serves stale component CSS whose class names do not match the wasm.
