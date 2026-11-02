@@ -299,8 +299,7 @@ pub fn App() -> Element {
         groups
             .repos
             .iter()
-            .flat_map(|repo| &repo.rows)
-            .map(|row| 1 + row.workers.len())
+            .map(|repo| repo.agent_count())
             .sum::<usize>()
     });
 

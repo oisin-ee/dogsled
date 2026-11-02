@@ -24,6 +24,16 @@ pub struct NavigationRepo {
     pub to_land: usize,
 }
 
+impl NavigationRepo {
+    pub fn agent_count(&self) -> usize {
+        self.rows
+            .iter()
+            .flat_map(|row| std::iter::once(row).chain(&row.workers))
+            .filter(|row| row.role != "job")
+            .count()
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct NavigationRow {
     pub pane: Option<String>,
@@ -215,11 +225,7 @@ fn task_title(title: &str) -> String {
 
 #[component]
 pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
-    let count = group
-        .rows
-        .iter()
-        .map(|row| 1 + row.workers.len())
-        .sum::<usize>();
+    let count = group.agent_count();
     let branches = group.to_land;
     rsx! {
         SidebarGroup {
@@ -388,6 +394,29 @@ mod shell_tests {
         assert!(rows[1].workers[0].worker);
         assert_eq!(rows[2].pane.as_deref(), Some("orphan"));
         assert!(rows[2].worker);
+        Ok(())
+    }
+
+    #[test]
+    fn navigation_counts_agents_without_removing_jobs() -> Result<(), serde_json::Error> {
+        let mut nested_job = row("sh", Some("lead-a"), "working")?;
+        nested_job.kind = "job".to_owned();
+        let mut standalone_job = row("pnpm", None, "working")?;
+        standalone_job.kind = "job".to_owned();
+        let groups = navigation_groups(
+            &board(vec![
+                row("worker-b", Some("lead-a"), "working")?,
+                nested_job,
+                standalone_job,
+            ]),
+            &agents()?,
+        );
+        let repo = &groups.repos[0];
+        assert_eq!(repo.agent_count(), 3);
+        assert_eq!(repo.rows.len(), 3);
+        assert_eq!(repo.rows[0].workers.len(), 2);
+        assert!(repo.rows[0].workers.iter().any(|row| row.role == "job"));
+        assert!(repo.rows.iter().any(|row| row.role == "job"));
         Ok(())
     }
 

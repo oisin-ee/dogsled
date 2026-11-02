@@ -36,8 +36,7 @@
   box-sizing: border-box;
 }
 html,
-body,
-#main {
+body {
   height: 100%;
   margin: 0;
   overflow: hidden;
@@ -71,20 +70,20 @@ pre {
 textarea {
   caret-color: var(--console-accent);
 }
-.console-shell :is(button, a, textarea) {
+.console-provider .console-shell :is(button, a, textarea) {
   box-shadow: none;
 }
-.console-shell :is(button, a, textarea):focus-visible {
+.console-provider .console-shell :is(button, a, textarea):focus-visible {
   outline: 2px solid var(--console-accent);
 }
-.console-shell button:disabled {
+.console-provider .console-shell button:disabled {
   color: var(--console-dim);
   cursor: not-allowed;
 }
-.console-shell svg {
+.console-provider .console-shell svg {
   flex-shrink: 0;
 }
-.console-shell :is(h1, h2, p) {
+.console-provider .console-shell :is(h1, h2, p) {
   margin: 0;
 }
 .console-provider[data-slot="sidebar-wrapper"] {
@@ -102,7 +101,7 @@ textarea {
   gap: 0;
   isolation: isolate;
 }
-.console-topbar {
+.console-provider .console-shell .console-topbar {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
@@ -110,20 +109,20 @@ textarea {
   padding: 0 16px;
   border-bottom: 1px solid var(--console-line);
 }
-.console-topbar > [role="status"] {
+.console-provider .console-shell .console-topbar > [role="status"] {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.console-topbar > a {
+.console-provider .console-shell .console-topbar > a {
   flex-shrink: 0;
   font-size: 14px;
   font-weight: 600;
   color: inherit;
   text-decoration: none;
 }
-.console-hosts {
+.console-provider .console-shell .console-hosts {
   display: flex;
   gap: 18px;
   align-items: center;
@@ -131,81 +130,83 @@ textarea {
   color: var(--console-muted);
   font-size: 12px;
 }
-.console-host {
+.console-provider .console-shell .console-host {
   display: flex;
   gap: 6px;
   align-items: center;
   white-space: nowrap;
 }
-.console-host [role="progressbar"] {
+.console-provider .console-shell .console-host [role="progressbar"] {
   width: 48px;
   height: 4px;
   background: var(--console-line);
 }
-.console-host [role="progressbar"] > * {
+.console-provider .console-shell .console-host [role="progressbar"] > * {
   background: var(--console-running);
 }
-.console-inbox[data-slot="sidebar"],
-.console-agents[data-slot="sidebar"] {
+.console-provider .console-shell .console-inbox[data-slot="sidebar"],
+.console-provider .console-shell .console-agents[data-slot="sidebar"] {
   width: auto;
   min-height: 0;
   min-width: 0;
   border-right: 1px solid var(--console-line);
   background: var(--console-bg);
 }
-.console-inbox[data-slot="sidebar"] {
+.console-provider .console-shell .console-inbox[data-slot="sidebar"] {
   grid-column: 1;
   grid-row: 2;
   background: var(--console-panel);
 }
-.console-agents[data-slot="sidebar"] {
+.console-provider .console-shell .console-agents[data-slot="sidebar"] {
   grid-column: 2;
   grid-row: 2;
 }
-.console-column-header {
+.console-provider .console-shell .console-column-header {
   display: flex;
   flex-direction: row;
   align-items: center;
+  justify-content: flex-start;
+  text-align: left;
   gap: 8px;
   height: 52px;
   flex-shrink: 0;
   padding: 0 16px;
   border-bottom: 1px solid var(--console-line);
 }
-.console-column-header h2 {
+.console-provider .console-shell .console-column-header h2 {
   font-size: 13px;
   font-weight: 600;
 }
-.console-column-header > :last-child:not(h2) {
+.console-provider .console-shell .console-column-header > :last-child:not(h2) {
   margin-left: auto;
 }
-.console-shell .inbox-count {
+.console-provider .console-shell .inbox-count {
   border: 0;
 }
-.console-shell .inbox-count[data-waiting="true"] {
+.console-provider .console-shell .inbox-count[data-waiting="true"] {
   background: var(--console-waiting);
   color: var(--console-bg);
 }
-.console-scroll {
+.console-provider .console-shell .console-scroll {
   min-height: 0;
   min-width: 0;
   flex: 1;
   overflow: auto;
 }
-.console-shell .inbox-list {
+.console-provider .console-shell .inbox-list {
   display: flex;
   flex-direction: column;
   gap: 0;
 }
-.inbox-row {
+.console-provider .console-shell .inbox-row {
   border-bottom: 1px solid var(--console-line);
-  border-left: 1px solid transparent;
+  border-left: 3px solid transparent;
 }
-.inbox-row[data-open="true"] {
+.console-provider .console-shell .inbox-row[data-open="true"] {
   border-left-color: var(--console-waiting);
   background: var(--console-raised);
 }
-.console-shell .inbox-item {
+.console-provider .console-shell .inbox-item {
   width: 100%;
   height: auto;
   display: flex;
@@ -220,64 +221,67 @@ textarea {
   font-size: 13px;
   font-weight: 400;
 }
-.console-shell .inbox-item:hover {
+.console-provider .console-shell .inbox-item[data-style="ghost"]:hover {
   background: var(--console-raised);
 }
-.inbox-kind {
+.console-provider .console-shell .inbox-kind {
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--console-waiting);
   font-size: 12px;
 }
-.inbox-age {
+.console-provider .console-shell .inbox-age {
   margin-left: auto;
   color: var(--console-muted);
 }
-.inbox-title {
+.console-provider .console-shell .inbox-title {
   font-weight: 500;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
-.inbox-meta {
+.console-provider .console-shell .inbox-meta {
   color: var(--console-muted);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
-.inbox-keys {
+.console-provider .console-shell .inbox-keys {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   padding: 0 16px 12px;
 }
-.inbox-keys button {
+.console-provider .console-shell .inbox-keys button {
   min-width: 32px;
   height: 24px;
   padding: 0 9px;
   font-size: 12px;
 }
-.console-agents .console-scroll {
+.console-provider .console-shell .console-agents .console-scroll {
   padding: 4px 8px 8px;
 }
-.console-agents [data-slot="sidebar-group"] {
+.console-provider .console-shell .console-agents [data-slot="sidebar-group"] {
   padding: 0;
 }
-.console-agents [data-slot="sidebar-group-label"] {
+.console-provider .console-shell .console-agents [data-slot="sidebar-group-label"] {
   height: auto;
   padding: 12px 8px 4px;
   color: var(--console-muted);
   font-size: 12px;
 }
-.console-agents [data-slot="sidebar-menu-button"] {
+.console-provider .console-shell .console-agents [data-slot="sidebar-menu-button"] {
   gap: 8px;
   font-size: 13px;
   font-weight: 400;
 }
-.console-agents [data-slot="sidebar-menu-button"][data-active="true"] {
+.console-provider
+  .console-shell
+  .console-agents
+  [data-slot="sidebar-menu-button"][data-active="true"] {
   font-weight: 400;
   background: #22232a;
 }
-.agent-title {
+.console-provider .console-shell .agent-title {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -285,44 +289,44 @@ textarea {
   text-overflow: ellipsis;
   text-align: left;
 }
-.agent-dot {
+.console-provider .console-shell .agent-dot {
   width: 8px;
   height: 8px;
   flex: none;
   border: 1px solid var(--console-dim);
   border-radius: 50%;
 }
-.agent-dot[data-status="running"] {
+.console-provider .console-shell .agent-dot[data-status="running"] {
   border-color: var(--console-running);
   background: var(--console-running);
 }
-.agent-dot[data-status="waiting"] {
+.console-provider .console-shell .agent-dot[data-status="waiting"] {
   border-color: var(--console-waiting);
   background: var(--console-waiting);
 }
-.console-agents small {
+.console-provider .console-shell .console-agents small {
   color: var(--console-muted);
   font-size: 12px;
 }
-.console-agents [data-worker="true"] {
+.console-provider .console-shell .console-agents [data-worker="true"] {
   color: var(--console-muted);
   font-size: 12px;
 }
-.console-agents [data-worker="true"][data-needs-owner="true"] {
+.console-provider .console-shell .console-agents [data-worker="true"][data-needs-owner="true"] {
   color: var(--console-text);
 }
-.console-agents [data-slot="sidebar-menu-sub"] {
+.console-provider .console-shell .console-agents [data-slot="sidebar-menu-sub"] {
   border: 0;
   margin: 0;
   padding-left: 16px;
 }
-.console-main {
+.console-provider .console-shell .console-main {
   grid-column: 3;
   grid-row: 2;
   min-width: 0;
   min-height: 0;
 }
-.console-empty {
+.console-provider .console-shell .console-empty {
   display: grid;
   height: 100%;
   align-content: center;
@@ -331,11 +335,11 @@ textarea {
   color: var(--console-muted);
   padding: 24px;
 }
-.console-empty h1 {
+.console-provider .console-shell .console-empty h1 {
   font-size: 16px;
   color: var(--console-text);
 }
-.lead-panel {
+.console-provider .console-shell .lead-panel {
   display: grid;
   height: 100%;
   min-width: 0;
@@ -343,7 +347,7 @@ textarea {
   grid-template-columns: minmax(0, 1fr) 300px;
   grid-template-rows: 52px auto minmax(0, 1fr);
 }
-.lead-header {
+.console-provider .console-shell .lead-header {
   grid-column: 1;
   display: flex;
   min-width: 0;
@@ -352,30 +356,30 @@ textarea {
   padding: 0 16px;
   border-bottom: 1px solid var(--console-line);
 }
-.lead-heading {
+.console-provider .console-shell .lead-heading {
   flex: 1;
   min-width: 0;
 }
-.lead-heading h1 {
+.console-provider .console-shell .lead-heading h1 {
   font-size: 14px;
   font-weight: 600;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.lead-meta {
+.console-provider .console-shell .lead-meta {
   font-size: 12px;
   color: var(--console-muted);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.lead-actions {
+.console-provider .console-shell .lead-actions {
   display: flex;
   gap: 6px;
   flex: none;
 }
-.console-shell .icon-button[data-size] {
+.console-provider .console-shell .icon-button[data-size] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -386,11 +390,11 @@ textarea {
   border-radius: 6px;
   color: var(--console-muted);
 }
-.lead-tabs {
+.console-provider .console-shell .lead-tabs {
   display: none;
   flex: none;
 }
-.lead-tabs [role="tablist"] {
+.console-provider .console-shell .lead-tabs [role="tablist"] {
   flex: none;
   gap: 2px;
   padding: 2px;
@@ -398,27 +402,27 @@ textarea {
   border-radius: 7px;
   background: var(--console-panel);
 }
-.lead-tabs [role="tab"] {
+.console-provider .console-shell .lead-tabs [role="tab"] {
   height: 24px;
   padding: 0 8px;
   font-size: 12px;
   white-space: nowrap;
 }
-.lead-tabs [role="tab"][data-state="active"] {
+.console-provider .console-shell .lead-tabs [role="tab"][data-state="active"] {
   background: var(--console-line);
   box-shadow: none;
 }
-.lead-notices {
+.console-provider .console-shell .lead-notices {
   grid-column: 1;
   grid-row: 2;
   min-height: 0;
   max-height: 160px;
   overflow: auto;
 }
-.lead-notices:empty {
+.console-provider .console-shell .lead-notices:empty {
   display: none;
 }
-.lead-chat {
+.console-provider .console-shell .lead-chat {
   grid-column: 1;
   grid-row: 3;
   display: flex;
@@ -426,13 +430,13 @@ textarea {
   min-height: 0;
   min-width: 0;
 }
-.conversation-scroll {
+.console-provider .console-shell .conversation-scroll {
   flex: 1;
   min-height: 0;
   min-width: 0;
   overflow: auto;
 }
-.conversation-turns {
+.console-provider .console-shell .conversation-turns {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -441,13 +445,13 @@ textarea {
   padding: 16px 24px;
   font-size: 14px;
 }
-.conversation-turns > * {
+.console-provider .console-shell .conversation-turns > * {
   width: 100%;
   max-width: 640px;
   margin-inline: auto;
   overflow-wrap: anywhere;
 }
-.conversation-owner {
+.console-provider .console-shell .conversation-owner {
   align-self: flex-end;
   width: auto;
   max-width: 80%;
@@ -457,10 +461,10 @@ textarea {
   border-radius: 10px;
   padding: 8px 12px;
 }
-.conversation-agent {
+.console-provider .console-shell .conversation-agent {
   line-height: 1.6;
 }
-.console-composer {
+.console-provider .console-shell .console-composer {
   flex: none;
   display: flex;
   flex-direction: column;
@@ -471,99 +475,118 @@ textarea {
   border: 1px solid var(--console-line);
   background: var(--console-panel);
 }
-.composer-field {
+.console-provider .console-shell .composer-field {
   display: flex;
   align-items: flex-end;
   gap: 6px;
 }
-.console-composer textarea {
+.console-provider .console-shell .console-composer textarea[data-slot="textarea"] {
   flex: 1;
   min-width: 0;
-  min-height: 30px;
-  max-height: 160px;
+  field-sizing: content;
+  min-height: calc(1lh + 10px);
+  max-height: calc(8lh + 10px);
+  overflow-y: auto;
   padding: 5px 4px;
   border: 0;
-  resize: vertical;
-  background: none;
+  resize: none;
+  background: transparent;
+  box-shadow: none;
   color: var(--console-text);
   font: inherit;
   font-size: 14px;
+  line-height: 1.5;
 }
-.console-composer textarea:focus-visible {
+.console-provider
+  .console-shell
+  .console-composer
+  textarea[data-slot="textarea"]:is(:hover, :focus) {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.console-provider .console-shell .console-composer textarea:focus-visible {
+  outline: none;
+}
+.console-provider .console-shell .console-composer:focus-within {
+  outline: 2px solid var(--console-accent);
   outline-offset: -1px;
 }
-.console-shell .send-button {
+.console-provider .console-shell .send-button {
   background: var(--console-accent);
   color: white;
 }
-.console-shell .send-button[data-style="primary"]:not(:disabled):hover {
+.console-provider .console-shell .send-button[data-style="primary"]:not(:disabled):hover {
   background: var(--console-accent);
   color: white;
 }
-.console-composer input[hidden] {
+.console-provider .console-shell .console-composer input[hidden] {
   display: none;
 }
-.console-shell .send-button:disabled {
+.console-provider .console-shell .send-button:disabled {
   background: var(--console-line);
   color: var(--console-dim);
 }
-.composer-images {
+.console-provider .console-shell .composer-images {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   max-height: 132px;
   overflow: auto;
 }
-.composer-image {
+.console-provider .console-shell .composer-image {
   position: relative;
 }
-.composer-image img {
+.console-provider .console-shell .composer-image img {
   display: block;
   width: 80px;
   height: 60px;
   object-fit: cover;
   border-radius: 6px;
 }
-.composer-image button {
+.console-provider .console-shell .composer-image button {
   position: absolute;
   right: 0;
   top: 0;
 }
-.console-todos {
+.console-provider .console-shell .console-todos {
   grid-column: 2;
   grid-row: 1 / -1;
   min-height: 0;
   border-left: 1px solid var(--console-line);
 }
-.todo-panel {
+.console-provider .console-shell .todo-panel {
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
 }
-.todo-list {
+.console-provider .console-shell .todo-list {
   padding: 4px 16px 12px;
 }
-.todo-tab-body {
+.console-provider .console-shell .todo-tab-body {
   flex: 1;
   min-height: 0;
 }
-.todo-list [data-orientation="vertical"] {
+.console-provider .console-shell .todo-list [data-orientation="vertical"] {
   border-color: var(--console-line);
 }
-.todo-list [data-slot="item-group"] {
+.console-provider .console-shell .todo-list [data-slot="item-group"] {
   gap: 0;
 }
-.todo-list [data-slot="item-description"] {
-  display: block;
-  overflow: visible;
-  -webkit-line-clamp: unset;
+.console-provider .console-shell .todo-list [data-slot="item-description"] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--console-muted);
+  font-size: 12px;
 }
-.todo-list button {
+.console-provider .console-shell .todo-list button {
   font-size: 12px;
   color: var(--console-muted);
 }
-.console-shell .todo-list .todo-item {
+.console-provider .console-shell .todo-list .todo-item {
   gap: 10px;
   align-items: flex-start;
   padding: 5px 0;
@@ -571,11 +594,11 @@ textarea {
   font-size: 13px;
   background: none;
 }
-.todo-item .todo-title {
+.console-provider .console-shell .todo-item .todo-title {
   font-weight: 400;
   white-space: normal;
 }
-.todo-indicator {
+.console-provider .console-shell .todo-indicator {
   display: block;
   width: 14px;
   height: 14px;
@@ -583,49 +606,59 @@ textarea {
   border: 1px solid var(--console-dim);
   border-radius: 50%;
 }
-.todo-item[data-status="completed"] {
+.console-provider .console-shell .todo-item[data-status="completed"] {
   color: var(--console-muted);
 }
-.todo-item[data-status="completed"] > :first-child .todo-indicator {
+.console-provider
+  .console-shell
+  .todo-item[data-status="completed"]
+  > :first-child
+  .todo-indicator {
   border-color: var(--console-accent);
   background: var(--console-accent);
 }
-.todo-item[data-status="in-progress"] > :first-child .todo-indicator {
+.console-provider
+  .console-shell
+  .todo-item[data-status="in-progress"]
+  > :first-child
+  .todo-indicator {
   border-color: var(--console-accent);
 }
-.empty-lead {
+.console-provider .console-shell .empty-lead {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
 }
-.empty-lead .empty-chat {
+.console-provider .console-shell .empty-lead .empty-chat {
   flex: 1;
   min-height: 0;
 }
-.empty-lead .lead-header {
+.console-provider .console-shell .empty-lead .lead-header {
   flex-shrink: 0;
   height: 52px;
 }
-.pending-review {
+.console-provider .console-shell .pending-review {
   grid-column: 1 / -1;
   grid-row: 3;
   min-height: 0;
   overflow: auto;
 }
-.console-shell:has(.lead-panel[data-review-open="true"]) :is(.console-agents, .console-agents-tab) {
+.console-provider
+  .console-shell:has(.lead-panel[data-review-open="true"])
+  :is(.console-agents, .console-agents-tab) {
   display: none;
 }
-.console-shell:has(.lead-panel[data-review-open="true"]) .console-main {
+.console-provider .console-shell:has(.lead-panel[data-review-open="true"]) .console-main {
   grid-column: 2 / -1;
 }
-.lead-panel[data-review-open="true"] {
+.console-provider .console-shell .lead-panel[data-review-open="true"] {
   grid-template-columns: minmax(0, 1fr);
 }
-.lead-panel[data-review-open="true"] .lead-header {
+.console-provider .console-shell .lead-panel[data-review-open="true"] .lead-header {
   grid-column: 1 / -1;
 }
-.console-shell [role="tabpanel"] {
+.console-provider .console-shell [role="tabpanel"] {
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -633,34 +666,34 @@ textarea {
   background: none;
   min-height: 0;
 }
-.console-agents-tab {
+.console-provider .console-shell .console-agents-tab {
   display: contents;
 }
-.console-agents-tab[hidden] {
+.console-provider .console-shell .console-agents-tab[hidden] {
   display: none;
 }
-.chat-tab {
+.console-provider .console-shell .chat-tab {
   display: contents;
 }
-.todos-tab {
+.console-provider .console-shell .todos-tab {
   display: flex;
   flex-direction: column;
   grid-column: 1;
   grid-row: 3;
   min-width: 0;
 }
-.console-shell [role="tabpanel"][hidden] {
+.console-provider .console-shell [role="tabpanel"][hidden] {
   display: none;
 }
 
 @media (max-width: 1399px) {
-  .lead-panel {
+  .console-provider .console-shell .lead-panel {
     grid-template-columns: minmax(0, 1fr);
   }
-  .lead-tabs {
+  .console-provider .console-shell .lead-tabs {
     display: block;
   }
-  .todos-tab .todo-panel > .console-column-header {
+  .console-provider .console-shell .todos-tab .todo-panel > .console-column-header {
     display: none;
   }
 }
@@ -668,32 +701,32 @@ textarea {
   .console-provider .console-shell {
     grid-template-columns: 280px minmax(0, 1fr);
   }
-  .console-main {
+  .console-provider .console-shell .console-main {
     grid-column: 2;
   }
-  .console-agents-tab {
+  .console-provider .console-shell .console-agents-tab {
     grid-column: 2;
     grid-row: 2;
     display: block;
     padding-top: 52px;
     z-index: 2;
   }
-  .console-agents-tab .console-agents {
+  .console-provider .console-shell .console-agents-tab .console-agents {
     height: 100%;
   }
-  .console-agents-tab .console-column-header {
+  .console-provider .console-shell .console-agents-tab .console-column-header {
     display: none;
   }
-  .console-shell[data-panel="agents"] .console-main {
+  .console-provider .console-shell[data-panel="agents"] .console-main {
     pointer-events: none;
   }
-  .console-main .lead-header {
+  .console-provider .console-shell .console-main .lead-header {
     position: relative;
     z-index: 3;
     background: var(--console-bg);
     pointer-events: auto;
   }
-  .console-shell[data-panel="agents"] .console-main .console-empty {
+  .console-provider .console-shell[data-panel="agents"] .console-main .console-empty {
     visibility: hidden;
   }
 }
