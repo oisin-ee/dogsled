@@ -32,6 +32,41 @@ fn lanes(rig: &Rig) -> Value {
 }
 
 #[test]
+fn lane_status_write_failure_does_not_stop_service() {
+    let rig = Rig::new("service-lane-write-refused");
+    serve(&rig);
+    let db = rig.database();
+    db.execute_batch(
+        "CREATE TRIGGER fail_lanes_insert BEFORE INSERT ON service_lanes
+         BEGIN SELECT RAISE(ABORT, 'lane write refused'); END;
+         CREATE TRIGGER fail_lanes_update BEFORE UPDATE ON service_lanes
+         BEGIN SELECT RAISE(ABORT, 'lane write refused'); END;",
+    )
+    .unwrap();
+    drop(db);
+    fs::write(rig.dir.join("state/quota.json"), "poisoned").unwrap();
+    let lane_error = "dogsled service lane quota: invalid quota snapshot";
+    let recording_error =
+        "dogsled service lane quota: cannot record lane status: SQLite: lane write refused";
+    let journal = serve(&rig);
+    assert!(journal.contains(lane_error), "{journal}");
+    assert!(journal.contains(recording_error), "{journal}");
+
+    let before = rig.log("state/samples.jsonl").lines().count();
+    let mut child = rig.start(&["serve", "--interval", "1"]);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    // Observe publication passes, rather than assuming how long each pass takes.
+    while rig.log("state/samples.jsonl").lines().count() < before + 4 {
+        assert!(Instant::now() < deadline, "service did not keep publishing");
+        std::thread::yield_now();
+    }
+    child.owned.terminate();
+    let (_, journal) = child.output();
+    assert_eq!(journal.matches(lane_error).count(), 1, "{journal}");
+    assert_eq!(journal.matches(recording_error).count(), 1, "{journal}");
+}
+
+#[test]
 fn lane_errors_persist_across_service_runs_and_recover_once() {
     let rig = Rig::new("service-lane-recovery");
     let first_ms = now();

@@ -111,7 +111,7 @@ CREATE TABLE item_recovery_predecessors (
 
 /// Service diagnostics are independent of the execution records and start empty.
 pub(crate) const SERVICE_LANES_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS service_lanes (
+CREATE TABLE service_lanes (
     lane TEXT PRIMARY KEY NOT NULL,
     error TEXT,
     since_ms INTEGER,
