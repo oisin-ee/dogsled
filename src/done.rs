@@ -867,28 +867,84 @@ fn guarded<T>(
     })
 }
 
+/// One diagnostic per pane and kind; a complete pass also reports cleared warnings.
+#[derive(Default)]
+struct HandoffWarnings(BTreeMap<(String, &'static str), String>);
+
+impl HandoffWarnings {
+    fn add(&mut self, pane: &str, kind: &'static str, message: String) {
+        self.0.insert((pane.to_owned(), kind), message);
+    }
+
+    fn error(&mut self, pane: &str, kind: &'static str, error: impl std::fmt::Display) {
+        self.add(pane, kind, format!("dogsled handoff: {pane}: {error}"));
+    }
+
+    fn report(self, ledger: &Ledger, complete: bool) -> Result<()> {
+        static PREVIOUS: std::sync::Mutex<BTreeMap<std::path::PathBuf, HandoffWarnings>> =
+            std::sync::Mutex::new(BTreeMap::new());
+        let mut hosts = PREVIOUS
+            .lock()
+            .map_err(|_| Error::Invalid("handoff diagnostic memo poisoned".into()))?;
+        let previous = hosts.entry(ledger.dir.clone()).or_default();
+        for (source, message) in &self.0 {
+            if previous.0.get(source) != Some(message) {
+                eprintln!("{message}");
+            }
+        }
+        if complete {
+            for (pane, kind) in previous.0.keys().filter(|key| !self.0.contains_key(key)) {
+                eprintln!("dogsled handoff: {pane}: {kind} recovered");
+            }
+            *previous = self;
+        } else {
+            // An interrupted pass cannot prove an unvisited warning cleared.
+            previous.0.extend(self.0);
+        }
+        Ok(())
+    }
+}
+
 /// Child-host action lane, independent of fleet discovery, owner availability and sweeps.
 /// Keep the result durably before closing; the owner's children lane imports it afterwards.
 pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
-    ledger.with_lock("handoff", || handoff_locked(ledger, shell, now))
+    ledger.with_lock("handoff", || {
+        let mut warnings = HandoffWarnings::default();
+        let result = handoff_locked(ledger, shell, now, &mut warnings);
+        warnings.report(ledger, result.is_ok())?;
+        result
+    })
 }
 
 /// Checkout absence alone never establishes completion. Reconciliation needs the saved
 /// native-done boundary, sealed reply, and original checkout and terminal identities.
-fn removed_handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, mark: &Mark) -> Result<bool> {
+fn removed_handoff(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    mark: &Mark,
+    warnings: &mut HandoffWarnings,
+) -> Result<bool> {
     if !mark.native_done || mark.item.is_none() {
-        eprintln!(
-            "dogsled handoff: {}: removed checkout handoff is unproven",
-            mark.pane
+        warnings.add(
+            &mark.pane,
+            "removed checkout",
+            format!(
+                "dogsled handoff: {}: removed checkout handoff is unproven",
+                mark.pane
+            ),
         );
         return Ok(false);
     }
     let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
     let terminal = if panes.iter().any(|pane| pane.pane_id == mark.pane) {
         let Some(terminal) = terminals.get(&mark.pane).filter(|id| !id.is_empty()) else {
-            eprintln!(
-                "dogsled handoff: {}: current terminal identity is unknown; nothing was closed",
-                mark.pane
+            warnings.add(
+                &mark.pane,
+                "terminal identity",
+                format!(
+                    "dogsled handoff: {}: current terminal identity is unknown; nothing was closed",
+                    mark.pane
+                ),
             );
             return Ok(false);
         };
@@ -902,7 +958,7 @@ fn removed_handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, mark: &Mark
     {
         Ok(()) => (),
         Err(error @ crate::launch::CheckoutOwnerError::Refused(_)) => {
-            eprintln!("dogsled handoff: {}: {error}", mark.pane);
+            warnings.error(&mark.pane, "checkout owner", error);
             return Ok(false);
         }
         Err(crate::launch::CheckoutOwnerError::Evidence(error)) => return Err(error),
@@ -911,9 +967,13 @@ fn removed_handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, mark: &Mark
         && mark.reply.as_ref().is_some_and(|reply| reply.done)
         && crate::launch::checkout_for_pane(ledger, &mark.pane)?.is_some();
     if !proven {
-        eprintln!(
-            "dogsled handoff: {}: removed checkout handoff is unproven",
-            mark.pane
+        warnings.add(
+            &mark.pane,
+            "removed checkout",
+            format!(
+                "dogsled handoff: {}: removed checkout handoff is unproven",
+                mark.pane
+            ),
         );
     }
     Ok(proven)
@@ -941,7 +1001,12 @@ fn close_mark(
     )
 }
 
-fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
+fn handoff_locked(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    now: u64,
+    warnings: &mut HandoffWarnings,
+) -> Result<()> {
     if list(ledger)?.is_empty() {
         return Ok(());
     }
@@ -955,7 +1020,11 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
             && !(mark.closed_ms.is_some() && branch.landed)
         {
             if let Err(error) = refresh_branch(shell, branch) {
-                eprintln!("dogsled handoff: branch {}: {error}", branch.name);
+                warnings.add(
+                    &mark.pane,
+                    "branch",
+                    format!("dogsled handoff: branch {}: {error}", branch.name),
+                );
             }
             save(ledger, &mark)?;
         }
@@ -967,7 +1036,7 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
         // sealed native reply plus saved checkout identity permits finishing that handoff.
         if agent.is_none()
             && (agents.iter().any(|agent| agent.pane == mark.pane)
-                || !removed_handoff(ledger, shell, &mark)?)
+                || !removed_handoff(ledger, shell, &mark, warnings)?)
         {
             continue;
         }
@@ -1025,7 +1094,7 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
                     save(ledger, &mark)?;
                 }
                 Err(error) => {
-                    eprintln!("dogsled handoff: {}: {error}", mark.pane);
+                    warnings.error(&mark.pane, "preflight", error);
                     continue;
                 }
             }
@@ -1034,7 +1103,7 @@ fn handoff_locked(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) ->
             Ok(()) => {
                 eprintln!("dogsled handoff: closed {}", mark.pane);
             }
-            Err(error) => eprintln!("dogsled handoff: {}: {error}", mark.pane),
+            Err(error) => warnings.error(&mark.pane, "close", error),
         }
     }
     Ok(())

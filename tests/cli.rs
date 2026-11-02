@@ -45,6 +45,8 @@ mod retention;
 mod review;
 #[path = "cli/review_fixes.rs"]
 mod review_fixes;
+#[path = "cli/service_lanes.rs"]
+mod service_lanes;
 #[path = "cli/signals.rs"]
 mod signals;
 #[path = "cli/stop_sweep.rs"]

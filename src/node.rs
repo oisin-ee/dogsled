@@ -41,6 +41,9 @@ pub struct Snapshot {
 /// Live host response. Snapshot fields stay at the top level for older readers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotReport {
+    /// Current failures, read from the host-owned typed lane table.
+    #[serde(default)]
+    pub service_lanes: Vec<crate::tables::ServiceLane>,
     #[serde(flatten)]
     pub snapshot: Option<Snapshot>,
     /// Absent on peers predating lock-based liveness.
@@ -223,6 +226,7 @@ impl Node<'_> {
 
     pub fn snapshot(&self) -> Result<SnapshotReport> {
         Ok(SnapshotReport {
+            service_lanes: crate::store::read(self.ledger, crate::tables::failing_lanes)?,
             snapshot: self.ledger.read("host.json")?,
             running: Some(self.ledger.locked("service")?),
             handoffs: crate::done::list(self.ledger)?,
