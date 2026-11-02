@@ -102,7 +102,7 @@ impl Claim {
     fn pending(&self) -> Pending {
         Pending {
             tree: self.tree.clone(),
-            request_id: Some(self.request_id.clone()),
+            request_id: self.request_id.clone(),
         }
     }
 }
@@ -128,10 +128,7 @@ pub fn historical(ledger: &Ledger, id: &str) -> Result<Historical> {
 
 fn historical_guarded(ledger: &Ledger, id: &str) -> Result<Historical> {
     let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-    let claims: Vec<_> = records
-        .iter()
-        .filter(|p| p.request_id.as_deref() == Some(id))
-        .collect();
+    let claims: Vec<_> = records.iter().filter(|p| p.request_id == *id).collect();
     let receipts = ledger.child("preparation-receipts");
     let provenance = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
     let disposition = receipts.read::<Receipt>(&file(id))?;
@@ -316,7 +313,7 @@ fn binding(ledger: &Ledger, id: &str) -> Result<Option<Binding>> {
         .read::<super::PreparationReceipt>(&format!("{id}.json"))?;
     let Some(receipt) = receipt else {
         let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        if pending.iter().any(|p| p.request_id.as_deref() == Some(id)) {
+        if pending.iter().any(|p| p.request_id == *id) {
             return Err(conflict());
         }
         return Ok(None);
@@ -490,10 +487,7 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
     }
     ledger.with_lock("preparations", || {
         let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        let matching: Vec<_> = pending
-            .iter()
-            .filter(|p| p.request_id.as_deref() == Some(id))
-            .collect();
+        let matching: Vec<_> = pending.iter().filter(|p| p.request_id == *id).collect();
         match matching.as_slice() {
             [claim] if **claim == request.binding.claim.pending() => (),
             [] if existing.is_some() => (),
@@ -534,7 +528,7 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
     } else {
         // A released receipt cannot authorize removal of a recreated claim.
         let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        if pending.iter().any(|p| p.request_id.as_deref() == Some(id)) {
+        if pending.iter().any(|p| p.request_id == *id) {
             return Err(conflict());
         }
     }
@@ -634,9 +628,7 @@ fn dispose_guarded(
     if let Some(saved) = &saved {
         let held = ledger.with_lock("preparations", || {
             let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-            Ok(records
-                .iter()
-                .any(|record| record.request_id.as_deref() == Some(id)))
+            Ok(records.iter().any(|record| record.request_id == *id))
         })?;
         // The matching fence already captured validated host proof. A removed claim
         // needs no current repository or launch observation to finish acknowledgement.
@@ -1351,7 +1343,7 @@ mod tests {
             .unwrap();
         let first = request.binding.claim.pending();
         let mut other = first.clone();
-        other.request_id = Some("b".into());
+        other.request_id = "b".into();
         ledger
             .write("preparations.json", &vec![first, other.clone()])
             .unwrap();

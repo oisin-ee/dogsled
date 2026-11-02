@@ -266,7 +266,7 @@ Only no-launch proof permits `not_started`.
 After host acknowledgement, it reports `outcome: "unknown"`, `future_dispatch: "prohibited"`, and `ownership: "released"`.
 It also reports `task: "unresolved"`.
 Retirement never removes a checkout, kills a process, or settles a task.
-Claims without request IDs are unsupported.
+Every preparation claim names its request. Status reports a claim without a request ID as `unreadable`.
 
 For a separately authorized operator cleanup, the CLI accepts `--cleanup` with the required `--reason`.
 This override records the actor and authority for a historical claim without owner provenance.

@@ -532,11 +532,9 @@ fn refusal_release_and_settlement_recover_after_each_durable_boundary() {
         let (rig, execution, _) = refused_prepared_unit(point);
         let id = execution["requestId"].as_str().unwrap();
         let own = rig.read("state/preparations.json")[0].clone();
-        let mut legacy = own.clone();
-        legacy.as_object_mut().unwrap().remove("request_id");
         let mut other = own.clone();
         other["request_id"] = json!("later-request");
-        rig.put("state/preparations.json", &json!([own, legacy, other]));
+        rig.put("state/preparations.json", &json!([own, other]));
         let result = rig
             .cmd(&["unit", "settlements"])
             .env("DOGSLED_TEST_UNIT_CRASH", point)
@@ -549,12 +547,9 @@ fn refusal_release_and_settlement_recover_after_each_durable_boundary() {
             String::from_utf8_lossy(&result.stderr)
         );
         if point == "preparation-fenced" {
-            assert_eq!(
-                rig.read("state/preparations.json"),
-                json!([own, legacy, other])
-            );
+            assert_eq!(rig.read("state/preparations.json"), json!([own, other]));
         } else {
-            assert_eq!(rig.read("state/preparations.json"), json!([legacy, other]));
+            assert_eq!(rig.read("state/preparations.json"), json!([other]));
         }
         let (code, events) = rig.json(&["unit", "settlements"]);
         assert_eq!(code, 0, "{events}");
@@ -563,7 +558,7 @@ fn refusal_release_and_settlement_recover_after_each_durable_boundary() {
         let disposition = rig.read(&format!("state/preparation-receipts/{id}.disposition.json"));
         assert_eq!(disposition["request"]["binding"]["request_id"], id);
         assert_eq!(disposition["progress"], "released");
-        assert_eq!(rig.read("state/preparations.json"), json!([legacy, other]));
+        assert_eq!(rig.read("state/preparations.json"), json!([other]));
         assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
     }
 }
@@ -959,12 +954,8 @@ fn preparation_owners_coexist_and_release_only_their_records() {
         assert_eq!(code, 0, "{result}");
     }
     let path = repo.join(".worktrees/owned");
-    let mut holds = rig.read("state/preparations.json");
+    let holds = rig.read("state/preparations.json");
     assert_eq!(holds.as_array().unwrap().len(), 2);
-    let mut legacy = holds[0].clone();
-    legacy.as_object_mut().unwrap().remove("request_id");
-    holds.as_array_mut().unwrap().push(legacy.clone());
-    rig.put("state/preparations.json", &holds);
     assert_eq!(
         rig.json(&[
             "host",
@@ -976,9 +967,8 @@ fn preparation_owners_coexist_and_release_only_their_records() {
         0
     );
     let remaining = rig.read("state/preparations.json");
-    assert_eq!(remaining.as_array().unwrap().len(), 2);
+    assert_eq!(remaining.as_array().unwrap().len(), 1);
     assert_eq!(remaining[0]["request_id"], "later");
-    assert_eq!(remaining[1], legacy);
     assert_eq!(
         rig.run(&["host", "prepared", "--path", path.to_str().unwrap()])
             .status
@@ -1010,10 +1000,11 @@ fn successful_agent_place_and_failed_preparation_release_only_owned_preparation(
     for action in ["agent", "place", "setup-failure", "already-open"] {
         let (rig, repo) = place::place_rig(&format!("preparation-release-{action}"));
         let path = repo.join(".worktrees/owned");
-        let legacy = json!({"repo":repo,"path":path,"branch":"owned","head":""});
-        let mut other = legacy.clone();
+        // Claims at the same path that belong to other requests.
+        let stale = json!({"repo":repo,"path":path,"branch":"owned","head":"","request_id":"stale-request"});
+        let mut other = stale.clone();
         other["request_id"] = json!("other-request");
-        rig.put("state/preparations.json", &json!([legacy, other]));
+        rig.put("state/preparations.json", &json!([stale, other]));
         if action == "setup-failure" {
             fs::write(rig.dir.join("setup-fails"), "").unwrap();
         }
@@ -1058,7 +1049,7 @@ fn successful_agent_place_and_failed_preparation_release_only_owned_preparation(
         );
         assert_eq!(
             rig.read("state/preparations.json"),
-            json!([legacy, other]),
+            json!([stale, other]),
             "{action}"
         );
     }

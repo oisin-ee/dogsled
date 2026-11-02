@@ -874,7 +874,6 @@ pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
 }
 
 fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
-    let mine = |pane: &str| owner.is_none_or(|owner| owner == pane);
     let mut request_ids = std::collections::BTreeSet::new();
     for row in rows.iter_mut() {
         // Queue rows expose the ticket ID; retained resources belong to its request.
@@ -902,7 +901,8 @@ fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
                     .as_ref()
                     .is_some_and(|id| request_ids.contains(id))
             })
-            .filter(|hold| hold.owner_pane.as_deref().is_none_or(mine))
+            // A session board shows only its own holds; `--all` (no owner) shows every hold.
+            .filter(|hold| owner.is_none_or(|o| hold.owner_pane.as_deref() == Some(o)))
             .map(|hold| Row {
                 holds: Vec::new(),
                 group: Group::Attention,
@@ -1856,6 +1856,43 @@ mod tests {
             stopped_activity: std::collections::BTreeMap::new(),
             holds: Vec::new(),
         }
+    }
+
+    /// A session board showed every unowned hold on the host as its own blocked card.
+    #[test]
+    fn a_session_board_shows_only_the_holds_that_session_owns() {
+        let hold = |resource: &str, owner_pane: Option<&str>| crate::holds::Hold {
+            host: "local".into(),
+            resource: resource.into(),
+            owner: owner_pane.unwrap_or("unrecorded").into(),
+            owner_pane: owner_pane.map(str::to_owned),
+            code: "preparation_claim".into(),
+            reason: "held".into(),
+            next_command: "dogsled doctor".into(),
+            command_host: "local".into(),
+            command_argv: vec!["dogsled".into(), "doctor".into()],
+            request_id: None,
+        };
+        let status = Status {
+            holds: vec![
+                hold("mine", Some("w1:p1")),
+                hold("theirs", Some("w2:p1")),
+                hold("unowned", None),
+            ],
+            ..status(Vec::new(), Vec::new())
+        };
+        let shown = |owner| {
+            build(&status, owner, NOW)
+                .rows
+                .into_iter()
+                .filter(|row| row.kind == "hold")
+                .map(|row| row.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(Some("w1:p1")), ["mine"]);
+        let mut all = shown(None);
+        all.sort();
+        assert_eq!(all, ["mine", "theirs", "unowned"]);
     }
 
     #[test]
