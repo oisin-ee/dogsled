@@ -337,6 +337,7 @@ fn an_idle_agent_that_has_not_called_done_holds_its_worktree() {
 fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     let rig = watchdog_rig("sweep-worktree");
     let tree = rig.dir.join("home/repo/tree");
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "swept-child");
     let kept = |rig: &Rig, why: &str| {
         let journal = requested_sweep(rig);
         assert!(
@@ -639,6 +640,7 @@ fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
     );
     idle_snapshot(&rig, "w3:p1");
     let tree = rig.dir.join("home/repo/tree");
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "busy-child");
     rig.put(
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","cwd":tree}]}}),
@@ -722,7 +724,9 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     };
     for name in ["done", "local", "pushed"] {
         branch(name);
+        super::sweep_ownership::record_closed_branch(&rig, &repo, name);
     }
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "branch-child");
     // `done` is squash-merged but on no remote: both scopes remove it.
     git(&repo, &["merge", "-q", "--squash", "done"]);
     git(&repo, &["commit", "-q", "-m", "done (#1)"]);
@@ -753,6 +757,13 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     git(&local, &["commit", "-q", "-m", "local only"]);
     let dirty = detached("dirty");
     fs::write(dirty.join("scratch"), "x").unwrap();
+    for (name, path) in [
+        ("pushed-child", &pushed),
+        ("local-child", &local),
+        ("dirty-child", &dirty),
+    ] {
+        super::sweep_ownership::record_closed_checkout(&rig, path, name);
+    }
     let journal = requested_sweep(&rig);
     assert!(!branch_exists(&rig, "pushed"), "{journal}");
     assert!(
@@ -770,7 +781,7 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     );
     assert!(
         !tree.exists(),
-        "a fresh worktree without a preparation hold loses nothing"
+        "a recorded closed child's worktree without a preparation hold loses nothing"
     );
     // Local-only commits and dirty files stay.
     for kept in [&local, &dirty] {

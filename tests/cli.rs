@@ -51,6 +51,8 @@ mod signals;
 mod stop_sweep;
 #[path = "cli/sweep.rs"]
 mod sweep;
+#[path = "cli/sweep_ownership.rs"]
+mod sweep_ownership;
 #[path = "cli/transcripts.rs"]
 mod transcripts;
 #[path = "cli/unit_requests.rs"]

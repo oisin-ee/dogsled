@@ -850,6 +850,103 @@ fn readable(
     (usable, trees, evidence)
 }
 
+/// Ownership evidence is loaded once per survey, then shared by all candidate lookups.
+struct Ownership {
+    items: Vec<crate::items::Item>,
+    marks: Vec<crate::done::Mark>,
+    registered: Vec<Tree>,
+    requests: Vec<(crate::work::Launch, Option<Tree>)>,
+}
+
+impl Ownership {
+    fn load(ledger: &Ledger) -> Result<Self> {
+        let items = crate::items::list(ledger)?;
+        let marks = crate::done::list(ledger)?;
+        let registered = ledger.read("worktrees.json")?.unwrap_or_default();
+        let requests = crate::launch::requests(ledger)?
+            .into_iter()
+            .filter(|request| matches!(request.action, crate::work::Action::Agent { .. }))
+            .map(|request| {
+                let (_, captured) = crate::launch::checkout_for_request(ledger, &request)?;
+                Ok((request, captured))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            items,
+            marks,
+            registered,
+            requests,
+        })
+    }
+
+    /// Automatic removal needs recorded child ownership, not just safe Git content. Discovery
+    /// can create a generation marker for any checkout, so a marker alone proves no ownership.
+    fn sweep_hold(&self, tree: &Tree) -> Option<&'static str> {
+        let mut closed = false;
+        for (request, captured) in &self.requests {
+            let Some(captured) = captured.as_ref().filter(|captured| {
+                captured.identity.as_ref().is_some_and(|identity| {
+                    identity.common != identity.gitdir && !identity.generation.is_empty()
+                }) && crate::worktree::same(&captured.repo, &tree.repo)
+                    && captured.branch == tree.branch
+                    && (tree.path.is_empty()
+                        || (crate::worktree::same(&captured.path, &tree.path)
+                            && captured.identity == tree.identity))
+            }) else {
+                continue;
+            };
+            let item = self.items.iter().find(|item| {
+                item.id == request.id && item.host == crate::hosts::LOCAL && item.kind == "agent"
+            });
+            let ended = item.map_or_else(
+                || {
+                    self.marks.iter().any(|mark| {
+                        mark.item.as_deref() == Some(request.id.as_str())
+                            && request.pane.as_deref() == Some(mark.pane.as_str())
+                            && mark.closed_ms.is_some()
+                    })
+                },
+                |item| item.closed_ms.is_some(),
+            );
+            if !ended {
+                return Some("recorded child is not closed");
+            }
+            closed |= self
+                .registered
+                .iter()
+                .chain(
+                    request
+                        .preparation
+                        .iter()
+                        .map(|binding| &binding.claim.tree),
+                )
+                .any(|saved| {
+                    saved.identity == captured.identity
+                        && crate::worktree::same(&saved.repo, &captured.repo)
+                        && crate::worktree::same(&saved.path, &captured.path)
+                        && saved.branch == captured.branch
+                });
+        }
+        if tree.path.is_empty() {
+            for item in self.items.iter().filter(|item| {
+                item.host == crate::hosts::LOCAL
+                    && item.kind == "agent"
+                    && item.branch.as_ref().is_some_and(|branch| {
+                        crate::worktree::same(&branch.repo, &tree.repo)
+                            && branch.name == tree.branch
+                    })
+            }) {
+                if item.closed_ms.is_none() {
+                    return Some("recorded child is not closed");
+                }
+                closed = true;
+            }
+        }
+        (!closed)
+            .then_some("not a recorded checkout or branch of a closed child; use dogsled prune")
+    }
+}
+
 /// The cleanup plan for `scope`. In `Sweep` scope a worktree that cannot be checked is skipped,
 /// so one broken entry does not stop the sweep of the others.
 pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
@@ -860,8 +957,19 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     let repos = repositories(node, &seen.panes, &seen.workspaces, &mut plan)?;
     let (repos, trees, evidence) = readable(node, repos, &mut plan);
     seen.evidence = evidence;
+    let ownership = (scope == Scope::Sweep)
+        .then(|| Ownership::load(node.ledger))
+        .transpose()?;
     let mut closing = Closing::default();
-    let found = parallel(&trees, |tree| disposition(node, tree, &seen));
+    let found = parallel(&trees, |tree| {
+        let mut found = disposition(node, tree, &seen)?;
+        if let Some(reason) = ownership.as_ref().and_then(|owned| owned.sweep_hold(tree)) {
+            found.removable = false;
+            found.detail.push_str("; held: ");
+            found.detail.push_str(reason);
+        }
+        Ok(found)
+    });
     let mut removed = BTreeSet::new();
     for (tree, found) in trees.iter().zip(found) {
         let found = match found {
@@ -919,6 +1027,17 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
                 format!("cannot inspect branches: {error}"),
                 false,
             ));
+        }
+    }
+    if let Some(ownership) = &ownership {
+        for candidate in plan.entries.iter_mut().filter(|e| e.class == "branches") {
+            if let Some(tree) = &candidate.tree
+                && let Some(reason) = ownership.sweep_hold(tree)
+            {
+                candidate.removable = false;
+                candidate.detail.push_str("; held: ");
+                candidate.detail.push_str(reason);
+            }
         }
     }
     idle(node, now, &seen, &closing, &mut plan)?;
@@ -1899,7 +2018,17 @@ pub fn forget_matching(ledger: &Ledger, tree: &Tree) -> Result<()> {
     })
 }
 
-fn remove_tree(guard: &crate::worktree::Guard, node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
+fn remove_tree(
+    guard: &crate::worktree::Guard,
+    node: &Node<'_>,
+    tree: &Tree,
+    scope: Scope,
+) -> Result<Outcome> {
+    if scope == Scope::Sweep
+        && let Some(reason) = Ownership::load(node.ledger)?.sweep_hold(tree)
+    {
+        return Ok(Outcome::Skipped(format!("refuse {}: {reason}", tree.path)));
+    }
     let (held, evidence) = match validate_tree(guard, node, tree)? {
         Recheck::Removable(held, evidence) => (held, evidence),
         Recheck::Refused(reason) => return Ok(Outcome::Skipped(reason)),
@@ -2190,12 +2319,22 @@ pub(crate) fn apply_survey(node: &Node<'_>, plan: &Plan, now: u64) -> Applied {
         .iter()
         .filter(|e| e.removable && SWEPT.contains(&e.class.as_str()))
     {
-        applied.record(entry, apply_one(node, plan, entry, now));
+        applied.record(entry, apply_scoped(node, plan, entry, now, Scope::Sweep));
     }
     applied
 }
 
 fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<Outcome> {
+    apply_scoped(node, actual, requested, now, Scope::Prune)
+}
+
+fn apply_scoped(
+    node: &Node<'_>,
+    actual: &Plan,
+    requested: &Entry,
+    now: u64,
+    scope: Scope,
+) -> Result<Outcome> {
     if requested.removable
         && requested.class == "worktrees"
         && let Some(tree) = &requested.tree
@@ -2204,7 +2343,7 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             node.shell,
             node.ledger,
             Path::new(&tree.repo),
-            |guard| remove_tree(guard, node, tree),
+            |guard| remove_tree(guard, node, tree, scope),
         );
     }
     if matches!(requested.class.as_str(), "disk" | "processes") {
@@ -2276,12 +2415,7 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             None => drop_registration(node, &candidate.id).map(Outcome::Done),
         },
         "branches" => match &requested.tree {
-            Some(tree) => crate::worktree::with_lifecycle(
-                node.shell,
-                node.ledger,
-                Path::new(&tree.repo),
-                |_| delete_branch(node.shell, tree),
-            ),
+            Some(tree) => remove_branch(node, tree, scope),
             None => Err(Error::Invalid("a branch entry has no branch".into())),
         },
         "workspaces" => close_workspace(node, &candidate.id, now),
@@ -2291,6 +2425,20 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
         "targets" => remove_target(&candidate.id).map(Outcome::Done),
         _ => Err(Error::Invalid("unknown cleanup class".into())),
     }
+}
+
+fn remove_branch(node: &Node<'_>, tree: &Tree, scope: Scope) -> Result<Outcome> {
+    crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&tree.repo), |_| {
+        if scope == Scope::Sweep
+            && let Some(reason) = Ownership::load(node.ledger)?.sweep_hold(tree)
+        {
+            return Ok(Outcome::Skipped(format!(
+                "refuse {}: {reason}",
+                tree.branch
+            )));
+        }
+        delete_branch(node.shell, tree)
+    })
 }
 
 /// Re-check a planned workspace close against a fresh survey under the cleanup lock.
