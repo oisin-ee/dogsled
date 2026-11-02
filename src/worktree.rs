@@ -1103,6 +1103,19 @@ fn run_teardown(
     mut operation: Option<&mut crate::preservation::Operation>,
 ) -> Result<()> {
     use crate::preservation::Stage;
+    if let Some(operation) = operation.as_deref() {
+        operation.check_retry(&operation.expectation.mode)?;
+        if matches!(
+            operation.stage,
+            Stage::TeardownComplete
+                | Stage::FinalCaptured
+                | Stage::Normalized
+                | Stage::Removed
+                | Stage::Finished
+        ) {
+            return Ok(());
+        }
+    }
     let settings = crate::repository::load(&tree.checkout)?;
     if let Some(operation) = operation.as_deref_mut() {
         let saved = operation
@@ -1127,6 +1140,7 @@ fn run_teardown(
     }
     if let Some(operation) = operation {
         operation.advance(ledger, Stage::TeardownComplete)?;
+        crate::work::launch_test_barrier("PRESERVATION_TEARDOWN_COMPLETE")?;
     }
     Ok(())
 }
@@ -1139,6 +1153,10 @@ fn normalize_preserved(
     operation: &mut crate::preservation::Operation,
 ) -> Result<()> {
     use crate::preservation::Stage;
+    if operation.stage == Stage::Normalized {
+        crate::close::validate_preservation(shell, ledger, operation, tree)?;
+        return Ok(());
+    }
     operation.capture_final(shell, ledger)?;
     let saved = operation
         .latest
@@ -1166,10 +1184,12 @@ fn normalize_preserved(
     crate::close::validate_preservation(shell, ledger, operation, &now)?;
     pin.validate(tree)?;
     operation.advance(ledger, Stage::Normalizing)?;
+    crate::work::launch_test_barrier("PRESERVATION_NORMALIZING")?;
     proof
         .normalize(shell, &now)
         .map_err(|e| operation.refusal(e))?;
     operation.advance(ledger, Stage::Normalized)?;
+    crate::work::launch_test_barrier("PRESERVATION_NORMALIZED")?;
     Ok(())
 }
 

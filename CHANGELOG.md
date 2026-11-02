@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- `dogsled close` resumes an interrupted preservation close after completed teardown, final capture, or normalization without repeating completed effects. A matching origin request can resume a requestless close for the same launch. Other identity changes still refuse the retry. Unknown teardown outcomes and interrupted normalization still retain the checkout.
+
 ## 0.29.1 - 2026-10-30
 
 - Admission works again when one committed unit cannot be queued. Before, a unit request saved without request validity, for example by an older `dogsled mcp`, made the service's recovery step fail on every tick, so no request was admitted on that host. Now the service logs that request and holds it alone.
