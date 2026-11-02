@@ -99,7 +99,7 @@ Overrides target the components' own classes and data attributes. Icons come fro
 
 ## Units
 
-Briefs are in `plans/briefs/portal-console-*.md`. Progress: units 1 to 4 are done. Unit 3 merged at `026abee` (bundle `.wasm` 3,984,587 bytes; no document scroll at 1440×900, 1280×800 and 1024×768). Unit 4 merged at `4dc16b9` (`.wasm` 6,172,931 bytes; highlighted code and tables checked in a live chat at the same widths).
+Briefs are in `plans/briefs/portal-console-*.md`. Progress: units 1 to 5 are done; unit 6 (finish) is next. Unit 3 merged at `026abee` (bundle `.wasm` 3,984,587 bytes; no document scroll at 1440×900, 1280×800 and 1024×768). Unit 4 merged at `4dc16b9` (`.wasm` 6,172,931 bytes; highlighted code and tables checked in a live chat at the same widths). Unit 5 merged at `af8a047`, with the lead fix `a58fbbb` that keeps the review grid inside a 744px column at 1024 wide. A two-revision fixture review and a live question form were checked at all three widths. Finish items: the `Recommended` badge has no inner padding, and the review header repeats the lead's full task title.
 
 1. **Wireframe** (lead). The Squig canvas `plans/portal-redesign.squig.json`: wide 1440×900, medium 1280×800 and narrow 1024×768, with the empty-inbox and plan-review states.
 2. **Highlighting choice** (selection-lead, read-only). One wasm-ready Rust highlighter for fenced code (`portal-console-highlighting.md`).
