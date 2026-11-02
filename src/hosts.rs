@@ -35,6 +35,8 @@ impl Host {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostReport {
+    #[serde(default)]
+    pub service_lanes: Vec<crate::tables::ServiceLane>,
     #[serde(flatten)]
     pub host: Host,
     pub service: String,
@@ -296,8 +298,10 @@ fn parse_machine_list(text: &str) -> Result<Vec<Host>> {
         .collect())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Cached {
+    #[serde(default)]
+    service_lanes: Vec<crate::tables::ServiceLane>,
     fetched_ms: u64,
     source: Vec<String>,
     snapshot: Option<Snapshot>,
@@ -711,6 +715,7 @@ impl<'a> Fleet<'a> {
     fn read_host(&self, host: &Host, now: u64) -> HostReport {
         let result = if host.is_local() {
             self.node().snapshot().map(|report| Cached {
+                service_lanes: report.service_lanes,
                 fetched_ms: now,
                 source: Vec::new(),
                 snapshot: report.snapshot,
@@ -728,6 +733,7 @@ impl<'a> Fleet<'a> {
             self.cached_peer(host, now)
         };
         let cached = result.unwrap_or_else(|e| Cached {
+            service_lanes: Vec::new(),
             fetched_ms: now,
             source: Vec::new(),
             snapshot: None,
@@ -786,6 +792,7 @@ impl<'a> Fleet<'a> {
             headroom
         });
         HostReport {
+            service_lanes: cached.service_lanes,
             host: host.clone(),
             service: if running { "up" } else { "down" }.into(),
             reachable: cached.reachable,
@@ -864,79 +871,46 @@ impl<'a> Fleet<'a> {
             let previous_holds = previous
                 .as_ref()
                 .map_or_else(Vec::new, |cached| cached.holds.clone());
-            let (
-                snapshot,
-                reachable,
-                available,
-                running,
-                handoffs,
-                holds,
-                error,
-                failure,
-                job_validity,
-            ) = match self.remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
+            let mut cached = match self
+                .remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
             {
-                Ok(Some(report)) => {
-                    let available = report.snapshot.is_some();
-                    (
-                        report
-                            .snapshot
-                            .or_else(|| previous.and_then(|c| c.snapshot)),
-                        true,
-                        available,
-                        report.running,
-                        report.handoffs,
-                        report.holds,
-                        None,
-                        None,
-                        report.job_validity,
-                    )
-                }
-                Ok(None) => (
-                    previous.and_then(|c| c.snapshot),
-                    true,
-                    false,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    Some("host.json is missing; service: down".into()),
-                    None,
-                    None,
-                ),
-                Err(e) => (
-                    previous.and_then(|c| c.snapshot),
-                    false,
-                    false,
-                    None,
-                    Vec::new(),
-                    previous_holds
+                Ok(Some(report)) => Cached {
+                    available: report.snapshot.is_some(),
+                    snapshot: report
+                        .snapshot
+                        .or_else(|| previous.and_then(|c| c.snapshot)),
+                    reachable: true,
+                    running: report.running,
+                    handoffs: report.handoffs,
+                    holds: report.holds,
+                    service_lanes: report.service_lanes,
+                    job_validity: report.job_validity,
+                    ..Cached::default()
+                },
+                Ok(None) => Cached {
+                    snapshot: previous.and_then(|c| c.snapshot),
+                    reachable: true,
+                    error: Some("host.json is missing; service: down".into()),
+                    ..Cached::default()
+                },
+                Err(e) => Cached {
+                    snapshot: previous.and_then(|c| c.snapshot),
+                    holds: previous_holds
                         .into_iter()
                         .map(crate::holds::Hold::unavailable)
                         .collect(),
-                    None,
-                    Some(Failure::of(&e)),
-                    None,
-                ),
+                    failure: Some(Failure::of(&e)),
+                    ..Cached::default()
+                },
             };
-            if reachable {
+            if cached.reachable {
                 retry.reset();
             } else {
                 retry.fail(now, &host.id);
             }
-            let cached = Cached {
-                fetched_ms: now,
-                source: source.clone(),
-                snapshot,
-                reachable,
-                available,
-                running,
-                handoffs,
-                holds,
-                error,
-                failure,
-                retry,
-                job_validity,
-            };
+            cached.fetched_ms = now;
+            cached.source.clone_from(&source);
+            cached.retry = retry;
             self.ledger.write(&file, &cached)?;
             Ok(cached)
         })

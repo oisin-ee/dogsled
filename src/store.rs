@@ -13,6 +13,7 @@ const VERSION: i64 = 2;
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
     format!("{}{}", crate::tables::SCHEMA, crate::admissions::SCHEMA)
+        + crate::tables::SERVICE_LANES_SCHEMA
 }
 
 fn create(connection: &Connection) -> Result<()> {
@@ -78,6 +79,8 @@ fn open(ledger: &Ledger) -> Result<Connection> {
     } else {
         connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
     }
+    // This independent diagnostic table has no historical data to convert.
+    connection.execute_batch(crate::tables::SERVICE_LANES_SCHEMA)?;
     connection.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(connection)
 }

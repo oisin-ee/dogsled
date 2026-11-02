@@ -34,6 +34,35 @@ const LANES: [Lane; 7] = [
     Lane::Quota,
 ];
 
+impl Lane {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Watchdog => "watchdog",
+            Self::Admission => "admission",
+            Self::Children => "children",
+            Self::Handoff => "handoff",
+            Self::Inbox => "inbox",
+            Self::Retention => "retention",
+            Self::Quota => "quota",
+        }
+    }
+}
+
+fn record(ledger: &Ledger, lane: Lane, result: Result<()>) -> Result<()> {
+    let error = result.err().map(|error| error.to_string());
+    let changed = crate::store::write(ledger, |tx| {
+        crate::tables::record_lane(tx, lane.name(), error.as_deref(), now_ms())
+    })?;
+    if changed {
+        if let Some(error) = error {
+            eprintln!("dogsled service lane {}: {error}", lane.name());
+        } else {
+            eprintln!("dogsled service lane {}: recovered", lane.name());
+        }
+    }
+    Ok(())
+}
+
 enum Event {
     Finished(usize, Result<()>),
     Sweep,
@@ -219,9 +248,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                             .map_err(|_| Error::Invalid("service action worker failed".into()))?;
                     }
                     completed[lane] = true;
-                    if let Err(error) = result {
-                        eprintln!("dogsled service lane {:?}: {error}", LANES[lane]);
-                    }
+                    record(node.ledger, LANES[lane], result)?;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {

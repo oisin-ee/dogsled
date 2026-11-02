@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- Status and prompt context show failing service lanes on each host, including when the failure started and how often it repeated. Service errors and handoff warnings print only when they change or recover.
+
 - Admissions move from one JSON file per request into typed tables in `state.db`: one `admissions` row per request, with child tables for job arguments, declined placements, custody acknowledgements, and reviews. Each field Dogsled reads is its own column. Peer protocol messages, such as commit inputs, receipts, and release certificates, are kept as the exact bytes exchanged, because their digests and replay depend on them.
 - `dogsled unit settlements`, which every Pi session runs every 10 seconds, reads only the caller's unsettled units, through an index. Before, it read every admission file several times per call and reread the whole queue for each failed or cancelled ticket, so about 11 sessions kept about 11 cores busy.
 - `state.db` is now schema version 2. A host with an older `state.db` starts again with an empty store. Admission files and older store contents are not read. Let queued work finish before you upgrade a host.

@@ -1793,6 +1793,7 @@ mod tests {
 
     fn host(id: &str, label: &str, agents: Vec<Agent>) -> HostReport {
         HostReport {
+            service_lanes: Vec::new(),
             host: Host {
                 id: id.into(),
                 label: label.into(),

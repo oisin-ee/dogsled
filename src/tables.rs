@@ -109,6 +109,88 @@ CREATE TABLE item_recovery_predecessors (
 "
 );
 
+/// Service diagnostics are independent of the execution records and start empty.
+pub(crate) const SERVICE_LANES_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS service_lanes (
+    lane TEXT PRIMARY KEY NOT NULL,
+    error TEXT,
+    since_ms INTEGER,
+    last_ms INTEGER NOT NULL,
+    repeats INTEGER NOT NULL,
+    CHECK ((error IS NULL) = (since_ms IS NULL))
+);
+";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ServiceLane {
+    pub lane: String,
+    pub error: Option<String>,
+    pub since_ms: Option<u64>,
+    pub last_ms: u64,
+    pub repeats: u64,
+}
+
+fn service_lane(row: &Row<'_>) -> Result<ServiceLane> {
+    Ok(ServiceLane {
+        lane: required(row, "lane")?,
+        error: text(row, "error")?,
+        since_ms: number(row, "since_ms")?,
+        last_ms: unsigned(row.get("last_ms")?)?,
+        repeats: unsigned(row.get("repeats")?)?,
+    })
+}
+
+pub(crate) fn failing_lanes(tx: &Transaction<'_>) -> Result<Vec<ServiceLane>> {
+    let mut statement =
+        tx.prepare_cached("SELECT * FROM service_lanes WHERE error IS NOT NULL ORDER BY lane")?;
+    let mut rows = statement.query([])?;
+    let mut lanes = Vec::new();
+    while let Some(row) = rows.next()? {
+        lanes.push(service_lane(row)?);
+    }
+    Ok(lanes)
+}
+
+/// Return whether the diagnostic changed, in the same transaction that records the pass.
+pub(crate) fn record_lane(
+    tx: &Transaction<'_>,
+    lane: &str,
+    error: Option<&str>,
+    now: u64,
+) -> Result<bool> {
+    let mut statement = tx.prepare_cached("SELECT * FROM service_lanes WHERE lane = ?1")?;
+    let mut rows = statement.query([lane])?;
+    let previous = rows.next()?.map(service_lane).transpose()?;
+    let changed = previous.as_ref().and_then(|old| old.error.as_deref()) != error;
+    let since = error.map(|_| {
+        if changed {
+            now
+        } else {
+            previous
+                .as_ref()
+                .and_then(|old| old.since_ms)
+                .unwrap_or(now)
+        }
+    });
+    let repeats = if error.is_none() {
+        0
+    } else if changed {
+        1
+    } else {
+        previous
+            .as_ref()
+            .map_or(1, |old| old.repeats.saturating_add(1))
+    };
+    let mut columns = Columns::default();
+    columns.text("lane", Some(lane));
+    columns.text("error", error);
+    columns.number("since_ms", since)?;
+    columns.number("last_ms", Some(now))?;
+    columns.number("repeats", Some(repeats))?;
+    columns.upsert(tx, "service_lanes", "lane")?;
+    Ok(changed)
+}
+
 pub(crate) fn tickets(tx: &Transaction<'_>) -> Result<Vec<Ticket>> {
     let mut statement = tx.prepare_cached("SELECT * FROM tickets ORDER BY seq")?;
     let mut rows = statement.query([])?;
@@ -428,4 +510,47 @@ fn item_row(tx: &Transaction<'_>, row: &Row<'_>) -> Result<Item> {
         recovery,
         id,
     })
+}
+
+#[cfg(test)]
+mod service_lane_tests {
+    use super::*;
+
+    #[test]
+    fn changed_error_starts_a_new_failure_and_success_clears_it() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(SERVICE_LANES_SCHEMA).unwrap();
+        let tx = db.transaction().unwrap();
+        assert!(!record_lane(&tx, "admission", None, 1).unwrap());
+        assert_eq!(failing_lanes(&tx).unwrap(), [] as [ServiceLane; 0]);
+        assert!(record_lane(&tx, "admission", Some("first"), 10).unwrap());
+        assert!(!record_lane(&tx, "admission", Some("first"), 20).unwrap());
+        assert_eq!(
+            failing_lanes(&tx).unwrap(),
+            vec![ServiceLane {
+                lane: "admission".into(),
+                error: Some("first".into()),
+                since_ms: Some(10),
+                last_ms: 20,
+                repeats: 2,
+            }]
+        );
+        assert!(record_lane(&tx, "admission", Some("changed"), 30).unwrap());
+        assert_eq!(
+            failing_lanes(&tx).unwrap(),
+            vec![ServiceLane {
+                lane: "admission".into(),
+                error: Some("changed".into()),
+                since_ms: Some(30),
+                last_ms: 30,
+                repeats: 1,
+            }]
+        );
+        assert!(record_lane(&tx, "admission", None, 40).unwrap());
+        assert!(!record_lane(&tx, "admission", None, 50).unwrap());
+        assert_eq!(failing_lanes(&tx).unwrap(), [] as [ServiceLane; 0]);
+        assert!(record_lane(&tx, "admission", Some("changed"), 60).unwrap());
+        assert_eq!(failing_lanes(&tx).unwrap()[0].since_ms, Some(60));
+        assert_eq!(failing_lanes(&tx).unwrap()[0].repeats, 1);
+    }
 }
