@@ -44,7 +44,7 @@ fn lane_status_write_failure_does_not_stop_service() {
     )
     .unwrap();
     drop(db);
-    fs::write(rig.dir.join("state/quota.json"), "poisoned").unwrap();
+    rig.fault_host_store("quota", false);
     let lane_error = "dogsled service lane quota: invalid quota snapshot";
     let recording_error =
         "dogsled service lane quota: cannot record lane status: SQLite: lane write refused";
@@ -72,7 +72,7 @@ fn lane_errors_persist_across_service_runs_and_recover_once() {
     let first_ms = now();
     fs::write(rig.dir.join("clock"), first_ms.to_string()).unwrap();
     // Only the quota lane reads this cache. Publication and status remain available.
-    fs::write(rig.dir.join("state/quota.json"), "poisoned").unwrap();
+    rig.fault_host_store("quota", false);
     let mut journal = String::new();
     for pass in 0..3 {
         fs::write(rig.dir.join("clock"), (first_ms + pass * 1_000).to_string()).unwrap();
@@ -106,7 +106,7 @@ fn lane_errors_persist_across_service_runs_and_recover_once() {
     let (_, snapshot) = rig.json(&["host", "snapshot"]);
     assert_eq!(snapshot["service_lanes"], failing);
 
-    fs::remove_file(rig.dir.join("state/quota.json")).unwrap();
+    rig.fault_host_store("clear-quota", false);
     let recovered = serve(&rig);
     assert_eq!(
         recovered
@@ -158,7 +158,7 @@ fn remote_lane_failures_reach_full_brief_and_context_status() {
 fn repeated_handoff_warning_prints_once_across_lane_threads() {
     let rig = Rig::new("service-handoff-warning");
     rig.done("missing-terminal", "gone:p1", 10);
-    let original = rig.read("state/done.json");
+    let original = rig.state(&["done"]);
     // Each lane pass has a new worker thread, but the diagnostic source is the same.
     let mut child = rig.start(&["serve", "--interval", "1"]);
     let deadline = Instant::now() + PROCESS_DEADLINE;
@@ -193,5 +193,5 @@ fn repeated_handoff_warning_prints_once_across_lane_threads() {
         1,
         "{journal}"
     );
-    assert_eq!(rig.read("state/done.json"), original);
+    assert_eq!(rig.state(&["done"]), original);
 }

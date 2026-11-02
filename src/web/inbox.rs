@@ -241,7 +241,7 @@ mod tests {
             7465,
             None,
             super::super::guard::Token::new("token".into()),
-            ledger.child("web"),
+            ledger.clone(),
         );
         let response = super::super::router(state.clone())
             .oneshot(
@@ -301,14 +301,19 @@ mod tests {
             7465,
             None,
             super::super::guard::Token::new("token".into()),
-            ledger.child("web"),
+            ledger.clone(),
         );
         let mut review = review();
         let save_review = |review: &Review| {
-            state.web.child("reviews").write(
-                "review-one.json",
-                &json!({"review": review, "delivered": false}),
-            )
+            crate::store::write(&state.web, |tx| {
+                crate::web_store::reviews::put(
+                    tx,
+                    &super::super::reviews::Record {
+                        review: review.clone(),
+                        delivered: false,
+                    },
+                )
+            })
         };
         save_review(&review)?;
         let body: AskBody = serde_json::from_value(json!({

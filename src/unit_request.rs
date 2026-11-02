@@ -1496,15 +1496,17 @@ mod stopped_tests {
     }
 
     fn claimed(ledger: &Ledger, host: &str, session: &str, revision: u64) {
-        ledger
-            .write(
-                "custody.json",
-                &json!([{"item":ID,"host":host,"owner_pane":"w1:p1","custodian_pane":"w2:p1",
+        crate::host_store::put_custodies(
+            ledger,
+            &serde_json::from_value::<Vec<crate::custody::Custody>>(
+                json!([{"item":ID,"host":host,"owner_pane":"w1:p1","custodian_pane":"w2:p1",
                     "custodian_session":session,"revision":revision,
                     "claims":[{"id":format!("claim-{revision}"),"claimant_pane":"w2:p1",
                         "claimed_ms":1,"revision":revision}]}]),
             )
-            .unwrap();
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     fn review(ledger: &Ledger, evidence: &str) -> crate::unit_transport::Review {

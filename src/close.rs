@@ -116,16 +116,16 @@ impl StoppedOrphan {
     }
 
     pub fn recorded(ledger: &Ledger, item: &str, agent: &crate::probe::Agent) -> Result<Self> {
-        #[derive(Default, Deserialize)]
-        struct Episodes {
-            #[serde(default)]
-            stopped: std::collections::BTreeMap<String, StoppedOrphan>,
-        }
-        let mut episodes: Episodes = ledger.read("watchdog.json")?.unwrap_or_default();
+        let mut episodes = crate::host_store::watchdog(ledger)?.unwrap_or_default();
         let episode = episodes
             .stopped
             .remove(item)
             .ok_or_else(|| refuse("stopped orphan has no recorded episode"))?;
+        let episode = Self {
+            pane: episode.pane,
+            agent_session: episode.agent_session,
+            turn: episode.turn,
+        };
         episode.validate(agent)?;
         Ok(episode)
     }

@@ -426,7 +426,7 @@ mod tests {
             crate::ledger::Ledger::new(
                 std::env::temp_dir().join(format!("dogsled-agents-{}", crate::ledger::new_id())),
             )
-            .child("web"),
+            .clone(),
         )
     }
 

@@ -58,8 +58,8 @@ pub struct AppState {
     /// The portal's own token. A request that carries it as a `Bearer`
     /// credential passes the guard's origin rule.
     token: guard::Token,
-    /// The portal's own directory. Every file the portal keeps lives under it,
-    /// so the routes never read a process-global state root.
+    /// The host ledger. Portal records share its typed SQLite database,
+    /// so routes never read a process-global state root.
     web: Ledger,
     /// The questions that wait for an answer, with the waiters of the long
     /// polls.
@@ -71,9 +71,8 @@ pub struct AppState {
 impl AppState {
     /// The state of a portal that serves on the given port.
     ///
-    /// The `web` ledger is the portal's own directory. The questions of the
-    /// portal live under it, so a new state over the same directory sees the
-    /// questions that wait.
+    /// The `web` ledger names the host database. A new state over the same
+    /// ledger sees the questions that wait.
     #[must_use]
     pub fn new(
         board: watch::Receiver<String>,
@@ -82,7 +81,7 @@ impl AppState {
         token: guard::Token,
         web: Ledger,
     ) -> Self {
-        let questions = store::Store::new(web.child("questions"));
+        let questions = store::Store::new(web.clone());
         Self {
             board,
             port,
@@ -196,7 +195,7 @@ async fn listen(
         port,
         agents,
         guard::Token::new(token::token(ledger)?),
-        ledger.child("web"),
+        ledger.clone(),
     );
     Ok((listener, state))
 }
@@ -377,7 +376,7 @@ mod tests {
             crate::ledger::Ledger::new(
                 std::env::temp_dir().join(format!("dogsled-web-{}", crate::ledger::new_id())),
             )
-            .child("web"),
+            .clone(),
         )
     }
 

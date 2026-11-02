@@ -180,16 +180,7 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                     continue;
                 }
                 expired.push(ticket.id.clone());
-                match std::fs::remove_file(
-                    ledger
-                        .child("cancellations")
-                        .dir
-                        .join(format!("{}.json", ticket.request.id)),
-                ) {
-                    Ok(()) => (),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(error) => return Err(error.into()),
-                }
+                crate::job_store::remove_cancellation(ledger, &ticket.request.id)?;
             }
         }
         if !expired.is_empty() {
@@ -201,77 +192,18 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
 }
 
 fn expire_request_sidecars(ledger: &Ledger, now: u64, tickets: &[Ticket]) -> Result<()> {
-    let sidecars = ledger.child("job-validity");
-    let entries = match std::fs::read_dir(&sidecars.dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
+    for (id, _) in crate::job_store::validities(ledger)? {
+        let id = id.as_str();
         let admission_owner = crate::admissions::exists(ledger, id)?;
         if admission_owner
-            || [
-                "preparation-receipts",
-                "placement-grants",
-                "preparation-expectations",
-            ]
-            .iter()
-            .any(|directory| {
-                ledger
-                    .child(directory)
-                    .dir
-                    .join(format!("{id}.json"))
-                    .exists()
-            })
-            || [
-                "progress.json",
-                "unit.json",
-                "release.json",
-                "reference-release.json",
-            ]
-            .iter()
-            .any(|extension| {
-                ledger
-                    .child("launches")
-                    .dir
-                    .join(format!("{id}.{extension}"))
-                    .exists()
-            })
+            || crate::preparation_store::exists(ledger, id)?
+            || crate::launch_store::exists(ledger, id)?
             || tickets.iter().any(|t| t.request.id == id)
-            || ledger
-                .child("launches")
-                .read::<Value>(&format!("{id}.json"))?
-                .is_some()
+            || crate::launch_store::receipt(ledger, id)?.is_some()
         {
             continue;
         }
-        ledger.child("request-ingress").with_lock(id, || {
-            sidecars.with_lock(id, || {
-                let Some(validity) = jobs::request_validity(ledger, id)? else {
-                    return Ok(());
-                };
-                if now.saturating_sub(validity.created_ms) > jobs::RECORD_KEEP_MS
-                    && jobs::record(ledger, id)?
-                        .is_none_or(|j| matches!(jobs::expiry(&j, now), jobs::Expiry::Record))
-                {
-                    jobs::remove(&path)?;
-                    jobs::remove(
-                        &ledger
-                            .child("request-ingress")
-                            .dir
-                            .join(format!("{id}.json")),
-                    )?;
-                }
-                Ok(())
-            })
-        })?;
+        crate::job_store::expire_validity(ledger, id, now)?;
     }
     Ok(())
 }
@@ -401,18 +333,13 @@ fn host_references_released(ledger: &Ledger, id: &str) -> Result<bool> {
         return Ok(true);
     }
     let revision = custody.map_or(0, |custody| custody.revision);
-    let launches = ledger.child("launches");
-    if let Some(release) =
-        launches.read::<crate::launch::OrdinaryReleaseAck>(&format!("{id}.release.json"))?
-    {
+    if let Some(release) = crate::launch_store::release(ledger, id)? {
         release.certificate.validate()?;
         return Ok(
             release.certificate.launch.id == id && release.certificate.custody_revision == revision
         );
     }
-    if let Some(release) = launches
-        .read::<crate::launch::ReferenceReleaseAck>(&format!("{id}.reference-release.json"))?
-    {
+    if let Some(release) = crate::launch_store::reference_release(ledger, id)? {
         release.certificate.validate()?;
         return Ok(
             release.certificate.launch.id == id && release.certificate.custody_revision == revision
@@ -423,11 +350,10 @@ fn host_references_released(ledger: &Ledger, id: &str) -> Result<bool> {
 
 /// Preserve conclusive job evidence before the job owner removes its bounded record.
 pub(crate) fn job_finished(ledger: &Ledger, job: &Job) -> Result<()> {
-    let launches = ledger.child("launches");
     // The caller holds launch before job, just like dispatch.
     {
-        let file = format!("{}.json", job.id);
-        if let Some(mut receipt) = launches.read::<Value>(&file)? {
+        let file = job.id.clone();
+        if let Some(mut receipt) = crate::launch_store::receipt(ledger, &file)? {
             let Some(launch) = receipt.get("launch") else {
                 return Ok(());
             };
@@ -441,7 +367,7 @@ pub(crate) fn job_finished(ledger: &Ledger, job: &Job) -> Result<()> {
                 return Ok(());
             }
             receipt["terminal_job"] = serde_json::to_value(job)?;
-            launches.write(&file, &receipt)?;
+            crate::launch_store::put_receipt(ledger, &file, &receipt)?;
         }
         Ok(())
     }
@@ -510,7 +436,7 @@ fn expire_admission(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
             }
             tickets.retain(|ticket| ticket.request.id != id);
             save_queue(ledger, &tickets)?;
-            jobs::remove(&ledger.child("cancellations").dir.join(format!("{id}.json")))?;
+            crate::job_store::remove_cancellation(ledger, id)?;
             crate::admissions::remove(ledger, id)
         })?;
         crate::custody::locked(ledger, id, |_| crate::custody::forget_released(ledger, id))
@@ -720,32 +646,32 @@ pub fn enqueue_retry(
 
 /// The expectation is captured once under admission. Release progress never replaces it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Cancellation {
-    version: u32,
+pub(crate) struct Cancellation {
+    pub(crate) version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    completion_version: Option<u32>,
+    pub(crate) completion_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    finished_ms: Option<u64>,
-    operation_id: String,
-    ticket: Ticket,
-    admission: Option<Value>,
-    preparation: Option<crate::prepare::PreparationLookup>,
-    placement: Option<crate::prepare::LookupRequest>,
-    outcome: crate::prepare::disposition::Outcome,
-    release: String,
-    intent: Option<crate::prepare::disposition::Request>,
-    acknowledgement: Option<crate::prepare::disposition::Acknowledgement>,
-    error: Option<String>,
+    pub(crate) finished_ms: Option<u64>,
+    pub(crate) operation_id: String,
+    pub(crate) ticket: Ticket,
+    pub(crate) admission: Option<Value>,
+    pub(crate) preparation: Option<crate::prepare::PreparationLookup>,
+    pub(crate) placement: Option<crate::prepare::LookupRequest>,
+    pub(crate) outcome: crate::prepare::disposition::Outcome,
+    pub(crate) release: String,
+    pub(crate) intent: Option<crate::prepare::disposition::Request>,
+    pub(crate) acknowledgement: Option<crate::prepare::disposition::Acknowledgement>,
+    pub(crate) error: Option<String>,
     /// Release needs an operator. The release stays pending, and repair skips the
     /// record until the evidence it was held on changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    held: Option<Held>,
+    pub(crate) held: Option<Held>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Held {
-    reason: String,
-    evidence: String,
+pub(crate) struct Held {
+    pub(crate) reason: String,
+    pub(crate) evidence: String,
 }
 
 const MISSING_IDENTITY: &str =
@@ -756,9 +682,7 @@ const MISSING_IDENTITY: &str =
 pub(crate) const REPAIR_BATCH: usize = 16;
 
 fn cancellation(ledger: &Ledger, request: &Request) -> Result<Option<Cancellation>> {
-    let saved = ledger
-        .child("cancellations")
-        .read::<Cancellation>(&format!("{}.json", request.id))?;
+    let saved = crate::job_store::cancellation(ledger, &request.id)?;
     if let Some(saved) = &saved {
         jobs::validate_id(&saved.operation_id)?;
         if saved.version != 1
@@ -820,17 +744,12 @@ fn capture_cancellation_from(
             "cancellation admission request changed",
         ));
     }
-    let launches = ledger.child("launches");
     let no_launch = attempt
         .as_ref()
         .is_some_and(|a| a.launch.is_none() && a.result.is_none())
         && ticket.result.is_none()
-        && launches
-            .read::<Value>(&format!("{}.json", request.id))?
-            .is_none()
-        && launches
-            .read::<Value>(&format!("{}.progress.json", request.id))?
-            .is_none();
+        && crate::launch_store::receipt(ledger, &request.id)?.is_none()
+        && crate::launch_store::progress_value(ledger, &request.id)?.is_none();
     let outcome = if no_launch {
         Outcome::NotStarted
     } else if attempt.as_ref().is_some_and(|a| a.launch.is_some()) {
@@ -839,10 +758,7 @@ fn capture_cancellation_from(
         Outcome::Unknown
     };
     let operation_id = new_id();
-    let mut preparation =
-        ledger
-            .child("preparation-expectations")
-            .read::<crate::prepare::PreparationLookup>(&format!("{}.json", request.id))?;
+    let mut preparation = crate::preparation_store::expectations::get(ledger, &request.id)?;
     if let Some(query) = &mut preparation {
         if serde_json::to_value(&query.request)? != expected_request
             || attempt.as_ref().and_then(|a| a.host.as_ref()) != Some(&query.host)
@@ -968,9 +884,7 @@ fn cancellation_intent(
         error: pending.then(|| "preparation release pending".into()),
         held: None,
     };
-    ledger
-        .child("cancellations")
-        .write(&format!("{}.json", request.id), &saved)?;
+    crate::job_store::put_cancellation(ledger, &saved)?;
     crate::unit_request::crash_point("cancellation-intent-saved");
     Ok(saved)
 }
@@ -1096,9 +1010,7 @@ pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
             saved.release = "pending".into();
             saved.intent = None;
             saved.error = Some(error.to_string());
-            ledger
-                .child("cancellations")
-                .write(&format!("{}.json", ticket.request.id), &saved)?;
+            crate::job_store::put_cancellation(ledger, &saved)?;
             project_cancellation(ledger, &saved)?;
             return Err(error);
         }
@@ -1192,31 +1104,12 @@ pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> 
 /// At most `REPAIR_BATCH` releases are attempted, least recently attempted first, and
 /// every changed ticket is saved in one queue write at the end.
 fn repair_cancellations(fleet: &Fleet) -> Result<()> {
-    let directory = fleet.ledger.child("cancellations");
-    let entries = match std::fs::read_dir(&directory.dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut records = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        // Every attempt rewrites its record, so the oldest write was attempted last.
-        let attempted = entry.metadata().and_then(|m| m.modified()).ok();
-        records.push((attempted, id.to_owned()));
-    }
-    records.sort();
+    let records = crate::job_store::cancellations(fleet.ledger)?;
     let mut tickets = queue(fleet.ledger)?;
     let mut projected = Vec::new();
     let mut attempts = 0;
-    for (_, id) in records {
+    for record in records {
+        let id = record.ticket.request.id;
         let result = jobs::validate_id(&id).and_then(|()| {
             crate::admissions::lock(fleet.ledger, &id, || {
                 repair_cancellation(fleet, &id, &mut tickets, attempts < REPAIR_BATCH)
@@ -1267,10 +1160,7 @@ fn repair_cancellation(
     tickets: &mut [Ticket],
     may_attempt: bool,
 ) -> Result<Repair> {
-    let directory = fleet.ledger.child("cancellations");
-    let file = format!("{id}.json");
-    let saved = directory
-        .read::<Cancellation>(&file)?
+    let saved = crate::job_store::cancellation(fleet.ledger, id)?
         .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
     let mut saved = cancellation(fleet.ledger, &saved.ticket.request)?
         .ok_or_else(|| crate::unit_transport::conflict("cancellation disappeared"))?;
@@ -1279,7 +1169,7 @@ fn repair_cancellation(
         Err(error) => {
             if saved.error.as_deref() != Some(error.to_string().as_str()) {
                 saved.error = Some(error.to_string());
-                directory.write(&file, &saved)?;
+                crate::job_store::put_cancellation(fleet.ledger, &saved)?;
             }
             return Err(error);
         }
@@ -1319,7 +1209,7 @@ fn repair_cancellation(
             Some(saved.ticket.created_ms),
         )?;
     }
-    directory.write(&file, &saved)?;
+    crate::job_store::put_cancellation(fleet.ledger, &saved)?;
     project_attempt(fleet.ledger, &saved)?;
     project_ticket(tickets, &saved)?;
     Ok(Repair::Attempted(Box::new(saved)))
@@ -1333,11 +1223,11 @@ fn identityless(saved: &Cancellation) -> bool {
 
 /// Everything a held release can be retried on. A change to any of them retries it.
 fn held_evidence(ledger: &Ledger, id: &str) -> Result<String> {
-    let file = format!("{id}.json");
-    let mut evidence = vec![crate::admissions::value(ledger, id)?];
-    for store in ["preparation-expectations", "preparation-retirements"] {
-        evidence.push(ledger.child(store).read::<Value>(&file)?);
-    }
+    let evidence = vec![
+        crate::admissions::value(ledger, id)?,
+        crate::preparation_store::expectations::value(ledger, id)?,
+        crate::preparation_store::retirements::value(ledger, id)?,
+    ];
     Ok(crate::unit_transport::digest_hex(&serde_json::to_vec(
         &evidence,
     )?))
@@ -1420,10 +1310,7 @@ fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<(
         }
         LookupState::Disposition { receipt, .. } => {
             saved.intent = Some(receipt.request);
-            fleet
-                .ledger
-                .child("cancellations")
-                .write(&format!("{}.json", request.id), saved)?;
+            crate::job_store::put_cancellation(fleet.ledger, saved)?;
             return Ok(());
         }
         _ => {
@@ -1456,10 +1343,7 @@ fn resolve_cancelled_intent(fleet: &Fleet, saved: &mut Cancellation) -> Result<(
         },
         outcome: saved.outcome.clone(),
     });
-    fleet
-        .ledger
-        .child("cancellations")
-        .write(&format!("{}.json", request.id), saved)?;
+    crate::job_store::put_cancellation(fleet.ledger, saved)?;
     Ok(())
 }
 
@@ -1493,10 +1377,7 @@ fn acknowledge_cancellation(fleet: &Fleet, host: &Host, saved: &mut Cancellation
         prepare::validate_ack(intent, ack)?;
     } else {
         saved.acknowledgement = Some(prepare::dispose(fleet, host, intent)?);
-        fleet
-            .ledger
-            .child("cancellations")
-            .write(&format!("{}.json", request.id), saved)?;
+        crate::job_store::put_cancellation(fleet.ledger, saved)?;
         crate::unit_request::crash_point("cancellation-acknowledgement-saved");
     }
     saved.release = "acknowledged".into();
@@ -1912,11 +1793,7 @@ pub fn receive_launch(
                             launch.id
                         )));
                     }
-                    None if ledger
-                        .child("launches")
-                        .read::<Value>(&format!("{}.json", launch.id))?
-                        .is_none() =>
-                    {
+                    None if crate::launch_store::receipt(ledger, &launch.id)?.is_none() => {
                         jobs::check_validity(ledger, validity.as_ref())?;
                         jobs::record_request_validity(ledger, &launch.id, *validity)?;
                     }
@@ -2129,10 +2006,7 @@ fn replay_launch(ledger: &Ledger, launch: &Launch) -> Result<Option<Value>> {
     if matches!(launch.action, Action::Agent { .. }) {
         return crate::launch::replay(ledger, launch);
     }
-    if let Some(value) = ledger
-        .child("launches")
-        .read::<Value>(&format!("{}.json", launch.id))?
-    {
+    if let Some(value) = crate::launch_store::receipt(ledger, &launch.id)? {
         if let Action::Job {
             cmd,
             timeout_ms,
@@ -2188,8 +2062,8 @@ fn launch_guarded(
     let receipts = ledger.child("launches");
     ledger.with_lock("done", || {
         receipts.with_lock(&launch.id, || {
-            let file = format!("{}.json", launch.id);
-            if let Some(value) = receipts.read::<Value>(&file)? {
+            let file = launch.id.clone();
+            if let Some(value) = crate::launch_store::receipt(ledger, &file)? {
                 // A saved receipt is the only evidence that this request dispatched. It
                 // replays only when it correlates to this request and to the recorded job.
                 if let Action::Job {
@@ -2236,7 +2110,7 @@ fn launch_guarded(
             if let Some(checkout) = checkout {
                 result["checkout"] = serde_json::to_value(checkout)?;
             }
-            receipts.write(&file, &result)?;
+            crate::launch_store::put_receipt(ledger, &file, &result)?;
             crate::prepare::disposition::transfer_guarded(ledger, launch, &result)?;
             Ok(result)
         })
@@ -2716,16 +2590,15 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
             )?,
             binding: None,
         };
-        let expectations = fleet.ledger.child("preparation-expectations");
-        let file = format!("{}.json", request.id);
-        if let Some(saved) = expectations.read::<crate::prepare::PreparationLookup>(&file)? {
+        if let Some(saved) = crate::preparation_store::expectations::get(fleet.ledger, &request.id)?
+        {
             if serde_json::to_value(&saved)? != serde_json::to_value(&query)? {
                 return Err(crate::unit_transport::conflict(
                     "preparation expectation changed",
                 ));
             }
         } else {
-            expectations.write(&file, &query)?;
+            crate::preparation_store::expectations::put(fleet.ledger, &request.id, &query)?;
         }
         crate::prepare::run(
             fleet,

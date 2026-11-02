@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { TodoPublisher, type TodoSnapshot } from "./work-todo.ts";
+import { TodoPublisher, type TodoPayload, type TodoSnapshot } from "./work-todo.ts";
 import { todoDisplay, todoSections } from "./todo-fixture.test.ts";
 import { herdrAvailable, parseBoard, renderBoard } from "./board.ts";
 
@@ -11,41 +8,47 @@ function snapshot(): TodoSnapshot {
 	return { session: "session", branch: "branch", revision: 1, display: todoDisplay() };
 }
 
-test("todo publisher writes the typed sections, orders revisions, and clears sessions", async () => {
-	const dir = await mkdtemp(join(tmpdir(), "dogsled-todo-"));
-	const path = join(dir, "pane.json");
+test("todo publisher sends typed sections, orders revisions, and clears sessions", async () => {
+	const calls: { pane: string; payload: TodoPayload | undefined }[] = [];
 	const errors: unknown[] = [];
-	const publisher = new TodoPublisher("w1:p1", error => errors.push(error));
-	try {
-		publisher.configure({ path });
-		const sections = todoSections({
-			in_progress: [{ status: "in_progress", text: "Land PR #112", description: "Release it.", review: false, unit: null, children: [] }],
-			pending: [{ status: "pending", text: "Verify", review: true, unit: "u1", children: [{ status: "pending", text: "child", unit: null }] }],
-		});
-		const next = snapshot();
-		next.display = todoDisplay({ sections, state: new Proxy({}, { get() { throw new Error("Do not inspect task state"); } }) });
-		publisher.publish(next);
-		publisher.publish(next);
-		await publisher.flushed();
-		const payload = JSON.parse(await readFile(path, "utf8"));
-		assert.deepEqual(Object.keys(payload), ["session", "branch", "revision", "current", "pane", "sections"]);
-		assert.equal(payload.pane, "w1:p1");
-		assert.equal(payload.current, "Verify changes");
-		assert.deepEqual(payload.sections, sections);
-		assert.deepEqual(payload.sections.map((section: { status: string }) => section.status), ["in_progress", "pending", "completed", "abandoned"]);
-		publisher.publish({ ...next, revision: 2, branch: "other" });
-		await publisher.flushed();
-		assert.equal(JSON.parse(await readFile(path, "utf8")).revision, 2);
-		await publisher.clear();
-		await assert.rejects(readFile(path), { code: "ENOENT" });
-		assert.deepEqual(errors, []);
-	} finally { await rm(dir, { recursive: true, force: true }); }
+	const publisher = new TodoPublisher("w1:p1", error => errors.push(error), async (pane, payload) => { calls.push({ pane, payload }); });
+	publisher.configure();
+	const sections = todoSections({
+		in_progress: [{ status: "in_progress", text: "Land PR #112", description: "Release it.", review: false, unit: null, children: [] }],
+		pending: [{ status: "pending", text: "Verify", review: true, unit: "u1", children: [{ status: "pending", text: "child", unit: null }] }],
+	});
+	const next = snapshot();
+	next.display = todoDisplay({ sections, state: new Proxy({}, { get() { throw new Error("Do not inspect task state"); } }) });
+	publisher.publish(next);
+	publisher.publish(next);
+	await publisher.flushed();
+	assert.equal(calls.length, 1);
+	const payload = calls[0]?.payload;
+	assert.ok(payload);
+	assert.deepEqual(Object.keys(payload), ["session", "branch", "revision", "current", "pane", "sections"]);
+	assert.equal(payload.pane, "w1:p1");
+	assert.equal(payload.current, "Verify changes");
+	assert.deepEqual(payload.sections, sections);
+	assert.deepEqual(payload.sections.map(section => section.status), ["in_progress", "pending", "completed", "abandoned"]);
+	publisher.publish({ ...next, revision: 2, branch: "other" });
+	await publisher.flushed();
+	assert.equal(calls[1]?.payload?.revision, 2);
+	await publisher.clear();
+	assert.equal(calls[2]?.pane, "w1:p1");
+	assert.equal(calls[2]?.payload, undefined);
+	assert.deepEqual(errors, []);
 });
 
-test("publisher rejects a path without a string", () => {
-	const publisher = new TodoPublisher("w1:p1", () => {});
-	assert.throws(() => publisher.configure({ path: 1 }));
-	assert.throws(() => publisher.configure(null));
+test("publisher remains disabled until configured and reports failed publications", async () => {
+	const errors: unknown[] = [];
+	const publisher = new TodoPublisher("w1:p1", error => errors.push(error), async () => { throw new Error("storage refused"); });
+	publisher.publish(snapshot());
+	await publisher.flushed();
+	assert.deepEqual(errors, []);
+	publisher.configure();
+	publisher.publish(snapshot());
+	await publisher.flushed();
+	assert.equal(errors.length, 1);
 });
 
 test("the board decoder keeps lifecycle strings and unknown groups visible", () => {

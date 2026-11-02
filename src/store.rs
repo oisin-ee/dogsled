@@ -12,8 +12,18 @@ const VERSION: i64 = 2;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
-    format!("{}{}", crate::tables::SCHEMA, crate::admissions::SCHEMA)
-        + crate::tables::SERVICE_LANES_SCHEMA
+    [
+        crate::tables::SCHEMA,
+        crate::tables::SERVICE_LANES_SCHEMA,
+        crate::admissions::SCHEMA,
+        crate::launch_store::SCHEMA,
+        crate::web_store::SCHEMA,
+        crate::job_store::SCHEMA,
+        crate::preparation_store::SCHEMA,
+        crate::host_store::SCHEMA,
+        crate::host_store::PEER_SCHEMA,
+    ]
+    .concat()
 }
 
 fn create(connection: &Connection) -> Result<()> {
@@ -106,26 +116,78 @@ pub(crate) fn write<T>(
     transact(ledger, TransactionBehavior::Immediate, f)
 }
 
+/// The file a cached connection opened. A replaced or removed `state.db` has a new identity.
+type Identity = (u64, u64);
+
+thread_local! {
+    /// Open connections, reused by later transactions on this thread. A connection is taken
+    /// out for one transaction, so a nested transaction opens its own.
+    static CONNECTIONS: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, (Identity, Connection)>> =
+        std::cell::RefCell::default();
+    /// The empty schema that a read sees when the host has no store yet.
+    static EMPTY: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Close this thread's cached connections.
+#[cfg(test)]
+pub(crate) fn release() {
+    CONNECTIONS.with_borrow_mut(std::collections::HashMap::clear);
+}
+
+fn identity(path: &std::path::Path) -> Result<Option<Identity>> {
+    use std::os::unix::fs::MetadataExt as _;
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A connection to this ledger's store: the cached one when it still opens the same file
+/// at the supported version, otherwise a new one.
+fn connection(ledger: &Ledger, path: &std::path::Path) -> Result<(Identity, Connection)> {
+    if let Some((cached, connection)) = CONNECTIONS.with_borrow_mut(|open| open.remove(path))
+        && identity(path)? == Some(cached)
+        && version(&connection)? == VERSION
+    {
+        return Ok((cached, connection));
+    }
+    let connection = open(ledger)?;
+    let opened =
+        identity(path)?.ok_or_else(|| Error::Invalid(format!("{} disappeared", path.display())))?;
+    Ok((opened, connection))
+}
+
 fn transact<T>(
     ledger: &Ledger,
     behavior: TransactionBehavior,
     f: impl FnOnce(&Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
     (|| {
-        let mut connection = if matches!(behavior, TransactionBehavior::Deferred)
-            && !database(ledger)?.try_exists()?
-        {
-            // A read never creates the store: a host without one has empty tables.
-            let connection = Connection::open_in_memory()?;
-            create(&connection)?;
-            connection
-        } else {
-            open(ledger)?
-        };
+        let path = database(ledger)?;
+        if matches!(behavior, TransactionBehavior::Deferred) && identity(&path)?.is_none() {
+            // A read never creates the store: a host without one has empty tables. The
+            // read is rolled back, so the shared empty schema stays empty.
+            let mut connection = if let Some(connection) = EMPTY.take() {
+                connection
+            } else {
+                let connection = Connection::open_in_memory()?;
+                create(&connection)?;
+                connection
+            };
+            let result = (|| {
+                let tx = connection.transaction_with_behavior(behavior)?;
+                f(&tx)
+            })();
+            EMPTY.set(Some(connection));
+            return result;
+        }
+        let (opened, mut connection) = connection(ledger, &path)?;
         connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
         let tx = connection.transaction_with_behavior(behavior)?;
         let result = f(&tx)?;
         tx.commit()?;
+        CONNECTIONS.with_borrow_mut(|open| open.insert(path, (opened, connection)));
         Ok(result)
     })()
     .map_err(classify)

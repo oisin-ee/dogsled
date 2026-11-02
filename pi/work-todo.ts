@@ -1,7 +1,6 @@
 import type { TodoPresenter, TodoWork } from "./todo/src/work.ts";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
-import { rename, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 
 /** The provider owns rendering and state interpretation; this is an in-process capability. */
 export interface TodoViewHost {
@@ -48,48 +47,53 @@ export interface TodoPayload {
 	sections: readonly TodoSection[];
 }
 
-/** Atomic per-pane publication into Dogsled's ledger. One ordered writer per Pi session. */
+/** The binary owns typed persistence; Pi only sends the provider's snapshot. */
+type Publish = (pane: string, payload: TodoPayload | undefined) => Promise<void>;
+
+function publishCommand(pane: string, payload: TodoPayload | undefined): Promise<void> {
+	const args = ["todo-publish", "--pane", pane];
+	if (!payload) args.push("--clear");
+	return new Promise((resolve, reject) => {
+		const child = execFile(process.env["DOGSLED_BIN"] ?? "dogsled", args, (error, _stdout, stderr) => {
+			if (error) reject(new Error(`todo publication failed: ${stderr.trim() || error.message}`));
+			else resolve();
+		});
+		child.stdin?.on("error", reject);
+		child.stdin?.end(payload ? JSON.stringify(payload) : undefined);
+	});
+}
+
+/** One ordered publication queue per Pi session. */
 export class TodoPublisher {
-	private path: string | undefined;
+	private enabled = false;
 	private published: TodoSnapshot | undefined;
 	private queue = Promise.resolve();
 	private readonly pane: string;
 	private readonly failed: (error: unknown) => void;
-	constructor(pane: string, failed: (error: unknown) => void) { this.pane = pane; this.failed = failed; }
-
-	configure(value: unknown): void {
-		if (!record(value) || typeof value["path"] !== "string") throw new Error("Invalid todo publication path");
-		if (this.path !== value["path"]) this.published = undefined;
-		this.path = value["path"];
+	private readonly send: Publish;
+	constructor(pane: string, failed: (error: unknown) => void, send: Publish = publishCommand) {
+		this.pane = pane; this.failed = failed; this.send = send;
 	}
 
+	configure(): void { this.enabled = true; }
+
 	publish(next: TodoSnapshot | undefined): void {
-		const path = this.path;
-		if (!path || (next && next === this.published)) return;
+		if (!this.enabled || (next && next === this.published)) return;
 		const payload: TodoPayload | undefined = next
 			? { session: next.session, branch: next.branch, revision: next.revision, current: next.display.current, pane: this.pane, sections: next.display.sections }
 			: undefined;
 		this.published = next;
-		this.queue = this.queue.then(async () => {
-			if (!payload) { await rm(path, { force: true }); return; }
-			const temporary = `${path}.${randomUUID()}.tmp`;
-			try {
-				await writeFile(temporary, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
-				await rename(temporary, path);
-			} finally { await rm(temporary, { force: true }); }
-		}).catch(error => { this.published = undefined; this.failed(error); });
+		this.queue = this.queue.then(() => this.send(this.pane, payload))
+			.catch(error => { this.published = undefined; this.failed(error); });
 	}
 
 	async clear(): Promise<void> {
-		const path = this.path;
 		this.published = undefined;
-		this.queue = this.queue.then(async () => { if (path) await rm(path, { force: true }); }).catch(this.failed);
+		this.queue = this.queue.then(async () => { if (this.enabled) await this.send(this.pane, undefined); }).catch(this.failed);
 		await this.queue;
 	}
 	async flushed(): Promise<void> { await this.queue; }
 }
-
-function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 
 /** A view lease catches provider failures on every path and disposes exactly once. */
 class HostedTodo implements TodoView {

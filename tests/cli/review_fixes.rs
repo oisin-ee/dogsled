@@ -20,14 +20,14 @@ fn low_disk_missing_and_unreadable_paths_preserve_other_candidates() {
     let missing = rig.dir.join("home/repo/missing");
     let unreadable = rig.dir.join("home/repo/unreadable");
     fs::create_dir_all(&unreadable).unwrap();
-    let mut trees = rig.read("state/worktrees.json");
+    let mut trees = rig.state(&["worktrees"]);
     for path in [&missing, &unreadable] {
         trees
             .as_array_mut()
             .unwrap()
             .push(json!({"repo":rig.dir.join("home/repo"),"path":path,"branch":"old"}));
     }
-    rig.put("state/worktrees.json", &trees);
+    rig.put_state(&["state", "worktrees", "--put"], &trees);
     rig.script("du", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/du.log\"\ncase \"$*\" in *unreadable*) echo denied >&2; exit 1 ;; esac\nprintf '42 path\\n'\n");
     let (code, plan) = rig.json(&["doctor"]);
     assert_eq!(code, 0, "{plan}");
@@ -52,7 +52,7 @@ fn low_disk_missing_and_unreadable_paths_preserve_other_candidates() {
         String::from_utf8_lossy(&out.stderr)
     );
     let paths: Vec<_> = rig
-        .read("state/worktrees.json")
+        .state(&["worktrees"])
         .as_array()
         .unwrap()
         .iter()

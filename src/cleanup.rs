@@ -5,7 +5,9 @@
 
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
-use crate::node::{Node, Snapshot};
+use crate::node::Node;
+#[cfg(test)]
+use crate::node::Snapshot;
 use crate::probe::{Agent, Pane};
 use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
@@ -255,16 +257,14 @@ impl Seen {
 }
 
 pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
-    ledger.with_lock("repositories", || {
-        let mut repos: BTreeSet<String> = ledger.read("repositories.json")?.unwrap_or_default();
+    crate::store::write(ledger, |tx| {
+        let mut repos = crate::host_store::repositories_rows(tx)?;
         repos.insert(tree.repo.clone());
-        ledger.write("repositories.json", &repos)
-    })?;
-    ledger.with_lock("worktrees", || {
-        let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
+        crate::host_store::replace_repositories(tx, &repos)?;
+        let mut trees = crate::host_store::trees_rows(tx)?;
         trees.retain(|t| !crate::worktree::same(&t.path, &tree.path));
         trees.push(tree);
-        ledger.write("worktrees.json", &trees)
+        crate::host_store::replace_trees(tx, &trees)
     })
 }
 
@@ -421,8 +421,8 @@ fn repositories(
     workspaces: &[Workspace],
     plan: &mut Plan,
 ) -> Result<BTreeSet<String>> {
-    let recorded: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-    let mut repos: BTreeSet<String> = node.ledger.read("repositories.json")?.unwrap_or_default();
+    let recorded: Vec<Tree> = crate::host_store::trees(node.ledger)?;
+    let mut repos: BTreeSet<String> = crate::host_store::repositories(node.ledger)?;
     repos.extend(recorded.iter().map(|t| t.repo.clone()));
     repos.retain(|repo| {
         if !missing(repo) {
@@ -431,7 +431,7 @@ fn repositories(
         plan.entries.push(entry(
             "repositories",
             repo.clone(),
-            "missing remembered repository; drops stale entries from repositories.json and worktrees.json".into(),
+            "missing remembered repository; drops stale entries from repository and worktree tables".into(),
             true,
         ));
         false
@@ -754,12 +754,7 @@ fn readable(
     let mut trees = Vec::new();
     let mut evidence = BTreeMap::new();
     // An unreadable registry hides no candidate: Git's list still drives removal.
-    let recorded: Vec<Tree> = node
-        .ledger
-        .read("worktrees.json")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let recorded: Vec<Tree> = crate::host_store::trees(node.ledger).unwrap_or_default();
     for repo in repos {
         let discovered =
             crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&repo), |guard| {
@@ -840,8 +835,8 @@ fn readable(
                 repo.clone(),
                 format!(
                     "{error}; repository entry {repo}; check {} and {} and cleanup.repositories",
-                    node.ledger.dir.join("repositories.json").display(),
-                    node.ledger.dir.join("worktrees.json").display()
+                    node.ledger.dir.join("state.db").display(),
+                    node.ledger.dir.join("state.db").display()
                 ),
                 false,
             )),
@@ -862,7 +857,7 @@ impl Ownership {
     fn load(ledger: &Ledger) -> Result<Self> {
         let items = crate::items::list(ledger)?;
         let marks = crate::done::list(ledger)?;
-        let registered = ledger.read("worktrees.json")?.unwrap_or_default();
+        let registered = crate::host_store::trees(ledger)?;
         let requests = crate::launch::requests(ledger)?
             .into_iter()
             .filter(|request| matches!(request.action, crate::work::Action::Agent { .. }))
@@ -1069,10 +1064,7 @@ fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result
         }
     }
     // Only registered worktrees are dogsled-owned disk paths.
-    let owned = node
-        .ledger
-        .read::<Vec<Tree>>("worktrees.json")?
-        .unwrap_or_default();
+    let owned = crate::host_store::trees(node.ledger)?;
     disk(node, &owned, plan)?;
     processes(node.shell, &seen.panes, plan)
 }
@@ -1397,10 +1389,7 @@ fn idle_panes(node: &Node<'_>, now: u64, seen: &Seen) -> Result<BTreeMap<String,
     let mut idle = BTreeMap::new();
     let jobs = crate::jobs::list(node.ledger)?;
     let items = crate::items::list(node.ledger)?;
-    let snapshot = node
-        .ledger
-        .read::<Snapshot>("host.json")?
-        .filter(|s| s.fresh(now));
+    let snapshot = crate::host_store::snapshot(node.ledger)?.filter(|s| s.fresh(now));
     for pane in panes
         .iter()
         .filter(|p| eligible(p) && p.agent.is_none() && !agents.iter().any(|a| a.pane == p.pane_id))
@@ -1618,11 +1607,7 @@ fn pane_holds(usage: &Usage, seen: &Seen, decider: Decider) -> Vec<String> {
 /// reported age is not held: that is the existing rule.
 fn young_shells(node: &Node<'_>, usage: &Usage) -> Result<Vec<String>> {
     let now = crate::ledger::now_ms();
-    let Some(snapshot) = node
-        .ledger
-        .read::<Snapshot>("host.json")?
-        .filter(|s| s.fresh(now))
-    else {
+    let Some(snapshot) = crate::host_store::snapshot(node.ledger)?.filter(|s| s.fresh(now)) else {
         return Ok(Vec::new());
     };
     Ok(usage
@@ -1887,12 +1872,7 @@ fn unless_gone<T>(
 /// that a later survey plans for a missing registered worktree. An unregistered one needs no
 /// entry.
 fn vanished(node: &Node<'_>, tree: &Tree) -> Option<Entry> {
-    let recorded: Vec<Tree> = node
-        .ledger
-        .read("worktrees.json")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let recorded: Vec<Tree> = crate::host_store::trees(node.ledger).unwrap_or_default();
     recorded
         .into_iter()
         .find(|t| crate::worktree::same(&t.path, &tree.path))
@@ -2006,15 +1986,15 @@ fn validate_tree(
 
 /// Reconcile only the registration of the checkout that this operation captured.
 pub fn forget_matching(ledger: &Ledger, tree: &Tree) -> Result<()> {
-    ledger.with_lock("worktrees", || {
-        let mut recorded: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
+    crate::store::write(ledger, |tx| {
+        let mut recorded = crate::host_store::trees_rows(tx)?;
         recorded.retain(|record| {
             !crate::worktree::same(&record.path, &tree.path)
                 || record.identity != tree.identity
                 || !crate::worktree::same(&record.repo, &tree.repo)
                 || record.branch != tree.branch
         });
-        ledger.write("worktrees.json", &recorded)
+        crate::host_store::replace_trees(tx, &recorded)
     })
 }
 
@@ -2104,36 +2084,33 @@ fn remove_tree(
 }
 
 fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
-    node.ledger.with_lock("repositories", || {
-        node.ledger.with_lock("worktrees", || {
-            if !missing(repo) {
-                return Err(Error::Invalid(format!(
-                    "refuse {repo}: the repository is no longer missing"
-                )));
-            }
-            let mut repos: BTreeSet<String> =
-                node.ledger.read("repositories.json")?.unwrap_or_default();
-            let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-            repos.remove(repo);
-            // An existing worktree may still hold content even when its main checkout is gone.
-            trees.retain(|tree| !crate::worktree::same(&tree.repo, repo) || !missing(&tree.path));
-            node.ledger.write("worktrees.json", &trees)?;
-            node.ledger.write("repositories.json", &repos)
-        })
+    crate::store::write(node.ledger, |tx| {
+        if !missing(repo) {
+            return Err(Error::Invalid(format!(
+                "refuse {repo}: the repository is no longer missing"
+            )));
+        }
+        let mut repos: BTreeSet<String> = crate::host_store::repositories_rows(tx)?;
+        let mut trees = crate::host_store::trees_rows(tx)?;
+        repos.remove(repo);
+        // An existing worktree may still hold content even when its main checkout is gone.
+        trees.retain(|tree| !crate::worktree::same(&tree.repo, repo) || !missing(&tree.path));
+        crate::host_store::replace_trees(tx, &trees)?;
+        crate::host_store::replace_repositories(tx, &repos)
     })?;
     Ok(format!("dropped stale repository registration {repo}"))
 }
 
 fn drop_registration(node: &Node<'_>, path: &str) -> Result<String> {
-    node.ledger.with_lock("worktrees", || {
-        let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
+    crate::store::write(node.ledger, |tx| {
+        let mut trees = crate::host_store::trees_rows(tx)?;
         if !missing(path) {
             return Err(Error::Invalid(format!(
                 "refuse {path}: the worktree is no longer missing"
             )));
         }
         trees.retain(|t| !crate::worktree::same(&t.path, path));
-        node.ledger.write("worktrees.json", &trees)
+        crate::host_store::replace_trees(tx, &trees)
     })?;
     Ok(format!("dropped the stale registration of {path}"))
 }
@@ -2697,7 +2674,7 @@ mod tests {
                 },
                 jobs: vec![],
             };
-            self.ledger.write("host.json", &snapshot).unwrap();
+            crate::host_store::put_snapshot(&self.ledger, &snapshot).unwrap();
         }
 
         fn plan(&self) -> Plan {
@@ -2751,25 +2728,17 @@ mod tests {
             && e.detail.contains("cleanup.repositories")));
         // Surveying must not change registrations; only applying the candidate may do so.
         assert_eq!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::repositories(&rig.ledger).unwrap(),
             BTreeSet::from([missing.clone()])
         );
         apply_one(&rig.node(), &plan, stale, 100).unwrap();
         assert!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
+            crate::host_store::repositories(&rig.ledger)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             [] as [Tree; 0]
         );
         let mut next = Plan::default();
@@ -2819,14 +2788,7 @@ mod tests {
         );
         let planned = doctor(&rig.node(), 100).unwrap();
         assert!(planned.entries.iter().any(|e| e.id == repo && e.removable));
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap().len(), 1);
         let applied = sweep(&rig.node(), 100).unwrap();
         assert!(applied.failures.is_empty(), "{:?}", applied.failures);
         assert!(applied.results.iter().any(|result| result.contains(&repo)));
@@ -2843,16 +2805,11 @@ mod tests {
                 .any(|e| e.detail.contains("cleanup.repositories"))
         );
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             [] as [Tree; 0]
         );
         assert!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
+            crate::host_store::repositories(&rig.ledger)
                 .unwrap()
                 .is_empty()
         );
@@ -2889,30 +2846,14 @@ mod tests {
         let stale = plan.entries.iter().find(|e| e.id == repo).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
         assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap()
-                .len(),
-            2
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap().len(), 2);
         std::fs::remove_dir(&repo).unwrap();
         apply_one(&rig.node(), &plan, stale, 100).unwrap();
         assert_eq!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::repositories(&rig.ledger).unwrap(),
             BTreeSet::from([surviving])
         );
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
-            [live_tree]
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap(), [live_tree]);
     }
 
     #[test]
@@ -2930,13 +2871,7 @@ mod tests {
         remember(&rig.ledger, tree.clone()).unwrap();
         drop_repository(&rig.node(), &tree.repo).unwrap();
         assert!(path.is_dir());
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
-            [tree]
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap(), [tree]);
     }
 
     #[test]
@@ -2953,7 +2888,7 @@ mod tests {
             .into_iter()
             .map(|path| path.display().to_string())
             .collect();
-        rig.ledger.write("repositories.json", &paths).unwrap();
+        crate::host_store::put_repositories(&rig.ledger, &paths).unwrap();
         let mut plan = Plan::default();
         let repos = repositories(&rig.node(), &[], &[], &mut plan).unwrap();
         let resolved: BTreeSet<_> = paths
@@ -2969,13 +2904,7 @@ mod tests {
             assert!(plan.entries.iter().any(|e| e.id == *path && !e.removable));
             assert!(!plan.entries.iter().any(|e| e.id == *path && e.removable));
         }
-        assert_eq!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
-                .unwrap(),
-            paths
-        );
+        assert_eq!(crate::host_store::repositories(&rig.ledger).unwrap(), paths);
     }
 
     #[test]
@@ -3005,13 +2934,7 @@ mod tests {
         );
         assert!(result.unwrap().contains(&tree.repo));
         assert!(plan.entries.iter().all(|e| !e.removable));
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
-            [tree]
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap(), [tree]);
     }
 
     #[test]
@@ -3034,19 +2957,13 @@ mod tests {
         std::fs::create_dir(&tree.path).unwrap();
         assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             std::slice::from_ref(&tree)
         );
         std::fs::remove_dir(&tree.path).unwrap();
         apply_one(&rig.node(), &plan, stale, 100).unwrap();
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             [] as [Tree; 0]
         );
         assert!(repo.is_dir());
@@ -3089,12 +3006,7 @@ mod tests {
         let plan = Plan {
             entries: vec![planned.clone()],
         };
-        let registered = || {
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap()
-        };
+        let registered = || crate::host_store::trees(&rig.ledger).unwrap();
 
         // Unlisted but still on disk: it may hold content, so the refusal stays.
         std::fs::create_dir_all(&tree.path).unwrap();

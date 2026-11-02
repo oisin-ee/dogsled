@@ -1,6 +1,6 @@
 //! The only way a message reaches an agent. Nothing types into a terminal.
 //!
-//! Each agent terminal has an inbox on its own host: `inbox/<terminal_id>.json`. A sender puts
+//! Each agent terminal has a typed inbox in its host database. A sender puts
 //! a record there, locally or over SSH. The terminal's reader (the Pi extension, or the Claude
 //! and Codex hooks) claims its pending records, shows them to the agent without touching the
 //! editor, and acknowledges them. A claim is a lease: a record that is claimed but not
@@ -211,11 +211,9 @@ pub fn hostname() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn store(ledger: &Ledger) -> Ledger {
-    ledger.child("inbox")
-}
+use crate::web_store::inbox as records_store;
 
-/// Herdr terminal ids name files, so only plain ids are accepted.
+/// Keep terminal ids in Herdr's bounded, plain identifier namespace.
 pub fn validate_terminal(terminal: &str) -> Result<()> {
     if terminal.is_empty()
         || terminal.len() > 64
@@ -229,26 +227,22 @@ pub fn validate_terminal(terminal: &str) -> Result<()> {
 }
 
 fn records(ledger: &Ledger, terminal: &str) -> Result<Vec<Record>> {
-    Ok(store(ledger)
-        .read(&format!("{terminal}.json"))?
-        .unwrap_or_default())
+    crate::store::read(ledger, |tx| records_store::records(tx, terminal))
 }
 
-/// Change `terminal`'s records under its lock.
+/// Change one terminal's records in a short database transaction.
 fn update<T>(
     ledger: &Ledger,
     terminal: &str,
     change: impl FnOnce(&mut Vec<Record>) -> Result<T>,
 ) -> Result<T> {
     validate_terminal(terminal)?;
-    let store = store(ledger);
-    store.with_lock(terminal, || {
-        let before = records(ledger, terminal)?;
+    crate::store::write(ledger, |tx| {
+        let before = records_store::records(tx, terminal)?;
         let mut all = before.clone();
         let result = change(&mut all)?;
-        // A reader watches this file, so an empty claim must not touch it.
         if all != before {
-            store.write(&format!("{terminal}.json"), &all)?;
+            records_store::put_records(tx, terminal, &all)?;
         }
         Ok(result)
     })
@@ -256,7 +250,7 @@ fn update<T>(
 
 pub fn reader(ledger: &Ledger, terminal: &str) -> Result<Option<Reader>> {
     validate_terminal(terminal)?;
-    store(ledger).read(&format!("{terminal}.reader.json"))
+    crate::store::read(ledger, |tx| records_store::reader(tx, terminal))
 }
 
 /// Put `record` in its terminal's inbox on this host. Refuses a terminal that is not in this
@@ -332,14 +326,12 @@ pub(crate) fn deliverable(ledger: &Ledger, record: &Record) -> Result<()> {
             record.text.len()
         )));
     }
-    let live = ledger
-        .read::<crate::node::Snapshot>("host.json")?
-        .is_some_and(|s| {
-            s.probe
-                .agent_panes
-                .iter()
-                .any(|a| a.terminal_id.as_deref() == Some(record.terminal.as_str()))
-        });
+    let live = crate::host_store::snapshot(ledger)?.is_some_and(|s| {
+        s.probe
+            .agent_panes
+            .iter()
+            .any(|a| a.terminal_id.as_deref() == Some(record.terminal.as_str()))
+    });
     if !live {
         return Err(Error::Invalid(format!(
             "{} ({}) is not running on this host; nothing was sent",
@@ -362,12 +354,13 @@ pub(crate) fn deliverable(ledger: &Ledger, record: &Record) -> Result<()> {
 /// claimed ones whose lease ended. Each claim starts a lease of the backoff delay.
 pub fn claim(ledger: &Ledger, terminal: &str, reader: &Reader, now: u64) -> Result<Vec<Record>> {
     validate_terminal(terminal)?;
-    let file = format!("{terminal}.reader.json");
-    let store = store(ledger);
-    let known = store.read::<Reader>(&file)?;
-    if known.is_none_or(|k| k.harness != reader.harness || k.pane != reader.pane) {
-        store.write(&file, reader)?;
-    }
+    crate::store::write(ledger, |tx| {
+        let known = records_store::reader(tx, terminal)?;
+        if known.is_none_or(|k| k.harness != reader.harness || k.pane != reader.pane) {
+            records_store::put_reader(tx, terminal, reader)?;
+        }
+        Ok(())
+    })?;
     let claimed = update(ledger, terminal, |all| {
         let mut claimed = Vec::new();
         for record in all.iter_mut().filter(|r| {
@@ -432,19 +425,8 @@ pub fn received(ledger: &Ledger, terminal: &str) -> Result<Vec<Record>> {
 /// and of a record claimed too often; drop old final records and the files of gone terminals.
 /// `live` holds the terminals in this host's latest snapshot.
 pub fn maintain(ledger: &Ledger, live: &[String], now: u64) -> Result<()> {
-    let store = store(ledger);
-    let Ok(entries) = std::fs::read_dir(&store.dir) else {
-        return Ok(());
-    };
-    for entry in entries {
-        let name = entry?.file_name();
-        let Some(terminal) = name
-            .to_str()
-            .and_then(|n| n.strip_suffix(".json"))
-            .filter(|n| !n.ends_with(".reader") && validate_terminal(n).is_ok())
-        else {
-            continue;
-        };
+    for terminal in crate::store::read(ledger, records_store::terminals)? {
+        let terminal = terminal.as_str();
         let gone = !live.iter().any(|t| t == terminal);
         let empty = update(ledger, terminal, |all| {
             for record in all.iter_mut().filter(|r| r.state.open()) {
@@ -471,15 +453,12 @@ pub fn maintain(ledger: &Ledger, live: &[String], now: u64) -> Result<()> {
             Ok(all.is_empty())
         })?;
         if gone && empty {
-            for file in [
-                format!("{terminal}.json"),
-                format!("{terminal}.reader.json"),
-            ] {
-                match std::fs::remove_file(store.dir.join(file)) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                    _ => (),
+            crate::store::write(ledger, |tx| {
+                if records_store::records(tx, terminal)?.is_empty() {
+                    records_store::remove_terminal(tx, terminal)?;
                 }
-            }
+                Ok(())
+            })?;
         }
     }
     Ok(())
@@ -510,10 +489,14 @@ pub struct Sent {
     pub check: Backoff,
 }
 
-const OUTBOX: &str = "outbox.json";
-
 pub fn outbox(ledger: &Ledger) -> Result<Vec<Sent>> {
-    Ok(ledger.read(OUTBOX)?.unwrap_or_default())
+    crate::store::read(ledger, records_store::sent)
+}
+
+pub(crate) fn notification_failures(
+    ledger: &Ledger,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    crate::store::read(ledger, records_store::failures)
 }
 
 /// Where `send` delivers: an agent pane on a host, with its terminal.
@@ -642,13 +625,13 @@ pub fn send(
 
 /// Keep `sent` in this host's outbox, once: a retried record keeps its first entry.
 pub(crate) fn record_sent(ledger: &Ledger, sent: &Sent, now: u64) -> Result<()> {
-    ledger.with_lock("outbox", || {
-        let mut all = outbox(ledger)?;
+    crate::store::write(ledger, |tx| {
+        let mut all = records_store::sent(tx)?;
         if !all.iter().any(|s| s.id == sent.id) {
             all.push(sent.clone());
         }
         all.retain(|s| s.state.open() || now.saturating_sub(s.created_ms) < KEEP_MS);
-        ledger.write(OUTBOX, &all)
+        records_store::put_sent(tx, &all)
     })
 }
 
@@ -689,8 +672,8 @@ pub fn reconcile(fleet: &Fleet, now: u64) -> Result<()> {
     if outcomes.is_empty() {
         return Ok(());
     }
-    let failed = fleet.ledger.with_lock("outbox", || {
-        let mut all = outbox(fleet.ledger)?;
+    let failed = crate::store::write(fleet.ledger, |tx| {
+        let mut all = records_store::sent(tx)?;
         let mut failed = Vec::new();
         for s in &mut all {
             let Some((_, outcome)) = outcomes.iter().find(|(id, _)| *id == s.id) else {
@@ -716,7 +699,7 @@ pub fn reconcile(fleet: &Fleet, now: u64) -> Result<()> {
                 Err(()) => s.check.fail(now, &s.id),
             }
         }
-        fleet.ledger.write(OUTBOX, &all)?;
+        records_store::put_sent(tx, &all)?;
         Ok(failed)
     })?;
     for s in failed {
@@ -834,8 +817,9 @@ pub fn ack_for(
     ack(ledger, &terminal_of(&local_agent(shell, pane)?)?, ids, now)
 }
 
-/// The directory and file name of `pane`'s inbox. A reader watches the directory, because
-/// each write replaces the file.
+/// The host database a reader watches for committed inbox writes.
+/// Short-lived store connections checkpoint their WAL on close. Watch that checkpoint,
+/// not WAL creation: opening a reader must not wake itself.
 pub fn path_for(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
@@ -843,10 +827,7 @@ pub fn path_for(
 ) -> Result<(String, String)> {
     let terminal = terminal_of(&local_agent(shell, pane)?)?;
     validate_terminal(&terminal)?;
-    Ok((
-        store(ledger).dir.display().to_string(),
-        format!("{terminal}.json"),
-    ))
+    Ok((ledger.dir.display().to_string(), "state.db".into()))
 }
 
 /// What `pane` received and sent.
@@ -979,9 +960,7 @@ impl Listing {
 /// The service's inbox lane: maintain this host's inboxes, then follow up what it sent.
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     crate::unit_request::refresh(fleet, crate::unit_request::Scope::All)?;
-    let live: Vec<String> = fleet
-        .ledger
-        .read::<crate::node::Snapshot>("host.json")?
+    let live: Vec<String> = crate::host_store::snapshot(fleet.ledger)?
         .map(|s| {
             s.probe
                 .agent_panes
@@ -1218,13 +1197,8 @@ pub fn notify_child(
     });
     match result {
         Err(Error::Invalid(reason) | Error::Refused { detail: reason, .. }) => {
-            fleet.ledger.with_lock("notification-failures", || {
-                let mut failures: std::collections::BTreeMap<String, String> = fleet
-                    .ledger
-                    .read("notification-failures.json")?
-                    .unwrap_or_default();
-                failures.insert(id.into(), reason.clone());
-                fleet.ledger.write("notification-failures.json", &failures)
+            crate::store::write(fleet.ledger, |tx| {
+                records_store::put_failure(tx, id, &reason)
             })?;
             eprintln!("dogsled notification {id}: {reason}");
             Ok(false)
@@ -1343,10 +1317,8 @@ mod tests {
                 .enumerate()
                 .map(|(i, t)| serde_json::json!({"pane":format!("w1:p{i}"),"agent":"pi","state":"idle","name":null,"transcript":null,"transcript_modified":null,"terminal_id":t}))
                 .collect();
-            self.ledger
-                .write(
-                    "host.json",
-                    &serde_json::json!({"sampled_ms":1,"probe":{"host":"local","label":"local","load1":0.0,"cores":1,"memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":50.0,"agents":{"total":0,"by_status":{}},"agent_panes":agents,"reservations":[],"panes":[]}}),
+            crate::host_store::put_snapshot(&self.ledger,
+                    &serde_json::from_value(serde_json::json!({"sampled_ms":1,"probe":{"host":"local","label":"local","load1":0.0,"cores":1,"memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":50.0,"agents":{"total":0,"by_status":{}},"agent_panes":agents,"reservations":[],"panes":[]}})).unwrap(),
                 )
                 .unwrap();
         }
@@ -1465,10 +1437,9 @@ mod tests {
             State::Pending
         );
         maintain(&rig.ledger, &["term_b".into()], 10 + KEEP_MS).unwrap();
-        let dir = rig.ledger.dir.join("inbox");
-        assert!(!dir.join("term_a.json").exists());
-        assert!(!dir.join("term_a.reader.json").exists());
-        assert!(dir.join("term_b.json").exists());
+        assert_eq!(records(&rig.ledger, "term_a").unwrap(), []);
+        assert!(reader(&rig.ledger, "term_a").unwrap().is_none());
+        assert_ne!(records(&rig.ledger, "term_b").unwrap(), []);
     }
 
     #[test]
@@ -1525,11 +1496,7 @@ mod tests {
                 !notify_child(&fleet, &[], &child, event, "reply", "old child".into(), 1).unwrap()
             );
             assert_eq!(received(&rig.ledger, "replacement_owner").unwrap().len(), 0);
-            let failures: std::collections::BTreeMap<String, String> = rig
-                .ledger
-                .read("notification-failures.json")
-                .unwrap()
-                .unwrap();
+            let failures = notification_failures(&rig.ledger).unwrap();
             assert!(failures[event].contains("subject expired or missing"));
         }
         assert!(
@@ -1552,7 +1519,8 @@ mod tests {
             hosts: vec![crate::hosts::Host::local()],
         };
         claim(&rig.ledger, "term_owner", &Rig::reader(), 0).unwrap();
-        let snapshot: crate::node::Snapshot = rig.ledger.read("host.json").unwrap().unwrap();
+        let snapshot: crate::node::Snapshot =
+            crate::host_store::snapshot(&rig.ledger).unwrap().unwrap();
         let reports: Vec<crate::hosts::HostReport> = serde_json::from_value(serde_json::json!([{ "id":"local", "label":"local", "service":"up", "reachable":true, "sampled_ms":1, "probe":snapshot.probe, "headroom":null, "error":null, "jobs":[] }])).unwrap();
         assert!(
             notify(

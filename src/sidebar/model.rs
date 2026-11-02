@@ -288,7 +288,7 @@ pub enum Effect {
     CloseDock,
 }
 
-/// Only these survive a restart (`sidebar/<owner>.json`).
+/// Sidebar preferences retained in the host database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Saved {
     pub focus: Panel,
@@ -595,34 +595,17 @@ fn step(index: usize, delta: isize, len: usize) -> usize {
         .min(len.saturating_sub(1))
 }
 
-/// `sidebar/<owner>.json`: path-safe whatever the pane id looks like.
-pub fn saved_name(owner: &str) -> String {
-    let safe: String = owner
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("{safe}.json")
-}
-
 pub fn load(ledger: &crate::ledger::Ledger, owner: &str) -> Option<Saved> {
-    ledger
-        .child("sidebar")
-        .read(&saved_name(owner))
+    crate::store::read(ledger, |tx| crate::web_store::board::sidebar(tx, owner))
         .ok()
         .flatten()
 }
 
 pub fn save(ledger: &crate::ledger::Ledger, owner: &str, saved: &Saved) {
-    let dir = ledger.child("sidebar");
     // A sidebar that cannot remember its folds still works.
-    let _ = std::fs::create_dir_all(&dir.dir);
-    let _ = dir.write(&saved_name(owner), saved);
+    let _ = crate::store::write(ledger, |tx| {
+        crate::web_store::board::put_sidebar(tx, owner, saved)
+    });
 }
 
 #[cfg(test)]
@@ -870,7 +853,7 @@ pub mod tests {
         model.fold_open = true;
         model.toggle_collapse(Panel::Agents);
         save(&ledger, "w1:p1", &model.saved());
-        assert!(dir.join("sidebar").join("w1_p1.json").exists());
+        assert!(dir.join("state.db").exists());
         let restored = Model::from_saved(load(&ledger, "w1:p1"));
         assert_eq!(restored.focus, Panel::Todos);
         assert!(restored.fold_open && restored.is_collapsed(Panel::Agents));

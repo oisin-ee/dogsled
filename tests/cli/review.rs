@@ -59,7 +59,7 @@ fn closed_wrapper_stdout_preserves_full_log_and_child_exit() {
     for line in ["first\n", "second\n", "third\n"] {
         assert!(log.contains(line), "{log}");
     }
-    assert_eq!(rig.read("state/jobs/closed-output.json")["exit"], 7);
+    assert_eq!(rig.job("closed-output")["exit"], 7);
     // The command's group is gone before the test ends, so no command outlives its test.
     drop(command);
     assert!(
@@ -137,7 +137,7 @@ fn command_deadline_bounds_local_git_and_remote_report() {
 #[test]
 fn command_deadline_bounds_host_lock_wait() {
     let rig = Rig::new("locked-placement");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -176,7 +176,7 @@ fn command_deadline_bounds_host_lock_wait() {
 fn service_publishes_snapshots_while_remote_action_times_out() {
     let rig = Rig::new("service-hung-peer");
     rig.peer();
-    rig.snapshot("state/host.json", now(), 9999.0, 1);
+    rig.snapshot("state", now(), 9999.0, 1);
     rig.config("free_core_fraction_min = 2\n");
     // Queue without consulting a hung peer, then make that peer hang for admission.
     let (_, ticket) = rig.json(&["place", "--host", "netcup"]);
@@ -187,7 +187,7 @@ fn service_publishes_snapshots_while_remote_action_times_out() {
     rig.script("herdr", r#"#!/bin/sh
 case "$*" in
  'machine list --json') cat "$RIG/machines.json" ;;
- 'agent list') cat "$RIG/state/host.json" >> "$RIG/publications"; printf '\n---\n' >> "$RIG/publications"; cat "$RIG/agents.json" ;;
+ 'agent list') "$DOGSLED_BINARY" state host --json >> "$RIG/publications"; printf '\n---\n' >> "$RIG/publications"; cat "$RIG/agents.json" ;;
  'pane list') cat "$RIG/panes.json" ;;
  *) exit 2 ;;
 esac

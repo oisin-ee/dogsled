@@ -94,7 +94,7 @@ esac
         "gitdir: ../.git/worktrees/tree\n",
     )
     .unwrap();
-    rig.put("state/worktrees.json", &json!([{"repo":rig.dir.join("home/repo"),"path":rig.dir.join("home/repo/tree"),"branch":"feature","head":"abc","identity":{
+    rig.put_state(&["state", "worktrees", "--put"], &json!([{"repo":rig.dir.join("home/repo"),"path":rig.dir.join("home/repo/tree"),"branch":"feature","head":"abc","identity":{
         "common":rig.dir.join("home/repo/.git"),"gitdir":rig.dir.join("home/repo/.git/worktrees/tree"),"generation":"0123456789abcdef0123456789abcdef"
     }}]));
     rig
@@ -102,13 +102,12 @@ esac
 
 fn stopped_rig(name: &str, reader: bool) -> Rig {
     let rig = watchdog_rig(name);
-    rig.put("state/worktrees.json", &json!([]));
+    rig.put_state(&["state", "worktrees", "--put"], &json!([]));
     rig.put_items(&json!([{"id":"child","kind":"agent","host":"local",
         "pane":"w2:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":null}]));
-    fs::create_dir_all(rig.dir.join("state/inbox")).unwrap();
     if reader {
-        rig.put(
-            "state/inbox/term_child.reader.json",
+        rig.put_inbox_reader(
+            "term_child",
             &json!({"pane":"w2:p1","harness":"pi","registered_ms":1}),
         );
     }
@@ -134,7 +133,7 @@ fn stopped_tick(rig: &Rig, now: u64, raw: &str, seq: u64) {
 }
 
 fn corrective_messages(rig: &Rig) -> Vec<Value> {
-    rig.read("state/inbox/term_child.json")
+    rig.inbox("term_child")
         .as_array()
         .unwrap()
         .iter()
@@ -153,7 +152,7 @@ fn stopped_child_gets_exactly_one_prompt_across_five_restarts() {
     }
     let messages = corrective_messages(&rig);
     assert_eq!(messages.len(), 1);
-    let saved = rig.read("state/watchdog.json");
+    let saved = rig.state(&["watchdog"]);
     assert_eq!(saved["stopped"]["child"]["pane"], "w2:p1");
     assert_eq!(saved["stopped"]["child"]["agent_session"], "child-session");
     assert_eq!(saved["stopped"]["child"]["turn"]["state_change_seq"], 1);
@@ -170,7 +169,7 @@ fn stopped_failed_put_retries_same_id_three_times_only() {
     let mut id = Value::Null;
     for offset in 0..5 {
         stopped_tick(&rig, NOW + offset * 1_000, "idle", 1);
-        let saved = rig.read("state/watchdog.json");
+        let saved = rig.state(&["watchdog"]);
         let episode = &saved["stopped"]["child"];
         if offset == 0 {
             id = episode["message_id"].clone();
@@ -179,12 +178,12 @@ fn stopped_failed_put_retries_same_id_three_times_only() {
         assert_eq!(episode["attempts"], (offset + 1).min(3));
         assert_eq!(episode["delivered"], false);
     }
-    rig.put(
-        "state/inbox/term_child.reader.json",
+    rig.put_inbox_reader(
+        "term_child",
         &json!({"pane":"w2:p1","harness":"pi","registered_ms":1}),
     );
     stopped_tick(&rig, NOW + 6_000, "idle", 1);
-    assert!(!rig.dir.join("state/inbox/term_child.json").exists());
+    assert_eq!(rig.inbox("term_child"), json!([]));
     rig.service();
     let out = rig.run(&["board"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("stopped; prompt undelivered"));
@@ -227,11 +226,11 @@ fn working_blocked_and_unknown_children_get_no_corrective_prompt() {
         let rig = stopped_rig(&format!("stopped-excluded-{raw}"), true);
         stopped_tick(&rig, NOW, raw, 1);
         assert!(
-            !rig.dir.join("state/inbox/term_child.json").exists(),
+            rig.inbox("term_child").as_array().unwrap().is_empty(),
             "{raw}"
         );
         assert!(
-            rig.read("state/watchdog.json")["stopped"]
+            rig.state(&["watchdog"])["stopped"]
                 .as_object()
                 .unwrap()
                 .is_empty()
@@ -243,7 +242,7 @@ fn working_blocked_and_unknown_children_get_no_corrective_prompt() {
 fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
     let rig = watchdog_rig("watchdog-stall");
     // No auto-removal in this stall test.
-    rig.put("state/worktrees.json", &json!([]));
+    rig.put_state(&["state", "worktrees", "--put"], &json!([]));
     let path = rig.dir.join("transcript.jsonl");
     fs::write(&path, "test\n").unwrap();
     let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
@@ -261,7 +260,7 @@ fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
                 .success()
         );
     }
-    assert!(rig.read("state/host.json")["probe"]["agent_panes"][0]["stalled_since_ms"].is_number());
+    assert!(rig.host()["probe"]["agent_panes"][0]["stalled_since_ms"].is_number());
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("notification show").count(), 1);
     assert!(log.contains("--token dogsled=stalled 48h"));
@@ -287,11 +286,11 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
         &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"idle",
             "terminal_id":"term_owner","completion_seq":1,"state_change_seq":1}]}}),
     );
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"] = json!([{"pane":"w1:p1","agent":"pi","state":"idle",
         "terminal_id":"term_owner"}]);
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     // The owner's own item is open, and the sweep keeps an orphan on this host.
     // The orphan has an open item whose owner pane is gone, so the sweep keeps it, and
     // the check-in used to name it on every turn.
@@ -319,15 +318,14 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
                 "completion_seq":1,"state_change_seq":1}
         ]}}),
     );
-    rig.put(
-        "state/orphans.json",
+    rig.put_state(
+        &["state", "orphans", "--put"],
         &json!([{"item":"orphan","host":"local","pane":"w3:p1","owner_pane":"gone",
             "name":"lost-child","reason":"owner gone is gone; the child is working","since_ms":1}]),
     );
     // The owner reads its inbox.
-    fs::create_dir_all(rig.dir.join("state/inbox")).unwrap();
-    rig.put(
-        "state/inbox/term_owner.reader.json",
+    rig.put_inbox_reader(
+        "term_owner",
         &json!({"pane":"w1:p1","harness":"pi","registered_ms":1}),
     );
     assert!(
@@ -335,7 +333,7 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
             .status
             .success()
     );
-    let inbox = rig.read("state/inbox/term_owner.json");
+    let inbox = rig.inbox("term_owner");
     let text = inbox
         .as_array()
         .unwrap()
@@ -347,7 +345,7 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
     assert!(!text.contains("Orphaned children"), "{text}");
     assert!(!text.contains("lost-child"), "{text}");
     // The orphan is still there: the sweep kept it, so the check-in had one to repeat.
-    let orphans = rig.read("state/orphans.json");
+    let orphans = rig.state(&["orphans"]);
     assert_eq!(orphans[0]["item"], json!("orphan"), "{orphans}");
     assert_eq!(orphans[0]["name"], json!("lost-child"), "{orphans}");
     let items = rig.items();
@@ -363,11 +361,11 @@ fn a_check_in_does_not_repeat_the_orphans_the_sweep_keeps() {
 #[test]
 fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
     let rig = watchdog_rig("doctor");
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
     snapshot["probe"]["agent_panes"][0]["pane"] = json!("w2:p1");
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{"pane_id":"w2:p1","agent":"pi","agent_status":"idle",
@@ -376,7 +374,7 @@ fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
     // A non-caller idle for a day after it called `done`: either scope may close it.
     rig.done("term_child", "w2:p1", 1);
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    rig.put("state/jobs/old.json", &json!({"id":"old","cmd":["test"],"cwd":"/","host":"local","owner":"w1:p1","pane":"job-pane","state":"idle","exit":0,"signal":null,"reason":null,"started_ms":1,"ended_ms":2,"timeout_ms":null,"idle_timeout_ms":null}));
+    rig.put_job("old", &json!({"id":"old","cmd":["test"],"cwd":"/","host":"local","owner":"w1:p1","pane":"job-pane","state":"idle","exit":0,"signal":null,"reason":null,"started_ms":1,"ended_ms":2,"timeout_ms":null,"idle_timeout_ms":null}));
     fs::write(rig.dir.join("state/jobs/old.log"), "hello").unwrap();
     let (code, plan) = rig.json(&["doctor"]);
     assert_eq!(code, 0, "{plan}");
@@ -414,7 +412,7 @@ fn prune_rechecks_job_terminal_evidence_after_selection() {
             "signal":null,"reason":null,"started_ms":1,"ended_ms":2,
             "timeout_ms":null,"idle_timeout_ms":null});
         fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-        rig.put("state/jobs/old.json", &job);
+        rig.put_job("old", &job);
         fs::write(rig.dir.join("state/jobs/old.log"), "old output").unwrap();
         let mut changed = job;
         if reversed {
@@ -424,7 +422,7 @@ fn prune_rechecks_job_terminal_evidence_after_selection() {
         }
         rig.put("changed-job.json", &changed);
         // Disk inspection follows job selection in the fresh apply-time survey.
-        rig.script("df", "#!/bin/sh\ncp \"$RIG/changed-job.json\" \"$RIG/state/jobs/old.json\"\nprintf 'FS 1000 950 50 95%% /\\n'\n");
+        rig.script("df", "#!/bin/sh\n\"$RIG_DOGSLED\" state job old --put < \"$RIG/changed-job.json\"\nprintf 'FS 1000 950 50 95%% /\\n'\n");
         let plan =
             json!({"entries":[{"class":"jobs","id":"old","detail":"ended","removable":true}]});
         let (_, applied) = rig.json(&["host", "prune", "--plan", &plan.to_string()]);
@@ -436,7 +434,7 @@ fn prune_rechecks_job_terminal_evidence_after_selection() {
             applied.to_string().contains("job is not expired"),
             "{applied}"
         );
-        assert_eq!(rig.read("state/jobs/old.json"), changed);
+        assert_eq!(rig.job("old"), changed);
         assert_eq!(rig.log("state/jobs/old.log"), "old output");
         assert!(rig.dir.join("home/repo/tree").exists());
     }
@@ -480,10 +478,10 @@ fn prune_refuses_dirty_live_and_working_candidates_and_never_kills_processes() {
         &json!({"result":{"panes":[{"pane_id":"live","agent":"pi","agent_status":"working","cwd":alias.join("subdir")}]}}),
     );
     assert!(refused(&plan).contains("no longer safe"));
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":"working"}]}}),
@@ -533,7 +531,7 @@ fn prune_confirmation_and_native_removal() {
         stdout.contains("and closed shell; branch deleted"),
         "{stdout}"
     );
-    assert_eq!(rig.read("state/worktrees.json"), json!([]));
+    assert_eq!(rig.state(&["worktrees"]), json!([]));
 }
 
 #[test]
@@ -651,7 +649,7 @@ fn serve_keeps_an_idle_shell_start_until_the_shell_runs_a_command() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        rig.read("state/host.json")["probe"]["panes"][0].clone()
+        rig.host()["probe"]["panes"][0].clone()
     };
     assert_eq!(tick(1_000)["idle_since_ms"], 1_000);
     assert_eq!(tick(2_000)["idle_since_ms"], 1_000);
@@ -679,8 +677,8 @@ fn doctor_closes_an_all_idle_workspace_whole_and_other_idle_panes_alone() {
     ];
     rig.put("panes.json", &json!({"result":{"panes":live}}));
     fs::write(rig.dir.join("busy"), "w4:p2\n").unwrap();
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"] = json!([]);
     snapshot["probe"]["panes"] = json!(
         live.iter()
@@ -692,7 +690,7 @@ fn doctor_closes_an_all_idle_workspace_whole_and_other_idle_panes_alone() {
             })
             .collect::<Vec<_>>()
     );
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     let (code, plan) = rig.json(&["doctor"]);
     assert_eq!(code, 0, "{plan}");
     let idle: Vec<_> = plan["entries"]
@@ -766,8 +764,8 @@ fn doctor_closes_ended_job_tabs_and_shells_in_deleted_directories_at_once() {
     fs::write(rig.dir.join("busy"), "w4:p2\nw4:p3\n").unwrap();
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     let job = |id: &str, pane: &str, ended: Option<u64>| {
-        rig.put(
-            &format!("state/jobs/{id}.json"),
+        rig.put_job(
+            id,
             &json!({"id":id,"cmd":["true"],"cwd":home,"host":"h","owner":"w1:p1","pane":pane,
                 "state":if ended.is_some() {"idle"} else {"working"},"exit":ended.map(|_| 0),
                 "signal":null,"reason":null,"started_ms":NOW - 60_000,"ended_ms":ended,
@@ -777,8 +775,8 @@ fn doctor_closes_ended_job_tabs_and_shells_in_deleted_directories_at_once() {
     job("r-1", "w4:p1", Some(NOW - 1_000));
     job("r-2", "w4:p2", None);
     job("r-3", "w4:p3", Some(NOW - 1_000));
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"] = json!([]);
     snapshot["probe"]["panes"] = json!(
         live.iter()
@@ -790,7 +788,7 @@ fn doctor_closes_ended_job_tabs_and_shells_in_deleted_directories_at_once() {
             })
             .collect::<Vec<_>>()
     );
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     let (code, plan) = rig.json(&["doctor"]);
     assert_eq!(code, 0, "{plan}");
     let panes: Vec<_> = plan["entries"]
@@ -825,7 +823,7 @@ fn doctor_closes_ended_job_tabs_and_shells_in_deleted_directories_at_once() {
         assert!(!log.contains(&format!("pane close {kept}")), "{log}");
     }
     // The job record and log stay until they expire.
-    assert!(rig.dir.join("state/jobs/r-1.json").exists());
+    assert!(!rig.job("r-1").is_null());
 }
 
 #[test]
@@ -855,8 +853,8 @@ esac
         |id: &str, workspace: &str| json!({"pane_id":id,"workspace_id":workspace,"cwd":home});
     let live = [pane("w3:p1", "w3"), pane("w4:p1", "w4")];
     rig.put("panes.json", &json!({"result":{"panes":live}}));
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"] = json!([]);
     // The last sample saw both panes as idle shells.
     snapshot["probe"]["panes"] = json!(
@@ -869,7 +867,7 @@ esac
             })
             .collect::<Vec<_>>()
     );
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     let (code, plan) = rig.json(&["doctor"]);
     assert_eq!(code, 0, "{plan}");
     // The sidebar pane is not a candidate. The ordinary idle shell still is.

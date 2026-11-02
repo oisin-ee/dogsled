@@ -11,6 +11,8 @@ mod context;
 mod done;
 #[path = "cli/drop.rs"]
 mod drop;
+#[path = "cli/host_store.rs"]
+mod host_store;
 #[path = "cli/inbox.rs"]
 mod inbox;
 #[path = "cli/jobs.rs"]
@@ -63,6 +65,8 @@ mod unit_requests;
 mod unit_seeded;
 #[path = "cli/watchdog.rs"]
 mod watchdog;
+#[path = "cli/web_state.rs"]
+mod web_state;
 
 use serde_json::{Value, json};
 use std::fs;
@@ -563,6 +567,48 @@ fn now() -> u64 {
 /// What dogsled tells each child at launch: `src/done.rs`'s `CONTRACT`, as Herdr logs it.
 const CONTRACT: &str = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use the native tools. Commit your changes before done. Call done once during the turn that completes the whole task, then end the turn with your final reply. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not call done when you need an answer, cannot continue, or own open children.";
 
+const HERDR_SCRIPT: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/herdr.log"
+# The line Herdr types for `agent start`: the kind, then each argument shell-quoted.
+# A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
+if test "$1 $2" = 'agent start'; then
+  (
+    kind=$5; shift 8
+    typed=$kind
+    for arg in "$@"; do
+      q=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
+      typed="$typed '$q'"
+    done
+    printf '%s\n' "$typed" >> "$RIG/typed.log"
+    test "$(printf '%s\n' "$typed" | wc -c)" -le 1024
+  ) || { echo '{"error":{"code":"agent_start_input_failed","message":"line too long"}}' >&2; exit 1; }
+fi
+case "$*" in
+  'machine list --json') cat "$RIG/machines.json" ;;
+  'agent list') cat "${RIG_AGENTS:-$RIG/agents.json}" ;;
+  'pane list') cat "$RIG/panes.json" ;;
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
+  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}' ;;
+  'worktree list --cwd'*) cat "$RIG/herdr-worktrees" ;;
+  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
+  'pane run'*)
+    shift 3
+    case "$*" in
+      *' exec --job-validity '*) sh -c "$*" > "$RIG/job-output" 2>&1 < /dev/null & ;;
+      *) sh -c "$*" > "$RIG/job-output" 2>&1 ;;
+    esac
+    printf '{}\n' ;;
+  'pane close '*)
+    mkdir -p "$RIG/at-close"
+    "$RIG_DOGSLED" --json state jobs > "$RIG/at-close/jobs.json"
+    if test -f "$RIG/fail-close"; then echo close-refused >&2; exit 1; fi
+    printf '{}\n' ;;
+  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
+  'machine rename'*|'machine enable'*|'machine disable'*) printf '{}\n' ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#;
+
 struct Rig {
     dir: PathBuf,
     service: std::sync::Mutex<Option<fs::File>>,
@@ -607,50 +653,7 @@ impl Rig {
             "panes.json",
             &json!({"result":{"panes":[{"pane_id":"w1:p1","terminal_id":"term_owner"},{"pane_id":"w2:p1","terminal_id":"term_child"}]}}),
         );
-        rig.script(
-            "herdr",
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> "$RIG/herdr.log"
-# The line Herdr types for `agent start`: the kind, then each argument shell-quoted.
-# A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
-if test "$1 $2" = 'agent start'; then
-  (
-    kind=$5; shift 8
-    typed=$kind
-    for arg in "$@"; do
-      q=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
-      typed="$typed '$q'"
-    done
-    printf '%s\n' "$typed" >> "$RIG/typed.log"
-    test "$(printf '%s\n' "$typed" | wc -c)" -le 1024
-  ) || { echo '{"error":{"code":"agent_start_input_failed","message":"line too long"}}' >&2; exit 1; }
-fi
-case "$*" in
-  'machine list --json') cat "$RIG/machines.json" ;;
-  'agent list') cat "${RIG_AGENTS:-$RIG/agents.json}" ;;
-  'pane list') cat "$RIG/panes.json" ;;
-  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
-  'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}' ;;
-  'worktree list --cwd'*) cat "$RIG/worktrees.json" ;;
-  'tab create'*|'workspace create'*) printf '%s\n' '{"result":{"root_pane":{"pane_id":"w2:p1","terminal_id":"term_child"}}}' ;;
-  'pane run'*)
-    shift 3
-    case "$*" in
-      *' exec --job-validity '*) sh -c "$*" > "$RIG/job-output" 2>&1 < /dev/null & ;;
-      *) sh -c "$*" > "$RIG/job-output" 2>&1 ;;
-    esac
-    printf '{}\n' ;;
-  'pane close '*)
-    mkdir -p "$RIG/at-close"
-    cp "$DOGSLED_STATE"/jobs/*.json "$RIG/at-close/"
-    if test -f "$RIG/fail-close"; then echo close-refused >&2; exit 1; fi
-    printf '{}\n' ;;
-  'agent start'*|'agent prompt'*|'pane report-agent'*|'pane report-metadata'*) printf '{}\n' ;;
-  'machine rename'*|'machine enable'*|'machine disable'*) printf '{}\n' ;;
-  *) echo unexpected >&2; exit 2 ;;
-esac
-"#,
-        );
+        rig.script("herdr", HERDR_SCRIPT);
         rig.script(
             "ssh",
             r#"#!/bin/sh
@@ -750,23 +753,20 @@ esac
     fn put(&self, path: &str, value: &Value) {
         // Production publishes request authority before either a job or its receipt.
         // A fixture for either record must include that earlier publication too.
-        let validity = if path.starts_with("state/jobs/") {
-            value.get("validity")
-        } else if path.starts_with("state/launches/") {
-            value.pointer("/request/validity")
-        } else {
-            None
-        };
-        if let Some(validity) = validity.filter(|v| !v.is_null()) {
-            let sidecars = self.dir.join("state/job-validity");
-            fs::create_dir_all(&sidecars).unwrap();
-            let sidecar = sidecars.join(Path::new(path).file_name().unwrap());
-            if !sidecar.exists() {
-                fs::write(sidecar, serde_json::to_vec_pretty(validity).unwrap()).unwrap();
+        if path.starts_with("state/launches/")
+            && let Some(validity) = value.pointer("/request/validity").filter(|v| !v.is_null())
+        {
+            let id = Path::new(path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split('.')
+                .next()
+                .unwrap();
+            if self.validity(id).is_null() {
+                self.put_validity(id, validity);
             }
-        }
-        if path == "state/host.json" {
-            self.service();
         }
         fs::write(
             self.dir.join(path),
@@ -775,7 +775,7 @@ esac
         .unwrap();
     }
     fn disposition_request(&self, id: &str) -> String {
-        let receipt = self.read(&format!("state/preparation-receipts/{id}.json"));
+        let receipt = self.preparation_record("state", "receipt", id).read();
         json!({"version":1,"binding":receipt["binding"],
             "policy":{"kind":"prohibit","basis":"placement_returned"},"outcome":"unknown"})
         .to_string()
@@ -786,9 +786,7 @@ esac
         assert!(tree["identity"].is_object());
         let request = json!([tree["repo"], tree["branch"], null]);
         let binding = json!({"request_id":id,"request":request,"claim":{"tree":tree,"request_id":id},"prepared":prepared});
-        fs::create_dir_all(self.dir.join("state/preparation-receipts")).unwrap();
-        self.put(
-            &format!("state/preparation-receipts/{id}.json"),
+        self.preparation_record("state", "receipt", id).put(
             &json!({"version":1,"request":request,"prepared":prepared,"failure":null,"binding":binding}),
         );
     }
@@ -798,14 +796,17 @@ esac
         fs::write(&path, text).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+
     fn config(&self, text: &str) {
         fs::write(self.dir.join("config.toml"), text).unwrap();
     }
+
     fn cmd(&self, args: &[&str]) -> Command {
         if args.first() == Some(&"serve") {
             self.service.lock().unwrap().take();
         }
         let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
+        cmd.env("DOGSLED_BIN", env!("CARGO_BIN_EXE_dogsled"));
         cmd.args(args);
         // Fixtures speak the current wire unless a test explicitly selects another version.
         if args.windows(2).any(|w| {
@@ -838,6 +839,7 @@ esac
         self.rig_env(&mut cmd);
         cmd
     }
+
     /// The environment every process in this rig runs with. A process the rig starts, and
     /// a process the test spawns from what the rig recorded, run with the same
     /// environment, so both see the same fake Herdr, the same state, and the same rig.
@@ -854,7 +856,9 @@ esac
         .env("HERDR_PANE_ID", "w1:p1")
         .env("HERDR_WORKSPACE_ID", "w1")
         .env("RIG", &self.dir)
+        .env("RIG_DOGSLED", env!("CARGO_BIN_EXE_dogsled"))
         .env("HOME", self.dir.join("home"))
+        .env("DOGSLED_BINARY", env!("CARGO_BIN_EXE_dogsled"))
         .env("DOGSLED_CONFIG", self.dir.join("config.toml"))
         .env("DOGSLED_STATE", self.dir.join("state"));
         if let Ok(now) = fs::read_to_string(self.dir.join("clock")) {
@@ -864,9 +868,11 @@ esac
             cmd.env("DOGSLED_TEST_BUSY_WINDOW_MS", window.trim());
         }
     }
+
     fn run(&self, args: &[&str]) -> Output {
         self.cmd(args).output().unwrap()
     }
+
     /// Spawn the wrapper the fake Herdr recorded as `path`, as this test's own child.
     /// The child leads a process group of its own, so the guard kills the wrapper and
     /// every command that shares its group. The test reaps the child and reads its exit
@@ -881,6 +887,7 @@ esac
         cmd.stderr(fs::File::create(self.dir.join("wrapper-error")).unwrap());
         Owned::spawn(&mut cmd)
     }
+
     /// Run `args` in the background, so the test can act while the command waits. The
     /// command is the test's own child, so the test reaps it and reads its exit status.
     /// The command leads a process group of its own, so the guard kills the commands it
@@ -910,6 +917,7 @@ esac
             output,
         }
     }
+
     fn json(&self, args: &[&str]) -> (i32, Value) {
         let out = self.cmd(args).arg("--json").output().unwrap();
         let value: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
@@ -929,18 +937,28 @@ esac
         };
         (out.status.code().unwrap(), value)
     }
+
     fn snapshot(&self, path: &str, sampled: u64, load: f64, cores: u32) {
         // Busy fraction that reproduces the old load rule's verdict for this load. The zero
         // tick counters let a Linux `serve --once` derive a busy sample from one real reading.
         let busy = (load / (1.5 * f64::from(cores))).min(1.0);
-        self.put(path, &json!({"placement_replay":3,"request_validity":1,"sampled_ms":sampled,"probe":{
+        let snapshot = json!({"placement_replay":3,"request_validity":1,"sampled_ms":sampled,"probe":{
             "host":"local","label":"local","load1":load,"cores":cores,"busy":busy,
             "cpu_ticks":{"busy":0,"total":0},
             "memory":{"used_bytes":1_073_741_824_u64,"total_bytes":8_589_934_592_u64},
             "disk_free_percent":50.0,"agents":{"total":1,"by_status":{"idle":1}},
             "agent_panes":[{"pane":"w1:p1","agent":"pi","state":"idle","name":null,"transcript":null,"transcript_modified":null}],"reservations":[],"panes":[]
-        }}));
+        }});
+        if Path::new(path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
+            self.put(path, &snapshot);
+        } else {
+            self.put_host_at(path, &snapshot);
+        }
     }
+
     fn peer(&self) {
         self.put(
             "machines.json",
@@ -948,14 +966,13 @@ esac
         );
         self.snapshot("remote.json", now(), 3.0, 16);
     }
+
     /// The agent in `terminal` called `dogsled done`, and the turn that called it ended as
     /// completion `seq`.
     fn done(&self, terminal: &str, pane: &str, seq: u64) {
-        self.put(
-            "state/done.json",
-            &json!({terminal: {"pane":pane,"after":seq - 1,"sealed":seq,"marked_ms":1}}),
-        );
+        self.put_done(&json!({terminal: {"pane":pane,"after":seq - 1,"sealed":seq,"marked_ms":1}}));
     }
+
     fn database(&self) -> rusqlite::Connection {
         fs::create_dir_all(self.dir.join("state")).unwrap();
         let mut connection = rusqlite::Connection::open(self.dir.join("state/state.db")).unwrap();
@@ -989,60 +1006,130 @@ esac
         initialization.unlock().unwrap();
         connection
     }
+
     fn items(&self) -> Value {
         self.state(&["items"])
     }
+
     fn tickets(&self) -> Value {
         self.state(&["tickets"])
     }
-    /// The admission stored for request `id`, or null.
-    fn admission(&self, id: &str) -> Value {
-        self.state(&["admission", id])
+
+    fn put_done(&self, value: &Value) {
+        let mut marks = value.clone();
+        let agents = self.read("agents.json");
+        let items = self.items();
+        for mark in marks.as_object_mut().unwrap().values_mut() {
+            let pane = mark["pane"].as_str().unwrap().to_owned();
+            if let Some(agent) = agents["result"]["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|agent| agent["pane_id"] == pane)
+            {
+                if mark.get("session").is_none() {
+                    mark["session"] = agent["agent_session"]["value"].clone();
+                }
+                if mark.get("name").is_none() {
+                    mark["name"] = agent["name"].clone();
+                }
+            }
+            if mark.get("item").is_none()
+                && let Some(item) = items
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["pane"] == pane && item["closed_ms"].is_null())
+            {
+                mark["item"] = item["id"].clone();
+            }
+            if mark.get("item").is_none() {
+                mark["item"] = self.state(&["done-identity", &pane]);
+            }
+        }
+        self.put_state(&["state", "done", "--put"], &marks);
     }
-    fn delete_admission(&self, id: &str) {
-        self.state(&["admission", id, "--delete"]);
+
+    fn fault_host_store(&self, store: &str, write: bool) {
+        let mut args = vec!["fault", store];
+        if write {
+            args.push("--write");
+        }
+        self.state(&args);
     }
-    fn admission_ids(&self) -> Vec<String> {
-        self.admissions()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|attempt| attempt["request"]["id"].as_str().unwrap().to_owned())
-            .collect()
+
+    fn host(&self) -> Value {
+        self.state(&["host"])
     }
-    /// Run `dogsled state` with `args`, and return its JSON output.
-    fn state(&self, args: &[&str]) -> Value {
-        let out = self
-            .cmd(&[&["state"], args].concat())
-            .arg("--json")
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{out:?}");
-        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+
+    fn host_at(&self, state: &str) -> Value {
+        self.state_at(state, &["host"])
     }
-    /// Make every later admission update fail, as a storage failure would.
-    fn refuse_admission_writes(&self) {
-        self.database()
-            .execute_batch(
-                "CREATE TRIGGER refuse_admission_writes BEFORE UPDATE ON admissions
-                 BEGIN SELECT RAISE(ABORT, 'admission write refused'); END;",
-            )
-            .unwrap();
+
+    fn put_host(&self, value: &Value) {
+        self.put_host_at("state", value);
     }
-    fn has_admission(&self, id: &str) -> bool {
-        !self.admission(id).is_null()
+
+    fn put_host_at(&self, state: &str, value: &Value) {
+        if state == "state" {
+            self.service();
+        }
+        self.put_state_in(&["state", "host", "--put"], value, state);
     }
-    /// Every stored admission, oldest first.
-    fn admissions(&self) -> Value {
-        self.state(&["admissions"])
+
+    fn launch_record(&self, id: &str, record: &str) -> Value {
+        self.state(&["launch", id, "--record", record])
     }
-    fn put_admission(&self, id: &str, value: &Value) {
-        self.put_state(&["state", "admission", id, "--put"], value);
+
+    fn put_launch_record(&self, id: &str, record: &str, value: &Value) {
+        if let Some(validity) = value.pointer("/request/validity").filter(|v| !v.is_null())
+            && self.validity(id).is_null()
+        {
+            self.put_validity(id, validity);
+        }
+        self.put_state(&["state", "launch", id, "--record", record, "--put"], value);
     }
-    /// Run `dogsled` with `args`, with `value` as its JSON input.
-    fn put_state(&self, args: &[&str], value: &Value) {
+
+    fn launch(&self, id: &str) -> Value {
+        self.launch_record(id, "receipt")
+    }
+
+    fn put_launch(&self, id: &str, value: &Value) {
+        self.put_launch_record(id, "receipt", value);
+    }
+
+    fn launch_progress(&self, id: &str) -> Value {
+        self.launch_record(id, "progress")
+    }
+
+    fn put_launch_progress(&self, id: &str, value: &Value) {
+        self.put_launch_record(id, "progress", value);
+    }
+
+    fn launch_seed(&self, id: &str) -> Value {
+        self.launch_record(id, "seed")
+    }
+
+    fn put_launch_seed(&self, id: &str, value: &Value) {
+        self.put_launch_record(id, "seed", value);
+    }
+
+    fn launch_continuations(&self, id: &str) -> Value {
+        self.launch_record(id, "continuations")
+    }
+
+    fn put_launch_continuations(&self, id: &str, value: &Value) {
+        self.put_launch_record(id, "continuations", value);
+    }
+
+    fn delete_launch_record(&self, id: &str, record: &str) {
+        self.state(&["launch", id, "--record", record, "--delete"]);
+    }
+
+    fn refuse_launch_record(&self, id: &str, record: &str, value: &Value) {
+        let before = self.launch_record(id, record);
         let mut child = self
-            .cmd(args)
+            .cmd(&["state", "launch", id, "--record", record, "--put"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1054,7 +1141,315 @@ esac
         )
         .unwrap();
         let out = child.wait_with_output().unwrap();
+        assert!(
+            !out.status.success(),
+            "malformed {record} was stored: {out:?}"
+        );
+        assert_eq!(self.launch_record(id, record), before);
+    }
+
+    fn launch_ids(&self) -> Vec<String> {
+        serde_json::from_value(self.state(&["launches"])).unwrap()
+    }
+
+    fn peer_launch_record(&self, id: &str, record: &str) -> Value {
+        let out = self
+            .cmd(&["state", "launch", id, "--record", record, "--json"])
+            .env("DOGSLED_STATE", self.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    fn put_peer_launch_record(&self, id: &str, record: &str, value: &Value) {
+        let mut child = self
+            .cmd(&["state", "launch", id, "--record", record, "--put"])
+            .env("DOGSLED_STATE", self.dir.join("peer-state"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            value.to_string().as_bytes(),
+        )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    /// The admission stored for request `id`, or null.
+    fn admission(&self, id: &str) -> Value {
+        self.state(&["admission", id])
+    }
+
+    fn delete_admission(&self, id: &str) {
+        self.state(&["admission", id, "--delete"]);
+    }
+
+    fn admission_ids(&self) -> Vec<String> {
+        self.admissions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attempt| attempt["request"]["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn put_preparation_refused(&self, state: &str, kind: &str, id: &str, value: &Value) -> Output {
+        let mut child = self
+            .cmd(&["state", "preparation", kind, id, "--put"])
+            .env("DOGSLED_STATE", self.dir.join(state))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            value.to_string().as_bytes(),
+        )
+        .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn preparations(&self) -> Value {
+        self.preparation_record("state", "claims", "").read()
+    }
+
+    fn preparation_record<'a>(
+        &'a self,
+        state: &'a str,
+        kind: &'a str,
+        id: &str,
+    ) -> PreparationRecord<'a> {
+        PreparationRecord {
+            rig: self,
+            state,
+            kind,
+            id: id.into(),
+        }
+    }
+
+    /// Run `dogsled state` with `args`, and return its JSON output.
+    fn state(&self, args: &[&str]) -> Value {
+        self.state_at("state", args)
+    }
+
+    fn state_at(&self, state: &str, args: &[&str]) -> Value {
+        let out = self
+            .cmd(&[&["state"], args].concat())
+            .env("DOGSLED_STATE", self.dir.join(state))
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    }
+
+    /// Make every later admission update fail, as a storage failure would.
+    fn refuse_admission_writes(&self) {
+        self.database()
+            .execute_batch(
+                "CREATE TRIGGER refuse_admission_writes BEFORE UPDATE ON admissions
+                 BEGIN SELECT RAISE(ABORT, 'admission write refused'); END;",
+            )
+            .unwrap();
+    }
+
+    fn has_admission(&self, id: &str) -> bool {
+        !self.admission(id).is_null()
+    }
+
+    /// Every stored admission, oldest first.
+    fn admissions(&self) -> Value {
+        self.state(&["admissions"])
+    }
+
+    fn put_admission(&self, id: &str, value: &Value) {
+        self.put_state(&["state", "admission", id, "--put"], value);
+    }
+
+    fn inbox(&self, terminal: &str) -> Value {
+        self.state(&["inbox", terminal])
+    }
+
+    fn put_inbox(&self, terminal: &str, records: &Value) {
+        self.put_state(&["state", "inbox", terminal, "--put"], records);
+    }
+
+    fn put_inbox_reader(&self, terminal: &str, reader: &Value) {
+        self.put_state(&["state", "inbox-reader", terminal, "--put"], reader);
+    }
+
+    fn delete_inbox_reader(&self, terminal: &str) {
+        self.state(&["inbox-reader", terminal, "--delete"]);
+    }
+
+    fn outbox(&self) -> Value {
+        self.state(&["outbox"])
+    }
+
+    fn clear_outbox(&self) {
+        self.state(&["outbox", "--delete"]);
+    }
+
+    fn remote_inbox(&self, terminal: &str) -> Value {
+        let out = self
+            .cmd(&["state", "inbox", terminal])
+            .env("DOGSLED_STATE", self.dir.join("remote-state"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    fn put_remote_state(&self, args: &[&str], value: &Value) {
+        let mut child = self
+            .cmd(args)
+            .env("DOGSLED_STATE", self.dir.join("remote-state"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            value.to_string().as_bytes(),
+        )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    /// Run `dogsled` with `args`, with `value` as its JSON input.
+    fn put_state(&self, args: &[&str], value: &Value) {
+        self.put_state_in(args, value, "state");
+    }
+
+    /// Run `dogsled` with `args` and `value` as its JSON input, and return its output.
+    fn write_state(&self, args: &[&str], value: &Value) -> Output {
+        self.write_state_in(args, value, "state")
+    }
+
+    fn put_state_in(&self, args: &[&str], value: &Value, state: &str) {
+        let out = self.write_state_in(args, value, state);
         assert!(out.status.success(), "{args:?}: {out:?}");
+    }
+
+    fn write_state_in(&self, args: &[&str], value: &Value, state: &str) -> Output {
+        let mut child = self
+            .cmd(args)
+            .env("DOGSLED_STATE", self.dir.join(state))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            value.to_string().as_bytes(),
+        )
+        .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn job(&self, id: &str) -> Value {
+        self.state(&["job", id])
+    }
+
+    fn stop_requested(&self, id: &str) -> Value {
+        self.state(&["job-stop", id])
+    }
+
+    fn at_close(&self, id: &str) -> Value {
+        self.read("at-close/jobs.json")
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["id"] == id)
+            .unwrap()
+            .clone()
+    }
+
+    fn validity(&self, id: &str) -> Value {
+        self.state(&["validity", id])
+    }
+
+    fn cancellation(&self, id: &str) -> Value {
+        self.state(&["cancellation", id])
+    }
+
+    fn clock(&self) -> Value {
+        self.state(&["clock"])
+    }
+
+    fn reservations(&self) -> Value {
+        self.state(&["reservations"])
+    }
+
+    fn put_job(&self, id: &str, value: &Value) {
+        if let Some(validity) = value.get("validity").filter(|v| !v.is_null())
+            && self.validity(id).is_null()
+        {
+            self.put_validity(id, validity);
+        }
+        self.put_state(&["state", "job", id, "--put"], value);
+    }
+
+    fn put_validity(&self, id: &str, value: &Value) {
+        self.put_state(&["state", "validity", id, "--put"], value);
+    }
+
+    fn put_cancellation(&self, id: &str, value: &Value) {
+        self.put_state(&["state", "cancellation", id, "--put"], value);
+    }
+
+    fn put_clock(&self, value: &Value) {
+        self.put_state(&["state", "clock", "--put"], value);
+    }
+
+    fn put_reservations(&self, value: &Value) {
+        self.put_state(&["state", "reservations", "--put"], value);
+    }
+
+    fn delete_job(&self, id: &str) {
+        self.state(&["job", id, "--delete"]);
+    }
+
+    fn delete_validity(&self, id: &str) {
+        self.state(&["validity", id, "--delete"]);
+    }
+
+    fn peer_state(&self, args: &[&str]) -> Value {
+        let out = self
+            .cmd(&[&["state"], args].concat())
+            .env("DOGSLED_STATE", self.dir.join("peer-state"))
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
+    }
+
+    fn put_peer_state(&self, args: &[&str], value: &Value) {
+        let mut child = self
+            .cmd(&[&["state"], args].concat())
+            .env("DOGSLED_STATE", self.dir.join("peer-state"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            value.to_string().as_bytes(),
+        )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
     }
     fn put_items(&self, value: &Value) {
         self.put_state(&["state", "items", "--put"], value);
@@ -1096,7 +1491,6 @@ esac
         pane: &str,
         created_ms: u64,
     ) {
-        fs::create_dir_all(self.dir.join("state/jobs")).unwrap();
         let job = json!({
             "id": id,
             "cmd": cmd,
@@ -1115,11 +1509,7 @@ esac
             "validity": {"version": 1, "created_ms": created_ms},
             "startup": {"version":1,"scope":"non_repository","cwd":self.dir.join("home")},
         });
-        fs::write(
-            self.dir.join(format!("state/jobs/{id}.json")),
-            serde_json::to_vec_pretty(&job).unwrap(),
-        )
-        .unwrap();
+        self.put_job(id, &job);
     }
     /// The validity evidence a record of this rig carries: the request's own creation
     /// time, which never moves while the rig lives.
@@ -1137,10 +1527,10 @@ esac
         fs::read_to_string(self.dir.join(path)).unwrap_or_default()
     }
     fn expire_cache(&self) {
-        let mut cache = self.read("state/peer-38313033.json");
+        let mut cache = self.state(&["peer", "8103"]);
         cache["fetched_ms"] = json!(0);
         cache["retry"] = json!({});
-        self.put("state/peer-38313033.json", &cache);
+        self.put_state(&["state", "peer", "8103", "--put"], &cache);
     }
 }
 impl Drop for Rig {
@@ -1162,7 +1552,7 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let snapshot = rig.read("state/host.json");
+    let snapshot = rig.host();
     assert!(snapshot["sampled_ms"].as_u64().unwrap() > 0);
     assert!(snapshot["probe"]["memory"]["total_bytes"].as_u64().unwrap() > 0);
     assert_eq!(snapshot["probe"]["agents"]["total"], 1);
@@ -1224,11 +1614,11 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
 #[test]
 fn failed_probe_preserves_last_complete_snapshot() {
     let rig = Rig::new("failed-probe");
-    rig.snapshot("state/host.json", 1, 2.0, 4);
-    let before = fs::read(rig.dir.join("state/host.json")).unwrap();
+    rig.snapshot("state", 1, 2.0, 4);
+    let before = rig.host();
     rig.script("herdr", "#!/bin/sh\necho disconnected >&2\nexit 1\n");
     assert_eq!(rig.run(&["serve", "--once"]).status.code(), Some(2));
-    assert_eq!(fs::read(rig.dir.join("state/host.json")).unwrap(), before);
+    assert_eq!(rig.host(), before);
 }
 
 #[test]
@@ -1248,7 +1638,7 @@ fn serve_records_transcript_paths_and_file_mtimes() {
         {"pane_id":"w1:p4","agent":"pi"}
     ]}}));
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let snapshot = rig.read("state/host.json");
+    let snapshot = rig.host();
     let agents = snapshot["probe"]["agent_panes"].as_array().unwrap();
     assert_eq!(agents[0]["pane"], "w1:p1");
     assert_eq!(agents[0]["agent"], "pi");
@@ -1268,7 +1658,7 @@ fn serve_records_transcript_paths_and_file_mtimes() {
 fn service_liveness_and_snapshot_age_are_independent() {
     let rig = Rig::new("service-liveness");
     fs::write(rig.dir.join("clock"), "61000").unwrap();
-    rig.snapshot("state/host.json", 1000, 0.0, 8);
+    rig.snapshot("state", 1000, 0.0, 8);
     let status = rig.json(&["status"]).1;
     assert_eq!(status["hosts"][0]["service"], "up");
     assert_eq!(status["hosts"][0]["sampled_ms"], 1000);
@@ -1287,7 +1677,7 @@ fn service_liveness_and_snapshot_age_are_independent() {
 fn status_reads_snapshots_and_caches_peer_reads() {
     let rig = Rig::new("status-cache");
     rig.peer();
-    rig.snapshot("state/host.json", now(), 50.0, 12);
+    rig.snapshot("state", now(), 50.0, 12);
     rig.config("remote_command = ['custom-dogsled', 'argument with spaces']\n");
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0);
@@ -1449,7 +1839,7 @@ cat "$RIG/remote.json"
 fn place_reserves_most_headroom_and_respects_host_pin() {
     let rig = Rig::new("place");
     rig.peer();
-    rig.snapshot("state/host.json", now(), 0.0, 2);
+    rig.snapshot("state", now(), 0.0, 2);
     let (code, placed) = rig.json(&["place"]);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["host"]["id"], "8103");
@@ -1457,7 +1847,7 @@ fn place_reserves_most_headroom_and_respects_host_pin() {
     let (code, placed) = rig.json(&["place", "--host", "local"]);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["host"]["id"], "local");
-    let reservations = rig.read("state/placements.json");
+    let reservations = rig.reservations();
     assert_eq!(reservations.as_array().unwrap().len(), 1);
     assert_eq!(reservations[0]["id"], placed["reservation"]);
     assert_eq!(rig.json(&["place", "--host", "missing"]).0, 2);
@@ -1467,14 +1857,14 @@ fn place_reserves_most_headroom_and_respects_host_pin() {
 fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
     let rig = Rig::new("fallback");
     rig.peer();
-    rig.snapshot("state/host.json", now(), 0.0, 2);
+    rig.snapshot("state", now(), 0.0, 2);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     let (code, placed) = rig.json(&["place"]);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["host"]["id"], "local");
-    let mut snapshot = rig.read("state/host.json");
+    let mut snapshot = rig.host();
     snapshot["probe"]["disk_free_percent"] = json!(14.0);
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     assert_eq!(rig.json(&["place", "--host", "local"]).0, 1);
     assert!(
         String::from_utf8(rig.run(&["status"]).stdout)
@@ -1486,21 +1876,21 @@ fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
 #[test]
 fn full_is_exit_one_with_durable_queue() {
     let rig = Rig::new("full");
-    rig.snapshot("state/host.json", now(), 3.0, 2);
+    rig.snapshot("state", now(), 3.0, 2);
     let output = rig.run(&["place"]);
     assert_eq!(output.status.code(), Some(1));
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["queued"], true);
     assert!(value["ticket"].is_string());
     assert_eq!(rig.tickets()[0]["state"], "pending");
-    rig.snapshot("state/host.json", 0, 0.0, 2);
+    rig.snapshot("state", 0, 0.0, 2);
     assert_eq!(rig.json(&["place"]).0, 1);
 }
 
 #[test]
 fn concurrent_placement_rechecks_capacity_under_host_lock() {
     let rig = Rig::new("concurrent-place");
-    rig.snapshot("state/host.json", now(), 2.0, 2);
+    rig.snapshot("state", now(), 2.0, 2);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| rig.json(&["place"]).0))
@@ -1509,16 +1899,13 @@ fn concurrent_placement_rechecks_capacity_under_host_lock() {
         assert_eq!(codes.iter().filter(|&&code| code == 0).count(), 1);
         assert_eq!(codes.iter().filter(|&&code| code == 1).count(), 7);
     });
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
 }
 
 #[test]
 fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     let rig = Rig::new("reservation");
-    rig.snapshot("state/host.json", now(), 2.0, 2);
+    rig.snapshot("state", now(), 2.0, 2);
     assert_eq!(rig.json(&["place"]).0, 0);
     assert!(!rig.log("herdr.log").contains("agent list"));
     rig.put(
@@ -1529,16 +1916,10 @@ fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     let queued = rig.tickets()[0]["id"].as_str().unwrap().to_owned();
     assert!(rig.run(&["cancel", &queued]).status.success());
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
-    rig.put(
-        "state/placements.json",
-        &json!([{"id":"expired","created_ms":now()-90_001}]),
-    );
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
+    rig.put_reservations(&json!([{"id":"expired","created_ms":now()-90_001}]));
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/placements.json"), json!([]));
+    assert_eq!(rig.reservations(), json!([]));
     for command in ["bind", "release"] {
         assert_eq!(rig.run(&["host", command]).status.code(), Some(2));
     }
@@ -1699,7 +2080,7 @@ fn removed_commands_and_sidebar_are_not_accepted() {
 #[test]
 fn watch_prints_a_frame_without_waiting_for_the_interval() {
     let rig = Rig::new("watch");
-    rig.snapshot("state/host.json", now(), 1.0, 2);
+    rig.snapshot("state", now(), 1.0, 2);
     // The test owns the command as its own child, so the test reaps it. The guard kills
     // the command's group, so the watch never outlives the test.
     let mut command = rig.cmd(&["status", "--watch", "--line", "--interval", "3600"]);
@@ -1731,7 +2112,7 @@ fn watch_prints_a_frame_without_waiting_for_the_interval() {
 #[test]
 fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
     let rig = Rig::new("background-drop");
-    rig.snapshot("state/host.json", now(), 1.0, 2);
+    rig.snapshot("state", now(), 1.0, 2);
     // The command never ends on its own: it watches until the test ends it.
     let background = rig.start(&["status", "--watch", "--line", "--interval", "3600"]);
     let pid = background.owned.pid;
@@ -1753,4 +2134,54 @@ fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
         wait_gone(pid, PROCESS_DEADLINE),
         "the command outlived its drop"
     );
+}
+
+/// Typed state inspection through the binary, including the peer host fixture.
+struct PreparationRecord<'a> {
+    rig: &'a Rig,
+    state: &'a str,
+    kind: &'a str,
+    id: String,
+}
+impl PreparationRecord<'_> {
+    fn args(&self) -> Vec<&str> {
+        if self.kind == "claims" {
+            vec!["state", "preparations"]
+        } else {
+            vec!["state", "preparation", self.kind, &self.id]
+        }
+    }
+    fn read(&self) -> Value {
+        let out = self
+            .rig
+            .cmd(&self.args())
+            .env("DOGSLED_STATE", self.rig.dir.join(self.state))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+    fn exists(&self) -> bool {
+        if self.kind == "claims" {
+            !self.read().as_array().unwrap().is_empty()
+        } else {
+            !self.read().is_null()
+        }
+    }
+    fn put(&self, value: &Value) {
+        let mut args = self.args();
+        args.push("--put");
+        self.rig.put_state_in(&args, value, self.state);
+    }
+    fn delete(&self) {
+        let mut args = self.args();
+        args.push("--delete");
+        let out = self
+            .rig
+            .cmd(&args)
+            .env("DOGSLED_STATE", self.rig.dir.join(self.state))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
 }

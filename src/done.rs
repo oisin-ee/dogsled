@@ -8,8 +8,6 @@ use crate::probe::Agent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-const FILE: &str = "done.json";
-
 /// One line because Herdr refuses newlines in an argument.
 pub const CONTRACT: &str = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use the native tools. Commit your changes before done. Call done once during the turn that completes the whole task, then end the turn with your final reply. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not call done when you need an answer, cannot continue, or own open children.";
 
@@ -134,7 +132,7 @@ fn waiting(agent: &Agent) -> bool {
     matches!(agent.state.as_str(), "idle" | "done")
 }
 
-fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
+pub(crate) fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     if let Some(id) = crate::launch::identity(ledger, pane)? {
         return Ok(Some(id));
     }
@@ -144,8 +142,9 @@ fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
         .map(|i| i.id))
 }
 
-fn key(mark: &Mark) -> String {
-    // JSON tuples avoid ambiguous concatenation, and the key is never a file path.
+pub(crate) fn key(mark: &Mark) -> String {
+    // Preserve the established in-memory iteration order. The database stores the
+    // three identity columns, never this transient map index.
     serde_json::json!([mark.item, mark.pane, mark.session]).to_string()
 }
 
@@ -174,31 +173,6 @@ fn owners(ledger: &Ledger) -> Result<BTreeMap<String, Vec<String>>> {
             .push(format!("queued {}", ticket.id));
     }
     Ok(owners)
-}
-
-/// Preserve unmatched legacy records until their pane is observable. Migration never deletes
-/// a mark, even if its old terminal disappeared before the first read by this version.
-fn migrate(ledger: &Ledger, marks: Marks, agents: &[Agent]) -> Result<Marks> {
-    let mut migrated = Marks::new();
-    for (old_key, mut mark) in marks {
-        if old_key != key(&mark) {
-            if let Some(agent) = agents.iter().find(|a| a.pane == mark.pane) {
-                mark.session.clone_from(&agent.agent_session);
-                mark.name.clone_from(&agent.name);
-                mark.item = identity(ledger, &mark.pane)?;
-            } else {
-                migrated.insert(old_key, mark);
-                continue;
-            }
-        }
-        let new_key = key(&mark);
-        if migrated.contains_key(&new_key) {
-            migrated.insert(old_key, mark);
-        } else {
-            migrated.insert(new_key, mark);
-        }
-    }
-    Ok(migrated)
 }
 
 /// The pane's unit evidence. An error stays an error: it never reads as a plain pane.
@@ -248,10 +222,19 @@ pub enum Input<'a> {
     Legacy { from: &'a crate::inbox::Sender },
 }
 
+// This lock also serializes inbox acceptance and process handoff; the transaction
+// protects the mark rows without spanning those outside effects.
+fn marks_transaction<T>(
+    ledger: &Ledger,
+    change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
+) -> Result<T> {
+    ledger.with_lock("done", || crate::store::write(ledger, change))
+}
+
 pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
-    ledger.with_lock("done", || {
-        let before: Marks = ledger.read(FILE)?.unwrap_or_default();
-        let mut marks = migrate(ledger, before.clone(), agents)?;
+    marks_transaction(ledger, |tx| {
+        let before: Marks = crate::host_store::marks_rows(tx)?;
+        let mut marks = before.clone();
         let owners = owners(ledger)?;
         for agent in agents {
             let mut done = false;
@@ -314,7 +297,7 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
             crate::lifecycle::publish(agent, crate::lifecycle::Host::Up);
         }
         if before != marks {
-            ledger.write(FILE, &marks)?;
+            crate::host_store::replace_marks(tx, &marks)?;
         }
         Ok(())
     })
@@ -378,8 +361,8 @@ pub fn mark(
         closed_ms: None,
         dropped_ms: None,
     };
-    ledger.with_lock("done", || {
-        let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+    marks_transaction(ledger, |tx| {
+        let mut marks: Marks = crate::host_store::marks_rows(tx)?;
         for existing in marks.values().filter(|m| matches(m, &agent)) {
             if let Some(signal) = &existing.signal
                 && signal.cleared_ms.is_none()
@@ -396,7 +379,7 @@ pub fn mark(
             )));
         }
         marks.insert(key(&mark), mark.clone());
-        ledger.write(FILE, &marks)
+        crate::host_store::replace_marks(tx, &marks)
     })?;
     Ok(mark)
 }
@@ -425,8 +408,8 @@ pub fn signal(
         .ok_or_else(|| unproven(pane))?;
     let turn = Turn::of_agent(&agent);
     let item = identity(ledger, pane)?;
-    ledger.with_lock("done", || {
-        let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+    marks_transaction(ledger, |tx| {
+        let mut marks: Marks = crate::host_store::marks_rows(tx)?;
         for mark in marks.values().filter(|m| matches(m, &agent)) {
             if has_done(mark) {
                 return Err(conflict(pane));
@@ -477,7 +460,7 @@ pub fn signal(
             dropped_ms: None,
         };
         marks.insert(key(&mark), mark);
-        ledger.write(FILE, &marks)?;
+        crate::host_store::replace_marks(tx, &marks)?;
         Ok(signal)
     })
 }
@@ -627,7 +610,7 @@ pub fn refresh_branch(shell: &dyn crate::shell::Shell, branch: &mut Branch) -> R
 
 /// Only a closed native handoff with released references is expendable.
 pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
-    let marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+    let marks: Marks = crate::host_store::marks(ledger)?;
     if !marks.values().any(|mark| {
         mark.closed_ms
             .is_some_and(|closed| now.saturating_sub(closed) > crate::jobs::RECORD_KEEP_MS)
@@ -637,8 +620,8 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
     let (panes, _) = crate::cleanup::pane_snapshot(&crate::shell::System::default())?;
     ledger.with_lock("custody", || {
         ledger.with_lock("handoff", || {
-            ledger.with_lock("done", || {
-                let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+            marks_transaction(ledger, |tx| {
+                let mut marks: Marks = crate::host_store::marks_rows(tx)?;
                 let mut expired = Vec::new();
                 for (key, mark) in &marks {
                     let Some(closed) = mark.closed_ms else {
@@ -666,24 +649,20 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
                     return Ok(());
                 }
                 marks.retain(|key, _| !expired.contains(key));
-                ledger.write(FILE, &marks)
+                crate::host_store::replace_marks(tx, &marks)
             })
         })
     })
 }
 
 pub fn list(ledger: &Ledger) -> Result<Vec<Mark>> {
-    Ok(ledger
-        .read::<Marks>(FILE)?
-        .unwrap_or_default()
-        .into_values()
-        .collect())
+    Ok(crate::host_store::marks(ledger)?.into_values().collect())
 }
 
 /// Keep explicit branch disposal even when the origin is on another host.
 pub fn dropped(ledger: &Ledger, item: &crate::items::Item, now: u64) -> Result<()> {
-    ledger.with_lock("done", || {
-        let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+    marks_transaction(ledger, |tx| {
+        let mut marks: Marks = crate::host_store::marks_rows(tx)?;
         for mark in marks.values_mut().filter(|m| {
             m.pane == item.pane
                 && m.item.as_deref().is_none_or(|id| id == item.id)
@@ -700,13 +679,13 @@ pub fn dropped(ledger: &Ledger, item: &crate::items::Item, now: u64) -> Result<(
                 branch.ahead = 0;
             }
         }
-        ledger.write(FILE, &marks)
+        crate::host_store::replace_marks(tx, &marks)
     })
 }
 
 fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
-    ledger.with_lock("done", || {
-        let mut marks: Marks = ledger.read(FILE)?.unwrap_or_default();
+    marks_transaction(ledger, |tx| {
+        let mut marks: Marks = crate::host_store::marks_rows(tx)?;
         // A message during the same turn may have removed it. Never resurrect it.
         if let std::collections::btree_map::Entry::Occupied(mut entry) = marks.entry(key(mark)) {
             let mut updated = mark.clone();
@@ -719,7 +698,7 @@ fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
                 updated.branch.clone_from(&entry.get().branch);
             }
             entry.insert(updated);
-            ledger.write(FILE, &marks)?;
+            crate::host_store::replace_marks(tx, &marks)?;
         }
         Ok(())
     })
@@ -769,8 +748,8 @@ fn guarded<T>(
     accept: impl FnOnce(Option<&Mark>) -> Result<(T, bool)>,
 ) -> Result<T> {
     ledger.with_lock("done", || {
-        let before: Marks = ledger.read(FILE)?.unwrap_or_default();
-        let mut marks = migrate(ledger, before.clone(), std::slice::from_ref(agent))?;
+        let before: Marks = crate::host_store::marks(ledger)?;
+        let mut marks = before.clone();
         let mut refusal = None;
         let mut continued = false;
         let mut legacy = None;
@@ -845,7 +824,7 @@ fn guarded<T>(
         }
         if let Some(refusal) = refusal {
             if marks != before {
-                ledger.write(FILE, &marks)?;
+                crate::host_store::put_marks(ledger, &marks)?;
             }
             return Err(Error::Invalid(refusal));
         }
@@ -861,7 +840,7 @@ fn guarded<T>(
             marks.retain(|_, m| !matches(m, agent) || !has_done(m));
         }
         if marks != before {
-            ledger.write(FILE, &marks)?;
+            crate::host_store::put_marks(ledger, &marks)?;
         }
         Ok(result)
     })

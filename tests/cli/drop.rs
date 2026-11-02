@@ -35,19 +35,16 @@ fn rig(name: &str) -> (Rig, PathBuf) {
         "owner_pane":"w1:p1","name":"child","created_ms":1,"closed_ms":2,
         "branch":{"repo":repo,"name":"feat/x","ahead":1,"landed":false}
     }]));
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     (rig, repo)
 }
 
 fn mark(rig: &Rig) {
     let item = rig.items()[0].clone();
-    rig.put(
-        "state/done.json",
-        &json!({"term_child":{
-            "pane":"w2:p1","item":"i1","marked_ms":1,"closed_ms":2,
-            "branch":item["branch"]
-        }}),
-    );
+    rig.put_done(&json!({"term_child":{
+        "pane":"w2:p1","item":"i1","marked_ms":1,"closed_ms":2,
+        "branch":item["branch"]
+    }}));
 }
 
 fn rows(rig: &Rig) -> Vec<Value> {
@@ -78,7 +75,15 @@ fn local_drop_deletes_local_and_origin_branches_and_settles_mark_and_board() {
     );
     assert_eq!(rows(&rig), [] as [Value; 0]);
     assert!(rig.items()[0]["dropped_ms"].is_u64());
-    assert!(rig.read("state/done.json")["term_child"]["dropped_ms"].is_u64());
+    assert!(
+        rig.state(&["done"])
+            .as_object()
+            .unwrap()
+            .values()
+            .find(|mark| mark["pane"] == "w2:p1")
+            .unwrap()["dropped_ms"]
+            .is_u64()
+    );
     assert_eq!(rig.json(&["drop", "i1"]).0, 0, "repeated drop is harmless");
 }
 
@@ -334,10 +339,10 @@ fn dropped_or_landed_item_is_hidden_even_with_a_stale_mark() {
 #[test]
 fn stale_host_or_existing_mark_does_not_trigger_missing_mark_check() {
     let (rig, _) = rig("drop-no-check");
-    rig.snapshot("state/host.json", now() - 31_000, 0.0, 8);
+    rig.snapshot("state", now() - 31_000, 0.0, 8);
     assert_eq!(rows(&rig).len(), 1);
     assert!(rig.items()[0]["branch_checked_ms"].is_null());
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     mark(&rig);
     assert_eq!(rows(&rig).len(), 1);
     assert!(rig.items()[0]["branch_checked_ms"].is_null());

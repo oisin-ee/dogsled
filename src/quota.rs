@@ -14,7 +14,6 @@ use crate::hosts::Fleet;
 use crate::ledger::Ledger;
 use crate::shell::Shell;
 
-const CACHE: &str = "quota.json";
 const REFRESH_MS: u64 = 5 * 60_000;
 const MAX_SNAPSHOT: u64 = 1024 * 1024;
 const KEY_ARGS: &[&str] = &[
@@ -130,7 +129,7 @@ impl Snapshot {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.version != 1
             || !label(&self.source)
             || self.pools.iter().any(|row| {
@@ -187,8 +186,7 @@ fn invalid_snapshot() -> Error {
 }
 
 pub fn cached(ledger: &Ledger) -> Result<Snapshot> {
-    let snapshot: Snapshot = ledger
-        .read(CACHE)
+    let snapshot: Snapshot = crate::host_store::quota(ledger)
         .map_err(|_| invalid_snapshot())?
         .unwrap_or_else(Snapshot::empty);
     snapshot.validate()?;
@@ -205,10 +203,14 @@ pub fn store(ledger: &Ledger, input: impl std::io::Read) -> Result<Snapshot> {
     let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|_| invalid_snapshot())?;
     snapshot.validate()?;
     ledger.with_lock("quota", || {
-        if cached(ledger)?.fetched_ms <= snapshot.fetched_ms {
-            ledger.write(CACHE, &snapshot)?;
-        }
-        Ok(())
+        crate::store::write(ledger, |tx| {
+            if crate::host_store::quota_rows(tx)?.map_or(0, |previous| previous.fetched_ms)
+                <= snapshot.fetched_ms
+            {
+                crate::host_store::replace_quota(tx, &snapshot)?;
+            }
+            Ok(())
+        })
     })?;
     Ok(snapshot)
 }
@@ -552,12 +554,12 @@ fn parse_usage(pool: Pool, account: &str, body: &Value) -> Collected<Vec<Row>> {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Refresh {
-    attempted_ms: u64,
-    attempts: u64,
-    retry: Backoff,
-    pending_push: bool,
-    push_retry: Backoff,
+pub(crate) struct Refresh {
+    pub(crate) attempted_ms: u64,
+    pub(crate) attempts: u64,
+    pub(crate) retry: Backoff,
+    pub(crate) pending_push: bool,
+    pub(crate) push_retry: Backoff,
 }
 
 pub fn command(
@@ -606,10 +608,11 @@ impl Collector<'_> {
         if only_cached || !self.macos || self.policy.quota.management_url.is_none() {
             return Ok(previous);
         }
-        let observed: Refresh = self.ledger.read("quota-refresh.json")?.unwrap_or_default();
+        let observed: Refresh = crate::host_store::quota_refresh(self.ledger)?.unwrap_or_default();
         self.ledger.with_lock("quota", || {
             let mut snapshot = cached(self.ledger)?;
-            let mut refresh: Refresh = self.ledger.read("quota-refresh.json")?.unwrap_or_default();
+            let mut refresh: Refresh =
+                crate::host_store::quota_refresh(self.ledger)?.unwrap_or_default();
             let fresh =
                 snapshot.fetched_ms != 0 && now.saturating_sub(snapshot.fetched_ms) < REFRESH_MS;
             let collect = (force || (!fresh && refresh.retry.ready(now)))
@@ -627,7 +630,7 @@ impl Collector<'_> {
                 match client.collect(now, &crate::inbox::hostname()) {
                     Ok(collected) => {
                         collected.validate()?;
-                        self.ledger.write(CACHE, &collected)?;
+                        crate::host_store::put_quota(self.ledger, &collected)?;
                         refresh.retry.reset();
                         refresh.pending_push = true;
                         refresh.push_retry.reset();
@@ -635,14 +638,14 @@ impl Collector<'_> {
                     }
                     Err(error) => {
                         refresh.retry.fail(now, "quota");
-                        self.ledger.write("quota-refresh.json", &refresh)?;
+                        crate::host_store::put_quota_refresh(self.ledger, &refresh)?;
                         return Err(Error::Invalid(error));
                     }
                 }
             }
             if refresh.pending_push {
                 // Persist before transport so a crash leaves delivery pending.
-                self.ledger.write("quota-refresh.json", &refresh)?;
+                crate::host_store::put_quota_refresh(self.ledger, &refresh)?;
                 match push(self.shell, self.ledger, self.policy, self.home, &snapshot) {
                     Ok(()) => {
                         refresh.pending_push = false;
@@ -650,12 +653,12 @@ impl Collector<'_> {
                     }
                     Err(error) => {
                         refresh.push_retry.fail(now, "quota-push");
-                        self.ledger.write("quota-refresh.json", &refresh)?;
+                        crate::host_store::put_quota_refresh(self.ledger, &refresh)?;
                         return Err(error);
                     }
                 }
             }
-            self.ledger.write("quota-refresh.json", &refresh)?;
+            crate::host_store::put_quota_refresh(self.ledger, &refresh)?;
             Ok(snapshot)
         })
     }
@@ -848,9 +851,17 @@ mod tests {
         assert!(!printed.contains(SECRET));
         assert!(!printed.contains(RAW_KEY));
         for entry in std::fs::read_dir(&f.ledger.dir).unwrap() {
-            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
-            assert!(!text.contains(SECRET));
-            assert!(!text.contains(RAW_KEY));
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            assert!(
+                !bytes
+                    .windows(SECRET.len())
+                    .any(|value| value == SECRET.as_bytes())
+            );
+            assert!(
+                !bytes
+                    .windows(RAW_KEY.len())
+                    .any(|value| value == RAW_KEY.as_bytes())
+            );
         }
         let requests = f.shell.requests.lock().unwrap();
         assert!(requests[1].contains("anthropic-beta"));
@@ -999,9 +1010,17 @@ mod tests {
             assert!(!printed.contains(SECRET));
             assert!(!printed.contains(RAW_KEY));
             for entry in std::fs::read_dir(&f.ledger.dir).unwrap() {
-                let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
-                assert!(!text.contains(SECRET));
-                assert!(!text.contains(RAW_KEY));
+                let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+                assert!(
+                    !bytes
+                        .windows(SECRET.len())
+                        .any(|value| value == SECRET.as_bytes())
+                );
+                assert!(
+                    !bytes
+                        .windows(RAW_KEY.len())
+                        .any(|value| value == RAW_KEY.as_bytes())
+                );
             }
         }
     }
@@ -1044,7 +1063,7 @@ mod tests {
             source: "laptop".into(),
             ..Snapshot::empty()
         };
-        f.ledger.write(CACHE, &snapshot).unwrap();
+        crate::host_store::put_quota(&f.ledger, &snapshot).unwrap();
         assert_eq!(
             f.collector().read(true, false, 2_000_000).unwrap(),
             snapshot

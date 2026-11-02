@@ -11,7 +11,7 @@ fn repository(name: &str) -> (Rig, PathBuf) {
         &["remote", "set-url", "origin", remote.to_str().unwrap()],
     );
     git(&repo, &["push", "-q", "-u", "origin", "main"]);
-    rig.put("state/repositories.json", &json!([repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo]));
     (rig, repo)
 }
 
@@ -40,9 +40,12 @@ fn run(rig: &Rig, args: &[&str]) {
 }
 
 fn sweep(rig: &Rig) -> Value {
-    rig.put("state/sweep-request.json", &json!("ownership-test"));
+    rig.put_state(
+        &["state", "sweep-request", "--put"],
+        &json!("ownership-test"),
+    );
     run(rig, &["serve", "--once", "--interval", "1"]);
-    let report = rig.read("state/sweep.json");
+    let report = rig.state(&["sweep"]);
     assert_eq!(report["failures"], json!([]), "{report}");
     report
 }
@@ -62,10 +65,9 @@ fn prune_entry(rig: &Rig, class: &str, path: &Path) -> Value {
 /// Give cleanup fixtures the same identity-bearing registration, launch, and closed item
 /// that a finished child leaves. An existing registration also supports the fake-Git rigs.
 pub(super) fn record_closed_checkout(rig: &Rig, path: &Path, id: &str) {
-    let mut registered = if rig.dir.join("state/worktrees.json").exists() {
-        rig.read("state/worktrees.json")
-    } else {
-        json!([])
+    let mut registered = match rig.state(&["worktrees"]) {
+        Value::Null => json!([]),
+        registered => registered,
     };
     let captured = if let Some(tree) = registered
         .as_array()
@@ -77,7 +79,7 @@ pub(super) fn record_closed_checkout(rig: &Rig, path: &Path, id: &str) {
     } else {
         let tree = prune_entry(rig, "worktrees", path)["tree"].clone();
         registered.as_array_mut().unwrap().push(tree.clone());
-        rig.put("state/worktrees.json", &registered);
+        rig.put_state(&["state", "worktrees", "--put"], &registered);
         tree
     };
     assert!(captured["identity"].is_object(), "{captured}");
@@ -90,16 +92,15 @@ pub(super) fn record_closed_checkout(rig: &Rig, path: &Path, id: &str) {
         "pane":pane,"owner_pane":"gone-owner","created_ms":now(),"closed_ms":now()}));
     rig.put_items(&items);
     let result = json!({"checkout":captured});
-    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
-    rig.put(
-        &format!("state/launches/{id}.progress.json"),
+    rig.put_launch_progress(
+        id,
         &json!({
             "request":{"id":id,"action":{"type":"agent","kind":"pi","name":id,"message":"go"},
                 "host":"local","cwd":path,"pane":pane,"terminal":id,"owner":"gone-owner"},
             "pane":pane,"terminal":id,"attempted":true,"confirmed":true,"result":result,"error":null
         }),
     );
-    rig.put(&format!("state/launches/{id}.json"), &result);
+    rig.put_launch(id, &result);
 }
 
 pub(super) fn record_closed_branch(rig: &Rig, repo: &Path, branch: &str) {

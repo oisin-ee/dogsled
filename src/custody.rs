@@ -14,7 +14,6 @@ use crate::ledger::Ledger;
 use serde::{Deserialize, Serialize};
 
 /// The custody records, beside the item records they describe.
-const FILE: &str = "custody.json";
 /// The lock that guards a claim on the host that recorded the item.
 const LOCK: &str = "custody";
 
@@ -293,7 +292,7 @@ pub fn evidence(
 
 /// Every custody record on this host.
 pub fn list(ledger: &Ledger) -> Result<Vec<Custody>> {
-    Ok(ledger.read(FILE)?.unwrap_or_default())
+    crate::host_store::custodies(ledger)
 }
 
 /// The custody of one item, when this host holds one.
@@ -310,44 +309,22 @@ pub(crate) fn forget_released(ledger: &Ledger, id: &str) -> Result<()> {
             .iter()
             .any(|mark| mark.item.as_deref() == Some(id))
         || crate::admissions::exists(ledger, id)?
-        || [
-            "preparation-receipts",
-            "placement-grants",
-            "preparation-retirements",
-        ]
-        .iter()
-        .any(|directory| {
-            ledger
-                .child(directory)
-                .dir
-                .join(format!("{id}.json"))
-                .exists()
-        })
-        || [
-            "json",
-            "progress.json",
-            "release.json",
-            "reference-release.json",
-            "unit.json",
-        ]
-        .iter()
-        .any(|extension| {
-            ledger
-                .child("launches")
-                .dir
-                .join(format!("{id}.{extension}"))
-                .exists()
-        })
+        || (crate::preparation_store::receipts::get(ledger, id)?.is_some()
+            || crate::preparation_store::grants::get(ledger, id)?.is_some()
+            || crate::preparation_store::retirements::get(ledger, id)?.is_some())
+        || crate::launch_store::exists(ledger, id)?
     {
         return Ok(());
     }
-    let mut records = list(ledger)?;
-    let before = records.len();
-    records.retain(|record| record.item != id);
-    if before != records.len() {
-        ledger.write(FILE, &records)?;
-    }
-    Ok(())
+    crate::store::write(ledger, |tx| {
+        let mut records = crate::host_store::custodies_rows(tx)?;
+        let before = records.len();
+        records.retain(|record| record.item != id);
+        if before != records.len() {
+            crate::host_store::replace_custodies(tx, &records)?;
+        }
+        Ok(())
+    })
 }
 
 /// Run `check` on the custody of `item` while the custody lock is held, so a claim cannot
@@ -365,14 +342,20 @@ pub fn locked<T>(
 /// The record is written under the custody lock, so a concurrent claim sees it whole.
 pub fn ensure(ledger: &Ledger, item: &Item) -> Result<Custody> {
     ledger.with_lock(LOCK, || {
-        if let Some(existing) = get(ledger, &item.id)? {
-            return Ok(existing);
-        }
-        let record = Custody::origin(item);
-        let mut records = list(ledger)?;
-        records.push(record.clone());
-        ledger.write(FILE, &records)?;
-        Ok(record)
+        crate::store::write(ledger, |tx| {
+            let mut records = crate::host_store::custodies_rows(tx)?;
+            if let Some(existing) = records
+                .iter()
+                .find(|record| record.item == item.id)
+                .cloned()
+            {
+                return Ok(existing);
+            }
+            let record = Custody::origin(item);
+            records.push(record.clone());
+            crate::host_store::replace_custodies(tx, &records)?;
+            Ok(record)
+        })
     })
 }
 
@@ -393,14 +376,16 @@ pub fn claim(
     // a refused claim from a host that could not read or write its records.
     let mut refused: Option<Refusal> = None;
     let result = ledger.with_lock(LOCK, || {
-        match claim_locked(ledger, request, &probed, &panes, &session) {
-            Ok(outcome) => Ok(outcome),
-            Err(ClaimError::Refusal(refusal)) => {
-                refused = Some(refusal);
-                Err(crate::error::Error::Invalid("claim refused".into()))
+        crate::store::write(ledger, |tx| {
+            match claim_locked(ledger, tx, request, &probed, &panes, &session) {
+                Ok(outcome) => Ok(outcome),
+                Err(ClaimError::Refusal(refusal)) => {
+                    refused = Some(refusal);
+                    Err(crate::error::Error::Invalid("claim refused".into()))
+                }
+                Err(ClaimError::Host(error)) => Err(error),
             }
-            Err(ClaimError::Host(error)) => Err(error),
-        }
+        })
     });
     match result {
         Ok(outcome) => Ok(outcome),
@@ -432,6 +417,7 @@ fn custodian_pane(ledger: &Ledger, item: &str) -> std::result::Result<String, Cl
 /// Claim the custody under the custody lock.
 fn claim_locked(
     ledger: &Ledger,
+    tx: &rusqlite::Transaction<'_>,
     request: &ClaimRequest,
     probed: &str,
     panes: &PaneState,
@@ -444,7 +430,7 @@ fn claim_locked(
         }
         .into());
     };
-    let mut records = list(ledger)?;
+    let mut records = crate::host_store::custodies_rows(tx)?;
     let record = records
         .iter()
         .find(|custody| custody.item == request.item)
@@ -530,7 +516,7 @@ fn claim_locked(
         Some(slot) => *slot = custody.clone(),
         None => records.push(custody.clone()),
     }
-    ledger.write(FILE, &records)?;
+    crate::host_store::replace_custodies(tx, &records)?;
     Ok(ClaimOutcome::Claimed { custody })
 }
 
@@ -753,7 +739,7 @@ mod tests {
             panic!("the claim was refused");
         };
         assert_eq!(custody.custodian_pane, "w3:p1");
-        let before = std::fs::read(ledger.dir.join(FILE)).unwrap();
+        let before = list(&ledger).unwrap();
         // The custodian's pane lives and runs its session: the child is not an orphan.
         let mut second = request(&host(), 1);
         second.pane = "w5:p1".into();
@@ -765,7 +751,7 @@ mod tests {
             "{error:?}"
         );
         // The refused claim wrote nothing.
-        assert_eq!(std::fs::read(ledger.dir.join(FILE)).unwrap(), before);
+        assert_eq!(list(&ledger).unwrap(), before);
         // Once the custodian's pane is gone, the next lead claims at the new revision.
         let ClaimOutcome::Claimed { custody } =
             claim(&ledger, &second, &shell_without_owner()).unwrap()
@@ -830,7 +816,7 @@ mod tests {
         let ledger = ledger();
         let item = item(&ledger, Some("owner-session"));
         ensure(&ledger, &item).unwrap();
-        let before = std::fs::read(ledger.dir.join(FILE)).unwrap();
+        let before = list(&ledger).unwrap();
         // The owner is still there.
         let shell = shell_with_owner("owner-session");
         let error = claim(&ledger, &request(&host(), 0), &shell).unwrap_err();
@@ -845,7 +831,7 @@ mod tests {
             matches!(refusal(&error), Refusal::WrongHost { .. }),
             "{error:?}"
         );
-        assert_eq!(std::fs::read(ledger.dir.join(FILE)).unwrap(), before);
+        assert_eq!(list(&ledger).unwrap(), before);
         let custody = get(&ledger, "child").unwrap().expect("the custody exists");
         assert_eq!(custody.revision, 0);
         assert_eq!(custody.claims, [] as [Claim; 0]);
@@ -943,7 +929,10 @@ mod tests {
         let mut stale = request(&host(), 1);
         stale.pane = "w5:p1".into();
         stale.session = Some("second-claimant".into());
-        let error = claim_locked(&ledger, &stale, &probed, &panes, &session).unwrap_err();
+        let error = crate::store::write(&ledger, |tx| {
+            Ok(claim_locked(&ledger, tx, &stale, &probed, &panes, &session).unwrap_err())
+        })
+        .unwrap();
         assert!(
             matches!(refusal(&error), Refusal::Moved { .. }),
             "{error:?}"

@@ -227,7 +227,7 @@ mod tests {
                 std::env::temp_dir()
                     .join(format!("dogsled-questions-api-{}", crate::ledger::new_id())),
             )
-            .child("web"),
+            .clone(),
         )
     }
 
@@ -387,7 +387,7 @@ mod tests {
         .await;
         assert_eq!(saved["rejection"]["reason"], "Neither option. Use Dioxus.");
         assert_eq!(saved["responses"], json!([]));
-        let reopened = crate::web::store::Store::new(state.web.child("questions"));
+        let reopened = crate::web::store::Store::new(state.web.clone());
         let crate::web::store::Poll::Answered(outcome) = reopened
             .wait(&id, Duration::ZERO)
             .await
@@ -521,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn a_question_waiting_for_an_answer_survives_a_restart() {
         let dir = std::env::temp_dir().join(format!("dogsled-restart-{}", crate::ledger::new_id()));
-        let web = crate::ledger::Ledger::new(dir.clone()).child("web");
+        let web = crate::ledger::Ledger::new(dir.clone());
         let id = {
             let (_sender, receiver) = tokio::sync::watch::channel(String::new());
             let state = AppState::new(

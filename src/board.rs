@@ -10,8 +10,8 @@ use crate::ledger::Ledger;
 use crate::probe::Agent;
 use crate::shell::Shell;
 use crate::watchdog::age;
+use crate::web_store::board as state;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
 /// A todo's lifecycle state. The four sections always appear in this order.
@@ -75,30 +75,31 @@ pub struct TodoSections {
 
 const MAX_TODO_BYTES: u64 = 1024 * 1024;
 
-/// The service's cache of every live pane's sections. Protocol v3 changed its shape, so it has
-/// a new name: the sidebar can start before the service upgrades, and must not read the
-/// rendered-lines cache (`todos.json`) that an older service still writes.
-const TODO_CACHE: &str = "todo-sections.json";
-
-fn key(value: &str) -> String {
-    Sha256::digest(value.as_bytes())
-        .iter()
-        .fold(String::new(), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
+/// Publish or withdraw one pane's typed todo snapshot.
+pub(crate) fn publish_todo(ledger: &Ledger, pane: &str, clear: bool) -> Result<()> {
+    use std::io::Read as _;
+    if pane.is_empty() {
+        return Err(Error::Invalid("todo publication needs a pane".into()));
+    }
+    if clear {
+        return crate::store::write(ledger, |tx| state::remove_todo(tx, "published", pane));
+    }
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(MAX_TODO_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TODO_BYTES {
+        return Err(Error::Invalid("todo sections snapshot too large".into()));
+    }
+    let todo: TodoSections = serde_json::from_slice(&bytes)?;
+    if todo.pane != pane {
+        return Err(Error::Invalid("todo pane mismatch".into()));
+    }
+    crate::store::write(ledger, |tx| state::put_todo(tx, "published", &todo))
 }
 
-/// The same ledger path for Pi publication and service intake.
-pub fn todo_path(ledger: &Ledger, pane: &str) -> Result<serde_json::Value> {
-    let dir = ledger.child("todo-lines");
-    std::fs::create_dir_all(&dir.dir)?;
-    Ok(serde_json::json!({
-        "path": dir.dir.join(format!("{}.json", key(pane))),
-    }))
-}
-
-fn validate_todo(todo: &TodoSections) -> Result<()> {
+pub(crate) fn validate_todo(todo: &TodoSections) -> Result<()> {
     let ordered = todo.sections.len() == SECTION_ORDER.len()
         && todo
             .sections
@@ -113,54 +114,24 @@ fn validate_todo(todo: &TodoSections) -> Result<()> {
     Ok(())
 }
 
-/// The publication lane reads only files belonging to currently observed agent panes.
-/// Each file is replaced atomically by Pi. Closed panes cannot leave visible todo rows.
+/// Cache only publications belonging to currently observed agent panes.
 pub fn collect_todos(ledger: &Ledger) -> Result<()> {
-    use std::io::Read as _;
-    let snapshot: Option<crate::node::Snapshot> = ledger.read("host.json")?;
-    let mut todos = Vec::new();
-    if let Some(snapshot) = snapshot {
-        for agent in &snapshot.probe.agent_panes {
-            let path = ledger
-                .child("todo-lines")
-                .dir
-                .join(format!("{}.json", key(&agent.pane)));
-            let file = match std::fs::File::open(path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let mut bytes = Vec::new();
-            file.take(MAX_TODO_BYTES + 1).read_to_end(&mut bytes)?;
-            let todo = (|| -> Result<TodoSections> {
-                if bytes.len() as u64 > MAX_TODO_BYTES {
-                    return Err(Error::Invalid("todo sections snapshot too large".into()));
+    let snapshot: Option<crate::node::Snapshot> = crate::host_store::snapshot(ledger)?;
+    crate::store::write(ledger, |tx| {
+        let mut todos = Vec::new();
+        if let Some(snapshot) = snapshot {
+            for agent in snapshot.probe.agent_panes {
+                if let Some(todo) = state::todo(tx, "published", &agent.pane)? {
+                    todos.push(todo);
                 }
-                let todo: TodoSections = serde_json::from_slice(&bytes)?;
-                validate_todo(&todo)?;
-                if todo.pane != agent.pane {
-                    return Err(Error::Invalid("rendered todo pane mismatch".into()));
-                }
-                Ok(todo)
-            })();
-            match todo {
-                Ok(todo) => todos.push(todo),
-                Err(_) => eprintln!(
-                    "dogsled board: invalid todo sections snapshot for {}",
-                    agent.pane
-                ),
             }
         }
-    }
-    ledger.write(TODO_CACHE, &todos)
+        state::cache_todos(tx, &todos)
+    })
 }
 
 pub fn cached_todos(ledger: &Ledger) -> Result<Vec<TodoSections>> {
-    let todos: Vec<TodoSections> = ledger.read(TODO_CACHE)?.unwrap_or_default();
-    for todo in &todos {
-        validate_todo(todo)?;
-    }
-    Ok(todos)
+    crate::store::read(ledger, |tx| state::todos(tx, "cached"))
 }
 
 /// Plugin context names the opener, not the new board pane.
@@ -287,9 +258,8 @@ fn dock(
         let tab = caller["tab_id"]
             .as_str()
             .ok_or_else(|| Error::Invalid("board owner tab is unavailable".into()))?;
-        let registry = ledger.child("boards");
-        let file = format!("{}.json", key(tab));
-        if let Some(saved) = registry.read::<serde_json::Value>(&file)? {
+        if let Some(saved) = crate::store::read(ledger, |tx| state::dock(tx, tab))? {
+            let saved = serde_json::to_value(saved)?;
             let live = panes.iter().any(|pane| {
                 pane["pane_id"] == saved["pane_id"]
                     && pane["terminal_id"] == saved["terminal_id"]
@@ -304,10 +274,10 @@ fn dock(
                     "herdr",
                     &["plugin".into(), "pane".into(), "close".into(), id.into()],
                 )?;
-                std::fs::remove_file(registry.dir.join(&file))?;
+                crate::store::write(ledger, |tx| state::remove_dock(tx, tab))?;
                 return Ok(serde_json::json!({"closed": id}));
             }
-            std::fs::remove_file(registry.dir.join(&file))?;
+            crate::store::write(ledger, |tx| state::remove_dock(tx, tab))?;
         }
         let focused = panes
             .iter()
@@ -361,7 +331,8 @@ fn dock(
         })?;
         socket.set_split_ratio(tab, &path, dock_ratio(width))?;
         socket.focus_pane(&focused)?;
-        registry.write(&file, pane)?;
+        let dock: state::Dock = serde_json::from_value(pane.clone())?;
+        crate::store::write(ledger, |tx| state::put_dock(tx, tab, &dock))?;
         Ok(pane.clone())
     })
 }
@@ -379,19 +350,11 @@ pub fn command(
         all,
         open: opening,
         toggle: toggling,
-        todo_path: publishing,
     } = command
     else {
         return Err(Error::Invalid("expected board command".into()));
     };
     let owner = owner(requested, all)?;
-    if publishing {
-        return crate::print(
-            true,
-            &todo_path(ledger, owner.as_deref().unwrap_or_default())?,
-            String::new,
-        );
-    }
     if opening || toggling {
         let socket = crate::herdr_socket::Client::from_env()?;
         let owner = owner.as_deref().unwrap_or_default();
@@ -944,26 +907,7 @@ pub fn enrich(
 }
 
 fn inbox_messages(ledger: &Ledger) -> Result<Vec<crate::inbox::Record>> {
-    let mut messages = Vec::new();
-    let directory = ledger.child("inbox").dir;
-    match std::fs::read_dir(directory) {
-        Ok(entries) => {
-            for entry in entries {
-                let path = entry?.path();
-                if let Some(terminal) = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .and_then(|n| n.strip_suffix(".json"))
-                    .filter(|n| !n.ends_with(".reader"))
-                {
-                    messages.extend(crate::inbox::received(ledger, terminal)?);
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(messages)
+    crate::store::read(ledger, crate::web_store::inbox::all_records)
 }
 
 fn enrich_rows(
@@ -1297,36 +1241,24 @@ mod tests {
             probe: host.probe.unwrap(),
             jobs: vec![],
         };
-        ledger.write("host.json", &snapshot).unwrap();
+        crate::host_store::put_snapshot(&ledger, &snapshot).unwrap();
         let todo = todo_fixture("w1:p1");
-        let location = todo_path(&ledger, "w1:p1").unwrap();
-        assert!(location["path"].is_string());
-        assert!(location.get("width").is_none());
-        ledger
-            .child("todo-lines")
-            .write(&format!("{}.json", key("w1:p1")), &todo)
-            .unwrap();
-        // An older service's rendered-lines cache is a different file, so it cannot hide these.
-        ledger
-            .write(
-                "todos.json",
-                &serde_json::json!([{"session": "s", "pane": "w1:p1", "lines": [], "width": 36}]),
-            )
-            .unwrap();
+        crate::store::write(&ledger, |tx| state::put_todo(tx, "published", &todo)).unwrap();
         assert_eq!(cached_todos(&ledger).unwrap(), Vec::<TodoSections>::new());
         collect_todos(&ledger).unwrap();
         assert_eq!(cached_todos(&ledger).unwrap(), vec![todo.clone()]);
         let mut invalid = todo;
         invalid.pane = "another".into();
-        ledger
-            .child("todo-lines")
-            .write(&format!("{}.json", key("w1:p1")), &invalid)
-            .unwrap();
+        invalid.revision = 0;
+        assert!(
+            crate::store::write(&ledger, |tx| state::put_todo(tx, "published", &invalid)).is_err()
+        );
+        crate::store::write(&ledger, |tx| state::remove_todo(tx, "published", "w1:p1")).unwrap();
         collect_todos(&ledger).unwrap();
         assert_eq!(cached_todos(&ledger).unwrap(), Vec::<TodoSections>::new());
         let mut snapshot = snapshot;
         snapshot.probe.agent_panes.clear();
-        ledger.write("host.json", &snapshot).unwrap();
+        crate::host_store::put_snapshot(&ledger, &snapshot).unwrap();
         collect_todos(&ledger).unwrap();
         assert_eq!(cached_todos(&ledger).unwrap(), Vec::<TodoSections>::new());
         std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -1580,10 +1512,8 @@ mod tests {
         let rig = dock_rig(leaf("w1:p1"), leaf("w1:p1"), "split_0_root", 120, "w1:p1");
         let saved =
             serde_json::json!({"pane_id":"w1:p2","terminal_id":"term-board","tab_id":"w1:t1"});
-        rig.ledger
-            .child("boards")
-            .write(&format!("{}.json", key("w1:t1")), &saved)
-            .unwrap();
+        let dock = serde_json::from_value(saved.clone()).unwrap();
+        crate::store::write(&rig.ledger, |tx| state::put_dock(tx, "w1:t1", &dock)).unwrap();
         rig.shell.on(
             "herdr pane list",
             &serde_json::json!({"result":{"panes":[
@@ -1610,13 +1540,12 @@ mod tests {
             120,
             "w1:p1",
         );
-        rig.ledger
-            .child("boards")
-            .write(
-                &format!("{}.json", key("w1:t1")),
-                &serde_json::json!({"pane_id":"w1:p2","terminal_id":"old"}),
-            )
-            .unwrap();
+        let saved = state::Dock {
+            pane_id: "w1:p2".into(),
+            terminal_id: "old".into(),
+            tab_id: None,
+        };
+        crate::store::write(&rig.ledger, |tx| state::put_dock(tx, "w1:t1", &saved)).unwrap();
         assert_eq!(rig.open()["terminal_id"], "term-board");
         rig.finish();
     }
@@ -1652,11 +1581,9 @@ mod tests {
                 .any(|call| call == "herdr plugin pane close w1:p2")
         );
         assert!(
-            !rig.ledger
-                .child("boards")
-                .dir
-                .join(format!("{}.json", key("w1:t1")))
-                .exists()
+            crate::store::read(&rig.ledger, |tx| state::dock(tx, "w1:t1"))
+                .unwrap()
+                .is_none()
         );
         assert_eq!(
             rig.focus_requests().len(),
@@ -1695,10 +1622,7 @@ mod tests {
             }
         }
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        ledger
-            .child("launches")
-            .write(
-                "r-1-1-0.progress.json",
+        crate::launch_store::put_progress_value(&ledger, "r-1-1-0",
                 &serde_json::json!({
                     "request":{"id":"r-1-1-0","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
                         "host":"local","cwd":"/checkout","pane":"w2:p2","terminal":"term_child","owner":"w1:p1"},
@@ -1739,7 +1663,7 @@ mod tests {
             }
         }
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        ledger.child("launches").write("child.progress.json", &serde_json::json!({
+        crate::launch_store::put_progress_value(&ledger, "child", &serde_json::json!({
             "request":{"id":"child","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
                 "host":"local","cwd":"/checkout","owner":"w1:p1"},
             "pane":"w2:p2","terminal":"term_before_restore","attempted":true,"confirmed":false,
@@ -1987,9 +1911,9 @@ mod tests {
             done_ms: None,
         };
         let unread = record("one", 1, crate::inbox::State::Pending);
-        ledger
-            .child("inbox")
-            .write("term_owner.json", &vec![unread.clone()])?;
+        crate::store::write(&ledger, |tx| {
+            crate::web_store::inbox::put_records(tx, "term_owner", std::slice::from_ref(&unread))
+        })?;
         let shell = crate::shell::Fake::new();
         enrich(&mut board, &status, &[todo], &ledger, &shell)?;
         assert_eq!(board.rows[0].owner_pane.as_deref(), Some("w1:p1"));
