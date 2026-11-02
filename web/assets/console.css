@@ -638,26 +638,6 @@ textarea {
   flex-shrink: 0;
   height: 52px;
 }
-.console-provider .console-shell .pending-review {
-  grid-column: 1 / -1;
-  grid-row: 3;
-  min-height: 0;
-  overflow: auto;
-}
-.console-provider
-  .console-shell:has(.lead-panel[data-review-open="true"])
-  :is(.console-agents, .console-agents-tab) {
-  display: none;
-}
-.console-provider .console-shell:has(.lead-panel[data-review-open="true"]) .console-main {
-  grid-column: 2 / -1;
-}
-.console-provider .console-shell .lead-panel[data-review-open="true"] {
-  grid-template-columns: minmax(0, 1fr);
-}
-.console-provider .console-shell .lead-panel[data-review-open="true"] .lead-header {
-  grid-column: 1 / -1;
-}
 .console-provider .console-shell [role="tabpanel"] {
   padding: 0;
   border: 0;

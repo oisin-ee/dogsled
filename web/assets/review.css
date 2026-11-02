@@ -1,0 +1,417 @@
+/* Pending requests keep their own reading regions and pinned actions. */
+.console-provider
+  .console-shell:has(.lead-panel[data-review-open="true"])
+  :is(.console-agents, .console-agents-tab) {
+  display: none;
+}
+.console-provider .console-shell:has(.lead-panel[data-review-open="true"]) .console-main {
+  grid-column: 2 / -1;
+}
+.console-provider .console-shell .lead-panel[data-review-open="true"] {
+  display: flex;
+  flex-direction: column;
+}
+.console-provider .console-shell .lead-panel[data-review-open="true"] .lead-notices {
+  flex: none;
+}
+.console-provider .console-shell .pending-review {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.console-provider .console-shell .review-editor {
+  flex: 1;
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr) auto;
+  gap: 0;
+  min-height: 0;
+  min-width: 0;
+}
+.console-provider .console-shell .review-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px 0 24px;
+  border-bottom: 1px solid var(--console-line);
+}
+.console-provider .console-shell .review-heading {
+  flex: 1;
+  min-width: 0;
+}
+.console-provider .console-shell .review-heading h1 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.console-provider .console-shell .review-heading :is(h1, p) {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.console-provider .console-shell .review-heading p {
+  font-size: 12px;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .review-header [role="tablist"] {
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--console-line);
+  border-radius: 7px;
+  background: var(--console-panel);
+}
+.console-provider .console-shell .review-header [role="tab"] {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .review-header [role="tab"][data-state="active"] {
+  background: var(--console-line);
+  color: var(--console-text);
+  box-shadow: none;
+}
+.console-provider .console-shell .review-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  min-height: 0;
+  min-width: 0;
+}
+.console-provider .console-shell .review-body .review-document {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  padding: 28px 40px 40px;
+  overflow: auto;
+}
+.console-provider .console-shell .review-prose,
+.console-provider .console-shell .review-diff {
+  max-width: 680px;
+  margin-inline: auto;
+  font-size: 14px;
+}
+.console-provider .console-shell .review-diff {
+  overflow: auto;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+.console-provider .console-shell .review-body .review-margin {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  padding: 16px;
+  border-left: 1px solid var(--console-line);
+  overflow: auto;
+}
+.console-provider .console-shell .review-margin h2 {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: var(--console-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.console-provider .console-shell .review-empty {
+  color: var(--console-muted);
+}
+.console-provider .console-shell .review-note {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-raised);
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .review-note blockquote {
+  margin: 0 0 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--console-waiting);
+  font-size: 12px;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .review-note-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-top: 6px;
+}
+.console-provider .console-shell .review-decision {
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--console-line);
+}
+.console-provider .console-shell .review-decision-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.console-provider .console-shell .review-decision textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  max-height: 120px;
+  padding: 9px 12px;
+  resize: vertical;
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-panel);
+  color: var(--console-text);
+  font: inherit;
+}
+.console-provider .console-shell .review-decision button {
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.console-provider .console-shell .review-dialog {
+  max-width: min(640px, calc(100vw - 48px));
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  border: 1px solid var(--console-line);
+  border-radius: 10px;
+  background: var(--console-panel);
+  color: var(--console-text);
+  font: inherit;
+  text-align: left;
+  box-shadow: none;
+}
+.console-provider .console-shell .review-dialog [data-slot="item-description"] {
+  display: block;
+  overflow: visible;
+}
+.console-provider .console-shell .question-form,
+.console-provider .console-shell .prompt-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.console-provider .console-shell .question-body,
+.console-provider .console-shell .prompt-body {
+  padding: 24px;
+}
+.console-provider .console-shell .question-measure,
+.console-provider .console-shell .prompt-measure {
+  max-width: 640px;
+  margin-inline: auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .question-heading {
+  padding-bottom: 24px;
+}
+.console-provider .console-shell :is(.question-heading, .prompt-measure) h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+.console-provider .console-shell .question-heading p {
+  color: var(--console-muted);
+  padding-top: 6px;
+}
+.console-provider .console-shell .question-heading .question-age {
+  font-size: 12px;
+}
+.console-provider .console-shell .question-block[data-slot="card"],
+.console-provider .console-shell .question-rejection[data-slot="card"] {
+  min-width: 0;
+  gap: 12px;
+  padding: 20px 0;
+  border: 0;
+  border-top: 1px solid var(--console-line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.console-provider .console-shell .question-form [data-slot^="card-"] {
+  min-width: 0;
+  padding: 0;
+}
+.console-provider .console-shell .question-form [data-slot="card-title"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .question-form [data-slot="card-content"] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.console-provider
+  .console-shell
+  .question-form
+  :is([data-slot="item-content"], [role="radiogroup"]) {
+  min-width: 0;
+  width: 100%;
+}
+.console-provider .console-shell .question-form [data-slot="item-description"] {
+  display: block;
+  overflow: visible;
+}
+.console-provider .console-shell .question-form .question-option {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 0;
+}
+.console-provider .console-shell .question-option-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.console-provider .console-shell .question-option-row :is([role="radio"], label) {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  align-items: flex-start;
+  text-align: left;
+  white-space: normal;
+  line-height: 1.5;
+  font-weight: 400;
+}
+.console-provider .console-shell .question-option-row [role="radio"]::before {
+  flex: none;
+  margin-top: 3px;
+  border: 1px solid var(--console-muted);
+}
+.console-provider .console-shell .question-option-row [role="checkbox"] {
+  flex: none;
+  margin-top: 3px;
+}
+.console-provider .console-shell .question-option-row .recommended-badge {
+  flex: none;
+  width: auto;
+  max-width: none;
+  overflow: visible;
+  white-space: nowrap;
+  background: var(--console-accent);
+  color: white;
+  border: 0;
+  border-radius: 6px;
+}
+.console-provider .console-shell .question-option-content {
+  min-width: 0;
+  padding-left: 26px;
+}
+.console-provider .console-shell .question-form [data-slot="item-footer"] {
+  flex-direction: column;
+  align-items: stretch;
+  padding-left: 26px;
+}
+.console-provider .console-shell .question-form :is(img, iframe, textarea, table) {
+  max-width: 100%;
+}
+.console-provider .console-shell .question-form :is(.question-code, pre) {
+  max-width: 100%;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-panel);
+  font-size: 12px;
+}
+.console-provider .console-shell .question-markdown {
+  min-width: 0;
+  line-height: 1.75;
+}
+.console-provider .console-shell .question-markdown > * + * {
+  margin-top: 12px;
+}
+.console-provider .console-shell .question-markdown :is(ul, ol) {
+  padding-left: 22px;
+}
+.console-provider .console-shell .question-markdown ul {
+  list-style: disc;
+}
+.console-provider .console-shell .question-markdown ol {
+  list-style: decimal;
+}
+.console-provider .console-shell .question-markdown table {
+  display: block;
+  overflow-x: auto;
+}
+.console-provider .console-shell .question-markdown a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--console-accent);
+  text-underline-offset: 0.2em;
+}
+.console-provider .console-shell .question-decision {
+  flex: none;
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--console-line);
+}
+.console-provider .console-shell .question-decision-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  max-width: 640px;
+  margin-inline: auto;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .question-decision button {
+  height: 40px;
+  border-radius: 8px;
+}
+.console-provider .console-shell .prompt-measure pre {
+  max-width: 100%;
+  max-height: 50dvh;
+  overflow: auto;
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-panel);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+.console-provider .console-shell .prompt-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.console-provider .console-shell .prompt-keys button {
+  min-width: 32px;
+  height: 24px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+.console-provider .console-shell .prompt-composer input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--console-text);
+}
+@media (max-width: 1099px) {
+  .console-provider .console-shell .review-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .console-provider .console-shell .review-body .review-document {
+    padding: 24px 24px 32px;
+  }
+  .console-provider .console-shell .review-body .review-margin {
+    grid-column: 1;
+    border-left: 0;
+    padding: 16px 24px;
+  }
+  .console-provider .console-shell .review-margin > * {
+    max-width: 680px;
+    margin-inline: auto;
+  }
+  .console-provider .console-shell .review-margin h2 {
+    display: none;
+  }
+}

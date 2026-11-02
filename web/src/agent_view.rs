@@ -22,16 +22,12 @@ use crate::api;
 use crate::components::{
     accordion::{Accordion, AccordionContent, AccordionItem, AccordionTrigger},
     button::{Button, ButtonVariant},
-    card::{Card, CardContent, CardHeader, CardTitle},
     input::Input,
-    item::{
-        Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSize, ItemTitle,
-    },
+    item::{Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSize, ItemTitle},
     scroll_area::ScrollArea,
     skeleton::Skeleton,
     tabs::{TabContent, TabList, TabTrigger},
     textarea::Textarea,
-    toolbar::{Toolbar, ToolbarButton},
 };
 use crate::conversations::{Conversations, use_conversation};
 use crate::notice::{Alert, Status};
@@ -441,9 +437,9 @@ fn AgentSession(
         },
     });
 
+    let review_identity = identity.clone();
     let chat = rsx! {
         div { class: "lead-chat",
-            ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
                 if tab == Tab::Pending {
                     match &pending {
                         Some(RequestTab::Questions(id, _)) => rsx! {
@@ -460,9 +456,10 @@ fn AgentSession(
                         _ => rsx! {},
                     }
                 } else {
-                    Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working }
+                    ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
+                        Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working }
+                    }
                 }
-            }
             if tab == Tab::Conversation {
                 Composer { draft, images, uploading, disabled, busy: busy(), on_error: move |message| action_error.set(Some(message)),
                     on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
@@ -472,6 +469,7 @@ fn AgentSession(
 
     rsx! {
         section { class: "lead-panel", "data-review-open": plan_open,
+            if !plan_open {
             header { class: "lead-header",
                 div { class: "lead-heading", h1 { "{title}" }
                     p { class: "lead-meta", "{state} · {role}"
@@ -517,6 +515,7 @@ fn AgentSession(
                     }
                 }
             }
+            }
             div { class: "lead-notices",
                 if !metadata_loading() && !reachable() {
                     Status { "Herdr is not reachable. The board still works; conversation and messages do not." }
@@ -531,8 +530,13 @@ fn AgentSession(
                 if let Some(message) = follow_error() { Alert { "Could not follow the conversation: {message}" } }
             }
             if plan_open {
-                div { class: "pending-review console-scroll",
-                    if let Some(RequestTab::Review(id)) = &pending { ReviewView { review_id: id.clone(), embedded: true } }
+                div { class: "pending-review",
+                    if let Some(RequestTab::Review(id)) = &pending {
+                        ReviewView { review_id: id.clone(), embedded: true,
+                            lead: format!("{title} · {role} · {}", current.as_ref().and_then(|agent| agent.repository.as_deref()).unwrap_or("Unknown repository")),
+                            on_close: move |_| choice.set(Some((review_identity.clone(), Tab::Conversation))),
+                        }
+                    }
                 }
             } else {
                 if width() >= 1400 {
@@ -779,9 +783,10 @@ fn BlockedPanel(
         }))
         .collect();
     rsx! {
-        Card { aria_label: "Blocked agent",
-            CardHeader { CardTitle { "{title}" } }
-            CardContent {
+        section { class: "prompt-panel", aria_label: "Blocked agent",
+            div { class: "prompt-body console-scroll",
+                div { class: "prompt-measure",
+                h2 { "{title}" }
                 match screen {
                     Some(text) => rsx! {
                         pre { tabindex: "0", aria_label: "Agent screen",
@@ -795,34 +800,26 @@ fn BlockedPanel(
                     },
                     None => rsx! { Status { "Agent screen is not available yet." } },
                 }
-                Toolbar { aria_label: "Prompt options and terminal keys",
+                div { class: "prompt-keys", role: "group", aria_label: "Prompt options and terminal keys",
                     for (index, (key, text, label, allowed)) in keys.into_iter().enumerate() {
-                        ToolbarButton {
-                            key: "{index}-{key}",
-                            index,
-                            disabled: disabled || !allowed,
-                            aria_label: label,
-                            on_click: move |()| on_key.call(key.clone()),
-                            "{text}"
+                        Button { key: "{index}-{key}", variant: ButtonVariant::Outline, r#type: "button",
+                            disabled: disabled || !allowed, aria_label: label,
+                            onclick: move |_| on_key.call(key.clone()), "{text}"
                         }
                     }
                 }
-                Item {
-                    r#as: move |attributes: Vec<Attribute>| rsx! {
-                        form {
-                            onsubmit: move |event| { event.prevent_default(); on_send.call(()); },
-                            ..attributes,
-                            ItemContent {
-                                Input { r#type: "text", name: "reply", aria_label: "Reply to the prompt", placeholder: "Type a reply and press Enter",
-                                    value: "{draft}", disabled, oninput: move |event: FormEvent| draft.set(event.value()) }
-                            }
-                            ItemActions {
-                                Button { r#type: "submit", disabled: disabled || draft().trim().is_empty(), "Send" }
-                            }
-                        }
-                    },
                 }
-                Status { "Buttons are read from the agent's screen. Open in Herdr when none fits." }
+            }
+            form { class: "console-composer prompt-composer",
+                onsubmit: move |event| { event.prevent_default(); on_send.call(()); },
+                div { class: "composer-field",
+                    Input { r#type: "text", name: "reply", aria_label: "Reply to the prompt",
+                        value: "{draft}", disabled, oninput: move |event: FormEvent| draft.set(event.value()) }
+                    Button { class: "icon-button send-button", r#type: "submit", aria_label: "Send reply",
+                        disabled: disabled || draft().trim().is_empty(),
+                        ArrowUp { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                    }
+                }
             }
         }
     }

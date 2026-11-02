@@ -13,36 +13,34 @@ use futures_util::StreamExt;
 use gloo_net::http::{Request, RequestBuilder, Response};
 use js_sys::wasm_bindgen::JsCast;
 use portal_types::reviews::{
-    Annotation, AnnotationsBody, ApproveBody, Attachment, ChangeKind, DiffView, GeneralBody,
-    Review, ReviewList, ReviewSummary,
+    Annotation, AnnotationsBody, ApproveBody, ChangeKind, DiffView, GeneralBody, Review,
+    ReviewList, ReviewSummary,
 };
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use serde::de::DeserializeOwned;
 
+use dioxus_icons::lucide::{Pencil, Trash, X};
+
 use crate::agent_view::Draft;
+use crate::api;
 use crate::components::{
-    badge::{Badge, BadgeVariant},
     button::{Button, ButtonVariant},
-    card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle},
     collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger},
     dialog::{Dialog, DialogDescription, DialogTitle},
     input::Input,
     item::{
-        Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemHeader, ItemMedia,
-        ItemMediaVariant, ItemSize, ItemTitle, ItemVariant,
+        Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemMediaVariant,
+        ItemSize, ItemTitle, ItemVariant,
     },
     label::Label,
-    scroll_area::ScrollArea,
     skeleton::Skeleton,
+    tabs::{TabContent, TabList, TabTrigger, Tabs},
     textarea::Textarea,
 };
 use crate::notice::{Alert, Status};
 
 /// The time between two reads of the open plan reviews.
 const POLL: Duration = Duration::from_secs(2);
-
-/// The largest image the server stores.
-const MAX_IMAGE_BYTES: f64 = 10.0 * 1024.0 * 1024.0;
 
 fn segment(value: &str) -> String {
     String::from(js_sys::encode_uri_component(value))
@@ -97,6 +95,8 @@ async fn send<T: serde::Serialize>(request: RequestBuilder, body: &T) -> Result<
 pub fn ReviewView(
     #[props(default)] review_id: Option<String>,
     #[props(default)] embedded: bool,
+    #[props(default)] lead: String,
+    #[props(default)] on_close: EventHandler<()>,
 ) -> Element {
     let local_selected = use_signal(|| None::<String>);
     let mut selected = try_use_context::<Signal<Option<String>>>().unwrap_or(local_selected);
@@ -160,7 +160,7 @@ pub fn ReviewView(
         if let Some(message) = error() { Alert { "{message}" } }
         if let Some(id) = current {
             ReviewLoader {
-                key: "{id}", id, tick: tick(), embedded,
+                key: "{id}", id, tick: tick(), embedded, lead, on_close,
                 on_done: move |id: String| list.write().retain(|item| item.id != id),
             }
         } else if loading() {
@@ -172,7 +172,14 @@ pub fn ReviewView(
 }
 
 #[component]
-fn ReviewLoader(id: String, tick: u64, embedded: bool, on_done: EventHandler<String>) -> Element {
+fn ReviewLoader(
+    id: String,
+    tick: u64,
+    embedded: bool,
+    lead: String,
+    on_close: EventHandler<()>,
+    on_done: EventHandler<String>,
+) -> Element {
     let mut review = use_signal(|| None::<Review>);
     let mut error = use_signal(|| None::<String>);
     use_resource(use_reactive((&id, &tick), move |(id, _)| async move {
@@ -190,7 +197,7 @@ fn ReviewLoader(id: String, tick: u64, embedded: bool, on_done: EventHandler<Str
             if value.decision.is_some() {
                 Status { "This review is closed." }
             } else {
-                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, on_done }
+                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, lead, on_close, on_done }
             }
         } else { Status { "Loading plan…" } }
     }
@@ -242,6 +249,31 @@ fn safe_url(url: &str) -> bool {
 /// Markdown as safe HTML: raw HTML stays text and unsafe links are dropped.
 pub(crate) fn render_markdown(source: &str) -> String {
     render_plan(source, &[])
+}
+
+/// The first Markdown heading supplies the review title, without inline markup.
+fn plan_title(source: &str) -> Option<String> {
+    let mut title = None::<String>;
+    for event in Parser::new(source) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => title = Some(String::new()),
+            Event::End(TagEnd::Heading(_)) => {
+                return title.filter(|title| !title.trim().is_empty());
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some(title) = &mut title {
+                    title.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak if title.is_some() => {
+                if let Some(title) = &mut title {
+                    title.push(' ');
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Keep the original escaped events until an entire fence can be highlighted safely.
@@ -587,7 +619,7 @@ fn ReviewDecisionActions(controls: ReviewControls) -> Element {
                 r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some() || !(controls.can_request)(),
                 onclick: move |_| controls.decide.call(false), "Request changes"
             }
-            Button {
+            Button { class: "send-button",
                 r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some(),
                 onclick: move |_| controls.decide.call(true), "Approve plan"
             }
@@ -607,7 +639,13 @@ enum ReviewAction {
 }
 
 #[component]
-fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) -> Element {
+pub(crate) fn ReviewEditor(
+    initial: Review,
+    embedded: bool,
+    #[props(default)] lead: String,
+    #[props(default)] on_close: EventHandler<()>,
+    on_done: EventHandler<String>,
+) -> Element {
     let mut review = use_signal(|| initial);
     let mut general = use_signal(|| review.peek().general.clone());
     let mut notes = use_signal(String::new);
@@ -615,7 +653,9 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
     let uploading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut editing = use_signal(|| None::<Annotation>);
-    let mut show_diff = use_signal(|| false);
+    let mut tab = use_signal(|| "plan".to_owned());
+    let width = try_use_context::<crate::app::ConsoleWidth>();
+    let narrow = width.is_some_and(|width| (width.0)() < 1100);
     let mut diff = use_signal(|| None::<DiffView>);
     // One queue owns all writes. A blur save must finish before a decision,
     // and cannot replace newer annotations with an older response.
@@ -759,120 +799,124 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
         can_request,
         decide,
     };
+    let title = plan_title(content).unwrap_or_else(|| value.path.clone());
+    let has_changes = value.revisions.len() > 1;
+    let active = if !narrow && tab() == "notes" {
+        "plan".to_owned()
+    } else {
+        tab()
+    };
+    let diff_id = value.id.clone();
+    let diff_tab = active.clone();
+    use_resource(use_reactive(
+        (&diff_id, &diff_tab, &n),
+        move |(id, tab, n)| async move {
+            if tab == "changes" {
+                match get::<DiffView>(&format!(
+                    "/api/reviews/{}/diff?from={}&to={n}",
+                    segment(&id),
+                    n - 1
+                ))
+                .await
+                {
+                    Ok(value) => diff.set(Some(value)),
+                    Err(message) => error.set(Some(message)),
+                }
+            }
+        },
+    ));
+    let margin = rsx! {
+        h2 { "Your notes" span { "{value.annotations.len()}" } }
+        if value.annotations.is_empty() {
+            p { class: "review-empty", "Select text in the plan to add a note." }
+        }
+        for annotation in value.annotations.iter().cloned() {
+            article { class: "review-note", key: "{annotation.id}",
+                blockquote { "{annotation.quote}" }
+                p { "{annotation.comment}" }
+                Images { paths: annotation.images.clone() }
+                div { class: "review-note-actions",
+                    Button { class: "icon-button", variant: ButtonVariant::Ghost, r#type: "button",
+                        aria_label: "Edit note", disabled: busy() || editing().is_some(),
+                        onclick: { let annotation = annotation.clone(); move |_| editing.set(Some(annotation.clone())) },
+                        Pencil { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                    }
+                    Button { class: "icon-button", variant: ButtonVariant::Ghost, r#type: "button",
+                        aria_label: "Delete note", disabled: busy() || editing().is_some(),
+                        onclick: move |_| {
+                            if busy() { return; }
+                            busy.set(true);
+                            actions.send(ReviewAction::DeleteAnnotation(annotation.id.clone()));
+                        },
+                        Trash { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                    }
+                }
+            }
+        }
+    };
     rsx! {
-        if let Some(message) = error() { Alert { "{message}" } }
         if value.decision.is_some() {
             Status { "Review sent to the agent." }
         } else {
-            if embedded {
-                Item {
-                    ItemContent {
-                        ItemTitle { "{value.path}" Badge { variant: BadgeVariant::Outline, "Revision {n}" } }
+            Tabs { class: "review-editor", horizontal: true, value: Some(active),
+                on_value_change: move |value| tab.set(value),
+                header { class: "review-header",
+                    div { class: "review-heading",
+                        h1 { "{title}" }
+                        p { "Revision {n}" if !lead.is_empty() { " · {lead}" } }
                     }
-                    ReviewDecisionActions { controls }
-                }
-            }
-            Card { aria_label: "Plan",
-                if !embedded {
-                    CardHeader {
-                        CardTitle { "{value.path}" }
-                        CardDescription { "Revision {n}" }
+                    TabList { aria_label: "Review view",
+                        TabTrigger { value: "plan", index: 0usize, "Plan" }
+                        if has_changes { TabTrigger { value: "changes", index: 1usize, "Changes" } }
+                        if narrow { TabTrigger { value: "notes", index: if has_changes { 2usize } else { 1usize }, "Notes {value.annotations.len()}" } }
                     }
-                }
-                CardContent {
-                    // innerHTML needs a host element of its own, with no other children.
-                    div {
-                        id: "review-plan",
-                        tabindex: "0",
-                        aria_label: "Plan text",
-                        onmouseup: move |_| select(),
-                        onkeyup: move |_| select(),
-                        dangerous_inner_html: rendered,
+                    if embedded {
+                        Button { class: "icon-button", variant: ButtonVariant::Outline, r#type: "button",
+                            aria_label: "Close plan review", onclick: move |_| on_close.call(()),
+                            X { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                        }
                     }
                 }
-                if value.revisions.len() > 1 {
-                    CardFooter {
-                        Button { variant: ButtonVariant::Outline,
-                            r#type: "button", aria_expanded: show_diff(), disabled: busy(),
-                            onclick: move |_| async move {
-                                show_diff.toggle();
-                                if show_diff() && diff().is_none() {
-                                    busy.set(true);
-                                    let id = review.peek().id.clone();
-                                    match get::<DiffView>(&format!("/api/reviews/{}/diff?from={}&to={n}", segment(&id), n - 1)).await {
-                                        Ok(value) => diff.set(Some(value)),
-                                        Err(message) => error.set(Some(message)),
-                                    }
-                                    busy.set(false);
+                div { class: "review-body",
+                    TabContent { class: "review-document console-scroll", value: "plan", index: 0usize,
+                        // innerHTML needs a host element of its own, with no other children.
+                        div { class: "review-prose", id: "review-plan", tabindex: "0", aria_label: "Plan text",
+                            onmouseup: move |_| select(), onkeyup: move |_| select(), dangerous_inner_html: rendered }
+                    }
+                    if has_changes {
+                        TabContent { class: "review-document console-scroll", value: "changes", index: 1usize,
+                            if let Some(diff) = diff() {
+                                pre { class: "review-diff", tabindex: "0", aria_label: "Revision changes",
+                                    {diff.changes.iter().map(|line| format!("{} {} {} {}",
+                                        match line.kind { ChangeKind::Added => "+", ChangeKind::Removed => "−", ChangeKind::Same => " " },
+                                        line.old.map_or(String::new(), |n| n.to_string()),
+                                        line.new.map_or(String::new(), |n| n.to_string()), line.text,
+                                    )).collect::<Vec<_>>().join("\n")}
                                 }
+                            } else { Status { "Loading changes…" } }
+                        }
+                    }
+                    if narrow {
+                        TabContent { class: "review-margin console-scroll", value: "notes", index: if has_changes { 2usize } else { 1usize }, {margin.clone()} }
+                    } else {
+                        aside { class: "review-margin console-scroll", aria_label: "Your notes", {margin} }
+                    }
+                }
+                footer { class: "review-decision",
+                    if let Some(message) = error() { Alert { "{message}" } }
+                    if busy() { Status { "Saving…" } }
+                    div { class: "review-decision-controls",
+                        Textarea { id: "review-general", aria_label: "Note for the whole plan", name: "general", rows: "1",
+                            value: "{general}", disabled: busy(), oninput: move |event: FormEvent| general.set(event.value()),
+                            onblur: move |_| {
+                                if general() != review.peek().general { actions.send(ReviewAction::SaveGeneral(general())); }
                             },
-                            "Changes since revision {n - 1}"
                         }
-                    }
-                    if show_diff() {
-                        if let Some(diff) = diff() {
-                            CardContent {
-                                ScrollArea { aria_label: "Revision changes",
-                                    pre {
-                                        {diff.changes.iter().map(|line| format!(
-                                            "{} {} {} {}",
-                                            match line.kind { ChangeKind::Added => "+", ChangeKind::Removed => "−", ChangeKind::Same => " " },
-                                            line.old.map_or(String::new(), |n| n.to_string()),
-                                            line.new.map_or(String::new(), |n| n.to_string()),
-                                            line.text,
-                                        )).collect::<Vec<_>>().join("\n")}
-                                    }
-                                }
-                            }
-                        }
+                        ReviewDecisionActions { controls }
                     }
                 }
             }
-            Card { aria_label: "Your notes",
-                CardHeader {
-                    CardTitle { "Your notes" Badge { variant: BadgeVariant::Secondary, "{value.annotations.len()}" } }
-                    CardDescription { "Drafts. The lead gets them when you request changes." }
-                }
-                CardContent {
-                    ItemGroup {
-                        for annotation in value.annotations.iter().cloned() {
-                            Item { key: "{annotation.id}", variant: ItemVariant::Outline,
-                                ItemHeader {
-                                    Badge { variant: BadgeVariant::Outline, "Line {annotation.start_line}" }
-                                    if annotation.end_line != annotation.start_line {
-                                        Badge { variant: BadgeVariant::Outline, "Through line {annotation.end_line}" }
-                                    }
-                                }
-                                ItemContent {
-                                    ItemDescription { "{annotation.quote}" }
-                                    ItemTitle { "{annotation.comment}" }
-                                    Images { paths: annotation.images.clone() }
-                                }
-                                ItemActions {
-                                    Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy() || editing().is_some(), onclick: {
-                                        let annotation = annotation.clone(); move |_| { editing.set(Some(annotation.clone())); }
-                                    }, "Edit" }
-                                    Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy() || editing().is_some(), onclick: move |_| {
-                                        if busy() { return; }
-                                        busy.set(true);
-                                        actions.send(ReviewAction::DeleteAnnotation(annotation.id.clone()));
-                                    }, "Delete" }
-                                }
-                            }
-                        }
-                    }
-                    Label { html_for: "review-general", "Note for the whole plan" }
-                    Textarea { id: "review-general", name: "general", rows: "3", value: "{general}", disabled: busy(),
-                        oninput: move |event: FormEvent| general.set(event.value()),
-                        onblur: move |_| {
-                            if general() != review.peek().general {
-                                actions.send(ReviewAction::SaveGeneral(general()));
-                            }
-                        },
-                    }
-                }
-            }
-            Dialog {
+            Dialog { class: "review-dialog",
                 open: editing().is_some(),
                 aria_label: "Annotate plan selection",
                 on_open_change: move |open: bool| {
@@ -906,7 +950,6 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                     ReviewDecisionActions { controls }
                 }
             }
-            if busy() { Status { "Saving…" } }
         }
     }
 }
@@ -963,25 +1006,6 @@ fn pasted_files(event: &ClipboardEvent) -> Vec<web_sys::File> {
     })
 }
 
-/// Store one image and give the path the server chose.
-async fn upload_image(file: &web_sys::File) -> Result<String, String> {
-    if !matches!(
-        file.type_().as_str(),
-        "image/png" | "image/jpeg" | "image/webp"
-    ) {
-        return Err("Use PNG, JPEG or WebP images.".to_owned());
-    }
-    if file.size() > MAX_IMAGE_BYTES {
-        return Err("Each image must be at most 10 MiB.".to_owned());
-    }
-    let request = Request::post("/api/attachments")
-        .body(file.clone())
-        .map_err(|error| error.to_string())?;
-    let attachment: Attachment =
-        response(request.send().await.map_err(|error| error.to_string())?).await?;
-    Ok(attachment.path)
-}
-
 #[component]
 fn AnnotationEditor(
     annotation: Annotation,
@@ -1006,7 +1030,7 @@ fn AnnotationEditor(
         error.set(None);
         spawn(async move {
             for file in files {
-                match upload_image(&file).await {
+                match api::upload_image(&file).await {
                     Ok(path) => images.write().push(path),
                     Err(message) => {
                         error.set(Some(message));
@@ -1040,7 +1064,9 @@ fn AnnotationEditor(
             Item {
                 ItemContent { DialogTitle { "Line {annotation.start_line}" } }
                 ItemActions {
-                    Button { variant: ButtonVariant::Outline, r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "×" }
+                    Button { class: "icon-button", variant: ButtonVariant::Ghost, r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()),
+                        X { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                    }
                 }
             }
             Item { variant: ItemVariant::Muted,
