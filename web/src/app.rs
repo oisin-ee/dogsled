@@ -14,27 +14,41 @@ use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
 use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::button::{Button, ButtonVariant};
-use crate::components::card::{Card, CardContent, CardHeader, CardTitle};
-use crate::components::item::{
-    Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemSize, ItemTitle, ItemVariant,
-};
+use crate::components::item::ItemGroup;
 use crate::components::progress::Progress;
 use crate::components::scroll_area::ScrollArea;
-use crate::components::sheet::{
-    Sheet, SheetContentClose, SheetDescription, SheetFooter, SheetHeader, SheetTitle,
-};
-use crate::components::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent,
-    SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarProvider,
-};
+use crate::components::sidebar::{Sidebar, SidebarCollapsible, SidebarHeader, SidebarProvider};
 use crate::components::skeleton::Skeleton;
+use crate::components::tabs::{TabContent, TabList, TabTrigger, Tabs};
 use crate::conversations::Conversations;
+use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon};
+
+#[derive(Clone, Copy)]
+pub struct ConsoleWidth(pub Signal<u32>);
 use crate::notice::{Alert, Status};
 
 /// The time between two reads of the board and the agents.
 const RETRY: Duration = Duration::from_secs(2);
 
 const COMPONENTS_CSS: Asset = asset!("/assets/dx-components-theme.css");
+const CONSOLE_CSS: Asset = asset!("/assets/console.css");
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LeadPanel {
+    Agents,
+    Chat,
+    Todos,
+}
+
+impl LeadPanel {
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Agents => "agents",
+            Self::Chat => "chat",
+            Self::Todos => "todos",
+        }
+    }
+}
 
 /// The pending item the owner picked from the inbox. The shell passes it to
 /// `AgentView` as its `review` or `question` prop.
@@ -187,7 +201,30 @@ pub fn App() -> Element {
     let mut board = use_signal(|| None::<BoardView>);
     let mut board_error = use_signal(|| None::<String>);
     let mut stream_paused = use_signal(|| false);
-    let mut inbox_open = use_signal(|| false);
+    let mut panel = use_context_provider(|| Signal::new(LeadPanel::Chat));
+    let mut width = use_context_provider(|| ConsoleWidth(Signal::new(1440))).0;
+    use_effect(move || {
+        spawn(async move {
+            let mut eval = document::eval(
+                r#"
+                window.__consoleResizeHandler = () => dioxus.send(window.innerWidth);
+                window.addEventListener('resize', window.__consoleResizeHandler);
+                window.__consoleResizeHandler();
+            "#,
+            );
+            while let Ok(value) = eval.recv::<u32>().await {
+                width.set(value);
+                if value >= 1100 && *panel.peek() == LeadPanel::Agents {
+                    panel.set(LeadPanel::Chat);
+                }
+            }
+        });
+    });
+    use_drop(|| {
+        let _ = document::eval(
+            "window.removeEventListener('resize', window.__consoleResizeHandler); delete window.__consoleResizeHandler;",
+        );
+    });
     let mut agents = use_signal(Vec::<Agent>::new);
     let mut agent_error = use_signal(|| None::<String>);
     let mut inbox_state = use_signal(InboxState::default);
@@ -256,35 +293,22 @@ pub fn App() -> Element {
     let view = board();
     let items = inbox();
     let state = inbox_state();
-    // Red only when something waits; an empty or unread inbox stays quiet.
-    let waiting = state.count().is_some_and(|count| count > 0);
-    let count = state
-        .count()
-        .map_or_else(|| "—".to_owned(), |count| count.to_string());
     let elapsed_ms = now().saturating_sub(state.received_ms);
     let groups = view.as_ref().map(|view| navigation_groups(view, &agents()));
+    let agent_count = groups.as_ref().map_or(0, |groups| {
+        groups
+            .repos
+            .iter()
+            .map(|repo| repo.agent_count())
+            .sum::<usize>()
+    });
 
-    rsx! {
-        document::Stylesheet { href: COMPONENTS_CSS }
-        SidebarProvider {
-            Sidebar { collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
-                SidebarHeader {
-                    Item {
-                        ItemContent { ItemTitle { "Dogsled" } }
-                        ItemActions {
-                            Button { variant: ButtonVariant::Outline, r#type: "button",
-                                aria_expanded: inbox_open(), aria_controls: "portal-inbox",
-                                onclick: move |_| inbox_open.toggle(),
-                                "Inbox"
-                                Badge { variant: if waiting { BadgeVariant::Destructive } else { BadgeVariant::Secondary }, "{count}" }
-                            }
-                        }
-                    }
-                }
-                SidebarContent {
-                    if let Some(message) = board_error() {
-                        Alert { "Board updates unavailable: {message}" }
-                    }
+    let navigation = rsx! {
+            Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
+                SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" } }
+                ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
+                    if let Some(message) = board_error() { Alert { "Board updates unavailable: {message}" } }
+                    if let Some(message) = agent_error() { Status { title: "{message}", "Herdr is not reachable. The board still works." } }
                     match groups {
                         Some(groups) => rsx! {
                             for (index, group) in groups.repos.into_iter().enumerate() {
@@ -297,35 +321,30 @@ pub fn App() -> Element {
                         None => rsx! { Skeleton { role: "status", aria_label: "Loading agents" } },
                     }
                 }
-                SidebarFooter {
-                    if stream_paused() {
-                        Status { "Live updates paused, retrying" }
-                    }
-                    if let Some(message) = &state.error {
-                        Alert { title: "{message}", "Inbox unavailable: {message}. Reload to retry." }
-                    }
-                    if let Some(message) = agent_error() {
-                        Status { title: "{message}", "Herdr is not reachable. The board still works." }
-                    }
+            }
+    };
+
+    rsx! {
+        document::Stylesheet { href: COMPONENTS_CSS }
+        document::Stylesheet { href: CONSOLE_CSS }
+        SidebarProvider { class: "console-provider",
+        Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
+            on_value_change: move |value: String| panel.set(match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, _ => LeadPanel::Chat }),
+            header { class: "console-topbar",
+                a { href: "/", aria_label: "Homepage", "Dogsled" }
+                if stream_paused() { Status { "Live updates paused, retrying" } }
+                div { class: "console-hosts", aria_label: "Host load",
                     if let Some(view) = &view {
-                        SidebarGroup { aria_label: "Host load",
-                            SidebarGroupLabel { "Host load" }
-                            SidebarGroupContent {
-                                ItemGroup {
-                                    for host in &view.hosts {
-                                        {
-                                            let busy = host.busy.filter(|busy| busy.is_finite());
-                                            let load = busy.map_or(0.0, |busy| if host.cores == 0 { 0.0 } else { (busy / f64::from(host.cores) * 100.0).clamp(0.0, 100.0) });
-                                            let value = busy.map_or_else(|| format!("—/{}", host.cores), |busy| format!("{busy:.0}/{}", host.cores));
-                                            rsx! {
-                                                Item { key: "{host.label}", size: ItemSize::Sm, title: "{host.label}: {host.service}",
-                                                    ItemContent {
-                                                        ItemTitle { "{host.label}" Badge { variant: BadgeVariant::Outline, "{value}" } }
-                                                        Progress { value: Some(load), max: 100.0 }
-                                                    }
-                                                }
-                                            }
-                                        }
+                        for host in &view.hosts {
+                            {
+                                let busy = host.busy.filter(|busy| busy.is_finite());
+                                let load = busy.map_or(0.0, |busy| if host.cores == 0 { 0.0 } else { (busy / f64::from(host.cores) * 100.0).clamp(0.0, 100.0) });
+                                let value = busy.map_or_else(|| format!("—/{}", host.cores), |busy| format!("{busy:.0}/{}", host.cores));
+                                rsx! {
+                                    div { class: "console-host", key: "{host.label}", title: "{host.label}: {host.service}",
+                                        span { "{host.label}" }
+                                        Progress { value: Some(load), max: 100.0, aria_label: "{host.label} CPU load" }
+                                        span { "{value}" }
                                     }
                                 }
                             }
@@ -333,76 +352,81 @@ pub fn App() -> Element {
                     }
                 }
             }
-            SidebarInset {
+            InboxSidebar { count: state.count(), loading: state.snapshot.is_none(), error: state.error.clone(),
+                items: items.clone(), elapsed_ms, agents: agents(), reachable: agent_error().is_none() }
+            if width() >= 1100 { {navigation.clone()} } else {
+                TabContent { class: "console-agents-tab", value: "agents", index: 0usize, {navigation.clone()} }
+            }
+            main { class: "console-main",
                 match selected() {
                     Some(pane) => {
                         let picked = selection().filter(|item| item.pane == pane);
                         let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());
                         let review = pick(InboxKind::Review);
                         let question = pick(InboxKind::Question);
-                        rsx! { AgentView { key: "{pane}", pane, review, question } }
+                        rsx! { AgentView { key: "{pane}", pane, review, question, agent_count } }
                     }
-                    None => rsx! {
-                        ScrollArea { direction: ScrollDirection::Vertical,
-                            if !items.is_empty() {
-                                Card {
-                                    CardHeader { CardTitle { "Waiting on you" } }
-                                    CardContent { InboxList { items: items.clone(), elapsed_ms, inbox_open } }
-                                }
-                            } else if state.error.is_some() {
-                                Alert { "Inbox unavailable. Reload to retry." }
-                            } else if state.snapshot.is_none() || view.is_none() {
-                                Skeleton { role: "status", aria_label: "Loading agents" }
-                            } else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
-                                Item { variant: ItemVariant::Muted,
-                                    ItemContent {
-                                        ItemTitle { "No agents are running" }
-                                        ItemDescription { "Start an agent with `dogsled spawn`." }
-                                    }
-                                }
-                            } else {
-                                Item { variant: ItemVariant::Muted,
-                                    ItemContent {
-                                        ItemTitle { "Select an agent" }
-                                        ItemDescription { "Choose an agent in the navigation to open its work." }
-                                    }
-                                }
-                            }
+                    None => rsx! { div { class: "empty-lead",
+                        if width() < 1100 {
+                            header { class: "lead-header", TabList { aria_label: "Lead view", TabTrigger { value: "agents", index: 0usize, "Agents {agent_count}" } TabTrigger { value: "chat", index: 1usize, "Chat" } } }
                         }
-                    },
+                        TabContent { class: "empty-chat", value: "chat", index: 1usize,
+                        div { class: "console-empty",
+                        if view.is_none() { Skeleton { role: "status", aria_label: "Loading agents" } }
+                        else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
+                            h1 { "No agents are running" }
+                            p { "Start an agent with " code { "dogsled spawn" } "." }
+                        } else { h1 { "Select an agent" } p { "Choose an agent or a waiting item to open its work." } }
+                    } } } },
                 }
             }
-            Sheet {
-                open: Some(inbox_open()),
-                on_open_change: move |open: bool| inbox_open.set(open),
-                id: "portal-inbox",
-                SheetContentClose {}
-                SheetHeader {
-                    SheetTitle { "Inbox" }
-                    SheetDescription { "Everything waiting on you" }
-                }
-                if let Some(message) = &state.error {
-                    Alert { "Inbox unavailable: {message}. Reload to retry." }
-                }
-                if state.snapshot.is_none() && state.error.is_none() {
-                    Skeleton { role: "status", aria_label: "Loading inbox" }
-                } else if state.count() == Some(0) && state.error.is_none() {
-                    Status { "Nothing is waiting on you." }
-                } else {
-                    InboxList { items, elapsed_ms, inbox_open }
-                }
-                SheetFooter { "Selecting an item opens that agent with the item in front." }
+        }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn InboxSidebar(
+    count: Option<usize>,
+    loading: bool,
+    error: Option<String>,
+    items: Vec<InboxItem>,
+    elapsed_ms: u64,
+    agents: Vec<Agent>,
+    reachable: bool,
+) -> Element {
+    let label = count.map_or_else(|| "—".to_owned(), |count| count.to_string());
+    let waiting = count.is_some_and(|count| count > 0);
+    rsx! {
+        Sidebar { class: "console-inbox", collapsible: SidebarCollapsible::None, aria_label: "Waiting on you",
+            SidebarHeader { class: "console-column-header", h2 { "Waiting on you" }
+                Badge { class: "inbox-count", variant: BadgeVariant::Secondary, "data-waiting": waiting, "{label}" }
+            }
+            ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
+                if let Some(message) = &error { Alert { "Inbox unavailable: {message}. Reload to retry." } }
+                if loading && error.is_none() { Skeleton { role: "status", aria_label: "Loading inbox" } }
+                else if error.is_none() && count == Some(0) { Status { "Nothing is waiting on you." } }
+                else { InboxList { items, elapsed_ms, agents, reachable } }
             }
         }
     }
 }
 
 #[component]
-fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool>) -> Element {
+pub(crate) fn InboxList(
+    items: Vec<InboxItem>,
+    elapsed_ms: u64,
+    agents: Vec<Agent>,
+    reachable: bool,
+) -> Element {
     let mut selected = use_context::<Signal<Option<String>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
+    let mut panel = use_context::<Signal<LeadPanel>>();
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
     rsx! {
-        ItemGroup {
+        if let Some(message) = error() { Alert { "{message}" } }
+        ItemGroup { class: "inbox-list",
             for item in items {
                 {
                     let kind = item.selection.kind;
@@ -410,26 +434,58 @@ fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool
                         .unwrap_or("Agent task");
                     let repository = item.repository.as_deref().map(repository_name);
                     let age = age(item.age_ms.saturating_add(elapsed_ms));
+                    let open = selection().as_ref() == Some(&item.selection);
+                    let options = agents.iter().find(|agent| agent.pane == item.selection.pane)
+                        .and_then(|agent| agent.blocked.as_ref()).map(|prompt| prompt.options.clone()).unwrap_or_default();
                     rsx! {
-                        Button {
-                            key: "{kind:?}:{item.selection.id}",
-                            variant: ButtonVariant::Ghost,
-                            r#type: "button",
-                            onclick: {
-                                let item = item.clone();
-                                move |_| {
-                                    selected.set(Some(item.selection.pane.clone()));
-                                    selection.set(Some(item.selection.clone()));
-                                    inbox_open.set(false);
+                        div { class: "inbox-row", key: "{kind:?}:{item.selection.id}", "data-open": open,
+                            Button { class: "inbox-item", variant: ButtonVariant::Ghost, r#type: "button",
+                                aria_current: open.then_some("true"),
+                                onclick: {
+                                    let item = item.clone();
+                                    move |_| {
+                                        selected.set(Some(item.selection.pane.clone()));
+                                        selection.set(Some(item.selection.clone()));
+                                        panel.set(LeadPanel::Chat);
+                                    }
+                                },
+                                span { class: "inbox-kind",
+                                    match kind {
+                                        InboxKind::Review => rsx! { FileText { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                        InboxKind::Question => rsx! { CircleQuestionMark { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                        InboxKind::Prompt => rsx! { CornerDownLeft { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                        InboxKind::UnseenWorker => rsx! { Moon { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                    }
+                                    "{kind.label()}" span { class: "inbox-age", "{age}" }
                                 }
-                            },
-                            Badge { variant: BadgeVariant::Outline, "{kind.label()}" }
-                            "{item.title}"
-                            Badge { variant: BadgeVariant::Secondary,
-                                "{title}"
-                                if let Some(repository) = repository { " · {repository}" }
+                                span { class: "inbox-title", "{item.title}" }
+                                span { class: "inbox-meta", "{title}" if let Some(repository) = repository { " · {repository}" } }
                             }
-                            Badge { variant: BadgeVariant::Secondary, "{age}" }
+                            if kind == InboxKind::Prompt && !options.is_empty() {
+                                div { class: "inbox-keys",
+                                    for option in options {
+                                        {
+                                            let pane = item.selection.pane.clone();
+                                            let send_key = option.key.clone();
+                                            rsx! {
+                                                Button { key: "{option.key}", variant: ButtonVariant::Secondary, r#type: "button",
+                                                    disabled: !reachable || busy() || !crate::agent_view::allowed_key(&option.key),
+                                                    title: "{option.label}", aria_label: "{option.label}",
+                                                    onclick: move |_| {
+                                                        let pane = pane.clone(); let key = send_key.clone();
+                                                        async move {
+                                                            if busy() || !reachable { return; }
+                                                            busy.set(true);
+                                                            error.set(api::send_key(&pane, &key).await.err());
+                                                            busy.set(false);
+                                                        }
+                                                    }, "{option.key}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

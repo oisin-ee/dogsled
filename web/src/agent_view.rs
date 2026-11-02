@@ -5,10 +5,13 @@ use std::time::Duration;
 
 use dioxus::html::geometry::PixelsVector2D;
 use dioxus::prelude::*;
+use dioxus::web::WebEventExt;
+use dioxus_icons::lucide::{ArrowUp, ExternalLink, Paperclip, Square, X};
 use dioxus_primitives::dioxus_attributes::attributes;
 use dioxus_primitives::scroll_area::ScrollDirection;
 use dioxus_sdk_time::use_interval;
 use gloo_net::http::Request;
+use js_sys::wasm_bindgen::JsCast;
 use portal_types::agents::{self as wire, BlockedPrompt, Role, Turn};
 use portal_types::questions::{Pending, PendingList};
 use portal_types::reviews::{ReviewList, ReviewSummary};
@@ -18,17 +21,15 @@ use serde::de::DeserializeOwned;
 use crate::api;
 use crate::components::{
     accordion::{Accordion, AccordionContent, AccordionItem, AccordionTrigger},
-    badge::{Badge, BadgeVariant},
     button::{Button, ButtonVariant},
     card::{Card, CardContent, CardHeader, CardTitle},
     input::Input,
     item::{
-        Item, ItemActions, ItemContent, ItemDescription, ItemFooter, ItemGroup, ItemMedia,
-        ItemSize, ItemTitle,
+        Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSize, ItemTitle,
     },
     scroll_area::ScrollArea,
     skeleton::Skeleton,
-    tabs::{TabContent, TabList, TabTrigger, Tabs},
+    tabs::{TabContent, TabList, TabTrigger},
     textarea::Textarea,
     toolbar::{Toolbar, ToolbarButton},
 };
@@ -60,8 +61,6 @@ const PANEL_KEYS: &[(&str, &str)] = &[
 enum Tab {
     Pending,
     Conversation,
-    Todos,
-    Branch,
 }
 
 #[derive(Clone, PartialEq)]
@@ -80,14 +79,6 @@ impl RequestTab {
         }
     }
 
-    fn label(&self) -> String {
-        match self {
-            Self::Review(_) => "Plan review".to_owned(),
-            Self::Questions(_, count) => format!("Questions {count}"),
-            Self::Prompt => "Prompt".to_owned(),
-        }
-    }
-
     fn state(&self) -> &'static str {
         match self {
             Self::Review(_) => "Waiting for your plan review",
@@ -102,14 +93,20 @@ pub fn AgentView(
     pane: String,
     #[props(default)] review: Option<String>,
     #[props(default)] question: Option<String>,
+    agent_count: usize,
 ) -> Element {
     rsx! {
-        AgentSession { key: "{pane}", pane, review, question }
+        AgentSession { key: "{pane}", pane, review, question, agent_count }
     }
 }
 
 #[component]
-fn AgentSession(pane: String, review: Option<String>, question: Option<String>) -> Element {
+fn AgentSession(
+    pane: String,
+    review: Option<String>,
+    question: Option<String>,
+    agent_count: usize,
+) -> Element {
     let mut agent = use_signal(|| None::<wire::AgentView>);
     let mut board = use_signal(|| None::<BoardView>);
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
@@ -130,6 +127,12 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     // A choice belongs to the request that was visible when it was made.
     // A new request opens in front; polling the same request preserves the tab.
     let mut choice = use_signal(|| None::<(String, Tab)>);
+    let mut images = use_signal(Vec::<String>::new);
+    let uploading = use_signal(|| false);
+    use_effect(move || {
+        let _ = selection();
+        choice.set(None);
+    });
     let local_draft = use_signal(String::new);
     let mut draft = try_use_context::<Draft>().map_or(local_draft, |draft| draft.0);
 
@@ -236,7 +239,9 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     let send = move |prompt_reply: bool| {
         let pane = send_pane.clone();
         let text = draft();
-        if busy() || !reachable() || text.trim().is_empty() {
+        let sent_images = if prompt_reply { Vec::new() } else { images() };
+        let message = message_with_images(&text, &sent_images);
+        if busy() || uploading() || !reachable() || message.trim().is_empty() {
             return;
         }
         busy.set(true);
@@ -250,16 +255,20 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 agent.set(Some(current));
                 if blocked && !prompt_reply {
                     return Err(
-                        "The agent needs a response. Open the Prompt tab to reply.".to_owned()
+                        "The agent needs a response. Select its prompt in Waiting on you to reply."
+                            .to_owned(),
                     );
                 }
-                api::send_prompt(&pane, &text).await
+                api::send_prompt(&pane, &message).await
             }
             .await;
             match result {
                 Ok(()) => {
                     if draft() == text {
                         draft.set(String::new());
+                    }
+                    if !prompt_reply && images() == sent_images {
+                        images.set(Vec::new());
                     }
                 }
                 Err(message) => action_error.set(Some(message)),
@@ -308,6 +317,14 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
             .flat_map(|repo| &repo.todos)
             .filter(|todo| todo.pane == pane)
             .cloned()
+            .collect()
+    });
+    let workers: Vec<(String, String)> = board_view.as_ref().map_or_else(Vec::new, |board| {
+        board
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.rows)
+            .map(|row| (row.id.clone(), format!("{} · {}", row.what, row.host)))
             .collect()
     });
     let todo_count: usize = todos
@@ -361,28 +378,24 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
         .unwrap_or("Loading…")
         .to_owned();
     let disabled = busy() || metadata_loading() || !reachable() || current.is_none();
-    let waiting = pending.is_some();
     let plan_open = tab == Tab::Pending && matches!(pending, Some(RequestTab::Review(_)));
     let focus_pane = pane.clone();
-    let pending_identity = identity.clone();
-    let conversation_identity = identity.clone();
-    let todos_identity = identity.clone();
-    let branch_identity = identity.clone();
-    // The Pending tab is first when there is one, so the tab indexes stay
-    // contiguous for the arrow keys.
-    let first_tab = usize::from(pending.is_some());
-    let tab_value = match tab {
-        Tab::Pending => "pending",
-        Tab::Conversation => "conversation",
-        Tab::Todos => "todos",
-        Tab::Branch => "branch",
-    };
-    let tab_index = match tab {
-        Tab::Pending => 0,
-        Tab::Conversation => first_tab,
-        Tab::Todos => first_tab + 1,
-        Tab::Branch => first_tab + 2,
-    };
+    let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
+    use_effect(use_reactive(&identity, move |identity| {
+        if !identity.is_empty() {
+            panel.set(crate::app::LeadPanel::Chat);
+        }
+    }));
+    let width = use_context::<crate::app::ConsoleWidth>().0;
+    let first_tab = usize::from(width() < 1100);
+    let completed: usize = todos
+        .iter()
+        .flat_map(|todo| &todo.sections)
+        .filter(|section| section.status == TodoStatusView::Completed)
+        .map(|section| section.count)
+        .sum();
+    let role = if row.is_some() { "worker" } else { "lead" };
+    let host = row.map(|row| row.host.as_str());
     let working = current
         .as_ref()
         .is_some_and(|agent| agent.state == "working")
@@ -416,7 +429,10 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
         },
     ));
     let tracking = attributes!(div {
-        onmounted: move |event| page.set(Some(event.data())),
+        onmounted: move |event| {
+            page.set(Some(event.data()));
+            following.set(true);
+        },
         onscroll: move |event| {
             let remaining = f64::from(event.scroll_height())
                 - event.scroll_top()
@@ -424,35 +440,71 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
             following.set(remaining < 48.0);
         },
     });
-    let choose_tab = {
-        let pending_identity = pending_identity.clone();
-        move |value: String| {
-            following.set(true);
-            let chosen = match value.as_str() {
-                "pending" => (pending_identity.clone(), Tab::Pending),
-                "todos" => (todos_identity.clone(), Tab::Todos),
-                "branch" => (branch_identity.clone(), Tab::Branch),
-                _ => (conversation_identity.clone(), Tab::Conversation),
-            };
-            choice.set(Some(chosen));
+
+    let chat = rsx! {
+        div { class: "lead-chat",
+            ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
+                if tab == Tab::Pending {
+                    match &pending {
+                        Some(RequestTab::Questions(id, _)) => rsx! {
+                            QuestionForm { requested: id.clone(), on_done: move |id: String| {
+                                if let Some(pending) = questions.write().as_mut() { pending.retain(|item| item.id != id); }
+                                if selection.peek().as_ref().is_some_and(|item| item.kind == crate::app::InboxKind::Question && item.id == id) { selection.set(None); }
+                                refresh += 1;
+                            } }
+                        },
+                        Some(RequestTab::Prompt) => rsx! {
+                            BlockedPanel { prompt: current.as_ref().and_then(|agent| agent.blocked.clone()), screen: screen(),
+                                disabled, on_key: send_key, draft, on_send: move |_| reply_send(true) }
+                        },
+                        _ => rsx! {},
+                    }
+                } else {
+                    Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working }
+                }
+            }
+            if tab == Tab::Conversation {
+                Composer { draft, images, uploading, disabled, busy: busy(), on_error: move |message| action_error.set(Some(message)),
+                    on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
+            }
         }
     };
 
     rsx! {
-        ScrollArea { direction: ScrollDirection::Vertical, attributes: tracking,
-        Tabs {
-            aria_label: "Selected agent", horizontal: true,
-            value: Some(tab_value.to_owned()), on_value_change: choose_tab,
-            Item {
-                ItemContent { ItemTitle { "{title}" } }
-                ItemActions {
-                    if !plan_open {
-                        Button { variant: ButtonVariant::Outline, r#type: "button", disabled,
-                            onclick: move |_| interrupt("ctrl+c".to_owned()), "Interrupt" }
+        section { class: "lead-panel", "data-review-open": plan_open,
+            header { class: "lead-header",
+                div { class: "lead-heading", h1 { "{title}" }
+                    p { class: "lead-meta", "{state} · {role}"
+                        if let Some(harness) = harness { " · {harness}" }
+                        if let Some(host) = host { " · {host}" }
+                        if let Some(branch) = branch { " · {branch}" }
                     }
-                    Button {
-                        variant: ButtonVariant::Outline,
-                        r#type: "button", disabled,
+                }
+                if !plan_open && width() < 1400 {
+                    div { class: "lead-tabs",
+                        TabList { aria_label: "Lead view",
+                            if width() < 1100 { TabTrigger { value: "agents", index: 0usize, "Agents {agent_count}" } }
+                            TabTrigger { value: "chat", index: first_tab, "Chat" }
+                            TabTrigger { value: "todos", index: first_tab + 1, "Todos {completed}/{todo_count}" }
+                        }
+                    }
+                }
+                div { class: "lead-actions",
+                    if tab == Tab::Pending {
+                        Button { class: "icon-button", variant: ButtonVariant::Ghost, r#type: "button",
+                            aria_label: if plan_open { "Close plan review" } else { "Show conversation" },
+                            title: if plan_open { "Close plan review" } else { "Show conversation" },
+                            onclick: move |_| choice.set(Some((identity.clone(), Tab::Conversation))), X { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                        }
+                    }
+                    if !plan_open {
+                        Button { class: "icon-button", variant: ButtonVariant::Outline, r#type: "button", disabled,
+                            aria_label: "Interrupt", title: "Interrupt", onclick: move |_| interrupt("ctrl+c".to_owned()),
+                            Square { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                        }
+                    }
+                    Button { class: "icon-button", variant: ButtonVariant::Outline, r#type: "button", disabled,
+                        aria_label: "Open in Herdr", title: "Open in Herdr",
                         onclick: move |_| {
                             let pane = focus_pane.clone();
                             async move {
@@ -461,103 +513,40 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                                 action_error.set(api::focus_agent(&pane).await.err());
                                 busy.set(false);
                             }
-                        },
-                        "Open in Herdr"
+                        }, ExternalLink { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
                     }
                 }
-                ItemFooter {
-                    Badge { variant: if waiting { BadgeVariant::Destructive } else { BadgeVariant::Secondary }, "{state}" }
-                    Badge { variant: BadgeVariant::Outline, if row.is_some() { "worker" } else { "lead" } }
-                    if let Some(harness) = harness { Badge { variant: BadgeVariant::Outline, "{harness}" } }
-                    if let Some(row) = row { Badge { variant: BadgeVariant::Outline, "{row.host}" } }
-                    if let Some(branch) = branch { Badge { variant: BadgeVariant::Outline, "{branch}" } }
-                }
             }
-            TabList { aria_label: "Agent tabs",
-                if let Some(pending) = &pending {
-                    TabTrigger { value: "pending", index: 0usize,
-                        Badge { variant: BadgeVariant::Destructive, aria_hidden: "true", "●" }
-                        "{pending.label()}"
+            div { class: "lead-notices",
+                if !metadata_loading() && !reachable() {
+                    Status { "Herdr is not reachable. The board still works; conversation and messages do not." }
+                }
+                if let Some(message) = metadata_error() { Alert { "{message}" } }
+                if let Some(message) = screen_error() { Alert { "{message}" } }
+                if let Some(message) = transcript_error { Alert { "{message}" } }
+                if let Some(message) = pending_error() { Alert { "{message}" } }
+                if let Some(message) = board_error() { Alert { "{message}" } }
+                if stream_error().is_some() { Status { "Live updates paused. Checking every 5 seconds." } }
+                if let Some(message) = action_error() { Alert { "{message}" } }
+                if let Some(message) = follow_error() { Alert { "Could not follow the conversation: {message}" } }
+            }
+            if plan_open {
+                div { class: "pending-review console-scroll",
+                    if let Some(RequestTab::Review(id)) = &pending { ReviewView { review_id: id.clone(), embedded: true } }
+                }
+            } else {
+                if width() >= 1400 {
+                    {chat.clone()}
+                    aside { class: "console-todos", Todos { todos: todos.clone(), workers: workers.clone() } }
+                } else {
+                    TabContent { class: "chat-tab", value: "chat", index: first_tab, {chat.clone()} }
+                    TabContent { class: "todos-tab", value: "todos", index: first_tab + 1,
+                        div { class: "todo-tab-body", Todos { todos: todos.clone(), workers: workers.clone() } }
+                        Composer { draft, images, uploading, disabled, busy: busy(), on_error: move |message| action_error.set(Some(message)),
+                            on_send: move |_| conversation_send(false) }
                     }
                 }
-                TabTrigger { value: "conversation", index: first_tab, "Conversation" }
-                TabTrigger { value: "todos", index: first_tab + 1, "Todos {todo_count}" }
-                TabTrigger { value: "branch", index: first_tab + 2, "Branch" }
             }
-            if !metadata_loading() && !reachable() {
-                Status { "Herdr is not reachable. The board and retained conversation still work; messages do not." }
-            }
-            if let Some(message) = metadata_error() { Alert { "{message}" } }
-            if let Some(message) = screen_error() { Alert { "{message}" } }
-            if let Some(message) = transcript_error { Alert { "{message}" } }
-            if let Some(message) = pending_error() { Alert { "{message}" } }
-            if let Some(message) = board_error() { Alert { "{message}" } }
-            if stream_error().is_some() {
-                Status { "Live updates paused. Checking every 5 seconds." }
-            }
-            if let Some(message) = action_error() { Alert { "{message}" } }
-            if let Some(message) = follow_error() { Alert { "Could not follow the conversation: {message}" } }
-            TabContent { value: tab_value, index: tab_index,
-            match tab {
-                Tab::Pending => match pending {
-                    Some(RequestTab::Review(id)) => rsx! {
-                        ReviewView { review_id: id, embedded: true }
-                    },
-                    Some(RequestTab::Questions(id, _)) => rsx! {
-                        QuestionForm {
-                            requested: id,
-                            on_done: move |id: String| {
-                                if let Some(pending) = questions.write().as_mut() {
-                                    pending.retain(|item| item.id != id);
-                                }
-                                let selected_question = selection.peek().as_ref().is_some_and(|item| {
-                                    item.kind == crate::app::InboxKind::Question && item.id == id
-                                });
-                                if selected_question { selection.set(None); }
-                                refresh += 1;
-                            },
-                        }
-                    },
-                    Some(RequestTab::Prompt) => rsx! {
-                        BlockedPanel {
-                            prompt: current.as_ref().and_then(|agent| agent.blocked.clone()), screen: screen(),
-                            disabled, on_key: send_key, draft,
-                            on_send: move |_| reply_send(true),
-                        }
-                    },
-                    None => rsx! {},
-                },
-                Tab::Conversation => rsx! {
-                    Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working }
-                    Composer { draft, disabled, busy: busy(), on_send: move |_| conversation_send(false) }
-                },
-                Tab::Todos => rsx! { Todos { todos } },
-                Tab::Branch => rsx! {
-                    Card { aria_label: "Branch",
-                        CardHeader { CardTitle { "Branch" } }
-                        CardContent {
-                            ItemGroup {
-                                if let Some(branch) = branch {
-                                    Item { size: ItemSize::Sm, ItemContent { ItemTitle { "{branch}" } } }
-                                } else {
-                                    Status { "No branch is recorded for this agent." }
-                                }
-                                if let Some(row) = row {
-                                    if !row.activity.is_empty() {
-                                        Item { size: ItemSize::Sm, ItemContent { ItemDescription { "{row.activity}" } } }
-                                    }
-                                    if let Some(ahead) = row.ahead {
-                                        Item { size: ItemSize::Sm, ItemContent { ItemDescription { "{ahead} commits ahead" } } }
-                                    }
-                                    if row.dirty { Status { "The worktree has uncommitted changes." } }
-                                }
-                            }
-                        }
-                    }
-                },
-            }
-            }
-        }
         }
     }
 }
@@ -635,54 +624,117 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
 #[component]
 fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool) -> Element {
     rsx! {
-        if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
-        else if available && turns.is_empty() { Status { "No conversation yet. Send a message to start." } }
-        for (index, turn) in turns.iter().enumerate() {
-            Card { key: "{index}",
-                CardHeader { CardTitle { match turn.role { Role::User => "You", Role::Assistant => "Agent" } } }
-                CardContent {
-                    // innerHTML needs a host element of its own, with no other children.
+        div { class: "conversation-turns",
+            if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
+            else if available && turns.is_empty() { Status { "No conversation yet. Send a message to start." } }
+            for (index, turn) in turns.iter().enumerate() {
+                article { key: "{index}", class: if turn.role == Role::User { "conversation-owner" } else { "conversation-agent" },
+                    aria_label: if turn.role == Role::User { "You" } else { "Agent" },
                     div { dangerous_inner_html: crate::review_view::render_markdown(&turn.text) }
                 }
             }
+            if working { Status { "Working…" } }
         }
-        if working { Status { "Working…" } }
     }
 }
 
+pub(crate) fn message_with_images(text: &str, images: &[String]) -> String {
+    if images.is_empty() {
+        return text.to_owned();
+    }
+    format!(
+        "{text}\n\nReference images:\n{}",
+        images
+            .iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 #[component]
-fn Composer(
+pub(crate) fn Composer(
     draft: Signal<String>,
+    images: Signal<Vec<String>>,
+    uploading: Signal<bool>,
     disabled: bool,
     busy: bool,
+    on_error: EventHandler<String>,
     on_send: EventHandler<()>,
 ) -> Element {
-    rsx! {
-        Item {
-            r#as: move |attributes: Vec<Attribute>| rsx! {
-                form {
-                    onsubmit: move |event| { event.prevent_default(); on_send.call(()); },
-                    ..attributes,
-                    ItemContent {
-                        Textarea {
-                            name: "message", aria_label: "Message this agent", rows: "3", value: "{draft}", disabled,
-                            placeholder: "Message this agent",
-                            oninput: move |event: FormEvent| draft.set(event.value()),
-                            onkeydown: move |event: KeyboardEvent| {
-                                if event.key() == Key::Enter && !event.modifiers().shift() && !event.is_composing() {
-                                    event.prevent_default(); on_send.call(());
-                                }
-                            },
-                        }
+    let mut round = use_signal(|| 0_u32);
+    use_drop(move || uploading.set(false));
+    let upload = use_callback(move |files: Vec<web_sys::File>| {
+        if disabled || busy || uploading() || files.is_empty() {
+            return;
+        }
+        uploading.set(true);
+        spawn(async move {
+            for file in files {
+                match api::upload_image(&file).await {
+                    Ok(path) => images.write().push(path),
+                    Err(message) => {
+                        on_error.call(message);
+                        break;
                     }
-                    ItemFooter {
-                        ItemDescription { "Enter sends · Shift+Enter adds a line · while it works, the message waits for the next turn" }
-                        Button { r#type: "submit", disabled: disabled || draft().trim().is_empty(),
-                            if busy { "Sending…" } else { "Send" }
+                }
+            }
+            round += 1;
+            uploading.set(false);
+        });
+    });
+    rsx! {
+        form { class: "console-composer", aria_label: "Message composer", aria_busy: uploading() || busy,
+            onsubmit: move |event| { event.prevent_default(); if !disabled && !busy && !uploading() { on_send.call(()); } },
+            if !images().is_empty() {
+                div { class: "composer-images",
+                    for (index, path) in images().iter().enumerate() {
+                        {
+                            let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
+                            rsx! {
+                                div { class: "composer-image", key: "{index}:{path}",
+                                    img { src: "/api/attachments/{filename}", alt: "Attached image {index + 1}" }
+                                    Button { class: "icon-button", variant: ButtonVariant::Secondary, r#type: "button", disabled: disabled || busy || uploading(),
+                                        aria_label: "Remove image {index + 1}", title: "Remove image {index + 1}",
+                                        onclick: move |_| { images.write().remove(index); }, X { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-            },
+            }
+            div { class: "composer-field",
+                Button { class: "icon-button attach-button", variant: ButtonVariant::Ghost, r#type: "button",
+                    aria_label: "Attach images", title: "Attach images", disabled: disabled || busy || uploading(),
+                    onclick: move |_| { let _ = document::eval("document.getElementById('composer-images').click()"); },
+                    Paperclip { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                }
+                Input { key: "{round}", id: "composer-images", name: "images", r#type: "file", hidden: true,
+                    accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: disabled || busy || uploading(),
+                    onchange: move |event: FormEvent| upload.call(event.files().iter().filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned()).collect()),
+                }
+                Textarea { name: "message", aria_label: "Message this agent", rows: "1", value: "{draft}", disabled: disabled || busy,
+                    oninput: move |event: FormEvent| draft.set(event.value()),
+                    onpaste: move |event: ClipboardEvent| {
+                        let files = event.data().try_as_web_event()
+                            .and_then(|event| event.dyn_into::<web_sys::ClipboardEvent>().ok())
+                            .and_then(|event| event.clipboard_data()).and_then(|data| data.files());
+                        let files: Vec<_> = files.map_or_else(Vec::new, |files| (0..files.length()).filter_map(|index| files.item(index)).collect());
+                        if !files.is_empty() { event.prevent_default(); upload.call(files); }
+                    },
+                    onkeydown: move |event: KeyboardEvent| {
+                        if event.key() == Key::Enter && !event.modifiers().shift() && !event.is_composing() {
+                            event.prevent_default();
+                            if !disabled && !busy && !uploading() { on_send.call(()); }
+                        }
+                    },
+                }
+                Button { class: "icon-button send-button", r#type: "submit", aria_label: "Send message", title: "Send message",
+                    disabled: disabled || busy || uploading() || (draft().trim().is_empty() && images().is_empty()),
+                    ArrowUp { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                }
+            }
         }
     }
 }
@@ -777,34 +829,49 @@ fn BlockedPanel(
 }
 
 #[component]
-fn Todos(todos: Vec<TodoView>) -> Element {
+fn Todos(todos: Vec<TodoView>, workers: Vec<(String, String)>) -> Element {
     rsx! {
-        Card { aria_label: "Agent todos",
-            CardHeader { CardTitle { "Todos" } }
-            CardContent {
+        section { class: "todo-panel", aria_label: "Agent todos",
+            header { class: "console-column-header", h2 { "Todos" } }
+            ScrollArea { class: "console-scroll todo-list", direction: ScrollDirection::Vertical,
                 if todos.is_empty() { Status { "No todos are recorded for this agent." } }
                 for todo in todos {
-                    ItemGroup { key: "{todo.session}",
-                        Item { size: ItemSize::Sm, ItemContent { ItemTitle { "{todo.current}" } } }
-                        Accordion { allow_multiple_open: true, horizontal: false,
-                            for (position, section) in todo.sections.into_iter().enumerate() {
-                                AccordionItem { key: "{position}", index: position, default_open: true,
-                                    AccordionTrigger { "{status_label(section.status)} · {section.count}" }
-                                    AccordionContent {
-                                        ItemGroup {
-                                            for item in section.items {
-                                                Item { size: ItemSize::Sm,
-                                                    ItemMedia { Badge { variant: BadgeVariant::Outline, "{status_label(item.status)}" } }
-                                                    ItemContent {
-                                                        ItemTitle { "{item.text}" }
-                                                        if let Some(description) = item.description { ItemDescription { "{description}" } }
-                                                        ItemGroup {
-                                                            for child in item.children {
-                                                                Item { size: ItemSize::Sm,
-                                                                    ItemMedia { Badge { variant: BadgeVariant::Outline, "{status_label(child.status)}" } }
-                                                                    ItemContent {
-                                                                        ItemTitle { "{child.text}" }
-                                                                        if let Some(description) = child.description { ItemDescription { "{description}" } }
+                    {
+                        let mut sections = todo.sections;
+                        sections.sort_by_key(|section| match section.status {
+                            TodoStatusView::InProgress => 0, TodoStatusView::Pending => 1,
+                            TodoStatusView::Completed => 2, TodoStatusView::Abandoned => 3,
+                        });
+                        rsx! {
+                            Accordion { key: "{todo.session}", allow_multiple_open: true, horizontal: false,
+                                for (position, section) in sections.into_iter().enumerate() {
+                                    {
+                                        let mut items = section.items;
+                                        if section.status == TodoStatusView::Completed { items.reverse(); }
+                                        rsx! {
+                                            AccordionItem { key: "{position}", index: position, default_open: true,
+                                                AccordionTrigger { "{status_label(section.status)} · {section.count}" }
+                                                AccordionContent {
+                                                    ItemGroup {
+                                                        for item in items {
+                                                            Item { class: "todo-item", "data-status": status_class(item.status), size: ItemSize::Sm,
+                                                                ItemMedia { span { class: "todo-indicator", aria_label: status_label(item.status) } }
+                                                                ItemContent {
+                                                                    ItemTitle { class: "todo-title", "{item.text}" }
+                                                                    if let Some(worker) = item.unit.as_ref().and_then(|unit| workers.iter().find(|(id, _)| id == unit)) {
+                                                                        ItemDescription { "{worker.1}" }
+                                                                    }
+                                                                    if let Some(description) = item.description { ItemDescription { "{description}" } }
+                                                                    ItemGroup {
+                                                                        for child in item.children {
+                                                                            Item { class: "todo-item", "data-status": status_class(child.status), size: ItemSize::Sm,
+                                                                                ItemMedia { span { class: "todo-indicator", aria_label: status_label(child.status) } }
+                                                                                ItemContent {
+                                                                                    ItemTitle { class: "todo-title", "{child.text}" }
+                                                                                    if let Some(description) = child.description { ItemDescription { "{description}" } }
+                                                                                }
+                                                                            }
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -824,6 +891,15 @@ fn Todos(todos: Vec<TodoView>) -> Element {
     }
 }
 
+fn status_class(status: TodoStatusView) -> &'static str {
+    match status {
+        TodoStatusView::InProgress => "in-progress",
+        TodoStatusView::Pending => "pending",
+        TodoStatusView::Completed => "completed",
+        TodoStatusView::Abandoned => "abandoned",
+    }
+}
+
 fn status_label(status: TodoStatusView) -> &'static str {
     match status {
         TodoStatusView::InProgress => "In progress",
@@ -833,7 +909,7 @@ fn status_label(status: TodoStatusView) -> &'static str {
     }
 }
 
-fn allowed_key(key: &str) -> bool {
+pub(crate) fn allowed_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
         "enter"

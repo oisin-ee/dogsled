@@ -29,6 +29,27 @@ pub async fn fetch_board() -> Result<BoardView, String> {
     response.json().await.map_err(|error| error.to_string())
 }
 
+const MAX_IMAGE_BYTES: f64 = 10.0 * 1024.0 * 1024.0;
+
+/// Store an image and return the server-owned reference path.
+pub async fn upload_image(file: &web_sys::File) -> Result<String, String> {
+    if !matches!(
+        file.type_().as_str(),
+        "image/png" | "image/jpeg" | "image/webp"
+    ) {
+        return Err("Use PNG, JPEG or WebP images.".to_owned());
+    }
+    if file.size() > MAX_IMAGE_BYTES {
+        return Err("Each image must be at most 10 MiB.".to_owned());
+    }
+    let request = Request::post(&format!("{BASE}/api/attachments"))
+        .body(file.clone())
+        .map_err(|error| error.to_string())?;
+    let attachment: portal_types::reviews::Attachment =
+        read_json(request.send().await.map_err(|error| error.to_string())?).await?;
+    Ok(attachment.path)
+}
+
 /// Read a JSON body, or the server's own `error` text when it refused.
 async fn read_json<T: DeserializeOwned>(response: gloo_net::http::Response) -> Result<T, String> {
     if !response.ok() {
