@@ -48,10 +48,6 @@ const BASE: &str = match option_env!("DOGSLED_API") {
 #[derive(Clone, Copy)]
 pub struct Draft(pub Signal<String>);
 
-/// The tallest the conversation grows before it scrolls, so the header and the
-/// composer stay in view on a desktop screen.
-const CONVERSATION_HEIGHT: &str = "50svh";
-
 /// The compact prompt controls are a subset of the server's allowed keys.
 const PANEL_KEYS: &[(&str, &str)] = &[
     ("esc", "Esc"),
@@ -387,9 +383,51 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
         Tab::Todos => first_tab + 1,
         Tab::Branch => first_tab + 2,
     };
+    let working = current
+        .as_ref()
+        .is_some_and(|agent| agent.state == "working")
+        && reachable();
+    let mut page = use_signal(|| None::<Rc<MountedData>>);
+    let mut following = use_signal(|| true);
+    let mut follow_error = use_signal(|| None::<String>);
+    // Follow the newest turn until the owner scrolls up to read; scrolling back
+    // to the end resumes it. The page region is the one that scrolls.
+    use_effect(use_reactive(
+        (&retained, &transcript_loading, &working, &tab),
+        move |_| {
+            if tab != Tab::Conversation || !following() {
+                return;
+            }
+            let Some(page) = page() else {
+                return;
+            };
+            spawn(async move {
+                let scrolled = async {
+                    let size = page.get_scroll_size().await?;
+                    page.scroll(
+                        PixelsVector2D::new(0.0, size.height),
+                        ScrollBehavior::Instant,
+                    )
+                    .await
+                }
+                .await;
+                follow_error.set(scrolled.err().map(|error| error.to_string()));
+            });
+        },
+    ));
+    let tracking = attributes!(div {
+        onmounted: move |event| page.set(Some(event.data())),
+        onscroll: move |event| {
+            let remaining = f64::from(event.scroll_height())
+                - event.scroll_top()
+                - f64::from(event.client_height());
+            following.set(remaining < 48.0);
+        },
+    });
     let choose_tab = {
         let pending_identity = pending_identity.clone();
         move |value: String| {
+            following.set(true);
             let chosen = match value.as_str() {
                 "pending" => (pending_identity.clone(), Tab::Pending),
                 "todos" => (todos_identity.clone(), Tab::Todos),
@@ -401,6 +439,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
     };
 
     rsx! {
+        ScrollArea { direction: ScrollDirection::Vertical, attributes: tracking,
         Tabs {
             aria_label: "Selected agent", horizontal: true,
             value: Some(tab_value.to_owned()), on_value_change: choose_tab,
@@ -457,6 +496,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 Status { "Live updates paused. Checking every 5 seconds." }
             }
             if let Some(message) = action_error() { Alert { "{message}" } }
+            if let Some(message) = follow_error() { Alert { "Could not follow the conversation: {message}" } }
             TabContent { value: tab_value, index: tab_index,
             match tab {
                 Tab::Pending => match pending {
@@ -488,7 +528,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                     None => rsx! {},
                 },
                 Tab::Conversation => rsx! {
-                    Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working: current.as_ref().is_some_and(|agent| agent.state == "working") && reachable() }
+                    Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working }
                     Composer { draft, disabled, busy: busy(), on_send: move |_| conversation_send(false) }
                 },
                 Tab::Todos => rsx! { Todos { todos } },
@@ -517,6 +557,7 @@ fn AgentSession(pane: String, review: Option<String>, question: Option<String>) 
                 },
             }
             }
+        }
         }
     }
 }
@@ -593,61 +634,19 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
 
 #[component]
 fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool) -> Element {
-    let mut area = use_signal(|| None::<Rc<MountedData>>);
-    let mut following = use_signal(|| true);
-    let mut scroll_error = use_signal(|| None::<String>);
-    // Follow the newest turn until the owner scrolls up to read; scrolling back
-    // to the end resumes it.
-    use_effect(use_reactive((&turns, &loading, &working), move |_| {
-        if !following() {
-            return;
-        }
-        let Some(area) = area() else {
-            return;
-        };
-        spawn(async move {
-            let scrolled = async {
-                let size = area.get_scroll_size().await?;
-                area.scroll(
-                    PixelsVector2D::new(0.0, size.height),
-                    ScrollBehavior::Instant,
-                )
-                .await
-            }
-            .await;
-            scroll_error.set(scrolled.err().map(|error| error.to_string()));
-        });
-    }));
-    let tracking = attributes!(div {
-        max_height: CONVERSATION_HEIGHT,
-        aria_label: "Conversation",
-        tabindex: "0",
-        onmounted: move |event| area.set(Some(event.data())),
-        onscroll: move |event| {
-            let remaining = f64::from(event.scroll_height())
-                - event.scroll_top()
-                - f64::from(event.client_height());
-            following.set(remaining < 48.0);
-        },
-    });
     rsx! {
-        ScrollArea {
-            direction: ScrollDirection::Vertical,
-            attributes: tracking,
-            if let Some(message) = scroll_error() { Alert { "Could not follow the conversation: {message}" } }
-            if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
-            else if available && turns.is_empty() { Status { "No conversation yet. Send a message to start." } }
-            for (index, turn) in turns.iter().enumerate() {
-                Card { key: "{index}",
-                    CardHeader { CardTitle { match turn.role { Role::User => "You", Role::Assistant => "Agent" } } }
-                    CardContent {
-                        // innerHTML needs a host element of its own, with no other children.
-                        div { dangerous_inner_html: crate::review_view::render_markdown(&turn.text) }
-                    }
+        if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
+        else if available && turns.is_empty() { Status { "No conversation yet. Send a message to start." } }
+        for (index, turn) in turns.iter().enumerate() {
+            Card { key: "{index}",
+                CardHeader { CardTitle { match turn.role { Role::User => "You", Role::Assistant => "Agent" } } }
+                CardContent {
+                    // innerHTML needs a host element of its own, with no other children.
+                    div { dangerous_inner_html: crate::review_view::render_markdown(&turn.text) }
                 }
             }
-            if working { Status { "Working…" } }
         }
+        if working { Status { "Working…" } }
     }
 }
 

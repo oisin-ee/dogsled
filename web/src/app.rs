@@ -35,7 +35,6 @@ use crate::notice::{Alert, Status};
 const RETRY: Duration = Duration::from_secs(2);
 
 const COMPONENTS_CSS: Asset = asset!("/assets/dx-components-theme.css");
-const MAIN_CSS: Asset = asset!("/assets/main.css");
 
 /// The pending item the owner picked from the inbox. The shell passes it to
 /// `AgentView` as its `review` or `question` prop.
@@ -267,8 +266,6 @@ pub fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: COMPONENTS_CSS }
-        document::Stylesheet { href: MAIN_CSS }
-        document::Link { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" }
         SidebarProvider {
             Sidebar { collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
                 SidebarHeader {
@@ -337,16 +334,16 @@ pub fn App() -> Element {
                 }
             }
             SidebarInset {
-                ScrollArea { direction: ScrollDirection::Vertical,
-                    match selected() {
-                        Some(pane) => {
-                            let picked = selection().filter(|item| item.pane == pane);
-                            let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());
-                            let review = pick(InboxKind::Review);
-                            let question = pick(InboxKind::Question);
-                            rsx! { AgentView { key: "{pane}", pane, review, question } }
-                        }
-                        None => rsx! {
+                match selected() {
+                    Some(pane) => {
+                        let picked = selection().filter(|item| item.pane == pane);
+                        let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());
+                        let review = pick(InboxKind::Review);
+                        let question = pick(InboxKind::Question);
+                        rsx! { AgentView { key: "{pane}", pane, review, question } }
+                    }
+                    None => rsx! {
+                        ScrollArea { direction: ScrollDirection::Vertical,
                             if !items.is_empty() {
                                 Card {
                                     CardHeader { CardTitle { "Waiting on you" } }
@@ -371,8 +368,8 @@ pub fn App() -> Element {
                                     }
                                 }
                             }
-                        },
-                    }
+                        }
+                    },
                 }
             }
             Sheet {

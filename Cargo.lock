@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "dogsled"
-version = "0.29.1"
+version = "0.29.3"
 dependencies = [
  "axum",
  "chrono",

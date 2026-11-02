@@ -314,7 +314,25 @@ fn capture_expected(
         {
             return Err(operation.refusal("pane terminal or item changed"));
         }
-        Some(operation.expectation.tree.clone())
+        let mut planned = operation.expectation.tree.clone();
+        match operation.stage {
+            crate::preservation::Stage::TeardownComplete => {
+                // The completed hook may have committed. Capture its final state next.
+                if let Some(live) = live {
+                    planned.head.clone_from(&live.head);
+                }
+            }
+            crate::preservation::Stage::FinalCaptured | crate::preservation::Stage::Normalized => {
+                planned.head = operation
+                    .latest
+                    .as_ref()
+                    .and_then(|saved| saved.head.commit())
+                    .ok_or_else(|| operation.refusal("missing final HEAD"))?
+                    .into();
+            }
+            _ => (),
+        }
+        Some(planned)
     } else {
         close_expectation(saved.as_ref(), live)
     };
@@ -983,18 +1001,31 @@ fn begin_preservation(
             .iter()
             .map(crate::preservation::CloseRequest::of)
             .collect();
+        let mut observed = tree.tree();
+        if let Some(existing) = existing
+            && matches!(
+                existing.stage,
+                crate::preservation::Stage::TeardownComplete
+                    | crate::preservation::Stage::FinalCaptured
+                    | crate::preservation::Stage::Normalized
+            )
+        {
+            // The live HEAD was checked against the resumed stage above. The
+            // operation and its recovery context retain the original close HEAD.
+            observed.head.clone_from(&existing.expectation.tree.head);
+        }
         let expectation = crate::preservation::CloseExpectation {
             pane: pane.into(),
             terminal: terminals.get(pane).cloned(),
             request: request.cloned(),
             launch: crate::launch::identity(ledger, pane)?,
             owners,
-            tree: tree.tree(),
+            tree: observed,
             mode,
             caller: caller.clone(),
         };
         if let Some(existing) = existing
-            && existing.expectation != expectation
+            && !existing.matches_expectation(&expectation)
         {
             return Err(existing.refusal("preservation close expectation changed"));
         }
