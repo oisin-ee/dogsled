@@ -1,18 +1,48 @@
 //! Plan reviews, their source-mapped Markdown, and the owner's draft feedback.
 
+use std::collections::BTreeMap;
+use std::ops::Range;
+use std::time::Duration;
+
+use dioxus::html::FileData;
 use dioxus::prelude::*;
+use dioxus::web::WebEventExt;
+use dioxus_primitives::dioxus_attributes::attributes;
+use dioxus_sdk_time::sleep;
 use futures_util::StreamExt;
 use gloo_net::http::{Request, RequestBuilder, Response};
+use js_sys::wasm_bindgen::JsCast;
 use portal_types::reviews::{
-    Annotation, AnnotationsBody, ApproveBody, ChangeKind, DiffView, GeneralBody, Review,
-    ReviewList, ReviewSummary,
+    Annotation, AnnotationsBody, ApproveBody, Attachment, ChangeKind, DiffView, GeneralBody,
+    Review, ReviewList, ReviewSummary,
 };
-use pulldown_cmark::{Event, Parser, Tag, TagEnd, html};
-use serde::{Deserialize, de::DeserializeOwned};
+use pulldown_cmark::{CowStr, Event, Parser, Tag, TagEnd, html};
+use serde::de::DeserializeOwned;
 
 use crate::agent_view::Draft;
+use crate::components::{
+    badge::{Badge, BadgeVariant},
+    button::{Button, ButtonVariant},
+    card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle},
+    collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger},
+    dialog::{Dialog, DialogDescription, DialogTitle},
+    input::Input,
+    item::{
+        Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemHeader, ItemMedia,
+        ItemMediaVariant, ItemSize, ItemTitle, ItemVariant,
+    },
+    label::Label,
+    scroll_area::ScrollArea,
+    skeleton::Skeleton,
+    textarea::Textarea,
+};
+use crate::notice::{Alert, Status};
 
-const REVIEW_CSS: Asset = asset!("/assets/review_view.css");
+/// The time between two reads of the open plan reviews.
+const POLL: Duration = Duration::from_secs(2);
+
+/// The largest image the server stores.
+const MAX_IMAGE_BYTES: f64 = 10.0 * 1024.0 * 1024.0;
 
 fn segment(value: &str) -> String {
     String::from(js_sys::encode_uri_component(value))
@@ -63,17 +93,6 @@ async fn send<T: serde::Serialize>(request: RequestBuilder, body: &T) -> Result<
     .await
 }
 
-async fn pause() -> Result<(), String> {
-    let mut timer = document::eval(
-        "await new Promise(resolve => setTimeout(resolve, 2000)); dioxus.send(true);",
-    );
-    timer
-        .recv::<bool>()
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
 #[component]
 pub fn ReviewView(
     #[props(default)] review_id: Option<String>,
@@ -103,12 +122,7 @@ pub fn ReviewView(
                 Err(message) => error.set(Some(message)),
             }
             loading.set(false);
-            if let Err(message) = pause().await {
-                error.set(Some(format!(
-                    "Review refresh stopped: {message}. Reload the page."
-                )));
-                break;
-            }
+            sleep(POLL).await;
         }
     });
     let reviews = list();
@@ -126,32 +140,33 @@ pub fn ReviewView(
             .map(|item| item.id.clone())
     });
     rsx! {
-        document::Stylesheet { href: REVIEW_CSS }
-        section { class: if embedded { "rv rv-embedded" } else { "rv" }, aria_label: "Plan reviews",
-            if !embedded && review_id.is_none() {
-                h2 { "Plans · Needs you: {reviews.len()}" }
-                nav { class: "rv-needs", aria_label: "Plans needing review",
-                    for item in reviews {
-                        button {
-                            key: "{item.id}", r#type: "button",
-                            class: if current.as_ref() == Some(&item.id) { "rv-item active" } else { "rv-item" },
-                            onclick: move |_| { selected.set(Some(item.pane.clone())); opened.set(Some(item.id.clone())); },
-                            "{item.path} · {item.pane}"
-                        }
+        if !embedded && review_id.is_none() {
+            Item { ItemContent { ItemTitle { "Plans · Needs you: {reviews.len()}" } } }
+            ItemGroup { aria_label: "Plans needing review",
+                for item in reviews {
+                    Button { variant: ButtonVariant::Outline,
+                        key: "{item.id}", r#type: "button",
+                        aria_current: (current.as_ref() == Some(&item.id)).then_some("true"),
+                        onclick: {
+                            let pane = item.pane.clone();
+                            let id = item.id.clone();
+                            move |_| { selected.set(Some(pane.clone())); opened.set(Some(id.clone())); }
+                        },
+                        "{item.path} · {item.pane}"
                     }
                 }
             }
-            if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
-            if let Some(id) = current {
-                ReviewLoader {
-                    key: "{id}", id, tick: tick(), embedded,
-                    on_done: move |id: String| list.write().retain(|item| item.id != id),
-                }
-            } else if loading() {
-                p { role: "status", "Loading plans…" }
-            } else {
-                p { class: "rv-muted", "Select a plan above, or an agent with an open plan." }
+        }
+        if let Some(message) = error() { Alert { "{message}" } }
+        if let Some(id) = current {
+            ReviewLoader {
+                key: "{id}", id, tick: tick(), embedded,
+                on_done: move |id: String| list.write().retain(|item| item.id != id),
             }
+        } else if loading() {
+            Skeleton { role: "status", aria_label: "Loading plans" }
+        } else {
+            Status { "Select a plan above, or an agent with an open plan." }
         }
     }
 }
@@ -170,14 +185,14 @@ fn ReviewLoader(id: String, tick: u64, embedded: bool, on_done: EventHandler<Str
         }
     }));
     rsx! {
-        if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
+        if let Some(message) = error() { Alert { "{message}" } }
         if let Some(value) = review() {
             if value.decision.is_some() {
-                p { role: "status", "This review is closed." }
+                Status { "This review is closed." }
             } else {
                 ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, on_done }
             }
-        } else { p { role: "status", "Loading plan…" } }
+        } else { Status { "Loading plan…" } }
     }
 }
 
@@ -229,120 +244,245 @@ pub(crate) fn render_markdown(source: &str) -> String {
 }
 
 fn render_plan(source: &str, annotations: &[Annotation]) -> String {
-    let events = Parser::new(source)
-        .into_offset_iter()
-        .map(|(event, range)| match event {
-            Event::Start(tag) if block(&tag) => {
-                let (start, end) = lines(source, range);
-                let marked = annotations
-                    .iter()
-                    .any(|item| item.start_line <= end && item.end_line >= start);
-                let mut opening = String::new();
-                if matches!(tag, Tag::HtmlBlock) {
-                    opening.push_str("<pre>");
-                } else {
-                    html::push_html(&mut opening, std::iter::once(Event::Start(tag)));
+    let parsed: Vec<_> = Parser::new(source).into_offset_iter().collect();
+    let mut marks = quoted_ranges(source, &parsed, annotations);
+    let events = parsed
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, (event, range))| {
+            let ranges = marks.remove(&index).unwrap_or_default();
+            match event {
+                Event::Start(tag) if block(&tag) => {
+                    let (start, end) = lines(source, range);
+                    let mut opening = String::new();
+                    if matches!(tag, Tag::HtmlBlock) {
+                        opening.push_str("<pre>");
+                    } else {
+                        html::push_html(&mut opening, std::iter::once(Event::Start(tag)));
+                    }
+                    if let Some(position) = opening.find('>') {
+                        opening.insert_str(
+                            position,
+                            &format!(" data-start-line=\"{start}\" data-end-line=\"{end}\""),
+                        );
+                    }
+                    vec![Event::Html(opening.into())]
                 }
-                if let Some(index) = opening.find('>') {
-                    opening.insert_str(
-                        index,
-                        &format!(
-                            " data-start-line=\"{start}\" data-end-line=\"{end}\"{}",
-                            if marked {
-                                " class=\"rv-annotated\""
-                            } else {
-                                ""
-                            }
-                        ),
-                    );
+                Event::End(TagEnd::HtmlBlock) => vec![Event::Html("</pre>".into())],
+                Event::Rule => {
+                    let (start, end) = lines(source, range);
+                    vec![Event::Html(
+                        format!("<hr data-start-line=\"{start}\" data-end-line=\"{end}\" />")
+                            .into(),
+                    )]
                 }
-                Event::Html(opening.into())
+                Event::Html(text) | Event::InlineHtml(text) | Event::Text(text) => {
+                    marked(text, &ranges)
+                }
+                Event::Code(text) if !ranges.is_empty() => {
+                    let mut pieces = vec![Event::Html("<code>".into())];
+                    pieces.extend(marked(text, &ranges));
+                    pieces.push(Event::Html("</code>".into()));
+                    pieces
+                }
+                Event::Start(Tag::Link {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                }) => vec![Event::Start(Tag::Link {
+                    link_type,
+                    dest_url: if safe_url(&dest_url) {
+                        dest_url
+                    } else {
+                        "#".into()
+                    },
+                    title,
+                    id,
+                })],
+                Event::Start(Tag::Image {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                }) => vec![Event::Start(Tag::Image {
+                    link_type,
+                    dest_url: if safe_url(&dest_url) {
+                        dest_url
+                    } else {
+                        "".into()
+                    },
+                    title,
+                    id,
+                })],
+                other => vec![other],
             }
-            Event::End(TagEnd::HtmlBlock) => Event::Html("</pre>".into()),
-            Event::Rule => {
-                let (start, end) = lines(source, range);
-                Event::Html(
-                    format!("<hr data-start-line=\"{start}\" data-end-line=\"{end}\" />").into(),
-                )
-            }
-            Event::Html(text) | Event::InlineHtml(text) => Event::Text(text),
-            Event::Start(Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            }) => Event::Start(Tag::Link {
-                link_type,
-                dest_url: if safe_url(&dest_url) {
-                    dest_url
-                } else {
-                    "#".into()
-                },
-                title,
-                id,
-            }),
-            Event::Start(Tag::Image {
-                link_type,
-                dest_url,
-                title,
-                id,
-            }) => Event::Start(Tag::Image {
-                link_type,
-                dest_url: if safe_url(&dest_url) {
-                    dest_url
-                } else {
-                    "".into()
-                },
-                title,
-                id,
-            }),
-            other => other,
         });
     let mut output = String::new();
     html::push_html(&mut output, events);
     output
 }
 
-/// Match quotes across inline Markdown nodes without changing source line mapping.
-fn highlight_notes(annotations: &[Annotation]) {
-    let notes = serde_json::json!(annotations).to_string();
-    document::eval(&format!("const notes = {notes}; {HIGHLIGHTS}"));
+/// A run of rendered text that a note's quote can match.
+struct Run<'a> {
+    /// The event that holds the text, or none for a line break.
+    event: Option<usize>,
+    /// The event that opened the enclosing block.
+    block: usize,
+    /// The source lines of that block.
+    lines: (usize, usize),
+    text: &'a str,
 }
 
-const HIGHLIGHTS: &str = r#"
-requestAnimationFrame(() => {
-  const root = document.getElementById('review-plan');
-  if (!root || !window.CSS?.highlights) return;
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const nodes = [];
-  while (walker.nextNode()) nodes.push(walker.currentNode);
-  const ranges = [];
-  for (const note of notes) {
-    let text = '';
-    const positions = [];
-    for (const node of nodes) {
-      const block = node.parentElement.closest('[data-start-line]');
-      if (!block || Number(block.dataset.endLine) < note.start_line || Number(block.dataset.startLine) > note.end_line) continue;
-      for (let offset = 0; offset < node.length; offset++) {
-        const ch = /\s/.test(node.data[offset]) ? ' ' : node.data[offset];
-        if (ch === ' ' && text.endsWith(' ')) continue;
-        text += ch;
-        positions.push({node, offset});
-      }
+/// Whether a block closes with this tag.
+fn block_end(tag: &TagEnd) -> bool {
+    matches!(
+        tag,
+        TagEnd::Paragraph
+            | TagEnd::Heading(_)
+            | TagEnd::BlockQuote(_)
+            | TagEnd::CodeBlock
+            | TagEnd::List(_)
+            | TagEnd::Item
+            | TagEnd::HtmlBlock
+    )
+}
+
+/// The byte ranges of each text event that a note's quote covers. The quote
+/// matches across inline nodes and across runs of white space, and only in
+/// the blocks that touch the note's lines.
+fn quoted_ranges(
+    source: &str,
+    parsed: &[(Event<'_>, Range<usize>)],
+    annotations: &[Annotation],
+) -> BTreeMap<usize, Vec<Range<usize>>> {
+    let mut runs = Vec::new();
+    let mut blocks: Vec<(usize, (usize, usize))> = Vec::new();
+    let mut images = 0_usize;
+    for (index, (event, range)) in parsed.iter().enumerate() {
+        match event {
+            Event::Start(tag) => {
+                if block(tag) {
+                    blocks.push((index, lines(source, range.clone())));
+                }
+                if matches!(tag, Tag::Image { .. }) {
+                    images += 1;
+                }
+            }
+            Event::End(tag) => {
+                if block_end(tag) {
+                    blocks.pop();
+                }
+                if matches!(tag, TagEnd::Image) {
+                    images = images.saturating_sub(1);
+                }
+            }
+            // The text of an image becomes its alt attribute and cannot hold markup.
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text)
+                if images == 0 =>
+            {
+                if let Some(&(block, lines)) = blocks.last() {
+                    runs.push(Run {
+                        event: Some(index),
+                        block,
+                        lines,
+                        text,
+                    });
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some(&(block, lines)) = blocks.last() {
+                    runs.push(Run {
+                        event: None,
+                        block,
+                        lines,
+                        text: " ",
+                    });
+                }
+            }
+            _ => {}
+        }
     }
-    const quote = note.quote.replace(/\s+/g, ' ').trim();
-    const index = quote ? text.indexOf(quote) : -1;
-    if (index < 0) continue;
-    const start = positions[index], end = positions[index + quote.length - 1];
-    const range = new Range();
-    range.setStart(start.node, start.offset);
-    range.setEnd(end.node, end.offset + 1);
-    ranges.push(range);
-  }
-  CSS.highlights.set('review-notes', new Highlight(...ranges));
-  root.classList.add('rv-exact-highlights');
-});
-"#;
+    let mut found: BTreeMap<usize, Vec<Range<usize>>> = BTreeMap::new();
+    for note in annotations {
+        let quote = note.quote.split_whitespace().collect::<Vec<_>>().join(" ");
+        if quote.is_empty() {
+            continue;
+        }
+        let mut chars: Vec<(char, Option<(usize, usize)>)> = Vec::new();
+        let mut previous = None;
+        for run in &runs {
+            if run.lines.1 < note.start_line || run.lines.0 > note.end_line {
+                continue;
+            }
+            if previous.is_some_and(|block| block != run.block) {
+                chars.push((' ', None));
+            }
+            previous = Some(run.block);
+            for (offset, ch) in run.text.char_indices() {
+                let ch = if ch.is_whitespace() { ' ' } else { ch };
+                if ch == ' ' && chars.last().is_some_and(|(last, _)| *last == ' ') {
+                    continue;
+                }
+                chars.push((ch, run.event.map(|event| (event, offset))));
+            }
+        }
+        let text: String = chars.iter().map(|(ch, _)| *ch).collect();
+        let Some(at) = text.find(&quote) else {
+            continue;
+        };
+        let first = text[..at].chars().count();
+        let covered = &chars[first..first + quote.chars().count()];
+        let mut spans: BTreeMap<usize, Range<usize>> = BTreeMap::new();
+        for (ch, position) in covered {
+            if let Some((event, offset)) = *position {
+                let end = offset + ch.len_utf8();
+                spans
+                    .entry(event)
+                    .and_modify(|span| span.end = end)
+                    .or_insert(offset..end);
+            }
+        }
+        for (event, span) in spans {
+            found.entry(event).or_default().push(span);
+        }
+    }
+    for ranges in found.values_mut() {
+        ranges.sort_by_key(|range| range.start);
+        let mut merged: Vec<Range<usize>> = Vec::new();
+        for range in ranges.drain(..) {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        *ranges = merged;
+    }
+    found
+}
+
+/// The text as events, with each of the ranges wrapped in a mark.
+fn marked<'a>(text: CowStr<'a>, ranges: &[Range<usize>]) -> Vec<Event<'a>> {
+    let owned = |piece: &str| Event::Text(CowStr::from(piece.to_owned()));
+    if ranges.is_empty() {
+        return vec![Event::Text(text)];
+    }
+    let mut pieces = Vec::new();
+    let mut done = 0;
+    for range in ranges {
+        if range.start > done {
+            pieces.push(owned(&text[done..range.start]));
+        }
+        pieces.push(Event::Html("<mark>".into()));
+        pieces.push(owned(&text[range.clone()]));
+        pieces.push(Event::Html("</mark>".into()));
+        done = range.end;
+    }
+    if done < text.len() {
+        pieces.push(owned(&text[done..]));
+    }
+    pieces
+}
 
 fn quote_message(quote: &str, start: usize, end: usize) -> String {
     let quoted = quote
@@ -353,32 +493,38 @@ fn quote_message(quote: &str, start: usize, end: usize) -> String {
     format!("{quoted}\n(plan lines {start}–{end})")
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+/// What the owner selected in the plan.
+#[derive(Clone, Debug, PartialEq)]
 struct Selection {
     quote: String,
     start: usize,
     end: usize,
-    left: f64,
-    top: f64,
 }
 
-const SELECTION: &str = r#"
-const root = document.getElementById('review-plan');
-const selection = window.getSelection();
-let result = null;
-if (selection && selection.rangeCount && !selection.isCollapsed) {
-  const range = selection.getRangeAt(0);
-  const element = node => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('[data-start-line]');
-  const first = element(range.startContainer), last = element(range.endContainer);
-  if (first && last && root?.contains(first) && root.contains(last)) {
-    const rect = range.getBoundingClientRect();
-    window.__reviewSelection = range.cloneRange();
-    if (window.CSS?.highlights) CSS.highlights.set('review-selection', new Highlight(range));
-    result = {quote: selection.toString(), start: Number(first.dataset.startLine), end: Number(last.dataset.endLine), left: rect.left, top: rect.bottom};
-  }
+/// The owner's selection, when it starts and ends inside the rendered plan.
+fn read_selection() -> Option<Selection> {
+    let selection = web_sys::window()?.get_selection().ok()??;
+    if selection.is_collapsed() || selection.range_count() == 0 {
+        return None;
+    }
+    let range = selection.get_range_at(0).ok()?;
+    let first = plan_block(&range.start_container().ok()?)?;
+    let last = plan_block(&range.end_container().ok()?)?;
+    Some(Selection {
+        quote: String::from(selection.to_string()),
+        start: first.get_attribute("data-start-line")?.parse().ok()?,
+        end: last.get_attribute("data-end-line")?.parse().ok()?,
+    })
 }
-dioxus.send(result);
-"#;
+
+/// The source-mapped block of the plan that holds a node.
+fn plan_block(node: &web_sys::Node) -> Option<web_sys::Element> {
+    node.dyn_ref::<web_sys::Element>()
+        .cloned()
+        .or_else(|| node.parent_element())?
+        .closest("#review-plan [data-start-line]")
+        .ok()?
+}
 
 /// Both decision bars use the editor's serialized write queue.
 #[derive(Clone, Copy, PartialEq)]
@@ -392,13 +538,13 @@ struct ReviewControls {
 #[component]
 fn ReviewDecisionActions(controls: ReviewControls) -> Element {
     rsx! {
-        div { class: "rv-actions rv-decisions",
-            button {
+        ItemActions {
+            Button { variant: ButtonVariant::Outline,
                 r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some() || !(controls.can_request)(),
                 onclick: move |_| controls.decide.call(false), "Request changes"
             }
-            button {
-                r#type: "button", class: "rv-primary", disabled: (controls.busy)() || (controls.editing)().is_some(),
+            Button {
+                r#type: "button", disabled: (controls.busy)() || (controls.editing)().is_some(),
                 onclick: move |_| controls.decide.call(true), "Approve plan"
             }
         }
@@ -422,9 +568,9 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
     let mut general = use_signal(|| review.peek().general.clone());
     let mut notes = use_signal(String::new);
     let mut busy = use_signal(|| false);
+    let uploading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut editing = use_signal(|| None::<Annotation>);
-    let mut anchor = use_signal(|| None::<(f64, f64)>);
     let mut show_diff = use_signal(|| false);
     let mut diff = use_signal(|| None::<DiffView>);
     // One queue owns all writes. A blur save must finish before a decision,
@@ -525,28 +671,28 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
     let content = latest
         .as_ref()
         .map_or("", |revision| revision.content.as_str());
-    let rendered = render_plan(content, &value.annotations);
-    use_effect(move || highlight_notes(&review().annotations));
-    let select = move || async move {
+    // The passage being annotated stays marked while its note is open.
+    let mut marked = value.annotations.clone();
+    if let Some(annotation) = editing().filter(|annotation| annotation.id.is_empty()) {
+        marked.push(annotation);
+    }
+    let rendered = render_plan(content, &marked);
+    let mut select = move || {
         if busy() || editing().is_some() {
             return;
         }
-        let mut script = document::eval(SELECTION);
-        match script.recv::<Option<Selection>>().await {
-            Ok(Some(selection)) if !selection.quote.trim().is_empty() => {
-                editing.set(Some(Annotation {
-                    id: String::new(),
-                    revision: n,
-                    start_line: selection.start,
-                    end_line: selection.end,
-                    quote: selection.quote,
-                    comment: String::new(),
-                    images: vec![],
-                }));
-                anchor.set(Some((selection.left, selection.top)));
-            }
-            Ok(_) => {}
-            Err(message) => error.set(Some(format!("Could not read the selection: {message}"))),
+        if let Some(selection) =
+            read_selection().filter(|selection| !selection.quote.trim().is_empty())
+        {
+            editing.set(Some(Annotation {
+                id: String::new(),
+                revision: n,
+                start_line: selection.start,
+                end_line: selection.end,
+                quote: selection.quote,
+                comment: String::new(),
+                images: vec![],
+            }));
         }
     };
     let decide = move |approve: bool| {
@@ -569,116 +715,129 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
         can_request,
         decide,
     };
-    use_drop(move || {
-        document::eval(
-            "window.CSS?.highlights?.delete('review-selection'); window.CSS?.highlights?.delete('review-notes'); window.__reviewSelection = null;",
-        );
-    });
-    use_effect(move || {
-        if editing().is_none() {
-            document::eval(
-                "window.CSS?.highlights?.delete('review-selection'); window.__reviewSelection = null;",
-            );
-        }
-    });
     rsx! {
-        article { class: "rv-review",
-            if let Some(message) = error() { p { class: "error rv-error", role: "alert", "{message}" } }
-            if value.decision.is_some() {
-                p { role: "status", "Review sent to the agent." }
-            } else {
-                if embedded {
-                    header { class: "rv-decision-bar",
-                        div { class: "rv-bar-identity",
-                            span { class: "rv-filename", "{value.path}" }
-                            span { class: "rv-muted", "Revision {n}" }
-                        }
-                        ReviewDecisionActions { controls }
+        if let Some(message) = error() { Alert { "{message}" } }
+        if value.decision.is_some() {
+            Status { "Review sent to the agent." }
+        } else {
+            if embedded {
+                Item {
+                    ItemContent {
+                        ItemTitle { "{value.path}" Badge { variant: BadgeVariant::Outline, "Revision {n}" } }
+                    }
+                    ReviewDecisionActions { controls }
+                }
+            }
+            Card { aria_label: "Plan",
+                if !embedded {
+                    CardHeader {
+                        CardTitle { "{value.path}" }
+                        CardDescription { "Revision {n}" }
                     }
                 }
-                div { class: "rv-layout",
-                    div { class: "rv-document", id: "review-document",
-                        div { class: "rv-paper",
-                            if !embedded {
-                                div { class: "rv-path",
-                                    span { class: "rv-filename", "{value.path}" }
-                                    span { "Revision {n}" }
+                CardContent {
+                    // innerHTML needs a host element of its own, with no other children.
+                    div {
+                        id: "review-plan",
+                        tabindex: "0",
+                        aria_label: "Plan text",
+                        onmouseup: move |_| select(),
+                        onkeyup: move |_| select(),
+                        dangerous_inner_html: rendered,
+                    }
+                }
+                if value.revisions.len() > 1 {
+                    CardFooter {
+                        Button { variant: ButtonVariant::Outline,
+                            r#type: "button", aria_expanded: show_diff(), disabled: busy(),
+                            onclick: move |_| async move {
+                                show_diff.toggle();
+                                if show_diff() && diff().is_none() {
+                                    busy.set(true);
+                                    let id = review.peek().id.clone();
+                                    match get::<DiffView>(&format!("/api/reviews/{}/diff?from={}&to={n}", segment(&id), n - 1)).await {
+                                        Ok(value) => diff.set(Some(value)),
+                                        Err(message) => error.set(Some(message)),
+                                    }
+                                    busy.set(false);
                                 }
-                            }
-                            div { id: "review-plan", class: "rv-prose", tabindex: "0", aria_label: "Plan text",
-                                onmounted: move |_| highlight_notes(&review.peek().annotations),
-                                onmouseup: move |_| select(), onkeyup: move |_| select(), dangerous_inner_html: rendered,
-                            }
-                            if value.revisions.len() > 1 {
-                    button {
-                        r#type: "button", aria_expanded: show_diff(), disabled: busy(),
-                        onclick: move |_| async move {
-                            show_diff.toggle();
-                            if show_diff() && diff().is_none() {
-                                busy.set(true);
-                                let id = review.peek().id.clone();
-                                match get::<DiffView>(&format!("/api/reviews/{}/diff?from={}&to={n}", segment(&id), n - 1)).await {
-                                    Ok(value) => diff.set(Some(value)),
-                                    Err(message) => error.set(Some(message)),
-                                }
-                                busy.set(false);
-                            }
-                        },
-                        "Changes since revision {n - 1}"
+                            },
+                            "Changes since revision {n - 1}"
+                        }
                     }
                     if show_diff() {
                         if let Some(diff) = diff() {
-                            pre { class: "rv-diff", tabindex: "0", aria_label: "Revision changes",
-                                for (index, line) in diff.changes.iter().enumerate() {
-                                    div { key: "{index}", class: match line.kind { ChangeKind::Added => "added", ChangeKind::Removed => "removed", ChangeKind::Same => "same" },
-                                        {format!("{} {} {} {}", match line.kind { ChangeKind::Added => "+", ChangeKind::Removed => "−", ChangeKind::Same => " " }, line.old.map_or(String::new(), |n| n.to_string()), line.new.map_or(String::new(), |n| n.to_string()), line.text)}
+                            CardContent {
+                                ScrollArea { aria_label: "Revision changes",
+                                    pre {
+                                        {diff.changes.iter().map(|line| format!(
+                                            "{} {} {} {}",
+                                            match line.kind { ChangeKind::Added => "+", ChangeKind::Removed => "−", ChangeKind::Same => " " },
+                                            line.old.map_or(String::new(), |n| n.to_string()),
+                                            line.new.map_or(String::new(), |n| n.to_string()),
+                                            line.text,
+                                        )).collect::<Vec<_>>().join("\n")}
                                     }
                                 }
                             }
                         }
                     }
                 }
-                        }
-                    }
-                    aside { class: "rv-annotations", aria_label: "Your notes",
-                        h3 { span { "Your notes" } span { class: "rv-count", "{value.annotations.len()}" } }
-                        p { class: "rv-draft-hint", "Drafts. The lead gets them when you request changes." }
-                    for annotation in value.annotations.iter().cloned() {
-                        div { class: "rv-annotation", key: "{annotation.id}",
-                            p { class: "rv-line", "Line {annotation.start_line}" }
-                            if annotation.end_line != annotation.start_line {
-                                p { class: "rv-line", "Through line {annotation.end_line}" }
-                            }
-                            blockquote { "{annotation.quote}" }
-                            p { "{annotation.comment}" }
-                            Images { paths: annotation.images.clone() }
-                            div { class: "rv-actions",
-                                button { r#type: "button", disabled: busy() || editing().is_some(), onclick: {
-                                    let annotation = annotation.clone(); move |_| { anchor.set(None); editing.set(Some(annotation.clone())); }
-                                }, "Edit" }
-                                button { r#type: "button", disabled: busy() || editing().is_some(), onclick: move |_| {
-                                    if busy() { return; }
-                                    busy.set(true);
-                                    actions.send(ReviewAction::DeleteAnnotation(annotation.id.clone()));
-                                }, "Delete" }
-                            }
-                        }
-                    }
-                label { class: "rv-general-label", r#for: "review-general", "Note for the whole plan" }
-                textarea { id: "review-general", name: "general", rows: "3", value: "{general}", disabled: busy(),
-                    oninput: move |event: FormEvent| general.set(event.value()),
-                    onblur: move |_| {
-                        if general() != review.peek().general {
-                            actions.send(ReviewAction::SaveGeneral(general()));
-                        }
-                    },
+            }
+            Card { aria_label: "Your notes",
+                CardHeader {
+                    CardTitle { "Your notes" Badge { variant: BadgeVariant::Secondary, "{value.annotations.len()}" } }
+                    CardDescription { "Drafts. The lead gets them when you request changes." }
                 }
+                CardContent {
+                    ItemGroup {
+                        for annotation in value.annotations.iter().cloned() {
+                            Item { key: "{annotation.id}", variant: ItemVariant::Outline,
+                                ItemHeader {
+                                    Badge { variant: BadgeVariant::Outline, "Line {annotation.start_line}" }
+                                    if annotation.end_line != annotation.start_line {
+                                        Badge { variant: BadgeVariant::Outline, "Through line {annotation.end_line}" }
+                                    }
+                                }
+                                ItemContent {
+                                    ItemDescription { "{annotation.quote}" }
+                                    ItemTitle { "{annotation.comment}" }
+                                    Images { paths: annotation.images.clone() }
+                                }
+                                ItemActions {
+                                    Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy() || editing().is_some(), onclick: {
+                                        let annotation = annotation.clone(); move |_| { editing.set(Some(annotation.clone())); }
+                                    }, "Edit" }
+                                    Button { variant: ButtonVariant::Outline, r#type: "button", disabled: busy() || editing().is_some(), onclick: move |_| {
+                                        if busy() { return; }
+                                        busy.set(true);
+                                        actions.send(ReviewAction::DeleteAnnotation(annotation.id.clone()));
+                                    }, "Delete" }
+                                }
+                            }
+                        }
+                    }
+                    Label { html_for: "review-general", "Note for the whole plan" }
+                    Textarea { id: "review-general", name: "general", rows: "3", value: "{general}", disabled: busy(),
+                        oninput: move |event: FormEvent| general.set(event.value()),
+                        onblur: move |_| {
+                            if general() != review.peek().general {
+                                actions.send(ReviewAction::SaveGeneral(general()));
+                            }
+                        },
                     }
                 }
+            }
+            Dialog {
+                open: editing().is_some(),
+                aria_label: "Annotate plan selection",
+                on_open_change: move |open: bool| {
+                    if !open && !busy() && !uploading() { editing.set(None); }
+                },
                 if let Some(annotation) = editing() {
                     AnnotationEditor {
-                        key: "{annotation.id}-{annotation.start_line}-{annotation.end_line}", annotation, anchor: anchor(),
-                        busy: busy(),
+                        key: "{annotation.id}-{annotation.start_line}-{annotation.end_line}", annotation,
+                        busy: busy(), uploading,
                         on_close: move |_| editing.set(None),
                         on_save: move |annotation: Annotation| {
                             if busy() { return; }
@@ -687,19 +846,23 @@ fn ReviewEditor(initial: Review, embedded: bool, on_done: EventHandler<String>) 
                         },
                     }
                 }
-                if !embedded {
-                    footer { class: "rv-footer",
-                        details {
-                            summary { "Approval notes (optional)" }
-                            textarea { id: "review-notes", aria_label: "Approval notes", name: "notes", rows: "2", value: "{notes}", disabled: busy(),
-                                oninput: move |event: FormEvent| notes.set(event.value()),
+            }
+            if !embedded {
+                Item {
+                    ItemContent {
+                        Collapsible {
+                            CollapsibleTrigger { "Approval notes (optional)" }
+                            CollapsibleContent {
+                                Textarea { id: "review-notes", aria_label: "Approval notes", name: "notes", rows: "2", value: "{notes}", disabled: busy(),
+                                    oninput: move |event: FormEvent| notes.set(event.value()),
+                                }
                             }
                         }
-                        ReviewDecisionActions { controls }
                     }
+                    ReviewDecisionActions { controls }
                 }
-                if busy() { p { class: "rv-saving", role: "status", "Saving…" } }
             }
+            if busy() { Status { "Saving…" } }
         }
     }
 }
@@ -713,168 +876,208 @@ fn image_url(path: &str) -> String {
 
 #[component]
 fn Images(paths: Vec<String>) -> Element {
-    rsx! { div { class: "rv-images",
+    rsx! {
         for (index, path) in paths.iter().enumerate() {
-            a { key: "{path}", href: image_url(path), target: "_blank", rel: "noopener noreferrer",
-                img { src: image_url(path), alt: "Annotation image {index + 1}" }
+            Item {
+                key: "{path}",
+                size: ItemSize::Sm,
+                r#as: {
+                    let url = image_url(path);
+                    move |attributes: Vec<Attribute>| rsx! {
+                        a { href: "{url}", target: "_blank", rel: "noopener noreferrer", ..attributes,
+                            ItemMedia { variant: ItemMediaVariant::Image,
+                                img { src: "{url}", alt: "Annotation image {index + 1}" }
+                            }
+                        }
+                    }
+                },
             }
         }
-    } }
+    }
+}
+
+/// The files that an input or a drop carries.
+fn dropped_files(files: Vec<FileData>) -> Vec<web_sys::File> {
+    files
+        .iter()
+        .filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned())
+        .collect()
+}
+
+/// The files that a paste carries.
+fn pasted_files(event: &ClipboardEvent) -> Vec<web_sys::File> {
+    let list = event
+        .data()
+        .try_as_web_event()
+        .and_then(|event| event.dyn_into::<web_sys::ClipboardEvent>().ok())
+        .and_then(|event| event.clipboard_data())
+        .and_then(|data| data.files());
+    list.map_or_else(Vec::new, |list| {
+        (0..list.length())
+            .filter_map(|index| list.item(index))
+            .collect()
+    })
+}
+
+/// Store one image and give the path the server chose.
+async fn upload_image(file: &web_sys::File) -> Result<String, String> {
+    if !matches!(
+        file.type_().as_str(),
+        "image/png" | "image/jpeg" | "image/webp"
+    ) {
+        return Err("Use PNG, JPEG or WebP images.".to_owned());
+    }
+    if file.size() > MAX_IMAGE_BYTES {
+        return Err("Each image must be at most 10 MiB.".to_owned());
+    }
+    let request = Request::post("/api/attachments")
+        .body(file.clone())
+        .map_err(|error| error.to_string())?;
+    let attachment: Attachment =
+        response(request.send().await.map_err(|error| error.to_string())?).await?;
+    Ok(attachment.path)
 }
 
 #[component]
 fn AnnotationEditor(
     annotation: Annotation,
-    anchor: Option<(f64, f64)>,
     busy: bool,
+    mut uploading: Signal<bool>,
     on_save: EventHandler<Annotation>,
     on_close: EventHandler<()>,
 ) -> Element {
     let draft = try_use_context::<Draft>().map(|draft| draft.0);
     let mut comment = use_signal(|| annotation.comment.clone());
     let mut images = use_signal(|| annotation.images.clone());
-    let mut uploading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
-    let mut mounted = use_signal(|| false);
-    // The DOM component owns the listeners; AbortController removes them on unmount.
-    use_resource(move || async move {
-        if !mounted() {
+    // A new input replaces the old one after each upload, so the same file can be chosen again.
+    let mut uploads = use_signal(|| 0_u32);
+    // Leaving the editor stops its upload; the page must not stay locked.
+    use_drop(move || uploading.set(false));
+    let upload = use_callback(move |files: Vec<web_sys::File>| {
+        if uploading() || files.is_empty() {
             return;
         }
-        let mut script = document::eval(UPLOADS);
-        loop {
-            match script.recv::<UploadEvent>().await {
-                Ok(event) => {
-                    uploading.set(event.busy);
-                    if let Some(path) = event.path {
-                        images.write().push(path);
-                    }
-                    if let Some(message) = event.error {
+        uploading.set(true);
+        error.set(None);
+        spawn(async move {
+            for file in files {
+                match upload_image(&file).await {
+                    Ok(path) => images.write().push(path),
+                    Err(message) => {
                         error.set(Some(message));
+                        break;
                     }
-                }
-                Err(message) => {
-                    error.set(Some(format!("Image upload stopped: {message}")));
-                    break;
                 }
             }
-        }
+            uploads += 1;
+            uploading.set(false);
+        });
+    });
+    let drop_zone = attributes!(div {
+        role: "group",
+        onpaste: move |event: ClipboardEvent| {
+            let files = pasted_files(&event);
+            if !files.is_empty() {
+                event.prevent_default();
+                upload.call(files);
+            }
+        },
+        ondragover: move |event: DragEvent| event.prevent_default(),
+        ondrop: move |event: DragEvent| {
+            event.prevent_default();
+            upload.call(dropped_files(event.data_transfer().files()));
+        },
     });
     let quote = annotation.quote.clone();
     let save = annotation.clone();
     rsx! {
-        section { id: "review-annotation", class: "rv-popover", role: "dialog", aria_label: "Annotate plan selection",
-            onmounted: move |_| {
-                mounted.set(true);
-                let position = serde_json::to_string(&anchor).unwrap_or_default();
-                document::eval(&format!(r#"
-                    const root = document.getElementById('review-annotation');
-                    const anchor = {position};
-                    const place = () => {{
-                        const rect = window.__reviewSelection?.getBoundingClientRect();
-                        const x = rect?.left ?? anchor?.[0] ?? (innerWidth - root.offsetWidth) / 2;
-                        const y = rect?.bottom ?? anchor?.[1] ?? 160;
-                        root.style.setProperty('--popover-left', `${{Math.max(12, Math.min(x, innerWidth - root.offsetWidth - 12))}}px`);
-                        root.style.setProperty('--popover-top', `${{Math.max(12, Math.min(y + 8, innerHeight - root.offsetHeight - 12))}}px`);
-                    }};
-                    place();
-                    const controller = new AbortController();
-                    window.addEventListener('resize', place, {{signal: controller.signal}});
-                    document.getElementById('review-document')?.addEventListener('scroll', place, {{signal: controller.signal}});
-                    const size = new ResizeObserver(place); size.observe(root);
-                    const removed = new MutationObserver(() => {{
-                        if (!root.isConnected) {{ controller.abort(); size.disconnect(); removed.disconnect(); }}
-                    }});
-                    removed.observe(document.body, {{childList: true, subtree: true}});
-                "#));
-            },
-            onkeydown: move |event: KeyboardEvent| { if event.key() == Key::Escape && !busy && !uploading() { on_close.call(()); } },
-            div { class: "rv-popover-heading",
-                span { "Line {annotation.start_line}" }
-                button { r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "×" }
+        ItemGroup { attributes: drop_zone,
+            Item {
+                ItemContent { DialogTitle { "Line {annotation.start_line}" } }
+                ItemActions {
+                    Button { variant: ButtonVariant::Outline, r#type: "button", aria_label: "Close note", disabled: busy || uploading(), onclick: move |_| on_close.call(()), "×" }
+                }
             }
-            blockquote { "{annotation.quote}" }
-            textarea { id: "annotation-comment", name: "comment", aria_label: "Note for the lead", placeholder: "Add a note for the lead", rows: "3", autofocus: true, value: "{comment}", disabled: busy,
+            Item { variant: ItemVariant::Muted,
+                ItemContent { ItemDescription { "{annotation.quote}" } }
+            }
+            Textarea { id: "annotation-comment", name: "comment", aria_label: "Note for the lead", placeholder: "Add a note for the lead", rows: "3", "autofocus": true, value: "{comment}", disabled: busy,
                 oninput: move |event: FormEvent| comment.set(event.value()),
             }
-            input { id: "annotation-images", class: "rv-file", aria_label: "Add images (PNG, JPEG, WebP; up to 10 MiB each)", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading() }
-            p { class: "rv-image-hint", "Paste, drop or add images." }
+            Label { html_for: "annotation-images", "Add images (PNG, JPEG, WebP; up to 10 MiB each)" }
+            for round in [uploads()] {
+                Input { key: "{round}", id: "annotation-images", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading(),
+                    onchange: move |event: FormEvent| upload.call(dropped_files(event.files())),
+                }
+            }
+            DialogDescription { "Paste, drop or add images." }
             Images { paths: images() }
             for (index, path) in images().iter().enumerate() {
-                button { key: "{path}-{index}", r#type: "button", disabled: busy || uploading(), onclick: move |_| { images.write().remove(index); }, "Remove image {index + 1}" }
+                Button { variant: ButtonVariant::Outline, key: "{path}-{index}", r#type: "button", disabled: busy || uploading(), onclick: move |_| { images.write().remove(index); }, "Remove image {index + 1}" }
             }
-            if let Some(message) = error() { p { class: "error", role: "alert", "{message}" } }
-            if uploading() { p { role: "status", "Uploading images…" } }
-            div { class: "rv-actions",
-                button { r#type: "button", disabled: draft.is_none() || busy || uploading(), title: if draft.is_none() { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
-                    let Some(mut draft) = draft else { return; };
-                    let message = quote_message(&quote, annotation.start_line, annotation.end_line);
-                    let mut text = draft();
-                    if !text.is_empty() { text.push_str("\n\n"); }
-                    text.push_str(&message); draft.set(text); on_close.call(());
-                }, "Quote in message" }
-                button { r#type: "button", disabled: busy || uploading(), onclick: move |_| {
-                    document::eval("document.getElementById('annotation-images')?.click();");
-                }, "Add image" }
-                button { r#type: "button", class: "rv-primary", disabled: busy || uploading(), onclick: move |_| {
-                    let mut value = save.clone(); value.comment = comment(); value.images = images(); on_save.call(value);
-                }, "Save note" }
+            if let Some(message) = error() { Alert { "{message}" } }
+            if uploading() { Status { "Uploading images…" } }
+            Item {
+                ItemActions {
+                    Button { variant: ButtonVariant::Outline, r#type: "button", disabled: draft.is_none() || busy || uploading(), title: if draft.is_none() { "Open the agent conversation to quote a passage" } else { "Append quote to the message draft" }, onclick: move |_| {
+                        let Some(mut draft) = draft else { return; };
+                        let message = quote_message(&quote, annotation.start_line, annotation.end_line);
+                        let mut text = draft();
+                        if !text.is_empty() { text.push_str("\n\n"); }
+                        text.push_str(&message); draft.set(text); on_close.call(());
+                    }, "Quote in message" }
+                    Button { r#type: "button", disabled: busy || uploading(), onclick: move |_| {
+                        let mut value = save.clone(); value.comment = comment(); value.images = images(); on_save.call(value);
+                    }, "Save note" }
+                }
             }
         }
     }
 }
 
-#[derive(Deserialize)]
-struct UploadEvent {
-    busy: bool,
-    path: Option<String>,
-    error: Option<String>,
-}
-
-const UPLOADS: &str = r#"
-const root = document.getElementById('review-annotation');
-const controller = new AbortController();
-const signal = controller.signal;
-let running = false;
-const send = (busy, path = null, error = null) => dioxus.send({busy, path, error});
-const upload = async files => {
-  if (running || !root.isConnected) return;
-  running = true;
-  send(true);
-  try {
-    for (const file of files) {
-      if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('Use PNG, JPEG or WebP images.');
-      if (file.size > 10 * 1024 * 1024) throw new Error('Each image must be at most 10 MiB.');
-      const response = await fetch('/api/attachments', {method: 'POST', body: file, signal});
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || `Image upload failed (${response.status}).`);
-      send(true, body.path);
-    }
-  } catch (error) { if (!signal.aborted) send(true, null, error.message); }
-  finally { running = false; if (!signal.aborted) send(false); }
-};
-const observer = new MutationObserver(() => {
-  if (!root.isConnected) { controller.abort(); observer.disconnect(); }
-});
-observer.observe(document.body, {childList: true, subtree: true});
-root.addEventListener('paste', event => {
-  const files = Array.from(event.clipboardData?.files || []);
-  if (files.length) { event.preventDefault(); upload(files); }
-}, {signal});
-root.addEventListener('dragover', event => { event.preventDefault(); }, {signal});
-root.addEventListener('drop', event => {
-  event.preventDefault(); upload(Array.from(event.dataTransfer?.files || []));
-}, {signal});
-root.querySelector('input[type=file]').addEventListener('change', event => {
-  upload(Array.from(event.target.files || [])); event.target.value = '';
-}, {signal});
-// Keep the eval channel open for event callbacks until this editor unmounts.
-await new Promise(resolve => signal.addEventListener('abort', resolve, {once: true}));
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decision_controls_fixture(props: (bool, bool, bool)) -> Element {
+        let busy = use_signal(|| props.0);
+        let editing = use_signal(|| {
+            props.1.then(|| Annotation {
+                id: "note".into(),
+                revision: 1,
+                start_line: 1,
+                end_line: 1,
+                quote: "Plan".into(),
+                comment: String::new(),
+                images: vec![],
+            })
+        });
+        let can_request = use_memo(move || props.2);
+        let decide = use_callback(|_| {});
+        rsx! { ReviewDecisionActions { controls: ReviewControls { busy, editing, can_request, decide } } }
+    }
+
+    #[test]
+    fn official_decision_buttons_preserve_disabled_states() {
+        for (state, disabled) in [
+            ((false, false, true), 0),
+            ((false, false, false), 1),
+            ((true, false, true), 2),
+            ((false, true, true), 2),
+        ] {
+            let mut dom = VirtualDom::new_with_props(decision_controls_fixture, state);
+            dom.rebuild_in_place();
+            let html = dioxus_ssr::render(&dom);
+            assert_eq!(html.matches("<button").count(), 2, "{html}");
+            assert_eq!(html.matches(r#"type="button""#).count(), 2, "{html}");
+            assert_eq!(html.matches("disabled").count(), disabled, "{html}");
+            assert!(html.contains(r#"data-style="outline""#), "{html}");
+            assert!(html.contains(r#"data-style="primary""#), "{html}");
+            assert!(html.contains("Request changes"), "{html}");
+            assert!(html.contains("Approve plan"), "{html}");
+        }
+    }
 
     #[test]
     fn heading_list_and_code_have_source_line_ranges() {
@@ -920,9 +1123,45 @@ mod tests {
         };
         let rendered = render_plan("# One\n\ntwo\n", &[annotation]);
         assert!(
-            rendered
-                .contains("<p data-start-line=\"3\" data-end-line=\"3\" class=\"rv-annotated\">")
+            rendered.contains("<p data-start-line=\"3\" data-end-line=\"3\"><mark>two</mark></p>")
         );
-        assert!(!rendered.contains("<h1 data-start-line=\"1\" data-end-line=\"1\" class="));
+        assert!(!rendered.contains("<mark>One"));
+    }
+
+    #[test]
+    fn a_quote_is_marked_across_inline_nodes_and_white_space() {
+        let annotation = Annotation {
+            id: "a".into(),
+            revision: 1,
+            start_line: 1,
+            end_line: 2,
+            quote: "say hello   world".into(),
+            comment: String::new(),
+            images: vec![],
+        };
+        let rendered = render_plan("say **hello**\nworld and more\n", &[annotation]);
+        assert!(
+            rendered.contains(
+                "<mark>say </mark><strong><mark>hello</mark></strong>\n<mark>world</mark> and more"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_quote_outside_its_lines_or_inside_an_image_is_not_marked() {
+        let annotation = |quote: &str, line: usize| Annotation {
+            id: "a".into(),
+            revision: 1,
+            start_line: line,
+            end_line: line,
+            quote: quote.into(),
+            comment: String::new(),
+            images: vec![],
+        };
+        let source = "one\n\n![two](a.png)\n";
+        assert!(!render_plan(source, &[annotation("one", 3)]).contains("<mark>"));
+        let image = render_plan(source, &[annotation("two", 3)]);
+        assert!(!image.contains("<mark>"), "{image}");
     }
 }

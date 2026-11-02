@@ -458,7 +458,7 @@ fn a_recorded_final_handoff_publishes_done_and_keeps_the_raw_terminal_state() {
     assert_eq!(published["handoff"], "recorded", "{published}");
 
     // Closing an ordinary child must not turn its saved handoff into an expired unit.
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_number());
+    assert!(rig.items()[0]["closed_ms"].is_number());
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),

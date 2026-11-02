@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "dogsled"
-version = "0.28.1"
+version = "0.29.3"
 dependencies = [
  "axum",
  "chrono",
@@ -4840,6 +4840,7 @@ dependencies = [
  "dioxus",
  "dioxus-icons",
  "dioxus-primitives",
+ "dioxus-sdk-time",
  "dioxus-ssr",
  "futures-util",
  "gloo-net",

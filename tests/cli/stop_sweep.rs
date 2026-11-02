@@ -68,7 +68,7 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
     let rig = Rig::new("holds");
     let claims = json!([
         {"repo":"/tmp/repo","path":"/tmp/held","branch":"feat/x","request_id":"request-held"},
-        {"repo":"/tmp/repo","path":"/tmp/legacy","branch":"feat/legacy"}
+        {"repo":"/tmp/repo","path":"/tmp/damaged","branch":"feat/damaged"}
     ]);
     rig.put("state/preparations.json", &claims);
     let (code, status) = rig.json(&["status"]);
@@ -90,11 +90,12 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
         held["next_command"],
         "dogsled retire-preparation request-held --host local --reason 'release reported historical preparation claim'"
     );
-    let legacy = holds
+    // A claim without its request is a damaged record, not a supported claim type.
+    let damaged = holds
         .iter()
-        .find(|h| h["code"] == "legacy_preparation")
+        .find(|h| h["resource"].as_str().unwrap().contains("/tmp/damaged"))
         .unwrap();
-    assert_eq!(legacy["next_command"], "dogsled doctor --host local");
+    assert_eq!(damaged["code"], "unreadable");
     let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
     assert!(human.contains("Resource holds:"), "{human}");
     assert!(
@@ -273,6 +274,7 @@ fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
     assert!(tree.exists());
     assert!(!rig.dir.join("state/sweep.json").exists());
     assert!(!rig.log("herdr.log").contains("workspace list"));
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "stop-child");
     assert_eq!(gate(&rig, "w1:p1"), "");
     assert!(rig.dir.join("state/sweep-request.json").exists());
     assert!(!rig.dir.join("state/sweep.json").exists());
@@ -407,6 +409,7 @@ fn missing_configured_repository_stays_in_status_and_does_not_stop_other_cleanup
     let missing = rig.dir.join("gone-repo");
     let repo = rig.dir.join("home/repo");
     rig.put("state/repositories.json", &json!([missing, repo]));
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "healthy-child");
     rig.config(&format!("[cleanup]\nrepositories = [{}]\n", json!(missing)));
     gate(&rig, "w1:p1");
     serve(&rig);
@@ -435,6 +438,7 @@ fn cleanup_failure_report_preserves_worktree_identity_for_notice_routing() {
         "state/repositories.json",
         &json!([rig.dir.join("home/repo")]),
     );
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "failed-child");
     fs::write(rig.dir.join("hook-fails"), "").unwrap();
     gate(&rig, "w1:p1");
     serve(&rig);

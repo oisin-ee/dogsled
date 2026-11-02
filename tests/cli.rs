@@ -51,6 +51,8 @@ mod signals;
 mod stop_sweep;
 #[path = "cli/sweep.rs"]
 mod sweep;
+#[path = "cli/sweep_ownership.rs"]
+mod sweep_ownership;
 #[path = "cli/transcripts.rs"]
 mod transcripts;
 #[path = "cli/unit_requests.rs"]
@@ -76,7 +78,7 @@ pub(crate) fn outcome_identity(mut value: Value) -> Value {
     value
 }
 
- const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
+const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The state the guard and its fallback share. A finished process has released its pid,
 /// and the host may then hand that pid to another process. A signal sent after that can

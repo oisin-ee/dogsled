@@ -53,12 +53,6 @@ const RULES: &[Rule] = &[
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
-        code: "legacy_preparation",
-        evidence: &[],
-        reason: "requestless preparation claim; request-scoped retirement is unsupported",
-        command: &["dogsled", "doctor", "--host", "{host}"],
-    },
-    Rule {
         code: "admission",
         evidence: &[],
         reason: "admission progress retained; execution outcome is not settled by inspection",
@@ -93,6 +87,18 @@ const RULES: &[Rule] = &[
         evidence: &[],
         reason: "cancel intent retained; matching release acknowledgement pending",
         command: &["dogsled", "cancel", "{id}"],
+    },
+    Rule {
+        code: "cancellation_held",
+        evidence: &[],
+        reason: "cancelled request saved no preparation identity; release stays held until its preparation is retired",
+        command: &[
+            "dogsled",
+            "retire-preparation",
+            "{id}",
+            "--reason",
+            "release held cancellation preparation",
+        ],
     },
     Rule {
         code: "validity",
@@ -642,31 +648,28 @@ fn preparations(ledger: &Ledger, owned: &impl Fn(&str, String, &str) -> Hold) ->
     let mut holds = Vec::new();
     let preparations: Vec<Value> = ledger.read("preparations.json")?.unwrap_or_default();
     for claim in preparations {
-        let id = claim["request_id"].as_str();
-        let disposition = id
-            .map(|id| {
-                crate::jobs::validate_id(id)?;
-                ledger
-                    .child("preparation-receipts")
-                    .read::<crate::prepare::disposition::Receipt>(&format!("{id}.disposition.json"))
-            })
-            .transpose();
-        let code = match (&id, &disposition) {
-            (None, _) => "legacy_preparation",
-            (_, Err(_)) => "unreadable",
-            (_, Ok(Some(Some(_)))) => "preparation_fenced",
-            _ => "preparation_claim",
+        let resource = format!("preparation claim for {}", text(&claim, "/path"));
+        // Every claim names its request. One without it is a damaged record.
+        let Some(id) = claim["request_id"].as_str() else {
+            holds.push(owned("unreadable", resource, "unrecorded"));
+            continue;
+        };
+        let disposition = crate::jobs::validate_id(id).and_then(|()| {
+            ledger
+                .child("preparation-receipts")
+                .read::<crate::prepare::disposition::Receipt>(&format!("{id}.disposition.json"))
+        });
+        let code = match &disposition {
+            Err(_) => "unreadable",
+            Ok(Some(_)) => "preparation_fenced",
+            Ok(None) => "preparation_claim",
         };
         let mut hold = owned(
             code,
-            format!(
-                "preparation claim {} for {}",
-                id.unwrap_or("requestless"),
-                text(&claim, "/path")
-            ),
-            id.unwrap_or("unrecorded"),
+            format!("preparation claim {id} for {}", text(&claim, "/path")),
+            id,
         );
-        if let Ok(Some(Some(disposition))) = disposition {
+        if let Ok(Some(disposition)) = disposition {
             hold.reason = format!(
                 "{} (progress: {:?}; outcome: {:?})",
                 hold.reason, disposition.progress, disposition.request.outcome
@@ -815,6 +818,9 @@ fn releases(
     for (name, value) in records(ledger, "cancellations")? {
         let id = name.trim_end_matches(".json");
         match value {
+            Some(value) if value["release"] == "pending" && value["held"].is_object() => {
+                holds.push(owned("cancellation_held", format!("cancellation {id}"), id));
+            }
             Some(value) if value["release"] == "pending" => {
                 let mut hold = owned("cancellation", format!("cancellation {id}"), id);
                 hold.command_argv = vec![

@@ -944,6 +944,11 @@ fn repository_lifecycle_lock(repo: &Path) -> fs::File {
     lock
 }
 
+/// A contender must reach its repository lock wait before this budget ends. Process start and
+/// the git calls before that wait share the budget, so it allows for a loaded machine. The
+/// contender still gives up on the held lock and reports it.
+const CONTENDER_BUDGET_MS: &str = "8000";
+
 fn lifecycle_git_barrier(rig: &Rig) -> Fifo {
     let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
     rig.script("herdr", &script.replace("case \"$*\" in", "case \"$*\" in\n  'tab create'*|'workspace create'*) printf '%s\\n' '{\"result\":{\"root_pane\":{\"pane_id\":\"w8:p1\",\"terminal_id\":\"term_tree\"}}}' ;;\n  'pane run'*) printf '{}\\n' ;;"));
@@ -981,7 +986,7 @@ fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "prepare",
                 "--repo",
@@ -997,7 +1002,7 @@ fn prepare_and_launch_wait_for_repository_lifecycle_lock() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "launch",
                 "--job-validity",
@@ -1388,7 +1393,7 @@ fn repository_lock_precedes_launch_and_store_locks() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "prepare",
                 "--repo",
@@ -1404,7 +1409,7 @@ fn repository_lock_precedes_launch_and_store_locks() {
             vec![
                 "--json",
                 "--budget-ms",
-                "1500",
+                CONTENDER_BUDGET_MS,
                 "host",
                 "launch",
                 "--request",

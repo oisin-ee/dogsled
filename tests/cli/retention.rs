@@ -56,7 +56,7 @@ fn r1b_closed_items_and_marks_expire_only_after_the_strict_window() {
     held["branch"] = json!({"repo":"/tmp/repo","name":"feature","ahead":1,"landed":false});
     let mut open = closed_item("open", ended);
     open["closed_ms"] = Value::Null;
-    rig.put("state/items.json", &json!([item, held, open]));
+    rig.put_items(&json!([item, held, open]));
     let mark = json!({"pane":"finished","item":"finished","session":"old",
         "marked_ms":ended-1,"sealed":1,"closed_ms":ended,"native_done":true,
         "reply":{"seq":1,"text":"final","captured_ms":ended,"done":true}});
@@ -66,11 +66,11 @@ fn r1b_closed_items_and_marks_expire_only_after_the_strict_window() {
     );
     clock(&rig, ended + WINDOW);
     serve(&rig);
-    assert_eq!(rig.read("state/items.json").as_array().unwrap().len(), 3);
+    assert_eq!(rig.items().as_array().unwrap().len(), 3);
     assert_eq!(rig.read("state/done.json").as_object().unwrap().len(), 1);
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
-    let items = rig.read("state/items.json");
+    let items = rig.items();
     assert_eq!(items.as_array().unwrap().len(), 2, "{items}");
     assert!(
         !items
@@ -90,11 +90,11 @@ fn r1b_last_job_identity_expiry_never_resolves_a_reused_agent() {
     let mut item = closed_item("r-old-job", ended);
     item["kind"] = json!("job");
     item["name"] = json!("reused");
-    rig.put("state/items.json", &json!([item]));
+    rig.put_items(&json!([item]));
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
     assert!(!rig.dir.join("state/jobs/r-old-job.json").exists());
-    assert_eq!(rig.read("state/items.json"), json!([]));
+    assert_eq!(rig.items(), json!([]));
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{
@@ -286,12 +286,12 @@ fn r1c_released_seeded_family_expires_but_live_or_symlinked_evidence_stays() {
             assert_eq!(code, 0, "{value}");
             assert!(value["acknowledgement"].is_object(), "{value}");
         }
-        let mut items = rig.read("state/items.json");
+        let mut items = rig.items();
         items[0]["closed_ms"] = json!(ended);
         items[0]["native_done"] = json!(true);
         items[0]["reply"]["done"] = json!(true);
         items[0]["reply"]["reported_ms"] = json!(ended);
-        rig.put("state/items.json", &items);
+        rig.put_items(&items);
         if held != "live" {
             rig.put("agents.json", &json!({"result":{"agents":[]}}));
             rig.put("panes.json", &json!({"result":{"panes":[]}}));
@@ -312,7 +312,7 @@ fn r1c_released_seeded_family_expires_but_live_or_symlinked_evidence_stays() {
             rig.log("retention-output"),
             rig.log(&format!("state/admissions/{id}.json")),
             rig.log(&format!("state/launches/{id}.progress.json")),
-            rig.log("state/items.json")
+            rig.items()
         );
         assert_eq!(
             rig.dir
@@ -457,11 +457,11 @@ fn r1a_unknown_cancelled_ticket_remains_unsettled_despite_age() {
     let finished = rig.now_ms();
     clock(&rig, finished + WINDOW);
     serve(&rig);
-    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
+    assert_eq!(rig.tickets().as_array().unwrap().len(), 1);
     clock(&rig, finished + WINDOW + 1);
     serve(&rig);
-    assert_eq!(rig.read("state/queue.json").as_array().unwrap().len(), 1);
-    assert!(rig.read("state/queue.json")[0]["finished_ms"].is_number());
+    assert_eq!(rig.tickets().as_array().unwrap().len(), 1);
+    assert!(rig.tickets()[0]["finished_ms"].is_number());
 }
 
 #[test]
@@ -496,7 +496,7 @@ fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() 
     serve(&rig);
     assert!(!rig.dir.join(format!("state/launches/{id}.json")).exists());
     assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
-    assert_eq!(rig.read("state/items.json"), json!([]));
+    assert_eq!(rig.items(), json!([]));
 }
 
 #[test]
@@ -575,7 +575,5 @@ fn r1a_abandoned_acknowledged_unit_expires_without_recovery_reenqueue() {
         2
     );
     serve(&rig);
-    if rig.dir.join("state/queue.json").exists() {
-        assert_eq!(rig.read("state/queue.json"), json!([]));
-    }
+    assert_eq!(rig.tickets(), json!([]));
 }

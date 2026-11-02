@@ -21,3 +21,7 @@ publish-jobs = ["./publish-npm"]
 github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token = "write" } }
 # Dotfiles installs these templates; dist only bundles them beside the binary.
 include = ["plugin/services/dogsled.service", "plugin/services/dev.dogsled.plist", "plugin/services/dev.dogsled.web.plist"]
+
+# GitHub retires the macos-14 image on 2026-11-02 and fails its jobs during brownouts.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

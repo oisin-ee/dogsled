@@ -113,11 +113,18 @@ impl Drop for PausedClose {
 }
 
 fn pause_p3(rig: &Rig, phase: &str) -> PausedClose {
+    pause_close(rig, phase, &["close", "w2:p1", "--json"])
+}
+
+fn pause_close(rig: &Rig, phase: &str, args: &[&str]) -> PausedClose {
     let base = rig.dir.join("barrier");
+    if base.with_extension("ready").exists() {
+        fs::remove_file(base.with_extension("ready")).unwrap();
+    }
     let fifo = Fifo::new(&rig.dir, "barrier.go");
     let go = fifo.hold();
     let child = rig
-        .cmd(&["close", "w2:p1", "--json"])
+        .cmd(args)
         .env(format!("DOGSLED_TEST_LAUNCH_PRESERVATION_{phase}"), &base)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -131,7 +138,12 @@ fn pause_p3(rig: &Rig, phase: &str) -> PausedClose {
     let deadline = Instant::now() + PROCESS_DEADLINE;
     while !base.with_extension("ready").exists() {
         if let Some(status) = paused.child.as_mut().unwrap().try_wait().unwrap() {
-            panic!("close exited before {phase}: {status}");
+            let output = paused.child.take().unwrap().wait_with_output().unwrap();
+            panic!(
+                "close exited before {phase}: {status}; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         assert!(Instant::now() < deadline, "no {phase} barrier");
         std::thread::sleep(Duration::from_millis(5));
@@ -431,19 +443,232 @@ fn p3_crash_boundaries_keep_a_recoverable_copy() {
             fs::write(tree.join("replacement"), b"do not touch\n").unwrap();
         }
         let (code, replay) = rig.json(&["close", "w2:p1"]);
-        if phase == "BEFORE_NORMALIZE" {
-            assert_ne!(code, 0, "{replay}");
-            assert_p3_kept(&rig, &tree);
-        } else {
-            assert_eq!(code, 0, "{replay}");
-            assert_eq!(replay["recovery"]["operation"], operation["id"]);
-            if phase == "AFTER_REMOVE" {
+        assert_eq!(code, 0, "{replay}");
+        assert_eq!(replay["recovery"]["operation"], operation["id"]);
+        if phase == "AFTER_REMOVE" {
+            assert_eq!(
+                fs::read(tree.join("replacement")).unwrap(),
+                b"do not touch\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn p3_completed_teardown_stages_resume_without_repeating_effects() {
+    for (phase, stage) in [
+        ("TEARDOWN_COMPLETE", "teardown_complete"),
+        ("BEFORE_NORMALIZE", "final_captured"),
+        ("NORMALIZED", "normalized"),
+    ] {
+        for content in ["clean", "dirty", "commit"] {
+            let (rig, tree) = p3_rig(&format!("p3-resume-{phase}-{content}"));
+            let repo = rig.dir.join("home/repo");
+            if content != "clean" {
+                fs::write(tree.join("draft"), b"live work\n").unwrap();
+                fs::write(rig.dir.join("hook-dirt"), b"").unwrap();
+            }
+            if content == "commit" {
+                fs::write(rig.dir.join("hook-commit"), b"").unwrap();
+            }
+            interrupt_p3(&rig, phase);
+            let operation = operations(&rig).remove(0);
+            assert_eq!(operation["stage"], stage);
+            assert_eq!(rig.log("hook.log").lines().count(), 1);
+            assert!(tree.exists());
+            assert!(rig.items()[0]["closed_ms"].is_null());
+            let (code, closed) = rig.json(&["close", "w2:p1"]);
+            assert_eq!(code, 0, "{phase}: {closed}");
+            assert!(!tree.exists());
+            assert_eq!(rig.log("hook.log").lines().count(), 1);
+            assert!(rig.items()[0]["closed_ms"].is_number());
+            let finished = operations(&rig).remove(0);
+            assert_eq!(finished["stage"], "finished");
+            assert_eq!(finished["id"], operation["id"]);
+            assert_eq!(finished["expectation"], operation["expectation"]);
+            for snapshot in [&finished["initial"], &finished["latest"]] {
                 assert_eq!(
-                    fs::read(tree.join("replacement")).unwrap(),
-                    b"do not touch\n"
+                    git(
+                        &repo,
+                        &["rev-parse", snapshot["ref_name"].as_str().unwrap()]
+                    ),
+                    snapshot["commit"]
                 );
             }
+            assert_eq!(
+                closed["recovery"]["pinned_oid"],
+                finished["latest"]["commit"]
+            );
         }
+    }
+}
+
+#[test]
+fn p3_interrupted_normalization_still_refuses_retry() {
+    let (rig, tree) = p3_rig("p3-normalizing");
+    fs::write(tree.join("draft"), b"live work\n").unwrap();
+    interrupt_p3(&rig, "NORMALIZING");
+    assert_eq!(operations(&rig)[0]["stage"], "normalizing");
+    let output = rig.run(&["close", "w2:p1"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("normalization was interrupted"), "{error}");
+    assert_p3_kept(&rig, &tree);
+    assert_eq!(rig.log("hook.log").lines().count(), 1);
+}
+
+#[test]
+fn p3_retry_rejects_changed_close_identity_or_live_work() {
+    for drift in [
+        "terminal",
+        "owner",
+        "caller",
+        "workspace",
+        "inside",
+        "cwd",
+        "head",
+        "content",
+    ] {
+        let (rig, tree) = p3_rig(&format!("p3-retry-drift-{drift}"));
+        fs::write(tree.join("draft"), b"live work\n").unwrap();
+        interrupt_p3(&rig, "BEFORE_NORMALIZE");
+        let operation = operations(&rig).remove(0);
+        let mut cmd = rig.cmd(&["close", "w2:p1"]);
+        match drift {
+            "terminal" => {
+                let mut panes = rig.read("panes.json");
+                panes["result"]["panes"][1]["terminal_id"] = json!("replacement");
+                rig.put("panes.json", &panes);
+            }
+            "owner" => {
+                let mut items = rig.items();
+                items[0]["owner_session"] = json!("replacement");
+                rig.put_items(&items);
+            }
+            "caller" => {
+                cmd.env("HERDR_PANE_ID", "w3:p1");
+            }
+            "workspace" => {
+                cmd.env("HERDR_WORKSPACE_ID", "w3");
+            }
+            "inside" => {
+                cmd.current_dir(&tree);
+            }
+            "cwd" => {
+                cmd.current_dir(rig.dir.join("home/repo"));
+            }
+            "head" => {
+                super::close::git(&tree, &["commit", "--allow-empty", "-qm", "new head"]);
+            }
+            _ => {
+                fs::write(tree.join("new-work"), b"new work\n").unwrap();
+            }
+        }
+        let output = cmd.output().unwrap();
+        assert!(!output.status.success(), "{drift}");
+        assert_p3_kept(&rig, &tree);
+        assert_eq!(rig.log("hook.log").lines().count(), 1);
+        assert_eq!(operations(&rig)[0]["id"], operation["id"]);
+        assert_eq!(operations(&rig)[0]["stage"], "final_captured");
+    }
+}
+
+#[test]
+fn p3_requestless_close_adopts_only_its_matching_launch_request() {
+    for phase in [
+        "TEARDOWN_COMPLETE",
+        "BEFORE_NORMALIZE",
+        "NORMALIZED",
+        "FINAL_PIN",
+    ] {
+        let (rig, tree) = p3_rig(&format!("p3-adopt-{phase}"));
+        let repo = rig.dir.join("home/repo");
+        rig.put_items(&json!([]));
+        super::close::unfinished_launch(&rig, "origin-launch", &tree, "w2:p1");
+        let mut launch = rig.read("state/launches/origin-launch.progress.json");
+        launch["confirmed"] = json!(true);
+        launch["terminal"] = json!("term_child");
+        rig.put("state/launches/origin-launch.progress.json", &launch);
+        rig.put(
+            "state/launches/origin-launch.json",
+            &json!({"host":"local","name":"worker","pane":"w2:p1"}),
+        );
+        let args = &["host", "close", "w2:p1", "--json"];
+        if phase == "FINAL_PIN" {
+            fs::write(rig.dir.join("hook-dirt"), b"").unwrap();
+            pause_close(&rig, "TEARDOWN_COMPLETE", args).interrupt();
+            pause_close(&rig, "AFTER_PIN", args).interrupt();
+        } else {
+            pause_close(&rig, phase, args).interrupt();
+        }
+        let operation = operations(&rig).remove(0);
+        assert!(operation["expectation"]["request"].is_null());
+        assert_eq!(operation["expectation"]["owners"], json!([]));
+        assert_eq!(operation["expectation"]["launch"], "origin-launch");
+        assert_eq!(
+            operation["expectation"]["caller"],
+            json!({"pane":null,"workspace":null,"cwd":null})
+        );
+        let request = json!({"item":"origin-launch","created_ms":1,"owner_pane":"owner:p1",
+            "owner_session":"owner-session","host":"execution-host"});
+        let mut different = request.clone();
+        different["item"] = json!("another-launch");
+        let (code, refused) = rig.json(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--preservation-request",
+            &different.to_string(),
+        ]);
+        assert_ne!(code, 0, "{refused}");
+        assert!(tree.exists());
+        assert!(operations(&rig)[0]["expectation"]["request"].is_null());
+        let (code, closed) = rig.json(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--preservation-request",
+            &request.to_string(),
+        ]);
+        assert_eq!(code, 0, "{phase}: {closed}");
+        assert!(!tree.exists());
+        assert_eq!(rig.log("hook.log").lines().count(), 1);
+        let all = operations(&rig);
+        assert_eq!(all.len(), 1, "adoption must keep the original ledger key");
+        let finished = &all[0];
+        assert_eq!(finished["id"], operation["id"]);
+        assert_eq!(finished["stage"], "finished");
+        let mut expected = operation["expectation"].clone();
+        expected["request"] = request.clone();
+        assert_eq!(finished["expectation"], expected);
+        for snapshot in [&finished["initial"], &finished["latest"]] {
+            assert_eq!(
+                git(
+                    &repo,
+                    &["rev-parse", snapshot["ref_name"].as_str().unwrap()]
+                ),
+                snapshot["commit"]
+            );
+        }
+        let (code, replay) = rig.json(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--preservation-request",
+            &request.to_string(),
+        ]);
+        assert_eq!(code, 0, "{replay}");
+        assert_eq!(replay["recovery"], closed["recovery"]);
+        different = request.clone();
+        different["owner_session"] = json!("another-owner");
+        let (code, refused) = rig.json(&[
+            "host",
+            "close",
+            "w2:p1",
+            "--preservation-request",
+            &different.to_string(),
+        ]);
+        assert_ne!(code, 0, "{refused}");
     }
 }
 
@@ -554,6 +779,10 @@ esac
     assert!(!tree.exists(), "{}", String::from_utf8_lossy(&out.stderr));
     let original: Value = rig.read("peer-close.json");
     assert!(original["recovery"]["id"].is_string(), "{original}");
+    assert_eq!(
+        original["recovery"]["item"], "p3-child",
+        "origin close must send its recorded item"
+    );
     assert!(rig.items()[0]["closed_ms"].is_null());
     fs::create_dir(&tree).unwrap();
     super::close::git(&tree, &["init", "-q", "-b", "main"]);

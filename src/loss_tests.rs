@@ -357,12 +357,10 @@ fn deleted_checkout(staged: bool) -> Repo {
 fn held_tracked_deletions_are_lossless_and_cleanup_removes_them_without_force() {
     for staged in [false, true] {
         let repo = deleted_checkout(staged);
+        let ledger = Ledger::new(repo.root.join("state"));
+        closed_child(&ledger, &registered(&repo, &ledger));
         let loss = repo.assess();
         assert!(loss.loses_nothing() && loss.landed());
-        let ledger = Ledger::new(repo.root.join("state"));
-        ledger
-            .write("repositories.json", &vec![repo.repo.display().to_string()])
-            .unwrap();
         let cleanup = crate::config::Cleanup::default();
         let node = crate::node::Node {
             shell: &System,
@@ -622,7 +620,7 @@ fn prune_and_sweep_have_identical_idle_pane_candidates_at_the_fifteen_minute_bou
 }
 
 #[test]
-fn survey_continues_past_missing_repositories_and_scopes_agree() {
+fn survey_continues_past_missing_repositories_and_scopes_follow_ownership() {
     let repo = Repo::new();
     let ledger = Ledger::new(repo.root.join("state"));
     let missing = repo.root.join("missing").display().to_string();
@@ -661,14 +659,74 @@ fn survey_continues_past_missing_repositories_and_scopes_agree() {
             .map(|e| (e.id.clone(), e.removable))
             .collect::<Vec<_>>()
     };
-    assert_eq!(decisions(&prune), decisions(&sweep));
-    assert!(decisions(&prune).iter().any(|(_, removable)| *removable));
+    // Unrecorded worktrees and branches are an intentional difference between the scopes.
+    assert_eq!(decisions(&prune).len(), 2);
+    assert!(decisions(&prune).iter().all(|(_, removable)| *removable));
+    assert!(decisions(&sweep).iter().all(|(_, removable)| !*removable));
+    assert_eq!(
+        decisions(&prune)
+            .iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        decisions(&sweep)
+            .iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    );
     for plan in [&prune, &sweep] {
         assert!(plan.entries.iter().any(|e| e.class == "repositories"
             && e.id == missing
             && e.removable
             && e.detail.contains("repositories.json")));
     }
+    // With closed-child provenance, the same two entries agree again.
+    closed_child(&ledger, &registered(&repo, &ledger));
+    crate::items::record(
+        &ledger,
+        crate::items::Item {
+            id: "closed-branch".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "closed-branch".into(),
+            created_ms: 1,
+            closed_ms: Some(2),
+            branch: Some(crate::done::Branch {
+                repo: repo.repo.display().to_string(),
+                name: "unused".into(),
+                ahead: 0,
+                landed: true,
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    ledger
+        .write(
+            "repositories.json",
+            &vec![repo.repo.display().to_string(), missing],
+        )
+        .unwrap();
+    let prune = survey(&node, Scope::Prune, 100).unwrap();
+    let sweep = survey(&node, Scope::Sweep, 100).unwrap();
+    assert_eq!(decisions(&prune), decisions(&sweep));
+    assert!(decisions(&sweep).iter().all(|(_, removable)| *removable));
+}
+
+#[test]
+fn dirty_worktree_reports_content_until_pending_preparation_holds_it() {
+    let repo = Repo::new();
+    let ledger = Ledger::new(repo.root.join("state"));
+    ledger
+        .write("repositories.json", &vec![repo.repo.display().to_string()])
+        .unwrap();
+    let cleanup = crate::config::Cleanup::default();
+    let node = crate::node::Node {
+        shell: &System,
+        ledger: &ledger,
+        thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
+        home: repo.root.to_str().unwrap(),
+        cleanup: &cleanup,
+    };
     std::fs::write(repo.tree.join("dirty"), "work").unwrap();
     let plan = survey(&node, Scope::Prune, 100).unwrap();
     // The survey also covers the caller's own repository, which may have findings of its own.
@@ -700,13 +758,13 @@ fn survey_continues_past_missing_repositories_and_scopes_agree() {
     ledger
         .write(
             "preparations.json",
-            &vec![crate::cleanup::Tree {
-                repo: repo.repo.display().to_string(),
-                path: repo.tree.display().to_string(),
-                branch: "feature".into(),
-                head: String::new(),
-                identity: None,
-            }],
+            &serde_json::json!([{
+                "repo": repo.repo.display().to_string(),
+                "path": repo.tree.display().to_string(),
+                "branch": "feature",
+                "head": "",
+                "request_id": "held-request",
+            }]),
         )
         .unwrap();
     let held = survey(&node, Scope::Prune, 100).unwrap();
@@ -795,8 +853,9 @@ impl Landed {
             cleanup: &self.cleanup,
         }
     }
-    /// The sweep survey, reduced to this fixture's worktree.
+    /// The sweep survey of a closed child's worktree, reduced to this fixture.
     fn plan(&self, shell: &dyn Shell) -> crate::cleanup::Plan {
+        closed_child(&self.ledger, &registered(&self.repo, &self.ledger));
         let mut plan = survey(&self.node(shell), Scope::Sweep, 100).unwrap();
         plan.entries.retain(|e| {
             e.class == "worktrees"
@@ -1041,6 +1100,7 @@ fn prune_commit_after_the_plan_is_skipped_not_an_identity_change() {
 
 /// The sweep plan for the fixture's branch once its worktree is gone: a removable branch entry.
 fn branch_plan(fixture: &Landed) -> crate::cleanup::Plan {
+    closed_child(&fixture.ledger, &registered(&fixture.repo, &fixture.ledger));
     git(
         &fixture.repo.repo,
         &["worktree", "remove", fixture.repo.tree.to_str().unwrap()],
@@ -1282,6 +1342,35 @@ fn registered(repo: &Repo, ledger: &Ledger) -> crate::cleanup::Tree {
     tree
 }
 
+/// The durable registration, launch identity and closed item of a finished child. Keep its
+/// pane distinct from the live shell used by close/race fixtures.
+fn closed_child(ledger: &Ledger, tree: &crate::cleanup::Tree) {
+    crate::items::record(
+        ledger,
+        crate::items::Item {
+            id: "sweep-child".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "closed-child".into(),
+            owner_pane: "parent".into(),
+            created_ms: 1,
+            closed_ms: Some(2),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = serde_json::json!({"checkout":tree});
+    let launches = ledger.child("launches");
+    launches.write("sweep-child.progress.json", &serde_json::json!({
+        "request":{"id":"sweep-child","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
+            "host":"local","cwd":tree.path,"pane":"closed-child","terminal":"closed-terminal",
+            "workspace":null,"workspace_name":null,"owner":"parent"},
+        "pane":"closed-child","terminal":"closed-terminal","attempted":true,"confirmed":true,
+        "result":result,"error":null
+    })).unwrap();
+    launches.write("sweep-child.json", &result).unwrap();
+}
+
 fn fixture_plan(node: &crate::node::Node<'_>, scope: Scope, repo: &Repo) -> crate::cleanup::Plan {
     let mut plan = survey(node, scope, 100).unwrap();
     plan.entries.retain(|e| {
@@ -1302,6 +1391,7 @@ fn worktree_removed_after_listing_is_reconciled_not_failed() {
     let repo = Repo::new();
     let ledger = Ledger::new(repo.root.join("state"));
     let tree = registered(&repo, &ledger);
+    closed_child(&ledger, &tree);
     let cleanup = crate::config::Cleanup::default();
     let (main, path) = (repo.repo.clone(), repo.tree.clone());
     let remove = move || {
@@ -1330,7 +1420,7 @@ fn worktree_removed_after_listing_is_reconciled_not_failed() {
                 ],
             );
             // This is a fresh checkout, not the incarnation saved by the previous survey.
-            registered(&repo, &ledger);
+            closed_child(&ledger, &registered(&repo, &ledger));
             racing
                 .fired
                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1371,7 +1461,7 @@ fn worktree_removed_after_listing_is_reconciled_not_failed() {
         ],
     );
     let _ = tree;
-    registered(&repo, &ledger);
+    closed_child(&ledger, &registered(&repo, &ledger));
     let node = crate::node::Node {
         shell: &System,
         ..node
@@ -2145,6 +2235,7 @@ fn symlinked_home_preserves_identity_through_prune_and_close() {
                 home: home.to_str().unwrap(),
                 ..fixture.node(&shell)
             };
+            closed_child(&fixture.ledger, &recorded(&fixture.ledger)[0]);
             let plan = fixture_plan(&node, Scope::Prune, &fixture.repo);
             assert_eq!(plan.entries.len(), 1, "{plan:?}");
             assert!(plan.entries[0].removable, "{}", plan.entries[0].detail);
@@ -3014,6 +3105,7 @@ fn git_status_error_in_an_existing_listed_worktree_still_fails() {
     let repo = Repo::new();
     let ledger = Ledger::new(repo.root.join("state"));
     let tree = registered(&repo, &ledger);
+    closed_child(&ledger, &tree);
     let cleanup = crate::config::Cleanup::default();
     let index = repo.repo.join(".git/worktrees/tree/index");
     git(&repo.tree, &["status"]);

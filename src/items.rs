@@ -300,7 +300,9 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
             if expired.is_empty() {
                 return Ok(());
             }
-            ledger.write("items.json", &kept)?;
+            crate::store::write(ledger, |tx| {
+                crate::store::sync(tx, crate::store::Table::Items, &kept)
+            })?;
             for id in expired {
                 crate::custody::forget_released(ledger, &id)?;
             }

@@ -562,7 +562,7 @@ fn identified_legacy_metadata_retires_without_discovering_identity() {
 }
 
 #[test]
-fn requestless_and_unknown_claims_refuse() {
+fn unknown_and_duplicate_claims_refuse() {
     let (rig, _) = prepared("retire-refusals", "a");
     let original = rig.read("state/preparations.json");
     for id in ["", "unknown", "../a"] {
@@ -573,11 +573,6 @@ fn requestless_and_unknown_claims_refuse() {
         );
         assert_eq!(rig.read("state/preparations.json"), original);
     }
-    let mut requestless = original.clone();
-    requestless[0].as_object_mut().unwrap().remove("request_id");
-    rig.put("state/preparations.json", &requestless);
-    assert_ne!(retire(&rig, "a").0, 0);
-    assert_eq!(rig.read("state/preparations.json"), requestless);
     let mut duplicate = original.clone();
     duplicate.as_array_mut().unwrap().push(original[0].clone());
     rig.put("state/preparations.json", &duplicate);
