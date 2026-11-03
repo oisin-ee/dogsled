@@ -571,6 +571,56 @@ fn running_serve_retries_an_unsuccessful_probe_without_replacing_the_writer() {
 }
 
 #[test]
+fn running_serve_reprobes_a_failed_exec_without_spinning() {
+    let rig = Rig::short("upgrade-serve-exec-failed");
+    let executable = replacement(&rig);
+    // Removing the probe itself before it exits forces exec to fail after the
+    // successful --version result has been cached. No scheduler race is needed.
+    rig.script(
+        "vanishing-version",
+        &format!("#!/bin/sh\nrm -- \"$0\"\nprintf '%s\\n' 'dogsled {NEW_VERSION}'\n"),
+    );
+    let probe = rig.dir.join("bin/vanishing-version");
+    let mut owned = serve_inside_pass(&rig, &executable);
+    let pid = owned.pid;
+    record(&rig, &probe, NEW_VERSION);
+    fs::write(rig.dir.join("release-pass"), "release").unwrap();
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while !rig
+        .log("service-stderr")
+        .contains("dogsled service upgrade:")
+    {
+        assert!(
+            !process_gone(pid),
+            "service exited: {}",
+            rig.log("service-stderr")
+        );
+        assert!(Instant::now() < deadline, "service did not attempt exec");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!probe.exists(), "the validated executable was not removed");
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        assert!(
+            !process_gone(pid),
+            "service exited: {}",
+            rig.log("service-stderr")
+        );
+        assert_eq!(
+            rig.log("service-stderr")
+                .matches("dogsled service upgrade:")
+                .count(),
+            1,
+            "service retried exec without invalidating its cached validation"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_current_writer(&rig);
+    assert!(samples(&rig) > 0, "service did not resume publication");
+    assert_eq!(owned.child_mut().id(), pid);
+}
+
+#[test]
 fn running_serve_replaces_stale_writers_without_exiting() {
     let rig = Rig::short("upgrade-serve-stale");
     let executable = replacement(&rig);

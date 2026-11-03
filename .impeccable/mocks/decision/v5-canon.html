@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Category standard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0E0F11;--p1:#141518;--p2:#1B1C20;--line:#26272C;--fg:#E6E6E9;--fg2:#9A9DA6;--fg3:#62656E;--acc:#5E6AD2;--you:#F2C94C;--run:#4CB782;--red:#EB5757}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden}
+body{font:13px/1.5 Inter,system-ui,sans-serif;color:var(--fg);background:var(--bg);display:grid;grid-template:44px 132px 1fr/260px 1fr 320px;font-variant-numeric:tabular-nums}
+::selection{background:#5E6AD266}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+code,pre,.mono{font-family:"JetBrains Mono",ui-monospace,monospace}
+header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid var(--line)}
+.mark{font-weight:600;font-size:14px}
+.hosts{margin-left:auto;display:flex;gap:18px;font-size:12px;color:var(--fg2);align-items:center}
+.bar{display:inline-block;width:48px;height:4px;border-radius:2px;background:var(--line);margin:0 6px;vertical-align:middle;overflow:hidden}.bar i{display:block;height:100%;background:var(--run)}
+.strip{grid-column:1/-1;display:flex;gap:10px;padding:12px 16px;overflow-x:auto;border-bottom:1px solid var(--line);background:var(--p1)}
+.sh{flex:none;width:88px;display:flex;flex-direction:column;gap:6px;padding-top:2px;font-size:12px;font-weight:500;color:var(--fg2)}
+.sh b{align-self:flex-start;font-size:12px;font-weight:600;line-height:18px;padding:0 7px;border-radius:9px;background:var(--you);color:var(--bg)}
+.card{flex:1 1 0;min-width:200px;max-width:264px;background:var(--p2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;cursor:pointer}
+.card:hover{border-color:#3A3B42}
+.card .k{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:500;color:var(--you)}
+.card .k time{margin-left:auto;color:var(--fg3)}
+.card .t{font-weight:500;margin-top:4px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .m{font-size:12px;color:var(--fg2)}
+.btns{display:flex;gap:6px;margin-top:auto;padding-top:6px}
+.btns button{height:24px;min-width:32px;padding:0 9px;border-radius:5px;background:#26272C;font-size:12px;font-weight:500}
+.btns .p{background:var(--acc);color:#fff}
+nav{border-right:1px solid var(--line);overflow:auto;min-height:0;padding:8px}
+.rp{display:flex;justify-content:space-between;padding:12px 8px 4px;font-size:12px;font-weight:500;color:var(--fg3)}
+.ld{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer}
+.ld:hover{background:var(--p2)}.ld.sel{background:#22232A}
+.ld span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ld small{color:var(--fg3);font-size:12px}
+.st{width:8px;height:8px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--fg3);flex:none}.st.run{background:var(--run);box-shadow:none}.st.you{background:var(--you);box-shadow:none}
+.wk{display:flex;gap:8px;align-items:center;padding:3px 8px 3px 24px;font-size:12px;color:var(--fg2)}.wk span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wk .st{width:6px;height:6px}
+.main{display:flex;flex-direction:column;min-height:0;min-width:0}
+.mh{display:flex;align-items:center;gap:10px;height:52px;padding:0 20px;border-bottom:1px solid var(--line)}
+.mh h1{font-size:14px;font-weight:600}.mh p{font-size:12px;color:var(--fg2)}
+.ib{display:grid;place-items:center;width:30px;height:30px;border-radius:6px;color:var(--fg2);border:1px solid var(--line)}
+.msgs{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:16px;padding:16px 0}
+.msgs>*{width:min(680px,calc(100% - 48px));margin:0 auto}
+.me{align-self:flex-end;width:auto!important;max-width:440px;margin-right:24px!important;background:var(--p2);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+.md{font-size:14px;line-height:1.6;color:#D9DAE0}.md h3{font-size:15px;font-weight:600;color:var(--fg);margin-bottom:4px}
+.md p+*,.md ol+*{margin-top:8px}.md ol{padding-left:20px}.md strong{color:var(--fg);font-weight:600}
+.md code{font-size:12px;background:#1F2026;border-radius:4px;padding:1px 5px}
+.md pre{background:var(--p1);border:1px solid var(--line);border-radius:8px;padding:10px 14px;font-size:12px;line-height:1.6}
+.md pre code{background:none;padding:0}.kw{color:#C792EA}.nu{color:#F78C6C}.cm{color:#62656E}
+.md table{border-collapse:collapse;font-size:13px}.md th{text-align:left;color:var(--fg2);font-weight:500}.md td,.md th{padding:4px 24px 4px 0;border-bottom:1px solid var(--line)}
+.tool{font-size:12px;color:var(--fg3)}
+.live{display:flex;align-items:center;gap:8px;color:var(--fg2)}
+.composer{display:flex;align-items:flex-end;gap:6px;margin:0 24px 16px;padding:6px;border-radius:10px;background:var(--p1);border:1px solid var(--line)}
+.composer textarea{flex:1;border:0;resize:none;font:inherit;font-size:14px;color:var(--fg);background:none;height:30px;padding:5px 4px;outline:none;caret-color:var(--acc)}
+.send{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;background:var(--acc);color:#fff}
+aside{border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.ah{display:flex;justify-content:space-between;align-items:center;height:52px;padding:0 16px;border-bottom:1px solid var(--line);font-weight:600}
+.ah span{font-weight:400;color:var(--fg2);font-size:12px}
+.todos{overflow:auto;min-height:0;padding:4px 16px 12px}
+.sec{display:flex;justify-content:space-between;font-size:12px;color:var(--fg3);margin:14px 0 4px}
+.td{display:flex;gap:10px;padding:5px 0;line-height:1.4}
+.cb{width:14px;height:14px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--fg3);flex:none;margin-top:3px}
+.td.now .cb{box-shadow:inset 0 0 0 1.5px var(--you),inset 0 0 0 3.5px var(--bg);background:var(--you)}
+.td.done{color:var(--fg3)}.td.done .cb{background:var(--acc);box-shadow:none}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="doc" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol>
+<symbol id="ask" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+<symbol id="key" viewBox="0 0 24 24"><path d="M9 10l-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+<symbol id="moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+<symbol id="merge" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="clip" viewBox="0 0 24 24"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l8.6-8.6A4 4 0 1 1 18 8.8l-8.6 8.6a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+</defs></svg>
+<header><span class="mark">Dogsled</span>
+ <div class="hosts"><span>local<span class="bar"><i style="width:33%"></i></span>4/12</span><span>netcup<span class="bar"><i style="width:25%"></i></span>4/16</span><span>momokaya-2<span class="bar"><i style="width:14%"></i></span>1/7</span></div></header>
+<div class="strip">
+ <div class="sh">Waiting on you<b>5</b></div>
+ <div class="card"><p class="k"><svg class="i"><use href="#key"/></svg>Prompt<time>1m</time></p><p class="t">Allow git push to origin?</p><p class="m">Writer on netcup · dogsled</p><div class="btns"><button>y</button><button>n</button><button>esc</button></div></div>
+ <div class="card"><p class="k"><svg class="i"><use href="#doc"/></svg>Plan review<time>8m</time></p><p class="t">Typed SQLite state store, rev 3</p><p class="m">dogsled</p></div>
+ <div class="card"><p class="k"><svg class="i"><use href="#ask"/></svg>2 questions<time>12m</time></p><p class="t">Before the iOS gate</p><p class="m">rondo-lead · rondo</p></div>
+ <div class="card"><p class="k"><svg class="i"><use href="#moon"/></svg>Idle worker<time>18h</time></p><p class="t">Prune stale Herdr panes</p><p class="m">Unseen · dogsled</p></div>
+ <div class="card"><p class="k"><svg class="i"><use href="#merge"/></svg>To land<time>2d</time></p><p class="t">review/schwab-auth-transport-fix</p><div class="btns"><button class="p">Land</button><button>Prune</button></div></div>
+</div>
+<nav>
+ <p class="rp"><span>dogsled</span><span>4</span></p>
+ <div class="ld sel"><i class="st run"></i><span>Review d0a1246, release 0.29.3</span><small>28/32</small></div>
+ <p class="wk"><i class="st run"></i><span>Fix placement retry</span>netcup</p>
+ <p class="wk"><i class="st"></i><span>Review d0a1246</span>done</p>
+ <div class="ld"><i class="st you"></i><span>Move state into typed SQLite</span><small>75/78</small></div>
+ <div class="ld"><i class="st"></i><span>Find why Herdr panes linger</span><small>idle</small></div>
+ <div class="ld"><i class="st"></i><span>Replace portal controls</span><small>idle</small></div>
+ <p class="rp"><span>rondo</span><span>1</span></p>
+ <div class="ld"><i class="st you"></i><span>Build the iOS screens</span><small>6/14</small></div>
+ <p class="rp"><span>rt100k</span><span>1</span></p>
+ <div class="ld"><i class="st run"></i><span>Verify the Schwab auth fixtures</span><small>11/19</small></div>
+ <p class="rp"><span>grabcrft</span><span>1</span></p>
+ <div class="ld"><i class="st"></i><span>Milestone 3 plan</span><small>idle</small></div>
+</nav>
+<section class="main">
+ <div class="mh"><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p>Working · lead · pi · claude-opus · local · main</p></div><span style="flex:1"></span><button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div>
+ <div class="msgs">
+  <p class="me">Review d0a1246, merge both fixes, then cut 0.29.3.</p>
+  <article class="md"><h3>Review of <code>d0a1246</code></h3><p>Both fixes hold. <strong>Prune order:</strong> <code>cleanup::prune</code> now closes the pane first. <strong>Placement retry</strong> is bounded:</p>
+   <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(<span class="nu">3</span>) {
+    <span class="kw">if</span> place(&amp;host).<span class="kw">await</span>.is_ok() { <span class="kw">break</span>; }
+    sleep(delay).<span class="kw">await</span>; <span class="cm">// 250 ms, 500 ms, 1 s</span>
+}</code></pre>
+   <table><tr><th>Gate</th><th>Result</th></tr><tr><td><code>moon run :lint</code></td><td>passed</td></tr><tr><td><code>moon run :test</code></td><td>958 → 960 passed</td></tr></table></article>
+  <p class="tool mono">bash · git merge --no-ff fix/prune-order fix/placement-retry</p>
+  <p class="live"><i class="st run"></i>Running moon run :check on netcup</p>
+ </div>
+ <form class="composer"><button type="button" class="ib" style="border:0" aria-label="Attach image"><svg class="i"><use href="#clip"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#up"/></svg></button></form>
+</section>
+<aside><div class="ah">Todos <span>28 of 32</span></div>
+ <div class="todos">
+  <div class="td now"><i class="cb"></i><div>Release 0.29.3<p style="font-size:12px;color:var(--fg2)">Tag v0.29.3 and push · writer · netcup</p></div></div>
+  <div class="td"><i class="cb"></i>Publish release notes</div>
+  <div class="td"><i class="cb"></i>Bump the dotfiles pin after the GitHub release</div>
+  <div class="td"><i class="cb"></i>Close #212 with the release link</div>
+  <p class="sec"><span>Completed</span><span>28</span></p>
+  <div class="td done"><i class="cb"></i>Merge fix/placement-retry</div>
+  <div class="td done"><i class="cb"></i>Merge fix/prune-order</div>
+  <div class="td done"><i class="cb"></i>Review d0a1246</div>
+  <p class="sec"><span>Abandoned</span><span>3</span></p>
+ </div></aside>
+</body></html>

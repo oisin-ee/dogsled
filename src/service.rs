@@ -201,6 +201,7 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
         match crate::upgrade::handover(&writer, None) {
             Err(error) if matches!(error.root(), Error::NewerWriter(_)) => {
                 eprintln!("dogsled service upgrade: {error}");
+                std::thread::sleep(interval);
             }
             result => {
                 return result;

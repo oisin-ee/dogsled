@@ -2,7 +2,34 @@
 //! revisions of it, the owner's annotations, and the decision that goes back
 //! to the agent's session.
 
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
+
+/// The first Markdown heading supplies the review title, without inline markup.
+#[must_use]
+pub fn plan_title(source: &str) -> Option<String> {
+    let mut title = None::<String>;
+    for event in Parser::new(source) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => title = Some(String::new()),
+            Event::End(TagEnd::Heading(_)) => {
+                return title.filter(|title| !title.trim().is_empty());
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if let Some(title) = &mut title {
+                    title.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak if title.is_some() => {
+                if let Some(title) = &mut title {
+                    title.push(' ');
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 /// One plan under review, with everything the owner added to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,4 +216,31 @@ pub struct DecisionEvent {
     pub message: String,
     /// The latest revision of the plan.
     pub plan_content: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_title;
+
+    #[test]
+    fn plan_title_uses_the_first_heading_without_inline_markup() {
+        assert_eq!(
+            plan_title(
+                "Intro.\n\n## Typed **SQLite** `state` [store](https://example.com)\n\n# Later heading"
+            ),
+            Some("Typed SQLite state store".to_owned())
+        );
+        assert_eq!(
+            plan_title("A *setext* title\n================\n"),
+            Some("A setext title".to_owned())
+        );
+    }
+
+    #[test]
+    fn plan_title_requires_a_nonempty_heading() {
+        assert_eq!(plan_title("A plan without a heading."), None);
+        assert_eq!(plan_title("#\n\n# Later heading"), None);
+        assert_eq!(plan_title("```md\n# Not a heading\n```\n"), None);
+        assert_eq!(plan_title(""), None);
+    }
 }

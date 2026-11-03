@@ -124,6 +124,7 @@ pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: Option<u16>) ->
         match crate::upgrade::handover(&writer, None) {
             Err(error) if matches!(error.root(), crate::error::Error::NewerWriter(_)) => {
                 eprintln!("dogsled web upgrade: {error}");
+                std::thread::sleep(TICK);
             }
             result => {
                 return result;

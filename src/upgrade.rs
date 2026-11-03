@@ -70,6 +70,9 @@ enum Validation {
     Stale,
 }
 
+type Validations = std::sync::Mutex<std::collections::HashMap<(String, String), Validation>>;
+static VALIDATED: OnceLock<Validations> = OnceLock::new();
+
 /// This query deliberately knows nothing about the rest of the database's schema.
 pub(crate) fn newer(ledger: &Ledger) -> Result<Boundary> {
     match boundary(ledger) {
@@ -260,8 +263,6 @@ fn probe(writer: &Writer) -> Result<Validation> {
 
 /// Cache definite outcomes once per executable/version pair. Retry inconclusive probes.
 fn validated(writer: &Writer) -> Result<Validation> {
-    type Validations = std::sync::Mutex<std::collections::HashMap<(String, String), Validation>>;
-    static VALIDATED: OnceLock<Validations> = OnceLock::new();
     let mut validations = VALIDATED
         .get_or_init(Validations::default)
         .lock()
@@ -304,6 +305,13 @@ pub(crate) fn handover(writer: &Writer, resume: Option<&str>) -> Result<()> {
         command.args(["--mcp-resume", resume]);
     }
     let error = command.exec();
+    // The file can change after validation. A failed exec invalidates that proof;
+    // the next owner boundary must probe again instead of reusing a valid target.
+    VALIDATED
+        .get_or_init(Validations::default)
+        .lock()
+        .map_err(|error| Error::Invalid(error.to_string()))?
+        .remove(&(writer.executable.clone(), writer.version.clone()));
     Err(refusal(writer, error))
 }
 
@@ -404,6 +412,10 @@ mod tests {
         }
         assert!(matches!(validated(&writer).unwrap(), Validation::Valid));
         assert_eq!(std::fs::read_to_string(probes).unwrap().lines().count(), 3);
+        std::fs::remove_file(executable).unwrap();
+        let error = handover(&writer, None).unwrap_err();
+        assert!(matches!(error.root(), Error::NewerWriter(_)), "{error}");
+        assert!(matches!(validated(&writer).unwrap(), Validation::Stale));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

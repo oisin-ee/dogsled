@@ -204,6 +204,7 @@ pub fn command(
         match crate::upgrade::handover(&writer, None) {
             Err(error) if matches!(error.root(), Error::NewerWriter(_)) => {
                 eprintln!("dogsled sidebar upgrade: {error}");
+                std::thread::sleep(TICK);
             }
             result => {
                 return result;

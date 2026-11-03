@@ -1,0 +1,60 @@
+{
+  "title": "Choose the portal's world: the familiar hand",
+  "question": "You asked for safer. Three familiar directions and the category standard. Pick one, or re-roll.",
+  "options": [
+    {
+      "id": "native-mac",
+      "kind": "grounded",
+      "label": "Native Mac",
+      "lineage": "macOS Mail, Reminders and the Finder source list",
+      "thesis": "Dogsled as a well-behaved Mac app: a source list that starts with what waits on you.",
+      "palette": ["#FFFFFF", "#ECEBEF", "#1D1D1F", "#8A8A8E", "#007AFF", "#FF9500", "#34C759"],
+      "materials": ["source-list sidebar", "count capsules", "Reminders ring checkboxes"],
+      "viewport": "Sidebar with the Waiting on you section pinned above the agents tree; conversation centre; todo inspector right; host load in the toolbar.",
+      "risk": "Looks like a stock Mac app, and a light window sits beside a dark Herdr terminal.",
+      "html": ".impeccable/mocks/decision/v5-native-mac.html",
+      "comp": ".impeccable/mocks/decision/v5-native-mac.png"
+    },
+    {
+      "id": "pull-request",
+      "kind": "grounded",
+      "label": "Pull Request",
+      "lineage": "GitHub Primer: notifications, PR timelines, task lists",
+      "thesis": "Every lead reads like a pull request you are reviewing: a timeline, state labels and a task list.",
+      "palette": ["#1F2328", "#FFFFFF", "#F6F8FA", "#D1D9E0", "#0969DA", "#1A7F37", "#9A6700", "#8250DF"],
+      "materials": ["timeline rail", "comment boxes", "Primer state labels"],
+      "viewport": "Notifications column, repositories column, the lead's timeline with the composer below, and a PR-style sidebar with the task list.",
+      "risk": "Comment boxes cost more height than chat, and four columns make the conversation narrow.",
+      "html": ".impeccable/mocks/decision/v5-pull-request.html",
+      "comp": ".impeccable/mocks/decision/v5-pull-request.png"
+    },
+    {
+      "id": "workspace-chat",
+      "kind": "grounded",
+      "label": "Workspace Chat",
+      "lineage": "Slack: aubergine sidebar, unread weight, mention badges",
+      "thesis": "Leads are channels you talk in; a red badge means an agent needs you.",
+      "palette": ["#3F0E40", "#350D36", "#FFFFFF", "#1D1C1D", "#1164A3", "#E01E5A", "#2BAC76"],
+      "materials": ["coloured sidebar", "grouped messages", "activity pane"],
+      "viewport": "Aubergine sidebar of repositories and leads with badges; messages centre; right pane with Waiting on you above the todos.",
+      "risk": "The agent reads as a coworker in a chat app; the inbox sits on the right, not the left.",
+      "html": ".impeccable/mocks/decision/v5-workspace-chat.html",
+      "comp": ".impeccable/mocks/decision/v5-workspace-chat.png"
+    }
+  ],
+  "reroll": { "registers": ["safer", "bolder"] },
+  "buildPath": { "value": "code", "toggle": true },
+  "canon": true,
+  "canonCard": {
+    "kind": "canon",
+    "label": "The category standard",
+    "thesis": "The dark agent console of Linear, Cursor and Conductor, at full craft.",
+    "palette": ["#0E0F11", "#16171A", "#E6E6E9", "#8A8F98", "#5E6AD2", "#F2C94C"],
+    "materials": ["flat dark panels", "1px rules", "Inter"],
+    "viewport": "Inbox strip under the top bar; agents left; conversation centre; todos right.",
+    "risk": "Indistinguishable from every other agent console by design.",
+    "html": ".impeccable/mocks/decision/v5-canon.html",
+    "comp": ".impeccable/mocks/decision/v5-canon.png"
+  },
+  "steer": true
+}

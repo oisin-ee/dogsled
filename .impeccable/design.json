@@ -1,0 +1,363 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-03T12:55:35+00:00",
+  "title": "Design System: Dogsled",
+  "extensions": {
+    "colorMeta": {
+      "console-black": {
+        "role": "neutral",
+        "displayName": "Console Black",
+        "canonical": "#0e0f11",
+        "purpose": "Ground behind every column; text on yellow.",
+        "tonalRamp": [
+          "#0a0b0d",
+          "#242527",
+          "#414244",
+          "#606164",
+          "#818285",
+          "#a3a5a8",
+          "#c8c9cc",
+          "#edeef1"
+        ]
+      },
+      "panel-graphite": {
+        "role": "neutral",
+        "displayName": "Panel Graphite",
+        "canonical": "#141518",
+        "purpose": "Inbox sidebar, composer, tab tracks, fields, code panels.",
+        "tonalRamp": [
+          "#0a0b0e",
+          "#242528",
+          "#414245",
+          "#606165",
+          "#818286",
+          "#a3a5a9",
+          "#c7c9cd",
+          "#edeef3"
+        ]
+      },
+      "raised-graphite": {
+        "role": "neutral",
+        "displayName": "Raised Graphite",
+        "canonical": "#1b1c20",
+        "purpose": "Hovered and open rows, owner messages, notes, inline code.",
+        "tonalRamp": [
+          "#0a0b0f",
+          "#242529",
+          "#414246",
+          "#606166",
+          "#818287",
+          "#a3a5aa",
+          "#c7c9ce",
+          "#edeef4"
+        ]
+      },
+      "selection-graphite": {
+        "role": "neutral",
+        "displayName": "Selection Graphite",
+        "canonical": "#22232a",
+        "purpose": "Active row in the agents sidebar.",
+        "tonalRamp": [
+          "#0a0b11",
+          "#23242c",
+          "#404149",
+          "#5f6169",
+          "#80828a",
+          "#a3a4ad",
+          "#c7c8d2",
+          "#eceef8"
+        ]
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#26272c",
+        "purpose": "Every 1px rule, active segmented tab, meter tracks, disabled primary.",
+        "tonalRamp": [
+          "#0a0b0f",
+          "#24252a",
+          "#414247",
+          "#606167",
+          "#818288",
+          "#a3a5ab",
+          "#c7c9cf",
+          "#edeef5"
+        ]
+      },
+      "console-white": {
+        "role": "neutral",
+        "displayName": "Console White",
+        "canonical": "#e6e6e9",
+        "purpose": "Primary text.",
+        "tonalRamp": [
+          "#0b0b0d",
+          "#252527",
+          "#424244",
+          "#616163",
+          "#828285",
+          "#a5a5a7",
+          "#c9c9cc",
+          "#eeeef1"
+        ]
+      },
+      "muted-steel": {
+        "role": "neutral",
+        "displayName": "Muted Steel",
+        "canonical": "#9a9da6",
+        "purpose": "Metadata, section labels, finished todos, empty states, icon buttons.",
+        "tonalRamp": [
+          "#090b11",
+          "#23252c",
+          "#3f4249",
+          "#5e6169",
+          "#7f828b",
+          "#a2a5ae",
+          "#c6c9d2",
+          "#ebeef8"
+        ]
+      },
+      "dim-steel": {
+        "role": "neutral",
+        "displayName": "Dim Steel",
+        "canonical": "#62656e",
+        "purpose": "Disabled text and the faintest metadata.",
+        "tonalRamp": [
+          "#090b11",
+          "#22252c",
+          "#3f424a",
+          "#5e616a",
+          "#7f828b",
+          "#a1a5af",
+          "#c5c9d3",
+          "#ebeef9"
+        ]
+      },
+      "signal-indigo": {
+        "role": "primary",
+        "displayName": "Signal Indigo",
+        "canonical": "#5e6ad2",
+        "purpose": "Selection, focus, primary action, done, Recommended.",
+        "tonalRamp": [
+          "#060031",
+          "#19056f",
+          "#2f3094",
+          "#4a53b9",
+          "#6976df",
+          "#8c9cff",
+          "#bac6fe",
+          "#eaeefe"
+        ]
+      },
+      "on-indigo": {
+        "role": "primary",
+        "displayName": "On Indigo",
+        "canonical": "#ffffff",
+        "purpose": "Text and icons on an indigo fill only.",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ]
+      },
+      "waiting-yellow": {
+        "role": "secondary",
+        "displayName": "Waiting Yellow",
+        "canonical": "#f2c94c",
+        "purpose": "Only for things waiting on the owner.",
+        "tonalRamp": [
+          "#100a00",
+          "#2f2401",
+          "#514002",
+          "#775e01",
+          "#9e7e08",
+          "#c8a007",
+          "#edc447",
+          "#ffeebe"
+        ]
+      },
+      "running-green": {
+        "role": "tertiary",
+        "displayName": "Running Green",
+        "canonical": "#4cb782",
+        "purpose": "Only for running work and host load meters.",
+        "tonalRamp": [
+          "#010f06",
+          "#002e1a",
+          "#014f30",
+          "#037449",
+          "#279966",
+          "#53bd88",
+          "#79e2ab",
+          "#c3ffdc"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Empty-state titles and question headings."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Product name, conversation title and plan title."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Rows, messages and controls; tabular numerals."
+      },
+      "prose": {
+        "displayName": "Prose",
+        "purpose": "Rendered plan and question Markdown at a 680px measure."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Metadata, segmented tabs, section labels and badges."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Code, paths, commands and IDs; diffs at 12px."
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      {
+        "name": "narrow",
+        "value": "800px",
+        "purpose": "Minimum width; Agents / Chat / Todos tabs, review Notes tab."
+      },
+      {
+        "name": "medium",
+        "value": "1100px",
+        "purpose": "Chat / Todos tabs; agents sidebar visible."
+      },
+      {
+        "name": "wide",
+        "value": "1400px",
+        "purpose": "All four columns side by side."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one primary action in a decision bar (Approve plan).",
+      "html": "<button class=\"ds-btn-primary\">Approve plan</button>",
+      "css": ".ds-btn-primary { font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.5; font-size: 14px; font-weight: 500; height: 40px; padding: 0 16px; border: 0; border-radius: 8px; background: var(--console-accent, #5e6ad2); color: #ffffff; cursor: pointer; } .ds-btn-primary:focus-visible { outline: 2px solid var(--console-accent, #5e6ad2); outline-offset: 2px; } .ds-btn-primary:disabled { background: var(--console-line, #26272c); color: var(--console-dim, #62656e); cursor: default; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "The secondary action beside the primary (Request changes).",
+      "html": "<button class=\"ds-btn-outline\">Request changes</button>",
+      "css": ".ds-btn-outline { font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.5; font-size: 14px; font-weight: 500; height: 40px; padding: 0 16px; border: 1px solid var(--console-dim, #62656e); border-radius: 8px; background: color-mix(in oklab, var(--console-dim, #62656e) 30%, transparent); color: var(--console-text, #e6e6e9); cursor: pointer; } .ds-btn-outline:hover { background: var(--console-line, #26272c); } .ds-btn-outline:focus-visible { outline: 2px solid var(--console-accent, #5e6ad2); outline-offset: 2px; }"
+    },
+    {
+      "name": "Segmented Tabs",
+      "kind": "nav",
+      "refersTo": "segmented-tabs",
+      "description": "Header tabs that fold columns on smaller screens (Chat / Todos, Plan / Changes / Notes).",
+      "html": "<div class=\"ds-tabs\" role=\"tablist\"><button class=\"ds-tab\" role=\"tab\" aria-selected=\"true\">Chat</button><button class=\"ds-tab\" role=\"tab\" aria-selected=\"false\">Todos 2/3</button></div>",
+      "css": ".ds-tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--console-line, #26272c); border-radius: 7px; background: var(--console-panel, #141518); } .ds-tab { font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.5; font-size: 12px; font-weight: 500; height: 24px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: var(--console-muted, #9a9da6); cursor: pointer; } .ds-tab:hover { color: var(--console-text, #e6e6e9); } .ds-tab[aria-selected=\"true\"] { background: var(--console-line, #26272c); color: var(--console-text, #e6e6e9); } .ds-tab:focus-visible { outline: 2px solid var(--console-accent, #5e6ad2); outline-offset: 2px; }"
+    },
+    {
+      "name": "Count Badge",
+      "kind": "chip",
+      "refersTo": "badge-count-waiting",
+      "description": "The inbox count pill; yellow only when something is waiting.",
+      "html": "<span class=\"ds-count\">0</span> <span class=\"ds-count ds-count-waiting\">3</span>",
+      "css": ".ds-count { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 9px; background: var(--console-line, #26272c); color: var(--console-text, #e6e6e9); font: 600 12px/18px Inter, system-ui, sans-serif; font-variant-numeric: tabular-nums; } .ds-count-waiting { background: var(--console-waiting, #f2c94c); color: var(--console-bg, #0e0f11); }"
+    },
+    {
+      "name": "Composer",
+      "kind": "input",
+      "refersTo": "composer",
+      "description": "The pinned message composer: attach icon, field, send icon; no helper text.",
+      "html": "<div class=\"ds-composer\"><button class=\"ds-icon\" aria-label=\"Attach image\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48\"/></svg></button><textarea class=\"ds-field\" rows=\"1\" aria-label=\"Message\"></textarea><button class=\"ds-send\" aria-label=\"Send\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m5 12 7-7 7 7\"/><path d=\"M12 19V5\"/></svg></button></div>",
+      "css": ".ds-composer { display: flex; align-items: flex-end; gap: 6px; padding: 6px; border: 1px solid var(--console-line, #26272c); border-radius: 10px; background: var(--console-panel, #141518); } .ds-composer:focus-within { outline: 2px solid var(--console-accent, #5e6ad2); outline-offset: -1px; } .ds-icon { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--console-muted, #9a9da6); cursor: pointer; } .ds-icon:hover { background: var(--console-raised, #1b1c20); color: var(--console-text, #e6e6e9); } .ds-field { font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.5; flex: 1; min-height: calc(1lh + 10px); max-height: calc(8lh + 10px); field-sizing: content; resize: none; padding: 5px 4px; border: 0; background: transparent; color: var(--console-text, #e6e6e9); caret-color: var(--console-accent, #5e6ad2); outline: none; } .ds-send { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: var(--console-accent, #5e6ad2); color: #ffffff; cursor: pointer; } .ds-send:disabled { background: var(--console-line, #26272c); color: var(--console-dim, #62656e); } :is(.ds-icon, .ds-send):focus-visible { outline: 2px solid var(--console-accent, #5e6ad2); outline-offset: 2px; }"
+    },
+    {
+      "name": "Inbox Row",
+      "kind": "custom",
+      "refersTo": "inbox-row",
+      "description": "One waiting item in the inbox sidebar; the open row takes the raised tone and a yellow left edge.",
+      "html": "<a class=\"ds-inbox-row\" href=\"#\" data-open=\"true\"><span class=\"ds-inbox-top\"><span class=\"ds-inbox-kind\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"/><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"/><path d=\"M10 9H8\"/><path d=\"M16 13H8\"/><path d=\"M16 17H8\"/></svg> Plan review</span><span class=\"ds-inbox-age\">3 m</span></span><span class=\"ds-inbox-title\">Console review fixture, revision 2</span><span class=\"ds-inbox-meta\">wwh-p36 · dogsled</span></a>",
+      "css": ".ds-inbox-row { font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.5; display: grid; gap: 2px; width: 280px; padding: 12px 15px; border-left: 3px solid transparent; border-bottom: 1px solid var(--console-line, #26272c); background: var(--console-panel, #141518); color: var(--console-text, #e6e6e9); text-decoration: none; } .ds-inbox-row:hover { background: var(--console-raised, #1b1c20); } .ds-inbox-row[data-open=\"true\"] { background: var(--console-raised, #1b1c20); border-left-color: var(--console-waiting, #f2c94c); } .ds-inbox-row:focus-visible { outline: 2px solid var(--console-accent, #5e6ad2); outline-offset: 2px; outline-offset: -2px; } .ds-inbox-top { display: flex; justify-content: space-between; font-size: 12px; } .ds-inbox-kind { display: inline-flex; align-items: center; gap: 6px; color: var(--console-waiting, #f2c94c); } .ds-inbox-age, .ds-inbox-meta { color: var(--console-muted, #9a9da6); font-size: 12px; } .ds-inbox-title { font-weight: 500; line-height: 1.35; }"
+    },
+    {
+      "name": "Owner Message",
+      "kind": "card",
+      "refersTo": "owner-message",
+      "description": "The owner's own message in the conversation, right-aligned on the raised tone.",
+      "html": "<div class=\"ds-owner-msg\">do the rules tell you to delegate small work?</div>",
+      "css": ".ds-owner-msg { font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.5; width: fit-content; max-width: 80%; margin-left: auto; padding: 8px 12px; border: 1px solid var(--console-line, #26272c); border-radius: 10px; background: var(--console-raised, #1b1c20); color: var(--console-text, #e6e6e9); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Category Standard, Played Straight",
+    "overview": "The portal is the dark agent console that Linear, Cursor and Conductor users already know, built without a twist. It is a work surface that an owner reads in seconds when they come back: the inbox first, then the lead's conversation, then its todo progress. Nothing on the screen performs; every pixel is a row, a rule, a label or a message.\n\nDensity is high and calm. Text is small (13px) and tabular, panels are separated by 1px hairlines instead of cards, and the application always fits the viewport: the document never scrolls, and each column scrolls inside itself. Colour carries state, not decoration. Indigo marks selection, the primary action and done work; yellow means only \"waiting on you\"; green means only \"running\".\n\nThe system is built on the official Dioxus components (dioxus-primitives). Their structure stays; the console changes only their look, from a CSS layer scoped to the console shell.",
+    "keyCharacteristics": [
+      "Near-black ground with two raised graphite tones and 1px hairline rules.",
+      "Three state colours with one meaning each.",
+      "Inter at 12–16px for interface text; JetBrains Mono for code, paths and commands.",
+      "Gentle corners (4–10px), no shadows, no gradients.",
+      "Fixed-viewport application layout; columns scroll internally.",
+      "Columns fold into header tabs on smaller screens; the inbox never folds."
+    ],
+    "rules": [
+      {
+        "name": "The One Meaning Rule",
+        "body": "Yellow means waiting on the owner, green means running, indigo means selected, primary or done. Never use one of them for decoration or for a second meaning.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Pinned Theme Rule",
+        "body": "The palette belongs to the portal. It does not follow Herdr's terminal theme.",
+        "section": "colors"
+      },
+      {
+        "name": "The Mono Means Machine Rule",
+        "body": "JetBrains Mono is only for text a machine reads or produces: code, diffs, paths, commands and IDs. Interface labels stay in Inter.",
+        "section": "typography"
+      },
+      {
+        "name": "The Inbox Never Folds Rule",
+        "body": "The inbox sidebar is visible at every supported width. Every waiting item stays visible and clickable; other columns fold into tabs before the inbox does.",
+        "section": "layout"
+      },
+      {
+        "name": "The Fixed Viewport Rule",
+        "body": "The page itself never scrolls. A region that can grow scrolls inside its own column.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat Console Rule",
+        "body": "No shadows and no gradients, at rest or on hover. Raise a surface by one tone, never by a shadow.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep every control an official Dioxus component and change its look in the console CSS layer, scoped under the console shell.",
+      "Do keep yellow for waiting, green for running and indigo for selected, primary and done.",
+      "Do keep the inbox sidebar visible at every width and fold other columns into header tabs first.",
+      "Do render chat and plan Markdown with the Markdown library and highlight code with the highlighter; never hand-roll either.",
+      "Do keep the document from scrolling; let each column scroll itself."
+    ],
+    "donts": [
+      "Don't replace a component with a plain element to change how it looks.",
+      "Don't add shadows, gradients or decorative colour.",
+      "Don't add helper or placeholder text where an icon or control can carry the meaning.",
+      "Don't show branches waiting to land as inbox items.",
+      "Don't pin the palette to Herdr's theme.",
+      "Don't fall back to the plain upstream component look."
+    ]
+  }
+}

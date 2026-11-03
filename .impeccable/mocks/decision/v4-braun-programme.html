@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Braun Programme</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--housing:#E4E1DA;--panel:#F6F4EF;--ink:#2A2A28;--ink2:#57544E;--ink3:#8C8880;--rule:#CCC8BF;--yellow:#F2B705;--green:#4E9A4A;--red:#D2452E;--brown:#7A5C3E}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden}
+body{font:14px/1.45 "Hanken Grotesk",system-ui,sans-serif;color:var(--ink);background:var(--housing);font-variant-numeric:tabular-nums;display:grid;grid-template-rows:56px 1fr}
+::selection{background:var(--yellow);color:var(--ink)}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+header{background:var(--ink);color:var(--panel);display:flex;align-items:center;gap:24px;padding:0 24px}
+.mark{font-weight:700;font-size:19px;letter-spacing:-.02em}
+.live{display:flex;align-items:center;gap:8px;font-size:12px;color:#B9B5AD}
+.hosts{margin-left:auto;display:flex;gap:28px}
+.host{display:flex;align-items:center;gap:10px;font-size:12px;color:#B9B5AD}
+.host b{font-weight:500;color:var(--panel);min-width:38px;text-align:right}
+.grille{display:grid;grid-auto-flow:column;grid-template-rows:repeat(2,7px);gap:3px}
+.grille i{width:7px;height:7px;border-radius:50%;background:#121211;box-shadow:inset 0 1px 1px #000}
+.grille i.b{background:var(--green);box-shadow:0 0 0 1px #2f5d2c}
+main{display:grid;grid-template-columns:296px 272px 1fr 320px;min-height:0}
+main>section{min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--rule)}
+.h{display:flex;align-items:center;gap:8px;height:48px;padding:0 16px;font-size:13px;font-weight:600;border-bottom:1px solid var(--rule)}
+.h .n{margin-left:auto;font-weight:500;color:var(--ink2)}
+.scroll{overflow:auto;min-height:0;flex:1}
+.lamp{display:inline-block;width:8px;height:8px;border-radius:50%;background:#A9A59D;flex:none}
+.lamp.run{width:10px;height:10px;background:var(--green)}
+.lamp.you{width:12px;height:12px;background:var(--yellow);box-shadow:0 0 0 2px #fff3}
+.keycap{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;background:var(--yellow);color:var(--ink);box-shadow:inset 0 -2px 0 #c99500,0 1px 2px #0003;flex:none}
+.count{background:var(--yellow);color:var(--ink);border-radius:5px;padding:1px 7px;font-weight:700}
+.inbox li{list-style:none;display:flex;gap:12px;padding:12px 16px;border-bottom:1px solid var(--rule);cursor:pointer}
+.inbox li:hover{background:#ECE9E3}
+.inbox .t{font-weight:600;line-height:1.3}
+.inbox .m,.m{font-size:12px;color:var(--ink2)}
+.inbox time{margin-left:auto;font-size:12px;color:var(--ink2)}
+.inbox .keys{display:flex;gap:6px;margin-top:8px}
+.inbox .keys button{min-width:34px;height:26px;padding:0 8px;border-radius:5px;background:var(--panel);box-shadow:inset 0 -2px 0 var(--rule),0 0 0 1px var(--rule);font-size:12px;font-weight:600}
+.inbox .land{margin-top:8px;height:26px;padding:0 10px;border-radius:5px;background:var(--ink);color:var(--panel);font-size:12px;font-weight:600}
+.repo{display:flex;justify-content:space-between;padding:14px 16px 6px;font-size:12px;font-weight:600;color:var(--ink2)}
+.lead{display:flex;gap:10px;padding:8px 16px;align-items:baseline;cursor:pointer}
+.lead .lamp{transform:translateY(1px)}
+.lead .t{font-weight:500;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.lead.sel{background:var(--ink);color:var(--panel)}.lead.sel .m{color:#B9B5AD}
+.wk{display:flex;align-items:center;gap:8px;padding:3px 16px 3px 34px;font-size:12px;color:var(--ink2)}
+.wk span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wk .lamp{width:6px;height:6px}
+.wk.you{color:var(--ink);font-weight:600}.wk.you .lamp{width:9px;height:9px;background:var(--yellow)}
+.conv{background:var(--panel)}
+.ch{display:flex;align-items:center;gap:16px;height:64px;padding:0 24px;border-bottom:1px solid var(--rule)}
+.ch h1{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.ch .m{display:flex;align-items:center;gap:6px}
+.acts{margin-left:auto;display:flex;gap:8px}
+.ib{display:grid;place-items:center;width:34px;height:34px;border-radius:7px;box-shadow:0 0 0 1px var(--rule);background:var(--panel)}
+.ib:hover{background:var(--housing)}
+.msgs{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:20px;padding:24px 0}
+.msgs>*{width:min(680px,calc(100% - 48px));margin:0 auto}
+.me{align-self:end;margin-right:24px!important;width:auto!important;max-width:480px;background:var(--housing);border-radius:10px 10px 2px 10px;padding:10px 14px}
+.md{line-height:1.6}
+.md h3{font-size:15px;font-weight:700;margin-bottom:6px}
+.md p+*,.md ol+*{margin-top:10px}
+.md ol{padding-left:20px}.md li{margin:3px 0}
+.md code{font:12.5px "JetBrains Mono",monospace;background:#E9E6DF;border-radius:4px;padding:1px 5px}
+.md pre{background:#ECE9E2;border-radius:6px;padding:12px 14px;font:12.5px/1.6 "JetBrains Mono",monospace;overflow:auto}
+.md pre code{background:none;padding:0}.kw{font-weight:600}.st{color:var(--brown)}.cm{color:var(--ink3);font-style:italic}
+.md table{border-collapse:collapse;width:100%;font-size:13px}
+.md th{text-align:left;font-weight:600;color:var(--ink2);border-bottom:1px solid var(--ink)}
+.md td,.md th{padding:6px 10px 6px 0}.md td{border-bottom:1px solid var(--rule)}
+.tool{display:flex;gap:10px;font:12px "JetBrains Mono",monospace;color:var(--ink2)}
+.tool b{font-weight:500;color:var(--ink)}
+.status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink2)}
+.composer{display:flex;align-items:flex-end;gap:8px;margin:0 24px 20px;padding:8px;border-radius:12px;background:#fff;box-shadow:0 0 0 1px var(--rule),0 2px 6px #0000000d}
+.composer textarea{flex:1;border:0;resize:none;font:inherit;background:none;padding:7px 4px;height:36px;outline:none;caret-color:var(--ink)}
+.send{display:grid;place-items:center;width:36px;height:36px;border-radius:9px;background:var(--ink);color:var(--panel)}
+.tally{display:flex;gap:2px;padding:14px 16px 4px}
+.tally i{flex:1;height:14px;border-radius:2px;background:var(--ink)}
+.tally i.r{background:var(--green)}.tally i.p{background:none;box-shadow:inset 0 0 0 1px var(--ink3)}
+.sec{display:flex;justify-content:space-between;padding:16px 16px 6px;font-size:12px;font-weight:600;color:var(--ink2)}
+.td{display:flex;gap:10px;padding:6px 16px;line-height:1.35}
+.box{width:14px;height:14px;border-radius:3px;box-shadow:inset 0 0 0 1.5px var(--ink3);flex:none;margin-top:2px}
+.td.cur .box{box-shadow:none;background:var(--green)}
+.td.done{color:var(--ink2)}.td.done .box{box-shadow:none;background:var(--ink);display:grid;place-items:center;color:var(--panel)}
+.td.done .box svg{width:10px;height:10px;stroke-width:3}
+.td ul{list-style:none;margin-top:4px;font-size:12px;color:var(--ink2)}.td ul li{display:flex;gap:6px;align-items:center;padding:2px 0}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="doc" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8M16 17H8"/></symbol>
+<symbol id="ask" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+<symbol id="key" viewBox="0 0 24 24"><path d="M9 10l-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+<symbol id="idle" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+<symbol id="merge" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="clip" viewBox="0 0 24 24"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l8.6-8.6A4 4 0 1 1 18 8.8l-8.6 8.6a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+<symbol id="ok" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+</defs></svg>
+<header>
+ <span class="mark">dogsled</span><span class="live"><i class="lamp run"></i>live</span>
+ <div class="hosts">
+  <div class="host">local<span class="grille"><i class="b"></i><i class="b"></i><i class="b"></i><i class="b"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>4/12</b></div>
+  <div class="host">netcup<span class="grille"><i class="b"></i><i class="b"></i><i class="b"></i><i class="b"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>4/16</b></div>
+  <div class="host">momokaya-2<span class="grille"><i class="b"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>1/7</b></div>
+ </div>
+</header>
+<main>
+<section class="inbox"><div class="h">Waiting on you <span class="n"><span class="count">5</span></span></div>
+ <ul class="scroll">
+  <li><span class="keycap"><svg class="i"><use href="#doc"/></svg></span><div><p class="t">Typed SQLite state store</p><p class="m">Plan review · revision 3 · dogsled</p></div><time>8m</time></li>
+  <li><span class="keycap"><svg class="i"><use href="#ask"/></svg></span><div><p class="t">Before the iOS gate</p><p class="m">2 questions · rondo-lead · rondo</p></div><time>12m</time></li>
+  <li><span class="keycap"><svg class="i"><use href="#key"/></svg></span><div><p class="t">Allow git push to origin?</p><p class="m">Prompt · writer on netcup · dogsled</p><div class="keys"><button>y</button><button>n</button><button>esc</button></div></div><time>1m</time></li>
+  <li><span class="keycap"><svg class="i"><use href="#idle"/></svg></span><div><p class="t">Prune stale Herdr panes</p><p class="m">Worker idle 18 h, unseen · dogsled</p></div><time>18h</time></li>
+  <li><span class="keycap"><svg class="i"><use href="#merge"/></svg></span><div><p class="t">review/schwab-auth-transport-fix</p><p class="m">+3 ahead, never merged · rt100k</p><button class="land">Land</button></div><time>2d</time></li>
+ </ul>
+</section>
+<section class="agents"><div class="h">Agents <span class="n">7 leads · 4 workers</span></div>
+ <div class="scroll">
+  <p class="repo"><span>dogsled</span><span>4</span></p>
+  <a class="lead sel"><i class="lamp run"></i><div><p class="t">Review d0a1246, merge both fixes, release 0.29.3</p><p class="m">local · 28/32</p></div></a>
+  <p class="wk"><i class="lamp run"></i><span>Fix placement retry</span>netcup</p>
+  <p class="wk"><i class="lamp"></i><span>Review d0a1246</span>done</p>
+  <a class="lead"><i class="lamp you"></i><div><p class="t">Move all Dogsled state into typed SQLite</p><p class="m">local · 75/78 · plan</p></div></a>
+  <a class="lead"><i class="lamp"></i><div><p class="t">Replace hand-rolled portal controls</p><p class="m">local · idle 2 h</p></div></a>
+  <a class="lead"><i class="lamp"></i><div><p class="t">Find why old Herdr panes are not pruned</p><p class="m">local · idle 40 m</p></div></a>
+  <p class="wk you"><i class="lamp"></i><span>Prune stale Herdr panes</span>18 h</p>
+  <p class="repo"><span>rondo</span><span>1</span></p>
+  <a class="lead"><i class="lamp you"></i><div><p class="t">Build the iOS screens from the wireframes</p><p class="m">local · 6/14 · questions</p></div></a>
+  <p class="repo"><span>grabcrft</span><span>1</span></p>
+  <a class="lead"><i class="lamp"></i><div><p class="t">Find out what happened to the milestone 3 plan</p><p class="m">local · 154/176</p></div></a>
+  <p class="repo"><span>rt100k</span><span>1</span></p>
+  <a class="lead"><i class="lamp run"></i><div><p class="t">Verify the Schwab auth fixtures</p><p class="m">local · 11/19</p></div></a>
+ </div>
+</section>
+<section class="conv">
+ <div class="ch"><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p class="m"><i class="lamp run"></i>Working · lead · pi · claude-opus · local · main</p></div>
+  <div class="acts"><button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div></div>
+ <div class="msgs">
+  <p class="me">Review d0a1246, merge both fixes, then cut 0.29.3.</p>
+  <article class="md">
+   <h3>Review of <code>d0a1246</code></h3>
+   <p>Both fixes hold. Two notes:</p>
+   <ol><li><strong>Prune order.</strong> <code>cleanup::prune</code> now closes the pane before it removes the worktree, so Herdr stops listing dead panes.</li>
+   <li><strong>Placement retry.</strong> Bounded at three attempts with backoff:</li></ol>
+   <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(<span class="st">3</span>) {
+    <span class="kw">if</span> place(&amp;host).<span class="kw">await</span>.is_ok() { <span class="kw">break</span>; }
+    sleep(delay).<span class="kw">await</span>; <span class="cm">// 250 ms, 500 ms, 1 s</span>
+}</code></pre>
+   <table><thead><tr><th>Gate</th><th>Result</th></tr></thead><tbody><tr><td><code>moon run :lint</code></td><td>passed</td></tr><tr><td><code>moon run :test</code></td><td>958 → 960 passed</td></tr></tbody></table>
+  </article>
+  <p class="tool"><b>bash</b> git merge --no-ff fix/prune-order fix/placement-retry</p>
+  <p class="status"><i class="lamp run"></i>Running moon run :check on netcup</p>
+ </div>
+ <form class="composer"><button type="button" class="ib" aria-label="Attach image"><svg class="i"><use href="#clip"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#up"/></svg></button></form>
+</section>
+<section class="todos"><div class="h">Todos <span class="n">28 of 32</span></div>
+ <div class="tally"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="r"></i><i class="p"></i><i class="p"></i><i class="p"></i></div>
+ <div class="scroll">
+  <p class="sec"><span>In progress</span><span>1</span></p>
+  <div class="td cur"><i class="box"></i><div><p>Release 0.29.3</p><ul><li><i class="lamp run"></i>Tag v0.29.3 and push · writer · netcup</li><li><i class="lamp"></i>Publish release notes</li></ul></div></div>
+  <p class="sec"><span>Pending</span><span>3</span></p>
+  <div class="td"><i class="box"></i><p>Bump the dotfiles pin after the GitHub release</p></div>
+  <div class="td"><i class="box"></i><p>Close #212 with the release link</p></div>
+  <div class="td"><i class="box"></i><p>Prune the merged fix branches</p></div>
+  <p class="sec"><span>Done</span><span>28</span></p>
+  <div class="td done"><i class="box"><svg class="i"><use href="#ok"/></svg></i><p>Merge fix/placement-retry</p></div>
+  <div class="td done"><i class="box"><svg class="i"><use href="#ok"/></svg></i><p>Merge fix/prune-order</p></div>
+  <div class="td done"><i class="box"><svg class="i"><use href="#ok"/></svg></i><p>Review d0a1246</p></div>
+  <div class="td done"><i class="box"><svg class="i"><use href="#ok"/></svg></i><p>Gate 261a passed 8/8</p></div>
+  <p class="sec"><span>Abandoned</span><span>3</span></p>
+ </div>
+</section>
+</main>
+</body></html>

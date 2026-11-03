@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-- Running services, web portals, sidebars, and MCP sessions keep running when a newer writer blocks work inside a pass or request. They retry pending probes and handover at the next boundary.
+- Running services, web portals, sidebars, and MCP sessions keep running when a newer writer blocks work inside a pass or request. Failed executable replacements are re-probed, with retries paced by the service interval, UI tick, or next MCP input.
 
 ## 0.31.0 - 2026-11-03
 
