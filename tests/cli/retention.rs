@@ -419,6 +419,64 @@ fn r1a_deleted_grant_replay_without_expectation_never_allocates() {
 }
 
 #[test]
+fn unstarted_release_fence_expires_only_after_its_completion_window() {
+    let rig = Rig::new("unstarted-retention");
+    let issued = rig.now_ms();
+    clock(&rig, issued);
+    rig.snapshot("state", issued, 0.0, 8);
+    let created = issued.to_string();
+    let (code, result) = rig.json(&[
+        "host",
+        "reserve",
+        "--id",
+        "unstarted",
+        "--job-validity",
+        "2",
+        "--job-created-ms",
+        &created,
+    ]);
+    assert!([0, 3].contains(&code), "{result}");
+    clock(&rig, issued + DAY);
+    let proof = json!({"id":"unstarted","validity":{"version":1,"created_ms":issued},"owner":"w1:p1","owner_host":"origin"});
+    let args = ["host", "release-unstarted", "--input", &proof.to_string()];
+    let (code, acknowledgement) = rig.json(&args);
+    assert_eq!(code, 0, "{acknowledgement}");
+    assert_eq!(rig.json(&args).1, acknowledgement);
+    let mut changed = proof.clone();
+    changed["owner"] = json!("w9:p9");
+    assert_eq!(
+        rig.json(&["host", "release-unstarted", "--input", &changed.to_string()])
+            .0,
+        2
+    );
+    assert_eq!(rig.reservations(), json!([]));
+    let ended = acknowledgement["finished_ms"].as_u64().unwrap();
+    clock(&rig, ended + WINDOW);
+    serve(&rig);
+    assert!(!rig.validity("unstarted").is_null());
+    assert_eq!(rig.json(&["host", "snapshot"]).1["holds"], json!([]));
+    assert_eq!(
+        rig.json(&[
+            "host",
+            "reserve",
+            "--id",
+            "unstarted",
+            "--job-validity",
+            "2",
+            "--job-created-ms",
+            &created
+        ])
+        .0,
+        2
+    );
+    clock(&rig, ended + WINDOW + 1);
+    serve(&rig);
+    assert!(rig.validity("unstarted").is_null());
+    assert_eq!(rig.json(&args).0, 2);
+    assert!(rig.validity("unstarted").is_null());
+}
+
+#[test]
 fn r1a_unknown_cancelled_ticket_remains_unsettled_despite_age() {
     let rig = Rig::short("r1-ticket");
     let issued = rig.now_ms();

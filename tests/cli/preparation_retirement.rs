@@ -115,6 +115,9 @@ fn two_requests_on_one_path_retire_independently() {
         "b",
     ]);
     assert_eq!(code, 0, "{second}");
+    for id in ["a", "b"] {
+        rig.put_request_owner(id, "w1:p1", "local");
+    }
     let claims = rig.preparations();
     let b = claims[1].clone();
     let b_receipt = rig.preparation_record("state", "receipt", "b").read();

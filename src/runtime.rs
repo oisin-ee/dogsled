@@ -692,18 +692,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            let applied: crate::cleanup::Applied = if host.is_local() {
-                crate::cleanup::apply(&fleet.node(), &plan, now_ms())?
-            } else {
-                fleet.remote_setup(
-                    host,
-                    &[
-                        "prune".into(),
-                        "--plan".into(),
-                        serde_json::to_string(&plan)?,
-                    ],
-                )?
-            };
+            let applied = crate::commands::prune(fleet, host, &plan, now_ms())?;
             crate::print(json_output, &applied, || applied.render())?;
             if !applied.failures.is_empty() {
                 return Ok(ExitCode::from(2));

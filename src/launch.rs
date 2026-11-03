@@ -54,10 +54,28 @@ pub(crate) struct Progress {
 pub(crate) enum PreflightRefusal {
     LineBudget { bytes: usize },
     Validity { detail: String },
+    Job { detail: String },
 }
 
 impl Progress {
     fn preflight_failure(&self) -> Result<Option<&str>> {
+        if let Some(PreflightRefusal::Job { detail }) = &self.preflight_refusal {
+            if !matches!(self.request.action, Action::Job { .. })
+                || self.request.unit.is_some()
+                || self.attempted
+                || self.confirmed
+                || self.pane.is_some()
+                || self.terminal.is_some()
+                || self.terminal_receipt.is_some()
+                || self.stopped.is_some()
+                || self.error.as_ref() != Some(detail)
+            {
+                return Err(crate::worktree::refuse(
+                    "inconsistent job refusal provenance",
+                ));
+            }
+            return Ok(Some(detail));
+        }
         if let Some(PreflightRefusal::Validity { detail }) = &self.preflight_refusal {
             if self.attempted
                 || self.confirmed
@@ -207,6 +225,10 @@ pub enum OrdinaryTerminal {
     Job {
         job: Box<crate::jobs::Job>,
     },
+    Refused {
+        failed: String,
+        finished_ms: u64,
+    },
     Agent {
         pane: String,
         terminal: String,
@@ -263,6 +285,11 @@ impl OrdinaryRelease {
                 && &job.cmd == cmd
                 && &job.timeout_ms == timeout_ms
                 && &job.idle_timeout_ms == idle_timeout_ms =>
+            {
+                Ok(())
+            }
+            (Action::Job { .. }, OrdinaryTerminal::Refused { failed, .. })
+                if !failed.is_empty() =>
             {
                 Ok(())
             }
@@ -325,9 +352,124 @@ pub(crate) fn retained_job(ledger: &Ledger, id: &str) -> Result<Option<crate::jo
     Ok(None)
 }
 
+/// The preparation gate excludes dispatch while a no-start refusal is published.
+/// Only an unclaimed request or its producer-settled non-executable intent qualifies;
+/// an uncertain or executable claim never becomes a refusal by inspection.
+pub(crate) fn job_refused(ledger: &Ledger, launch: &Launch, error: &Error) -> Result<()> {
+    if !matches!(launch.action, Action::Job { .. }) || matches!(error, Error::Deadline(_)) {
+        return Ok(());
+    }
+    ledger.child("launches").with_lock(&launch.id, || {
+        if crate::jobs::record(ledger, &launch.id)?
+            .is_some_and(|job| !refused_intent_matches(&job, launch, &error.to_string()))
+            || crate::launch_store::receipt(ledger, &launch.id)?.is_some()
+            || crate::launch_store::progress(ledger, &launch.id)?.is_some()
+        {
+            return Ok(());
+        }
+        let mut finished_ms = None;
+        crate::jobs::finish_once(
+            ledger,
+            &mut finished_ms,
+            launch.validity.map(|v| v.created_ms),
+        )?;
+        crate::launch_store::put_progress(
+            ledger,
+            &launch.id,
+            &Progress {
+                request: launch.clone(),
+                finished_ms,
+                closed_ms: None,
+                pane: None,
+                terminal: None,
+                attempted: false,
+                confirmed: false,
+                result: Value::Null,
+                error: Some(error.to_string()),
+                preflight_refusal: Some(PreflightRefusal::Job {
+                    detail: error.to_string(),
+                }),
+                terminal_receipt: None,
+                stopped: None,
+                origin_release: None,
+            },
+        )
+    })
+}
+
+fn refused_intent_matches(job: &crate::jobs::Job, launch: &Launch, failed: &str) -> bool {
+    let Action::Job {
+        cmd,
+        timeout_ms,
+        idle_timeout_ms,
+        validity,
+    } = &launch.action
+    else {
+        return false;
+    };
+    crate::jobs::terminal(job)
+        && job.started_ms.is_none()
+        && job.pane.is_empty()
+        && job.exit.is_none()
+        && job.signal.is_none()
+        && job.id == launch.id
+        && job.host == launch.host
+        && job.owner == launch.owner
+        && job.cwd == launch.cwd
+        && job.cmd == *cmd
+        && job.timeout_ms == *timeout_ms
+        && job.idle_timeout_ms == *idle_timeout_ms
+        && job.validity == *validity
+        && job.reason.as_deref() == Some(failed)
+}
+
+pub(crate) fn job_refusal(ledger: &Ledger, launch: &Launch) -> Result<Option<String>> {
+    let Some(progress) = crate::launch_store::progress(ledger, &launch.id)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        progress.preflight_refusal,
+        Some(PreflightRefusal::Job { .. })
+    ) {
+        return Ok(None);
+    }
+    if progress.request != *launch {
+        return Err(crate::unit_transport::conflict(
+            "job refusal request changed",
+        ));
+    }
+    Ok(progress.preflight_failure()?.map(str::to_owned))
+}
+
 /// The request lock owns terminal evidence and release acceptance.
 fn ordinary_evidence_locked(ledger: &Ledger, id: &str) -> Result<OrdinaryEvidence> {
     if let Some(mut progress) = crate::launch_store::progress(ledger, id)? {
+        if matches!(
+            progress.preflight_refusal,
+            Some(PreflightRefusal::Job { .. })
+        ) {
+            let failed = progress
+                .preflight_failure()?
+                .ok_or_else(|| crate::unit_transport::conflict("job refusal evidence missing"))?
+                .to_owned();
+            let finished_ms = retention_completion(ledger, id)?
+                .ok_or_else(|| crate::unit_transport::conflict("job refusal completion missing"))?;
+            if crate::jobs::record(ledger, id)?
+                .is_some_and(|job| !refused_intent_matches(&job, &progress.request, &failed))
+                || crate::launch_store::receipt(ledger, id)?.is_some()
+            {
+                return Err(crate::unit_transport::conflict(
+                    "job refusal has execution evidence",
+                ));
+            }
+            return Ok(OrdinaryEvidence {
+                launch: progress.request,
+                terminal_evidence: OrdinaryTerminal::Refused {
+                    failed,
+                    finished_ms,
+                },
+            });
+        }
         if progress.closed_ms.is_none()
             && progress.request.unit.is_none()
             && let Some(mark) = crate::done::list(ledger)?.into_iter().find(|mark| {
@@ -398,7 +540,7 @@ pub fn release_ordinary(
     certificate.validate()?;
     let id = &certificate.launch.id;
     let launches = ledger.child("launches");
-    launches.with_lock(id, || {
+    let ack = launches.with_lock(id, || {
         let file = id.to_owned();
         if let Some(saved) = crate::launch_store::release(ledger, &file)? {
             return if saved.certificate == *certificate {
@@ -423,7 +565,9 @@ pub fn release_ordinary(
         };
         crate::launch_store::put_release(ledger, &file, &ack)?;
         Ok(ack)
-    })
+    })?;
+    crate::job_store::release_reservation(ledger, id)?;
+    Ok(ack)
 }
 
 fn ordinary_certificate(
@@ -458,13 +602,44 @@ fn ordinary_certificate(
 /// Capture intent and result at the origin before the RPC. Retry the identical
 /// certificate after a lost reply; no custody/items lock crosses transport.
 pub(crate) fn release_owned(fleet: &crate::hosts::Fleet) -> Result<()> {
+    crate::work::settle_failed_jobs(fleet.ledger)?;
+    crate::work::release_unstarted_jobs(fleet)?;
+    for attempt in crate::admissions::all(fleet.ledger)? {
+        if attempt.unit.is_none()
+            && attempt.placement.is_none()
+            && let Some(launch) = &attempt.launch
+            && matches!(launch.action, Action::Job { .. })
+            && attempt.result.is_none()
+            && let Err(error) = release_refused_job(fleet, launch)
+        {
+            eprintln!("dogsled job refusal {}: {error}", launch.id);
+        }
+    }
     for job in crate::jobs::list(fleet.ledger)?
         .iter()
         .filter(|job| crate::jobs::terminal(job))
     {
         crate::items::job_finished(fleet.ledger, job)?;
     }
-    for item in crate::items::list(fleet.ledger)? {
+    for mut item in crate::items::list(fleet.ledger)? {
+        if item.kind == "job" && item.closed_ms.is_none() {
+            let host = fleet.find(&item.host)?;
+            if !host.is_local() {
+                match fleet.remote::<crate::jobs::Job>(host, &["job".into(), item.id.clone()]) {
+                    Ok(job)
+                        if job.id == item.id
+                            && job.host == item.host
+                            && crate::jobs::terminal(&job) =>
+                    {
+                        crate::items::job_finished(fleet.ledger, &job)?;
+                        item.closed_ms = job.ended_ms;
+                        item.job_ended_ms = job.ended_ms;
+                    }
+                    Ok(_) => (),
+                    Err(error) => eprintln!("dogsled job completion {}: {error}", item.id),
+                }
+            }
+        }
         if item.closed_ms.is_none()
             || item.resource_closed_ms.is_some()
             || item.recovery.is_some()
@@ -514,40 +689,84 @@ fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) ->
                 .as_ref()
                 .map_or(String::new(), |reply| reply.text.clone())
         };
-        crate::admissions::lock(fleet.ledger, &item.id, || {
-            crate::custody::locked(fleet.ledger, &item.id, |custody| {
-                let mut attempt =
-                    crate::admissions::get(fleet.ledger, &item.id)?.ok_or_else(|| {
-                        crate::unit_transport::conflict("origin admission disappeared")
-                    })?;
-                if attempt.launch.as_ref() != Some(&launch) {
-                    return Err(crate::unit_transport::conflict("origin launch changed"));
-                }
-                if let Some(saved) = attempt.ordinary_release {
-                    return Ok(saved);
-                }
-                let certificate = ordinary_certificate(
-                    &launch,
-                    evidence.terminal_evidence,
-                    custody.map_or(0, |custody| custody.revision),
-                )?;
-                let intent = OrdinaryReleaseIntent {
-                    certificate,
-                    acknowledgement: None,
-                    result: retained,
-                };
-                attempt.ordinary_release = Some(intent.clone());
-                crate::admissions::put(fleet.ledger, &item.id, &attempt)?;
-                Ok(intent)
-            })
-        })?
+        save_ordinary_intent(fleet.ledger, &launch, evidence.terminal_evidence, retained)?
     };
-    if intent.acknowledgement.is_some() {
+    acknowledge_ordinary_release(fleet, &intent, item.closed_ms)
+}
+
+fn save_ordinary_intent(
+    ledger: &Ledger,
+    launch: &Launch,
+    terminal: OrdinaryTerminal,
+    result: String,
+) -> Result<OrdinaryReleaseIntent> {
+    crate::admissions::lock(ledger, &launch.id, || {
+        crate::custody::locked(ledger, &launch.id, |custody| {
+            let mut attempt = crate::admissions::get(ledger, &launch.id)?
+                .ok_or_else(|| crate::unit_transport::conflict("origin admission disappeared"))?;
+            if attempt.launch.as_ref() != Some(launch) {
+                return Err(crate::unit_transport::conflict("origin launch changed"));
+            }
+            if let Some(saved) = attempt.ordinary_release {
+                return Ok(saved);
+            }
+            let certificate = ordinary_certificate(
+                launch,
+                terminal,
+                custody.map_or(0, |custody| custody.revision),
+            )?;
+            let intent = OrdinaryReleaseIntent {
+                certificate,
+                acknowledgement: None,
+                result,
+            };
+            attempt.ordinary_release = Some(intent.clone());
+            crate::admissions::put(ledger, &launch.id, &attempt)?;
+            Ok(intent)
+        })
+    })
+}
+
+fn release_refused_job(fleet: &crate::hosts::Fleet, launch: &Launch) -> Result<()> {
+    let attempt = crate::admissions::get(fleet.ledger, &launch.id)?
+        .ok_or_else(|| crate::unit_transport::conflict("origin admission disappeared"))?;
+    let intent = if let Some(intent) = attempt.ordinary_release {
+        intent
+    } else {
+        let evidence = fleet.ordinary_evidence(fleet.find(&launch.host)?, &launch.id)?;
+        if evidence.launch != *launch {
+            return Err(crate::unit_transport::conflict(
+                "origin execution evidence changed",
+            ));
+        }
+        let OrdinaryTerminal::Refused { ref failed, .. } = evidence.terminal_evidence else {
+            return Ok(());
+        };
+        let result = failed.clone();
+        save_ordinary_intent(fleet.ledger, launch, evidence.terminal_evidence, result)?
+    };
+    acknowledge_ordinary_release(fleet, &intent, None)
+}
+
+fn acknowledge_ordinary_release(
+    fleet: &crate::hosts::Fleet,
+    intent: &OrdinaryReleaseIntent,
+    finished: Option<u64>,
+) -> Result<()> {
+    let id = &intent.certificate.launch.id;
+    let host = fleet.find(&intent.certificate.launch.host)?;
+    if intent.acknowledgement.is_some()
+        && crate::admissions::get(fleet.ledger, id)?
+            .is_some_and(|attempt| attempt.finished_ms.is_some())
+    {
         return Ok(());
     }
-    let acknowledgement = fleet.release_ordinary(host, &intent.certificate)?;
-    crate::admissions::lock(fleet.ledger, &item.id, || {
-        let mut attempt = crate::admissions::get(fleet.ledger, &item.id)?
+    let acknowledgement = match &intent.acknowledgement {
+        Some(ack) => ack.clone(),
+        None => fleet.release_ordinary(host, &intent.certificate)?,
+    };
+    crate::admissions::lock(fleet.ledger, id, || {
+        let mut attempt = crate::admissions::get(fleet.ledger, id)?
             .ok_or_else(|| crate::unit_transport::conflict("origin admission disappeared"))?;
         let saved = attempt
             .ordinary_release
@@ -562,9 +781,13 @@ fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) ->
         }
         saved.acknowledgement = Some(acknowledgement);
         if attempt.finished_ms.is_none() {
-            attempt.finished_ms = item.closed_ms;
+            attempt.finished_ms = finished.or(match &intent.certificate.terminal_evidence {
+                OrdinaryTerminal::Job { job } => job.ended_ms,
+                OrdinaryTerminal::Refused { finished_ms, .. } => Some(*finished_ms),
+                OrdinaryTerminal::Agent { closed_ms, .. } => Some(*closed_ms),
+            });
         }
-        crate::admissions::put(fleet.ledger, &item.id, &attempt)
+        crate::admissions::put(fleet.ledger, id, &attempt)
     })
 }
 
@@ -577,6 +800,19 @@ pub(crate) fn retained_execution(ledger: &Ledger, id: &str) -> Result<bool> {
         (progress.origin_release.is_none() && crate::launch_store::release(ledger, id)?.is_none())
             || retention_completion(ledger, id)?.is_none(),
     )
+}
+
+pub(crate) fn ordinary_released(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
+    let Some(release) = crate::launch_store::release(ledger, id)? else {
+        return Ok(false);
+    };
+    release.certificate.validate()?;
+    if release.certificate.launch.id != id {
+        return Err(crate::unit_transport::conflict(
+            "ordinary release identity changed",
+        ));
+    }
+    Ok(ordinary_retention_completion(ledger, id, &release, now)?.is_some())
 }
 
 fn ordinary_retention_completion(
@@ -602,6 +838,7 @@ fn ordinary_retention_completion(
     }
     let ended = match &release.certificate.terminal_evidence {
         OrdinaryTerminal::Job { job } => job.ended_ms,
+        OrdinaryTerminal::Refused { finished_ms, .. } => Some(*finished_ms),
         OrdinaryTerminal::Agent { closed_ms, .. } => Some(*closed_ms),
     };
     crate::jobs::completion_time(

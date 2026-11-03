@@ -715,13 +715,14 @@ fn print_host_reservation(
     id: &str,
     input: Option<&str>,
     validity: Option<jobs::Validity>,
+    (owner, owner_host): (&str, &str),
 ) -> Result<ExitCode> {
     let out = if let Some(input) = input {
         let envelope: node::PlacementReplay = serde_json::from_str(input)?;
         envelope.validate(id)?;
         node.reserve_placement(&envelope, now_ms())?
     } else {
-        node.reserve(id, now_ms(), validity)?
+        node.reserve(id, now_ms(), validity, owner, owner_host)?
     };
     print(true, &out, String::new)?;
     Ok(if out.reserved {
@@ -807,12 +808,44 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     Ok(())
 }
 
+fn host_reserve(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
+    let HostCommand::Reserve {
+        id,
+        owner,
+        owner_host,
+        placement_replay,
+        preparation_protocol,
+        thresholds,
+        job_validity,
+        job_created_ms,
+        request_validity,
+        request_created_ms,
+    } = cmd
+    else {
+        return Err(Error::Invalid("not a reservation command".into()));
+    };
+    prepare::require_protocol(preparation_protocol)?;
+    let node = Node {
+        thresholds: thresholds.over(node.thresholds),
+        ..*node
+    };
+    reserve_with_protocol(
+        &node,
+        &id,
+        placement_replay.as_deref(),
+        (job_validity, job_created_ms),
+        (request_validity, request_created_ms),
+        (&owner, &owner_host),
+    )
+}
+
 fn reserve_with_protocol(
     node: &Node<'_>,
     id: &str,
     placement_replay: Option<&str>,
     (job_validity, job_created_ms): (Option<u32>, Option<u64>),
     (request_validity, request_created_ms): (Option<u32>, Option<u64>),
+    (owner, owner_host): (&str, &str),
 ) -> Result<ExitCode> {
     if request_validity.is_some() {
         if request_validity != Some(jobs::REQUEST_VALIDITY_PROTOCOL_VERSION)
@@ -825,7 +858,7 @@ fn reserve_with_protocol(
         }
         if placement_replay.is_none() {
             let validity = request_created_ms.map(jobs::Validity::new);
-            let out = node.reserve(id, now_ms(), validity)?;
+            let out = node.reserve(id, now_ms(), validity, owner, owner_host)?;
             print(true, &out, String::new)?;
             return Ok(if out.reserved {
                 ExitCode::SUCCESS
@@ -835,7 +868,7 @@ fn reserve_with_protocol(
         }
     }
     let validity = reservation_validity(job_validity, job_created_ms)?;
-    print_host_reservation(node, id, placement_replay, validity)
+    print_host_reservation(node, id, placement_replay, validity, (owner, owner_host))
 }
 
 fn checkout_authority(
@@ -1280,29 +1313,12 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             String::new,
         )?,
         HostCommand::PlacementFinished { input } => print_placement_finished(node, &input)?,
-        HostCommand::Reserve {
-            id,
-            placement_replay,
-            preparation_protocol,
-            thresholds,
-            job_validity,
-            job_created_ms,
-            request_validity,
-            request_created_ms,
-        } => {
-            prepare::require_protocol(preparation_protocol)?;
-            let node = Node {
-                thresholds: thresholds.over(node.thresholds),
-                ..*node
-            };
-            return reserve_with_protocol(
-                &node,
-                &id,
-                placement_replay.as_deref(),
-                (job_validity, job_created_ms),
-                (request_validity, request_created_ms),
-            );
-        }
+        HostCommand::ReleaseUnstarted { input } => print(
+            true,
+            &jobs::release_unstarted(node.ledger, &serde_json::from_str(&input)?)?,
+            String::new,
+        )?,
+        cmd @ HostCommand::Reserve { .. } => return host_reserve(cmd, node),
         cmd @ (HostCommand::PreparationLookup { .. }
         | HostCommand::Prepared { .. }
         | HostCommand::Prepare { .. }) => host_preparation(cmd, node)?,

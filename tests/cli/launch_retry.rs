@@ -1897,7 +1897,7 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
             "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
-                "workspace":null,"workspace_name":null,"owner":"w1:p1"},
+                "workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":"local"},
             "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
             "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
         }]),
@@ -1929,7 +1929,7 @@ fn queued_placement_validates_branch_under_symlinked_temp_root() {
             "id":"invalid-ticket","request":{"id":"invalid-request","action":{"type":"place"},"validity":rig.job_validity(),
                 "host":"local","branch":"bad..branch","base":null,"cwd":repo,
                 "repository":{"path":repo,"origin":"https://example.invalid/repo.git","relative":"repo","working_root":repo},
-                "workspace":null,"workspace_name":null,"owner":"w1:p1"},
+                "workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":"local"},
             "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
             "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
         }]),

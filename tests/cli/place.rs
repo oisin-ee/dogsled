@@ -334,7 +334,7 @@ fn queued_placement_accepts_symlinked_repository_root() {
             "id":"alias-ticket","request":{"id":"alias-request","validity":request_authority(&rig,"alias-request"),"action":{"type":"place"},
                 "host":"local","branch":"alias-branch","base":"main","cwd":aliased_repo,
                 "repository":{"path":aliased_repo,"origin":"https://example.invalid/repo.git","relative":"repo space","working_root":aliased_repo},
-                "workspace":null,"workspace_name":null,"owner":"w1:p1"},
+                "workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":"local"},
             "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
             "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
         }]),
@@ -1201,7 +1201,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
 fn result_is_durable_before_host_release() {
     let (rig, repo) = place_rig("result-before-release");
     let request = json!({"id":"durable-placement","validity":request_authority(&rig,"durable-placement"),"action":{"type":"place"},"host":"local",
-        "branch":"durable","base":"main","cwd":repo,"owner":"w1:p1",
+        "branch":"durable","base":"main","cwd":repo,"owner":"w1:p1","owner_host":"local",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
     rig.put_tickets(&json!([{"id":"durable-ticket","request":request,
@@ -1250,7 +1250,7 @@ fn placement_crash_boundaries_replay_one_result() {
     ] {
         let (rig, repo) = place_rig(boundary);
         let request = json!({"id":"queued-placement", "validity":request_authority(&rig,"queued-placement"), "action":{"type":"place"}, "host":"local",
-        "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1",
+        "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1","owner_host":"local",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
         rig.put_tickets(&json!([{"id":"placement-ticket", "request":request,

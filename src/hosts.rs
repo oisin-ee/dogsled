@@ -583,6 +583,25 @@ impl<'a> Fleet<'a> {
         }
     }
 
+    pub(crate) fn release_unstarted(
+        &self,
+        host: &Host,
+        request: &crate::jobs::UnstartedRelease,
+    ) -> Result<crate::jobs::UnstartedAck> {
+        if host.is_local() {
+            crate::jobs::release_unstarted(self.ledger, request)
+        } else {
+            self.remote(
+                host,
+                &[
+                    "release-unstarted".into(),
+                    "--input".into(),
+                    serde_json::to_string(request)?,
+                ],
+            )
+        }
+    }
+
     pub fn reserve(
         &self,
         host: &Host,
@@ -592,6 +611,7 @@ impl<'a> Fleet<'a> {
         placement: Option<&crate::node::PlacementReplay>,
         nonjob: bool,
     ) -> Result<ReserveOutcome> {
+        let (owner, owner_host) = crate::job_store::owner(self.ledger, id)?;
         if let Some(replay) = placement {
             replay.validate(id)?;
             if replay.envelope.host != *host || validity.is_some() {
@@ -604,7 +624,7 @@ impl<'a> Fleet<'a> {
             return if let Some(envelope) = placement {
                 self.node().reserve_placement(envelope, now)
             } else {
-                self.node().reserve(id, now, validity)
+                self.node().reserve(id, now, validity, &owner, &owner_host)
             };
         }
         if nonjob {
@@ -632,6 +652,10 @@ impl<'a> Fleet<'a> {
             crate::prepare::disposition::VERSION.to_string(),
             "--id".into(),
             id.into(),
+            "--owner".into(),
+            owner,
+            "--owner-host".into(),
+            owner_host,
             "--free-core-fraction-min".into(),
             t.free_core_fraction_min.to_string(),
             "--memory-reserve-bytes".into(),

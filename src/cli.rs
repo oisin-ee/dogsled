@@ -132,7 +132,7 @@ pub enum Command {
         host: Option<String>,
         #[arg(long)]
         yes: bool,
-        #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "targets", "disk", "processes"])]
+        #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "targets", "disk", "processes", "resources"])]
         classes: Vec<String>,
     },
     /// Reserve capacity on the host with the most headroom.
@@ -819,9 +819,17 @@ pub enum HostCommand {
         #[arg(long)]
         input: String,
     },
+    ReleaseUnstarted {
+        #[arg(long)]
+        input: String,
+    },
     Reserve {
         #[arg(long)]
         id: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        owner_host: String,
         /// Versioned placement expectation; never falls back to TTL-only admission.
         #[arg(long, conflicts_with_all = ["job_validity", "job_created_ms"])]
         placement_replay: Option<String>,

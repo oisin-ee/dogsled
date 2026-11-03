@@ -1000,7 +1000,11 @@ fn successful_agent_place_and_failed_preparation_release_only_owned_preparation(
     for action in ["agent", "place", "setup-failure", "already-open"] {
         let (rig, repo) = place::place_rig(&format!("preparation-release-{action}"));
         let path = repo.join(".worktrees/owned");
-        // Claims at the same path that belong to other requests.
+        // Claims at the same path retain their original caller provenance.
+        for id in ["stale-request", "other-request"] {
+            rig.put_validity(id, &rig.job_validity());
+            rig.put_request_owner(id, "w1:p1", "local");
+        }
         let stale = json!({"repo":repo,"path":path,"branch":"owned","head":"","request_id":"stale-request"});
         let mut other = stale.clone();
         other["request_id"] = json!("other-request");

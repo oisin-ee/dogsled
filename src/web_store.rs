@@ -45,7 +45,7 @@ CREATE TABLE inbox_sent (
     next_ms INTEGER NOT NULL CHECK(next_ms >= 0)
 ) STRICT;
 CREATE INDEX inbox_sent_due ON inbox_sent(state, next_ms);
-CREATE TABLE notification_failures (id TEXT PRIMARY KEY NOT NULL CHECK(length(id) > 0), reason TEXT NOT NULL) STRICT;
+CREATE TABLE notification_failures (id TEXT PRIMARY KEY NOT NULL CHECK(length(id) > 0), reason TEXT NOT NULL, owner TEXT NOT NULL CHECK(length(owner) > 0), owner_host TEXT NOT NULL CHECK(length(owner_host) > 0)) STRICT;
 ",
     "CREATE TABLE board_docks (
     tab TEXT PRIMARY KEY NOT NULL CHECK(length(tab) > 0),

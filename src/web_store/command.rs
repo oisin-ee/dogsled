@@ -60,11 +60,13 @@ fn inbox_state(ledger: &Ledger, command: StateCommand) -> Result<Value> {
         }
         StateCommand::NotificationFailures { put } => {
             if put {
-                let records = input::<std::collections::BTreeMap<String, String>>()?;
+                let records = input::<
+                    std::collections::BTreeMap<String, crate::inbox::NotificationFailure>,
+                >()?;
                 crate::store::write(ledger, |tx| {
                     tx.execute("DELETE FROM notification_failures", [])?;
-                    for (id, reason) in &records {
-                        inbox::put_failure(tx, id, reason)?;
+                    for (id, failure) in &records {
+                        inbox::put_failure(tx, id, failure)?;
                     }
                     Ok(())
                 })?;

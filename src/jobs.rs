@@ -34,6 +34,84 @@ impl Validity {
     }
 }
 
+/// An origin prohibition sent only after admission-locked no-start proof and preparation release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnstartedRelease {
+    pub id: String,
+    pub validity: Validity,
+    pub owner: String,
+    pub owner_host: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnstartedAck {
+    pub request: UnstartedRelease,
+    pub finished_ms: u64,
+}
+
+pub(crate) fn reject_unstarted(ledger: &Ledger, id: &str) -> Result<()> {
+    if crate::job_store::unstarted_finished(ledger, id)?.is_some() {
+        return Err(Error::Invalid(
+            "request released without execution; future dispatch prohibited".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn release_unstarted(
+    ledger: &Ledger,
+    request: &UnstartedRelease,
+) -> Result<UnstartedAck> {
+    validate_id(&request.id)?;
+    if request.owner.is_empty()
+        || request.owner_host.is_empty()
+        || request.validity.version != Validity::VERSION
+    {
+        return Err(Error::Invalid(
+            "unstarted release identity is incomplete".into(),
+        ));
+    }
+    let ack = ledger
+        .child("preparation-receipts")
+        .with_lock(&request.id, || {
+            ledger.child("launches").with_lock(&request.id, || {
+                if record(ledger, &request.id)?.is_some()
+                    || crate::launch_store::exists(ledger, &request.id)?
+                    || crate::prepare::held(ledger, &request.id)?
+                {
+                    return Err(Error::Invalid(
+                        "unstarted release contradicts execution or preparation ownership".into(),
+                    ));
+                }
+                if let Some(saved) = request_validity(ledger, &request.id)? {
+                    match_request_validity(Some(saved), Some(request.validity))?;
+                } else {
+                    check_validity(ledger, Some(&request.validity))?;
+                    record_request_validity(ledger, &request.id, Some(request.validity))?;
+                }
+                crate::job_store::remember_owner(
+                    ledger,
+                    &request.id,
+                    &request.owner,
+                    Some(&request.owner_host),
+                )?;
+                let mut finished = crate::job_store::unstarted_finished(ledger, &request.id)?;
+                finish_once(ledger, &mut finished, Some(request.validity.created_ms))?;
+                let finished_ms = finished
+                    .ok_or_else(|| Error::Invalid("unstarted completion missing".into()))?;
+                crate::job_store::finish_unstarted(ledger, &request.id, finished_ms)?;
+                Ok(UnstartedAck {
+                    request: request.clone(),
+                    finished_ms,
+                })
+            })
+        })?;
+    crate::job_store::release_reservation(ledger, &request.id)?;
+    Ok(ack)
+}
+
 /// Version 2 requires recorded request validity and checkout ownership through spawn.
 /// Peers advertising an older version cannot safely execute a new job.
 pub const VALIDITY_PROTOCOL_VERSION: u32 = 2;
@@ -305,7 +383,8 @@ pub(crate) fn completion_time(
     let Some(finished) = finished else {
         return Ok(None);
     };
-    let effective = clock(ledger)?.high_water_ms.max(now_ms());
+    let effective =
+        recorded_clock(ledger)?.map_or(now_ms(), |clock| clock.high_water_ms.max(now_ms()));
     if !terminal
         || finished > effective
         || created.is_some_and(|created| finished.saturating_add(VALIDITY_SKEW_MS) < created)
@@ -1059,6 +1138,33 @@ pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
         claim.started_ms = None;
         claim.ended_ms = None;
         crate::job_store::save(tx, &claim)
+    })
+}
+
+/// Only the allocating producer can settle its exact non-executable intent.
+pub(crate) fn refuse_intent(ledger: &Ledger, expected: &Job, reason: &str) -> Result<u64> {
+    let mut finished = None;
+    finish_once(
+        ledger,
+        &mut finished,
+        expected.validity.map(|v| v.created_ms),
+    )?;
+    let ended = finished.ok_or_else(|| Error::Invalid("job refusal completion missing".into()))?;
+    crate::store::write(ledger, |tx| {
+        let mut job = crate::job_store::load(tx, &expected.id)?
+            .ok_or_else(|| Error::Invalid("job intent disappeared".into()))?;
+        if job != *expected
+            || job.state != CLAIMING
+            || job.started_ms.is_some()
+            || !job.pane.is_empty()
+        {
+            return Err(Error::Invalid("job intent changed before refusal".into()));
+        }
+        job.state = "blocked".into();
+        job.reason = Some(reason.into());
+        job.ended_ms = Some(ended);
+        crate::job_store::save(tx, &job)?;
+        Ok(ended)
     })
 }
 
