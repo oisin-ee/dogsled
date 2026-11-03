@@ -223,33 +223,23 @@ fn remote_launch_herdr_unavailable() {
 #[test]
 fn real_remote_missing_directory_names_the_path_and_host() {
     let rig = Rig::new("diagnostic-real-missing-cwd");
+    let missing = rig.dir.join("missing");
+    let missing = missing.to_str().unwrap();
+    assert!(!Path::new(missing).exists());
+    let expected = format!("execution directory {missing} does not exist on netcup");
     launch_peer(&rig);
     real_peer_prepare(&rig);
-    let args = [
-        "run",
-        "--host",
-        "netcup",
-        "--cwd",
-        "/Users/oisin",
-        "--",
-        "true",
-    ];
+    let args = ["run", "--host", "netcup", "--cwd", missing, "--", "true"];
     let (code, error) = run_json(&rig, &args);
     assert_eq!(code, 2, "{error}");
     assert_eq!(error["diagnostic"]["cause"], "execution_directory_missing");
     let text = error["error"].as_str().unwrap();
-    assert!(
-        text.contains("execution directory /Users/oisin does not exist on netcup"),
-        "{error}"
-    );
+    assert!(text.contains(&expected), "{error}");
     assert!(!text.contains("ssh "), "{error}");
     let plain = rig.run(&args);
     let stderr = String::from_utf8(plain.stderr).unwrap();
     assert_eq!(plain.status.code(), Some(2), "{stderr}");
-    assert!(
-        stderr.contains("execution directory /Users/oisin does not exist on netcup"),
-        "{stderr}"
-    );
+    assert!(stderr.contains(&expected), "{stderr}");
     assert!(!stderr.contains("ssh "), "{stderr}");
     assert!(!rig.log("herdr.log").contains("pane run"));
 }
@@ -257,6 +247,10 @@ fn real_remote_missing_directory_names_the_path_and_host() {
 #[test]
 fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
     let rig = Rig::new("diagnostic-missing-cwd-ticket");
+    let missing = rig.dir.join("missing");
+    let missing = missing.to_str().unwrap();
+    assert!(!Path::new(missing).exists());
+    let expected = format!("execution directory {missing} does not exist on netcup");
     launch_peer(&rig);
     real_peer_prepare(&rig);
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}));
@@ -264,27 +258,16 @@ fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     let (code, queued) = run_json(
         &rig,
-        &[
-            "run",
-            "--host",
-            "netcup",
-            "--cwd",
-            "/Users/oisin",
-            "--",
-            "true",
-        ],
+        &["run", "--host", "netcup", "--cwd", missing, "--", "true"],
     );
     assert_eq!(code, 1, "{queued}");
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "failed", "{ticket}");
     assert_eq!(ticket["diagnostic"]["cause"], "execution_directory_missing");
-    assert_eq!(ticket["diagnostic"]["context"]["directory"], "/Users/oisin");
+    assert_eq!(ticket["diagnostic"]["context"]["directory"], missing);
     let error = ticket["error"].as_str().unwrap();
-    assert!(
-        error.contains("execution directory /Users/oisin does not exist on netcup"),
-        "{ticket}"
-    );
+    assert!(error.contains(&expected), "{ticket}");
     assert!(!error.contains("ssh "), "{ticket}");
     let id = ticket["request"]["id"].as_str().unwrap();
     assert_eq!(rig.admission(id)["diagnostic"], ticket["diagnostic"]);
@@ -297,7 +280,7 @@ fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
     assert!(status.status.success(), "{status:?}");
     let text = String::from_utf8(status.stdout).unwrap();
     assert!(
-        text.contains("/Users/oisin") && text.contains("execution_directory_missing"),
+        text.contains(missing) && text.contains("execution_directory_missing"),
         "{text}"
     );
 }
@@ -336,20 +319,15 @@ fn launch_ssh_exit_255_stays_a_transport_failure_even_with_a_peer_envelope() {
 #[test]
 fn waiting_remote_job_receives_the_real_missing_directory_diagnostic() {
     let rig = Rig::new("diagnostic-run-wait-missing-cwd");
+    let missing = rig.dir.join("missing");
+    let missing = missing.to_str().unwrap();
+    assert!(!Path::new(missing).exists());
+    let expected = format!("execution directory {missing} does not exist on netcup");
     launch_peer(&rig);
     real_peer_prepare(&rig);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     let mut command = rig.start(&[
-        "--json",
-        "run",
-        "--wait",
-        "--max",
-        "30s",
-        "--host",
-        "netcup",
-        "--cwd",
-        "/Users/oisin",
-        "--",
+        "--json", "run", "--wait", "--max", "30s", "--host", "netcup", "--cwd", missing, "--",
         "true",
     ]);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -366,24 +344,36 @@ fn waiting_remote_job_receives_the_real_missing_directory_diagnostic() {
         error["diagnostic"]["cause"], "execution_directory_missing",
         "{stdout} {stderr}"
     );
-    assert_eq!(error["diagnostic"]["context"]["directory"], "/Users/oisin");
+    assert_eq!(error["diagnostic"]["context"]["directory"], missing);
     assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("execution directory /Users/oisin does not exist on netcup"),
+        error["error"].as_str().unwrap().contains(&expected),
         "{error}"
     );
 }
 
 #[test]
 fn jobs_and_agents_share_repository_relative_remote_cwd_mapping() {
+    assert_repository_relative_remote_cwd_mapping(false);
+}
+
+#[test]
+fn jobs_and_agents_map_symlinked_repository_cwd_to_the_remote_checkout() {
+    assert_repository_relative_remote_cwd_mapping(true);
+}
+
+fn assert_repository_relative_remote_cwd_mapping(symlinked: bool) {
     for action in ["run", "agent"] {
-        let rig = Rig::new(&format!("diagnostic-cwd-mapping-{action}"));
+        let rig = Rig::new(&format!("diagnostic-cwd-mapping-{action}-{symlinked}"));
         let repo = rig.dir.join("home/repo");
         repository(&repo);
-        let cwd = repo.join("nested");
-        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(repo.join("nested")).unwrap();
+        let cwd = if symlinked {
+            let alias = rig.dir.join("alias-home");
+            std::os::unix::fs::symlink(rig.dir.join("home"), &alias).unwrap();
+            alias.join("repo/nested")
+        } else {
+            repo.join("nested")
+        };
         launch_peer(&rig);
         let mut args = vec![action, "--host", "netcup", "--cwd", cwd.to_str().unwrap()];
         if action == "run" {

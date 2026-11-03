@@ -2684,8 +2684,10 @@ fn prepared_launch(
     } else if host.is_local() {
         request.cwd.clone()
     } else if let (Some(checkout), Some(repo)) = (checkout, &request.repository) {
-        let relative = std::path::Path::new(&request.cwd)
-            .strip_prefix(&repo.working_root)
+        let cwd = std::path::Path::new(&request.cwd).canonicalize()?;
+        let working_root = std::path::Path::new(&repo.working_root).canonicalize()?;
+        let relative = cwd
+            .strip_prefix(&working_root)
             .map_err(|_| Error::Invalid("repository cwd is outside its working root".into()))?;
         std::path::Path::new(&checkout)
             .join(relative)
