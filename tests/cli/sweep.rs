@@ -655,12 +655,12 @@ fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
         assert!(!output.contains("sweep-argv-secret"), "{output}");
     }
     let latest = rig.state(&["sweep"]);
-    let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
-    assert!(!history.contains("sweep-argv-secret"), "{history}");
-    let reports: Vec<Value> = history
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let history = rig.state(&["sweeps"]);
+    assert!(
+        !history.to_string().contains("sweep-argv-secret"),
+        "{history}"
+    );
+    let reports = history.as_array().unwrap().clone();
     assert!(!reports.is_empty(), "{history}");
     assert_eq!(reports.last().unwrap(), &latest);
     for report in std::iter::once(&latest).chain(&reports) {
@@ -971,9 +971,9 @@ fn a_child_whose_custody_cannot_be_written_stays_unknown_and_the_other_is_still_
         &json!([{"item":"i1","host":"local","owner_pane":"w9:p1","custodian_pane":"w9:p1",
             "claims":[]}]),
     );
-    // The custody lock cannot be opened, so the record of the second child cannot be
+    // The custody table refuses writes, so the record of the second child cannot be
     // written. The record that is there still reads.
-    fs::create_dir_all(rig.dir.join("state/custody.lock")).unwrap();
+    rig.fault_host_store("custody", true);
     rig.put_state(
         &["state", "orphans", "--put"],
         &json!([{"item":"i2","host":"local","pane":"w2:p2","owner_pane":"w9:p2",

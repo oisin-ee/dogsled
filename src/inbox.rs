@@ -1190,10 +1190,8 @@ pub fn notify_child(
     now: u64,
 ) -> Result<bool> {
     let result = crate::custody::locked(fleet.ledger, &child.item.id, |custody| {
-        fleet.ledger.with_lock("items", || {
-            let custodian = child.validate(fleet.ledger, id, custody)?;
-            notify_custodian(fleet, reports, &custodian, id, kind, text, now)
-        })
+        let custodian = child.validate(fleet.ledger, id, custody)?;
+        notify_custodian(fleet, reports, &custodian, id, kind, text, now)
     });
     match result {
         Err(Error::Invalid(reason) | Error::Refused { detail: reason, .. }) => {

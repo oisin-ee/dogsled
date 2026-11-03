@@ -2023,7 +2023,12 @@ fn seed_flags(
         None => crate::launch_store::put_seed(ledger, &request.id, seed)?,
     }
     // Outbound Pi transport, not authority: Dogsled never reads this artifact back.
-    receipts.write(&file, seed)?;
+    std::fs::create_dir_all(&receipts.dir)?;
+    let tmp = receipts
+        .dir
+        .join(format!(".{file}.{}.tmp", crate::ledger::new_id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(seed)?)?;
+    std::fs::rename(&tmp, receipts.dir.join(&file))?;
     let sessions = receipts.dir.join(format!("{}.sessions", request.id));
     std::fs::create_dir_all(&sessions)?;
     if std::fs::read_dir(&sessions)?.next().is_some() {

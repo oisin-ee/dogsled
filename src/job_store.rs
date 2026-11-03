@@ -365,18 +365,16 @@ pub(crate) fn validities(ledger: &Ledger) -> Result<Vec<(String, Validity)>> {
 }
 
 /// The caller has excluded admissions, preparations, tickets, and launch owners.
-pub(crate) fn expire_validity(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
-    store::write(ledger, |tx| {
-        if validity(tx, id)?.is_some_and(|validity| {
-            now.saturating_sub(validity.created_ms) > crate::jobs::RECORD_KEEP_MS
-        }) && load(tx, id)?
-            .is_none_or(|job| matches!(crate::jobs::expiry(&job, now), crate::jobs::Expiry::Record))
-        {
-            tx.execute("DELETE FROM job_validity WHERE id = ?1", [id])?;
-            tx.execute("DELETE FROM request_ingress WHERE id = ?1", [id])?;
-        }
-        Ok(())
-    })
+pub(crate) fn expire_validity_in(tx: &rusqlite::Transaction<'_>, id: &str, now: u64) -> Result<()> {
+    if validity(tx, id)?.is_some_and(|validity| {
+        now.saturating_sub(validity.created_ms) > crate::jobs::RECORD_KEEP_MS
+    }) && load(tx, id)?
+        .is_none_or(|job| matches!(crate::jobs::expiry(&job, now), crate::jobs::Expiry::Record))
+    {
+        tx.execute("DELETE FROM job_validity WHERE id = ?1", [id])?;
+        tx.execute("DELETE FROM request_ingress WHERE id = ?1", [id])?;
+    }
+    Ok(())
 }
 
 pub(crate) fn ingress(tx: &Transaction<'_>, id: &str) -> Result<bool> {
@@ -474,10 +472,13 @@ pub(crate) fn cancellations(ledger: &Ledger) -> Result<Vec<crate::work::Cancella
 }
 
 pub(crate) fn remove_cancellation(ledger: &Ledger, id: &str) -> Result<()> {
-    store::write(ledger, |tx| {
-        tx.execute("DELETE FROM cancellations WHERE id = ?1", [id])?;
-        Ok(())
-    })
+    store::write(ledger, |tx| remove_cancellation_in(tx, id))
+}
+
+/// [`remove_cancellation`] inside the caller's write transaction.
+pub(crate) fn remove_cancellation_in(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<()> {
+    tx.execute("DELETE FROM cancellations WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 pub(crate) fn put_cancellation(ledger: &Ledger, saved: &crate::work::Cancellation) -> Result<()> {
@@ -769,7 +770,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        expire_validity(&ledger, "request", 203 + crate::jobs::RECORD_KEEP_MS).unwrap();
+        store::write(&ledger, |tx| {
+            expire_validity_in(tx, "request", 203 + crate::jobs::RECORD_KEEP_MS)
+        })
+        .unwrap();
         assert_eq!(validities(&ledger).unwrap(), [] as [(String, Validity); 0]);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }

@@ -434,7 +434,8 @@ r#"CREATE TABLE host_report (
  ts_ms INTEGER NOT NULL CHECK (ts_ms >= 0),
  started_ms INTEGER NOT NULL CHECK (started_ms >= 0),
  finished_ms INTEGER NOT NULL CHECK (finished_ms >= 0)
-) STRICT;"#,
+) STRICT;
+CREATE INDEX host_report_ts ON host_report(ts_ms);"#,
 r#"CREATE TABLE host_marks_entries (
  owner TEXT NOT NULL REFERENCES host_marks(row_key) ON DELETE CASCADE,
  position INTEGER NOT NULL CHECK(position >= 0),
@@ -3586,15 +3587,57 @@ pub(crate) fn replace_quota_refresh(
 pub(crate) fn report(ledger: &Ledger) -> Result<Option<crate::sweep::Report>> {
     crate::store::read(ledger, report_rows)
 }
+/// The latest completed pass.
 pub(crate) fn report_rows(tx: &Transaction<'_>) -> Result<Option<crate::sweep::Report>> {
-    report_row(tx, "local")
+    let key: Option<String> = tx
+        .query_row(
+            "SELECT row_key FROM host_report ORDER BY ts_ms DESC, rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            error => Err(error),
+        })?;
+    match key {
+        Some(key) => report_row(tx, &key),
+        None => Ok(None),
+    }
 }
+/// Every retained pass, oldest first.
+pub(crate) fn reports(ledger: &Ledger) -> Result<Vec<crate::sweep::Report>> {
+    crate::store::read(ledger, |tx| {
+        let keys: Vec<String> = tx
+            .prepare("SELECT row_key FROM host_report ORDER BY ts_ms, rowid")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        keys.iter()
+            .filter_map(|key| report_row(tx, key).transpose())
+            .collect()
+    })
+}
+/// Replace the pass history with one pass.
+#[cfg(test)]
 pub(crate) fn put_report(ledger: &Ledger, value: &crate::sweep::Report) -> Result<()> {
     crate::store::write(ledger, |tx| replace_report(tx, value))
 }
 pub(crate) fn replace_report(tx: &Transaction<'_>, value: &crate::sweep::Report) -> Result<()> {
-    tx.execute("DELETE FROM host_report WHERE row_key='local'", [])?;
-    put_report_row(tx, "local", value)
+    tx.execute("DELETE FROM host_report", [])?;
+    put_report_row(tx, &crate::ledger::new_id(), value)
+}
+/// Append one completed pass and drop passes older than `keep_from_ms`.
+pub(crate) fn record_report(
+    ledger: &Ledger,
+    value: &crate::sweep::Report,
+    keep_from_ms: u64,
+) -> Result<()> {
+    let keep_from = i64::try_from(keep_from_ms).map_err(|_| invalid("time out of range"))?;
+    crate::store::write(ledger, |tx| {
+        put_report_row(tx, &crate::ledger::new_id(), value)?;
+        tx.execute("DELETE FROM host_report WHERE ts_ms < ?1", [keep_from])?;
+        Ok(())
+    })
 }
 pub(crate) fn marks(ledger: &Ledger) -> Result<BTreeMap<String, crate::done::Mark>> {
     crate::store::read(ledger, marks_rows)

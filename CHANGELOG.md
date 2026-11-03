@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Probe samples and cleanup pass history are typed `state.db` tables, `samples` and `host_report`. Dogsled no longer writes `samples.jsonl` or `sweeps.jsonl`, and no state record is a JSON file.
+- Items and queued tickets change in one SQLite write transaction. The `items.lock` and `queue.lock` files are gone, so a close no longer waits on a file lock to record an item. Kernel locks remain only where they guard work outside `state.db`: panes, checkouts, peer hosts, the quota service, and the capacity publication protocol.
+- A write to `state.db` that starts inside another write on the same thread fails at once. Before, it waited for itself until its deadline.
+- `state.db` is now schema version 3. A host with an older `state.db` starts again with an empty store. Delete the old `samples.jsonl`, `sweeps.jsonl`, `items.lock`, and `queue.lock` files after you upgrade.
+
 ## 0.30.0 - 2026-11-02
 
 - Store launch receipts, progress, releases, seeds, and continuation receipts in typed SQLite tables.
