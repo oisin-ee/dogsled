@@ -213,10 +213,10 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
 
 /// Settle each open agent item: an owned child that finished, and an orphan that is idle or
 /// done, clean, and pushed, close exactly as `dogsled close` would. Orphans that stay are
-/// recorded for status and check-ins.
+/// recorded for status and check-ins. The handoff lane owns local handoff (`crate::done`);
+/// this lane imports only what is already durable, so a long close never stalls it.
 pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
     crate::unit_request::refresh(fleet, crate::unit_request::Scope::All)?;
-    crate::done::handoff(fleet.ledger, fleet.shell, now)?;
     crate::items::handoffs(fleet.ledger, &fleet.status(now)?)?;
     let items: Vec<Item> = crate::items::list(fleet.ledger)?
         .into_iter()

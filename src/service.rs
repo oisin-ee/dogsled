@@ -198,6 +198,16 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
     outcome
 }
 
+/// One `--once` pass imports the handoffs this pass made: children follows the handoff lane.
+/// The continuous service needs no order; the next children pass imports later handoffs.
+fn ready(lane: Lane, completed: [bool; LANES.len()]) -> bool {
+    lane != Lane::Children
+        || LANES
+            .iter()
+            .zip(completed)
+            .any(|(other, done)| *other == Lane::Handoff && done)
+}
+
 /// Start eligible action lanes without coupling their scheduling to publication or input.
 fn start_lanes(
     node: &Node<'_>,
@@ -208,7 +218,7 @@ fn start_lanes(
     send: &mpsc::Sender<Event>,
 ) {
     for (lane, worker) in workers.iter_mut().enumerate() {
-        if worker.is_none() && (!once || !completed[lane]) {
+        if worker.is_none() && (!once || (!completed[lane] && ready(LANES[lane], completed))) {
             let mut ledger = node.ledger.clone();
             ledger.budget = crate::budget::Budget::default();
             let policy = policy.clone();
@@ -303,6 +313,9 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                         }
                         completed[lane] = true;
                         diagnostics.record(node.ledger, LANES[lane], result);
+                        if once && current {
+                            start_lanes(node, policy, once, &mut workers, completed, &send);
+                        }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
