@@ -1,0 +1,99 @@
+name: Release please
+
+on:
+  push:
+    branches: [main]
+
+# Keep release-PR updates behind publication and its lifecycle-label change.
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      release-pr: ${{ steps.release.outputs.pr }}
+      tag: ${{ steps.release.outputs.tag }}
+      publish: ${{ steps.release.outputs.publish }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Detect a merged release PR without a tag
+        id: release
+        run: |
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --paginate |
+            jq -r --arg sha "$GITHUB_SHA" '.[] | select(
+              .merged_at != null and .merge_commit_sha == $sha and
+              .base.ref == "main" and (.head.ref | startswith("release-please--")) and
+              any(.labels[]; .name == "autorelease: pending")
+            ) | .number')
+          if test -z "$pr"; then
+            exit 0
+          fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          version=$(jq -er '.["."]' .release-please-manifest.json)
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          remote_tag=$(git ls-remote --tags origin "refs/tags/$tag")
+          if test -z "$remote_tag"; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release-please:
+    needs: prepare
+    if: needs.prepare.outputs.release-pr == ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # GITHUB_TOKEN release PRs intentionally start no pull_request workflows.
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
+
+  ci:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: [prepare, ci]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_PR: ${{ needs.prepare.outputs.release-pr }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Tag the validated release commit and dispatch dist
+        run: |
+          test -z "$(git ls-remote --tags origin "refs/tags/$TAG")"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f "tag=$TAG"
+      - name: Complete the release-please lifecycle
+        run: |
+          gh label create "autorelease: tagged" --repo "$GITHUB_REPOSITORY" --force
+          gh pr edit "$RELEASE_PR" --repo "$GITHUB_REPOSITORY" \
+            --remove-label "autorelease: pending" --add-label "autorelease: tagged"
