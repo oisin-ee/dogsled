@@ -8,7 +8,7 @@ use crate::ledger::Ledger;
 
 /// The schema version this binary creates. A store with an older version starts again
 /// empty: earlier records are not read or converted.
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -350,7 +350,9 @@ mod tests {
         std::fs::create_dir_all(&ledger.dir).unwrap();
         let path = ledger.dir.join("state.db");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("PRAGMA user_version=3;").unwrap();
+        connection
+            .execute_batch(&format!("PRAGMA user_version={};", VERSION + 1))
+            .unwrap();
         drop(connection);
         let before = std::fs::read(&path).unwrap();
         for error in [
@@ -369,11 +371,12 @@ mod tests {
         std::fs::create_dir_all(&ledger.dir).unwrap();
         let connection = Connection::open(ledger.dir.join("state.db")).unwrap();
         connection
-            .execute_batch(
+            .execute_batch(&format!(
                 "CREATE TABLE items (seq INTEGER PRIMARY KEY, record TEXT);
-                 INSERT INTO items (record) VALUES ('{}');
-                 PRAGMA user_version=1;",
-            )
+                 INSERT INTO items (record) VALUES ('{{}}');
+                 PRAGMA user_version={};",
+                VERSION - 1
+            ))
             .unwrap();
         drop(connection);
         assert_eq!(items(&ledger).unwrap(), json!([]));
@@ -485,8 +488,21 @@ mod tests {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_millis(50));
-        let error = write(&ledger, |_| Ok(())).unwrap_err();
+        // Give setup a generous command budget. Verify the timeout the store installs,
+        // then refuse a genuine lock conflict immediately, without racing that deadline.
+        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_secs(10));
+        let error = read(&ledger, |contender| {
+            let timeout: i64 = contender.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            assert!(
+                (1..=10_000).contains(&timeout),
+                "SQLite timeout {timeout} exceeds the command budget"
+            );
+            contender.execute_batch(
+                "PRAGMA busy_timeout=0; CREATE TABLE deadline_contender (id INTEGER)",
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
         assert!(
             matches!(error, Error::Deadline(ref detail) if detail == "state.db busy"),
             "{error}"

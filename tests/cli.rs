@@ -1000,7 +1000,7 @@ esac
             let schema = self.run(&["state", "schema"]);
             assert!(schema.status.success(), "{schema:?}");
             tx.execute_batch(&format!(
-                "{}PRAGMA user_version = 2;",
+                "{}PRAGMA user_version = 3;",
                 String::from_utf8(schema.stdout).unwrap()
             ))
             .unwrap();

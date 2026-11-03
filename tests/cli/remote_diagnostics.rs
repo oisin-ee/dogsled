@@ -1,5 +1,396 @@
 use super::*;
 
+fn launch_peer(rig: &Rig) {
+    rig.peer();
+    let mut snapshot = rig.read("remote.json");
+    snapshot["job_validity"] = json!(2);
+    rig.put("remote.json", &snapshot);
+}
+
+fn run_json(rig: &Rig, args: &[&str]) -> (i32, Value) {
+    let mut args = args.to_vec();
+    args.insert(0, "--json");
+    rig.json(&args)
+}
+
+// The caller accepts only typed envelopes and binds context to its own launch request.
+fn assert_remote_launch_cause(cause: &str) {
+    let rig = Rig::new(&format!("diagnostic-launch-{cause}"));
+    launch_peer(&rig);
+    fail_peer(
+        &rig,
+        "launch",
+        &json!({"error":"PRIVATE_SENTINEL", "diagnostic":{
+        "version":1,"operation":"launch","cause":cause,
+        "context":{"workspace":"PEER_SECRET","directory":"PEER_SECRET"},"host":"FORGED_HOST","request_id":"forged"}}),
+    );
+    let args = [
+        "run",
+        "--host",
+        "netcup",
+        "--cwd",
+        "/Users/oisin",
+        "--",
+        "true",
+    ];
+    let (code, error) = run_json(&rig, &args);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["diagnostic"]["cause"], cause, "{error}");
+    assert_eq!(error["diagnostic"]["host"], "netcup");
+    assert_eq!(error["diagnostic"]["context"]["directory"], "/Users/oisin");
+    assert_ne!(error["diagnostic"]["request_id"], "forged");
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains(cause) && text.contains("netcup"), "{error}");
+    assert!(!text.contains("ssh "), "{error}");
+    let plain = rig.run(&args);
+    assert_eq!(plain.status.code(), Some(2));
+    let stderr = String::from_utf8(plain.stderr).unwrap();
+    assert!(
+        stderr.contains(cause) && stderr.contains("netcup"),
+        "{stderr}"
+    );
+    for secret in ["PRIVATE_SENTINEL", "PEER_SECRET", "FORGED_HOST"] {
+        assert!(!error.to_string().contains(secret), "{error}");
+        assert!(!stderr.contains(secret), "{stderr}");
+    }
+}
+
+#[test]
+fn remote_launch_execution_directory_missing() {
+    assert_remote_launch_cause("execution_directory_missing");
+}
+
+#[test]
+fn remote_launch_checkout_unavailable() {
+    assert_remote_launch_cause("checkout_unavailable");
+}
+
+#[test]
+fn remote_launch_request_changed() {
+    assert_remote_launch_cause("request_changed");
+}
+
+#[test]
+fn remote_launch_protocol_unsupported() {
+    assert_remote_launch_cause("protocol_unsupported");
+}
+
+#[test]
+fn remote_launch_preparation_binding_missing() {
+    assert_remote_launch_cause("preparation_binding_missing");
+}
+
+#[test]
+fn remote_launch_preparation_binding_mismatch() {
+    assert_remote_launch_cause("preparation_binding_mismatch");
+}
+
+#[test]
+fn remote_launch_preparation_held() {
+    assert_remote_launch_cause("preparation_held");
+}
+
+#[test]
+fn remote_launch_preparation_interrupted() {
+    assert_remote_launch_cause("preparation_interrupted");
+}
+
+#[test]
+fn remote_launch_preparation_contradictory() {
+    assert_remote_launch_cause("preparation_contradictory");
+}
+
+#[test]
+fn remote_launch_launch_receipt_missing() {
+    assert_remote_launch_cause("launch_receipt_missing");
+}
+
+#[test]
+fn remote_launch_launch_receipt_mismatch() {
+    assert_remote_launch_cause("launch_receipt_mismatch");
+}
+
+#[test]
+fn remote_launch_job_claim_unresolved() {
+    assert_remote_launch_cause("job_claim_unresolved");
+}
+
+#[test]
+fn remote_launch_job_claim_exists() {
+    assert_remote_launch_cause("job_claim_exists");
+}
+
+#[test]
+fn remote_launch_pane_unavailable() {
+    assert_remote_launch_cause("pane_unavailable");
+}
+
+#[test]
+fn remote_launch_pane_identity_mismatch() {
+    assert_remote_launch_cause("pane_identity_mismatch");
+}
+
+#[test]
+fn remote_launch_pane_busy() {
+    assert_remote_launch_cause("pane_busy");
+}
+
+#[test]
+fn remote_launch_workspace_unavailable() {
+    assert_remote_launch_cause("workspace_unavailable");
+}
+
+#[test]
+fn remote_launch_branch_invalid() {
+    assert_remote_launch_cause("branch_invalid");
+}
+
+#[test]
+fn remote_launch_profile_invalid() {
+    assert_remote_launch_cause("profile_invalid");
+}
+
+#[test]
+fn remote_launch_command_too_long() {
+    assert_remote_launch_cause("command_too_long");
+}
+
+#[test]
+fn remote_launch_startup_uncertain() {
+    assert_remote_launch_cause("startup_uncertain");
+}
+
+#[test]
+fn remote_launch_launch_refused() {
+    assert_remote_launch_cause("launch_refused");
+}
+
+#[test]
+fn remote_launch_invalid_request() {
+    assert_remote_launch_cause("invalid_request");
+}
+
+#[test]
+fn remote_launch_validity_unprovable() {
+    assert_remote_launch_cause("validity_unprovable");
+}
+
+#[test]
+fn remote_launch_request_expired() {
+    assert_remote_launch_cause("request_expired");
+}
+
+#[test]
+fn remote_launch_request_from_future() {
+    assert_remote_launch_cause("request_from_future");
+}
+
+#[test]
+fn remote_launch_validity_clock_unavailable() {
+    assert_remote_launch_cause("validity_clock_unavailable");
+}
+
+#[test]
+fn remote_launch_io_failed() {
+    assert_remote_launch_cause("io_failed");
+}
+
+#[test]
+fn remote_launch_state_failed() {
+    assert_remote_launch_cause("state_failed");
+}
+
+#[test]
+fn remote_launch_invalid_payload() {
+    assert_remote_launch_cause("invalid_payload");
+}
+
+#[test]
+fn remote_launch_config_invalid() {
+    assert_remote_launch_cause("config_invalid");
+}
+
+#[test]
+fn remote_launch_command_failed() {
+    assert_remote_launch_cause("command_failed");
+}
+
+#[test]
+fn remote_launch_herdr_unavailable() {
+    assert_remote_launch_cause("herdr_unavailable");
+}
+
+#[test]
+fn real_remote_missing_directory_names_the_path_and_host() {
+    let rig = Rig::new("diagnostic-real-missing-cwd");
+    let missing = rig.dir.join("missing");
+    let missing = missing.to_str().unwrap();
+    assert!(!Path::new(missing).exists());
+    let expected = format!("execution directory {missing} does not exist on netcup");
+    launch_peer(&rig);
+    real_peer_prepare(&rig);
+    let args = ["run", "--host", "netcup", "--cwd", missing, "--", "true"];
+    let (code, error) = run_json(&rig, &args);
+    assert_eq!(code, 2, "{error}");
+    assert_eq!(error["diagnostic"]["cause"], "execution_directory_missing");
+    let text = error["error"].as_str().unwrap();
+    assert!(text.contains(&expected), "{error}");
+    assert!(!text.contains("ssh "), "{error}");
+    let plain = rig.run(&args);
+    let stderr = String::from_utf8(plain.stderr).unwrap();
+    assert_eq!(plain.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains(&expected), "{stderr}");
+    assert!(!stderr.contains("ssh "), "{stderr}");
+    assert!(!rig.log("herdr.log").contains("pane run"));
+}
+
+#[test]
+fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
+    let rig = Rig::new("diagnostic-missing-cwd-ticket");
+    let missing = rig.dir.join("missing");
+    let missing = missing.to_str().unwrap();
+    assert!(!Path::new(missing).exists());
+    let expected = format!("execution directory {missing} does not exist on netcup");
+    launch_peer(&rig);
+    real_peer_prepare(&rig);
+    rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}));
+    assert_eq!(run_json(&rig, &["inbox", "claim", "--harness", "pi"]).0, 0);
+    rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let (code, queued) = run_json(
+        &rig,
+        &["run", "--host", "netcup", "--cwd", missing, "--", "true"],
+    );
+    assert_eq!(code, 1, "{queued}");
+    rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
+    let ticket = advance(&rig);
+    assert_eq!(ticket["state"], "failed", "{ticket}");
+    assert_eq!(ticket["diagnostic"]["cause"], "execution_directory_missing");
+    assert_eq!(ticket["diagnostic"]["context"]["directory"], missing);
+    let error = ticket["error"].as_str().unwrap();
+    assert!(error.contains(&expected), "{ticket}");
+    assert!(!error.contains("ssh "), "{ticket}");
+    let id = ticket["request"]["id"].as_str().unwrap();
+    assert_eq!(rig.admission(id)["diagnostic"], ticket["diagnostic"]);
+    let inbox = rig.inbox("term_owner");
+    assert!(
+        inbox[0]["text"].as_str().unwrap().contains(error),
+        "{inbox}"
+    );
+    let status = rig.run(&["status"]);
+    assert!(status.status.success(), "{status:?}");
+    let text = String::from_utf8(status.stdout).unwrap();
+    assert!(
+        text.contains(missing) && text.contains("execution_directory_missing"),
+        "{text}"
+    );
+}
+
+#[test]
+fn launch_ssh_exit_255_stays_a_transport_failure_even_with_a_peer_envelope() {
+    let rig = Rig::new("diagnostic-launch-transport");
+    launch_peer(&rig);
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script("ssh", &script.replace("  *'host launch'*)", "  *'host launch'*) echo 'Permission denied (publickey)' >&2; cat \"$RIG/transport-envelope.json\"; exit 255;"));
+    rig.put("transport-envelope.json", &json!({"error":"PRIVATE_SENTINEL","deadline":true,"diagnostic":{"version":1,"operation":"launch","cause":"execution_directory_missing","context":{}}}));
+    let (code, error) = run_json(
+        &rig,
+        &[
+            "run",
+            "--host",
+            "netcup",
+            "--cwd",
+            "/Users/oisin",
+            "--",
+            "true",
+        ],
+    );
+    assert_eq!(code, 2, "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("ssh netcup: authentication failed"),
+        "{error}"
+    );
+    assert!(error["diagnostic"].is_null(), "{error}");
+    assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
+}
+
+#[test]
+fn waiting_remote_job_receives_the_real_missing_directory_diagnostic() {
+    let rig = Rig::new("diagnostic-run-wait-missing-cwd");
+    let missing = rig.dir.join("missing");
+    let missing = missing.to_str().unwrap();
+    assert!(!Path::new(missing).exists());
+    let expected = format!("execution directory {missing} does not exist on netcup");
+    launch_peer(&rig);
+    real_peer_prepare(&rig);
+    rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let mut command = rig.start(&[
+        "--json", "run", "--wait", "--max", "30s", "--host", "netcup", "--cwd", missing, "--",
+        "true",
+    ]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.tickets().as_array().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "waiting caller did not enqueue");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
+    assert_eq!(advance(&rig)["state"], "failed");
+    assert_eq!(command.wait().code(), Some(2));
+    let (stdout, stderr) = command.output();
+    let error: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        error["diagnostic"]["cause"], "execution_directory_missing",
+        "{stdout} {stderr}"
+    );
+    assert_eq!(error["diagnostic"]["context"]["directory"], missing);
+    assert!(
+        error["error"].as_str().unwrap().contains(&expected),
+        "{error}"
+    );
+}
+
+#[test]
+fn jobs_and_agents_share_repository_relative_remote_cwd_mapping() {
+    assert_repository_relative_remote_cwd_mapping(false);
+}
+
+#[test]
+fn jobs_and_agents_map_symlinked_repository_cwd_to_the_remote_checkout() {
+    assert_repository_relative_remote_cwd_mapping(true);
+}
+
+fn assert_repository_relative_remote_cwd_mapping(symlinked: bool) {
+    for action in ["run", "agent"] {
+        let rig = Rig::new(&format!("diagnostic-cwd-mapping-{action}-{symlinked}"));
+        let repo = rig.dir.join("home/repo");
+        repository(&repo);
+        fs::create_dir_all(repo.join("nested")).unwrap();
+        let cwd = if symlinked {
+            let alias = rig.dir.join("alias-home");
+            std::os::unix::fs::symlink(rig.dir.join("home"), &alias).unwrap();
+            alias.join("repo/nested")
+        } else {
+            repo.join("nested")
+        };
+        launch_peer(&rig);
+        let mut args = vec![action, "--host", "netcup", "--cwd", cwd.to_str().unwrap()];
+        if action == "run" {
+            args.extend(["--", "true"]);
+        } else {
+            args.extend(["--name", "worker", "--message", "go"]);
+        }
+        let (code, result) = run_json(&rig, &args);
+        assert_eq!(code, 0, "{action}: {result}");
+        let log = rig.log("ssh.log");
+        assert!(
+            log.contains("\"cwd\":\"/remote/repo/nested\""),
+            "{action}: {log}"
+        );
+    }
+}
+
 fn fail_peer(rig: &Rig, step: &str, response: &Value) {
     rig.put("failure.json", response);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
@@ -434,11 +825,7 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
     let repo = rig.dir.join("home/repo");
     repository(&repo);
     rig.peer();
-    fail_peer(
-        &rig,
-        "prepare",
-        &json!({"error":"unknown base origin/x PRIVATE_SENTINEL"}),
-    );
+    fail_peer(&rig, "prepare", &envelope("base_unavailable"));
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -456,17 +843,14 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
     ]);
     assert_eq!(code, 2, "{error}");
     let text = error["error"].as_str().unwrap();
-    assert!(text.contains("unknown base origin/x"), "{error}");
+    assert!(text.contains("base origin/x"), "{error}");
     assert!(text.contains("netcup"), "{error}");
     assert!(!error.to_string().contains("TASK_SECRET"), "{error}");
     // The cause is the caller's own base, not the peer's text.
     assert!(!error.to_string().contains("PRIVATE_SENTINEL"), "{error}");
     let attempt = rig.admissions()[0].clone();
     assert!(
-        attempt["error"]
-            .as_str()
-            .unwrap()
-            .contains("unknown base origin/x"),
+        attempt["error"].as_str().unwrap().contains("base origin/x"),
         "{attempt}"
     );
 }
@@ -897,11 +1281,8 @@ fn a_retained_failure_still_refuses_a_changed_request() {
     changed[7] = "main";
     let (code, conflict) = rig.json(&changed);
     assert_eq!(code, 2, "{conflict}");
-    assert!(
-        conflict["error"]
-            .as_str()
-            .unwrap()
-            .contains("preparation request changed"),
+    assert_eq!(
+        conflict["diagnostic"]["cause"], "request_changed",
         "{conflict}"
     );
     assert_eq!(rig.log("herdr.log"), herdr);
@@ -942,7 +1323,10 @@ fn a_receipt_without_an_outcome_stays_uncertain() {
             .contains("stopped during preparation"),
         "{uncertain}"
     );
-    assert!(uncertain.get("diagnostic").is_none(), "{uncertain}");
+    assert_eq!(
+        uncertain["diagnostic"]["cause"], "preparation_interrupted",
+        "{uncertain}"
+    );
     assert_eq!(rig.log("herdr.log"), herdr);
 }
 
@@ -1116,10 +1500,9 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
     assert!(!text.contains("PRIVATE_SENTINEL"));
 }
 
-/// A plain prepare failure names its cause in the failed ticket, in the admission
-/// record, and in the owner's inbox.
+/// A typed prepare failure names its cause in the ticket, admission, and owner inbox.
 #[test]
-fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
+fn a_typed_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
     let rig = Rig::new("diagnostic-plain-ticket");
     let repo = rig.dir.join("home/repo");
     repository(&repo);
@@ -1147,15 +1530,11 @@ fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
     ]);
     assert_eq!(code, 1, "{queued}");
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
-    fail_peer(
-        &rig,
-        "prepare",
-        &json!({"error":"unknown base origin/absent PRIVATE_SENTINEL"}),
-    );
+    fail_peer(&rig, "prepare", &envelope("base_unavailable"));
     let ticket = advance(&rig);
     assert_eq!(ticket["state"], "failed", "{ticket}");
     let error = ticket["error"].as_str().unwrap();
-    assert!(error.contains("unknown base origin/absent"), "{ticket}");
+    assert!(error.contains("base origin/absent"), "{ticket}");
     assert!(error.contains("netcup"), "{ticket}");
     assert!(!error.contains("PRIVATE_SENTINEL"), "{ticket}");
     let id = ticket["request"]["id"].as_str().unwrap();
@@ -1164,12 +1543,12 @@ fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
         attempt["error"]
             .as_str()
             .unwrap()
-            .contains("unknown base origin/absent"),
+            .contains("base origin/absent"),
         "{attempt}"
     );
     let inbox = rig.inbox("term_owner");
     let text = inbox[0]["text"].as_str().unwrap();
-    assert!(text.contains("unknown base origin/absent"), "{text}");
+    assert!(text.contains("base origin/absent"), "{text}");
     assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
     assert!(!text.contains("TASK_SECRET"), "{text}");
 }

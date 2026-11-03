@@ -2091,11 +2091,15 @@ fn peer_refused_job_reports_once_and_releases_holds() {
     let ticket = &tickets[0];
     assert_eq!(ticket["state"], "failed", "{tickets}");
     let id = ticket["request"]["id"].as_str().unwrap();
+    assert_eq!(
+        ticket["diagnostic"]["cause"], "execution_directory_missing",
+        "{ticket}"
+    );
     assert!(
         ticket["error"]
             .as_str()
             .unwrap()
-            .contains("remote command failed"),
+            .contains("netcup refused the launch: execution_directory_missing"),
         "{ticket}"
     );
     assert!(

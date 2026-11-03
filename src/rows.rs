@@ -55,7 +55,8 @@ macro_rules! diagnostic_sql {
     diagnostic_status INTEGER,
     diagnostic_host TEXT,
     diagnostic_request_id TEXT,
-    diagnostic_omission TEXT,"
+    diagnostic_omission TEXT,
+    diagnostic_directory TEXT,"
     };
 }
 
@@ -299,6 +300,10 @@ pub(crate) fn diagnostic_columns(
     columns.text("diagnostic_branch", diagnostic.context.branch.as_deref());
     columns.text("diagnostic_base", diagnostic.context.base.as_deref());
     columns.text(
+        "diagnostic_directory",
+        diagnostic.context.directory.as_deref(),
+    );
+    columns.text(
         "diagnostic_workspace",
         diagnostic.context.workspace.as_deref(),
     );
@@ -400,6 +405,7 @@ pub(crate) fn load_diagnostic(row: &Row<'_>) -> Result<Option<crate::diagnostic:
             branch: text(row, "diagnostic_branch")?,
             base: text(row, "diagnostic_base")?,
             workspace: text(row, "diagnostic_workspace")?,
+            directory: text(row, "diagnostic_directory")?,
             occupancy: optional(text(row, "diagnostic_occupancy")?, variant)?,
             new_worktree_removed: number(row, "diagnostic_new_worktree_removed")? == Some(1),
         },

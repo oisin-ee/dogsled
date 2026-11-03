@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## Unreleased
 
 - Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
+- Remote launch errors show the host and the typed refusal reason, including a missing execution directory, instead of reporting an SSH failure.
+- `state.db` is now schema version 3. A host with an older `state.db` starts again with an empty store. Let queued work finish before you upgrade a host.
 
 ## 0.30.0 - 2026-11-02
 

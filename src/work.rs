@@ -18,12 +18,14 @@ pub(crate) use placement::{
 
 use crate::checkout::Repository;
 use crate::commands::{self, Placement};
+use crate::diagnostic::Cause;
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
 use crate::items::{self, Item};
 use crate::jobs::{self, Job};
 use crate::ledger::{Ledger, new_id};
 use crate::shell::{Shell, quote};
+use crate::worktree::Linked;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1404,7 +1406,10 @@ pub fn workspace(shell: &dyn Shell, id: &str) -> Result<String> {
         .and_then(|rows| rows.iter().find(|w| w["workspace_id"] == id))
         .and_then(|w| w["label"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("caller workspace {id} has no label")))
+        .ok_or_else(|| {
+            Error::Invalid(format!("caller workspace {id} has no label"))
+                .because(Cause::WorkspaceUnavailable)
+        })
 }
 
 fn herdr(shell: &dyn Shell, args: &[String]) -> Result<Value> {
@@ -1413,12 +1418,7 @@ fn herdr(shell: &dyn Shell, args: &[String]) -> Result<Value> {
 }
 
 pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option<String>)> {
-    if !std::path::Path::new(&launch.cwd).is_dir() {
-        return Err(Error::Invalid(format!(
-            "{}: cwd does not exist: {}",
-            launch.host, launch.cwd
-        )));
-    }
+    crate::worktree::require_execution_directory(&launch.cwd)?;
     if let Some(pane) = &launch.pane {
         return Ok((pane.clone(), launch.terminal.clone()));
     }
@@ -1435,7 +1435,10 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
         .pointer("/result/root_pane/pane_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))?;
+        .ok_or_else(|| {
+            Error::Invalid(format!("herdr create returned no root pane: {value}"))
+                .because(Cause::WorkspaceUnavailable)
+        })?;
     let terminal = value
         .pointer("/result/root_pane/terminal_id")
         .and_then(Value::as_str)
@@ -1452,7 +1455,10 @@ fn live_terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
         .1
         .get(pane)
         .cloned()
-        .ok_or_else(|| Error::Invalid(format!("{pane}: cannot establish launch terminal identity")))
+        .ok_or_else(|| {
+            Error::Invalid(format!("{pane}: cannot establish launch terminal identity"))
+                .because(Cause::PaneUnavailable)
+        })
 }
 
 /// Retire a pane this launch allocated. Only that pane is closed, and only after the same
@@ -1469,30 +1475,35 @@ pub(crate) fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>)
             .iter()
             .any(|p| p.pane_id == pane && p.focused)
     {
-        return Err(Error::Invalid(format!("{pane}: caller or focused pane")));
+        return Err(
+            Error::Invalid(format!("{pane}: caller or focused pane")).because(Cause::PaneBusy)
+        );
     }
     let Some(expected) = terminal.filter(|id| !id.is_empty()) else {
-        return Err(Error::Invalid(format!(
-            "{pane}: the launch recorded no terminal identity"
-        )));
+        return Err(
+            Error::Invalid(format!("{pane}: the launch recorded no terminal identity"))
+                .because(Cause::PaneUnavailable),
+        );
     };
     if live_terminal(shell, pane)? != expected {
-        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed"))
+            .because(Cause::PaneIdentityMismatch));
     }
     if crate::probe::agent_list(shell)?
         .iter()
         .any(|agent| agent.pane == pane)
     {
-        return Err(Error::Invalid(format!(
-            "{pane}: an agent now owns the pane"
-        )));
+        return Err(
+            Error::Invalid(format!("{pane}: an agent now owns the pane")).because(Cause::PaneBusy),
+        );
     }
     if crate::probe::foreground(shell, pane)?.is_some() {
-        return Err(Error::Invalid(format!("{pane}: the pane is busy")));
+        return Err(Error::Invalid(format!("{pane}: the pane is busy")).because(Cause::PaneBusy));
     }
     // Inspection must not authorize closing a replacement terminal.
     if live_terminal(shell, pane)? != expected {
-        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed"))
+            .because(Cause::PaneIdentityMismatch));
     }
     shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
     Ok(())
@@ -1512,10 +1523,10 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
     let workspace = if let Some(id) = &launch.workspace {
         Some(id.clone())
     } else {
-        let name = launch
-            .workspace_name
-            .as_ref()
-            .ok_or_else(|| Error::Invalid("caller workspace name is required".into()))?;
+        let name = launch.workspace_name.as_ref().ok_or_else(|| {
+            Error::Invalid("caller workspace name is required".into())
+                .because(Cause::WorkspaceUnavailable)
+        })?;
         let value = herdr(shell, &["workspace".into(), "list".into()])?;
         value
             .pointer("/result/workspaces")
@@ -1530,10 +1541,9 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
             "workspace".into(),
             "create".into(),
             "--label".into(),
-            launch
-                .workspace_name
-                .clone()
-                .ok_or_else(|| Error::Invalid("missing workspace name".into()))?,
+            launch.workspace_name.clone().ok_or_else(|| {
+                Error::Invalid("missing workspace name".into()).because(Cause::WorkspaceUnavailable)
+            })?,
         ],
     })
 }
@@ -1582,13 +1592,15 @@ pub(crate) fn correlate(
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another request",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     if saved["host"] != json!(launch.host) {
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another host",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     // The receipt's own evidence is the first check. A receipt that names another command
     // or another request dispatched another job, whether or not its job record remains.
@@ -1599,7 +1611,8 @@ pub(crate) fn correlate(
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another command or request",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     // The job record is a second check, not a prerequisite. The prune removes a terminal
     // job record and keeps its receipt, so the receipt carries the replay alone.
@@ -1611,7 +1624,7 @@ pub(crate) fn correlate(
             return Err(Error::Invalid(format!(
                 "job {} has a legacy launch receipt without request evidence; inspect that host before resubmitting",
                 launch.id
-            )));
+            )).because(Cause::LaunchReceiptMissing));
         }
         // A complete receipt also names the pane it dispatched into. Without it the receipt
         // proves no dispatch, so a replay refuses.
@@ -1623,21 +1636,23 @@ pub(crate) fn correlate(
             return Err(Error::Invalid(format!(
                 "job {} has a launch receipt without a pane; inspect that host before resubmitting",
                 launch.id
-            )));
+            ))
+            .because(Cause::LaunchReceiptMissing));
         }
         return Ok(());
     };
     if job.id != launch.id {
-        return Err(Error::Invalid(format!(
-            "job {} claim belongs to job {}",
-            launch.id, job.id
-        )));
+        return Err(
+            Error::Invalid(format!("job {} claim belongs to job {}", launch.id, job.id))
+                .because(Cause::LaunchReceiptMismatch),
+        );
     }
     if saved["pane"] != json!(job.pane) {
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another pane",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     if job.cmd != cmd
         || job.cwd != launch.cwd
@@ -1650,7 +1665,8 @@ pub(crate) fn correlate(
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another command or request",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     Ok(())
 }
@@ -1663,7 +1679,8 @@ fn require_unclaimed(ledger: &Ledger, id: &str) -> Result<()> {
                 "job {} has an unresolved claim; inspect that host before resubmitting: {}",
                 id,
                 held.reason.unwrap_or_else(|| "outcome unknown".into())
-            )));
+            ))
+            .because(Cause::JobClaimUnresolved));
         }
         jobs::Ownership::Pending(_)
         | jobs::Ownership::Started(_)
@@ -1676,7 +1693,7 @@ fn require_unclaimed(ledger: &Ledger, id: &str) -> Result<()> {
         // overwrites nothing, saves no receipt, and releases no preparation.
         return Err(Error::Invalid(format!(
             "job {id} has a claim but no saved launch receipt; inspect that host before resubmitting"
-        )));
+        )).because(Cause::JobClaimExists));
     }
     Ok(())
 }
@@ -1810,7 +1827,8 @@ pub fn receive_launch(
                         return Err(Error::Invalid(format!(
                             "job {} request validity changed",
                             launch.id
-                        )));
+                        ))
+                        .because(Cause::RequestChanged));
                     }
                     None if crate::launch_store::receipt(ledger, &launch.id)?.is_none() => {
                         jobs::check_validity(ledger, validity.as_ref())?;
@@ -1877,14 +1895,18 @@ fn launch_with_ingress(
                 }
                 crate::prepare::disposition::replay_guarded(ledger, shell, launch)
             })?;
-        return replay?.ok_or_else(|| Error::Invalid("final launch receipt disappeared".into()));
+        return replay?.ok_or_else(|| {
+            Error::Invalid("final launch receipt disappeared".into())
+                .because(Cause::LaunchReceiptMissing)
+        });
     }
     if !matches!(launch.action, Action::Job { .. })
         && peer_validity != Some(jobs::REQUEST_VALIDITY_PROTOCOL_VERSION)
     {
-        return Err(Error::Invalid(
-            "unsupported non-job request validity protocol".into(),
-        ));
+        return Err(
+            Error::Invalid("unsupported non-job request validity protocol".into())
+                .because(Cause::ProtocolUnsupported),
+        );
     }
     if matches!(launch.action, Action::Job { .. }) {
         require_unclaimed(ledger, &launch.id)?;
@@ -1895,8 +1917,10 @@ fn launch_with_ingress(
         .with_lock(&launch.id, || {
             launch_test_barrier("ENTERED_GATE")?;
             if crate::prepare::validate_launch_binding(ledger, launch)?.legacy_final {
-                return replay_launch(ledger, launch)?
-                    .ok_or_else(|| crate::worktree::refuse("historical final launch disappeared"));
+                return replay_launch(ledger, launch)?.ok_or_else(|| {
+                    crate::worktree::refuse("historical final launch disappeared")
+                        .because(Cause::LaunchReceiptMissing)
+                });
             }
             // The preparation gate can wait behind a completed dispatch.
             jobs::reject_unstarted(ledger, &launch.id)?;
@@ -1939,8 +1963,8 @@ pub(crate) fn launch_test_barrier(phase: &str) -> Result<()> {
 
 fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<Value> {
     let job = matches!(launch.action, Action::Job { .. });
-    if job && !std::path::Path::new(&launch.cwd).is_dir() {
-        return Err(crate::worktree::refuse("execution directory disappeared"));
+    if job {
+        crate::worktree::require_execution_directory(&launch.cwd)?;
     }
     let (_, saved) = launch_checkout(ledger, launch)?;
     let before = if job {
@@ -1948,10 +1972,7 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
     } else {
         None
     };
-    let pin = before
-        .as_ref()
-        .map(crate::worktree::Linked::pin)
-        .transpose()?;
+    let pin = before.as_ref().map(Linked::pin).transpose()?;
     let repo = saved.as_ref().map(|t| std::path::PathBuf::from(&t.repo));
     let common = crate::worktree::common_dir(shell, std::path::Path::new(&launch.cwd));
     if repo.is_none() && before.is_none() && common.is_err() {
@@ -1980,47 +2001,55 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
             check_launch_validity(ledger, launch)?;
         }
         if current != saved {
-            return Err(crate::worktree::refuse(
-                "launch checkout changed while waiting",
-            ));
+            return Err(
+                crate::worktree::refuse("launch checkout changed while waiting")
+                    .because(Cause::CheckoutIdentityMismatch),
+            );
         }
         if recorded && saved.is_none() {
-            return Err(crate::worktree::refuse(
-                "recorded launch has no checkout identity",
-            ));
+            return Err(
+                crate::worktree::refuse("recorded launch has no checkout identity")
+                    .because(Cause::CheckoutUnavailable),
+            );
         }
         let live = if let Some(saved) = &saved {
-            let live = crate::worktree::snapshot(shell, &launch.cwd)?
-                .ok_or_else(|| crate::worktree::refuse("prepared checkout disappeared"))?;
+            let live = crate::worktree::snapshot(shell, &launch.cwd)?.ok_or_else(|| {
+                crate::worktree::refuse("prepared checkout disappeared")
+                    .because(Cause::CheckoutUnavailable)
+            })?;
             crate::worktree::validate_identity(shell, &live)?;
             if saved.identity != live.identity
                 || saved.branch != live.branch
                 || !crate::worktree::same(&saved.path, &live.path)
             {
-                return Err(crate::worktree::refuse(
-                    "prepared checkout identity changed",
-                ));
+                return Err(
+                    crate::worktree::refuse("prepared checkout identity changed")
+                        .because(Cause::CheckoutIdentityMismatch),
+                );
             }
             Some(live)
         } else if let Some(before) = &before {
-            let pin = pin
-                .as_ref()
-                .ok_or_else(|| crate::worktree::refuse("checkout is unpinned"))?;
+            let pin = pin.as_ref().ok_or_else(|| {
+                crate::worktree::refuse("checkout is unpinned").because(Cause::CheckoutUnavailable)
+            })?;
             pin.validate(before)?;
-            let observed = crate::worktree::snapshot(shell, &launch.cwd)?
-                .ok_or_else(|| crate::worktree::refuse("checkout disappeared"))?;
+            let observed = crate::worktree::snapshot(shell, &launch.cwd)?.ok_or_else(|| {
+                crate::worktree::refuse("checkout disappeared").because(Cause::CheckoutUnavailable)
+            })?;
             if before.identity.is_some()
                 && before.tree().drift(&observed.tree()) != crate::cleanup::Drift::Same
             {
-                return Err(crate::worktree::refuse(
-                    "checkout identity changed before launch",
-                ));
+                return Err(
+                    crate::worktree::refuse("checkout identity changed before launch")
+                        .because(Cause::CheckoutIdentityMismatch),
+                );
             }
             if before.gitdir != observed.gitdir
                 || before.head != observed.head
                 || before.branch != observed.branch
             {
-                return Err(crate::worktree::refuse("checkout changed before launch"));
+                return Err(crate::worktree::refuse("checkout changed before launch")
+                    .because(Cause::CheckoutIdentityMismatch));
             }
             // Both directory inodes are pinned across the wait. Fresh discovery may create
             // the first generation, but must never replace a known pre-lock identity.
@@ -2028,7 +2057,8 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
             pin.validate(before)?;
             live
         } else if job {
-            return Err(crate::worktree::refuse("repository checkout is unreadable"));
+            return Err(crate::worktree::refuse("repository checkout is unreadable")
+                .because(Cause::CheckoutUnavailable));
         } else {
             guard.discover(shell, &launch.cwd)?
         };
@@ -2070,9 +2100,10 @@ fn launch_checkout(
         .zip(captured.as_ref())
         .is_some_and(|(prepared, saved)| prepared.identity != saved.identity)
     {
-        return Err(crate::worktree::refuse(
-            "preparation and launch checkout identities differ",
-        ));
+        return Err(
+            crate::worktree::refuse("preparation and launch checkout identities differ")
+                .because(Cause::CheckoutIdentityMismatch),
+        );
     }
     Ok((recorded, preparation.or(captured)))
 }
@@ -2139,11 +2170,15 @@ fn launch_guarded(
                     checkout,
                 )?,
                 Action::Agent { .. } => {
-                    return Err(Error::Invalid(
-                        "agent launch must use its receipt owner".into(),
-                    ));
+                    return Err(
+                        Error::Invalid("agent launch must use its receipt owner".into())
+                            .because(Cause::RequestChanged),
+                    );
                 }
-                Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
+                Action::Place => {
+                    return Err(Error::Invalid("place does not launch a pane".into())
+                        .because(Cause::InvalidRequest));
+                }
             };
             if let Some(checkout) = checkout {
                 result["checkout"] = serde_json::to_value(checkout)?;
@@ -2269,13 +2304,15 @@ pub(crate) fn agent_argv(
         "claude" | "codex" => {
             return Err(Error::Invalid(
                 "profiles configure Pi children; omit --profile or use --kind pi".into(),
-            ));
+            )
+            .because(Cause::ProfileInvalid));
         }
         other => {
             return Err(Error::Invalid(format!(
                 "kind {other} cannot take its task at launch; use one of {}",
                 KINDS.join(", ")
-            )));
+            ))
+            .because(Cause::InvalidRequest));
         }
     };
     args.push(task);
@@ -2288,6 +2325,7 @@ pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
          types it as one terminal line, which holds at most 1024 bytes; the task is not on \
          it, so shorten the name, the profile's flags or the state directory's path"
     ))
+    .because(Cause::CommandTooLong)
 }
 
 /// A new request runs now only when no ticket that could take one of its hosts waits ahead of
@@ -2550,7 +2588,8 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
                 .launch
                 .as_ref()
                 .ok_or_else(|| Error::Invalid("missing prepared launch".into()))?;
-            let result = finish(fleet, request, &host, launch, now)?;
+            let result = finish(fleet, request, &host, launch, now);
+            let result = record_launch_outcome(fleet.ledger, id, &mut attempt, result)?;
             save_result(fleet.ledger, id, attempt, &result)?;
             return Ok(Some(result));
         }
@@ -2559,6 +2598,20 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
         }
     }
     begin(fleet, request, now)
+}
+
+fn record_launch_outcome(
+    ledger: &Ledger,
+    id: &str,
+    attempt: &mut Attempt,
+    outcome: Result<Value>,
+) -> Result<Value> {
+    if let Err(error) = &outcome {
+        attempt.error = Some(error.to_string());
+        attempt.diagnostic = error.diagnostic().cloned();
+        crate::admissions::put(ledger, id, attempt)?;
+    }
+    outcome
 }
 
 fn save_result(ledger: &Ledger, id: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
@@ -2615,7 +2668,8 @@ fn begin(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     };
     attempt.launch = Some(launch_request.clone());
     crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
-    let result = finish(fleet, request, &host, &launch_request, now)?;
+    let result = finish(fleet, request, &host, &launch_request, now);
+    let result = record_launch_outcome(fleet.ledger, &request.id, &mut attempt, result)?;
     save_result(fleet.ledger, &request.id, attempt, &result)?;
     Ok(Some(result))
 }
@@ -2698,8 +2752,10 @@ fn prepared_launch(
     } else if host.is_local() {
         request.cwd.clone()
     } else if let (Some(checkout), Some(repo)) = (checkout, &request.repository) {
-        let relative = std::path::Path::new(&request.cwd)
-            .strip_prefix(&repo.working_root)
+        let cwd = std::path::Path::new(&request.cwd).canonicalize()?;
+        let working_root = std::path::Path::new(&repo.working_root).canonicalize()?;
+        let relative = cwd
+            .strip_prefix(&working_root)
             .map_err(|_| Error::Invalid("repository cwd is outside its working root".into()))?;
         std::path::Path::new(&checkout)
             .join(relative)

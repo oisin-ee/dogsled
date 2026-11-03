@@ -55,7 +55,8 @@ pub fn validate_launch_binding(
     {
         return Err(worktree::refuse(
             "preparation receipt is missing its binding; claim remains held",
-        ));
+        )
+        .because(Cause::PreparationBindingMissing));
     }
     let historical = receipt
         .as_ref()
@@ -72,7 +73,8 @@ pub fn validate_launch_binding(
         {
             return Err(worktree::refuse(
                 "preparation binding no longer matches its immutable outcome",
-            ));
+            )
+            .because(Cause::PreparationBindingMismatch));
         }
     }
     let expected = receipt.as_ref().and_then(|r| r.binding.as_ref());
@@ -84,9 +86,10 @@ pub fn validate_launch_binding(
         false
     };
     if launch.preparation.as_deref() != expected && !legacy_final {
-        return Err(worktree::refuse(
-            "preparation binding changed; ownership remains unresolved",
-        ));
+        return Err(
+            worktree::refuse("preparation binding changed; ownership remains unresolved")
+                .because(Cause::PreparationBindingMismatch),
+        );
     }
     Ok(LaunchAuthority {
         binding: expected.cloned().map(Box::new),
@@ -216,7 +219,8 @@ pub fn validate_ack(
     {
         return Err(worktree::refuse(
             "unproven preparation disposition acknowledgement; ownership remains unresolved",
-        ));
+        )
+        .because(Cause::PreparationBindingMismatch));
     }
     Ok(())
 }
@@ -240,9 +244,12 @@ pub fn launch_response(
     let receipt =
         crate::preparation_store::dispositions::get(ledger, &launch.id)?.ok_or_else(|| {
             worktree::refuse("launch has no disposition proof; execution remains unresolved")
+                .because(Cause::PreparationBindingMissing)
         })?;
     if receipt.progress != disposition::Progress::Released {
-        return Err(worktree::refuse("launch disposition remains held"));
+        return Err(
+            worktree::refuse("launch disposition remains held").because(Cause::PreparationHeld)
+        );
     }
     validate_transfer(launch, &result, &receipt.request)?;
     Ok(serde_json::to_value(LaunchResponse {
@@ -262,7 +269,8 @@ fn validate_transfer(
     {
         return Err(worktree::refuse(
             "launch disposition binding changed; execution remains unresolved",
-        ));
+        )
+        .because(Cause::PreparationBindingMismatch));
     }
     match &request.policy {
         disposition::Policy::Transfer {
@@ -277,7 +285,8 @@ fn validate_transfer(
         }
         _ => Err(worktree::refuse(
             "launch disposition owner changed; execution remains unresolved",
-        )),
+        )
+        .because(Cause::PreparationBindingMismatch)),
     }
 }
 
@@ -344,11 +353,16 @@ pub fn main_checkout(shell: &dyn Shell, repo: &str) -> Result<PathBuf> {
     )?;
     let path = Path::new(out.stdout.trim());
     if path.as_os_str().is_empty() {
-        return Err(Error::Invalid("git returned no checkout".into()));
+        return Err(
+            Error::Invalid("git returned no checkout".into()).because(Cause::CheckoutUnavailable)
+        );
     }
     Ok(if path.file_name().is_some_and(|name| name == ".git") {
         path.parent()
-            .ok_or_else(|| Error::Invalid("git returned no checkout parent".into()))?
+            .ok_or_else(|| {
+                Error::Invalid("git returned no checkout parent".into())
+                    .because(Cause::CheckoutUnavailable)
+            })?
             .to_path_buf()
     } else {
         path.to_path_buf()
@@ -456,16 +470,18 @@ fn deliver_with(
     placement: Option<&crate::node::PlacementReplay>,
 ) -> Result<Prepared> {
     if envelope.version != ENVELOPE_VERSION {
-        return Err(worktree::refuse(
-            "unsupported preparation validity envelope",
-        ));
+        return Err(
+            worktree::refuse("unsupported preparation validity envelope")
+                .because(Cause::ProtocolUnsupported),
+        );
     }
     crate::jobs::validate_id(&envelope.request_id)?;
     if envelope
         .validity
         .is_some_and(|validity| validity.version != crate::jobs::Validity::VERSION)
     {
-        return Err(worktree::refuse("unsupported preparation validity stamp"));
+        return Err(worktree::refuse("unsupported preparation validity stamp")
+            .because(Cause::ProtocolUnsupported));
     }
     if host.is_local() {
         if placement.is_none() {
@@ -499,7 +515,10 @@ fn deliver_with(
         "--request-created-ms".into(),
         envelope
             .validity
-            .ok_or_else(|| worktree::refuse("request validity is unprovable"))?
+            .ok_or_else(|| {
+                worktree::refuse("request validity is unprovable")
+                    .because(Cause::ValidityUnprovable)
+            })?
             .created_ms
             .to_string(),
         "--preparation-protocol".into(),
@@ -522,14 +541,15 @@ fn deliver_with(
     }
     let prepared: Prepared = fleet.remote_setup(host, &args)?;
     validate_prepared(&prepared, &envelope.request_id)?;
-    let binding = prepared
-        .binding
-        .as_deref()
-        .ok_or_else(|| worktree::refuse("preparation binding disappeared"))?;
+    let binding = prepared.binding.as_deref().ok_or_else(|| {
+        worktree::refuse("preparation binding disappeared")
+            .because(Cause::PreparationBindingMissing)
+    })?;
     if binding.request.1 != envelope.branch || binding.request.2 != envelope.base {
         return Err(worktree::refuse(
             "peer returned a different preparation request; ownership remains unresolved",
-        ));
+        )
+        .because(Cause::PreparationBindingMismatch));
     }
     Ok(prepared)
 }
@@ -999,6 +1019,7 @@ fn lookup_receipt(
 pub fn validate_prepared(prepared: &Prepared, id: &str) -> Result<()> {
     let binding = prepared.binding.as_deref().ok_or_else(|| {
         worktree::refuse("peer returned no preparation binding; ownership remains unresolved")
+            .because(Cause::PreparationBindingMissing)
     })?;
     let mut snapshot = prepared.clone();
     snapshot.binding = None;
@@ -1014,7 +1035,8 @@ pub fn validate_prepared(prepared: &Prepared, id: &str) -> Result<()> {
     {
         return Err(worktree::refuse(
             "peer returned a mismatched preparation binding; ownership remains unresolved",
-        ));
+        )
+        .because(Cause::PreparationBindingMismatch));
     }
     Ok(())
 }
@@ -1022,18 +1044,18 @@ pub fn validate_prepared(prepared: &Prepared, id: &str) -> Result<()> {
 /// Path equivalence can be established only where the checkout actually lives.
 fn validate_prepared_host(prepared: &Prepared, id: &str) -> Result<()> {
     validate_prepared(prepared, id)?;
-    let binding = prepared
-        .binding
-        .as_deref()
-        .ok_or_else(|| worktree::refuse("missing preparation binding"))?;
+    let binding = prepared.binding.as_deref().ok_or_else(|| {
+        worktree::refuse("missing preparation binding").because(Cause::PreparationBindingMissing)
+    })?;
     if prepared
         .path
         .as_deref()
         .is_none_or(|path| !worktree::same(path, &binding.claim.tree.path))
     {
-        return Err(worktree::refuse(
-            "prepared path does not name the captured checkout",
-        ));
+        return Err(
+            worktree::refuse("prepared path does not name the captured checkout")
+                .because(Cause::CheckoutIdentityMismatch),
+        );
     }
     Ok(())
 }
@@ -1043,7 +1065,8 @@ pub fn require_protocol(version: Option<u32>) -> Result<()> {
     if version != Some(disposition::VERSION) {
         return Err(worktree::refuse(
             "unsupported preparation disposition protocol; ownership remains held",
-        ));
+        )
+        .because(Cause::ProtocolUnsupported));
     }
     Ok(())
 }
@@ -1084,9 +1107,7 @@ fn local_with(
     request_id: Option<&str>,
     delivery: Delivery<'_>,
 ) -> Result<Prepared> {
-    let id = request_id.ok_or_else(|| {
-        worktree::refuse("request validity is unprovable; requestless preparation refused")
-    })?;
+    let id = claim_id(request_id)?;
     let placement = delivery.placement;
     crate::jobs::validate_id(id)?;
     let receipts = ledger.child("preparation-receipts");
@@ -1251,9 +1272,10 @@ pub(crate) fn retention_completion(
         return Ok(None);
     };
     if disposition::retention_completion(ledger, id)? != Some(finished) {
-        return Err(worktree::refuse(
-            "preparation completion provenance changed",
-        ));
+        return Err(
+            worktree::refuse("preparation completion provenance changed")
+                .because(Cause::RequestChanged),
+        );
     }
     crate::jobs::completion_time(
         ledger,
@@ -1350,12 +1372,14 @@ fn replay(id: &str, receipt: &PreparationReceipt) -> Result<Prepared> {
     match (&receipt.prepared, &receipt.failure) {
         (Some(_), Some(_)) => Err(Error::Invalid(format!(
             "request {id} has a contradictory preparation receipt; inspect this host"
-        ))),
+        ))
+        .because(Cause::PreparationContradictory)),
         (Some(prepared), None) => Ok(prepared.clone()),
         (None, Some(failure)) => Err(failure.restore()),
         (None, None) => Err(Error::Invalid(format!(
             "request {id} stopped during preparation; inspect this host before resubmitting"
-        ))),
+        ))
+        .because(Cause::PreparationInterrupted)),
     }
 }
 
@@ -1416,9 +1440,10 @@ fn validate_branch(shell: &dyn Shell, branch: &str) -> Result<()> {
             )?
             .ok()
     {
-        return Err(Error::Invalid(format!(
-            "{branch} is not a valid branch name"
-        )));
+        return Err(
+            Error::Invalid(format!("{branch} is not a valid branch name"))
+                .because(Cause::BranchInvalid),
+        );
     }
     Ok(())
 }
@@ -1448,7 +1473,10 @@ fn local_guarded(
     validate_branch(shell, branch)?;
     shell
         .run_ok("herdr", &["workspace".into(), "list".into()])
-        .map_err(|e| Error::Invalid(format!("no Herdr server is reachable on this host: {e}")))?;
+        .map_err(|e| {
+            Error::Invalid(format!("no Herdr server is reachable on this host: {e}"))
+                .because(Cause::HerdrUnavailable)
+        })?;
     let existing = worktree::list(shell, checkout)?
         .into_iter()
         .find(|w| w.branch.as_deref() == Some(branch));
@@ -1557,7 +1585,10 @@ fn check_effect<'a>(
 }
 
 fn claim_id(request_id: Option<&str>) -> Result<&str> {
-    request_id.ok_or_else(|| worktree::refuse("requestless preparation refused"))
+    request_id.ok_or_else(|| {
+        worktree::refuse("request validity is unprovable; requestless preparation refused")
+            .because(Cause::ValidityUnprovable)
+    })
 }
 
 struct Preparation<'a> {
@@ -1629,9 +1660,9 @@ fn make(
         })?;
         (path, true)
     };
-    let linked = guard
-        .discover(shell, &path)?
-        .ok_or_else(|| worktree::refuse("prepared checkout disappeared"))?;
+    let linked = guard.discover(shell, &path)?.ok_or_else(|| {
+        worktree::refuse("prepared checkout disappeared").because(Cause::CheckoutUnavailable)
+    })?;
     let id = claim_id(request_id)?;
     let pending = Pending {
         tree: linked.tree(),
@@ -1698,9 +1729,10 @@ pub fn on_host(
     placement: Option<&crate::node::PlacementReplay>,
 ) -> Result<Prepared> {
     if envelope.version != ENVELOPE_VERSION {
-        return Err(worktree::refuse(
-            "unsupported preparation validity envelope",
-        ));
+        return Err(
+            worktree::refuse("unsupported preparation validity envelope")
+                .because(Cause::ProtocolUnsupported),
+        );
     }
     let repo = Path::new(node.home)
         .join(&envelope.repo)
