@@ -13,13 +13,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.28.0
+mise use github:oisin-ee/dogsled@v0.31.0 # x-release-please-version
 ```
 
 Pi (extension, tools, the `todo` tool, and skill), from npm:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.31.0
+pi install npm:@oisin-ee/pi-dogsled@0.31.0 # x-release-please-version
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -48,6 +48,31 @@ herdr plugin install oisin-ee/dogsled --ref v0.28.0 --yes
 ```
 
 The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build step (`plugin/fetch.sh`) installs its own binary at `bin/dogsled`: the release archive for the manifest version, checked against its published SHA-256. When that release has no archive for the platform, it runs `cargo build --release --locked` instead, which needs Rust at the crate's `rust-version` or newer. A checksum mismatch stops the install. `DOGSLED_RELEASES` replaces the download base, such as a mirror. `herdr plugin link` skips build steps, so run `sh plugin/fetch.sh` in a linked checkout. No plugin starts host services.
+
+## Releasing
+
+Ordinary merges to `main` do not bump versions or publish packages.
+Release-please maintains one release PR with lockstep versions and a changelog from conventional commits.
+Every commit subject that reaches `main` must use conventional commits. For a squash merge, that subject is the PR title.
+The bot uses `GITHUB_TOKEN`, so its release-PR updates do not start CI.
+Nothing auto-merges the release PR.
+
+When the user requests a release, merge the open release-please PR.
+The merge runs the full CI suite through the reusable CI workflow.
+After CI passes, the publish job creates `vX.Y.Z` at that release commit and dispatches dist.
+Dist publishes the binaries and calls the existing npm publisher.
+The publish job changes `autorelease: pending` to `autorelease: tagged` so release-please can prepare the next release.
+
+If CI fails before tag creation, rerun the failed jobs at the same revision.
+If dispatch fails after tag creation, dispatch the existing tag manually:
+
+```sh
+gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z
+```
+
+Never move an existing tag.
+A partial publication can leave conflicting assets and requires review before a retry.
+If dispatch failed before the label change, change the merged PR label from `autorelease: pending` to `autorelease: tagged` after dispatch succeeds.
 
 ## Web portal
 

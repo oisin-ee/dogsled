@@ -10,23 +10,11 @@ use crate::ledger::Ledger;
 /// empty: earlier records are not read or converted.
 const VERSION: i64 = 4;
 
-fn supported_version() -> i64 {
-    if cfg!(debug_assertions)
-        && crate::upgrade::reported_version() != env!("CARGO_PKG_VERSION")
-        && let Ok(version) = std::env::var("DOGSLED_TEST_SCHEMA_VERSION")
-        && let Ok(version) = version.parse()
-    {
-        return version;
-    }
-    VERSION
-}
-
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
     [
         crate::tables::SCHEMA,
         crate::tables::SERVICE_LANES_SCHEMA,
-        crate::tables::WRITER_SCHEMA,
         crate::admissions::SCHEMA,
         crate::launch_store::SCHEMA,
         crate::web_store::SCHEMA,
@@ -41,7 +29,7 @@ pub(crate) fn schema() -> String {
 
 /// The script that creates a fresh store: the schema, then its version.
 pub(crate) fn creation() -> String {
-    format!("{}PRAGMA user_version = {};", schema(), supported_version())
+    format!("{}PRAGMA user_version = {VERSION};", schema())
 }
 
 fn create(connection: &Connection) -> Result<()> {
@@ -50,16 +38,10 @@ fn create(connection: &Connection) -> Result<()> {
 }
 
 fn version(connection: &Connection) -> Result<i64> {
-    crate::upgrade::guard(connection)?;
-    schema_version(connection)
-}
-
-pub(crate) fn schema_version(connection: &Connection) -> Result<i64> {
     let version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let supported = supported_version();
-    if version > supported {
+    if version > VERSION {
         return Err(Error::Invalid(format!(
-            "state.db schema version {version} is newer than supported version {supported}"
+            "state.db schema version {version} is newer than supported version {VERSION}"
         )));
     }
     Ok(version)
@@ -82,25 +64,19 @@ fn database(ledger: &Ledger) -> Result<std::path::PathBuf> {
 fn open(ledger: &Ledger) -> Result<Connection> {
     let path = database(ledger)?;
     std::fs::create_dir_all(&ledger.dir)?;
-    let mut connection = Connection::open(&path)?;
+    let mut connection = Connection::open(path)?;
     connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
     // Refuse a newer schema before changing persistent connection settings.
     let current = version(&connection)?;
     connection.execute_batch("PRAGMA synchronous=FULL;")?;
-    if current < supported_version() {
+    if current < VERSION {
         // Two fresh openers deadlock upgrading SHARED to EXCLUSIVE for WAL; SQLite returns BUSY without calling the busy handler.
         ledger.with_lock("state-db", || {
             let current = version(&connection)?;
             connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
-            if current < supported_version() {
+            if current < VERSION {
                 // An older store starts again empty. Nothing reads or converts it.
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                // Recheck inside the write transaction: another binary may have opened
-                // and registered since the schema check above.
-                if version(&tx)? == supported_version() {
-                    tx.commit()?;
-                    return Ok(());
-                }
                 let tables: Vec<String> = tx
                     .prepare(
                         "SELECT name FROM sqlite_schema
@@ -112,10 +88,6 @@ fn open(ledger: &Ledger) -> Result<Connection> {
                     tx.execute_batch(&format!("DROP TABLE \"{table}\""))?;
                 }
                 create(&tx)?;
-                // Publish the replacement schema and its executable owner atomically.
-                if crate::upgrade::registration_allowed(&path)? {
-                    crate::tables::save_writer(&tx, &crate::upgrade::self_writer()?)?;
-                }
                 tx.commit()?;
             }
             Ok(())
@@ -124,7 +96,6 @@ fn open(ledger: &Ledger) -> Result<Connection> {
         connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
     }
     connection.execute_batch("PRAGMA foreign_keys=ON;")?;
-    crate::upgrade::register(&mut connection, &path)?;
     Ok(connection)
 }
 
@@ -206,11 +177,10 @@ fn identity(path: &std::path::Path) -> Result<Option<Identity>> {
 /// A connection to this ledger's store: the cached one when it still opens the same file
 /// at the supported version, otherwise a new one.
 fn connection(ledger: &Ledger, path: &std::path::Path) -> Result<(Identity, Connection)> {
-    if let Some((cached, mut connection)) = CONNECTIONS.with_borrow_mut(|open| open.remove(path))
+    if let Some((cached, connection)) = CONNECTIONS.with_borrow_mut(|open| open.remove(path))
         && identity(path)? == Some(cached)
-        && version(&connection)? == supported_version()
+        && version(&connection)? == VERSION
     {
-        crate::upgrade::register(&mut connection, path)?;
         return Ok((cached, connection));
     }
     let connection = open(ledger)?;
@@ -250,7 +220,6 @@ fn transact<T>(
         let (opened, mut connection) = connection(ledger, &path)?;
         connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
         let tx = connection.transaction_with_behavior(behavior)?;
-        crate::upgrade::guard(&tx)?;
         let result = f(&tx)?;
         tx.commit()?;
         CONNECTIONS.with_borrow_mut(|open| open.insert(path, (opened, connection)));

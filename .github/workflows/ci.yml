@@ -1,11 +1,10 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -19,12 +18,8 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  rust:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
+  checks:
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -40,16 +35,48 @@ jobs:
       # .prototools pins moon, node, dx, pnpm, wasm-bindgen, and shfmt.
       - run: proto install
       - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: moon run dogsled:fmt-check todo-core:fmt todo-wasm:fmt prewalk-core:fmt prewalk-wasm:fmt
       - name: Web lint
         run: moon run :web-lint
       - name: Web build
         run: moon run :web-build
-      - name: Format
-        run: moon run dogsled:fmt-check todo-core:fmt todo-wasm:fmt prewalk-core:fmt prewalk-wasm:fmt
+      - name: Upload web bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-bundle
+          path: web/public
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  rust:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Download web bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-bundle
+          path: web/public
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      - run: rustup toolchain install
+      - run: proto install
+      - uses: Swatinem/rust-cache@v2
+      # The checks job already satisfied the web-build dependency. Keep the
+      # local Moon dependencies, but do not rebuild the downloaded bundle.
       - name: Lint
-        run: moon run dogsled:lint :clippy
+        run: moon run dogsled:lint :clippy --upstream none
       - name: Test
-        run: moon run dogsled:test todo-core:test todo-wasm:test prewalk-core:test prewalk-wasm:test
+        run: moon run dogsled:test todo-core:test todo-wasm:test prewalk-core:test prewalk-wasm:test --upstream none
 
   typescript:
     runs-on: ubuntu-24.04

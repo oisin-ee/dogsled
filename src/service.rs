@@ -191,11 +191,8 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
 }
 
 pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
-    let outcome = node
-        .ledger
-        .with_lock("service", || run(node, policy, interval, once));
-    crate::upgrade::check(node.ledger)?;
-    outcome
+    node.ledger
+        .with_lock("service", || run(node, policy, interval, once))
 }
 
 /// One `--once` pass imports the handoffs this pass made: children follows the handoff lane.
@@ -249,87 +246,68 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut completed = [false; LANES.len()];
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
-    let outcome = (|| {
+    loop {
+        // The socket only reduces latency. Recover pending requests on every publication
+        // iteration, including when the socket cannot bind or a notification was lost.
+        requested |= crate::sweep::pending(node.ledger)?;
+        node.tick(now_ms())?;
+        if let Err(error) = crate::board::collect_todos(node.ledger) {
+            eprintln!("dogsled service: todo intake failed: {error}");
+        }
+        start_lanes(node, policy, once, &mut workers, completed, &send);
+        next += interval;
         loop {
-            let current = match crate::upgrade::newer(node.ledger)? {
-                crate::upgrade::Boundary::Ready(_) => return Ok(()),
-                crate::upgrade::Boundary::Current => true,
-                crate::upgrade::Boundary::Pending(error) => {
-                    eprintln!("dogsled service upgrade: {error}");
-                    next = Instant::now();
-                    false
-                }
-            };
-            if current {
-                // The socket only reduces latency. Recover requests on every publication pass.
-                requested |= crate::sweep::pending(node.ledger)?;
-                node.tick(now_ms())?;
-                if let Err(error) = crate::board::collect_todos(node.ledger) {
-                    eprintln!("dogsled service: todo intake failed: {error}");
-                }
-                start_lanes(node, policy, once, &mut workers, completed, &send);
+            if requested && sweep.is_none() {
+                requested = false;
+                let mut ledger = node.ledger.clone();
+                ledger.budget = crate::budget::Budget::default();
+                let policy = policy.clone();
+                let home = node.home.to_owned();
+                let send = send.clone();
+                sweep = Some(std::thread::spawn(move || {
+                    let shell = System::default();
+                    let node = Node {
+                        shell: &shell,
+                        ledger: &ledger,
+                        thresholds: (&policy).into(),
+                        home: &home,
+                        cleanup: &policy.cleanup,
+                    };
+                    let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
+                }));
             }
-            next += interval;
-            loop {
-                if current && requested && sweep.is_none() {
-                    requested = false;
-                    let mut ledger = node.ledger.clone();
-                    ledger.budget = crate::budget::Budget::default();
-                    let policy = policy.clone();
-                    let home = node.home.to_owned();
-                    let send = send.clone();
-                    sweep = Some(std::thread::spawn(move || {
-                        let shell = System::default();
-                        let node = Node {
-                            shell: &shell,
-                            ledger: &ledger,
-                            thresholds: (&policy).into(),
-                            home: &home,
-                            cleanup: &policy.cleanup,
-                        };
-                        let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
-                    }));
+            if once && completed.iter().all(|done| *done) && sweep.is_none() {
+                return Ok(());
+            }
+            match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
+                Ok(Event::Sweep) => requested = true,
+                Ok(Event::Swept(result)) => {
+                    if let Some(handle) = sweep.take() {
+                        handle
+                            .join()
+                            .map_err(|_| Error::Invalid("service sweep worker failed".into()))?;
+                    }
+                    if let Err(error) = result {
+                        eprintln!("dogsled service sweep: {error}");
+                    }
                 }
-                if current && once && completed.iter().all(|done| *done) && sweep.is_none() {
-                    return Ok(());
+                Ok(Event::Finished(lane, result)) => {
+                    if let Some(handle) = workers[lane].take() {
+                        handle
+                            .join()
+                            .map_err(|_| Error::Invalid("service action worker failed".into()))?;
+                    }
+                    completed[lane] = true;
+                    diagnostics.record(node.ledger, LANES[lane], result);
+                    if once {
+                        start_lanes(node, policy, once, &mut workers, completed, &send);
+                    }
                 }
-                match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
-                    Ok(Event::Sweep) => requested = true,
-                    Ok(Event::Swept(result)) => {
-                        if let Some(handle) = sweep.take() {
-                            handle.join().map_err(|_| {
-                                Error::Invalid("service sweep worker failed".into())
-                            })?;
-                        }
-                        if let Err(error) = result {
-                            eprintln!("dogsled service sweep: {error}");
-                        }
-                    }
-                    Ok(Event::Finished(lane, result)) => {
-                        if let Some(handle) = workers[lane].take() {
-                            handle.join().map_err(|_| {
-                                Error::Invalid("service action worker failed".into())
-                            })?;
-                        }
-                        completed[lane] = true;
-                        diagnostics.record(node.ledger, LANES[lane], result);
-                        if once && current {
-                            start_lanes(node, policy, once, &mut workers, completed, &send);
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => break,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        return Err(Error::Invalid("service worker disconnected".into()));
-                    }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Invalid("service worker disconnected".into()));
                 }
             }
         }
-    })();
-    // No worker or service lock can cross exec: their external effects must finish.
-    for handle in workers.into_iter().flatten().chain(sweep) {
-        handle
-            .join()
-            .map_err(|_| Error::Invalid("service worker failed while draining".into()))?;
     }
-    outcome
 }

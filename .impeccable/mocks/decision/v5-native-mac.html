@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Native Mac</title>
+<style>
+:root{--win:#FFFFFF;--side:#ECEBEF;--hover:#DEDDE2;--label:#1D1D1F;--sec:#6E6E73;--ter:#A1A1A6;--sep:#D9D8DD;--blue:#007AFF;--orange:#FF9500;--green:#34C759;--red:#FF3B30;--fill:#F2F2F4}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden}
+body{font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;color:var(--label);background:var(--win);display:grid;grid-template-columns:280px 1fr 320px;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+::selection{background:#B3D7FF}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+.side{background:var(--side);border-right:1px solid var(--sep);display:flex;flex-direction:column;min-height:0}
+.lights{display:flex;gap:8px;padding:18px 18px 12px}.lights i{width:12px;height:12px;border-radius:50%;background:#FF5F57}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+.list{overflow:auto;min-height:0;flex:1;padding:0 10px 12px}
+.sh{display:flex;justify-content:space-between;padding:12px 8px 4px;font-size:11px;font-weight:600;color:var(--sec)}
+.row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;min-height:28px}
+.row:hover{background:var(--hover)}
+.row .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cap{font-size:11px;font-weight:600;color:var(--sec);background:#D9D8DE;border-radius:9px;padding:0 7px;line-height:17px}
+.row.sel{background:var(--blue);color:#fff}.row.sel .cap,.row.sel .m{color:#fff}.row.sel .cap{background:#ffffff40}
+.ask{align-items:flex-start;padding:7px 8px}
+.ico{width:22px;height:22px;border-radius:6px;background:var(--orange);color:#fff;display:grid;place-items:center;flex:none;margin-top:1px}
+.ico svg{width:13px;height:13px;stroke-width:2.2}
+.ask .t{white-space:normal;font-weight:600;line-height:1.3}.m{font-size:11.5px;color:var(--sec)}
+.ask time{font-size:11px;color:var(--ter)}
+.keys{display:flex;gap:5px;margin-top:6px}
+.keys button{height:22px;min-width:30px;padding:0 9px;border-radius:5px;background:#fff;box-shadow:0 0 0 .5px #0003,0 1px 1px #0000001a;font-size:12px;font-weight:500}
+.keys button.p{background:var(--blue);color:#fff;box-shadow:none}
+.dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--ter)}.dot.run{background:var(--green)}.dot.you{background:var(--orange)}
+.wk{padding-left:28px;color:var(--sec);font-size:12px;min-height:24px}
+.disc{width:10px;height:10px;color:var(--ter)}
+.main{display:flex;flex-direction:column;min-height:0;min-width:0}
+.bar{display:flex;align-items:center;gap:12px;height:52px;padding:0 16px 0 20px;border-bottom:1px solid var(--sep)}
+.bar>div{flex:1;min-width:0}.bar h1{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.bar p{font-size:11.5px;color:var(--sec)}
+.tb{display:grid;place-items:center;width:30px;height:28px;border-radius:6px;color:var(--sec)}.tb:hover{background:var(--fill)}
+.foot{border-top:1px solid var(--sep);padding:10px 18px 12px;font-size:11.5px;color:var(--sec)}.foot p{display:grid;grid-template-columns:84px 1fr 34px;align-items:center;padding:2px 0}.foot b{font-weight:500;text-align:right}
+.gauge{display:block;height:5px;border-radius:3px;background:#DAD9DE;overflow:hidden}.gauge i{display:block;height:100%;background:var(--green);border-radius:3px}
+.msgs{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:16px;padding:20px 0}
+.msgs>*{width:min(700px,calc(100% - 48px));margin:0 auto}
+.me{align-self:flex-end;width:auto!important;max-width:460px;margin-right:24px!important;background:var(--blue);color:#fff;border-radius:16px 16px 4px 16px;padding:8px 13px;font-size:13.5px}
+.md{font-size:13.5px;line-height:1.6}.md h3{font-size:15px;font-weight:600;margin-bottom:4px}
+.md p+*,.md ol+*{margin-top:8px}.md ol{padding-left:20px}
+.md code{font:12px ui-monospace,"SF Mono",Menlo,monospace;background:var(--fill);border-radius:4px;padding:1px 4px}
+.md pre{background:var(--fill);border-radius:8px;padding:10px 14px;font:12px/1.6 ui-monospace,"SF Mono",Menlo,monospace}
+.md pre code{padding:0;background:none}.kw{color:#AD3DA4}.nu{color:#272AD8}.cm{color:#707F8C}
+.md table{border-collapse:collapse;font-size:13px}.md th{text-align:left;font-weight:600;color:var(--sec)}.md td,.md th{padding:4px 24px 4px 0;border-bottom:1px solid var(--sep)}
+.tool{font:11.5px ui-monospace,"SF Mono",Menlo,monospace;color:var(--sec)}
+.live{display:flex;align-items:center;gap:8px;color:var(--sec)}
+.composer{display:flex;align-items:flex-end;gap:6px;margin:0 24px 16px;padding:5px;border-radius:18px;background:#fff;box-shadow:0 0 0 1px var(--sep),0 1px 3px #0000000f}
+.composer textarea{flex:1;border:0;resize:none;font:13.5px -apple-system,sans-serif;height:28px;padding:5px 2px;outline:none;caret-color:var(--blue)}
+.send{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--blue);color:#fff}
+.insp{border-left:1px solid var(--sep);display:flex;flex-direction:column;min-height:0;background:#FBFBFC}
+.ih{height:52px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;border-bottom:1px solid var(--sep)}
+.ih h2{font-size:20px;font-weight:700;color:var(--blue);letter-spacing:-.01em}.ih b{font-size:20px;font-weight:600;color:var(--blue)}
+.todos{overflow:auto;min-height:0;padding:6px 18px 16px}
+.sec{font-size:11px;font-weight:600;color:var(--sec);margin:14px 0 2px;display:flex;justify-content:space-between}
+.td{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid #EDEDF0;line-height:1.35}
+.ring{width:18px;height:18px;border-radius:50%;box-shadow:inset 0 0 0 1.5px #C7C7CC;flex:none}
+.td.now .ring{box-shadow:inset 0 0 0 1.5px var(--green),inset 0 0 0 4px #fff;background:var(--green)}
+.td.done{color:var(--ter)}.td.done .ring{box-shadow:inset 0 0 0 1.5px var(--blue),inset 0 0 0 4px #fff;background:var(--blue)}
+.td .m{margin-top:2px}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="doc" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8"/></symbol>
+<symbol id="ask" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+<symbol id="key" viewBox="0 0 24 24"><path d="M9 10l-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+<symbol id="moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+<symbol id="merge" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol><symbol id="chevd" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol><symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+</defs></svg>
+<aside class="side"><div class="lights"><i></i><i></i><i></i></div>
+ <div class="list">
+  <p class="sh"><span>Waiting on you</span><span>5</span></p>
+  <div class="row ask"><span class="ico"><svg class="i"><use href="#key"/></svg></span><div style="flex:1"><p class="t">Allow git push to origin?</p><p class="m">Writer on netcup · dogsled</p><div class="keys"><button>Yes</button><button>No</button><button>Esc</button></div></div><time>1m</time></div>
+  <div class="row ask"><span class="ico"><svg class="i"><use href="#doc"/></svg></span><div style="flex:1"><p class="t">Review plan: typed SQLite state</p><p class="m">Revision 3 · dogsled</p></div><time>8m</time></div>
+  <div class="row ask"><span class="ico"><svg class="i"><use href="#ask"/></svg></span><div style="flex:1"><p class="t">2 questions before the iOS gate</p><p class="m">rondo-lead · rondo</p></div><time>12m</time></div>
+  <div class="row ask"><span class="ico"><svg class="i"><use href="#moon"/></svg></span><div style="flex:1"><p class="t">Prune stale Herdr panes</p><p class="m">Worker idle 18 h · dogsled</p></div><time>18h</time></div>
+  <div class="row ask"><span class="ico"><svg class="i"><use href="#merge"/></svg></span><div style="flex:1"><p class="t">Land review/schwab-auth-transport-fix</p><p class="m">+3, never merged · rt100k</p><div class="keys"><button class="p">Land</button><button>Prune</button></div></div><time>2d</time></div>
+  <p class="sh"><span>dogsled</span></p>
+  <div class="row sel"><svg class="i disc"><use href="#chevd"/></svg><i class="dot run"></i><span class="t">Review d0a1246, release 0.29.3</span><span class="cap">4</span></div>
+  <div class="row wk"><i class="dot run"></i><span class="t">Fix placement retry</span><span class="m">netcup</span></div>
+  <div class="row wk"><i class="dot"></i><span class="t">Review d0a1246</span><span class="m">done</span></div>
+  <div class="row"><span class="disc"></span><i class="dot you"></i><span class="t">Move state into typed SQLite</span><span class="cap">3</span></div>
+  <div class="row"><svg class="i disc"><use href="#chev"/></svg><i class="dot"></i><span class="t">Find why Herdr panes linger</span><span class="cap">2</span></div>
+  <div class="row"><span class="disc"></span><i class="dot"></i><span class="t">Replace portal controls</span><span class="cap">5</span></div>
+  <p class="sh"><span>rondo</span></p>
+  <div class="row"><span class="disc"></span><i class="dot you"></i><span class="t">Build the iOS screens</span><span class="cap">8</span></div>
+  <p class="sh"><span>rt100k</span></p>
+  <div class="row"><svg class="i disc"><use href="#chev"/></svg><i class="dot run"></i><span class="t">Verify the Schwab auth fixtures</span><span class="cap">8</span></div>
+  <p class="sh"><span>grabcrft</span></p>
+  <div class="row"><span class="disc"></span><i class="dot"></i><span class="t">Milestone 3 plan</span><span class="cap">0</span></div>
+ </div>
+ <div class="foot"><p><span>local</span><span class="gauge"><i style="width:33%"></i></span><b>4/12</b></p><p><span>netcup</span><span class="gauge"><i style="width:25%"></i></span><b>4/16</b></p><p><span>momokaya-2</span><span class="gauge"><i style="width:14%"></i></span><b>1/7</b></p></div></aside>
+<section class="main">
+ <div class="bar"><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p>Working · lead · pi · claude-opus · local · main</p></div>
+  <button class="tb" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="tb" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button>
+</div>
+ <div class="msgs">
+  <p class="me">Review d0a1246, merge both fixes, then cut 0.29.3.</p>
+  <article class="md"><h3>Review of <code>d0a1246</code></h3><p>Both fixes hold. Two notes:</p>
+   <ol><li><strong>Prune order.</strong> <code>cleanup::prune</code> now closes the pane before it removes the worktree.</li><li><strong>Placement retry.</strong> Bounded at three attempts:</li></ol>
+   <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(<span class="nu">3</span>) {
+    <span class="kw">if</span> place(&amp;host).<span class="kw">await</span>.is_ok() { <span class="kw">break</span>; }
+    sleep(delay).<span class="kw">await</span>; <span class="cm">// 250 ms, 500 ms, 1 s</span>
+}</code></pre>
+   <table><tr><th>Gate</th><th>Result</th></tr><tr><td><code>moon run :lint</code></td><td>passed</td></tr><tr><td><code>moon run :test</code></td><td>958 → 960 passed</td></tr></table></article>
+  <p class="tool">bash · git merge --no-ff fix/prune-order fix/placement-retry</p>
+  <p class="live"><i class="dot run"></i>Running moon run :check on netcup</p>
+ </div>
+ <form class="composer"><button type="button" class="tb" aria-label="Attach image"><svg class="i"><use href="#plus"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#up"/></svg></button></form>
+</section>
+<aside class="insp"><div class="ih"><h2>Todos</h2><b>4</b></div>
+ <div class="todos">
+  <div class="td now"><i class="ring"></i><div>Release 0.29.3<p class="m">Tag v0.29.3 and push · writer · netcup</p></div></div>
+  <div class="td"><i class="ring"></i><div>Publish release notes</div></div>
+  <div class="td"><i class="ring"></i><div>Bump the dotfiles pin after the GitHub release</div></div>
+  <div class="td"><i class="ring"></i><div>Close #212 with the release link</div></div>
+  <p class="sec"><span>Completed</span><span>28</span></p>
+  <div class="td done"><i class="ring"></i><div>Merge fix/placement-retry</div></div>
+  <div class="td done"><i class="ring"></i><div>Merge fix/prune-order</div></div>
+  <div class="td done"><i class="ring"></i><div>Review d0a1246</div></div>
+  <p class="sec"><span>Abandoned</span><span>3</span></p>
+ </div></aside>
+</body></html>

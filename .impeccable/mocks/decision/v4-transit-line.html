@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · Transit Line</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;500;600;700;800&family=Overpass+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--ground:#0B1230;--panel:#101A3E;--deep:#070C22;--rule:#22305E;--ink:#F4F4F0;--ink2:#A9B1CC;--ink3:#6F7AA0;--amber:#FFC20E;--d:#E21D2D;--r:#1E5BFF;--t:#22B14C;--g:#F28CB1}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden}
+body{font:14px/1.5 Overpass,system-ui,sans-serif;color:var(--ink);background:var(--ground);display:grid;grid-template:52px 1fr/300px 1fr;font-variant-numeric:tabular-nums}
+::selection{background:var(--amber);color:var(--deep)}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+.mono,time{font:500 12px "Overpass Mono",monospace;color:var(--ink2)}
+header{grid-column:1/-1;display:flex;align-items:center;gap:20px;padding:0 20px;border-bottom:1px solid var(--rule)}
+.mark{font-weight:800;font-size:19px;letter-spacing:.01em}
+.hosts{margin-left:auto;display:flex;gap:26px}
+.host{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;color:var(--ink2)}
+.zone{display:flex;gap:3px}.zone i{width:7px;height:7px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--ink3)}.zone i.on{background:var(--ink);box-shadow:none}
+.host b{font:500 12px "Overpass Mono";color:var(--ink)}
+.bul{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;font:800 11px Overpass;color:#fff;flex:none}
+.inbox{border-right:1px solid var(--rule);display:flex;flex-direction:column;min-height:0}
+.ih{display:flex;align-items:center;justify-content:space-between;padding:16px 18px 10px;font-weight:700;font-size:15px}
+.ih b{background:var(--amber);color:var(--deep);border-radius:11px;padding:0 9px;font-size:13px}
+.inbox ul{list-style:none;overflow:auto;min-height:0;flex:1}
+.inbox li{display:flex;gap:12px;padding:12px 18px;border-top:1px solid var(--rule);cursor:pointer}
+.inbox li:hover{background:var(--panel)}
+.kind{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--amber);text-transform:uppercase;letter-spacing:.05em}
+.kind svg{width:13px;height:13px}
+.inbox .t{font-weight:600;line-height:1.3;margin-top:2px}.inbox .m{font-size:12.5px;color:var(--ink2)}
+.inbox time{margin-left:auto}
+.keys{display:flex;gap:6px;margin-top:8px}
+.keys button{height:28px;min-width:36px;padding:0 10px;border-radius:14px;box-shadow:inset 0 0 0 1.5px var(--ink2);font:500 12px "Overpass Mono"}
+.keys button.go{background:var(--ink);color:var(--deep);box-shadow:none;font-family:Overpass;font-weight:700}
+.right{display:grid;grid-template-rows:252px 1fr;min-height:0;min-width:0}
+.net{border-bottom:1px solid var(--rule);position:relative;overflow:hidden}
+.net text{font-family:Overpass;fill:var(--ink)}
+.net .lab{font-size:13px;font-weight:600}.net .sub{font-size:11.5px;fill:var(--ink2);font-weight:500}
+.net .wl{font-size:12px;fill:var(--ink2)}
+.work{display:grid;grid-template-columns:1fr 330px;min-height:0}
+.conv{display:flex;flex-direction:column;min-height:0;min-width:0;border-right:1px solid var(--rule)}
+.ch{display:flex;align-items:center;gap:12px;height:58px;padding:0 24px;border-bottom:1px solid var(--rule)}
+.ch h1{font-size:16px;font-weight:700}.ch p{font-size:12.5px;color:var(--ink2)}
+.ib{display:grid;place-items:center;width:34px;height:34px;border-radius:17px;box-shadow:inset 0 0 0 1.5px var(--rule)}
+.msgs{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:14px;padding:16px 24px}
+.me{align-self:flex-end;max-width:440px;background:var(--panel);border-radius:14px 14px 4px 14px;padding:8px 14px}
+.md{max-width:680px;line-height:1.6}.md h3{font-size:16px;font-weight:800;margin-bottom:2px}
+.md p+*{margin-top:8px}
+.md code{font:12.5px "Overpass Mono";background:#1A2652;border-radius:4px;padding:1px 5px}
+.md pre{background:var(--deep);border-radius:6px;padding:10px 14px;font:12.5px/1.6 "Overpass Mono";box-shadow:inset 0 0 0 1px var(--rule)}
+.md pre code{background:none;padding:0}.kw{color:#7FA2FF}.nu{color:var(--g)}.cm{color:var(--ink3)}
+.md table{border-collapse:collapse;font-size:13.5px}.md th{text-align:left;color:var(--ink2);font-weight:600}.md td,.md th{padding:4px 22px 4px 0;border-bottom:1px solid var(--rule)}
+.tool{font:12px "Overpass Mono";color:var(--ink2)}
+.live{display:flex;align-items:center;gap:8px;color:var(--ink2);font-size:13.5px}
+.composer{display:flex;align-items:flex-end;gap:8px;margin:0 24px 16px;padding:7px;border-radius:22px;background:var(--panel);box-shadow:inset 0 0 0 1px var(--rule)}
+.composer textarea{flex:1;border:0;resize:none;font:inherit;color:var(--ink);background:none;height:34px;padding:7px 6px;outline:none;caret-color:var(--amber)}
+.send{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:var(--ink);color:var(--deep)}
+.route{display:flex;flex-direction:column;min-height:0}
+.rh{display:flex;align-items:center;gap:10px;padding:16px 20px 8px;font-weight:700;font-size:15px}.rh .mono{margin-left:auto}
+.stops{overflow:auto;min-height:0;padding:6px 20px 16px}
+.stop{position:relative;display:flex;gap:14px;padding:0 0 14px 0;min-height:34px}
+.stop::before{content:"";position:absolute;left:9px;top:0;bottom:0;width:6px;background:var(--d)}
+.stop.first::before{top:10px}.stop.last::before{bottom:auto;height:10px}
+.stop.done::before{background:#5c2030}
+.mk{position:relative;z-index:1;width:24px;height:24px;flex:none;display:grid;place-items:center}
+.mk i{width:14px;height:14px;border-radius:50%;background:var(--ink);box-shadow:0 0 0 3px var(--deep)}
+.stop.now .mk i{width:20px;height:20px;background:var(--ink);box-shadow:0 0 0 3px var(--d),0 0 0 6px var(--deep)}
+.stop.done .mk i{width:10px;height:10px;background:var(--ink3)}
+.stop .tx{padding-top:2px;line-height:1.35}.stop.done .tx{color:var(--ink2)}
+.stop .tx p{font-size:12.5px;color:var(--ink2);margin-top:2px}
+.stop.void .mk i{background:none;box-shadow:inset 0 0 0 2px var(--ink3)}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="alert" viewBox="0 0 24 24"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="clip" viewBox="0 0 24 24"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l8.6-8.6A4 4 0 1 1 18 8.8l-8.6 8.6a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+</defs></svg>
+<header><span class="mark">Dogsled</span>
+ <div class="hosts">
+  <span class="host">local<span class="zone"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>4/12</b></span>
+  <span class="host">netcup<span class="zone"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>4/16</b></span>
+  <span class="host">momokaya-2<span class="zone"><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>1/7</b></span>
+ </div></header>
+<aside class="inbox"><div class="ih">Waiting on you <b>5</b></div>
+ <ul>
+  <li><span class="bul" style="background:var(--d)">D</span><div><p class="kind"><svg class="i"><use href="#alert"/></svg>Prompt</p><p class="t">Allow git push to origin?</p><p class="m">Writer on netcup</p><div class="keys"><button>y</button><button>n</button><button>esc</button></div></div><time>1m</time></li>
+  <li><span class="bul" style="background:var(--d)">D</span><div><p class="kind"><svg class="i"><use href="#alert"/></svg>Plan review</p><p class="t">Typed SQLite state store, revision 3</p><p class="m">Move all Dogsled state…</p></div><time>8m</time></li>
+  <li><span class="bul" style="background:var(--r)">R</span><div><p class="kind"><svg class="i"><use href="#alert"/></svg>2 questions</p><p class="t">Before the iOS gate</p><p class="m">rondo-lead</p></div><time>12m</time></li>
+  <li><span class="bul" style="background:var(--d)">D</span><div><p class="kind"><svg class="i"><use href="#alert"/></svg>Idle worker</p><p class="t">Prune stale Herdr panes</p><p class="m">Idle 18 h, unseen</p></div><time>18h</time></li>
+  <li><span class="bul" style="background:var(--t)">T</span><div><p class="kind"><svg class="i"><use href="#alert"/></svg>To land</p><p class="t">review/schwab-auth-transport-fix</p><p class="m">+3, never merged</p><div class="keys"><button class="go">Land</button><button>Prune</button></div></div><time>2d</time></li>
+ </ul></aside>
+<div class="right">
+ <svg class="net" viewBox="0 0 1140 252" width="1140" height="252" aria-label="Agents by repository">
+  <g stroke-linecap="round" fill="none">
+   <path d="M44 56H1100" stroke="var(--d)" stroke-width="6"/><path d="M190 56l32 32H560" stroke="var(--d)" stroke-width="4"/><path d="M970 56l32 32h70" stroke="var(--d)" stroke-width="4"/>
+   <path d="M44 150H520" stroke="var(--r)" stroke-width="6"/>
+   <path d="M44 192H520" stroke="var(--t)" stroke-width="6"/>
+   <path d="M44 234H520" stroke="var(--g)" stroke-width="6"/>
+  </g>
+  <g font-family="Overpass" font-weight="800" font-size="11" text-anchor="middle" fill="#fff">
+   <circle cx="24" cy="56" r="13" fill="var(--d)"/><text x="24" y="60" style="fill:#fff">D</text>
+   <circle cx="24" cy="150" r="13" fill="var(--r)"/><text x="24" y="154" style="fill:#fff">R</text>
+   <circle cx="24" cy="192" r="13" fill="var(--t)"/><text x="24" y="196" style="fill:#fff">T</text>
+   <circle cx="24" cy="234" r="13" fill="var(--g)"/><text x="24" y="238" style="fill:#0B1230">G</text>
+  </g>
+  <circle cx="190" cy="56" r="17" fill="none" stroke="var(--ink)" stroke-width="2"/>
+  <circle cx="190" cy="56" r="9" fill="var(--d)" stroke="var(--ink)" stroke-width="3"/>
+  <text class="lab" x="160" y="20">Review d0a1246, release 0.29.3</text><text class="sub" x="160" y="35">local · 28/32 · running</text>
+  <circle cx="450" cy="56" r="13" fill="none" stroke="var(--amber)" stroke-width="3"/><circle cx="450" cy="56" r="8" fill="var(--ink)" stroke="var(--deep)" stroke-width="2"/>
+  <text class="lab" x="420" y="20">Move state into typed SQLite</text><text class="sub" x="420" y="35" style="fill:var(--amber)">plan waiting · 75/78</text>
+  <circle cx="710" cy="56" r="8" fill="var(--ink)" stroke="var(--deep)" stroke-width="2"/>
+  <text class="lab" x="680" y="20">Replace portal controls</text><text class="sub" x="680" y="35">idle 2 h</text>
+  <circle cx="970" cy="56" r="8" fill="var(--ink)" stroke="var(--deep)" stroke-width="2"/>
+  <text class="lab" x="940" y="20">Prune old Herdr panes</text><text class="sub" x="940" y="35">idle 40 m</text>
+  <circle cx="270" cy="88" r="5" fill="var(--d)" stroke="var(--ink)" stroke-width="2"/><text class="wl" x="258" y="110">Fix placement retry · netcup</text>
+  <rect x="478" y="83" width="4" height="10" fill="var(--ink3)"/><text class="wl" x="456" y="110">Review · done</text>
+  <circle cx="1040" cy="88" r="9" fill="none" stroke="var(--amber)" stroke-width="2.5"/><circle cx="1040" cy="88" r="4" fill="var(--ink)"/><text class="wl" x="960" y="112" style="fill:var(--amber)">Prune panes · idle 18 h</text>
+  <circle cx="190" cy="150" r="13" fill="none" stroke="var(--amber)" stroke-width="3"/><circle cx="190" cy="150" r="8" fill="var(--ink)" stroke="var(--deep)" stroke-width="2"/>
+  <text class="lab" x="214" y="140">Build the iOS screens <tspan class="sub" dx="8" style="fill:var(--amber)">2 questions · 6/14</tspan></text>
+  <circle cx="190" cy="192" r="8" fill="var(--t)" stroke="var(--ink)" stroke-width="3"/>
+  <text class="lab" x="214" y="182">Verify the Schwab auth fixtures <tspan class="sub" dx="8">running · 11/19</tspan></text>
+  <circle cx="190" cy="234" r="8" fill="var(--ink)" stroke="var(--deep)" stroke-width="2"/>
+  <text class="lab" x="214" y="224">Find out what happened to the milestone 3 plan <tspan class="sub" dx="8">idle · 154/176</tspan></text>
+ </svg>
+ <div class="work">
+  <section class="conv">
+   <div class="ch"><span class="bul" style="background:var(--d)">D</span><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p>Lead · pi · claude-opus · local · main</p></div><span style="flex:1"></span><button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div>
+   <div class="msgs">
+    <p class="me">Review d0a1246, merge both fixes, then cut 0.29.3.</p>
+    <article class="md"><h3>Review of <code>d0a1246</code></h3>
+     <p>Both fixes hold. <strong>Prune order:</strong> <code>cleanup::prune</code> closes the pane before it removes the worktree. <strong>Placement retry</strong> is bounded:</p>
+     <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(<span class="nu">3</span>) {
+    <span class="kw">if</span> place(&amp;host).<span class="kw">await</span>.is_ok() { <span class="kw">break</span>; }
+    sleep(delay).<span class="kw">await</span>; <span class="cm">// 250 ms, 500 ms, 1 s</span>
+}</code></pre>
+     <table><tr><th>Gate</th><th>Result</th></tr><tr><td><code>moon run :lint</code></td><td>passed</td></tr><tr><td><code>moon run :test</code></td><td>958 → 960 passed</td></tr></table></article>
+    <p class="tool">bash · git merge --no-ff fix/prune-order fix/placement-retry</p>
+    <p class="live"><svg width="10" height="10"><circle cx="5" cy="5" r="5" fill="#E21D2D"/></svg>Running moon run :check on netcup</p>
+   </div>
+   <form class="composer"><button type="button" class="ib" aria-label="Attach image"><svg class="i"><use href="#clip"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#up"/></svg></button></form>
+  </section>
+  <section class="route"><div class="rh">Todos <span class="mono">28 of 32 · 3 abandoned</span></div>
+   <div class="stops">
+    <div class="stop done first"><span class="mk"><i></i></span><div class="tx">28 done<p>Last: Merge fix/placement-retry</p></div></div>
+    <div class="stop now"><span class="mk"><i></i></span><div class="tx"><strong>Release 0.29.3</strong><p>Tag v0.29.3 and push · writer · netcup</p></div></div>
+    <div class="stop"><span class="mk"><i></i></span><div class="tx">Publish release notes</div></div>
+    <div class="stop"><span class="mk"><i></i></span><div class="tx">Bump the dotfiles pin after the GitHub release</div></div>
+    <div class="stop last"><span class="mk"><i></i></span><div class="tx">Close #212 with the release link</div></div>
+   </div></section>
+ </div>
+</div>
+</body></html>

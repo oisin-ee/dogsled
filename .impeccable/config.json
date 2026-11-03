@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "inter",
+        "createdAt": "2026-11-03T09:14:30.958Z",
+        "reason": "The console contract (.impeccable/surfaces/web.md) sets Inter for UI text, after the owner chose the category-standard console direction."
+      }
+    ]
+  }
+}

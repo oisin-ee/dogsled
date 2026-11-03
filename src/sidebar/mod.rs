@@ -198,18 +198,6 @@ pub fn command(
     home: &str,
     owner: Option<String>,
 ) -> Result<()> {
-    let outcome = run(shell, ledger, policy, home, owner);
-    crate::upgrade::check(ledger)?;
-    outcome
-}
-
-fn run(
-    shell: System,
-    ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
-    owner: Option<String>,
-) -> Result<()> {
     let owner = board::owner(owner, false)?.unwrap_or_default();
     let mut model = Model::from_saved(model::load(ledger, &owner));
     let saved_card = model::load(ledger, &owner).and_then(|s| s.selected_card);
@@ -221,22 +209,10 @@ fn run(
     let mut last_saved = model.saved();
     let mut notice_until: Option<Instant> = None;
     let mut first = true;
-    let mut next_upgrade = Instant::now();
     std::thread::scope(|scope| {
         scope.spawn(|| reader(&shell, ledger, policy, home, &owner, &tx, &stop));
         let outcome = (|| -> Result<()> {
             loop {
-                if Instant::now() >= next_upgrade {
-                    match crate::upgrade::newer(ledger)? {
-                        crate::upgrade::Boundary::Ready(_) => return Ok(()),
-                        crate::upgrade::Boundary::Current => {}
-                        crate::upgrade::Boundary::Pending(error) => {
-                            model.notice = Some(error.to_string());
-                            notice_until = Some(Instant::now() + NOTICE);
-                        }
-                    }
-                    next_upgrade = Instant::now() + REFRESH;
-                }
                 let area = terminal.size()?;
                 let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
                 while let Ok(message) = rx.try_recv() {

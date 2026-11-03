@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dogsled · The Pass</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--steel:#C9CDD0;--steel2:#AEB3B8;--dark:#23272B;--dark2:#33383D;--paper:#FBFAF6;--print:#16181A;--print2:#565B60;--amber:#F29B30;--red:#C8102E;--green:#2F8A52}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1440px;height:900px;overflow:hidden}
+body{font:15px/1.45 Barlow,system-ui,sans-serif;color:var(--print);background:var(--steel);display:grid;grid-template:52px 1fr/300px 1fr}
+::selection{background:var(--amber)}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+.cond{font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;letter-spacing:.04em}
+header{grid-column:1/-1;background:var(--dark);color:#E9EBEC;display:flex;align-items:center;gap:20px;padding:0 20px;border-bottom:1px solid #000}
+.mark{font:700 22px "Barlow Condensed";letter-spacing:.06em;text-transform:uppercase}
+.hosts{margin-left:auto;display:flex;gap:24px}
+.host{display:flex;align-items:center;gap:8px;font:600 13px "Barlow Condensed";letter-spacing:.06em;text-transform:uppercase;color:#AEB4B9}
+.burners{display:flex;gap:2px}.burners i{width:6px;height:16px;border-radius:1px;background:#3D4349}.burners i.on{background:var(--green)}
+.host b{font:500 12px "JetBrains Mono";color:#E9EBEC}
+.window{background:var(--dark);color:#E9EBEC;display:flex;flex-direction:column;min-height:0}
+.wh{display:flex;align-items:baseline;justify-content:space-between;padding:18px 18px 10px;font:700 18px "Barlow Condensed";letter-spacing:.05em;text-transform:uppercase}
+.wh b{background:var(--amber);color:var(--print);border-radius:4px;padding:0 8px;font-size:17px}
+.calls{flex:1;min-height:0;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:10px}
+.call{background:var(--paper);color:var(--print);border-radius:3px;padding:10px 12px 12px;box-shadow:0 2px 6px #0006;cursor:pointer}
+.call .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.tag{display:inline-flex;align-items:center;gap:5px;background:var(--amber);border-radius:3px;padding:1px 7px;font:700 12px "Barlow Condensed";letter-spacing:.06em;text-transform:uppercase}
+.tag svg{width:13px;height:13px}
+time,.mono{font:500 12px "JetBrains Mono",monospace;color:var(--print2)}
+.call .t{font-weight:600;line-height:1.25}.call .m{font-size:13px;color:var(--print2)}
+.acts{display:flex;gap:6px;margin-top:8px}
+.acts button{height:28px;min-width:36px;padding:0 10px;border-radius:3px;box-shadow:inset 0 0 0 1.5px var(--print);font:600 13px "JetBrains Mono"}
+.acts button.go{background:var(--print);color:var(--paper)}
+.pass{display:grid;grid-template-rows:236px 1fr;min-height:0;min-width:0}
+.rail{position:relative;overflow:hidden;padding:0 0 0 20px}
+.rail::before{content:"";position:absolute;left:0;right:0;top:14px;height:12px;background:linear-gradient(#5b6167,#2b3034 60%,#1d2124);box-shadow:0 3px 4px #0004}
+.tickets{display:flex;gap:12px;position:relative;padding-top:20px}
+.tk{flex:none;width:176px;height:196px;background:var(--paper);border-radius:2px 2px 0 0;padding:16px 12px 10px;box-shadow:0 3px 8px #0003;display:flex;flex-direction:column;position:relative;cursor:pointer}
+.tk::before{content:"";position:absolute;top:-8px;left:50%;width:44px;height:14px;margin-left:-22px;background:#3a4045;border-radius:2px}
+.tk .r{display:flex;justify-content:space-between;font:700 13px "Barlow Condensed";letter-spacing:.06em;text-transform:uppercase;color:var(--print2)}
+.tk .t{font:600 17px/1.15 "Barlow Condensed";margin-top:6px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.tk .w{margin-top:6px;font-size:12px;color:var(--print2);line-height:1.35}
+.tk .f{margin-top:auto;display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--steel2);padding-top:7px}
+.st{font:700 12px "Barlow Condensed";letter-spacing:.08em;text-transform:uppercase;padding:1px 6px;border-radius:2px}
+.st.fire{background:var(--green);color:#fff}.st.call2{background:var(--amber)}.st.idle{box-shadow:inset 0 0 0 1px var(--print2);color:var(--print2)}
+.tk.sel{height:216px;box-shadow:0 0 0 2px var(--print),0 6px 14px #0004;z-index:1}
+.open{background:var(--paper);margin:0 20px 0 20px;border-radius:2px 2px 0 0;box-shadow:0 -2px 10px #0002;display:grid;grid-template-columns:1fr 330px;min-height:0}
+.conv{display:flex;flex-direction:column;min-height:0;min-width:0}
+.oh{display:flex;align-items:center;gap:14px;height:56px;padding:0 22px;border-bottom:1px solid #E3E1DA}
+.oh h1{font:700 21px "Barlow Condensed";letter-spacing:.01em}
+.oh .m{font-size:13px;color:var(--print2)}
+.ib{display:grid;place-items:center;width:34px;height:34px;border-radius:3px;box-shadow:inset 0 0 0 1.5px #D4D2CB}
+.msgs{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;justify-content:flex-end;gap:14px;padding:16px 22px}
+.me{align-self:flex-end;max-width:440px;background:#EEECE5;border-radius:3px;padding:8px 12px}
+.md{max-width:700px;line-height:1.55}.md h3{font:700 18px "Barlow Condensed";margin-bottom:4px}
+.md p+*{margin-top:8px}
+.md code{font:12.5px "JetBrains Mono";background:#EEECE5;border-radius:3px;padding:1px 4px}
+.md pre{background:var(--dark);color:#E3E6E8;border-radius:3px;padding:10px 14px;font:12.5px/1.55 "JetBrains Mono";margin-top:8px}
+.md pre code{background:none;padding:0}.kw{color:#F7B864}.cm{color:#8C949B}
+.md table{border-collapse:collapse;font-size:14px;margin-top:8px}.md td,.md th{padding:4px 18px 4px 0;text-align:left;border-bottom:1px solid #E3E1DA}.md th{font-weight:600;color:var(--print2)}
+.tool{font:12px "JetBrains Mono";color:var(--print2)}
+.live{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--print2)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green)}
+.composer{display:flex;align-items:flex-end;gap:8px;margin:0 22px 16px;padding:7px;border-radius:4px;box-shadow:inset 0 0 0 1.5px var(--print)}
+.composer textarea{flex:1;border:0;resize:none;font:inherit;background:none;height:34px;padding:6px 4px;outline:none}
+.send{display:grid;place-items:center;width:34px;height:34px;border-radius:3px;background:var(--print);color:var(--paper)}
+.list{border-left:1px dashed var(--steel2);display:flex;flex-direction:column;min-height:0}
+.lh{display:flex;justify-content:space-between;align-items:baseline;padding:16px 18px 8px;font:700 18px "Barlow Condensed";letter-spacing:.05em;text-transform:uppercase}
+.items{overflow:auto;padding:0 18px 16px;min-height:0}
+.sec{font:700 13px "Barlow Condensed";letter-spacing:.07em;text-transform:uppercase;color:var(--print2);margin:12px 0 4px;display:flex;justify-content:space-between}
+.it{display:flex;gap:10px;padding:5px 0;line-height:1.3}
+.cb{width:16px;height:16px;border-radius:2px;box-shadow:inset 0 0 0 1.5px var(--print);flex:none;margin-top:1px;display:grid;place-items:center}
+.it.now .cb{background:var(--green);box-shadow:none}
+.it.done{color:var(--print2);text-decoration:line-through;text-decoration-color:#0006}.it.done .cb{background:var(--print);color:var(--paper);box-shadow:none}
+.it.done .cb svg{width:11px;height:11px;stroke-width:3}
+.sub{font-size:13px;color:var(--print2);margin-top:2px}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="doc" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8"/></symbol>
+<symbol id="ask" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+<symbol id="key" viewBox="0 0 24 24"><path d="M9 10l-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+<symbol id="merge" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+<symbol id="stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+<symbol id="ext" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="clip" viewBox="0 0 24 24"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l8.6-8.6A4 4 0 1 1 18 8.8l-8.6 8.6a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+<symbol id="up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+<symbol id="ok" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+</defs></svg>
+<header><span class="mark">Dogsled</span>
+ <div class="hosts">
+  <span class="host">local<span class="burners"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>4/12</b></span>
+  <span class="host">netcup<span class="burners"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>4/16</b></span>
+  <span class="host">momokaya-2<span class="burners"><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i></span><b>1/7</b></span>
+ </div></header>
+<aside class="window"><div class="wh">Waiting on you <b>5</b></div>
+ <div class="calls">
+  <div class="call"><div class="top"><span class="tag"><svg class="i"><use href="#key"/></svg>Prompt</span><time>1m</time></div><p class="t">Allow git push to origin?</p><p class="m">Writer on netcup · dogsled</p><div class="acts"><button>y</button><button>n</button><button>esc</button></div></div>
+  <div class="call"><div class="top"><span class="tag"><svg class="i"><use href="#doc"/></svg>Plan</span><time>8m</time></div><p class="t">Typed SQLite state store, revision 3</p><p class="m">Move all Dogsled state… · dogsled</p></div>
+  <div class="call"><div class="top"><span class="tag"><svg class="i"><use href="#ask"/></svg>2 questions</span><time>12m</time></div><p class="t">Before the iOS gate</p><p class="m">rondo-lead · rondo</p></div>
+  <div class="call"><div class="top"><span class="tag">Idle 18 h</span><time>18h</time></div><p class="t">Prune stale Herdr panes</p><p class="m">Unseen worker · dogsled</p></div>
+  <div class="call"><div class="top"><span class="tag"><svg class="i"><use href="#merge"/></svg>To land</span><time>2d</time></div><p class="t">review/schwab-auth-transport-fix</p><p class="m">+3, never merged · rt100k</p><div class="acts"><button class="go">Land</button><button>Prune</button></div></div>
+ </div></aside>
+<main class="pass">
+ <div class="rail"><div class="tickets">
+  <div class="tk sel"><p class="r"><span>dogsled</span><span class="mono">local</span></p><p class="t">Review d0a1246, merge both fixes, release 0.29.3</p><p class="w">+ writer · netcup · placement retry<br>+ reviewer · done</p><p class="f"><span class="st fire">Running</span><span class="mono">4 left</span></p></div>
+  <div class="tk"><p class="r"><span>dogsled</span><span class="mono">local</span></p><p class="t">Move all Dogsled state into typed SQLite</p><p class="w">Plan revision 3 waiting</p><p class="f"><span class="st call2">Needs you</span><span class="mono">3 left</span></p></div>
+  <div class="tk"><p class="r"><span>rondo</span><span class="mono">local</span></p><p class="t">Build the iOS screens from the wireframes</p><p class="w">2 questions waiting</p><p class="f"><span class="st call2">Needs you</span><span class="mono">8 left</span></p></div>
+  <div class="tk"><p class="r"><span>rt100k</span><span class="mono">local</span></p><p class="t">Verify the Schwab auth fixtures</p><p class="w">+ writer · local · fixture replay</p><p class="f"><span class="st fire">Running</span><span class="mono">8 left</span></p></div>
+  <div class="tk"><p class="r"><span>dogsled</span><span class="mono">local</span></p><p class="t">Find why old Herdr panes are not pruned</p><p class="w">+ worker idle 18 h, unseen</p><p class="f"><span class="st idle">Idle 40m</span><span class="mono">2 left</span></p></div>
+  <div class="tk"><p class="r"><span>dogsled</span><span class="mono">local</span></p><p class="t">Replace hand-rolled portal controls</p><p class="w"></p><p class="f"><span class="st idle">Idle 2h</span><span class="mono">5 left</span></p></div>
+  <div class="tk"><p class="r"><span>grabcrft</span><span class="mono">local</span></p><p class="t">Find out what happened to the milestone 3 plan</p><p class="w"></p><p class="f"><span class="st idle">Idle 1h</span><span class="mono">0 left</span></p></div>
+ </div></div>
+ <section class="open">
+  <div class="conv">
+   <div class="oh"><div><h1>Review d0a1246, merge both fixes, release 0.29.3</h1><p class="m">Lead · pi · claude-opus · local · main</p></div><span style="flex:1"></span><button class="ib" aria-label="Interrupt"><svg class="i"><use href="#stop"/></svg></button><button class="ib" aria-label="Open in Herdr"><svg class="i"><use href="#ext"/></svg></button></div>
+   <div class="msgs">
+    <p class="me">Review d0a1246, merge both fixes, then cut 0.29.3.</p>
+    <article class="md"><h3>Review of <code>d0a1246</code></h3>
+     <p>Both fixes hold. <strong>Prune order:</strong> <code>cleanup::prune</code> now closes the pane before it removes the worktree. <strong>Placement retry</strong> is bounded:</p>
+     <pre><code><span class="kw">for</span> delay <span class="kw">in</span> backoff.take(3) {
+    <span class="kw">if</span> place(&amp;host).<span class="kw">await</span>.is_ok() { <span class="kw">break</span>; }
+    sleep(delay).<span class="kw">await</span>; <span class="cm">// 250 ms, 500 ms, 1 s</span>
+}</code></pre>
+     <table><tr><th>Gate</th><th>Result</th></tr><tr><td><code>moon run :lint</code></td><td>passed</td></tr><tr><td><code>moon run :test</code></td><td>958 → 960 passed</td></tr></table></article>
+    <p class="tool">bash · git merge --no-ff fix/prune-order fix/placement-retry</p>
+    <p class="live"><i class="dot"></i>Running moon run :check on netcup</p>
+   </div>
+   <form class="composer"><button type="button" class="ib" aria-label="Attach image"><svg class="i"><use href="#clip"/></svg></button><textarea aria-label="Message this agent"></textarea><button class="send" aria-label="Send"><svg class="i"><use href="#up"/></svg></button></form>
+  </div>
+  <div class="list"><div class="lh">Todos <span class="mono">28/32</span></div>
+   <div class="items">
+    <p class="sec"><span>In progress</span></p>
+    <div class="it now"><i class="cb"></i><div>Release 0.29.3<p class="sub">Tag v0.29.3 and push · writer · netcup</p></div></div>
+    <p class="sec"><span>Pending</span><span>3</span></p>
+    <div class="it"><i class="cb"></i>Publish release notes</div>
+    <div class="it"><i class="cb"></i>Bump the dotfiles pin after the GitHub release</div>
+    <div class="it"><i class="cb"></i>Close #212 with the release link</div>
+    <p class="sec"><span>Done</span><span>28</span></p>
+    <div class="it done"><i class="cb"><svg class="i"><use href="#ok"/></svg></i>Merge fix/placement-retry</div>
+    <div class="it done"><i class="cb"><svg class="i"><use href="#ok"/></svg></i>Merge fix/prune-order</div>
+    <div class="it done"><i class="cb"><svg class="i"><use href="#ok"/></svg></i>Review d0a1246</div>
+    <p class="sec"><span>Abandoned</span><span>3</span></p>
+   </div></div>
+ </section>
+</main>
+</body></html>
