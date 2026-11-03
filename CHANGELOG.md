@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-- Running commands and services switch to the newest recorded Dogsled executable without a manual restart. Live MCP sessions keep their connection and pending request.
+- Running commands and services switch to the newest valid recorded Dogsled executable without a manual restart. Live MCP sessions keep their connection and pending request. Missing or invalid executables no longer block a compatible store. Debug builds do not register in the default state directory without an explicit override.
 
 ## 0.30.0 - 2026-11-02
 

@@ -66,7 +66,14 @@ pub(crate) fn newer(ledger: &Ledger) -> Result<Option<Writer>> {
     connection.busy_timeout(ledger.budget.remaining("state.db writer")?)?;
     match crate::tables::writer(&connection)? {
         Some(writer) if is_newer(&writer).map_err(|error| refusal(&writer, error))? => {
-            Ok(Some(writer))
+            if validated(&writer)? {
+                return Ok(Some(writer));
+            }
+            crate::store::schema_version(&connection)?;
+            drop(connection);
+            // Opening the store replaces a stale owner under its write transaction.
+            crate::store::write(ledger, |_| Ok(()))?;
+            Ok(None)
         }
         _ => Ok(None),
     }
@@ -74,8 +81,10 @@ pub(crate) fn newer(ledger: &Ledger) -> Result<Option<Writer>> {
 
 /// Store transactions refuse a newer owner; they never exec with locks or work live.
 pub(crate) fn guard(connection: &Connection) -> Result<()> {
+    crate::store::schema_version(connection)?;
     if let Some(writer) = crate::tables::writer(connection)?
         && is_newer(&writer)?
+        && validated(&writer)?
     {
         return Err(refusal(
             &writer,
@@ -96,10 +105,20 @@ pub(crate) fn self_writer() -> Result<Writer> {
     })
 }
 
+/// Explicit state directories remain available to debug builds and test ledgers.
+pub(crate) fn registration_allowed(path: &Path) -> Result<bool> {
+    Ok(!cfg!(debug_assertions)
+        || std::env::var_os("DOGSLED_STATE").is_some()
+        || path.parent() != Some(std::path::absolute(crate::ledger::default_dir())?.as_path()))
+}
+
 pub(crate) fn register(connection: &mut Connection, path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
     type Registrations = std::sync::Mutex<std::collections::HashSet<(u64, u64)>>;
     static REGISTERED: OnceLock<Registrations> = OnceLock::new();
+    if !registration_allowed(path)? {
+        return Ok(());
+    }
     let registered = REGISTERED.get_or_init(Registrations::default);
     let metadata = std::fs::metadata(path)?;
     let identity = (metadata.dev(), metadata.ino());
@@ -134,8 +153,17 @@ pub(crate) fn register(connection: &mut Connection, path: &Path) -> Result<()> {
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute_batch(crate::tables::WRITER_SCHEMA)?;
     guard(&tx)?;
+    let stale = crate::tables::writer(&tx)?.filter(|writer| writer.version != current.version);
     crate::tables::save_writer(&tx, &current)?;
     tx.commit()?;
+    if let Some(writer) = stale
+        && is_newer(&writer)?
+    {
+        eprintln!(
+            "dogsled: replaced stale state.db writer dogsled {} at {} with dogsled {} at {}",
+            writer.version, writer.executable, current.version, current.executable
+        );
+    }
     registered
         .lock()
         .map_err(|error| Error::Invalid(error.to_string()))?
@@ -185,6 +213,19 @@ pub(crate) fn validate(writer: &Writer) -> Result<()> {
     check().map_err(|error| refusal(writer, error))
 }
 
+/// A process probes each recorded executable/version pair only once, including failures.
+fn validated(writer: &Writer) -> Result<bool> {
+    type Validations = std::sync::Mutex<std::collections::HashMap<(String, String), bool>>;
+    static VALIDATED: OnceLock<Validations> = OnceLock::new();
+    let mut validations = VALIDATED
+        .get_or_init(Validations::default)
+        .lock()
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+    Ok(*validations
+        .entry((writer.executable.clone(), writer.version.clone()))
+        .or_insert_with(|| validate(writer).is_ok()))
+}
+
 /// Replace the image, retaining PID, standard streams, environment, and original argv.
 /// MCP supplies only its negotiated state and an undispatched input message.
 pub(crate) fn handover(writer: &Writer, resume: Option<&str>) -> Result<()> {
@@ -222,6 +263,46 @@ pub(crate) fn check(ledger: &Ledger) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn transaction_guards_cache_success_and_failure_per_writer_pair() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("probe");
+        let probes = dir.join("probes");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho probe >> '{}'\necho 'dogsled 999.0.0'\n",
+                probes.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(crate::tables::WRITER_SCHEMA)
+            .unwrap();
+        for (version, valid) in [("999.0.0", true), ("999.0.1", false)] {
+            let tx = connection.transaction().unwrap();
+            crate::tables::save_writer(
+                &tx,
+                &Writer {
+                    executable: executable.to_str().unwrap().into(),
+                    version: version.into(),
+                },
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            for _ in 0..3 {
+                assert_eq!(guard(&connection).is_err(), valid);
+            }
+        }
+        assert_eq!(std::fs::read_to_string(probes).unwrap().lines().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]

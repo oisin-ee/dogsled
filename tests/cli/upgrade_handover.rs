@@ -90,28 +90,120 @@ fn equal_version_updates_the_canonical_writer_path() {
     );
 }
 
-#[test]
-fn a_missing_replacement_fails_with_its_path_and_version() {
-    let rig = Rig::short("upgrade-missing");
-    let executable = rig.dir.join("missing-dogsled");
-    record(&rig, &executable, NEW_VERSION);
-    let (status, text) = output(rig.cmd(&["state", "items"]));
-    assert!(!status.success(), "{text}");
+fn assert_current_writer(rig: &Rig) {
+    let writer: (String, String) = rig
+        .database()
+        .query_row("SELECT version, executable FROM store_writer", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(writer.0, env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        PathBuf::from(writer.1),
+        fs::canonicalize(env!("CARGO_BIN_EXE_dogsled")).unwrap()
+    );
+}
+
+fn assert_stale_recovered(rig: &Rig, executable: &Path, args: &[&str]) -> String {
+    let (status, text) = output(rig.cmd(args));
+    assert!(status.success(), "{text}");
     assert!(text.contains(NEW_VERSION), "{text}");
     assert!(text.contains(executable.to_str().unwrap()), "{text}");
-    assert!(text.contains("handover failed"), "{text}");
+    assert_eq!(
+        text.matches("replaced stale state.db writer").count(),
+        1,
+        "{text}"
+    );
+    assert_current_writer(rig);
+    text
 }
 
 #[test]
-fn a_mismatching_replacement_version_is_refused() {
-    let rig = Rig::short("upgrade-mismatch");
+fn a_deleted_replacement_is_replaced_by_the_older_cli_and_serve() {
+    for args in [
+        &["state", "items"][..],
+        &["serve", "--once", "--interval", "1"][..],
+    ] {
+        let rig = Rig::short("upgrade-missing");
+        let executable = replacement(&rig);
+        record(&rig, &executable, NEW_VERSION);
+        fs::remove_file(&executable).unwrap();
+        assert_stale_recovered(&rig, &executable, args);
+    }
+}
+
+#[test]
+fn a_mismatching_replacement_is_replaced_by_the_older_cli_and_serve() {
+    for args in [
+        &["state", "items"][..],
+        &["serve", "--once", "--interval", "1"][..],
+    ] {
+        let rig = Rig::short("upgrade-mismatch");
+        let executable = replacement(&rig);
+        record(&rig, &executable, NEW_VERSION);
+        assert_stale_recovered(&rig, &executable, args);
+    }
+}
+
+#[test]
+fn a_debug_build_does_not_register_in_the_implicit_default_directory() {
+    let rig = Rig::short("upgrade-debug-default");
+    // Isolate the default directory without setting Dogsled's explicit override.
+    let state_home = rig.dir.join("xdg-state");
+    let input = rig.dir.join("empty-items");
+    fs::write(&input, "[]").unwrap();
+    let mut command = rig.cmd(&["state", "items", "--put"]);
+    command
+        .stdin(fs::File::open(input).unwrap())
+        .env_remove("DOGSLED_STATE")
+        .env("XDG_STATE_HOME", &state_home);
+    let (status, text) = output(command);
+    assert!(status.success(), "{text}");
+    let path = state_home.join("dogsled/state.db");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let count = || {
+        connection
+            .query_row("SELECT COUNT(*) FROM store_writer", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(), 0, "schema creation registered a debug writer");
+    let mut command = rig.cmd(&["state", "items"]);
+    command
+        .env_remove("DOGSLED_STATE")
+        .env("XDG_STATE_HOME", &state_home);
+    let (status, text) = output(command);
+    assert!(status.success(), "{text}");
+    assert_eq!(count(), 0, "opening the store registered a debug writer");
+    // An explicit override remains eligible, even when it names the same directory.
+    let mut command = rig.cmd(&["state", "items"]);
+    command.env("DOGSLED_STATE", path.parent().unwrap());
+    let (status, text) = output(command);
+    assert!(status.success(), "{text}");
+    assert_eq!(count(), 1);
+}
+
+#[test]
+fn a_stale_writer_cannot_replace_a_newer_schema() {
+    let rig = Rig::short("upgrade-stale-new-schema");
     let executable = replacement(&rig);
     record(&rig, &executable, NEW_VERSION);
+    fs::remove_file(&executable).unwrap();
+    rig.database()
+        .execute_batch("PRAGMA user_version = 999")
+        .unwrap();
     let (status, text) = output(rig.cmd(&["state", "items"]));
     assert!(!status.success(), "{text}");
-    assert!(text.contains("--version does not match"), "{text}");
-    assert!(text.contains(NEW_VERSION), "{text}");
-    assert!(text.contains(executable.to_str().unwrap()), "{text}");
+    assert!(
+        text.contains("schema version 999 is newer than supported version 2"),
+        "{text}"
+    );
+    let version: String = rig
+        .database()
+        .query_row("SELECT version FROM store_writer", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, NEW_VERSION);
 }
 
 #[test]
@@ -198,33 +290,28 @@ fn an_inherited_exec_guard_does_not_block_a_new_child_cli() {
 }
 
 #[test]
-fn a_hung_version_probe_fails_within_its_budget() {
+fn a_hung_version_probe_recovers_within_its_budget() {
     let rig = Rig::short("upgrade-probe-timeout");
     let executable = rig.dir.join("bin/hung-version");
     rig.script("hung-version", "#!/bin/sh\nexec sleep 60\n");
     record(&rig, &executable, NEW_VERSION);
     let started = Instant::now();
-    let (status, text) = output(rig.cmd(&["state", "items"]));
-    assert!(!status.success(), "{text}");
+    let text = assert_stale_recovered(&rig, &executable, &["state", "items"]);
     assert!(
         started.elapsed() < Duration::from_secs(15),
         "probe exceeded its budget: {text}"
     );
-    assert!(text.contains("deadline"), "{text}");
-    assert!(text.contains(executable.to_str().unwrap()), "{text}");
-    assert!(text.contains(NEW_VERSION), "{text}");
+    assert!(text.contains("stale"), "{text}");
 }
 
 #[test]
-fn noncanonical_replacement_path_is_refused() {
+fn noncanonical_replacement_path_is_replaced() {
     let rig = Rig::short("upgrade-noncanonical");
     let executable = replacement(&rig);
     let alias = rig.dir.join("new-link");
     std::os::unix::fs::symlink(&executable, &alias).unwrap();
     record(&rig, &alias, NEW_VERSION);
-    let (status, text) = output(command(&rig, &["state", "items"], &executable));
-    assert!(!status.success(), "{text}");
-    assert!(text.contains("absolute and canonical"), "{text}");
+    assert_stale_recovered(&rig, &alias, &["state", "items"]);
 }
 
 fn process_command(pid: u32) -> String {
@@ -286,6 +373,61 @@ fn running_serve_hands_over_between_passes_with_the_same_pid() {
         assert!(Instant::now() < deadline, "new service did not publish");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn running_serve_replaces_stale_writers_without_exiting() {
+    let rig = Rig::short("upgrade-serve-stale");
+    let executable = replacement(&rig);
+    let mut command = rig.cmd(&["serve", "--interval", "1"]);
+    let journal = rig.dir.join("service-stderr");
+    command
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&journal).unwrap());
+    let mut owned = Owned::spawn(&mut command);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while rig.log("state/samples.jsonl").is_empty() {
+        assert!(!process_gone(owned.pid), "service exited");
+        assert!(Instant::now() < deadline, "service did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for deleted in [false, true] {
+        if deleted {
+            fs::remove_file(&executable).unwrap();
+        }
+        record(&rig, &executable, NEW_VERSION);
+        let before = rig.log("state/samples.jsonl").lines().count();
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        loop {
+            assert!(
+                !process_gone(owned.pid),
+                "service exited: {}",
+                fs::read_to_string(&journal).unwrap()
+            );
+            let version: String = rig
+                .database()
+                .query_row("SELECT version FROM store_writer", [], |row| row.get(0))
+                .unwrap();
+            if version == env!("CARGO_PKG_VERSION")
+                && rig.log("state/samples.jsonl").lines().count() > before
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "service did not replace the stale writer"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_current_writer(&rig);
+    }
+    owned.terminate();
+    let text = fs::read_to_string(journal).unwrap();
+    assert_eq!(
+        text.matches("replaced stale state.db writer").count(),
+        2,
+        "{text}"
+    );
 }
 
 struct Mcp {

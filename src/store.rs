@@ -49,6 +49,10 @@ fn create(connection: &Connection) -> Result<()> {
 
 fn version(connection: &Connection) -> Result<i64> {
     crate::upgrade::guard(connection)?;
+    schema_version(connection)
+}
+
+pub(crate) fn schema_version(connection: &Connection) -> Result<i64> {
     let version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let supported = supported_version();
     if version > supported {
@@ -107,7 +111,9 @@ fn open(ledger: &Ledger) -> Result<Connection> {
                 }
                 create(&tx)?;
                 // Publish the replacement schema and its executable owner atomically.
-                crate::tables::save_writer(&tx, &crate::upgrade::self_writer()?)?;
+                if crate::upgrade::registration_allowed(&path)? {
+                    crate::tables::save_writer(&tx, &crate::upgrade::self_writer()?)?;
+                }
                 tx.commit()?;
             }
             Ok(())
@@ -173,10 +179,11 @@ fn identity(path: &std::path::Path) -> Result<Option<Identity>> {
 /// A connection to this ledger's store: the cached one when it still opens the same file
 /// at the supported version, otherwise a new one.
 fn connection(ledger: &Ledger, path: &std::path::Path) -> Result<(Identity, Connection)> {
-    if let Some((cached, connection)) = CONNECTIONS.with_borrow_mut(|open| open.remove(path))
+    if let Some((cached, mut connection)) = CONNECTIONS.with_borrow_mut(|open| open.remove(path))
         && identity(path)? == Some(cached)
         && version(&connection)? == supported_version()
     {
+        crate::upgrade::register(&mut connection, path)?;
         return Ok((cached, connection));
     }
     let connection = open(ledger)?;
