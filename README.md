@@ -53,7 +53,7 @@ The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build 
 
 Ordinary merges to `main` do not bump versions or publish packages.
 Release-please maintains one release PR with lockstep versions and a changelog from conventional commits.
-Feature PR titles must use conventional commits.
+Every commit subject that reaches `main` must use conventional commits. For a squash merge, that subject is the PR title.
 The bot uses `GITHUB_TOKEN`, so its release-PR updates do not start CI.
 Nothing auto-merges the release PR.
 

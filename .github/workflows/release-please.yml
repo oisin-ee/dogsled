@@ -53,8 +53,10 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.release-pr == ''
     runs-on: ubuntu-24.04
+    # The permissions that release-please-action documents for GITHUB_TOKEN.
     permissions:
       contents: write
+      issues: write
       pull-requests: write
     steps:
       # GITHUB_TOKEN release PRs intentionally start no pull_request workflows.
