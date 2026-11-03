@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-- The children lane no longer runs handoff itself. Before, it waited for `handoff.lock` while the handoff lane held it through a long close, and failed with `deadline reached: lock handoff.lock`. It now imports only durable handoffs. `serve --once` starts the children lane after the handoff lane, so one pass still imports that pass's handoffs.
+- The children lane no longer waits for `handoff.lock`. Before, it waited while the handoff lane held the lock through a long close, and failed with `deadline reached: lock handoff.lock`. It now runs handoff only when the lock is free and otherwise imports durable handoffs. `serve --once` starts the children lane after the handoff lane, so one pass still imports that pass's handoffs.
 
 ## 0.31.0 - 2026-11-03
 

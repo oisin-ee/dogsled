@@ -887,12 +887,24 @@ impl HandoffWarnings {
 /// Child-host action lane, independent of fleet discovery, owner availability and sweeps.
 /// Keep the result durably before closing; the owner's children lane imports it afterwards.
 pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
-    ledger.with_lock("handoff", || {
-        let mut warnings = HandoffWarnings::default();
-        let result = handoff_locked(ledger, shell, now, &mut warnings);
-        warnings.report(ledger, result.is_ok())?;
-        result
-    })
+    ledger.with_lock("handoff", || handoff_pass(ledger, shell, now))
+}
+
+/// Run a handoff pass only when no other pass holds the lock. A busy lock means the handoff
+/// lane is already doing this work, possibly through a long close; waiting adds nothing.
+pub fn handoff_if_free(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<bool> {
+    let Some(_lock) = ledger.try_lock("handoff")? else {
+        return Ok(false);
+    };
+    handoff_pass(ledger, shell, now)?;
+    Ok(true)
+}
+
+fn handoff_pass(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
+    let mut warnings = HandoffWarnings::default();
+    let result = handoff_locked(ledger, shell, now, &mut warnings);
+    warnings.report(ledger, result.is_ok())?;
+    result
 }
 
 /// Checkout absence alone never establishes completion. Reconciliation needs the saved
