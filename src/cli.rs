@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(
     name = "dogsled",
-    version,
+    version = crate::upgrade::reported_version(),
     about = "Host status and placement for Herdr agents",
     propagate_version = true
 )]
@@ -19,6 +19,9 @@ pub struct Cli {
     /// Remaining caller budget propagated across SSH.
     #[arg(long, global = true, hide = true)]
     pub budget_ms: Option<u64>,
+    /// Internal negotiated MCP state across an executable handover.
+    #[arg(long, global = true, hide = true)]
+    pub mcp_resume: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
