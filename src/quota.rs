@@ -202,15 +202,14 @@ pub fn store(ledger: &Ledger, input: impl std::io::Read) -> Result<Snapshot> {
     }
     let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|_| invalid_snapshot())?;
     snapshot.validate()?;
-    ledger.with_lock("quota", || {
-        crate::store::write(ledger, |tx| {
-            if crate::host_store::quota_rows(tx)?.map_or(0, |previous| previous.fetched_ms)
-                <= snapshot.fetched_ms
-            {
-                crate::host_store::replace_quota(tx, &snapshot)?;
-            }
-            Ok(())
-        })
+    // One write transaction compares and replaces, so an older snapshot never wins.
+    crate::store::write(ledger, |tx| {
+        if crate::host_store::quota_rows(tx)?.map_or(0, |previous| previous.fetched_ms)
+            <= snapshot.fetched_ms
+        {
+            crate::host_store::replace_quota(tx, &snapshot)?;
+        }
+        Ok(())
     })?;
     Ok(snapshot)
 }

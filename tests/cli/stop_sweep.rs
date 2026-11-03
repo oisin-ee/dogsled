@@ -296,8 +296,7 @@ fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
     assert!(rig.state(&["sweep-request"]).is_null());
     serve(&rig);
     assert_eq!(rig.state(&["sweep"]), report);
-    let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
-    assert_eq!(history.lines().count(), 1);
+    assert_eq!(rig.state(&["sweeps"]).as_array().unwrap().len(), 1);
     // Successful removals remain visible in status, but never continue an agent turn.
     assert_eq!(gate(&rig, "w1:p1"), "");
     let (_, status) = rig.json(&["status"]);
@@ -739,10 +738,10 @@ fn long_state_path_without_a_socket_still_consumes_stop_requests() {
                     .is_null()
         });
         assert_eq!(
-            fs::read_to_string(state.join("sweeps.jsonl"))
+            rig.state_at(state.to_str().unwrap(), &["sweeps"])
+                .as_array()
                 .unwrap()
-                .lines()
-                .count(),
+                .len(),
             count
         );
     }
@@ -812,24 +811,16 @@ fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
 fn pass_history_keeps_only_seven_days_including_the_boundary() {
     let rig = Rig::new("stop-history-window");
     let week = 7 * 24 * 60 * 60 * 1000u64;
-    // Legacy entries without timestamps also leave the retained window.
-    fs::write(
-        rig.dir.join("state/sweeps.jsonl"),
-        "{\"started_ms\":0,\"finished_ms\":0}\n",
-    )
-    .unwrap();
     for time in [1, 2, week + 1, week + 2] {
         fs::write(rig.dir.join("clock"), time.to_string()).unwrap();
         gate(&rig, "w1:p1");
         serve(&rig);
     }
-    let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
-    let reports: Vec<Value> = history
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let reports = rig.state(&["sweeps"]);
     assert_eq!(
         reports
+            .as_array()
+            .unwrap()
             .iter()
             .map(|r| r["ts_ms"].as_u64().unwrap())
             .collect::<Vec<_>>(),

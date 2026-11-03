@@ -418,7 +418,7 @@ pub enum StateCommand {
     DoneIdentity {
         pane: String,
     },
-    /// Print the SQL schema of `state.db`.
+    /// Print the SQL script that creates `state.db`: its schema and version.
     Schema,
     /// Print every admission, oldest first.
     Admissions,

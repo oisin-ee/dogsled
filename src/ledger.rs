@@ -1,13 +1,12 @@
-//! Host-owned snapshots and reservations. Writers use a kernel file lock and
-//! atomic replacement; readers never observe a partially written JSON file.
+//! The host state directory, its clock and ids, and kernel locks for outside resources.
+//! Records live in `state.db`; see `store`.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
@@ -148,78 +147,8 @@ impl Ledger {
         }
     }
 
-    pub fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
-        read(&self.dir.join(name))
-    }
-
-    pub fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<()> {
-        fs::create_dir_all(&self.dir)?;
-        let path = self.dir.join(name);
-        let tmp = self.dir.join(format!(".{name}.{}.tmp", new_id()));
-        let result = (|| {
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-            serde_json::to_writer_pretty(&mut file, value)?;
-            writeln!(file)?;
-            file.sync_all()?;
-            fs::rename(&tmp, path)?;
-            File::open(&self.dir)?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(tmp);
-        }
-        result
-    }
-
     pub fn reservations(&self, now: u64, ttl: u64) -> Result<Vec<Reservation>> {
         crate::job_store::live_reservations(self, now, ttl)
-    }
-
-    /// Append one JSON line. When the file's first line carries a `ts_ms`
-    /// older than `keep_from_ms`, rewrite it without the lines older than that
-    /// first, so the file holds a bounded window.
-    pub fn append_line<T: Serialize>(
-        &self,
-        name: &str,
-        value: &T,
-        keep_from_ms: u64,
-    ) -> Result<()> {
-        fs::create_dir_all(&self.dir)?;
-        let path = self.dir.join(name);
-        if let Ok(text) = fs::read_to_string(&path)
-            && text
-                .lines()
-                .next()
-                .is_some_and(|first| line_ts(first) < keep_from_ms)
-        {
-            let mut kept = String::new();
-            for line in text.lines().filter(|line| line_ts(line) >= keep_from_ms) {
-                kept.push_str(line);
-                kept.push('\n');
-            }
-            let tmp = self.dir.join(format!(".{name}.{}.tmp", new_id()));
-            fs::write(&tmp, kept)?;
-            fs::rename(&tmp, &path)?;
-        }
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        serde_json::to_writer(&mut file, value)?;
-        writeln!(file)?;
-        Ok(())
-    }
-}
-
-fn line_ts(line: &str) -> u64 {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|v| v.get("ts_ms")?.as_u64())
-        .unwrap_or(0)
-}
-
-fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -249,45 +178,23 @@ mod tests {
     fn lock_serializes_concurrent_writers_without_lost_updates() {
         let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
         let barrier = std::sync::Barrier::new(8);
+        let counter = AtomicU64::new(0);
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
                     barrier.wait();
                     ledger
                         .with_lock("host", || {
-                            let n: u64 = ledger.read("counter.json")?.unwrap_or_default();
-                            ledger.write("counter.json", &(n + 1))
+                            let n = counter.load(Ordering::Relaxed);
+                            std::thread::yield_now();
+                            counter.store(n + 1, Ordering::Relaxed);
+                            Ok(())
                         })
                         .unwrap();
                 });
             }
         });
-        assert_eq!(ledger.read::<u64>("counter.json").unwrap(), Some(8));
-        fs::remove_dir_all(ledger.dir).unwrap();
-    }
-
-    #[test]
-    fn append_line_keeps_a_bounded_window() {
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
-        for ts in [1_000u64, 2_000, 3_000] {
-            ledger
-                .append_line("samples.jsonl", &serde_json::json!({"ts_ms": ts}), 0)
-                .unwrap();
-        }
-        // The first line is older than the window: rewrite without it, then append.
-        ledger
-            .append_line("samples.jsonl", &serde_json::json!({"ts_ms": 4_000}), 1_500)
-            .unwrap();
-        let text = fs::read_to_string(ledger.dir.join("samples.jsonl")).unwrap();
-        let kept: Vec<u64> = text
-            .lines()
-            .map(|l| {
-                serde_json::from_str::<serde_json::Value>(l).unwrap()["ts_ms"]
-                    .as_u64()
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(kept, [2_000, 3_000, 4_000]);
+        assert_eq!(counter.load(Ordering::Relaxed), 8);
         fs::remove_dir_all(ledger.dir).unwrap();
     }
 }

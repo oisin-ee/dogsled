@@ -321,15 +321,20 @@ pub(crate) fn recorded_clock(ledger: &Ledger) -> Result<Option<Clock>> {
     })
 }
 
+/// The time a clock that is not recorded yet starts from: the newest local record.
+pub(crate) fn clock_floor(ledger: &Ledger) -> Result<u64> {
+    if recorded_clock(ledger)?.is_none() {
+        newest_record_ms(ledger)
+    } else {
+        Ok(0)
+    }
+}
+
 /// The validity fence is initialized and advanced in one database transaction.
 pub fn clock(ledger: &Ledger) -> Result<Clock> {
     let now = now_ms();
-    let newest = if recorded_clock(ledger)?.is_none() {
-        newest_record_ms(ledger)?
-    } else {
-        0
-    };
-    crate::store::write(ledger, |tx| load_clock(tx, now.max(newest)))
+    let floor = clock_floor(ledger)?;
+    crate::store::write(ledger, |tx| load_clock(tx, now.max(floor)))
 }
 
 fn load_clock(tx: &rusqlite::Transaction<'_>, now: u64) -> Result<Clock> {
@@ -358,7 +363,20 @@ pub fn finish_once(
     finished: &mut Option<u64>,
     created: Option<u64>,
 ) -> Result<()> {
-    let effective = advance_clock(ledger, now_ms())?;
+    finish_at(advance_clock(ledger, now_ms())?, finished, created)
+}
+
+/// [`finish_once`] inside the caller's write transaction. `floor` is [`clock_floor`].
+pub(crate) fn finish_once_in(
+    tx: &rusqlite::Transaction<'_>,
+    floor: u64,
+    finished: &mut Option<u64>,
+    created: Option<u64>,
+) -> Result<()> {
+    finish_at(advance_clock_in(tx, now_ms(), floor)?, finished, created)
+}
+
+fn finish_at(effective: u64, finished: &mut Option<u64>, created: Option<u64>) -> Result<()> {
     if let Some(saved) = finished {
         if *saved > effective
             || created.is_some_and(|created| saved.saturating_add(VALIDITY_SKEW_MS) < created)
@@ -380,11 +398,50 @@ pub(crate) fn completion_time(
     created: Option<u64>,
     terminal: bool,
 ) -> Result<Option<u64>> {
+    if finished.is_none() {
+        return Ok(None);
+    }
+    completion_at(
+        recorded_clock(ledger)?.map(|clock| clock.high_water_ms),
+        finished,
+        created,
+        terminal,
+    )
+}
+
+/// [`completion_time`] inside the caller's write transaction. Like it, this reads the
+/// recorded clock and never initializes one.
+pub(crate) fn completion_time_in(
+    tx: &rusqlite::Transaction<'_>,
+    finished: Option<u64>,
+    created: Option<u64>,
+    terminal: bool,
+) -> Result<Option<u64>> {
+    if finished.is_none() {
+        return Ok(None);
+    }
+    let recorded = crate::job_store::clock(tx).map_err(|error| match error {
+        Error::Deadline(_) => error,
+        _ => refuse(crate::error::Refusal::JobClockUnavailable),
+    })?;
+    completion_at(
+        recorded.map(|clock| clock.high_water_ms),
+        finished,
+        created,
+        terminal,
+    )
+}
+
+fn completion_at(
+    high_water_ms: Option<u64>,
+    finished: Option<u64>,
+    created: Option<u64>,
+    terminal: bool,
+) -> Result<Option<u64>> {
     let Some(finished) = finished else {
         return Ok(None);
     };
-    let effective =
-        recorded_clock(ledger)?.map_or(now_ms(), |clock| clock.high_water_ms.max(now_ms()));
+    let effective = high_water_ms.map_or(now_ms(), |high_water| high_water.max(now_ms()));
     if !terminal
         || finished > effective
         || created.is_some_and(|created| finished.saturating_add(VALIDITY_SKEW_MS) < created)
@@ -400,29 +457,32 @@ pub(crate) fn completion_time(
 /// high-water time is persisted first, so a host clock that moves back cannot reopen an
 /// expired request.
 pub fn advance_clock(ledger: &Ledger, now: u64) -> Result<u64> {
-    let newest = if recorded_clock(ledger)?.is_none() {
-        newest_record_ms(ledger)?
-    } else {
-        0
-    };
-    crate::store::write(ledger, |tx| {
-        let clock = load_clock(tx, now.max(newest))?;
-        let effective = clock.high_water_ms.max(now);
-        if effective != clock.high_water_ms {
-            crate::job_store::put_clock(
-                tx,
-                &Clock {
-                    version: Clock::VERSION,
-                    high_water_ms: effective,
-                },
-            )
-            .map_err(|error| match error {
-                Error::Deadline(_) => error,
-                _ => refuse(crate::error::Refusal::JobClockUnavailable),
-            })?;
-        }
-        Ok(effective)
-    })
+    let floor = clock_floor(ledger)?;
+    crate::store::write(ledger, |tx| advance_clock_in(tx, now, floor))
+}
+
+/// [`advance_clock`] inside the caller's write transaction. `floor` is [`clock_floor`].
+pub(crate) fn advance_clock_in(
+    tx: &rusqlite::Transaction<'_>,
+    now: u64,
+    floor: u64,
+) -> Result<u64> {
+    let clock = load_clock(tx, now.max(floor))?;
+    let effective = clock.high_water_ms.max(now);
+    if effective != clock.high_water_ms {
+        crate::job_store::put_clock(
+            tx,
+            &Clock {
+                version: Clock::VERSION,
+                high_water_ms: effective,
+            },
+        )
+        .map_err(|error| match error {
+            Error::Deadline(_) => error,
+            _ => refuse(crate::error::Refusal::JobClockUnavailable),
+        })?;
+    }
+    Ok(effective)
 }
 
 /// Check a recorded request against this host's clock. The clock advances first, so a

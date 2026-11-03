@@ -137,10 +137,13 @@ pub(crate) fn put_value(ledger: &Ledger, id: &str, attempt: &Value) -> Result<()
 }
 
 pub(crate) fn remove(ledger: &Ledger, id: &str) -> Result<()> {
-    store::write(ledger, |tx| {
-        tx.execute("DELETE FROM admissions WHERE id = ?1", [id])?;
-        Ok(())
-    })
+    store::write(ledger, |tx| remove_in(tx, id))
+}
+
+/// [`remove`] inside the caller's write transaction.
+pub(crate) fn remove_in(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<()> {
+    tx.execute("DELETE FROM admissions WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 pub(crate) fn ids(ledger: &Ledger) -> Result<Vec<String>> {

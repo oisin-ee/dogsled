@@ -1033,7 +1033,7 @@ fn state_authority(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
 
 fn state(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
     match cmd {
-        StateCommand::Schema => println!("{}", store::schema()),
+        StateCommand::Schema => println!("{}", store::creation()),
         command @ (StateCommand::Launches
         | StateCommand::Launch { .. }
         | StateCommand::Fault { .. }

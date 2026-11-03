@@ -128,10 +128,22 @@ impl Item {
 }
 
 fn change(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>)) -> Result<()> {
-    ledger.with_lock("items", || {
-        let mut items = list(ledger)?;
-        f(&mut items);
-        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))
+    update(ledger, |items| {
+        f(items);
+        Ok(((), true))
+    })
+}
+
+/// Read the items, change them, and save them in one write transaction. `f` returns its
+/// result and whether it changed the items.
+fn update<T>(ledger: &Ledger, f: impl FnOnce(&mut Vec<Item>) -> Result<(T, bool)>) -> Result<T> {
+    crate::store::write(ledger, |tx| {
+        let mut items = crate::tables::items(tx)?;
+        let (result, changed) = f(&mut items)?;
+        if changed {
+            crate::tables::sync_items(tx, &items)?;
+        }
+        Ok(result)
     })
 }
 
@@ -143,10 +155,9 @@ pub fn set_reply(ledger: &Ledger, id: &str, reply: Reply) -> Result<()> {
 /// Keep `reply` as `id`'s final reply, and record whether it came from the native `done`
 /// handoff. Only that provenance proves the child finished later, when the pane is gone.
 pub fn set_reply_with(ledger: &Ledger, id: &str, reply: Reply, native_done: bool) -> Result<()> {
-    ledger.with_lock("items", || {
-        let mut items = list(ledger)?;
+    update(ledger, |items| {
         let Some(item) = items.iter_mut().find(|i| i.id == id) else {
-            return Ok(());
+            return Ok(((), false));
         };
         if let Some(saved) = &item.reply
             && saved.result_id.is_some()
@@ -158,14 +169,14 @@ pub fn set_reply_with(ledger: &Ledger, id: &str, reply: Reply, native_done: bool
             }
             // Keep captured_ms and reported_ms: an identical replay is not new delivery.
             if !native_done || item.native_done {
-                return Ok(());
+                return Ok(((), false));
             }
             item.native_done = true;
-            return crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items));
+            return Ok(((), true));
         }
         item.reply = Some(reply);
         item.native_done |= native_done;
-        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))
+        Ok(((), true))
     })
 }
 
@@ -272,16 +283,16 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
         return Ok(());
     }
     let (panes, _) = crate::cleanup::pane_snapshot(&crate::shell::System::default())?;
+    let marks = crate::done::list(ledger)?;
     ledger.with_lock("custody", || {
-        ledger.with_lock("items", || {
-            let items = list(ledger)?;
+        let expired = update(ledger, |items| {
             let mut kept = Vec::new();
             let mut expired = Vec::new();
-            for item in items {
+            for item in std::mem::take(items) {
                 if (item.kind == "agent"
                     && item.host == crate::hosts::LOCAL
                     && panes.iter().any(|pane| pane.pane_id == item.pane))
-                    || crate::done::list(ledger)?
+                    || marks
                         .iter()
                         .any(|mark| mark.item.as_deref() == Some(&item.id))
                     || !retention_ready(ledger, &item, now)?
@@ -291,15 +302,14 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
                     expired.push(item.id);
                 }
             }
-            if expired.is_empty() {
-                return Ok(());
-            }
-            crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &kept))?;
-            for id in expired {
-                crate::custody::forget_released(ledger, &id)?;
-            }
-            Ok(())
-        })
+            *items = kept;
+            let changed = !expired.is_empty();
+            Ok((expired, changed))
+        })?;
+        for id in expired {
+            crate::custody::forget_released(ledger, &id)?;
+        }
+        Ok(())
     })
 }
 
@@ -308,15 +318,14 @@ pub fn list(ledger: &Ledger) -> Result<Vec<Item>> {
 }
 
 pub fn record(ledger: &Ledger, item: Item) -> Result<()> {
-    ledger.with_lock("items", || {
-        let mut items = list(ledger)?;
-        if !items.iter().any(|i| {
+    update(ledger, |items| {
+        if items.iter().any(|i| {
             i.id == item.id || (i.closed_ms.is_none() && i.host == item.host && i.pane == item.pane)
         }) {
-            items.push(item);
-            crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))?;
+            return Ok(((), false));
         }
-        Ok(())
+        items.push(item);
+        Ok(((), true))
     })
 }
 
@@ -380,8 +389,7 @@ pub fn close_result(
 
 /// End every open item on `host`'s `pane`, after `dogsled close` removed it.
 pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize> {
-    ledger.with_lock("items", || {
-        let mut items = list(ledger)?;
+    update(ledger, |items| {
         let mut count = 0;
         for item in items
             .iter_mut()
@@ -391,8 +399,7 @@ pub fn close(ledger: &Ledger, host: &str, pane: &str, now: u64) -> Result<usize>
             item.signal = None;
             count += 1;
         }
-        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))?;
-        Ok(count)
+        Ok((count, count > 0))
     })
 }
 
@@ -584,8 +591,7 @@ pub fn close_command(item: &Item, hosts: &[HostReport]) -> String {
 /// A job item ends with its job. An agent item stays open while its pane exists, so the
 /// owner keeps hearing about a finished child until `dogsled close` removes it.
 pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> {
-    ledger.with_lock("items", || {
-        let mut items = list(ledger)?;
+    change(ledger, |items| {
         for item in items.iter_mut().filter(|i| i.closed_ms.is_none()) {
             let Some(host) = hosts
                 .iter()
@@ -621,7 +627,6 @@ pub fn reconcile(ledger: &Ledger, hosts: &[HostReport], now: u64) -> Result<()> 
                 item.signal = None;
             }
         }
-        crate::store::write(ledger, |tx| crate::tables::sync_items(tx, &items))
     })
 }
 

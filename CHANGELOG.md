@@ -6,7 +6,10 @@ All notable changes to this project are documented in this file.
 
 - Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
 - Remote launch errors show the host and the typed refusal reason, including a missing execution directory, instead of reporting an SSH failure.
-- `state.db` is now schema version 3. A host with an older `state.db` starts again with an empty store. Let queued work finish before you upgrade a host.
+- Probe samples and cleanup pass history are typed `state.db` tables, `samples` and `host_report`. Dogsled no longer writes `samples.jsonl` or `sweeps.jsonl`, and no state record is a JSON file.
+- Items and queued tickets change in one SQLite write transaction. The `items.lock` and `queue.lock` files are gone, so a close no longer waits on a file lock to record an item. Kernel locks remain only where they guard work outside `state.db`: panes, checkouts, peer hosts, the quota service, and the capacity publication protocol.
+- A write to `state.db` that starts inside another write on the same thread fails at once. Before, it waited for itself until its deadline.
+- `state.db` is now schema version 4. A host with an older `state.db` starts again with an empty store. Let queued work finish before you upgrade a host. Delete the old `samples.jsonl`, `sweeps.jsonl`, `items.lock`, and `queue.lock` files after you upgrade.
 
 ## 0.30.0 - 2026-11-02
 

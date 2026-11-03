@@ -3,9 +3,9 @@
 use super::{
     BTreeMap, BTreeSet, Ledger, Result, consume_sweep_request, custodies, gate, landing, marks,
     operations, orphans, parents, peer, put_custodies, put_landing, put_marks, put_operations,
-    put_orphans, put_parents, put_peer, put_quota, put_quota_refresh, put_report, put_repositories,
+    put_orphans, put_parents, put_peer, put_quota, put_quota_refresh, put_repositories,
     put_snapshot, put_sweep_request, put_trees, put_watchdog, quota, quota_refresh, replace_gate,
-    report, repositories, snapshot, sweep_request, trees, watchdog,
+    replace_report, report, reports, repositories, snapshot, sweep_request, trees, watchdog,
 };
 
 macro_rules! commands {
@@ -15,6 +15,12 @@ macro_rules! commands {
             Peer { id: String, #[arg(long, conflicts_with = "delete")] put: bool, #[arg(long)] delete: bool },
             SweepRequest { #[arg(long, conflicts_with = "delete")] put: bool, #[arg(long)] delete: bool },
             Gate { #[arg(long)] delete: bool },
+            /// The latest completed cleanup pass.
+            Sweep { #[arg(long, conflicts_with = "delete")] put: bool, #[arg(long)] delete: bool },
+            /// Every retained cleanup pass, oldest first.
+            Sweeps,
+            /// Every retained probe sample, oldest first.
+            Samples,
             $( $variant {
                 #[arg(long, conflicts_with = "delete")]
                 put: bool,
@@ -40,6 +46,17 @@ macro_rules! commands {
                         Ok(serde_json::to_value(gate(tx)?)?)
                     })
                 }
+                Command::Sweep { put, delete } => {
+                    if put {
+                        let value: crate::sweep::Report = serde_json::from_reader(std::io::stdin().lock())?;
+                        crate::store::write(ledger, |tx| replace_report(tx, &value))?;
+                    } else if delete {
+                        crate::store::write(ledger, |tx| { tx.execute("DELETE FROM host_report", [])?; Ok(()) })?;
+                    }
+                    Ok(serde_json::to_value(report(ledger)?)?)
+                }
+                Command::Sweeps => Ok(serde_json::to_value(reports(ledger)?)?),
+                Command::Samples => Ok(serde_json::to_value(crate::node::samples(ledger)?)?),
                 $(Command::$variant { put, delete } => {
                     if put {
                         let value: $ty = serde_json::from_reader(std::io::stdin().lock())?;
@@ -98,7 +115,6 @@ commands! {
     Landing => "host_landing", BTreeMap<String, String>, landing, put_landing;
     Orphans => "host_orphans", Vec<crate::sweep::Orphan>, orphans, put_orphans;
     PreservationOperations => "host_operations", BTreeMap<String, crate::preservation::Operation>, operations, put_operations;
-    Sweep => "host_report", crate::sweep::Report, report, put_report;
     QuotaSnapshot => "host_quota", crate::quota::Snapshot, quota, put_quota;
     QuotaRefresh => "host_quota_refresh", crate::quota::Refresh, quota_refresh, put_quota_refresh;
 }
