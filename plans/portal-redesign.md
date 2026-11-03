@@ -99,23 +99,26 @@ Overrides target the components' own classes and data attributes. Icons come fro
 
 ## Units
 
-Briefs are in `plans/briefs/portal-console-*.md`. Progress: units 1 to 5 are done; unit 6 (finish) is next. Unit 3 merged at `026abee` (bundle `.wasm` 3,984,587 bytes; no document scroll at 1440×900, 1280×800 and 1024×768). Unit 4 merged at `4dc16b9` (`.wasm` 6,172,931 bytes; highlighted code and tables checked in a live chat at the same widths). Unit 5 merged at `af8a047`, with the lead fix `a58fbbb` that keeps the review grid inside a 744px column at 1024 wide. A two-revision fixture review and a live question form were checked at all three widths. Finish items: the `Recommended` badge has no inner padding, and the review header repeats the lead's full task title.
+Briefs are in `plans/briefs/portal-console-*.md`. Progress: units 1 to 5 are done; unit 6 (finish) is next. Unit 3 merged at `026abee` (bundle `.wasm` 3,984,587 bytes; no document scroll at 1440×900, 1280×800 and 1024×768). Unit 4 merged at `4dc16b9` (`.wasm` 6,172,931 bytes; highlighted code and tables checked in a live chat at the same widths). Unit 5 merged at `af8a047`, with the lead fix `a58fbbb` that keeps the review grid inside a 744px column at 1024 wide. A two-revision fixture review and a live question form were checked at all three widths. The finish audit (2026-11-03) is in `plans/briefs/portal-console-finish.md`. `impeccable detect` reports only Inter, which the contract chose; `.impeccable/config.json` records that.
 
 1. **Wireframe** (lead). The Squig canvas `plans/portal-redesign.squig.json`: wide 1440×900, medium 1280×800 and narrow 1024×768, with the empty-inbox and plan-review states.
 2. **Highlighting choice** (selection-lead, read-only). One wasm-ready Rust highlighter for fenced code (`portal-console-highlighting.md`).
 3. **Main screen** (writer). `console.css`, the fixed grid and its three widths, the top bar, the inbox sidebar (replaces the `Sheet` and the Inbox button), the agents sidebar, and the lead panel: header with tabs, conversation, icon-only composer and the todos column. Owns `web/src/app.rs`, `web/src/board.rs`, `web/src/agent_view.rs` and `web/assets/console.css`.
 4. **Markdown** (writer). Parser options, the chosen highlighter, message styles and `markdown.css`. Owns the render functions in `web/src/review_view.rs`, the `Conversation` component in `web/src/agent_view.rs`, and `web/Cargo.toml`.
 5. **Plan review and questions** (writer). The review over everything right of the inbox sidebar, the `Notes` tab below 1100px, questions and key prompts in the centre column, and `review.css`. Owns the `ReviewView` components in `web/src/review_view.rs` and `web/src/question_form.rs`.
-6. **Finish** (lead and reviewer). `impeccable detect --json web/`, the finish review against the sketches, and `DESIGN.md`.
+6. **Finish** (lead, then writer). The lead runs `impeccable detect --json web/` and the finish review against the sketches. The writer fixes what they found (`portal-console-finish.md`). After that merges, the lead writes `DESIGN.md` from the final tokens.
 
-Unit 3 starts after 1. Unit 4 starts after 3 merges and uses 2. Unit 5 starts after 4 merges, because both edit `web/src/review_view.rs`.
+Unit 3 starts after 1. Unit 4 starts after 3 merges and uses 2. Unit 5 starts after 4 merges, because both edit `web/src/review_view.rs`. Unit 6 starts after `origin/main` merges into `plan/portal-console`, because it edits `src/web/inbox.rs`, which `main` changed.
+
+## Decided
+
+- **Highlighter bundle cost** (owner, 2026-11-03). Keep every two-face grammar. Highlighting adds about 1.1 MB (brotli) to the bundle the portal serves over loopback; syntect's own set is about 360 KiB but has no TOML or TypeScript.
 
 ## Open decisions
 
 - **Tool lines.** Transcript turns carry only `role` and `text` (`portal-types/src/agents.rs:57`), so the conversation cannot show tool calls as mono lines yet. That needs a transcript change on the server and is not in units 3 to 5.
 - **Model and host in the lead header.** `AgentView` (`portal-types/src/agents.rs:22`) has `agent` (the harness) but no model or host, so the header shows `role · harness · branch`, and the host only for workers (from `RowView.host`). Showing the model needs the server to report it.
 - **Completed todo order.** Todos carry no completion time, so "latest first" reverses the server's order. That order is an estimate.
-- **Highlighter bundle cost.** Highlighting adds about 1.1 MB (brotli) to the bundle the portal serves over loopback. The owner can keep it or ask for a smaller grammar set; syntect's own set is about 360 KiB but has no TOML or TypeScript.
 - **Attachments to remote agents.** The composer attach control reuses `POST /api/attachments` and sends the stored paths as a "Reference images:" block, as review change requests already do. The files are stored on the portal host, so an agent on another host cannot open them.
 
 ## Verification
