@@ -8,6 +8,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
+pulldown-cmark = { version = "0.13.5", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 # The question forms keep the fields the schema does not name, so they need a
 # JSON value type of their own.

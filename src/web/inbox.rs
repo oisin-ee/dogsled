@@ -8,7 +8,7 @@ use axum::{Json, Router, routing::get};
 use portal_types::agents::AgentView;
 use portal_types::inbox::{InboxItem, InboxKind, InboxView};
 use portal_types::questions::Pending;
-use portal_types::reviews::Review;
+use portal_types::reviews::{Review, plan_title};
 use portal_types::{BoardView, RowView};
 
 use super::AppState;
@@ -82,11 +82,23 @@ fn view(
     let mut items = Vec::new();
     for review in reviews.iter().filter(|review| review.decision.is_none()) {
         let (agent_title, repository) = metadata(&review.pane);
+        let latest = review.revisions.last();
+        let title = latest
+            .and_then(|revision| plan_title(&revision.content))
+            .unwrap_or_else(|| {
+                review
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&review.path)
+                    .to_owned()
+            });
+        let revision = latest.map_or(0, |revision| revision.n);
         items.push(InboxItem {
             kind: InboxKind::Review,
             id: review.id.clone(),
             pane: review.pane.clone(),
-            title: review.path.clone(),
+            title: format!("{title}, revision {revision}"),
             agent_title,
             repository,
             age_ms: now.saturating_sub(
@@ -227,6 +239,41 @@ mod tests {
             general: String::new(),
             decision: None,
         }
+    }
+
+    #[test]
+    fn review_inbox_title_uses_the_latest_heading_or_file_name() -> Result<()> {
+        let mut review = review();
+        review.path = "/tmp/work/plans/change.md".to_owned();
+        review.revisions[0].content = "# Old title".to_owned();
+        review.revisions.push(portal_types::reviews::Revision {
+            n: 3,
+            content: "# Typed **SQLite** state store".to_owned(),
+            submitted_ms: 12,
+        });
+        for (content, expected) in [
+            (
+                "# Typed **SQLite** state store",
+                "Typed SQLite state store, revision 3",
+            ),
+            ("A plan without a heading.", "change.md, revision 3"),
+            ("#", "change.md, revision 3"),
+        ] {
+            review
+                .revisions
+                .last_mut()
+                .ok_or_else(|| Error::Invalid("missing test revision".to_owned()))?
+                .content = content.to_owned();
+            let inbox = view(&board()?, &[review.clone()], &[], &[], 20);
+            let item = inbox
+                .items
+                .iter()
+                .find(|item| item.kind == InboxKind::Review)
+                .ok_or_else(|| Error::Invalid("missing review inbox item".to_owned()))?;
+            assert_eq!(item.title, expected);
+            assert_eq!(item.age_ms, 8);
+        }
+        Ok(())
     }
 
     #[tokio::test]

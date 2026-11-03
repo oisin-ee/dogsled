@@ -231,8 +231,8 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
         SidebarGroup {
             if let Some(repository) = group.repository {
                 SidebarGroupLabel { title: "{repository}",
-                    "{repository_name(&repository)} · {count} "
-                    if count == 1 { "agent" } else { "agents" }
+                    span { "{repository_name(&repository)}" }
+                    span { "{count}" }
                 }
             }
             SidebarGroupContent {

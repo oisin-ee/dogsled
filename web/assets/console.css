@@ -138,6 +138,7 @@ textarea {
 }
 .console-provider .console-shell .console-host [role="progressbar"] {
   width: 48px;
+  min-width: 48px;
   height: 4px;
   background: var(--console-line);
 }
@@ -180,10 +181,17 @@ textarea {
 .console-provider .console-shell .console-column-header > :last-child:not(h2) {
   margin-left: auto;
 }
-.console-provider .console-shell .inbox-count {
+.console-provider .console-shell [data-part="inbox-count"] {
+  height: 18px;
+  padding: 0 7px;
   border: 0;
+  border-radius: 9px;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
 }
-.console-provider .console-shell .inbox-count[data-waiting="true"] {
+.console-provider .console-shell [data-part="inbox-count"][data-waiting="true"] {
   background: var(--console-waiting);
   color: var(--console-bg);
 }
@@ -266,6 +274,7 @@ textarea {
 .console-provider .console-shell .console-agents [data-slot="sidebar-group-label"] {
   height: auto;
   padding: 12px 8px 4px;
+  justify-content: space-between;
   color: var(--console-muted);
   font-size: 12px;
 }
@@ -555,6 +564,33 @@ textarea {
   min-height: 0;
   border-left: 1px solid var(--console-line);
 }
+.console-provider .console-shell [data-part="column-empty"],
+.console-provider .console-shell [data-part="finished-branches"] {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--console-muted);
+  font-size: 13px;
+  box-shadow: none;
+}
+.console-provider
+  .console-shell
+  :is([data-part="column-empty"], [data-part="finished-branches"])
+  [data-slot="item-title"] {
+  color: inherit;
+  font-size: inherit;
+  font-weight: 400;
+}
+.console-provider .console-shell .console-inbox [data-part="column-empty"] {
+  padding: 16px;
+}
+.console-provider .console-shell .todo-list [data-part="column-empty"] {
+  padding-top: 12px;
+}
+.console-provider .console-shell .console-agents [data-part="finished-branches"] {
+  padding: 8px;
+}
 .console-provider .console-shell .todo-panel {
   display: flex;
   height: 100%;
@@ -606,7 +642,10 @@ textarea {
   border: 1px solid var(--console-dim);
   border-radius: 50%;
 }
-.console-provider .console-shell .todo-item[data-status="completed"] {
+.console-provider
+  .console-shell
+  .todo-item:is([data-status="completed"], [data-status="abandoned"])
+  .todo-title {
   color: var(--console-muted);
 }
 .console-provider

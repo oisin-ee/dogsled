@@ -45,14 +45,25 @@
   font-size: 14px;
   font-weight: 600;
 }
-.console-provider .console-shell .review-heading :is(h1, p) {
+.console-provider .console-shell .review-heading :is(h1, .review-lead-title) {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 .console-provider .console-shell .review-heading p {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--console-muted);
+}
+.console-provider .console-shell .review-heading p > span {
+  flex: none;
+}
+.console-provider .console-shell .review-heading p > .review-lead-title {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .console-provider .console-shell .review-header [role="tablist"] {
   flex: none;
@@ -151,10 +162,11 @@
 .console-provider .console-shell .review-decision textarea {
   flex: 1;
   min-width: 0;
-  min-height: 40px;
-  max-height: 120px;
+  field-sizing: content;
+  min-height: calc(1lh + 18px);
+  max-height: calc(8lh + 18px);
   padding: 9px 12px;
-  resize: vertical;
+  resize: none;
   border: 1px solid var(--console-line);
   border-radius: 8px;
   background: var(--console-panel);
@@ -216,8 +228,8 @@
 .console-provider .console-shell .question-heading .question-age {
   font-size: 12px;
 }
-.console-provider .console-shell .question-block[data-slot="card"],
-.console-provider .console-shell .question-rejection[data-slot="card"] {
+.console-provider .console-shell [data-part="question-block"][data-slot="card"],
+.console-provider .console-shell [data-part="question-rejection"][data-slot="card"] {
   min-width: 0;
   gap: 12px;
   padding: 20px 0;
@@ -225,6 +237,7 @@
   border-top: 1px solid var(--console-line);
   border-radius: 0;
   background: transparent;
+  color: var(--console-text);
   box-shadow: none;
 }
 .console-provider .console-shell .question-form [data-slot^="card-"] {
@@ -289,7 +302,7 @@
   flex: none;
   margin-top: 3px;
 }
-.console-provider .console-shell .question-option-row .recommended-badge {
+.console-provider .console-shell .question-option-row [data-part="recommended-badge"] {
   flex: none;
   width: auto;
   max-width: none;
@@ -298,7 +311,13 @@
   background: var(--console-accent);
   color: white;
   border: 0;
-  border-radius: 6px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
 }
 .console-provider .console-shell .question-option-content {
   min-width: 0;
