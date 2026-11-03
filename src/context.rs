@@ -82,6 +82,7 @@ mod tests {
     fn status() -> Status {
         Status {
             hosts: vec![HostReport {
+                service_lanes: Vec::new(),
                 host: Host::local(),
                 service: "down".into(),
                 reachable: true,

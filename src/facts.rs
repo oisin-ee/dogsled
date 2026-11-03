@@ -1,6 +1,6 @@
 //! What each agent pane is doing, measured on its own host: the model in its transcript, its
 //! latest step, and the state of the linked worktree it runs in. The service publishes these in
-//! `host.json`, so every reader sees the same facts without SSH or a transcript of its own.
+//! the host snapshot, so every reader sees the same facts without SSH or a transcript of its own.
 
 use crate::activity;
 use crate::probe::{Agent, Probe};

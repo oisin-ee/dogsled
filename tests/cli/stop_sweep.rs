@@ -33,9 +33,8 @@ fn serve(rig: &Rig) -> String {
 /// The child's pane is gone, so the record holds nothing.
 fn launched_into(rig: &Rig, id: &str, owner: &str, tree: &Path) {
     fs::create_dir_all(tree).unwrap();
-    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
-    rig.put(
-        &format!("state/launches/{id}.progress.json"),
+    rig.put_launch_progress(
+        id,
         &json!({
             "request":{"id":id,"action":{"type":"agent","kind":"pi","name":id,"message":"go"},
                 "host":"local","cwd":tree,"owner":owner},
@@ -56,8 +55,8 @@ fn failed_pass(rig: &Rig, failed: &[(&Path, &str)]) {
         })
         .collect();
     let details: Vec<&str> = failed.iter().map(|(_, detail)| *detail).collect();
-    rig.put(
-        "state/sweep.json",
+    rig.put_state(
+        &["state", "sweep", "--put"],
         &json!({"started_ms":1,"finished_ms":2,"results":[],"failures":details,
             "failure_entries":entries,"repositories":[],"landed_dirty":[]}),
     );
@@ -66,11 +65,23 @@ fn failed_pass(rig: &Rig, failed: &[(&Path, &str)]) {
 #[test]
 fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() {
     let rig = Rig::new("holds");
-    let claims = json!([
-        {"repo":"/tmp/repo","path":"/tmp/held","branch":"feat/x","request_id":"request-held"},
-        {"repo":"/tmp/repo","path":"/tmp/damaged","branch":"feat/damaged"}
-    ]);
-    rig.put("state/preparations.json", &claims);
+    let malformed = json!([{ "repo":"/tmp/repo","path":"/tmp/damaged","branch":"feat/damaged" }]);
+    let mut child = rig
+        .cmd(&["state", "preparations", "--put"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        &mut child.stdin.take().unwrap(),
+        malformed.to_string().as_bytes(),
+    )
+    .unwrap();
+    assert!(!child.wait_with_output().unwrap().status.success());
+    assert_eq!(rig.preparations(), json!([]));
+    let claims = json!([{ "repo":"/tmp/repo","path":"/tmp/held","branch":"feat/x","head":"","request_id":"request-held" }]);
+    rig.preparation_record("state", "claims", "").put(&claims);
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0, "{status}");
     let holds = status["holds"].as_array().unwrap();
@@ -90,12 +101,7 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
         held["next_command"],
         "dogsled retire-preparation request-held --host local --reason 'release reported historical preparation claim'"
     );
-    // A claim without its request is a damaged record, not a supported claim type.
-    let damaged = holds
-        .iter()
-        .find(|h| h["resource"].as_str().unwrap().contains("/tmp/damaged"))
-        .unwrap();
-    assert_eq!(damaged["code"], "unreadable");
+
     let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
     assert!(human.contains("Resource holds:"), "{human}");
     assert!(
@@ -117,45 +123,37 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
     let (reply, error) = mcp.call("status", &json!({"all":true}));
     assert!(!error, "{reply}");
     assert_eq!(reply["rows"], board["rows"]);
-    assert_eq!(rig.read("state/preparations.json"), claims);
-    assert!(!rig.dir.join("state/preparation-receipts").exists());
+    assert_eq!(rig.preparations(), claims);
+    assert_eq!(rig.state(&["preparation", "receipt"]), json!([]));
 }
 
 #[test]
 fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
     let rig = Rig::new("hold-stores");
-    for directory in [
-        "admissions",
-        "placement-grants",
-        "job-validity",
-        "cancellations",
-    ] {
-        fs::create_dir_all(rig.dir.join("state").join(directory)).unwrap();
-    }
-    let request = json!({"id":"place-held","owner":"w1:p1","owner_host":"origin"});
-    rig.put(
-        "state/admissions/place-held.json",
-        &json!({"request":request,"placement":{"phase":"result_saved"}}),
+    let mut request = place_request("place-held");
+    request["owner_host"] = json!("origin");
+    rig.put_admission(
+        "place-held",
+        &json!({"request":request,"launch":null,"error":null,
+            "placement":{"version":4,"phase":"recorded","declined":[]}}),
     );
-    rig.put(
-        "state/placement-grants/place-held.json",
-        &json!({"envelope":{"request":request}}),
+    rig.preparation_record("state", "grant", "place-held").put(
+        &json!({"version":3,"envelope":{"version":3,"request":request,"host":{"id":"local","label":"local"},"reservation":"place-held"},"reservation":{"id":"place-held","created_ms":1},"headroom":{"host":"local","headroom":2.0,"eligible":true,"live_agents":1},"materialized":true}),
     );
-    rig.put(
-        "state/job-validity/place-held.json",
-        &json!({"version":1,"created_ms":1}),
+    rig.put_validity("place-held", &json!({"version":1,"created_ms":1}));
+    rig.put_reservations(&json!([
+        {"id":"live-capacity","created_ms":now()},
+        {"id":"expired-capacity","created_ms":0}
+    ]));
+    rig.put_admission(
+        "release-held",
+        &released_admission("release-held", "origin"),
     );
-    rig.put(
-        "state/placements.json",
-        &json!([
-            {"id":"live-capacity","created_ms":now()},
-            {"id":"expired-capacity","created_ms":0}
-        ]),
-    );
-    rig.put("state/admissions/release-held.json", &json!({"request":{"owner":"w1:p1","owner_host":"origin"},"result":{},"unit":{"reference_release":{"acknowledgement":null}}}));
-    rig.put(
-        "state/cancellations/cancel-held.json",
-        &json!({"release":"pending","ticket":{"id":"ticket-held","request":{"owner":"w1:p1"}}}),
+    rig.put_cancellation(
+        "cancel-held",
+        &json!({"version":1,"operation_id":"cancel-operation","release":"pending",
+            "ticket":{"id":"ticket-held","request":place_request("cancel-held"),"created_ms":1,"state":"cancelled","waiting":false,"notified":false},
+            "outcome":"not_started"}),
     );
     rig.put_items(&json!([{"id":"branch-held","kind":"agent","host":"local","pane":"gone","owner_pane":"w1:p1","created_ms":1,"closed_ms":2,"branch":{"repo":"/tmp/repo","name":"feat/kept","ahead":1,"landed":false}}]));
     let (code, status) = rig.json(&["status"]);
@@ -204,8 +202,8 @@ fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
         "dogsled drop branch-held --host local"
     );
     assert_eq!(
-        rig.read("state/admissions/place-held.json")["placement"]["phase"],
-        "result_saved"
+        rig.admission("place-held")["placement"]["phase"],
+        "recorded"
     );
     let (_, board) = rig.json(&["board", "--owner", "w1:p1"]);
     assert!(
@@ -265,23 +263,23 @@ fn peer_holds_are_routed_to_their_host_and_cached_when_it_is_unreachable() {
 #[test]
 fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
     let (rig, tree) = close_rig("stop-request");
-    rig.put(
-        "state/repositories.json",
+    rig.put_state(
+        &["state", "repositories", "--put"],
         &json!([rig.dir.join("home/repo")]),
     );
     serve(&rig);
     serve(&rig);
     assert!(tree.exists());
-    assert!(!rig.dir.join("state/sweep.json").exists());
+    assert!(rig.state(&["sweep"]).is_null());
     assert!(!rig.log("herdr.log").contains("workspace list"));
     super::sweep_ownership::record_closed_checkout(&rig, &tree, "stop-child");
     assert_eq!(gate(&rig, "w1:p1"), "");
-    assert!(rig.dir.join("state/sweep-request.json").exists());
-    assert!(!rig.dir.join("state/sweep.json").exists());
+    assert!(!rig.state(&["sweep-request"]).is_null());
+    assert!(rig.state(&["sweep"]).is_null());
     assert!(tree.exists(), "the hook must not remove anything");
     serve(&rig);
     assert!(!tree.exists());
-    let report = rig.read("state/sweep.json");
+    let report = rig.state(&["sweep"]);
     assert!(
         report["results"]
             .as_array()
@@ -290,9 +288,9 @@ fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
             .any(|r| r.as_str().unwrap().contains(tree.to_str().unwrap()))
     );
     assert!(report["finished_ms"].as_u64().unwrap() >= report["started_ms"].as_u64().unwrap());
-    assert!(!rig.dir.join("state/sweep-request.json").exists());
+    assert!(rig.state(&["sweep-request"]).is_null());
     serve(&rig);
-    assert_eq!(rig.read("state/sweep.json"), report);
+    assert_eq!(rig.state(&["sweep"]), report);
     let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
     assert_eq!(history.lines().count(), 1);
     // Successful removals remain visible in status, but never continue an agent turn.
@@ -347,9 +345,9 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
     let (rig, tree) = close_rig("stop-pruned-worktree");
     let repo = rig.dir.join("home/repo").canonicalize().unwrap();
     let head = git(&tree, &["rev-parse", "HEAD"]).trim().to_owned();
-    rig.put("state/repositories.json", &json!([repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo]));
     let registration = json!([{"repo":repo,"path":tree,"branch":"feat/x","head":head}]);
-    rig.put("state/worktrees.json", &registration);
+    rig.put_state(&["state", "worktrees", "--put"], &registration);
     // The tova case: the `.git` file went missing, so Git marked the worktree prunable, and
     // `git worktree prune` dropped it. The directory and its generated output remain.
     fs::create_dir_all(tree.join("build")).unwrap();
@@ -368,7 +366,7 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
     assert!(log.contains("dogsled sweep: hold:"), "{log}");
     assert!(!log.contains("failed:"), "{log}");
     assert!(tree.join("build/generated").is_file());
-    assert_eq!(rig.read("state/worktrees.json"), registration);
+    assert_eq!(rig.state(&["worktrees"]), registration);
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["sweep"]["failures"], json!([]), "{status}");
     let hold = &status["sweep"]["unlinked"][0];
@@ -400,7 +398,7 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
     gate(&rig, "w1:p1");
     let log = serve(&rig);
     assert!(!log.contains("failed:"), "{log}");
-    assert_eq!(rig.read("state/worktrees.json"), json!([]));
+    assert_eq!(rig.state(&["worktrees"]), json!([]));
 }
 
 #[test]
@@ -408,7 +406,7 @@ fn missing_configured_repository_stays_in_status_and_does_not_stop_other_cleanup
     let (rig, tree) = close_rig("stop-missing-repo");
     let missing = rig.dir.join("gone-repo");
     let repo = rig.dir.join("home/repo");
-    rig.put("state/repositories.json", &json!([missing, repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([missing, repo]));
     super::sweep_ownership::record_closed_checkout(&rig, &tree, "healthy-child");
     rig.config(&format!("[cleanup]\nrepositories = [{}]\n", json!(missing)));
     gate(&rig, "w1:p1");
@@ -417,7 +415,7 @@ fn missing_configured_repository_stays_in_status_and_does_not_stop_other_cleanup
         !tree.exists(),
         "one missing repository must not stop cleanup"
     );
-    assert_eq!(rig.read("state/repositories.json"), json!([repo]));
+    assert_eq!(rig.state(&["repositories"]), json!([repo]));
     assert!(
         fs::read_to_string(rig.dir.join("config.toml"))
             .unwrap()
@@ -434,8 +432,8 @@ fn missing_configured_repository_stays_in_status_and_does_not_stop_other_cleanup
 #[test]
 fn cleanup_failure_report_preserves_worktree_identity_for_notice_routing() {
     let (rig, tree) = close_rig("stop-failure-identity");
-    rig.put(
-        "state/repositories.json",
+    rig.put_state(
+        &["state", "repositories", "--put"],
         &json!([rig.dir.join("home/repo")]),
     );
     super::sweep_ownership::record_closed_checkout(&rig, &tree, "failed-child");
@@ -443,7 +441,7 @@ fn cleanup_failure_report_preserves_worktree_identity_for_notice_routing() {
     gate(&rig, "w1:p1");
     serve(&rig);
     assert!(tree.exists());
-    let report = rig.read("state/sweep.json");
+    let report = rig.state(&["sweep"]);
     let failed = report["failure_entries"]
         .as_array()
         .unwrap()
@@ -486,8 +484,7 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
     ]));
     let entry = json!({"class":"worktrees","id":checkout,"detail":"teardown refused","removable":true,
         "tree":{"repo":rig.dir.join("home/repo"),"path":checkout,"branch":"feat/child"}});
-    rig.put(
-        "state/sweep.json",
+    rig.put_state(&["state", "sweep", "--put"],
         &json!({"started_ms":1,"finished_ms":2,"results":[],
         "failures":["child teardown refused","host survey failed"],
         "failure_entries":[{"entry":entry,"detail":"child teardown refused"}],
@@ -514,7 +511,7 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
             .unwrap();
         String::from_utf8(out.stdout).unwrap()
     };
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     assert!(!context("w1:p1").contains("Cleanup at"));
     assert!(
         context("w3:p1").contains("Cleanup at 2 ms: 1 failures and 1 held worktrees in your work")
@@ -535,7 +532,7 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
     rig.put("panes.json", &panes);
     assert_eq!(gate(&rig, "w1:p1"), "");
     assert_eq!(gate(&rig, "w3:p1"), "");
-    fs::remove_file(rig.dir.join("state/gate.json")).unwrap();
+    rig.state(&["gate", "--delete"]);
     assert!(gate(&rig, "w3:p1").contains("child teardown refused"));
     assert_eq!(gate(&rig, "w1:p1"), "");
 }
@@ -553,7 +550,7 @@ fn landed_dirty_reaches_only_the_agent_that_created_the_worktree() {
             {"pane_id":"w3:p1","terminal_id":"researcher","cwd":repo}
         ]}}),
     );
-    rig.put("state/repositories.json", &json!([repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo]));
     // The creator recorded the launch through a symlinked path; it still names the worktree.
     launched_into(&rig, "creator", "w1:p1", &alias.join(".worktrees/x"));
     fs::write(tree.join("notes.txt"), "keep this work").unwrap();
@@ -586,7 +583,7 @@ fn landed_dirty_reaches_only_the_agent_that_created_the_worktree() {
         .push(json!({"pane_id":"w4:p1","terminal_id":"linked","cwd":tree}));
     rig.put("panes.json", &panes);
     assert_eq!(gate(&rig, "w4:p1"), "");
-    let report = rig.read("state/sweep.json");
+    let report = rig.state(&["sweep"]);
     assert_eq!(report["landed_dirty"][0]["kind"], "landed_dirty");
     assert_eq!(report["landed_dirty"][0]["removable"], false);
 }
@@ -634,7 +631,7 @@ fn claude_and_codex_stop_deliver_cleanup_and_request_the_next_pass() {
             "{reason}"
         );
         assert_eq!(reason.matches("survey unavailable").count(), 1, "{reason}");
-        assert!(rig.dir.join("state/sweep-request.json").exists());
+        assert!(!rig.state(&["sweep-request"]).is_null());
         assert_eq!(run().stdout, [] as [u8; 0]);
     }
 }
@@ -679,20 +676,20 @@ fn stop_wakes_the_service_without_waiting_for_the_publication_interval() {
     let mut service = command(&["serve", "--interval", "60"]);
     service.stdout(Stdio::null()).stderr(Stdio::null());
     let _service = Service(Owned::spawn(&mut service));
-    until(|| rig.dir.join("state/host.json").exists());
+    until(|| !rig.state(&["host"]).is_null());
     assert!(
         fs::metadata(rig.dir.join("state/sweep.sock"))
             .unwrap()
             .file_type()
             .is_socket()
     );
-    assert!(!rig.dir.join("state/sweep.json").exists());
+    assert!(rig.state(&["sweep"]).is_null());
     request();
-    until(|| rig.dir.join("state/sweep.json").exists());
-    until(|| !rig.dir.join("state/sweep-request.json").exists());
-    let first = rig.read("state/sweep.json");
+    until(|| !rig.state(&["sweep"]).is_null());
+    until(|| rig.state(&["sweep-request"]).is_null());
+    let first = rig.state(&["sweep"]);
     request();
-    until(|| rig.read("state/sweep.json") != first);
+    until(|| rig.state(&["sweep"]) != first);
 }
 
 #[test]
@@ -711,9 +708,9 @@ fn long_state_path_without_a_socket_still_consumes_stop_requests() {
         .stdout(Stdio::null())
         .stderr(journal);
     let _service = Service(Owned::spawn(&mut service));
-    until(|| state.join("host.json").exists());
+    until(|| !rig.host_at(state.to_str().unwrap()).is_null());
     assert!(!state.join("sweep.sock").exists());
-    assert!(!state.join("sweep.json").exists());
+    assert!(rig.state_at(state.to_str().unwrap(), &["sweep"]).is_null());
     assert!(
         fs::read_to_string(&journal_path)
             .unwrap()
@@ -730,7 +727,12 @@ fn long_state_path_without_a_socket_still_consumes_stop_requests() {
             .unwrap();
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("cleanup request failed"));
-        until(|| state.join("sweep.json").exists() && !state.join("sweep-request.json").exists());
+        until(|| {
+            !rig.state_at(state.to_str().unwrap(), &["sweep"]).is_null()
+                && rig
+                    .state_at(state.to_str().unwrap(), &["sweep-request"])
+                    .is_null()
+        });
         assert_eq!(
             fs::read_to_string(state.join("sweeps.jsonl"))
                 .unwrap()
@@ -755,10 +757,10 @@ fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
         launched_into(&rig, "owned", "w1:p1", &tree);
         failed_pass(&rig, &[(&tree, "previous survey failed")]);
         if harness != "pi" {
-            rig.snapshot("state/host.json", now(), 0.0, 8);
-            let mut snapshot = rig.read("state/host.json");
+            rig.snapshot("state", now(), 0.0, 8);
+            let mut snapshot = rig.host();
             snapshot["probe"]["agent_panes"][0]["terminal_id"] = json!("term_owner");
-            rig.put("state/host.json", &snapshot);
+            rig.put_host(&snapshot);
             let registered = rig
                 .cmd(&[
                     "hook",
@@ -778,9 +780,8 @@ fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
                 0
             );
         }
-        // A directory at the request file path makes atomic replacement fail while
-        // the inbox, latest report, and gate history remain writable.
-        fs::create_dir(rig.dir.join("state/sweep-request.json")).unwrap();
+        // A failed request insert leaves inbox, report, and gate tables writable.
+        rig.fault_host_store("sweep-request", true);
         let args = if harness == "pi" {
             vec!["hook", "gate"]
         } else {
@@ -795,10 +796,7 @@ fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
             let output: Value = serde_json::from_str(&text).unwrap();
             assert_eq!(output["decision"], "block");
             assert!(text.contains("inbox delivery survives"));
-            assert_eq!(
-                rig.read("state/inbox/term_owner.json")[0]["state"],
-                "delivered"
-            );
+            assert_eq!(rig.inbox("term_owner")[0]["state"], "delivered");
         }
         let repeated = rig.cmd(&args).env("HERDR_ENV", "1").output().unwrap();
         assert_eq!(repeated.stdout, [] as [u8; 0]);
@@ -832,7 +830,7 @@ fn pass_history_keeps_only_seven_days_including_the_boundary() {
             .collect::<Vec<_>>(),
         [2, week + 1, week + 2]
     );
-    let latest = rig.read("state/sweep.json");
+    let latest = rig.state(&["sweep"]);
     assert_eq!(latest["ts_ms"], latest["finished_ms"]);
     assert_eq!(latest["ts_ms"], week + 2);
 }
@@ -847,7 +845,7 @@ fn the_service_retention_pass_expires_old_job_records_without_a_doctor_run() {
     let job = json!({"id":"old","cmd":["true"],"cwd":rig.dir.join("home"),"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"idle","exit":0,"signal":null,"reason":null,
         "started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null});
-    rig.put("state/jobs/old.json", &job);
+    rig.put_job("old", &job);
     fs::write(rig.dir.join("state/jobs/old.log"), "the output\n").unwrap();
     // 40 days later the pass removes the record and its log.
     fs::write(
@@ -856,6 +854,6 @@ fn the_service_retention_pass_expires_old_job_records_without_a_doctor_run() {
     )
     .unwrap();
     serve(&rig);
-    assert!(!rig.dir.join("state/jobs/old.json").exists());
+    assert!(rig.job("old").is_null());
     assert!(!rig.dir.join("state/jobs/old.log").exists());
 }

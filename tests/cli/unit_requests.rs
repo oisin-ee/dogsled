@@ -14,7 +14,7 @@ pub(super) fn exported(index: usize) -> Value {
 
 pub(super) fn rig(name: &str, full: bool) -> Rig {
     let rig = Rig::short(name);
-    rig.snapshot("state/host.json", now(), if full { 3.0 } else { 0.0 }, 2);
+    rig.snapshot("state", now(), if full { 3.0 } else { 0.0 }, 2);
     worker_profile(&rig);
     rig
 }
@@ -80,14 +80,11 @@ pub(super) fn execution_input(execution: &Value) -> Value {
 }
 
 pub(super) fn admission(rig: &Rig, execution: &Value) -> Value {
-    rig.read(&format!(
-        "state/admissions/{}.json",
-        execution["requestId"].as_str().unwrap()
-    ))
+    rig.admission(execution["requestId"].as_str().unwrap())
 }
 
 fn no_launch(rig: &Rig) {
-    assert!(!rig.dir.join("state/placements.json").exists());
+    assert_eq!(rig.reservations(), json!([]));
     assert_eq!(rig.tickets(), json!([]));
     let log = rig.log("herdr.log");
     for forbidden in ["tab create", "worktree open", "agent start", "pane close"] {
@@ -234,11 +231,11 @@ fn cancel_before_admission_fences_every_replay() {
     let (rig, execution, ticket) = committed_queued("cancel-replays");
     assert!(rig.run(&["cancel", &ticket]).status.success());
     let id = execution["requestId"].as_str().unwrap();
-    let saved = rig.read(&format!("state/cancellations/{id}.json"));
+    let saved = rig.cancellation(id);
     assert_eq!(saved["version"], 1);
     assert_eq!(saved["outcome"], "not_started");
     assert!(rig.run(&["cancel", &ticket]).status.success());
-    assert_eq!(saved, rig.read(&format!("state/cancellations/{id}.json")));
+    assert_eq!(saved, rig.cancellation(id));
     let first = operation(&rig, "observe", &execution_input(&execution)).1["settlement"].clone();
     assert_eq!(first["result"]["kind"], "not_started");
     assert_eq!(
@@ -257,39 +254,33 @@ fn cancel_before_admission_fences_every_replay() {
 
 #[test]
 fn terminal_ticket_without_no_launch_proof_stays_unresolved() {
-    for case in ["legacy", "missing", "corrupt", "launch", "mismatch", "ack"] {
+    // The admissions table refuses a malformed record, so none can be stored to read back.
+    for case in ["legacy", "missing", "launch", "mismatch", "ack"] {
         let (rig, execution, _) = committed_queued(&format!("cancel-no-proof-{case}"));
         set_ticket(&rig, "cancelled", Value::Null);
-        let file = format!(
-            "state/admissions/{}.json",
-            execution["requestId"].as_str().unwrap()
-        );
+        let id = execution["requestId"].as_str().unwrap().to_owned();
         if case == "missing" {
-            fs::remove_file(rig.dir.join(&file)).unwrap();
-        }
-        if case == "corrupt" {
-            fs::write(rig.dir.join(&file), "{corrupt").unwrap();
+            rig.delete_admission(&id);
         }
         if case == "launch" {
-            let mut attempt = rig.read(&file);
+            let mut attempt = rig.admission(&id);
             attempt["launch"] = json!({"id":execution["requestId"],"action":attempt["request"]["action"],"host":"local","cwd":"/tmp","pane":null,"workspace":null,"workspace_name":null,"owner":"w1:p1"});
-            rig.put(&file, &attempt);
+            rig.put_admission(&id, &attempt);
         }
         if case == "mismatch" {
-            let mut attempt = rig.read(&file);
+            let mut attempt = rig.admission(&id);
             attempt["request"]["cwd"] = json!("/changed");
-            rig.put(&file, &attempt);
+            rig.put_admission(&id, &attempt);
         }
         if case == "ack" {
-            fs::create_dir_all(rig.dir.join("state/cancellations")).unwrap();
             let ticket = rig.tickets()[0].clone();
             let binding = json!({"request_id":execution["requestId"],"request":["/repo","worker",null],
                 "claim":{"request_id":execution["requestId"],"tree":{"repo":"/repo","path":"/repo/tree","branch":"worker","head":"head"}},"prepared":null});
             let policy = json!({"kind":"prohibit","basis":{"cancelled":{"operation_id":"cancel-ack","request_id":execution["requestId"]}}});
             let intent = json!({"version":1,"binding":binding,"policy":policy,"outcome":"unknown"});
             let ack = json!({"version":1,"binding":binding,"policy":policy,"outcome":"unknown","released":true});
-            rig.put(&format!("state/cancellations/{}.json", execution["requestId"].as_str().unwrap()),
-                &json!({"version":1,"operation_id":"cancel-ack","ticket":ticket,"admission":rig.read(&file),
+            rig.put_cancellation(execution["requestId"].as_str().unwrap(),
+                &json!({"version":1,"operation_id":"cancel-ack","ticket":ticket,"admission":rig.admission(&id),
                     "preparation":null,"placement":null,"outcome":"unknown","release":"acknowledged",
                     "intent":intent,"acknowledgement":ack,"error":null}));
         }
@@ -305,7 +296,7 @@ fn terminal_ticket_without_no_launch_proof_stays_unresolved() {
 
 fn admission_service(rig: &Rig) {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    rig.snapshot("state/host.json", rig.origin_ms, 0.0, 16);
+    rig.snapshot("state", rig.origin_ms, 0.0, 16);
 }
 
 #[test]
@@ -319,11 +310,11 @@ fn cancellation_intent_crash_repairs_queue_without_readmission() {
     assert_eq!(out.status.code(), Some(86), "{out:?}");
     assert_eq!(rig.tickets()[0]["state"], "pending");
     let id = execution["requestId"].as_str().unwrap();
-    let intent = rig.read(&format!("state/cancellations/{id}.json"));
+    let intent = rig.cancellation(id);
     admission_service(&rig);
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.tickets()[0]["state"], "cancelled");
-    assert_eq!(rig.read(&format!("state/cancellations/{id}.json")), intent);
+    assert_eq!(rig.cancellation(id), intent);
     assert_eq!(
         operation(&rig, "observe", &execution_input(&execution)).1["settlement"]["result"]["kind"],
         "not_started"
@@ -350,7 +341,7 @@ fn cancellation_after_saved_result_repairs_projection_as_too_late() {
     assert_eq!(rig.tickets()[0]["state"], "admitted");
     assert_eq!(rig.tickets()[0]["result"], result);
     assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
-    assert!(!rig.dir.join("state/cancellations").exists());
+    assert_eq!(rig.state(&["cancellations"]), json!([]));
 }
 
 #[test]
@@ -444,15 +435,15 @@ fn dispatch_before_cancel_preserves_possible_execution() {
     assert!(service.wait().success());
     assert!(cancel.wait().success());
     let id = execution["requestId"].as_str().unwrap();
-    let cancellation = rig.read(&format!("state/cancellations/{id}.json"));
+    let cancellation = rig.cancellation(id);
     assert_eq!(cancellation["outcome"], "possibly_executed");
     assert_eq!(admission(&rig, &execution)["launch"], saved_launch);
-    let host = rig.read(&format!("peer-state/launches/{id}.json"));
+    let host = rig.peer_launch_record(id, "receipt");
     assert!(host["pane"].is_string(), "{host}");
     assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
     assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read(&format!("peer-state/launches/{id}.json")), host);
+    assert_eq!(rig.peer_launch_record(id, "receipt"), host);
     assert_eq!(rig.log("ssh.log").matches("host launch ").count(), 1);
     assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
     assert!(!rig.log("herdr.log").contains("pane close"));
@@ -556,9 +547,8 @@ fn cancellation_launch_fixture(name: &str) -> (Rig, Value, String, Value) {
     let (rig, execution, ticket) = remotely_prepared_queued(name);
     set_ticket(&rig, "pending", Value::Null);
     let id = execution["requestId"].as_str().unwrap();
-    let file = format!("state/admissions/{id}.json");
     let mut attempt = admission(&rig, &execution);
-    let receipt = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
+    let receipt = rig.preparation_record("peer-state", "receipt", id).read();
     let commit = &attempt["unit"]["committed"];
     let request = &attempt["request"];
     let launch = json!({"id":id,"validity":request["validity"],"action":request["action"],"host":attempt["host"]["id"],
@@ -567,7 +557,7 @@ fn cancellation_launch_fixture(name: &str) -> (Rig, Value, String, Value) {
         "owner":request["owner"],"owner_host":request["owner_host"],"preparation_protocol":1,"preparation":receipt["binding"],
         "unit":{"version":1,"execution":commit["execution"],"binding":commit["binding"],"exported":commit["exported"]}});
     attempt["launch"] = launch.clone();
-    rig.put(&file, &attempt);
+    rig.put_admission(id, &attempt);
     (rig, execution, ticket, launch)
 }
 
@@ -589,10 +579,7 @@ fn cancellation_adopts_transfer_after_lost_launch_reply() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     assert!(
-        rig.dir
-            .join(format!(
-                "peer-state/preparation-receipts/{id}.disposition.json"
-            ))
+        rig.preparation_record("peer-state", "disposition", id)
             .exists(),
         "queue={} admission={} ssh={} herdr={}",
         rig.tickets(),
@@ -600,16 +587,19 @@ fn cancellation_adopts_transfer_after_lost_launch_reply() {
         rig.log("ssh.log"),
         rig.log("herdr.log")
     );
-    let disposition = rig.read(&format!(
-        "peer-state/preparation-receipts/{id}.disposition.json"
-    ));
+    let disposition = rig
+        .preparation_record("peer-state", "disposition", id)
+        .read();
     assert_eq!(disposition["request"]["policy"]["kind"], "transfer");
     assert!(rig.run(&["cancel", &ticket]).status.success());
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let cancellation = rig.read(&format!("state/cancellations/{id}.json"));
+    let cancellation = rig.cancellation(id);
     assert_eq!(cancellation["release"], "acknowledged", "{cancellation}");
     assert_eq!(cancellation["intent"], disposition["request"]);
-    assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
+    assert_eq!(
+        rig.preparation_record("peer-state", "claims", "").read(),
+        json!([])
+    );
     assert!(operation(&rig, "observe", &execution_input(&execution)).1["settlement"].is_null());
 }
 
@@ -647,7 +637,7 @@ fn native_refusal_and_cancellation_settle_in_both_orders() {
         let input = json!({"execution":execution});
         if cancel_first {
             assert!(rig.run(&["cancel", &ticket]).status.success());
-            let intent = rig.read(&format!("state/cancellations/{id}.json"))["intent"].clone();
+            let intent = rig.cancellation(id)["intent"].clone();
             let out = rig
                 .cmd(&[
                     "host",
@@ -677,17 +667,19 @@ fn native_refusal_and_cancellation_settle_in_both_orders() {
         let event = state["settlement"].clone();
         assert_eq!(operation(&rig, "observe", &input).1["settlement"], event);
         assert_eq!(rig.json(&["unit", "settlements"]).1, json!([event]));
-        assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
-        let disposition = rig.read(&format!(
-            "peer-state/preparation-receipts/{id}.disposition.json"
-        ));
+        assert_eq!(
+            rig.preparation_record("peer-state", "claims", "").read(),
+            json!([])
+        );
+        let disposition = rig
+            .preparation_record("peer-state", "disposition", id)
+            .read();
         assert_eq!(disposition["progress"], "released");
         assert_eq!(rig.log("herdr.log").matches("agent start ").count(), 1);
         assert!(rig.run(&["serve", "--once"]).status.success());
         assert_eq!(
-            rig.read(&format!(
-                "peer-state/preparation-receipts/{id}.disposition.json"
-            )),
+            rig.preparation_record("peer-state", "disposition", id)
+                .read(),
             disposition
         );
     }
@@ -697,12 +689,13 @@ fn native_refusal_and_cancellation_settle_in_both_orders() {
 fn unreachable_host_keeps_cancel_release_pending() {
     let (rig, execution, ticket) = remotely_prepared_queued("cancel-remote-release");
     let id = execution["requestId"].as_str().unwrap();
-    let receipt = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
-    let mut claims = rig.read("peer-state/preparations.json");
+    let receipt = rig.preparation_record("peer-state", "receipt", id).read();
+    let mut claims = rig.preparation_record("peer-state", "claims", "").read();
     let mut unrelated = claims[0].clone();
     unrelated["request_id"] = json!("other-request");
     claims.as_array_mut().unwrap().push(unrelated.clone());
-    rig.put("peer-state/preparations.json", &claims);
+    rig.preparation_record("peer-state", "claims", "")
+        .put(&claims);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     // Keep the real transport handler; this guard runs before its case dispatch.
     rig.script("ssh", &script.replacen("case \"$*\" in", "if test -f \"$RIG/disposition-offline\"; then case \"$*\" in *'host prepared '*) exit 255 ;; esac; fi\ncase \"$*\" in", 1));
@@ -710,12 +703,15 @@ fn unreachable_host_keeps_cancel_release_pending() {
     assert!(rig.run(&["cancel", &ticket]).status.success());
     for _ in 0..2 {
         assert!(rig.run(&["serve", "--once"]).status.success());
-        let saved = rig.read(&format!("state/cancellations/{id}.json"));
+        let saved = rig.cancellation(id);
         assert_eq!(saved["release"], "pending", "{saved}");
         assert_eq!(saved["outcome"], "not_started");
         assert_eq!(rig.tickets()[0]["state"], "cancelled");
     }
-    assert_eq!(rig.read("peer-state/preparations.json"), claims);
+    assert_eq!(
+        rig.preparation_record("peer-state", "claims", "").read(),
+        claims
+    );
     fs::remove_file(rig.dir.join("disposition-offline")).unwrap();
     let out = rig
         .cmd(&["serve", "--once"])
@@ -726,7 +722,7 @@ fn unreachable_host_keeps_cancel_release_pending() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(86), "{out:?}");
-    let acknowledged = rig.read(&format!("state/cancellations/{id}.json"));
+    let acknowledged = rig.cancellation(id);
     assert_eq!(
         acknowledged["acknowledgement"]["released"], true,
         "{acknowledged}"
@@ -738,7 +734,7 @@ fn unreachable_host_keeps_cancel_release_pending() {
     );
     let transport_before = rig.log("ssh.log");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    let saved = rig.read(&format!("state/cancellations/{id}.json"));
+    let saved = rig.cancellation(id);
     assert_eq!(saved["release"], "acknowledged", "{saved}");
     for command in ["host preparation-lookup ", "host prepared "] {
         assert_eq!(
@@ -748,9 +744,12 @@ fn unreachable_host_keeps_cancel_release_pending() {
     }
     assert_eq!(saved["operation_id"], acknowledged["operation_id"]);
     assert_eq!(saved["acknowledgement"], acknowledged["acknowledgement"]);
-    assert_eq!(rig.read("peer-state/preparations.json"), json!([unrelated]));
     assert_eq!(
-        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        rig.preparation_record("peer-state", "claims", "").read(),
+        json!([unrelated])
+    );
+    assert_eq!(
+        outcome_identity(rig.preparation_record("peer-state", "receipt", id).read()),
         outcome_identity(receipt)
     );
     assert_eq!(
@@ -777,28 +776,23 @@ fn corrupt_cancellation_holds_only_its_committed_unit() {
         let id = execution["requestId"].as_str().unwrap();
         let mut queue = rig.tickets();
         assert!(rig.run(&["cancel", &ticket]).status.success());
-        let file = format!("state/cancellations/{id}.json");
-        let corrupt = if unsupported {
-            let mut saved = rig.read(&file);
-            saved["version"] = json!(99);
-            saved
+        let mut corrupt = rig.cancellation(id);
+        if unsupported {
+            corrupt["version"] = json!(99);
         } else {
-            json!("invalid cancellation")
-        };
-        rig.put(&file, &corrupt);
+            corrupt["ticket"]["request"]["owner"] = json!("wrong-owner");
+        }
+        rig.put_cancellation(id, &corrupt);
         let mut unrelated = queue[0].clone();
         unrelated["id"] = json!("unrelated-ticket");
-        fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
-        rig.put(
-            "state/job-validity/unrelated-place.json",
-            &rig.job_validity(),
-        );
+
+        rig.put_validity("unrelated-place", &rig.job_validity());
         unrelated["request"] = json!({"id":"unrelated-place","validity":rig.job_validity(),"action":{"type":"place"},
             "host":"local","cwd":rig.dir.join("home"),"owner":"w1:p1"});
         queue.as_array_mut().unwrap().push(unrelated);
         rig.put_tickets(&queue);
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-        rig.snapshot("state/host.json", now(), 0.0, 2);
+        rig.snapshot("state", now(), 0.0, 2);
         let out = rig.run(&["serve", "--once"]);
         assert!(out.status.success(), "{out:?}");
         let queue = rig.tickets();
@@ -809,12 +803,17 @@ fn corrupt_cancellation_holds_only_its_committed_unit() {
             reason.contains(if unsupported {
                 "unsupported"
             } else {
-                "invalid type"
+                "expectation changed"
             }),
             "{queue}"
         );
         assert_eq!(queue[1]["state"], "admitted", "{queue}");
-        assert_eq!(rig.read(&format!("state/cancellations/{id}.json")), corrupt);
+        if !unsupported {
+            // A typed but contradictory snapshot records its diagnostic; it never
+            // replaces the captured cancellation expectation or launches that unit.
+            corrupt["error"] = json!("REQUEST_CONFLICT: cancelled ticket request changed");
+        }
+        assert_eq!(rig.cancellation(id), corrupt);
         assert!(admission(&rig, &execution)["launch"].is_null());
         assert!(!rig.log("herdr.log").contains("agent start"));
     }
@@ -898,13 +897,10 @@ fn unfinished_or_possibly_launched_tickets_never_settle() {
     assert_eq!(state["phase"], "queued");
     assert!(state["settlement"].is_null());
     // A failure after a launch request was saved may have reached the host.
-    let path = format!(
-        "state/admissions/{}.json",
-        execution["requestId"].as_str().unwrap()
-    );
-    let mut attempt = rig.read(&path);
+    let id = execution["requestId"].as_str().unwrap().to_owned();
+    let mut attempt = rig.admission(&id);
     attempt["launch"] = json!({"id":execution["requestId"],"action":{"type":"agent","kind":"pi","name":"n","message":"m"},"host":"local","cwd":"/tmp","pane":null,"workspace":null,"workspace_name":null,"owner":"w1:p1"});
-    rig.put(&path, &attempt);
+    rig.put_admission(&id, &attempt);
     set_ticket(&rig, "failed", json!("startup response lost"));
     let (_, state) = operation(&rig, "observe", &execution_input(&execution));
     assert_eq!(state["phase"], "unresolved");
@@ -1011,22 +1007,21 @@ fn unprovable_committed_unit_holds_only_itself_and_peers_are_admitted() {
     crash(&rig, &commit_input(&execution, 0), "committed");
     // An older writer saved this admission without request validity.
     let id = execution["requestId"].as_str().unwrap();
-    let file = format!("state/admissions/{id}.json");
-    let mut attempt = rig.read(&file);
+    let mut attempt = rig.admission(id);
     attempt["request"]
         .as_object_mut()
         .unwrap()
         .remove("validity");
-    rig.put(&file, &attempt);
-    fs::remove_file(rig.dir.join(format!("state/job-validity/{id}.json"))).ok();
-    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
-    rig.put("state/job-validity/peer-place.json", &rig.job_validity());
+    rig.put_admission(id, &attempt);
+    rig.delete_validity(id);
+
+    rig.put_validity("peer-place", &rig.job_validity());
     rig.put_tickets(&json!([{"id":"peer-ticket","request":{"id":"peer-place",
         "validity":rig.job_validity(),"action":{"type":"place"},"host":"local",
         "cwd":rig.dir.join("home"),"owner":"w1:p1"},"created_ms":now(),"state":"pending",
         "waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null}]));
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    rig.snapshot("state/host.json", now(), 0.0, 2);
+    rig.snapshot("state", now(), 0.0, 2);
     let out = rig.run(&["serve", "--once"]);
     assert!(out.status.success(), "{out:?}");
     assert!(
@@ -1236,10 +1231,7 @@ fn uuid_unit_names_fit_native_limits_and_native_collisions_stay_final() {
                 "{response}"
             );
             assert_eq!(operation(&rig, "commit", &input).0, 2);
-            let receipt = rig.read(&format!(
-                "state/launches/{}.json",
-                execution["requestId"].as_str().unwrap()
-            ));
+            let receipt = rig.launch(execution["requestId"].as_str().unwrap());
             assert!(
                 receipt["failed"]
                     .as_str()
@@ -1323,7 +1315,7 @@ fn service_never_expires_prepared_invocations() {
     assert_eq!(state["phase"], "prepared");
     assert!(state["settlement"].is_null());
     // Node::refresh writes the pruned reservation list even when it is empty.
-    assert_eq!(rig.read("state/placements.json"), json!([]));
+    assert_eq!(rig.reservations(), json!([]));
     assert_eq!(rig.tickets(), json!([]));
     assert!(!rig.log("herdr.log").contains("agent start"));
     assert!(!rig.log("herdr.log").contains("tab create"));
@@ -1400,10 +1392,9 @@ fn settled(name: &str, kind: &str) -> (Rig, Value) {
         "stopped"
     };
     unit[key] = returned_event(&execution, kind);
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
-    rig.put(
-        &format!("state/admissions/{ID}.json"),
-        &json!({"request":{},"launch":null,"error":null,"unit":unit}),
+    rig.put_admission(
+        ID,
+        &json!({"request":place_request(ID),"launch":null,"error":null,"unit":unit}),
     );
     (rig, execution)
 }
@@ -1418,7 +1409,7 @@ fn claimed(rig: &Rig, host: &str, pane: &str, session: Option<&str>, revision: u
         record["custodian_session"] = json!(session);
         record["claims"][0]["claimant_session"] = json!(session);
     }
-    rig.put("state/custody.json", &json!([record]));
+    rig.put_state(&["state", "custody", "--put"], &json!([record]));
 }
 
 fn live_session(rig: &Rig, pane: &str, session: &str) {
@@ -1451,8 +1442,7 @@ fn a_claimant_receives_the_unchanged_event_in_a_custody_envelope() {
     let (rig, execution) = settled("unit-custody-delivery", "returned");
     claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
     live_session(&rig, "w2:p1", "s2");
-    let path = format!("state/admissions/{ID}.json");
-    let before = fs::read(rig.dir.join(&path)).unwrap();
+    let before = rig.admission(ID);
     let (code, pending) = as_pane(&rig, "w2:p1", &["unit", "settlements"]);
     assert_eq!(code, 0, "{pending}");
     assert_eq!(
@@ -1460,7 +1450,7 @@ fn a_claimant_receives_the_unchanged_event_in_a_custody_envelope() {
         json!([{"version":1,"custody":reference(1, "w2:p1"),
             "settlement":returned_event(&execution, "returned")}])
     );
-    assert_eq!(fs::read(rig.dir.join(&path)).unwrap(), before);
+    assert_eq!(rig.admission(ID), before);
     // The previous custodian no longer receives it.
     assert_eq!(rig.json(&["unit", "settlements"]).1, json!([]));
 }
@@ -1493,7 +1483,7 @@ fn delivery_and_ack_refuse_a_caller_that_is_not_the_live_custodian() {
     // A stale revision is refused.
     claimed(&rig, &host, "w2:p1", Some("s2"), 2);
     assert_eq!(attempt("w2:p1").1, 2);
-    let saved = rig.read(&format!("state/admissions/{ID}.json"));
+    let saved = rig.admission(ID);
     assert!(saved["unit"]["custody_acks"].is_null(), "{saved}");
 }
 
@@ -1542,14 +1532,13 @@ fn a_new_custodian_gets_acknowledged_evidence_once_and_duplicate_acks_are_harmle
         json!([])
     );
     // The historical owner acknowledgement is kept.
-    let saved = rig.read(&format!("state/admissions/{ID}.json"));
+    let saved = rig.admission(ID);
     assert_eq!(saved["unit"]["settlement_ack"], format!("{ID}-returned"));
 }
 
 #[test]
 fn a_custody_less_ack_is_refused_once_custody_is_claimed() {
     let (rig, execution) = settled("unit-custody-legacy-ack", "returned");
-    let path = format!("state/admissions/{ID}.json");
     let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")});
     // Before any claim the legacy acknowledgement still works.
     assert_eq!(
@@ -1559,13 +1548,13 @@ fn a_custody_less_ack_is_refused_once_custody_is_claimed() {
     let (rig, execution) = settled("unit-custody-legacy-claimed", "returned");
     claimed(&rig, &local_host(), "w2:p1", Some("s2"), 1);
     live_session(&rig, "w2:p1", "s2");
-    let before = fs::read(rig.dir.join(&path)).unwrap();
+    let before = rig.admission(ID);
     // The origin owner passes the owner check, but custody has moved.
     let legacy = json!({"execution":execution,"eventId":format!("{ID}-returned")}).to_string();
     let (code, _) = rig.json(&["unit", "ack-settlement", "--input", &legacy]);
     assert_eq!(code, 2);
-    assert_eq!(fs::read(rig.dir.join(&path)).unwrap(), before);
-    let saved = rig.read(&path);
+    assert_eq!(rig.admission(ID), before);
+    let saved = rig.admission(ID);
     assert!(saved["unit"]["settlement_ack"].is_null(), "{saved}");
     // The live custodian still acknowledges with its custody reference.
     let input = ack(&execution, "returned", &reference(1, "w2:p1"));

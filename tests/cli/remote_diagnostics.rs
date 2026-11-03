@@ -54,12 +54,7 @@ fn cli_preserves_known_causes_and_never_peer_text() {
         assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
         assert!(!error.to_string().contains("TASK_SECRET"));
         assert_eq!(rig.tickets(), json!([]));
-        let admission = fs::read_dir(rig.dir.join("state/admissions"))
-            .unwrap()
-            .flatten()
-            .find(|f| f.path().extension().is_some_and(|e| e == "json"))
-            .unwrap();
-        let attempt: Value = serde_json::from_slice(&fs::read(admission.path()).unwrap()).unwrap();
+        let attempt = rig.admissions()[0].clone();
         assert_eq!(attempt["diagnostic"], error["diagnostic"]);
         assert_eq!(attempt["host"]["label"], "netcup");
         assert!(!rig.log("ssh.log").contains("host launch"));
@@ -372,7 +367,7 @@ fn real_preflight_is_read_only_and_existing_branch_refusal_still_wins() {
     assert_eq!(git(&["show-ref"]), before);
     assert_eq!(git(&["worktree", "list", "--porcelain"]), trees);
     assert!(!repo.join(".worktrees").exists());
-    assert!(!rig.dir.join("state/preparations.json").exists());
+    assert!(!rig.preparation_record("state", "claims", "").exists());
     assert_eq!(rig.log("setup.log"), "");
     assert!(!rig.log("herdr.log").contains("worktree open"));
 }
@@ -466,12 +461,7 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
     assert!(!error.to_string().contains("TASK_SECRET"), "{error}");
     // The cause is the caller's own base, not the peer's text.
     assert!(!error.to_string().contains("PRIVATE_SENTINEL"), "{error}");
-    let admission = fs::read_dir(rig.dir.join("state/admissions"))
-        .unwrap()
-        .flatten()
-        .find(|f| f.path().extension().is_some_and(|e| e == "json"))
-        .unwrap();
-    let attempt: Value = serde_json::from_slice(&fs::read(admission.path()).unwrap()).unwrap();
+    let attempt = rig.admissions()[0].clone();
     assert!(
         attempt["error"]
             .as_str()
@@ -490,7 +480,7 @@ fn real_remote_unrecorded_failure_preserves_warning_and_correlation() {
     let (rig, repo) = place::place_rig_with(
         "diagnostic-real-unrecorded",
         r#"[worktree]
-setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; chmod 555 \"$DOGSLED_STATE/preparation-receipts\"; exit 1"]
+setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; \"$DOGSLED_BIN\" state fault preparation-receipts --write; exit 1"]
 "#,
     );
     rig.peer();
@@ -523,16 +513,17 @@ setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; chmod 555
     let request = error["diagnostic"]["request_id"].as_str().unwrap();
     assert!(!request.is_empty(), "{error}");
     // The peer recorded the intent, and no outcome: the failure stayed unrecorded.
-    let receipts = rig.dir.join("peer-state/preparation-receipts");
-    let receipt = receipts.join(format!("{request}.json"));
-    let intent = fs::read_to_string(&receipt).unwrap();
-    assert!(intent.contains("\"prepared\": null"), "{intent}");
+    rig.cmd(&["state", "fault", "clear-preparation-receipts", "--write"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .status()
+        .unwrap();
+    let intent = rig
+        .preparation_record("peer-state", "receipt", request)
+        .read()
+        .to_string();
+    assert!(intent.contains("\"prepared\":null"), "{intent}");
     assert!(!intent.contains("\"failure\""), "{intent}");
-    fs::set_permissions(
-        &receipts,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
+
     let text = error["error"].as_str().unwrap();
     assert!(text.contains("cause was not recorded"), "{error}");
     assert!(
@@ -831,7 +822,9 @@ fn a_retained_failure_replays_its_cause_without_preparing_again() {
     assert_eq!(code, 2, "{original}");
     assert_eq!(original["diagnostic"]["cause"], "base_unavailable");
     assert_eq!(original["diagnostic"]["request_id"], "retained");
-    let receipt = rig.read("state/preparation-receipts/retained.json");
+    let receipt = rig
+        .preparation_record("state", "receipt", "retained")
+        .read();
     assert!(receipt["prepared"].is_null(), "{receipt}");
     assert_eq!(receipt["failure"]["kind"], "other", "{receipt}");
     assert_eq!(
@@ -934,14 +927,11 @@ fn a_receipt_without_an_outcome_stays_uncertain() {
     let (code, original) = rig.json(&args);
     assert_eq!(code, 2, "{original}");
     // A receipt written before failures were retained holds no outcome.
-    let receipt = rig.read("state/preparation-receipts/legacy.json");
+    let receipt = rig.preparation_record("state", "receipt", "legacy").read();
     let mut legacy = receipt.clone();
     legacy.as_object_mut().unwrap().remove("failure");
-    fs::write(
-        rig.dir.join("state/preparation-receipts/legacy.json"),
-        serde_json::to_vec_pretty(&legacy).unwrap(),
-    )
-    .unwrap();
+    rig.preparation_record("state", "receipt", "legacy")
+        .put(&legacy);
     let herdr = rig.log("herdr.log");
     let (code, uncertain) = rig.json(&args);
     assert_eq!(code, 2, "{uncertain}");
@@ -974,23 +964,25 @@ fn a_contradictory_receipt_is_refused() {
     ];
     let (code, original) = rig.json(&args);
     assert_eq!(code, 2, "{original}");
-    let mut receipt = rig.read("state/preparation-receipts/contradictory.json");
+    let mut receipt = rig
+        .preparation_record("state", "receipt", "contradictory")
+        .read();
     receipt["prepared"] = json!({"pane_id":"w8:p1","terminal_id":"term_tree"});
-    fs::write(
-        rig.dir
-            .join("state/preparation-receipts/contradictory.json"),
-        serde_json::to_vec_pretty(&receipt).unwrap(),
-    )
-    .unwrap();
-    let (code, refused) = rig.json(&args);
-    assert_eq!(code, 2, "{refused}");
-    assert!(
-        refused["error"]
-            .as_str()
-            .unwrap()
-            .contains("contradictory preparation receipt"),
-        "{refused}"
+    let original_receipt = rig
+        .preparation_record("state", "receipt", "contradictory")
+        .read();
+    let out = rig.put_preparation_refused("state", "receipt", "contradictory", &receipt);
+    assert!(!out.status.success());
+    assert_eq!(
+        rig.preparation_record("state", "receipt", "contradictory")
+            .read(),
+        original_receipt
     );
+    // The contradictory write was refused before it could replace the outcome.
+    receipt = original_receipt;
+    assert!(receipt["prepared"].is_null());
+    let (code, replay) = rig.json(&args);
+    assert_eq!((code, replay), (2, original));
 }
 
 /// A failure without a typed diagnostic keeps its safe classification and correlation, and
@@ -1013,7 +1005,7 @@ fn a_failure_without_a_diagnostic_keeps_only_safe_information() {
     ];
     let (code, original) = rig.json(&args);
     assert_eq!(code, 2, "{original}");
-    let receipt = rig.read("state/preparation-receipts/untyped.json");
+    let receipt = rig.preparation_record("state", "receipt", "untyped").read();
     assert!(!receipt.to_string().contains("SETUP_SECRET"), "{receipt}");
     assert_eq!(receipt["failure"]["detail_withheld"], true, "{receipt}");
     assert_eq!(receipt["failure"]["request_id"], "untyped", "{receipt}");
@@ -1038,7 +1030,7 @@ fn a_failure_whose_outcome_cannot_be_written_is_reported_as_unrecorded() {
     let (rig, repo) = place::place_rig_with(
         "diagnostic-unrecorded",
         r#"[worktree]
-setup = ['rm -f "$RIG/state/preparation-receipts/unrecorded.json"; mkdir -p "$RIG/state/preparation-receipts/unrecorded.json"; exit 1']
+setup = ['"$DOGSLED_BIN" state fault preparation-receipts --write; exit 1']
 "#,
     );
     let (code, error) = rig.json(&[
@@ -1167,7 +1159,7 @@ fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
     assert!(error.contains("netcup"), "{ticket}");
     assert!(!error.contains("PRIVATE_SENTINEL"), "{ticket}");
     let id = ticket["request"]["id"].as_str().unwrap();
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(id);
     assert!(
         attempt["error"]
             .as_str()
@@ -1175,7 +1167,7 @@ fn a_plain_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
             .contains("unknown base origin/absent"),
         "{attempt}"
     );
-    let inbox = rig.read("state/inbox/term_owner.json");
+    let inbox = rig.inbox("term_owner");
     let text = inbox[0]["text"].as_str().unwrap();
     assert!(text.contains("unknown base origin/absent"), "{text}");
     assert!(!text.contains("PRIVATE_SENTINEL"), "{text}");
@@ -1214,9 +1206,9 @@ fn queued_failure_keeps_cause_in_ticket_admission_and_owner_inbox() {
     assert_eq!(ticket["retry"]["attempts"], 0);
     assert_eq!(ticket["diagnostic"]["cause"], "base_unavailable");
     let id = ticket["request"]["id"].as_str().unwrap();
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(id);
     assert_eq!(attempt["diagnostic"], ticket["diagnostic"]);
-    let inbox = rig.read("state/inbox/term_owner.json");
+    let inbox = rig.inbox("term_owner");
     let text = inbox[0]["text"].as_str().unwrap();
     assert!(
         text.contains("on netcup") && text.contains("base_unavailable"),

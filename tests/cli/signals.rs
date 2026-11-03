@@ -28,7 +28,7 @@ fn setup(name: &str) -> Rig {
         "id":"child","kind":"agent","host":"local","pane":"w2:p1","owner_pane":"w1:p1",
         "owner_session":"owner-session","name":"worker","created_ms":1,"closed_ms":null
     }]));
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let out = rig.run(&["inbox", "claim", "--harness", "pi"]);
     assert!(
         out.status.success(),
@@ -58,10 +58,10 @@ fn serve(rig: &Rig) {
 }
 
 fn notes(rig: &Rig, kind: &str) -> Vec<Value> {
-    if !rig.dir.join("state/inbox/term_owner.json").exists() {
+    if rig.inbox("term_owner").as_array().unwrap().is_empty() {
         return Vec::new();
     }
-    let records = rig.read("state/inbox/term_owner.json");
+    let records = rig.inbox("term_owner");
     records
         .as_array()
         .unwrap()
@@ -110,7 +110,7 @@ fn ask_reaches_owner_item_and_inbox_once_and_next_turn_clears_it() {
     serve(&rig);
     assert!(rig.items()[0]["signal"].is_null());
     assert_ne!(row(&rig)["activity"], "Which branch should I use?");
-    let mark = rig.read("state/done.json");
+    let mark = rig.state(&["done"]);
     let mark = mark.as_object().unwrap().values().next().unwrap();
     assert!(mark["signal"]["cleared_ms"].is_u64(), "{mark}");
     assert!(
@@ -155,7 +155,7 @@ fn replacement_child_session_never_sees_or_clears_an_old_signal() {
     serve(&rig);
     assert!(rig.items()[0]["signal"].is_null());
     assert_eq!(notes(&rig, "ask"), Vec::<Value>::new());
-    let marks = rig.read("state/done.json");
+    let marks = rig.state(&["done"]);
     let mark = marks.as_object().unwrap().values().next().unwrap();
     assert!(mark["signal"]["cleared_ms"].is_null(), "{mark}");
 }
@@ -174,17 +174,17 @@ fn ask_works_with_dirty_work_and_open_children_and_does_not_close_input() {
     ]));
     let (code, event) = signal(&rig, "ask", "Can I expand scope?");
     assert_eq!(code, 0, "{event}");
-    let mark = rig.read("state/done.json");
+    let mark = rig.state(&["done"]);
     let mark = mark.as_object().unwrap().values().next().unwrap();
     assert!(
         mark["sealed"].is_null() && mark["reply"].is_null(),
         "{mark}"
     );
     // Signal-only records leave the normal input route open.
-    rig.snapshot("state/host.json", now(), 0.0, 8);
-    let mut host = rig.read("state/host.json");
+    rig.snapshot("state", now(), 0.0, 8);
+    let mut host = rig.host();
     host["probe"]["agent_panes"] = json!([{"pane":"w2:p1","agent":"pi","state":"working","terminal_id":"term_child","name":"worker"}]);
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     let out = rig
         .cmd(&["inbox", "claim", "--harness", "pi"])
         .env("HERDR_PANE_ID", "w2:p1")
@@ -193,10 +193,7 @@ fn ask_works_with_dirty_work_and_open_children_and_does_not_close_input() {
     assert!(out.status.success());
     let (code, sent) = rig.json(&["send", "worker", "--message", "Yes, expand scope"]);
     assert_eq!(code, 0, "{sent}");
-    assert_eq!(
-        rig.read("state/inbox/term_child.json")[0]["text"],
-        "Yes, expand scope"
-    );
+    assert_eq!(rig.inbox("term_child")[0]["text"], "Yes, expand scope");
 }
 
 #[test]
@@ -207,7 +204,7 @@ fn a_signal_reaches_the_current_custodian_once_even_after_custody_moves() {
     listed["result"]["agents"][2]["agent_session"] =
         json!({"kind":"path","value":"custodian-session"});
     rig.put("agents.json", &listed);
-    rig.put("state/custody.json", &json!([{
+    rig.put_state(&["state", "custody", "--put"], &json!([{
         "item":"child","host":"local","owner_pane":"w1:p1","owner_session":"owner-session",
         "custodian_pane":"w3:p1","custodian_session":"custodian-session","revision":1,"claims":[]
     }]));
@@ -221,7 +218,7 @@ fn a_signal_reaches_the_current_custodian_once_even_after_custody_moves() {
     serve(&rig);
     serve(&rig);
     assert_eq!(notes(&rig, "ask"), Vec::<Value>::new());
-    let records = rig.read("state/inbox/term_grandchild.json");
+    let records = rig.inbox("term_grandchild");
     let questions: Vec<_> = records
         .as_array()
         .unwrap()
@@ -230,10 +227,10 @@ fn a_signal_reaches_the_current_custodian_once_even_after_custody_moves() {
         .collect();
     assert_eq!(questions.len(), 1, "{records}");
     assert_eq!(questions[0]["text"], "Custodian question");
-    let mut custody = rig.read("state/custody.json");
+    let mut custody = rig.state(&["custody"]);
     custody[0]["custodian_pane"] = json!("w1:p1");
     custody[0]["custodian_session"] = json!("owner-session");
-    rig.put("state/custody.json", &custody);
+    rig.put_state(&["state", "custody", "--put"], &custody);
     serve(&rig);
     assert_eq!(notes(&rig, "ask"), Vec::<Value>::new());
 }
@@ -243,10 +240,10 @@ fn remote_snapshot_imports_and_clears_the_signal() {
     let rig = setup("signal-remote");
     let (code, event) = signal(&rig, "ask", "Remote question");
     assert_eq!(code, 0);
-    let marks = rig.read("state/done.json");
+    let marks = rig.state(&["done"]);
     let mut mark = marks.as_object().unwrap().values().next().unwrap().clone();
     mark["pane"] = json!("w9:p1");
-    rig.put("state/done.json", &json!({}));
+    rig.put_done(&json!({}));
     let mut listed = rig.read("agents.json");
     listed["result"]["agents"]
         .as_array_mut()
@@ -289,10 +286,10 @@ fn remote_snapshot_imports_and_clears_the_signal() {
 fn remote_signal(name: &str) -> (Rig, Value) {
     let rig = setup(name);
     assert_eq!(signal(&rig, "ask", "Remote outage question").0, 0);
-    let marks = rig.read("state/done.json");
+    let marks = rig.state(&["done"]);
     let mut mark = marks.as_object().unwrap().values().next().unwrap().clone();
     mark["pane"] = json!("w9:p1");
-    rig.put("state/done.json", &json!({}));
+    rig.put_done(&json!({}));
     let mut listed = rig.read("agents.json");
     listed["result"]["agents"]
         .as_array_mut()
@@ -333,7 +330,7 @@ fn refresh_remote(rig: &Rig) {
 fn remote_outage(rig: &Rig, saved: &Value) {
     fs::write(rig.dir.join("unreachable"), "offline").unwrap();
     refresh_remote(rig);
-    let cache = rig.read("state/peer-38313033.json");
+    let cache = rig.state(&["peer", "8103"]);
     assert_eq!(cache["reachable"], false, "{cache}");
     assert_eq!(cache["handoffs"], json!([]), "{cache}");
     assert_eq!(
@@ -404,18 +401,18 @@ fn outage_during_custody_move_does_not_deliver_the_same_event_twice() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut custody = rig.read("state/custody.json");
+    let mut custody = rig.state(&["custody"]);
     custody[0]["custodian_pane"] = json!("w3:p1");
     custody[0]["custodian_session"] = json!("custodian-session");
     custody[0]["revision"] = json!(1);
-    rig.put("state/custody.json", &custody);
+    rig.put_state(&["state", "custody", "--put"], &custody);
     serve(&rig);
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
     refresh_remote(&rig);
     assert_eq!(rig.items()[0]["signal"], saved);
     assert_eq!(notes(&rig, "ask").len(), 1);
-    if rig.dir.join("state/inbox/term_grandchild.json").exists() {
-        let records = rig.read("state/inbox/term_grandchild.json");
+    if !rig.inbox("term_grandchild").as_array().unwrap().is_empty() {
+        let records = rig.inbox("term_grandchild");
         assert_eq!(
             records
                 .as_array()
@@ -449,7 +446,7 @@ fn open_children_without_a_signal_show_waiting() {
             .find(|item| item["id"] == "grandchild")
             .unwrap();
         assert!(grandchild["closed_ms"].is_null(), "serve {pass}: {items}");
-        let host = rig.read("state/host.json");
+        let host = rig.host();
         let child = host["probe"]["agent_panes"]
             .as_array()
             .unwrap()

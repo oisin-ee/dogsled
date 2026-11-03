@@ -54,24 +54,23 @@ pub const RESULT_UNAVAILABLE: &str = "result unavailable: expired or unknown";
 /// Read the request-owned authority, which old queue writers never touch.
 pub fn request_validity(ledger: &Ledger, id: &str) -> Result<Option<Validity>> {
     validate_id(id)?;
-    ledger
-        .child("job-validity")
-        .read(&format!("{id}.json"))
-        .map_err(|_| refuse(crate::error::Refusal::JobValidityUnprovable))
+    crate::store::read(ledger, |tx| crate::job_store::validity(tx, id)).map_err(|error| match error
+    {
+        Error::Deadline(_) => error,
+        _ => refuse(crate::error::Refusal::JobValidityUnprovable),
+    })
 }
 
 /// Fresh origin issuance. The marker prevents transport from repairing deleted authority.
 pub fn issue_request_validity(ledger: &Ledger, id: &str) -> Result<Validity> {
     validate_id(id)?;
-    let ingress = ledger.child("request-ingress");
-    ingress.with_lock(id, || {
-        let file = format!("{id}.json");
-        if request_validity(ledger, id)?.is_some() || ingress.read::<Value>(&file)?.is_some() {
+    let validity = origin_validity(ledger)?;
+    crate::store::write(ledger, |tx| {
+        if crate::job_store::validity(tx, id)?.is_some() || crate::job_store::ingress(tx, id)? {
             return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
         }
-        let validity = origin_validity(ledger)?;
-        ingress.write(&file, &serde_json::json!({"version":1}))?;
-        record_request_validity(ledger, id, Some(validity))?;
+        crate::job_store::put_ingress(tx, id)?;
+        crate::job_store::put_validity(tx, id, validity)?;
         Ok(validity)
     })
 }
@@ -87,55 +86,39 @@ pub fn receive_request_validity(
     incoming: Option<Validity>,
 ) -> Result<()> {
     validate_id(id)?;
-    let ingress = ledger.child("request-ingress");
-    ingress.with_lock(id, || receive_nonjob_locked(ledger, &ingress, id, incoming))
-}
-
-fn receive_nonjob_locked(
-    ledger: &Ledger,
-    ingress: &Ledger,
-    id: &str,
-    incoming: Option<Validity>,
-) -> Result<()> {
     if let Some(saved) = request_validity(ledger, id)? {
         return match_request_validity(Some(saved), incoming);
     }
-    let file = format!("{id}.json");
-    if ingress.read::<Value>(&file)?.is_some() {
+    if crate::admissions::exists(ledger, id)? || crate::launch_store::exists(ledger, id)? {
         return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
     }
-    for directory in [
-        "admissions",
-        "launches",
-        "preparation-receipts",
-        "placement-grants",
-        "preparation-expectations",
-        "placement-attempts",
-        "cancellations",
-    ] {
-        if ledger.child(directory).read::<Value>(&file)?.is_some() {
-            return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
-        }
+    if crate::preparation_store::exists(ledger, id)? {
+        return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
     }
-    let holds = ledger
-        .read::<Vec<Value>>("placements.json")?
-        .unwrap_or_default();
-    if holds.iter().any(|hold| hold["id"] == id)
-        || ledger
-            .child("launches")
-            .read::<Value>(&format!("{id}.progress.json"))?
-            .is_some()
-        || crate::work::queue_records(ledger)?
-            .iter()
-            .any(|ticket| ticket["request"]["id"] == id)
+    let holds = crate::job_store::reservations(ledger)?;
+    if crate::job_store::selection(ledger, id)?.is_some()
+        || crate::job_store::cancellation(ledger, id)?.is_some()
+        || holds.iter().any(|hold| hold.id == id)
+        || crate::launch_store::progress_value(ledger, id)?.is_some()
+        || crate::work::queued_request(ledger, id)?
     {
         return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
     }
     check_validity(ledger, incoming.as_ref())?;
     // This is publication provenance only, never a second validity authority.
     // Publish it first: interrupted issuance refuses rather than recreating authority.
-    ingress.write(&file, &serde_json::json!({"version":1}))?;
-    record_request_validity(ledger, id, incoming)
+    crate::store::write(ledger, |tx| {
+        if let Some(saved) = crate::job_store::validity(tx, id)? {
+            return match_request_validity(Some(saved), incoming);
+        }
+        if crate::job_store::ingress(tx, id)? {
+            return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+        }
+        crate::job_store::put_ingress(tx, id)?;
+        let validity =
+            incoming.ok_or_else(|| refuse(crate::error::Refusal::JobValidityUnprovable))?;
+        crate::job_store::put_validity(tx, id, validity)
+    })
 }
 
 /// Compare a non-job transport stamp with its recorded authority. Missing authority
@@ -155,13 +138,14 @@ pub fn record_request_validity(
     validity: Option<Validity>,
 ) -> Result<()> {
     validate_id(id)?;
-    let sidecars = ledger.child("job-validity");
-    sidecars.with_lock(id, || match (request_validity(ledger, id)?, validity) {
-        (Some(saved), Some(incoming)) if saved != incoming => {
-            Err(Error::Invalid(format!("job {id} request validity changed")))
+    crate::store::write(ledger, |tx| {
+        match (crate::job_store::validity(tx, id)?, validity) {
+            (Some(saved), Some(incoming)) if saved != incoming => {
+                Err(Error::Invalid(format!("job {id} request validity changed")))
+            }
+            (None, Some(incoming)) => crate::job_store::put_validity(tx, id, incoming),
+            _ => Ok(()),
         }
-        (None, Some(incoming)) => sidecars.write(&format!("{id}.json"), &incoming),
-        _ => Ok(()),
     })
 }
 
@@ -178,10 +162,6 @@ impl Clock {
     pub const VERSION: u32 = 1;
 }
 
-/// The clock's own file and lock, under the host's ledger.
-const CLOCK_FILE: &str = "job-validity-clock.json";
-const CLOCK_LOCK: &str = "job-validity-clock";
-
 /// A refusal with the fixed message its code carries.
 fn refuse(code: crate::error::Refusal) -> Error {
     Error::Refused {
@@ -191,50 +171,57 @@ fn refuse(code: crate::error::Refusal) -> Error {
 }
 
 /// The newest timestamp in this host's own records: job records, launch receipts,
-/// admissions, and queue tickets. A record directory or file that exists but cannot be read
-/// or parsed refuses: the clock cannot start without accounting for every local record.
+/// admissions, and queue tickets. A store that cannot be read refuses: the clock cannot
+/// start without accounting for every local record.
 fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
     let mut newest = 0_u64;
+    for job in list(ledger)? {
+        for ms in [
+            job.validity.map(|v| v.created_ms),
+            job.started_ms,
+            job.ended_ms,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            newest = newest.max(ms);
+        }
+    }
     let mut note = |value: &Value, path: &str| {
         if let Some(ms) = value.pointer(path).and_then(Value::as_u64) {
             newest = newest.max(ms);
         }
     };
-    for value in json_files(&store(ledger).dir)? {
+    let admissions = crate::admissions::values(ledger)?;
+    let mut records = admissions.clone();
+    records.extend(crate::launch_store::values(ledger)?);
+    records.extend(crate::preparation_store::values(ledger)?);
+    records.extend(
+        crate::job_store::cancellations(ledger)?
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<Vec<_>>>()?,
+    );
+    for value in records {
+        note(&value, "/request/validity/created_ms");
         note(&value, "/validity/created_ms");
-        note(&value, "/started_ms");
-        note(&value, "/ended_ms");
+        note(&value, "/launch/validity/created_ms");
+        note(&value, "/preparation/validity/created_ms");
+        note(&value, "/envelope/request/validity/created_ms");
+        note(&value, "/finished_ms");
+        note(&value, "/recorded_ms");
+        note(&value, "/accepted_ms");
+        note(&value, "/terminal_job/ended_ms");
+        note(&value, "/certificate/terminal_evidence/job/ended_ms");
+        note(&value, "/certificate/terminal_evidence/closed_ms");
+        note(&value, "/origin_release/accepted_ms");
     }
-    for directory in [
-        "launches",
-        "admissions",
-        "preparation-receipts",
-        "placement-grants",
-        "preparation-expectations",
-        "preparation-retirements",
-        "cancellations",
-    ] {
-        for value in json_files(&ledger.child(directory).dir)? {
-            note(&value, "/request/validity/created_ms");
-            note(&value, "/validity/created_ms");
-            note(&value, "/launch/validity/created_ms");
-            note(&value, "/preparation/validity/created_ms");
-            note(&value, "/envelope/request/validity/created_ms");
-            note(&value, "/finished_ms");
-            note(&value, "/recorded_ms");
-            note(&value, "/accepted_ms");
-            note(&value, "/terminal_job/ended_ms");
-            note(&value, "/certificate/terminal_evidence/job/ended_ms");
-            note(&value, "/certificate/terminal_evidence/closed_ms");
-            note(&value, "/origin_release/accepted_ms");
-        }
-    }
-    for value in json_files(&ledger.child("admissions").dir)? {
+    for value in admissions {
         note(&value, "/request/action/validity/created_ms");
         note(&value, "/launch/action/validity/created_ms");
     }
-    for value in json_files(&ledger.child("job-validity").dir)? {
-        note(&value, "/created_ms");
+    for (_, validity) in crate::job_store::validities(ledger)? {
+        note(&serde_json::to_value(validity)?, "/created_ms");
     }
     for ticket in crate::work::queue_records(ledger).map_err(|error| match error {
         Error::Deadline(_) => error,
@@ -248,53 +235,39 @@ fn newest_record_ms(ledger: &Ledger) -> Result<u64> {
     Ok(newest)
 }
 
-/// Every JSON file in `dir`. A missing directory is empty. A directory that cannot be
-/// read, and a file that cannot be read or parsed, refuse: the bootstrap never skips a
-/// record.
-fn json_files(dir: &std::path::Path) -> Result<Vec<Value>> {
-    let unavailable = || refuse(crate::error::Refusal::JobClockUnavailable);
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(unavailable()),
-    };
-    let mut values = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|_| unavailable())?;
-        // A directory holds no record of its own.
-        if entry.file_type().map_err(|_| unavailable())?.is_dir() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let bytes = std::fs::read(&path).map_err(|_| unavailable())?;
-        values.push(serde_json::from_slice::<Value>(&bytes).map_err(|_| unavailable())?);
-    }
-    Ok(values)
+/// Read the clock without initializing it; projections must not create authority.
+pub(crate) fn recorded_clock(ledger: &Ledger) -> Result<Option<Clock>> {
+    crate::store::read(ledger, crate::job_store::clock).map_err(|error| match error {
+        Error::Deadline(_) => error,
+        _ => refuse(crate::error::Refusal::JobClockUnavailable),
+    })
 }
 
-/// The host's validity clock, under its own lock. A missing clock is created from the wall
-/// clock and the newest local record. A corrupt or unsupported clock refuses execution.
+/// The validity fence is initialized and advanced in one database transaction.
 pub fn clock(ledger: &Ledger) -> Result<Clock> {
-    let now = crate::ledger::now_ms();
-    ledger.with_lock(CLOCK_LOCK, || load_clock(ledger, now))
+    let now = now_ms();
+    let newest = if recorded_clock(ledger)?.is_none() {
+        newest_record_ms(ledger)?
+    } else {
+        0
+    };
+    crate::store::write(ledger, |tx| load_clock(tx, now.max(newest)))
 }
 
-/// Read the clock, and create it when it is missing.
-fn load_clock(ledger: &Ledger, now: u64) -> Result<Clock> {
-    match ledger.read::<Clock>(CLOCK_FILE) {
+fn load_clock(tx: &rusqlite::Transaction<'_>, now: u64) -> Result<Clock> {
+    match crate::job_store::clock(tx) {
         Ok(Some(clock)) if clock.version == Clock::VERSION => Ok(clock),
+        Err(error @ Error::Deadline(_)) => Err(error),
         Ok(Some(_)) | Err(_) => Err(refuse(crate::error::Refusal::JobClockUnavailable)),
         Ok(None) => {
             let clock = Clock {
                 version: Clock::VERSION,
-                high_water_ms: now.max(newest_record_ms(ledger)?),
+                high_water_ms: now,
             };
-            ledger
-                .write(CLOCK_FILE, &clock)
-                .map_err(|_| refuse(crate::error::Refusal::JobClockUnavailable))?;
+            crate::job_store::put_clock(tx, &clock).map_err(|error| match error {
+                Error::Deadline(_) => error,
+                _ => refuse(crate::error::Refusal::JobClockUnavailable),
+            })?;
             Ok(clock)
         }
     }
@@ -348,19 +321,26 @@ pub(crate) fn completion_time(
 /// high-water time is persisted first, so a host clock that moves back cannot reopen an
 /// expired request.
 pub fn advance_clock(ledger: &Ledger, now: u64) -> Result<u64> {
-    ledger.with_lock(CLOCK_LOCK, || {
-        let clock = load_clock(ledger, now)?;
+    let newest = if recorded_clock(ledger)?.is_none() {
+        newest_record_ms(ledger)?
+    } else {
+        0
+    };
+    crate::store::write(ledger, |tx| {
+        let clock = load_clock(tx, now.max(newest))?;
         let effective = clock.high_water_ms.max(now);
         if effective != clock.high_water_ms {
-            ledger
-                .write(
-                    CLOCK_FILE,
-                    &Clock {
-                        version: Clock::VERSION,
-                        high_water_ms: effective,
-                    },
-                )
-                .map_err(|_| refuse(crate::error::Refusal::JobClockUnavailable))?;
+            crate::job_store::put_clock(
+                tx,
+                &Clock {
+                    version: Clock::VERSION,
+                    high_water_ms: effective,
+                },
+            )
+            .map_err(|error| match error {
+                Error::Deadline(_) => error,
+                _ => refuse(crate::error::Refusal::JobClockUnavailable),
+            })?;
         }
         Ok(effective)
     })
@@ -494,6 +474,7 @@ pub fn duration(text: &str) -> std::result::Result<u64, String> {
 }
 
 pub fn store(ledger: &Ledger) -> Ledger {
+    // This directory holds output files and locks for the external process/pane only.
     ledger.child("jobs")
 }
 
@@ -506,40 +487,19 @@ pub fn validate_id(id: &str) -> Result<()> {
 
 pub fn get(ledger: &Ledger, id: &str) -> Result<Job> {
     validate_id(id)?;
-    store(ledger)
-        .read(&format!("{id}.json"))?
-        .ok_or_else(|| Error::Refused {
-            code: crate::error::Refusal::UnknownJob,
-            detail: RESULT_UNAVAILABLE.into(),
-        })
+    crate::job_store::get(ledger, id)?.ok_or_else(|| Error::Refused {
+        code: crate::error::Refusal::UnknownJob,
+        detail: RESULT_UNAVAILABLE.into(),
+    })
 }
 
 pub fn save(ledger: &Ledger, job: &Job) -> Result<()> {
     validate_id(&job.id)?;
-    store(ledger).write(&format!("{}.json", job.id), job)
+    crate::job_store::put(ledger, job)
 }
 
 pub fn list(ledger: &Ledger) -> Result<Vec<Job>> {
-    let store = store(ledger);
-    let entries = match fs::read_dir(&store.dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut jobs: Vec<Job> = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if entry.path().extension().is_some_and(|e| e == "json") {
-            // A record that expired between the listing and the read is gone, not broken.
-            match fs::read(entry.path()) {
-                Ok(bytes) => jobs.push(serde_json::from_slice(&bytes)?),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-    jobs.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(jobs)
+    crate::job_store::all(ledger)
 }
 
 pub fn stop(ledger: &Ledger, id: &str) -> Result<()> {
@@ -555,7 +515,7 @@ pub fn stop(ledger: &Ledger, id: &str) -> Result<()> {
                 pending.ended_ms = Some(now_ms());
                 save(ledger, &pending)?;
             }
-            store(ledger).write(&format!("{id}.stop"), &true)?;
+            crate::job_store::request_stop(ledger, id, true)?;
         }
         Ok(())
     })
@@ -631,25 +591,8 @@ pub fn expire(ledger: &Ledger, now: u64) -> Result<()> {
     // Persist the validity fence before any deletion, even when the wall clock rolled back.
     let now = advance_clock(ledger, now)?;
     crate::work::expire_requests(ledger, now)?;
-    let store = store(ledger);
-    let entries = match fs::read_dir(&store.dir) {
-        Ok(entries) => Some(entries),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
-    };
-    for entry in entries.into_iter().flatten() {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        if validate_id(id).is_err() {
-            continue;
-        }
-        if let Err(error) = expire_one(ledger, id, now) {
+    for id in crate::job_store::expiry_ids(ledger, now)? {
+        if let Err(error) = expire_one(ledger, &id, now) {
             // One unreadable record does not stop the others, and an unreadable record is
             // kept: an unknown state never expires.
             eprintln!("dogsled job expiry: {id}: {error}");
@@ -687,7 +630,7 @@ pub(crate) fn expire_one(ledger: &Ledger, id: &str, now: u64) -> Result<Expiry> 
                     }
                     // The record goes last: a reader that still sees the record finds the
                     // expiry marker on it.
-                    remove(&jobs.dir.join(format!("{id}.json")))?;
+                    crate::job_store::remove(ledger, id)?;
                     // The marker went with the record: nothing names this job any more.
                     remove(&jobs.dir.join(format!("{id}.log")))?;
                     Ok(Expiry::Record)
@@ -701,6 +644,7 @@ pub(crate) fn expire_one(ledger: &Ledger, id: &str, now: u64) -> Result<Expiry> 
 /// reader tells an expired output from a missing one. The log keeps only the marker, so
 /// every reader of the log reports the expiry instead of a missing file.
 fn expire_log(ledger: &Ledger, jobs: &Ledger, job: &Job) -> Result<()> {
+    fs::create_dir_all(&jobs.dir)?;
     if !job.output_expired {
         let mut marked = job.clone();
         marked.output_expired = true;
@@ -718,7 +662,7 @@ fn expire_log(ledger: &Ledger, jobs: &Ledger, job: &Job) -> Result<()> {
         fs::rename(&tmp, &log)?;
     }
     // The stop marker belongs to the output: it goes with it.
-    remove(&jobs.dir.join(format!("{}.stop", job.id)))?;
+    crate::job_store::request_stop(ledger, &job.id, false)?;
     Ok(())
 }
 
@@ -936,7 +880,7 @@ fn capture(
             if status.is_none() && reason.is_none() {
                 reason = if let Some(signal) = signals.pending().next() {
                     Some(format!("signal {signal}"))
-                } else if store(ledger).dir.join(format!("{}.stop", job.id)).exists() {
+                } else if crate::job_store::stop_requested(ledger, &job.id)? {
                     Some("stopped".into())
                 } else if job
                     .timeout_ms
@@ -1016,12 +960,16 @@ pub enum Ownership {
 /// so a caller never mistakes a corrupt record for an absent one.
 pub fn record(ledger: &Ledger, id: &str) -> Result<Option<Job>> {
     validate_id(id)?;
-    store(ledger).read(&format!("{id}.json"))
+    crate::job_store::get(ledger, id)
 }
 
 /// What the record says about who may run the job.
 pub fn ownership(ledger: &Ledger, id: &str) -> Result<Ownership> {
-    let Some(job) = record(ledger, id)? else {
+    ownership_record(id, record(ledger, id)?)
+}
+
+fn ownership_record(id: &str, job: Option<Job>) -> Result<Ownership> {
+    let Some(job) = job else {
         return Ok(Ownership::Unclaimed);
     };
     // The record's own identity must be the job that was asked for. A record stored under
@@ -1049,8 +997,11 @@ pub fn ownership(ledger: &Ledger, id: &str) -> Result<Ownership> {
 /// here stays uncertain and cannot authorize another allocation.
 pub fn publish_intent(ledger: &Ledger, job: &Job) -> Result<()> {
     validate_id(&job.id)?;
-    store(ledger).with_lock(&job.id, || {
-        if !matches!(ownership(ledger, &job.id)?, Ownership::Unclaimed) {
+    crate::store::write(ledger, |tx| {
+        if !matches!(
+            ownership_record(&job.id, crate::job_store::load(tx, &job.id)?)?,
+            Ownership::Unclaimed
+        ) {
             return Err(Error::Invalid(format!(
                 "job {} already has an owner",
                 job.id
@@ -1064,7 +1015,7 @@ pub fn publish_intent(ledger: &Ledger, job: &Job) -> Result<()> {
         intent.reason = None;
         intent.started_ms = None;
         intent.ended_ms = None;
-        save(ledger, &intent)
+        crate::job_store::save(tx, &intent)
     })
 }
 
@@ -1072,8 +1023,8 @@ pub fn publish_intent(ledger: &Ledger, job: &Job) -> Result<()> {
 /// the record's own: another owner never takes a job over.
 pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
     validate_id(&job.id)?;
-    store(ledger).with_lock(&job.id, || {
-        match ownership(ledger, &job.id)? {
+    crate::store::write(ledger, |tx| {
+        match ownership_record(&job.id, crate::job_store::load(tx, &job.id)?)? {
             Ownership::Uncertain(existing) if existing.state == CLAIMING => {
                 // The intent must be this request's intent. Only the pane may change: the
                 // command, directory, host, owner, and options are the request's own.
@@ -1107,7 +1058,7 @@ pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
         claim.reason = None;
         claim.started_ms = None;
         claim.ended_ms = None;
-        save(ledger, &claim)
+        crate::job_store::save(tx, &claim)
     })
 }
 
@@ -1116,8 +1067,8 @@ pub fn publish_claim(ledger: &Ledger, job: &Job) -> Result<()> {
 /// retry: the job stays unproved until the host says otherwise.
 pub fn uncertain(ledger: &Ledger, job: &Job, reason: String) -> Result<()> {
     validate_id(&job.id)?;
-    store(ledger).with_lock(&job.id, || {
-        let Some(current) = record(ledger, &job.id)? else {
+    crate::store::write(ledger, |tx| {
+        let Some(current) = crate::job_store::load(tx, &job.id)? else {
             return Ok(());
         };
         if current.started_ms.is_some() || current.ended_ms.is_some() {
@@ -1132,7 +1083,7 @@ pub fn uncertain(ledger: &Ledger, job: &Job, reason: String) -> Result<()> {
         held.exit = None;
         held.signal = None;
         held.ended_ms = None;
-        save(ledger, &held)
+        crate::job_store::save(tx, &held)
     })
 }
 
@@ -1143,8 +1094,8 @@ pub fn uncertain(ledger: &Ledger, job: &Job, reason: String) -> Result<()> {
 /// `initial` is the record the caller read for the requested job. The reload must still be
 /// that same job: a record whose execution-affecting fields changed is refused, never
 /// silently adopted.
-fn pending_claim(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
-    let Some(claimed) = record(ledger, id)? else {
+fn pending_claim(claimed: Option<Job>, id: &str, initial: &Job) -> Result<Job> {
+    let Some(claimed) = claimed else {
         return Err(Error::Invalid(format!("job {id} has no claim to run")));
     };
     // The record's own identity must be the requested job. A record stored under this name
@@ -1209,15 +1160,15 @@ fn pending_claim(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
 /// Mark the claim as started and return the running record. The short per-job record lock
 /// holds this publication, and it is released before any capture.
 fn start(ledger: &Ledger, id: &str, initial: &Job) -> Result<Job> {
-    store(ledger).with_lock(id, || {
-        let mut running = pending_claim(ledger, id, initial)?;
+    check_validity(ledger, initial.validity.as_ref())?;
+    crate::store::write(ledger, |tx| {
+        let mut running = pending_claim(crate::job_store::load(tx, id)?, id, initial)?;
         // The wrapper checks the request's age before it publishes the startup. `exec`
         // checks again right before the process starts, because the pane report blocks.
         // An expired or unprovable request never starts a process.
-        check_validity(ledger, running.validity.as_ref())?;
         running.started_ms = Some(now_ms());
         running.state = WORKING.into();
-        save(ledger, &running)?;
+        crate::job_store::save(tx, &running)?;
         Ok(running)
     })
 }

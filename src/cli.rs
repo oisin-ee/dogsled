@@ -60,14 +60,19 @@ pub enum Command {
         #[arg(long)]
         all: bool,
         /// Open or reuse this tab's board, docked on the left.
-        #[arg(long, conflicts_with_all = ["all", "todo_path", "toggle"])]
+        #[arg(long, conflicts_with_all = ["all", "toggle"])]
         open: bool,
         /// Close this tab's docked board, or open it when there is none.
-        #[arg(long, conflicts_with_all = ["all", "todo_path"])]
+        #[arg(long, conflicts_with_all = ["all"])]
         toggle: bool,
-        /// Local todo publication path.
-        #[arg(long, conflicts_with = "all")]
-        todo_path: bool,
+    },
+    /// Publish one pane's todo snapshot from stdin, or withdraw it.
+    #[command(hide = true)]
+    TodoPublish {
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        clear: bool,
     },
     /// The dock pane: framed Agents & Jobs and Todos panels. Herdr runs it; it needs a terminal.
     Sidebar {
@@ -332,6 +337,196 @@ pub enum Command {
     /// Internal local operations used by peers over SSH.
     #[command(subcommand, hide = true)]
     Host(HostCommand),
+    /// Inspect or repair this host's `state.db` records as JSON.
+    #[command(subcommand, hide = true)]
+    State(StateCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StateCommand {
+    Inbox {
+        terminal: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    InboxReader {
+        terminal: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Outbox {
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    NotificationFailures {
+        #[arg(long)]
+        put: bool,
+    },
+    Todo {
+        pane: String,
+        #[arg(long, default_value = "published")]
+        lane: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Sidebar {
+        owner: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Dock {
+        tab: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Question {
+        id: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Review {
+        id: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Attachment {
+        name: String,
+        #[arg(long)]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+
+    #[command(flatten)]
+    HostFiles(crate::host_store::Command),
+    DoneIdentity {
+        pane: String,
+    },
+    /// Print the SQL schema of `state.db`.
+    Schema,
+    /// Print every admission, oldest first.
+    Admissions,
+    /// Print the launch request IDs.
+    Launches,
+    /// Read or replace one typed launch record.
+    Launch {
+        id: String,
+        #[arg(long, value_enum, default_value = "receipt")]
+        record: crate::launch_store::Record,
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Jobs,
+    JobStop {
+        id: String,
+    },
+    RefuseClockWrites,
+    Cancellations,
+    Reservations {
+        #[arg(long)]
+        put: bool,
+    },
+    Job {
+        id: String,
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Validity {
+        id: String,
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Ingress {
+        id: String,
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Selection {
+        id: String,
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Cancellation {
+        id: String,
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    Clock {
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Print every item, oldest first.
+    Items {
+        /// Replace every item with the JSON list read from stdin.
+        #[arg(long)]
+        put: bool,
+    },
+    /// Print every queued ticket, oldest first.
+    Tickets {
+        /// Replace every ticket with the JSON list read from stdin.
+        #[arg(long)]
+        put: bool,
+    },
+    /// Inject or clear a preparation storage failure for integration fixtures.
+    Fault {
+        store: String,
+        #[arg(long)]
+        write: bool,
+    },
+    /// Inspect or update a typed preparation record.
+    Preparation {
+        kind: String,
+        id: Option<String>,
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Print preparation claims, or replace them from stdin.
+    Preparations {
+        #[arg(long)]
+        put: bool,
+    },
+    /// Print one admission, or null.
+    Admission {
+        id: String,
+        /// Replace the admission with the JSON attempt read from stdin.
+        #[arg(long, conflicts_with = "delete")]
+        put: bool,
+        /// Delete the admission.
+        #[arg(long)]
+        delete: bool,
+    },
 }
 
 #[derive(Debug, Args)]

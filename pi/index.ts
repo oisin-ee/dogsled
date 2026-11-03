@@ -130,10 +130,7 @@ export default function dogsled(pi: ExtensionAPI) {
 
 	async function publication(ctx: ExtensionContext): Promise<void> {
 		if (!owner) return;
-		const current = generation;
-		const location: unknown = JSON.parse(await exec(["board", "--todo-path", "--owner", owner, "--json"]));
-		if (current !== generation) return;
-		publisher.configure(location);
+		publisher.configure();
 		publishTodos(ctx);
 	}
 

@@ -11,6 +11,17 @@ use serde_json::json;
 
 mod reconcile;
 
+fn cancellation_value(ledger: &Ledger, id: &str) -> serde_json::Value {
+    serde_json::to_value(crate::job_store::cancellation(ledger, id).unwrap()).unwrap()
+}
+fn put_cancellation(ledger: &Ledger, value: &serde_json::Value) {
+    crate::job_store::put_cancellation(ledger, &serde_json::from_value(value.clone()).unwrap())
+        .unwrap();
+}
+fn put_job(ledger: &Ledger, value: &serde_json::Value) {
+    crate::job_store::put(ledger, &serde_json::from_value(value.clone()).unwrap()).unwrap();
+}
+
 #[test]
 fn cancellation_version_and_request_conflicts_refuse_replay_without_replacing_expectations() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
@@ -19,18 +30,12 @@ fn cancellation_version_and_request_conflicts_refuse_replay_without_replacing_ex
     let first = work::cancel(&ledger, &ticket).unwrap();
     assert_eq!(work::cancel(&ledger, &ticket).unwrap(), first);
     assert!(work::allow_admission(&ledger, &request).is_err());
-    let path = ledger.child("cancellations");
-    let mut saved: serde_json::Value = path.read("cancel-expectation.json").unwrap().unwrap();
+    let mut saved = cancellation_value(&ledger, "cancel-expectation");
     saved["version"] = json!(99);
-    path.write("cancel-expectation.json", &saved).unwrap();
+    put_cancellation(&ledger, &saved);
     assert!(work::cancel(&ledger, &ticket).is_err());
     assert!(work::allow_admission(&ledger, &request).is_err());
-    assert_eq!(
-        path.read::<serde_json::Value>("cancel-expectation.json")
-            .unwrap()
-            .unwrap(),
-        saved
-    );
+    assert_eq!(cancellation_value(&ledger, "cancel-expectation"), saved);
     assert_eq!(work::queue(&ledger).unwrap()[0].state, "cancelled");
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
@@ -53,19 +58,16 @@ fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
         }
     }
     // Cancellation alone proves no terminal job outcome. This local record does.
-    ledger
-        .child("jobs")
-        .write(
-            "terminal.json",
-            &json!({
-                "id":"terminal", "cmd":["true"], "cwd":"/", "host":"local",
-                "owner":"owner", "pane":"pane", "state":"idle", "exit":0,
-                "signal":null, "reason":null, "started_ms":created, "ended_ms":created,
-                "timeout_ms":null, "idle_timeout_ms":null,
-                "validity":{"version":1,"created_ms":created}, "output_expired":false
-            }),
-        )
-        .unwrap();
+    put_job(
+        &ledger,
+        &json!({
+            "id":"terminal", "cmd":["true"], "cwd":"/", "host":"local",
+            "owner":"owner", "pane":"pane", "state":"idle", "exit":0,
+            "signal":null, "reason":null, "started_ms":created, "ended_ms":created,
+            "timeout_ms":null, "idle_timeout_ms":null,
+            "validity":{"version":1,"created_ms":created}, "output_expired":false
+        }),
+    );
     let orphan = crate::jobs::Validity::new(created);
     crate::jobs::record_request_validity(&ledger, "orphan", Some(orphan)).unwrap();
     let completed = work::queue(&ledger)
@@ -85,11 +87,9 @@ fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
     work::expire_requests(&ledger, completed + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
     assert_eq!(work::queue(&ledger).unwrap().len(), 1);
     assert!(
-        !ledger
-            .child("cancellations")
-            .dir
-            .join("terminal.json")
-            .exists()
+        crate::job_store::cancellation(&ledger, "terminal")
+            .unwrap()
+            .is_none()
     );
     assert!(
         crate::jobs::request_validity(&ledger, "terminal")
@@ -165,10 +165,7 @@ fn orphan_request_sidecars_expire_only_without_launch_receipts() {
         )
         .unwrap();
     }
-    ledger
-        .child("launches")
-        .write("receipt.json", &json!({"id":"receipt"}))
-        .unwrap();
+    crate::launch_store::put_receipt(&ledger, "receipt", &json!({"id":"receipt"})).unwrap();
     work::expire_requests(&ledger, created + crate::jobs::RECORD_KEEP_MS + 1).unwrap();
     assert!(
         crate::jobs::request_validity(&ledger, "orphan")
@@ -215,10 +212,7 @@ fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
             "timeout_ms":null, "idle_timeout_ms":null,
             "validity":{"version":1,"created_ms":now}}
     });
-    ledger
-        .child("launches")
-        .write("receipted.json", &saved)
-        .unwrap();
+    crate::launch_store::put_receipt(&ledger, "receipted", &saved).unwrap();
     let result = work::receive_launch(&ledger, &shell, &launch, now, Some(2));
     assert!(
         crate::jobs::request_validity(&ledger, "receipted")
@@ -229,10 +223,7 @@ fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
     assert!(crate::jobs::record(&ledger, "receipted").unwrap().is_none());
     assert!(shell.calls.lock().unwrap().is_empty());
     assert_eq!(
-        ledger
-            .child("launches")
-            .read::<serde_json::Value>("receipted.json")
-            .unwrap(),
+        crate::launch_store::receipt(&ledger, "receipted").unwrap(),
         Some(saved)
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -256,37 +247,31 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
         let ticket = work::enqueue(&ledger, request, false, created).unwrap();
         work::cancel(&ledger, &ticket).unwrap();
         if pending {
-            let mut saved: serde_json::Value = ledger
-                .child("cancellations")
-                .read("missing-cancel.json")
-                .unwrap()
-                .unwrap();
+            let mut saved = cancellation_value(&ledger, "missing-cancel");
             saved["release"] = json!("pending");
-            ledger
-                .child("cancellations")
-                .write("missing-cancel.json", &saved)
-                .unwrap();
+            put_cancellation(&ledger, &saved);
         }
         if expire {
-            ledger.child("jobs").write("missing-cancel.json", &json!({
-                "id":"missing-cancel","cmd":["true"],"cwd":"/","host":"local","owner":"owner","pane":"pane",
-                "state":"idle","exit":0,"started_ms":created,"ended_ms":created,"output_expired":false
-            })).unwrap();
+            put_job(
+                &ledger,
+                &json!({
+                    "id":"missing-cancel","cmd":["true"],"cwd":"/","host":"local","owner":"owner","pane":"pane",
+                    "state":"idle","exit":0,"started_ms":created,"ended_ms":created,"output_expired":false
+                }),
+            );
             let completed = work::queue(&ledger).unwrap()[0].finished_ms.unwrap();
             work::expire_requests(&ledger, completed + 1 + crate::jobs::RECORD_KEEP_MS).unwrap();
             assert!(work::queue(&ledger).unwrap().is_empty());
             assert!(
-                !ledger
-                    .child("cancellations")
-                    .dir
-                    .join("missing-cancel.json")
-                    .exists()
+                crate::job_store::cancellation(&ledger, "missing-cancel")
+                    .unwrap()
+                    .is_none()
             );
         } else {
             crate::store::put_tickets(&ledger, &json!([])).unwrap();
         }
         work::enqueue(&ledger, place_request(&ledger, "unrelated"), false, 100).unwrap();
-        ledger.write("host.json", &snapshot(100)).unwrap();
+        crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
         let shell = Fake::new();
         let policy = Policy {
             memory_reserve_bytes: 0,
@@ -302,11 +287,7 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
         work::tick(&fleet, 100).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "admitted");
         if pending {
-            let saved: serde_json::Value = ledger
-                .child("cancellations")
-                .read("missing-cancel.json")
-                .unwrap()
-                .unwrap();
+            let saved = cancellation_value(&ledger, "missing-cancel");
             assert!(saved["error"].as_str().unwrap().contains("ticket"));
             assert_eq!(saved["release"], "pending");
         }
@@ -318,17 +299,15 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
 /// of them before admission, so new work waited for hours.
 #[test]
 fn unreleasable_cancellations_are_held_and_never_starve_admission() {
-    use std::os::unix::fs::MetadataExt as _;
     const HELD: usize = 40;
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     let _service = service(&ledger);
-    let cancellations = ledger.child("cancellations");
     let tickets: Vec<_> = (0..HELD)
         .map(|index| identityless_cancellation(&ledger, &format!("held-{index}")))
         .collect();
     crate::store::put_tickets(&ledger, &tickets).unwrap();
     work::enqueue(&ledger, place_request(&ledger, "unrelated"), false, 100).unwrap();
-    ledger.write("host.json", &snapshot(100)).unwrap();
+    crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     let shell = Fake::new();
     let policy = Policy {
         memory_reserve_bytes: 0,
@@ -344,10 +323,7 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
     let held = || {
         (0..HELD)
             .filter(|index| {
-                let saved: serde_json::Value = cancellations
-                    .read(&format!("held-{index}.json"))
-                    .unwrap()
-                    .unwrap();
+                let saved = cancellation_value(&ledger, &format!("held-{index}"));
                 assert_eq!(saved["release"], "pending", "a held release is never faked");
                 saved["held"].is_object()
             })
@@ -356,9 +332,7 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
     let written = || {
         (0..HELD)
             .map(|index| {
-                std::fs::metadata(cancellations.dir.join(format!("held-{index}.json")))
-                    .unwrap()
-                    .ino()
+                crate::job_store::cancellation_revision(&ledger, &format!("held-{index}")).unwrap()
             })
             .collect::<Vec<_>>()
     };
@@ -393,10 +367,9 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
         .count();
     assert_eq!(reported, HELD);
 
-    ledger
-        .child("admissions")
-        .write("held-0.json", &json!({"request": null}))
-        .unwrap();
+    let mut changed = crate::admissions::get(&ledger, "held-0").unwrap().unwrap();
+    changed.error = Some("changed evidence".into());
+    crate::admissions::put(&ledger, "held-0", &changed).unwrap();
     work::tick(&fleet, 100).unwrap();
     let after = written();
     assert_ne!(after[0], settled[0], "changed evidence is retried");
@@ -415,15 +388,14 @@ fn identityless_cancellation(ledger: &Ledger, id: &str) -> serde_json::Value {
     let admission = json!({
         "request": request, "host": Host::local(), "launch": null, "error": "refused",
     });
-    let file = format!("{id}.json");
-    ledger.child("admissions").write(&file, &admission).unwrap();
+    crate::admissions::put_value(ledger, id, &admission).unwrap();
     let saved = json!({
         "version": 1, "completion_version": 1, "operation_id": new_id(),
         "ticket": ticket, "admission": admission, "preparation": null, "placement": null,
         "outcome": "not_started", "release": "pending", "intent": null,
         "acknowledgement": null, "error": "preparation release pending",
     });
-    ledger.child("cancellations").write(&file, &saved).unwrap();
+    put_cancellation(ledger, &saved);
     ticket
 }
 
@@ -491,7 +463,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
         home: "/".into(),
         hosts: vec![Host::local()],
     };
-    ledger.write("host.json", &snapshot(100)).unwrap();
+    crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     for id in ["first", "second"] {
         work::enqueue(&ledger, place_request(&ledger, id), false, 100).unwrap();
     }
@@ -535,7 +507,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     // Exactly at TTL, a fresh sample admits the second ticket without a sleep.
     let mut refreshed = snapshot(90_100);
     refreshed.probe.agent_panes[0].state = "working".into();
-    ledger.write("host.json", &refreshed).unwrap();
+    crate::host_store::put_snapshot(&ledger, &refreshed).unwrap();
     work::tick(&fleet, 90_100).unwrap();
     assert_eq!(work::queue(&ledger).unwrap()[1].state, "admitted");
     std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -571,11 +543,11 @@ fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
     .unwrap();
     let mut current = snapshot(100);
     current.probe.panes.clear();
-    ledger.write("host.json", &current).unwrap();
+    crate::host_store::put_snapshot(&ledger, &current).unwrap();
     items::reconcile(&ledger, &fleet.status(200).unwrap(), 200).unwrap();
     assert!(items::list(&ledger).unwrap()[0].closed_ms.is_none());
     current.sampled_ms = 200;
-    ledger.write("host.json", &current).unwrap();
+    crate::host_store::put_snapshot(&ledger, &current).unwrap();
     items::reconcile(&ledger, &fleet.status(30_201).unwrap(), 30_201).unwrap();
     assert!(items::list(&ledger).unwrap()[0].closed_ms.is_none());
     items::reconcile(&ledger, &fleet.status(201).unwrap(), 201).unwrap();
@@ -618,32 +590,28 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
         home: "/".into(),
         hosts: vec![Host::local()],
     };
-    ledger.write("host.json", &snapshot(100)).unwrap();
+    crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     let request = place_request(&ledger, "captured-placement");
     assert!(work::perform(&fleet, &request, 100).unwrap().is_some());
-    let admission = ledger.child("admissions");
-    let before = std::fs::read(admission.dir.join("captured-placement.json")).unwrap();
-    let saved: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    let before = crate::admissions::value(&ledger, "captured-placement").unwrap();
+    let saved = before.clone().unwrap();
     assert_eq!(saved["request"], serde_json::to_value(&request).unwrap());
     assert_eq!(saved["placement"]["phase"], "completed");
     assert_eq!(
         saved["placement"]["saved"]["prepared"]["grant"]["envelope"]["request"],
         saved["request"]
     );
-    let hold = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    let hold = crate::job_store::reservations(&ledger).unwrap();
     for field in ["cwd", "owner", "branch", "host"] {
         let mut changed = serde_json::to_value(&request).unwrap();
         changed[field] = json!("changed");
         let changed: Request = serde_json::from_value(changed).unwrap();
         assert!(work::perform(&fleet, &changed, 101).is_err(), "{field}");
         assert_eq!(
-            std::fs::read(admission.dir.join("captured-placement.json")).unwrap(),
+            crate::admissions::value(&ledger, "captured-placement").unwrap(),
             before
         );
-        assert_eq!(
-            std::fs::read(ledger.dir.join("placements.json")).unwrap(),
-            hold
-        );
+        assert_eq!(crate::job_store::reservations(&ledger).unwrap(), hold);
     }
     let redirected = Fleet {
         hosts: vec![Host {
@@ -654,13 +622,10 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
     };
     assert!(work::perform(&redirected, &request, 101).is_err());
     assert_eq!(
-        std::fs::read(admission.dir.join("captured-placement.json")).unwrap(),
+        crate::admissions::value(&ledger, "captured-placement").unwrap(),
         before
     );
-    assert_eq!(
-        std::fs::read(ledger.dir.join("placements.json")).unwrap(),
-        hold
-    );
+    assert_eq!(crate::job_store::reservations(&ledger).unwrap(), hold);
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
 
@@ -680,7 +645,7 @@ fn placement_resume_skips_its_own_ticket_but_unreserved_work_waits() {
         home: "/".into(),
         hosts: vec![Host::local()],
     };
-    ledger.write("host.json", &snapshot(100)).unwrap();
+    crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     let request = place_request(&ledger, "resume-own-ticket");
     work::enqueue(&ledger, request.clone(), false, 100).unwrap();
     assert!(!work::waits_behind(&fleet, &request).unwrap());
@@ -690,12 +655,9 @@ fn placement_resume_skips_its_own_ticket_but_unreserved_work_waits() {
     assert!(work::waits_behind(&fleet, &request).unwrap());
     assert_eq!(work::submit(&fleet, &request, 101).unwrap(), Some(result));
     let newcomer = place_request(&ledger, "unreserved-newcomer");
-    let before = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    let before = crate::job_store::reservations(&ledger).unwrap();
     assert!(work::submit(&fleet, &newcomer, 101).unwrap().is_none());
-    assert_eq!(
-        std::fs::read(ledger.dir.join("placements.json")).unwrap(),
-        before
-    );
+    assert_eq!(crate::job_store::reservations(&ledger).unwrap(), before);
     let resumed = work::resume_placement(&ledger, &newcomer.id).unwrap();
     assert_eq!(
         serde_json::to_value(resumed).unwrap(),
@@ -718,27 +680,27 @@ fn placement_admission_never_downgrades_missing_or_newer_progress() {
         hosts: vec![Host::local()],
     };
     let request = place_request(&ledger, "no-downgrade");
-    let admissions = ledger.child("admissions");
     for progress in [
         json!(null),
         json!({"version":4,"phase":"recorded","declined":[]}),
     ] {
         let record =
             json!({"request":request,"host":null,"launch":null,"error":null,"placement":progress});
-        admissions.write("no-downgrade.json", &record).unwrap();
+        crate::admissions::put_value(&ledger, "no-downgrade", &record).unwrap();
+        let saved = crate::admissions::value(&ledger, "no-downgrade").unwrap();
         assert!(work::perform(&fleet, &request, 100).is_err());
         assert_eq!(
-            admissions
-                .read::<serde_json::Value>("no-downgrade.json")
-                .unwrap(),
-            Some(record)
+            crate::admissions::value(&ledger, "no-downgrade").unwrap(),
+            saved
         );
-        assert!(!ledger.dir.join("placements.json").exists());
+        assert_eq!(
+            crate::job_store::reservations(&ledger).unwrap(),
+            [] as [crate::ledger::Reservation; 0]
+        );
         assert!(
-            !ledger
-                .dir
-                .join("placement-grants/no-downgrade.json")
-                .exists()
+            crate::preparation_store::grants::get(&ledger, "no-downgrade")
+                .unwrap()
+                .is_none()
         );
     }
     std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -775,7 +737,7 @@ fn a_full_host_holds_back_only_the_tickets_that_need_it() {
     // Local has room for every local ticket in this test.
     let mut roomy = snapshot(100);
     roomy.probe.cores = 8;
-    ledger.write("host.json", &roomy).unwrap();
+    crate::host_store::put_snapshot(&ledger, &roomy).unwrap();
     // The peer has no disk to spare, so nothing fits there.
     let mut full = snapshot(100);
     full.probe.host = "peer".into();
@@ -846,7 +808,7 @@ fn submit_waits_behind_pending_tickets_even_with_room() {
         home: "/".into(),
         hosts: vec![Host::local()],
     };
-    ledger.write("host.json", &snapshot(100)).unwrap();
+    crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     let ahead = work::enqueue(&ledger, place_request(&ledger, "ahead"), false, 100).unwrap();
     // The host has room, but a ticket waits ahead: the new request must queue.
     assert!(
@@ -955,27 +917,12 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
         startup: None,
         output_expired: false,
     };
-    // A.json holds B's identity.
+    // A snapshot cannot be published under another job's primary key.
     let mut other = job.clone();
     other.id = "other".into();
-    crate::jobs::save(&ledger, &other).unwrap();
-    std::fs::rename(
-        crate::jobs::store(&ledger).dir.join("other.json"),
-        crate::jobs::store(&ledger).dir.join("claimed.json"),
-    )
-    .unwrap();
-    // The lookup refuses the contradictory identity.
-    let error = crate::jobs::ownership(&ledger, "claimed").unwrap_err();
-    assert!(
-        error.to_string().contains("belongs to job other"),
-        "{error}"
-    );
-    // No publication takes that record over.
-    let error = crate::jobs::publish_intent(&ledger, &job).unwrap_err();
-    assert!(
-        error.to_string().contains("belongs to job other"),
-        "{error}"
-    );
+    let error = crate::job_store::put_named(&ledger, "claimed", &other).unwrap_err();
+    assert!(error.to_string().contains("identity changed"), "{error}");
+    assert!(crate::jobs::record(&ledger, "claimed").unwrap().is_none());
     // A real job's intent keeps its own request: only the pane may change.
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     crate::jobs::publish_intent(&ledger, &job).unwrap();
@@ -1081,40 +1028,39 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
         cleanup: &policy.cleanup,
     };
     let now = crate::jobs::VALIDITY_WINDOW_MS + 1_000_000_u64;
-    ledger
-        .write(
-            "host.json",
-            &crate::node::Snapshot {
-                sampled_ms: now,
-                jobs: Vec::new(),
-                probe: Probe {
-                    host: "local".into(),
-                    label: "local".into(),
-                    load1: 0.0,
-                    cores: 8,
-                    cpu_ticks: None,
-                    busy: Some(0.0),
-                    memory: Memory::default(),
-                    disk_free_percent: 50.0,
-                    agents: AgentCounts::default(),
-                    agent_panes: Vec::new(),
-                    reservations: Vec::new(),
-                    panes: Vec::new(),
-                },
+    crate::host_store::put_snapshot(
+        &ledger,
+        &crate::node::Snapshot {
+            sampled_ms: now,
+            jobs: Vec::new(),
+            probe: Probe {
+                host: "local".into(),
+                label: "local".into(),
+                load1: 0.0,
+                cores: 8,
+                cpu_ticks: None,
+                busy: Some(0.0),
+                memory: Memory::default(),
+                disk_free_percent: 50.0,
+                agents: AgentCounts::default(),
+                agent_panes: Vec::new(),
+                reservations: Vec::new(),
+                panes: Vec::new(),
             },
-        )
-        .unwrap();
+        },
+    )
+    .unwrap();
     // The request is older than the validity window.
     let expired = crate::jobs::Validity::new(now - crate::jobs::VALIDITY_WINDOW_MS - 1);
-    // The clock file is written directly, so the test controls the host time.
-    std::fs::write(
-        ledger.dir.join("job-validity-clock.json"),
-        serde_json::to_vec(&crate::jobs::Clock {
-            version: crate::jobs::Clock::VERSION,
-            high_water_ms: now,
-        })
-        .unwrap(),
-    )
+    crate::store::write(&ledger, |tx| {
+        crate::job_store::put_clock(
+            tx,
+            &crate::jobs::Clock {
+                version: crate::jobs::Clock::VERSION,
+                high_water_ms: now,
+            },
+        )
+    })
     .unwrap();
     // Without an existing hold, the refusal changes no capacity record.
     let error = node
@@ -1122,7 +1068,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
         .expect_err("an expired request is refused");
     assert!(error.to_string().contains("older than 30 days"), "{error}");
     assert!(
-        !ledger.dir.join("placements.json").exists(),
+        crate::job_store::reservations(&ledger).unwrap().is_empty(),
         "the refused reservation wrote no capacity record"
     );
     // A hold is written only after its request authority is published.
@@ -1131,13 +1077,13 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
         id: "expired".into(),
         created_ms: now,
     }];
-    ledger.write("placements.json", &holds).unwrap();
-    let before = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    crate::job_store::put_reservations(&ledger, &holds).unwrap();
+    let before = crate::job_store::reservations(&ledger).unwrap();
     let error = node
         .reserve("expired", now, Some(expired))
         .expect_err("an expired request is refused");
     assert!(error.to_string().contains("older than 30 days"), "{error}");
-    let after = std::fs::read(ledger.dir.join("placements.json")).unwrap();
+    let after = crate::job_store::reservations(&ledger).unwrap();
     assert_eq!(after, before, "the refused reservation changed the hold");
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
@@ -1148,17 +1094,15 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
 fn a_missing_clock_with_an_unreadable_record_refuses() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     std::fs::create_dir_all(&ledger.dir).unwrap();
-    // A record that cannot be parsed.
-    let store = crate::jobs::store(&ledger);
-    std::fs::create_dir_all(&store.dir).unwrap();
-    std::fs::write(store.dir.join("broken.json"), "not json").unwrap();
+    // A database that cannot be read cannot authorize clock initialization.
+    let database = ledger.dir.join("state.db");
+    std::fs::write(&database, "not sqlite").unwrap();
     let error = crate::jobs::clock(&ledger).expect_err("the bootstrap refuses");
     assert!(
         error.to_string().contains("clock is unavailable"),
         "{error}"
     );
-    // No clock was written.
-    assert!(!ledger.dir.join("job-validity-clock.json").exists());
+    assert_eq!(std::fs::read(&database).unwrap(), b"not sqlite");
     // A missing record directory is empty, and the clock starts at the wall clock.
     let empty = Ledger::new(std::env::temp_dir().join(new_id()));
     std::fs::create_dir_all(&empty.dir).unwrap();
@@ -1175,18 +1119,17 @@ fn the_validity_clock_never_moves_back() {
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let created = 1_000_000_u64;
     let validity = crate::jobs::Validity::new(created);
-    // The clock starts at the wall clock, which the test cannot move. The clock file is
-    // read and written directly here, so the test controls the host time.
-    let clock_file = ledger.dir.join("job-validity-clock.json");
+    // Typed writes inject the host time without consulting the wall clock.
     let write = |high_water_ms: u64| {
-        std::fs::write(
-            &clock_file,
-            serde_json::to_vec(&crate::jobs::Clock {
-                version: crate::jobs::Clock::VERSION,
-                high_water_ms,
-            })
-            .unwrap(),
-        )
+        crate::store::write(&ledger, |tx| {
+            crate::job_store::put_clock(
+                tx,
+                &crate::jobs::Clock {
+                    version: crate::jobs::Clock::VERSION,
+                    high_water_ms,
+                },
+            )
+        })
         .unwrap();
     };
     // A request 30 days old is still valid, and one millisecond more is not.
@@ -1197,8 +1140,7 @@ fn the_validity_clock_never_moves_back() {
     let error = crate::jobs::check_validity_at(&ledger, Some(&validity), at + 1).unwrap_err();
     assert!(error.to_string().contains("older than 30 days"), "{error}");
     // The refusal advanced the clock, and the clock file holds the later time.
-    let saved: crate::jobs::Clock =
-        serde_json::from_slice(&std::fs::read(&clock_file).unwrap()).unwrap();
+    let saved = crate::jobs::recorded_clock(&ledger).unwrap().unwrap();
     assert!(saved.high_water_ms > created + crate::jobs::VALIDITY_WINDOW_MS);
     // A request without evidence never starts new execution.
     let error = crate::jobs::check_validity_at(&ledger, None, at + 1).unwrap_err();
@@ -1231,10 +1173,8 @@ fn a_custody_failure_after_the_launch_keeps_the_launch_result() {
         created_ms: 100,
         ..Item::default()
     };
-    // The custody file holds something that is not a custody record, so the record cannot
-    // be read and cannot be written back.
-    std::fs::create_dir_all(&ledger.dir).unwrap();
-    std::fs::write(ledger.dir.join("custody.json"), b"not a custody record").unwrap();
+    // Unreadable custody storage cannot be written back.
+    crate::host_store::fault(&ledger, "custody", false).unwrap();
     // The custody record cannot be read or written here.
     assert!(
         crate::custody::ensure(&ledger, &item).is_err(),

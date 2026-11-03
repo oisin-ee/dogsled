@@ -52,10 +52,7 @@ fn another_request_cannot_start_while_the_pane_is_locked_for_recovery() {
         "pane":"w2:p2","terminal":"term_shell","attempted":false,"confirmed":false,
         "result":{},"error":null
     })).unwrap();
-    ledger
-        .child("launches")
-        .write("different.progress.json", &progress)
-        .unwrap();
+    crate::launch_store::put_progress_value(&ledger, "different", &progress).unwrap();
     let panes = ledger.child("launch-panes");
     std::fs::create_dir_all(&panes.dir).unwrap();
     let key = crate::unit_transport::digest_hex(b"w2:p2");
@@ -77,10 +74,9 @@ fn another_request_cannot_start_while_the_pane_is_locked_for_recovery() {
         Err(Error::Deadline(_))
     ));
     assert_eq!(shell.starts.load(Ordering::SeqCst), 0);
+    ledger.budget = crate::budget::Budget::default();
     assert!(
-        !ledger
-            .child("launches")
-            .read::<Progress>("different.progress.json")
+        !crate::launch_store::progress(&ledger, "different")
             .unwrap()
             .unwrap()
             .attempted
@@ -92,9 +88,7 @@ fn another_request_cannot_start_while_the_pane_is_locked_for_recovery() {
         Err(Error::Invalid(_))
     ));
     assert_eq!(shell.starts.load(Ordering::SeqCst), 1);
-    let unconfirmed = ledger
-        .child("launches")
-        .read::<Progress>("different.progress.json")
+    let unconfirmed = crate::launch_store::progress(&ledger, "different")
         .unwrap()
         .unwrap();
     assert!(!unconfirmed.confirmed);
@@ -168,10 +162,7 @@ fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
             "pane":"w2:p2","terminal":"term_shell","attempted":recovering,"confirmed":false,
             "result":{"host":"peer","pane":"w2:p2"},"error":null
         })).unwrap();
-        ledger
-            .child("launches")
-            .write("stamp.progress.json", &progress)
-            .unwrap();
+        crate::launch_store::put_progress_value(&ledger, "stamp", &progress).unwrap();
         let shell = ConfirmingShell {
             recovering,
             starts: AtomicUsize::new(0),
@@ -192,15 +183,14 @@ fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
             shell.starts.load(Ordering::SeqCst),
             usize::from(!recovering)
         );
-        let saved = ledger
-            .child("launches")
-            .read::<Progress>("stamp.progress.json")
+        let saved = crate::launch_store::progress(&ledger, "stamp")
             .unwrap()
             .unwrap();
         assert!(saved.confirmed);
         assert_eq!(saved.result, result);
         // Simulate interruption between confirmation and final receipt publication.
-        std::fs::remove_file(ledger.child("launches").dir.join("stamp.json")).unwrap();
+        crate::launch_store::remove(&ledger, crate::launch_store::Record::Receipt, "stamp")
+            .unwrap();
         assert_eq!(agent(&ledger, &shell, &progress.request).unwrap(), result);
         assert_eq!(agent(&ledger, &shell, &progress.request).unwrap(), result);
         assert_eq!(
@@ -440,8 +430,7 @@ fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_n
             "pane":"w2:p2","terminal":"term_shell","attempted":false,"confirmed":false,
             "result":{"host":"local","pane":"w2:p2"},"error":null
         })).unwrap();
-        let receipts = ledger.child("launches");
-        receipts.write("budget.progress.json", &progress).unwrap();
+        crate::launch_store::put_progress_value(&ledger, "budget", &progress).unwrap();
         let shell = BudgetShell {
             expired: std::sync::atomic::AtomicBool::new(false),
             starts: AtomicUsize::new(0),
@@ -449,13 +438,16 @@ fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_n
         };
         assert!(agent(&ledger, &shell, &progress.request).is_err());
         assert_eq!(shell.starts.load(Ordering::SeqCst), 1);
-        let saved = receipts
-            .read::<Progress>("budget.progress.json")
+        let saved = crate::launch_store::progress(&ledger, "budget")
             .unwrap()
             .unwrap();
         assert_eq!(saved.attempted, uncertain);
         assert!(!saved.confirmed);
-        assert!(receipts.read::<Receipt>("budget.json").unwrap().is_none());
+        assert!(
+            crate::launch_store::receipt(&ledger, "budget")
+                .unwrap()
+                .is_none()
+        );
         let ready = ConfirmingShell {
             recovering: false,
             starts: AtomicUsize::new(0),

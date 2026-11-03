@@ -1,6 +1,7 @@
 //! Host status, local service, and capacity reservations for Herdr agents.
 
 mod activity;
+mod admissions;
 mod backoff;
 mod board;
 mod budget;
@@ -22,12 +23,15 @@ mod facts;
 mod gate;
 mod herdr_socket;
 mod holds;
+mod host_store;
 mod hosts;
 mod inbox;
 mod integration;
 mod items;
+mod job_store;
 mod jobs;
 mod launch;
+mod launch_store;
 mod ledger;
 mod lifecycle;
 mod loss;
@@ -38,6 +42,7 @@ mod mcp;
 mod node;
 mod plan;
 mod preparation_retirement;
+mod preparation_store;
 mod prepare;
 #[cfg_attr(not(test), expect(dead_code, reason = "wired by P2/P3"))]
 mod preservation;
@@ -45,25 +50,28 @@ mod probe;
 mod profiles;
 mod quota;
 mod repository;
+mod rows;
 mod runtime;
 mod service;
 mod shell;
 mod sidebar;
 mod store;
 mod sweep;
+mod tables;
 mod transcript;
 mod unit_reply;
 mod unit_request;
 mod unit_transport;
 mod watchdog;
 mod web;
+mod web_store;
 mod work;
 #[cfg(test)]
 mod work_tests;
 mod worktree;
 
 use clap::Parser;
-use cli::{Cli, Command, HookCommand, HostCommand, InboxCommand};
+use cli::{Cli, Command, HookCommand, HostCommand, InboxCommand, StateCommand};
 use error::{Error, Result};
 use ledger::{Ledger, now_ms};
 use node::Node;
@@ -477,6 +485,22 @@ fn hook(
 
 /// Recovery needs no Herdr discovery for local operations.
 fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    if let Command::TodoPublish { ref pane, clear } = cli.command {
+        let ledger = Ledger {
+            budget,
+            ..Ledger::new(ledger::default_dir())
+        };
+        board::publish_todo(&ledger, pane, clear)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Command::State(cmd) = cli.command {
+        let ledger = Ledger {
+            budget,
+            ..Ledger::new(ledger::default_dir())
+        };
+        state(cmd, &ledger)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let Command::Recovery {
         ref command,
         ref host,
@@ -875,6 +899,314 @@ fn print_placement_finished(node: &Node<'_>, input: &str) -> Result<()> {
         &node.finish_placement(&serde_json::from_str(input)?)?,
         String::new,
     )
+}
+
+fn state_authority(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
+    match cmd {
+        StateCommand::Reservations { put } => {
+            if put {
+                job_store::put_reservations(
+                    ledger,
+                    &serde_json::from_reader::<_, Vec<ledger::Reservation>>(
+                        std::io::stdin().lock(),
+                    )?,
+                )?;
+            } else {
+                print(true, &job_store::reservations(ledger)?, String::new)?;
+            }
+        }
+        StateCommand::RefuseClockWrites => {
+            store::write(ledger, |tx| {
+                tx.execute_batch("CREATE TRIGGER refuse_job_clock_insert BEFORE INSERT ON job_clock BEGIN SELECT RAISE(ABORT, 'clock write refused'); END; CREATE TRIGGER refuse_job_clock_update BEFORE UPDATE ON job_clock BEGIN SELECT RAISE(ABORT, 'clock write refused'); END;")?;
+                Ok(())
+            })?;
+        }
+        StateCommand::Validity { id, put, delete } => {
+            jobs::validate_id(&id)?;
+            if put {
+                let validity: jobs::Validity = serde_json::from_reader(std::io::stdin().lock())?;
+                store::write(ledger, |tx| job_store::put_validity(tx, &id, validity))?;
+            } else if delete {
+                store::write(ledger, |tx| {
+                    tx.execute("DELETE FROM job_validity WHERE id = ?1", [&id])?;
+                    Ok(())
+                })?;
+            } else {
+                print(
+                    true,
+                    &store::read(ledger, |tx| job_store::validity(tx, &id))?,
+                    String::new,
+                )?;
+            }
+        }
+        StateCommand::Ingress { id, put, delete } => {
+            jobs::validate_id(&id)?;
+            if put {
+                #[derive(serde::Deserialize)]
+                struct Ingress {
+                    version: u32,
+                }
+                let incoming: Ingress = serde_json::from_reader(std::io::stdin().lock())?;
+                if incoming.version != 1 {
+                    return Err(Error::Invalid("ingress version".into()));
+                }
+                store::write(ledger, |tx| job_store::put_ingress(tx, &id))?;
+            } else if delete {
+                store::write(ledger, |tx| {
+                    tx.execute("DELETE FROM request_ingress WHERE id = ?1", [&id])?;
+                    Ok(())
+                })?;
+            } else {
+                let present = store::read(ledger, |tx| job_store::ingress(tx, &id))?;
+                print(
+                    true,
+                    &present.then(|| serde_json::json!({"version":1})),
+                    String::new,
+                )?;
+            }
+        }
+        StateCommand::Clock { put, delete } => {
+            if put {
+                let clock: jobs::Clock = serde_json::from_reader(std::io::stdin().lock())?;
+                store::write(ledger, |tx| job_store::put_clock(tx, &clock))?;
+            } else if delete {
+                store::write(ledger, |tx| {
+                    tx.execute("DELETE FROM job_clock", [])?;
+                    Ok(())
+                })?;
+            } else {
+                print(true, &jobs::recorded_clock(ledger)?, String::new)?;
+            }
+        }
+        _ => return Err(Error::Invalid("not a request authority command".into())),
+    }
+    Ok(())
+}
+
+fn state(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
+    match cmd {
+        StateCommand::Schema => println!("{}", store::schema()),
+        command @ (StateCommand::Launches
+        | StateCommand::Launch { .. }
+        | StateCommand::Fault { .. }
+        | StateCommand::Preparations { .. }
+        | StateCommand::Preparation { .. }) => state_records(command, ledger)?,
+        command @ (StateCommand::Validity { .. }
+        | StateCommand::Ingress { .. }
+        | StateCommand::Clock { .. }
+        | StateCommand::Reservations { .. }
+        | StateCommand::RefuseClockWrites) => state_authority(command, ledger)?,
+        StateCommand::HostFiles(command) => {
+            print(true, &host_store::run(command, ledger)?, String::new)?;
+        }
+        StateCommand::DoneIdentity { pane } => {
+            print(true, &done::identity(ledger, &pane)?, String::new)?;
+        }
+        StateCommand::Admissions => print(true, &admissions::values(ledger)?, String::new)?,
+        command @ (StateCommand::Jobs
+        | StateCommand::JobStop { .. }
+        | StateCommand::Cancellations
+        | StateCommand::Job { .. }
+        | StateCommand::Selection { .. }
+        | StateCommand::Cancellation { .. }) => state_jobs(command, ledger)?,
+        StateCommand::Items { put: true } => {
+            let items: Vec<items::Item> = serde_json::from_reader(std::io::stdin().lock())?;
+            store::write(ledger, |tx| {
+                tx.execute("DELETE FROM items", [])?;
+                tables::sync_items(tx, &items)
+            })?;
+        }
+        StateCommand::Items { put: false } => {
+            print(true, &store::read(ledger, tables::items)?, String::new)?;
+        }
+        StateCommand::Tickets { put: true } => {
+            let tickets: Vec<work::Ticket> = serde_json::from_reader(std::io::stdin().lock())?;
+            store::write(ledger, |tx| {
+                tx.execute("DELETE FROM tickets", [])?;
+                tables::sync_tickets(tx, &tickets)
+            })?;
+        }
+        StateCommand::Tickets { put: false } => {
+            print(true, &store::read(ledger, tables::tickets)?, String::new)?;
+        }
+        command @ (StateCommand::Inbox { .. }
+        | StateCommand::InboxReader { .. }
+        | StateCommand::Outbox { .. }
+        | StateCommand::NotificationFailures { .. }
+        | StateCommand::Todo { .. }
+        | StateCommand::Sidebar { .. }
+        | StateCommand::Dock { .. }
+        | StateCommand::Question { .. }
+        | StateCommand::Review { .. }
+        | StateCommand::Attachment { .. }) => {
+            print(
+                true,
+                &web_store::command::run(ledger, command)?,
+                String::new,
+            )?;
+        }
+        StateCommand::Admission { id, put, delete } => {
+            jobs::validate_id(&id)?;
+            if put {
+                let attempt: serde_json::Value = serde_json::from_reader(std::io::stdin().lock())?;
+                admissions::put_value(ledger, &id, &attempt)?;
+            } else if delete {
+                admissions::remove(ledger, &id)?;
+            } else {
+                print(true, &admissions::value(ledger, &id)?, String::new)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Launch and preparation records, and the storage fault seams tests set up.
+fn state_records(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
+    match cmd {
+        StateCommand::Launches => print(true, &launch_store::ids(ledger)?, String::new)?,
+        StateCommand::Launch {
+            id,
+            record,
+            put,
+            delete,
+        } => {
+            jobs::validate_id(&id)?;
+            if put {
+                let value = serde_json::from_reader(std::io::stdin().lock())?;
+                launch_store::put_value(ledger, record, &id, value)?;
+            } else if delete {
+                launch_store::remove(ledger, record, &id)?;
+            } else {
+                print(
+                    true,
+                    &launch_store::value(ledger, record, &id)?,
+                    String::new,
+                )?;
+            }
+        }
+        StateCommand::Fault { store, write } => {
+            if !preparation_store::fault(ledger, &store, write)?
+                && !host_store::fault(ledger, &store, write)?
+            {
+                return Err(error::Error::Invalid("unknown state fault".into()));
+            }
+        }
+        StateCommand::Preparations { put } => {
+            if put {
+                preparation_store::put_pending(
+                    ledger,
+                    &serde_json::from_reader::<_, Vec<prepare::Pending>>(std::io::stdin().lock())?,
+                )?;
+            } else {
+                print(true, &preparation_store::pending(ledger)?, String::new)?;
+            }
+        }
+        StateCommand::Preparation {
+            kind,
+            id,
+            put,
+            delete,
+        } => {
+            macro_rules! record {
+                ($module:ident, $ty:ty) => {{
+                    use preparation_store::$module as records;
+                    match id.as_deref() {
+                        Some(id) if put => {
+                            let record: $ty = serde_json::from_reader(std::io::stdin().lock())?;
+                            records::put(ledger, id, &record)?;
+                        }
+                        Some(id) if delete => records::remove(ledger, id)?,
+                        Some(id) => print(true, &records::get(ledger, id)?, String::new)?,
+                        None if !put && !delete => {
+                            print(true, &records::ids(ledger)?, String::new)?
+                        }
+                        None => {
+                            return Err(error::Error::Invalid(
+                                "preparation record id required".into(),
+                            ));
+                        }
+                    }
+                }};
+            }
+            match kind.as_str() {
+                "receipt" => record!(receipts, prepare::PreparationReceipt),
+                "disposition" => record!(dispositions, prepare::disposition::Receipt),
+                "grant" => record!(grants, node::PlacementGrant),
+                "lifecycle" => record!(lifecycles, node::GrantLifecycle),
+                "expectation" => record!(expectations, prepare::PreparationLookup),
+                "retirement" => record!(retirements, preparation_retirement::Intent),
+                _ => {
+                    return Err(error::Error::Invalid(
+                        "unknown preparation record kind".into(),
+                    ));
+                }
+            }
+        }
+        _ => return Err(Error::Invalid("another state command".into())),
+    }
+    Ok(())
+}
+
+/// Job records, stop requests, placement selections, and cancellations.
+fn state_jobs(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
+    match cmd {
+        StateCommand::Jobs => print(true, &job_store::all(ledger)?, String::new)?,
+        StateCommand::JobStop { id } => {
+            jobs::validate_id(&id)?;
+            print(true, &job_store::stop_requested(ledger, &id)?, String::new)?;
+        }
+        StateCommand::Cancellations => {
+            print(true, &job_store::cancellations(ledger)?, String::new)?;
+        }
+        StateCommand::Job { id, put, delete } => {
+            jobs::validate_id(&id)?;
+            if put {
+                let job: jobs::Job = serde_json::from_reader(std::io::stdin().lock())?;
+                job_store::put_named(ledger, &id, &job)?;
+            } else if delete {
+                job_store::remove(ledger, &id)?;
+            } else {
+                print(true, &job_store::get(ledger, &id)?, String::new)?;
+            }
+        }
+        StateCommand::Selection { id, put, delete } => {
+            jobs::validate_id(&id)?;
+            if put {
+                #[derive(serde::Deserialize)]
+                struct Selection {
+                    host: String,
+                }
+                let selection: Option<Selection> =
+                    serde_json::from_reader(std::io::stdin().lock())?;
+                job_store::put_selection(ledger, &id, selection.as_ref().map(|s| s.host.as_str()))?;
+            } else if delete {
+                job_store::put_selection(ledger, &id, None)?;
+            } else {
+                print(
+                    true,
+                    &job_store::selection(ledger, &id)?
+                        .map(|host| serde_json::json!({"host":host})),
+                    String::new,
+                )?;
+            }
+        }
+        StateCommand::Cancellation { id, put, delete } => {
+            jobs::validate_id(&id)?;
+            if put {
+                let saved: work::Cancellation = serde_json::from_reader(std::io::stdin().lock())?;
+                if saved.ticket.request.id != id {
+                    return Err(Error::Invalid("cancellation identity changed".into()));
+                }
+                job_store::put_cancellation(ledger, &saved)?;
+            } else if delete {
+                job_store::remove_cancellation(ledger, &id)?;
+            } else {
+                print(true, &job_store::cancellation(ledger, &id)?, String::new)?;
+            }
+        }
+        _ => return Err(Error::Invalid("another state command".into())),
+    }
+    Ok(())
 }
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {

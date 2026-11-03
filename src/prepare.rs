@@ -27,10 +27,10 @@ pub struct Prepared {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Pending {
+pub(crate) struct Pending {
     #[serde(flatten)]
-    tree: crate::cleanup::Tree,
-    request_id: String,
+    pub(crate) tree: crate::cleanup::Tree,
+    pub(crate) request_id: String,
 }
 
 /// Refuse changed or missing authority before ingress can publish validity or dispatch.
@@ -48,9 +48,7 @@ pub fn validate_launch_binding(
     if launch.preparation.is_some() || launch.preparation_protocol.is_some() {
         require_protocol(launch.preparation_protocol)?;
     }
-    let receipt = ledger
-        .child("preparation-receipts")
-        .read::<PreparationReceipt>(&format!("{}.json", launch.id))?;
+    let receipt = crate::preparation_store::receipts::get(ledger, &launch.id)?;
     if receipt
         .as_ref()
         .is_some_and(|r| r.version.is_some() && r.binding.is_none())
@@ -113,10 +111,7 @@ fn legacy_bound_final(
     {
         return Ok(false);
     }
-    let Some(result) = ledger
-        .child("launches")
-        .read::<serde_json::Value>(&format!("{}.json", launch.id))?
-    else {
+    let Some(result) = crate::launch_store::receipt(ledger, &launch.id)? else {
         return Ok(false);
     };
     if result["host"].as_str() != Some(&launch.host) {
@@ -133,10 +128,7 @@ fn legacy_bound_final(
     {
         return Ok(false);
     }
-    if let Some(receipt) = ledger
-        .child("preparation-receipts")
-        .read::<disposition::Receipt>(&format!("{}.disposition.json", launch.id))?
-    {
+    if let Some(receipt) = crate::preparation_store::dispositions::get(ledger, &launch.id)? {
         let disposition::Policy::Transfer {
             launch: saved,
             pane,
@@ -160,9 +152,7 @@ fn legacy_bound_final(
     };
     match &launch.action {
         crate::work::Action::Agent { .. } => {
-            let saved = ledger
-                .child("launches")
-                .read::<serde_json::Value>(&format!("{}.progress.json", launch.id))?;
+            let saved = crate::launch_store::progress_value(ledger, &launch.id)?;
             if saved.as_ref().is_none_or(|saved| {
                 saved["request"].get("preparation_protocol").is_some()
                     || saved["request"].get("preparation").is_some()
@@ -247,10 +237,8 @@ pub fn launch_response(
     if launch.preparation.is_none() {
         return Ok(result);
     }
-    let receipt = ledger
-        .child("preparation-receipts")
-        .read::<disposition::Receipt>(&format!("{}.disposition.json", launch.id))?
-        .ok_or_else(|| {
+    let receipt =
+        crate::preparation_store::dispositions::get(ledger, &launch.id)?.ok_or_else(|| {
             worktree::refuse("launch has no disposition proof; execution remains unresolved")
         })?;
     if receipt.progress != disposition::Progress::Released {
@@ -680,9 +668,7 @@ fn validate_placement_delivery(
     };
     placement.validate(&envelope.request_id)?;
     let request: crate::work::Request = serde_json::from_value(placement.envelope.request.clone())?;
-    let grant = ledger
-        .child("placement-grants")
-        .read::<crate::node::PlacementGrant>(&format!("{}.json", envelope.request_id))?;
+    let grant = crate::preparation_store::grants::get(ledger, &envelope.request_id)?;
     let query = LookupRequest {
         version: disposition::VERSION,
         placement: placement.clone(),
@@ -912,14 +898,11 @@ fn lookup_records(
     let id = &query.preparation.request_id;
     let request: crate::work::Request =
         serde_json::from_value(query.placement.envelope.request.clone())?;
-    let grant = ledger
-        .child("placement-grants")
-        .read::<crate::node::PlacementGrant>(&format!("{id}.json"))?;
+    let grant = crate::preparation_store::grants::get(ledger, id)?;
     if !matching_lookup(query, &request, grant.as_ref()) {
         return Ok(LookupState::Mismatch);
     }
-    let holds: Vec<crate::ledger::Reservation> =
-        ledger.read("placements.json")?.unwrap_or_default();
+    let holds = crate::job_store::reservations(ledger)?;
     if let Some(grant) = &grant
         && holds
             .iter()
@@ -937,10 +920,9 @@ fn lookup_receipt(
     expected_binding: Option<&disposition::Binding>,
 ) -> Result<LookupState> {
     let id = &preparation.request_id;
-    let receipts = ledger.child("preparation-receipts");
-    let raw = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
-    let raw_disposition = receipts.read::<serde_json::Value>(&format!("{id}.disposition.json"))?;
-    let claims: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    let raw = crate::preparation_store::receipts::value(ledger, id)?;
+    let raw_disposition = crate::preparation_store::dispositions::value(ledger, id)?;
+    let claims = crate::preparation_store::pending_for(ledger, id)?;
     let held: Vec<_> = claims.iter().filter(|p| p.request_id == *id).collect();
     let Some(raw) = raw else {
         return Ok(
@@ -1109,7 +1091,6 @@ fn local_with(
     crate::jobs::validate_id(id)?;
     let receipts = ledger.child("preparation-receipts");
     receipts.with_lock(id, || {
-        let file = format!("{id}.json");
         let request = (
             main_checkout(shell, repo)?,
             branch.to_owned(),
@@ -1118,7 +1099,7 @@ fn local_with(
         if let Some(placement) = placement {
             validate_placement_delivery(ledger, id, &request, placement)?;
         }
-        if let Some(receipt) = receipts.read::<PreparationReceipt>(&file)? {
+        if let Some(receipt) = crate::preparation_store::receipts::get(ledger, id)? {
             retention_completion(ledger, id)?;
             if receipt.request != request || receipt.validity != delivery.validity {
                 return Err(crate::unit_transport::conflict(
@@ -1134,7 +1115,7 @@ fn local_with(
         // Without a completed receipt, a later call cannot prove those effects finished.
         let mut intent = PreparationReceipt::intent(request.clone());
         intent.validity = delivery.validity;
-        receipts.write(&file, &intent)?;
+        crate::preparation_store::receipts::put(ledger, id, &intent)?;
         let repository = request.0.clone();
         worktree::with_lifecycle(shell, ledger, &repository, |guard| {
             check_delivery(ledger, id, delivery.validity)?;
@@ -1161,8 +1142,9 @@ fn local_with(
                     let mut wire = prepared.clone();
                     wire.binding = binding.clone().map(Box::new);
                     validate_prepared_host(&wire, id)?;
-                    receipts.write(
-                        &file,
+                    crate::preparation_store::receipts::put(
+                        ledger,
+                        id,
                         &PreparationReceipt {
                             version: Some(disposition::VERSION),
                             request,
@@ -1180,20 +1162,20 @@ fn local_with(
                     // the original cause instead of preparing the branch again.
                     let error = error.correlate(Some(id));
                     let failure = error.retained(Operation::Prepare, Some(id));
-                    if receipts
-                        .write(
-                            &file,
-                            &PreparationReceipt {
-                                version: Some(disposition::VERSION),
-                                request,
-                                finished_ms: None,
-                                validity: delivery.validity,
-                                prepared: None,
-                                failure: Some(failure),
-                                binding: binding.clone(),
-                            },
-                        )
-                        .is_err()
+                    if crate::preparation_store::receipts::put(
+                        ledger,
+                        id,
+                        &PreparationReceipt {
+                            version: Some(disposition::VERSION),
+                            request,
+                            finished_ms: None,
+                            validity: delivery.validity,
+                            prepared: None,
+                            failure: Some(failure),
+                            binding: binding.clone(),
+                        },
+                    )
+                    .is_err()
                     {
                         // The outcome is not retained. The intent stays uncertain, and the report
                         // says so instead of claiming a durable cause.
@@ -1233,26 +1215,27 @@ fn preparation_binding(
 /// A preparation receipt holds the outcome of one request. `prepared` and `failure` are
 /// outcomes: only one of them can be set. A receipt without either outcome is an uncertain
 /// interruption, and stays uncertain.
-#[derive(Debug, Serialize, Deserialize)]
-struct PreparationReceipt {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparationReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    finished_ms: Option<u64>,
+    pub(crate) finished_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    validity: Option<crate::jobs::Validity>,
+    pub(crate) validity: Option<crate::jobs::Validity>,
     #[serde(
         default,
         deserialize_with = "receipt_version",
         skip_serializing_if = "Option::is_none"
     )]
-    version: Option<u32>,
+    pub(crate) version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    binding: Option<disposition::Binding>,
-    request: (PathBuf, String, Option<String>),
-    prepared: Option<Prepared>,
+    pub(crate) binding: Option<disposition::Binding>,
+    pub(crate) request: (PathBuf, String, Option<String>),
+    pub(crate) prepared: Option<Prepared>,
     /// The safe record of a returned failure. Absent in receipts written before failures
     /// were retained, and in receipts of an interrupted preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    failure: Option<crate::error::RetainedFailure>,
+    pub(crate) failure: Option<crate::error::RetainedFailure>,
 }
 
 /// Retention requires the exact acknowledged disposition, not a prepared worktree.
@@ -1261,10 +1244,7 @@ pub(crate) fn retention_completion(
     id: &str,
 ) -> Result<Option<u64>> {
     crate::jobs::validate_id(id)?;
-    let Some(receipt) = ledger
-        .child("preparation-receipts")
-        .read::<PreparationReceipt>(&format!("{id}.json"))?
-    else {
+    let Some(receipt) = crate::preparation_store::receipts::get(ledger, id)? else {
         return Ok(None);
     };
     let Some(finished) = receipt.finished_ms else {
@@ -1284,23 +1264,19 @@ pub(crate) fn retention_completion(
 }
 
 pub(crate) fn held(ledger: &crate::ledger::Ledger, id: &str) -> Result<bool> {
-    let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    let pending = crate::preparation_store::pending_for(ledger, id)?;
     Ok(pending.iter().any(|claim| claim.request_id == id))
 }
 
 /// The preparation gate is held by the admission or host expiry owner. An absent
 /// outcome is harmless only when no exact preparation claim remains.
 pub(crate) fn retention_ready(ledger: &crate::ledger::Ledger, id: &str, now: u64) -> Result<bool> {
-    let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    let pending = crate::preparation_store::pending_for(ledger, id)?;
     if pending.iter().any(|claim| claim.request_id == id) {
         return Ok(false);
     }
-    let receipts = ledger.child("preparation-receipts");
-    if receipts
-        .read::<PreparationReceipt>(&format!("{id}.json"))?
-        .is_none()
-    {
-        return Ok(!receipts.dir.join(format!("{id}.disposition.json")).exists());
+    if crate::preparation_store::receipts::get(ledger, id)?.is_none() {
+        return Ok(crate::preparation_store::dispositions::get(ledger, id)?.is_none());
     }
     Ok(retention_completion(ledger, id)?
         .is_some_and(|finished| now.saturating_sub(finished) > crate::jobs::RECORD_KEEP_MS))
@@ -1310,15 +1286,9 @@ pub(crate) fn expire_record(ledger: &crate::ledger::Ledger, id: &str, now: u64) 
     if !retention_ready(ledger, id, now)? {
         return Ok(());
     }
-    let receipts = ledger.child("preparation-receipts");
-    crate::jobs::remove(&receipts.dir.join(format!("{id}.disposition.json")))?;
-    crate::jobs::remove(&receipts.dir.join(format!("{id}.json")))?;
-    crate::jobs::remove(
-        &ledger
-            .child("preparation-expectations")
-            .dir
-            .join(format!("{id}.json")),
-    )
+    crate::preparation_store::dispositions::remove(ledger, id)?;
+    crate::preparation_store::receipts::remove(ledger, id)?;
+    crate::preparation_store::expectations::remove(ledger, id)
 }
 
 // Absence alone identifies the historical format; an explicit null is not a version.
@@ -1712,17 +1682,13 @@ fn record(
     pending: crate::cleanup::Tree,
     request_id: &str,
 ) -> Result<()> {
-    ledger.with_lock("preparations", || {
-        let mut preparations: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        preparations.retain(|record| {
-            !worktree::same(&record.tree.path, &pending.path) || record.request_id != request_id
-        });
-        preparations.push(Pending {
+    crate::preparation_store::record_pending(
+        ledger,
+        &Pending {
             tree: pending,
             request_id: request_id.into(),
-        });
-        ledger.write("preparations.json", &preparations)
-    })
+        },
+    )
 }
 
 /// Internal remote preparation applies host-relative checkout routing and remembers cleanup.
@@ -1761,7 +1727,7 @@ pub fn pending_trees(
     ledger: &crate::ledger::Ledger,
     _launches: &crate::launch::Survey,
 ) -> Result<Vec<crate::cleanup::Tree>> {
-    let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    let records = crate::preparation_store::pending(ledger)?;
     Ok(records.into_iter().map(|record| record.tree).collect())
 }
 
@@ -1771,7 +1737,7 @@ pub fn saved_tree(
     path: &str,
     request: Option<&str>,
 ) -> Result<Option<crate::cleanup::Tree>> {
-    let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
+    let records = crate::preparation_store::pending(ledger)?;
     Ok(records
         .into_iter()
         .find(|p| worktree::same(&p.tree.path, path) && request.is_none_or(|id| p.request_id == id))
@@ -1780,23 +1746,7 @@ pub fn saved_tree(
 
 /// Exact-match leaf. The caller owns the outer gates and a persisted disposition fence.
 fn used(ledger: &crate::ledger::Ledger, claim: &disposition::Claim, resume: bool) -> Result<()> {
-    ledger.with_lock("preparations", || {
-        let mut records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        let matches: Vec<_> = records
-            .iter()
-            .enumerate()
-            .filter(|(_, record)| record.request_id == claim.request_id)
-            .collect();
-        match matches.as_slice() {
-            [(index, record)] if record.tree == claim.tree => {
-                let index = *index;
-                records.remove(index);
-            }
-            [] if resume => return Ok(()),
-            _ => return Err(worktree::refuse("preparation claim changed or disappeared")),
-        }
-        ledger.write("preparations.json", &records)
-    })
+    crate::preparation_store::release_pending(ledger, claim, resume)
 }
 
 /// The branch's existing linked worktree, locked as an agent worktree. Another lock, or the

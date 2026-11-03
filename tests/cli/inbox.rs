@@ -17,8 +17,8 @@ fn agents(rig: &Rig, state: &str, panes: &[(&str, &str, &str)]) {
         .collect();
     rig.put("agents.json", &json!({"result":{"agents":listed}}));
     fs::create_dir_all(rig.dir.join(state)).unwrap();
-    rig.put(
-        &format!("{state}/host.json"),
+    rig.put_host_at(
+        state,
         &json!({"sampled_ms":now(),"probe":{"host":"local","label":"local","load1":0.0,"cores":8,
             "memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":50.0,
             "agents":{"total":panes.len(),"by_status":{}},"agent_panes":published,
@@ -113,10 +113,10 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
             .starts_with("lead (w1:p1 on ")
     );
     let (_, path) = as_pane(&rig, "w1:p2", &["inbox", "path"]);
-    assert_eq!(path["file"], "term_work.json");
+    assert_eq!(path["file"], "state.db");
     assert!(
         std::path::Path::new(path["dir"].as_str().unwrap())
-            .join("term_work.json")
+            .join("state.db")
             .is_file()
     );
     // The lease holds the record while the reader shows it.
@@ -136,6 +136,57 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
     assert_eq!(listing["sent"][0]["id"], id);
     // Nothing typed into any pane.
     assert!(!rig.log("herdr.log").contains("agent prompt"));
+}
+
+#[test]
+fn database_watcher_wakes_for_a_second_process_write_but_not_a_read() {
+    let rig = Rig::new("inbox-db-watch");
+    agents(&rig, "state", &[("w1:p2", "term_work", "worker")]);
+    as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
+    let (code, path) = as_pane(&rig, "w1:p2", &["inbox", "path"]);
+    assert_eq!(code, 0, "{path}");
+    let script = r"
+const assert = require('node:assert/strict');
+const { watch } = require('node:fs');
+const { execFile } = require('node:child_process');
+const [directory, file, binary] = process.argv.slice(1);
+function command(args, input) {
+    return new Promise((resolve, reject) => {
+        const child = execFile(binary, args, { env: { ...process.env, DOGSLED_STATE: directory } },
+            (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(stdout));
+        child.stdin.on('error', reject);
+        child.stdin.end(input);
+    });
+}
+(async () => {
+    const events = [];
+    let wake;
+    const awakened = new Promise(resolve => { wake = resolve; });
+    const watcher = watch(directory, (event, name) => {
+        if (name === file) { events.push(event); wake(); }
+    });
+    try {
+        await command(['state', 'inbox', 'term_work']);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(events, [], 'a pure read must not trigger another inbox claim');
+        const record = { id: 'wake', terminal: 'term_work', pane: 'w1:p2',
+            from: { host: 'local' }, kind: 'message', text: 'wake the reader',
+            created_ms: 1, state: 'pending', attempts: 0, next_ms: 0 };
+        await Promise.all([awakened, command(['state', 'inbox', 'term_work', '--put'], JSON.stringify([record]))]);
+        assert.ok(events.length > 0, 'the second process write must wake the reader');
+        const received = JSON.parse(await command(['state', 'inbox', 'term_work']));
+        assert.equal(received[0].id, 'wake');
+    } finally { watcher.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+";
+    let mut command = Command::new("node");
+    command
+        .arg("-e")
+        .arg(script)
+        .arg(path["dir"].as_str().unwrap())
+        .arg(path["file"].as_str().unwrap())
+        .arg(env!("CARGO_BIN_EXE_dogsled"));
+    assert!(Owned::spawn(&mut command).wait().success());
 }
 
 #[test]
@@ -160,7 +211,7 @@ esac
     );
     agents(&rig, "remote-state", &[("w9:p1", "term_far", "far")]);
     rig.put("remote-agents.json", &rig.read("agents.json"));
-    let remote = rig.read("remote-state/host.json");
+    let remote = rig.host_at("remote-state");
     rig.put("remote.json", &remote);
     agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
 
@@ -173,15 +224,14 @@ esac
             .contains("no dogsled inbox reader"),
         "{refused}"
     );
-    fs::create_dir_all(rig.dir.join("remote-state/inbox")).unwrap();
-    rig.put(
-        "remote-state/inbox/term_far.reader.json",
+    rig.put_remote_state(
+        &["state", "inbox-reader", "term_far", "--put"],
         &json!({"harness":"pi","pane":"w9:p1","registered_ms":1}),
     );
     let (code, sent) = rig.json(&["send", "far", "--host", "netcup", "--message", "it's done"]);
     assert_eq!(code, 0, "{sent}");
     assert_eq!(sent["host_label"], "netcup");
-    let stored = rig.read("remote-state/inbox/term_far.json");
+    let stored = rig.remote_inbox("term_far");
     assert_eq!(stored[0]["text"], "it's done");
     assert_eq!(stored[0]["from"]["pane"], "w1:p1");
     assert!(rig.log("ssh.log").contains("host inbox-put --record"));
@@ -193,7 +243,7 @@ esac
     records[0]["state"] = json!("failed");
     records[0]["reason"] = json!("its terminal is gone");
     records[0]["done_ms"] = json!(now());
-    rig.put("remote-state/inbox/term_far.json", &records);
+    rig.put_remote_state(&["state", "inbox", "term_far", "--put"], &records);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -234,7 +284,7 @@ esac
         ),
     );
     agents(&rig, "remote-state", &[("w9:p1", "term_far", "far")]);
-    let remote = rig.read("remote-state/host.json");
+    let remote = rig.host_at("remote-state");
     rig.put("remote.json", &remote);
     agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
 
@@ -299,10 +349,10 @@ fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
             ],
         );
         assert_eq!(hook(&rig, harness, "UserPromptSubmit"), "");
-        let mut host = rig.read("state/host.json");
+        let mut host = rig.host();
         host["probe"]["agent_panes"][2]["worktree"] = json!({"path":"/t","branch":"feat/x","ahead":0,"dirty":true,"landed":false,"head":"h","base":"b"});
         host["probe"]["agent_panes"][2]["done"] = json!(true);
-        rig.put("state/host.json", &host);
+        rig.put_host(&host);
         rig.put_items(&json!([{"id":"child","kind":"agent","host":"local","pane":"w1:p3","owner_pane":"w1:p2","name":"child","created_ms":1,"closed_ms":null}]));
         assert_eq!(
             rig.json(&["send", "owner", "--message", "please review"]).0,
@@ -334,7 +384,7 @@ fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
         );
         // A different child state produces a reminder even with an empty inbox.
         host["probe"]["agent_panes"][2]["worktree"]["ahead"] = json!(1);
-        rig.put("state/host.json", &host);
+        rig.put_host(&host);
         let value: Value = serde_json::from_str(&hook(&rig, harness, "Stop")).unwrap();
         assert!(
             value["reason"]
@@ -361,10 +411,9 @@ fn claude_and_codex_hooks_hand_over_the_inbox_without_typing() {
         serde_json::from_slice(&fs::read(rig.dir.join("agents.json")).unwrap()).unwrap();
     listed["result"]["agents"][1]["agent"] = json!("claude");
     rig.put("agents.json", &listed);
-    let mut host: Value =
-        serde_json::from_slice(&fs::read(rig.dir.join("state/host.json")).unwrap()).unwrap();
+    let mut host: Value = rig.host();
     host["probe"]["agent_panes"][1]["agent"] = json!("claude");
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     // The first hook registers the reader; an empty inbox prints nothing, so a `Stop` with
     // `stop_hook_active` ends the turn as it would.
     assert_eq!(hook(&rig, "claude", "Stop"), "");
@@ -443,14 +492,13 @@ fn custody_session(rig: &Rig, pane: &str, session: &str) {
         }
     }
     rig.put("agents.json", &listed);
-    let mut host: Value =
-        serde_json::from_slice(&fs::read(rig.dir.join("state/host.json")).unwrap()).unwrap();
+    let mut host: Value = rig.host();
     for agent in host["probe"]["agent_panes"].as_array_mut().unwrap() {
         if agent["pane"] == json!(pane) {
             agent["agent_session"] = json!(session);
         }
     }
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
 }
 
 #[test]
@@ -469,8 +517,8 @@ fn a_childs_reply_reaches_its_custodian_and_not_its_origin_owner() {
     custody_session(&rig, "w1:p4", "claimant-session");
     rig.put_items(&child_item());
     // The custody moved to the claimant: it holds the child now.
-    rig.put(
-        "state/custody.json",
+    rig.put_state(
+        &["state", "custody", "--put"],
         &json!([custody("child", "w1:p4", Some("claimant-session"))]),
     );
     // Both panes read their inbox.
@@ -479,7 +527,7 @@ fn a_childs_reply_reaches_its_custodian_and_not_its_origin_owner() {
     serve(&rig);
     serve(&rig);
     // The reply reaches the custodian, never the origin owner.
-    let custodian = rig.read("state/inbox/term_claimant.json");
+    let custodian = rig.inbox("term_claimant");
     let reached = replies(&custodian);
     assert_eq!(reached.len(), 1, "{custodian}");
     assert_eq!(reached[0]["kind"], "reply");
@@ -509,8 +557,8 @@ fn a_childs_reply_without_a_custody_record_reaches_its_origin_owner() {
     as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
     serve(&rig);
     serve(&rig);
-    assert!(!rig.dir.join("state/custody.json").exists());
-    let owner = rig.read("state/inbox/term_owner.json");
+    assert_eq!(rig.state(&["custody"]), json!([]));
+    let owner = rig.inbox("term_owner");
     let reached = replies(&owner);
     assert_eq!(reached.len(), 1, "{owner}");
     assert_eq!(reached[0]["kind"], "reply");
@@ -532,15 +580,15 @@ fn a_reused_pane_id_never_inherits_the_custody_of_a_child() {
     // The custodian pane is the owner's pane, but it runs another session now.
     custody_session(&rig, "w1:p2", "another-session");
     rig.put_items(&child_item());
-    rig.put(
-        "state/custody.json",
+    rig.put_state(
+        &["state", "custody", "--put"],
         &json!([custody("child", "w1:p2", Some("custodian-session"))]),
     );
     as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
     serve(&rig);
     serve(&rig);
     // The reply waits: the pane that answers for the child runs another session.
-    let owner = rig.read("state/inbox/term_owner.json");
+    let owner = rig.inbox("term_owner");
     assert!(replies(&owner).is_empty(), "{owner}");
 }
 
@@ -558,14 +606,14 @@ fn a_recorded_custodian_session_that_cannot_be_read_receives_nothing() {
     );
     // The custody records a session, but no live session of the pane can be read.
     rig.put_items(&child_item());
-    rig.put(
-        "state/custody.json",
+    rig.put_state(
+        &["state", "custody", "--put"],
         &json!([custody("child", "w1:p2", Some("custodian-session"))]),
     );
     as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
     serve(&rig);
     serve(&rig);
-    let owner = rig.read("state/inbox/term_owner.json");
+    let owner = rig.inbox("term_owner");
     assert!(replies(&owner).is_empty(), "{owner}");
 }
 
@@ -583,8 +631,8 @@ fn delivery_checks_the_live_session_of_the_recipient_not_the_snapshot() {
     );
     custody_session(&rig, "w1:p2", "custodian-session");
     rig.put_items(&child_item());
-    rig.put(
-        "state/custody.json",
+    rig.put_state(
+        &["state", "custody", "--put"],
         &json!([custody("child", "w1:p2", Some("custodian-session"))]),
     );
     as_pane(&rig, "w1:p2", &["inbox", "claim", "--harness", "pi"]);
@@ -620,7 +668,7 @@ fi
     );
     let journal = String::from_utf8_lossy(&out.stderr);
     assert!(!journal.contains("dogsled service lane "), "{journal}");
-    let snapshot = rig.read("state/host.json");
+    let snapshot = rig.host();
     assert_eq!(
         snapshot["probe"]["agent_panes"][1]["agent_session"], "custodian-session",
         "{snapshot}"
@@ -630,6 +678,6 @@ fi
         live["result"]["agents"][1]["agent_session"]["value"], "another-session",
         "{live}"
     );
-    let owner = rig.read("state/inbox/term_owner.json");
+    let owner = rig.inbox("term_owner");
     assert!(replies(&owner).is_empty(), "{owner}");
 }

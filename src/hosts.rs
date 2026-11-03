@@ -35,6 +35,8 @@ impl Host {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostReport {
+    #[serde(default)]
+    pub service_lanes: Vec<crate::tables::ServiceLane>,
     #[serde(flatten)]
     pub host: Host,
     pub service: String,
@@ -296,30 +298,32 @@ fn parse_machine_list(text: &str) -> Result<Vec<Host>> {
         .collect())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Cached {
-    fetched_ms: u64,
-    source: Vec<String>,
-    snapshot: Option<Snapshot>,
-    reachable: bool,
-    available: bool,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Cached {
     #[serde(default)]
-    running: Option<bool>,
+    pub(crate) service_lanes: Vec<crate::tables::ServiceLane>,
+    pub(crate) fetched_ms: u64,
+    pub(crate) source: Vec<String>,
+    pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) reachable: bool,
+    pub(crate) available: bool,
     #[serde(default)]
-    handoffs: Vec<crate::done::Mark>,
+    pub(crate) running: Option<bool>,
     #[serde(default)]
-    holds: Vec<crate::holds::Hold>,
+    pub(crate) handoffs: Vec<crate::done::Mark>,
+    #[serde(default)]
+    pub(crate) holds: Vec<crate::holds::Hold>,
     /// Safe words for a reachable host only; an unreachable one carries its `failure`.
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    failure: Option<Failure>,
+    pub(crate) failure: Option<Failure>,
     /// Consecutive failed reads: an unreachable peer is asked again with backoff, not on
     /// every cache expiry.
     #[serde(default)]
-    retry: crate::backoff::Backoff,
+    pub(crate) retry: crate::backoff::Backoff,
     /// The job validity protocol the peer speaks. A peer without it cannot run a job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    job_validity: Option<u32>,
+    pub(crate) job_validity: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -711,6 +715,7 @@ impl<'a> Fleet<'a> {
     fn read_host(&self, host: &Host, now: u64) -> HostReport {
         let result = if host.is_local() {
             self.node().snapshot().map(|report| Cached {
+                service_lanes: report.service_lanes,
                 fetched_ms: now,
                 source: Vec::new(),
                 snapshot: report.snapshot,
@@ -728,6 +733,7 @@ impl<'a> Fleet<'a> {
             self.cached_peer(host, now)
         };
         let cached = result.unwrap_or_else(|e| Cached {
+            service_lanes: Vec::new(),
             fetched_ms: now,
             source: Vec::new(),
             snapshot: None,
@@ -786,6 +792,7 @@ impl<'a> Fleet<'a> {
             headroom
         });
         HostReport {
+            service_lanes: cached.service_lanes,
             host: host.clone(),
             service: if running { "up" } else { "down" }.into(),
             reachable: cached.reachable,
@@ -812,19 +819,19 @@ impl<'a> Fleet<'a> {
         if host.is_local() {
             return Ok(());
         }
-        let name = Self::peer_file(host);
-        self.ledger.with_lock(&name, || {
-            let file = format!("{name}.json");
-            if let Some(mut cached) = self.ledger.read::<Cached>(&file)? {
-                cached.retry.reset();
-                cached.fetched_ms = 0;
-                self.ledger.write(&file, &cached)?;
-            }
-            Ok(())
+        self.ledger.with_lock(&Self::peer_lock(host), || {
+            crate::store::write(self.ledger, |tx| {
+                if let Some(mut cached) = crate::host_store::peer_row(tx, &host.id)? {
+                    cached.retry.reset();
+                    cached.fetched_ms = 0;
+                    crate::host_store::put_peer_row(tx, &host.id, &cached)?;
+                }
+                Ok(())
+            })
         })
     }
 
-    fn peer_file(host: &Host) -> String {
+    fn peer_lock(host: &Host) -> String {
         // Hex encoding prevents host ids from becoming path components.
         let key = host
             .id
@@ -842,14 +849,11 @@ impl<'a> Fleet<'a> {
     }
 
     fn cached_peer(&self, host: &Host, now: u64) -> Result<Cached> {
-        let name = Self::peer_file(host);
-        let file = format!("{name}.json");
         let source = self.remote_argv(host, &["snapshot".into()]);
-        self.ledger.with_lock(&name, || {
-            let previous: Option<Cached> = self
-                .ledger
-                .read::<Cached>(&file)?
-                .filter(|c| c.source == source);
+        // Serialize the SSH process for this peer, never all host database writes.
+        self.ledger.with_lock(&Self::peer_lock(host), || {
+            let previous =
+                crate::host_store::peer(self.ledger, &host.id)?.filter(|c| c.source == source);
             if let Some(cached) = &previous
                 && now.saturating_sub(cached.fetched_ms) < CACHE_MS
             {
@@ -864,80 +868,47 @@ impl<'a> Fleet<'a> {
             let previous_holds = previous
                 .as_ref()
                 .map_or_else(Vec::new, |cached| cached.holds.clone());
-            let (
-                snapshot,
-                reachable,
-                available,
-                running,
-                handoffs,
-                holds,
-                error,
-                failure,
-                job_validity,
-            ) = match self.remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
+            let mut cached = match self
+                .remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
             {
-                Ok(Some(report)) => {
-                    let available = report.snapshot.is_some();
-                    (
-                        report
-                            .snapshot
-                            .or_else(|| previous.and_then(|c| c.snapshot)),
-                        true,
-                        available,
-                        report.running,
-                        report.handoffs,
-                        report.holds,
-                        None,
-                        None,
-                        report.job_validity,
-                    )
-                }
-                Ok(None) => (
-                    previous.and_then(|c| c.snapshot),
-                    true,
-                    false,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    Some("host.json is missing; service: down".into()),
-                    None,
-                    None,
-                ),
-                Err(e) => (
-                    previous.and_then(|c| c.snapshot),
-                    false,
-                    false,
-                    None,
-                    Vec::new(),
-                    previous_holds
+                Ok(Some(report)) => Cached {
+                    available: report.snapshot.is_some(),
+                    snapshot: report
+                        .snapshot
+                        .or_else(|| previous.and_then(|c| c.snapshot)),
+                    reachable: true,
+                    running: report.running,
+                    handoffs: report.handoffs,
+                    holds: report.holds,
+                    service_lanes: report.service_lanes,
+                    job_validity: report.job_validity,
+                    ..Cached::default()
+                },
+                Ok(None) => Cached {
+                    snapshot: previous.and_then(|c| c.snapshot),
+                    reachable: true,
+                    error: Some("host snapshot is missing; service: down".into()),
+                    ..Cached::default()
+                },
+                Err(e) => Cached {
+                    snapshot: previous.and_then(|c| c.snapshot),
+                    holds: previous_holds
                         .into_iter()
                         .map(crate::holds::Hold::unavailable)
                         .collect(),
-                    None,
-                    Some(Failure::of(&e)),
-                    None,
-                ),
+                    failure: Some(Failure::of(&e)),
+                    ..Cached::default()
+                },
             };
-            if reachable {
+            if cached.reachable {
                 retry.reset();
             } else {
                 retry.fail(now, &host.id);
             }
-            let cached = Cached {
-                fetched_ms: now,
-                source: source.clone(),
-                snapshot,
-                reachable,
-                available,
-                running,
-                handoffs,
-                holds,
-                error,
-                failure,
-                retry,
-                job_validity,
-            };
-            self.ledger.write(&file, &cached)?;
+            cached.fetched_ms = now;
+            cached.source.clone_from(&source);
+            cached.retry = retry;
+            crate::host_store::put_peer(self.ledger, &host.id, &cached)?;
             Ok(cached)
         })
     }
@@ -1332,10 +1303,8 @@ mod tests {
             let printed = serde_json::to_string(&report).unwrap();
             assert!(!printed.contains("EXAMPLE_SECRET"), "{printed}");
             assert!(!format!("{report:?}").contains("EXAMPLE_SECRET"));
-            let cache = std::fs::read_to_string(
-                ledger.dir.join(format!("{}.json", Fleet::peer_file(&host))),
-            )
-            .unwrap();
+            let cache = serde_json::to_string(&crate::host_store::peer(&ledger, &host.id).unwrap())
+                .unwrap();
             assert!(!cache.contains("EXAMPLE_SECRET"), "{cache}");
             std::fs::remove_dir_all(ledger.dir).unwrap();
         }
@@ -1532,8 +1501,7 @@ mod tests {
             "snapshot": null, "reachable": false, "available": false,
             "error": format!("ssh peer: exit 255: {SECRET}")
         });
-        ledger
-            .write(&format!("{}.json", Fleet::peer_file(&host)), &old)
+        crate::host_store::put_peer(&ledger, &host.id, &serde_json::from_value(old).unwrap())
             .unwrap();
         let report = fleet.status(100).unwrap().remove(0);
         assert_eq!(report.condition(), "unreachable: other");

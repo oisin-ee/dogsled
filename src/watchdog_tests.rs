@@ -23,9 +23,8 @@ impl Shell for Commands {
         self.calls.lock().unwrap().push(command.clone());
         let stdout = if args == ["agent", "list"] {
             if let Some((dir, saved)) = self.reservation.lock().unwrap().as_mut() {
-                let state: State = Ledger::new(dir.clone())
-                    .read("watchdog.json")?
-                    .unwrap_or_default();
+                let state =
+                    crate::host_store::watchdog(&Ledger::new(dir.clone()))?.unwrap_or_default();
                 if saved.is_none()
                     && state
                         .stopped
@@ -132,7 +131,11 @@ impl Rig {
         if let Some(session) = session {
             record["custodian_session"] = json!(session);
         }
-        self.ledger.write("custody.json", &json!([record])).unwrap();
+        crate::host_store::put_custodies(
+            &self.ledger,
+            &serde_json::from_value::<Vec<crate::custody::Custody>>(json!([record])).unwrap(),
+        )
+        .unwrap();
     }
     fn fleet(&self) -> Fleet<'_> {
         Fleet {
@@ -187,7 +190,7 @@ impl Rig {
             "host":"local","label":"local","load1":0.0,"cores":1,"memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":99.0,"agents":{"total":2,"by_status":{}},"reservations":[],
             "panes":panes,"agent_panes":agents}})).unwrap();
         observe(&mut snapshot.probe, None, now);
-        self.ledger.write("host.json", &snapshot).unwrap();
+        crate::host_store::put_snapshot(&self.ledger, &snapshot).unwrap();
         self.fleet().status(now).unwrap()
     }
     /// The check-ins in the owner's inbox, oldest first.
@@ -247,16 +250,15 @@ fn stopped_reports(rig: &Rig, now: u64, raw: &str, seq: u64, since: u64) -> Vec<
     *rig.shell.child.lock().unwrap() = Some(json!({"pane_id":"child","agent":"pi",
         "agent_status":raw,"terminal_id":"term_child","agent_session":{"kind":"id","value":"session-child"},
         "state_change_seq":seq}));
-    rig.ledger
-        .write(
-            "host.json",
-            &Snapshot {
-                sampled_ms: now,
-                probe: reports[0].probe.clone().unwrap(),
-                jobs: vec![],
-            },
-        )
-        .unwrap();
+    crate::host_store::put_snapshot(
+        &rig.ledger,
+        &Snapshot {
+            sampled_ms: now,
+            probe: reports[0].probe.clone().unwrap(),
+            jobs: vec![],
+        },
+    )
+    .unwrap();
     reports
 }
 
@@ -292,7 +294,7 @@ fn stopped_child_gets_one_prompt_across_five_ticks_and_reload() {
     }
     let messages = stopped_messages(&rig);
     assert_eq!(messages.len(), 1);
-    let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    let saved: State = crate::host_store::watchdog(&rig.ledger).unwrap().unwrap();
     let episode = &saved.stopped["child"];
     assert_eq!(episode.pane, "child");
     assert_eq!(episode.agent_session, "session-child");
@@ -325,7 +327,7 @@ fn stopped_failed_put_reuses_id_and_stops_after_three_ticks() {
     let mut id = None;
     for now in 1..=5 {
         tick(&rig.fleet(), &stopped_reports(&rig, now, "idle", 1, 1), now).unwrap();
-        let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+        let saved: State = crate::host_store::watchdog(&rig.ledger).unwrap().unwrap();
         let episode = &saved.stopped["child"];
         assert_eq!(episode.attempts, now.min(3) as u8);
         if let Some(id) = &id {
@@ -345,7 +347,7 @@ fn stopped_retry_success_keeps_original_message_id() {
     let rig = Rig::new();
     rig.item("agent");
     tick(&rig.fleet(), &stopped_reports(&rig, 1, "idle", 1, 1), 1).unwrap();
-    let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    let saved: State = crate::host_store::watchdog(&rig.ledger).unwrap().unwrap();
     child_reader(&rig);
     tick(&rig.fleet(), &stopped_reports(&rig, 2, "idle", 1, 1), 2).unwrap();
     assert_eq!(
@@ -419,7 +421,7 @@ fn stopped_successful_put_crash_keeps_the_new_prompt_window_on_restart() {
             .any(|record| { Some(&record.id) == reserved.stopped["child"].message_id.as_ref() })
     );
     // Keep the successful inbox put, but lose every write after its reservation.
-    rig.ledger.write("watchdog.json", &reserved).unwrap();
+    crate::host_store::put_watchdog(&rig.ledger, &reserved).unwrap();
     for (now, raw, seq) in [(141_000, "working", 4), (142_000, "idle", 5)] {
         tick(
             &rig.fleet(),
@@ -504,7 +506,7 @@ fn stopped_prompt_working_observation_survives_restart() {
         reports[0].probe.as_mut().unwrap().agent_panes[1].state_change_seq = None;
         // Each tick reloads PromptHistory from the ledger, like a service restart.
         tick(&rig.fleet(), &reports, now).unwrap();
-        let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+        let saved: State = crate::host_store::watchdog(&rig.ledger).unwrap().unwrap();
         assert_eq!(
             saved.prompted_after[&key].last_observed_working,
             raw == "working"
@@ -518,7 +520,7 @@ fn stopped_prompt_working_observation_survives_restart() {
     )
     .unwrap();
     assert_eq!(stopped_messages(&rig).len(), 1);
-    let saved: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    let saved: State = crate::host_store::watchdog(&rig.ledger).unwrap().unwrap();
     assert!(!saved.prompted_after[&key].last_observed_working);
     assert_eq!(saved.prompted_after[&key].last_observed_ms, Some(140_000));
 }
@@ -529,13 +531,14 @@ fn stopped_prompt_legacy_history_defaults_to_not_working() {
     rig.item("agent");
     child_reader(&rig);
     tick(&rig.fleet(), &stopped_reports(&rig, 0, "idle", 7, 0), 0).unwrap();
-    let mut saved: serde_json::Value = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    let mut saved =
+        serde_json::to_value(crate::host_store::watchdog(&rig.ledger).unwrap().unwrap()).unwrap();
     let key = session_key("local", "session-child");
     let history = saved["prompted_after"][&key].as_object_mut().unwrap();
     history.remove("last_observed_working");
     history.remove("last_observed_ms");
-    rig.ledger.write("watchdog.json", &saved).unwrap();
-    let legacy: State = rig.ledger.read("watchdog.json").unwrap().unwrap();
+    crate::host_store::put_watchdog(&rig.ledger, &serde_json::from_value(saved).unwrap()).unwrap();
+    let legacy: State = crate::host_store::watchdog(&rig.ledger).unwrap().unwrap();
     assert!(!legacy.prompted_after[&key].last_observed_working);
     assert_eq!(legacy.prompted_after[&key].last_observed_ms, None);
     for (now, raw) in [(130_000, "working"), (140_000, "idle")] {
@@ -750,7 +753,10 @@ fn top_level_notification_once_per_stall_and_recovery() {
 #[test]
 fn an_owner_without_an_inbox_reader_gets_no_check_in_until_it_has_one() {
     let rig = Rig::new();
-    std::fs::remove_file(rig.ledger.dir.join("inbox/term_owner.reader.json")).unwrap();
+    crate::store::write(&rig.ledger, |tx| {
+        crate::web_store::inbox::remove_reader(tx, "term_owner")
+    })
+    .unwrap();
     rig.item("agent");
     let reports = rig.reports(600_001, "idle", "working", Some(1));
     tick(&rig.fleet(), &reports, 600_001).unwrap();
@@ -1004,11 +1010,9 @@ fn check_ins_do_not_report_orphans_the_sweep_keeps() {
         },
     )
     .unwrap();
-    rig.ledger
-        .write(
-            "orphans.json",
-            &json!([{"item":"orphan","host":"local","pane":"lost","owner_pane":"gone",
-                "name":"lost-child","reason":"owner gone is gone; the child is working","since_ms":1}]),
+    crate::host_store::put_orphans(&rig.ledger,
+            &serde_json::from_value::<Vec<crate::sweep::Orphan>>(json!([{"item":"orphan","host":"local","pane":"lost","owner_pane":"gone",
+                "name":"lost-child","reason":"owner gone is gone; the child is working","since_ms":1}])).unwrap(),
         )
         .unwrap();
     let reports = rig.reports(1_800_001, "idle", "done", Some(1));

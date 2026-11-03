@@ -913,6 +913,7 @@ mod tests {
             ..crate::items::Item::default()
         };
         let report = crate::hosts::HostReport {
+            service_lanes: Vec::new(),
             host: crate::hosts::Host {
                 id: "local".into(),
                 label: "local".into(),

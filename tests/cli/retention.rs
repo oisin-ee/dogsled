@@ -10,7 +10,7 @@ fn clock(rig: &Rig, now: u64) {
 
 fn serve(rig: &Rig) {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    rig.snapshot("state/host.json", rig.now_ms(), 0.0, 8);
+    rig.snapshot("state", rig.now_ms(), 0.0, 8);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(out.status.success(), "{out:?}");
     fs::write(rig.dir.join("retention-output"), &out.stderr).unwrap();
@@ -18,7 +18,7 @@ fn serve(rig: &Rig) {
 
 fn job(rig: &Rig, id: &str, ended: u64) {
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    rig.put(&format!("state/jobs/{id}.json"), &json!({
+    rig.put_job(id, &json!({
         "id":id,"cmd":["true"],"cwd":rig.dir.join("home"),"host":"local",
         "owner":"w1:p1","pane":"w2:p1","state":"idle","exit":0,"signal":null,
         "reason":null,"started_ms":ended,"ended_ms":ended,"timeout_ms":null,"idle_timeout_ms":null
@@ -34,8 +34,8 @@ fn r1b_explicit_prune_keeps_two_day_terminal_record_and_reports_expired() {
     clock(&rig, ended + 2 * DAY);
     let out = rig.run(&["prune", "--yes", "jobs"]);
     assert!(out.status.success(), "{out:?}");
-    assert!(rig.dir.join("state/jobs/old.json").exists());
-    assert_eq!(rig.read("state/jobs/old.json")["output_expired"], true);
+    assert!(!rig.job("old").is_null());
+    assert_eq!(rig.job("old")["output_expired"], true);
     let out = rig.run(&["logs", "old"]);
     assert!(out.status.success(), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stdout).contains("output expired"));
@@ -60,14 +60,11 @@ fn r1b_closed_items_and_marks_expire_only_after_the_strict_window() {
     let mark = json!({"pane":"finished","item":"finished","session":"old",
         "marked_ms":ended-1,"sealed":1,"closed_ms":ended,"native_done":true,
         "reply":{"seq":1,"text":"final","captured_ms":ended,"done":true}});
-    rig.put(
-        "state/done.json",
-        &json!({"[\"finished\",\"finished\",\"old\"]":mark}),
-    );
+    rig.put_done(&json!({"[\"finished\",\"finished\",\"old\"]":mark}));
     clock(&rig, ended + WINDOW);
     serve(&rig);
     assert_eq!(rig.items().as_array().unwrap().len(), 3);
-    assert_eq!(rig.read("state/done.json").as_object().unwrap().len(), 1);
+    assert_eq!(rig.state(&["done"]).as_object().unwrap().len(), 1);
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
     let items = rig.items();
@@ -79,7 +76,7 @@ fn r1b_closed_items_and_marks_expire_only_after_the_strict_window() {
             .iter()
             .any(|item| item["id"] == "finished")
     );
-    assert_eq!(rig.read("state/done.json"), json!({}));
+    assert_eq!(rig.state(&["done"]), json!({}));
 }
 
 #[test]
@@ -93,7 +90,7 @@ fn r1b_last_job_identity_expiry_never_resolves_a_reused_agent() {
     rig.put_items(&json!([item]));
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
-    assert!(!rig.dir.join("state/jobs/r-old-job.json").exists());
+    assert!(rig.job("r-old-job").is_null());
     assert_eq!(rig.items(), json!([]));
     rig.put(
         "agents.json",
@@ -135,14 +132,12 @@ fn r1a_settled_placement_family_expires_without_reallocation() {
     let id = result["request_id"].as_str().unwrap();
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
-    for path in [
-        format!("admissions/{id}.json"),
-        format!("placement-grants/{id}.json"),
-        format!("placement-grants/{id}.lifecycle.json"),
-        format!("preparation-receipts/{id}.json"),
-        format!("preparation-receipts/{id}.disposition.json"),
-    ] {
-        assert!(!rig.dir.join("state").join(&path).exists(), "{path}");
+    assert!(!rig.has_admission(id));
+    for kind in ["grant", "lifecycle", "receipt", "disposition"] {
+        assert!(
+            !rig.preparation_record("state", kind, id).exists(),
+            "{kind}"
+        );
     }
     let before = rig.log("herdr.log");
     assert_eq!(rig.json(&["place", "--resume", id]).0, 2);
@@ -159,12 +154,12 @@ fn r1b_live_nonchild_agent_reads_still_work_by_name_and_pane() {
     rig.put("agents.json", &json!({"result":{"agents":[{
         "pane_id":"w2:p1","terminal_id":"term_child","agent":"pi","name":"live-agent","agent_status":"idle"
     }]}}));
-    rig.snapshot("state/host.json", rig.now_ms(), 0.0, 8);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", rig.now_ms(), 0.0, 8);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"] = json!([{
         "pane":"w2:p1","terminal_id":"term_child","agent":"pi","state":"idle","name":"live-agent"
     }]);
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     for target in ["live-agent", "w2:p1"] {
         let (code, value) = rig.json(&["read", target]);
         assert_eq!(code, 0, "{value}");
@@ -178,10 +173,10 @@ fn r1c_remote_ordinary_job_requires_a_versioned_release_certificate() {
     let ended = rig.now_ms();
     clock(&rig, ended);
     job(&rig, "ordinary", ended);
-    let mut terminal = rig.read("state/jobs/ordinary.json");
+    let mut terminal = rig.job("ordinary");
     terminal["host"] = json!("remote-host");
     terminal["validity"] = json!({"version":1,"created_ms":ended});
-    rig.put("state/jobs/ordinary.json", &terminal);
+    rig.put_job("ordinary", &terminal);
     let launch = json!({"id":"ordinary","action":{"type":"job","cmd":["true"],
         "timeout_ms":null,"idle_timeout_ms":null,"validity":{"version":1,"created_ms":ended}},
         "host":"remote-host","cwd":rig.dir.join("home"),"pane":null,"terminal":null,
@@ -192,8 +187,8 @@ fn r1c_remote_ordinary_job_requires_a_versioned_release_certificate() {
         "owned transcript",
     )
     .unwrap();
-    rig.put(
-        "state/launches/ordinary.json",
+    rig.put_launch(
+        "ordinary",
         &json!({"id":"ordinary","host":"remote-host",
         "pane":"w2:p1","launch":launch,"terminal_job":terminal}),
     );
@@ -204,7 +199,7 @@ fn r1c_remote_ordinary_job_requires_a_versioned_release_certificate() {
         "released_references":["execution","recovery","custody"]});
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
-    assert!(rig.dir.join("state/launches/ordinary.json").exists());
+    assert!(!rig.launch_record("ordinary", "receipt").is_null());
     assert!(
         rig.dir
             .join("state/launches/ordinary.sessions/owned.jsonl")
@@ -240,7 +235,7 @@ fn r1c_remote_ordinary_job_requires_a_versioned_release_certificate() {
         accepted
     );
     serve(&rig);
-    assert!(!rig.dir.join("state/launches/ordinary.json").exists());
+    assert!(rig.launch_record("ordinary", "receipt").is_null());
     assert!(!rig.dir.join("state/launches/ordinary.sessions").exists());
     assert_eq!(
         rig.json(&[
@@ -254,11 +249,7 @@ fn r1c_remote_ordinary_job_requires_a_versioned_release_certificate() {
     );
     clock(&rig, ended + 2 * WINDOW + 2);
     serve(&rig);
-    assert!(
-        !rig.dir
-            .join("state/launches/ordinary.release.json")
-            .exists()
-    );
+    assert!(rig.launch_record("ordinary", "release").is_null());
     assert!(rig.dir.join("state/launches/ordinary.lock").exists());
 }
 
@@ -310,21 +301,19 @@ fn r1c_released_seeded_family_expires_but_live_or_symlinked_evidence_stays() {
             retained,
             "{held}: {}\nadmission: {}\nprogress: {}\nitems:{}",
             rig.log("retention-output"),
-            rig.log(&format!("state/admissions/{id}.json")),
-            rig.log(&format!("state/launches/{id}.progress.json")),
+            rig.admission(id),
+            rig.launch_progress(id),
             rig.items()
         );
         assert_eq!(
-            rig.dir
-                .join(format!("state/launches/{id}.progress.json"))
-                .exists(),
+            !rig.launch_record(id, "progress").is_null(),
             retained,
             "{held}"
         );
         assert_eq!(fs::read_to_string(unrelated).unwrap(), "untouched");
         assert!(rig.dir.join(format!("state/launches/{id}.lock")).exists());
         if !retained {
-            assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
+            assert!(!rig.has_admission(id));
             assert_eq!(
                 unit_requests::operation(&rig, "observe", &json!({"execution":execution})).0,
                 2
@@ -367,23 +356,15 @@ fn r1a_grant_expiry_requires_origin_terminal_proof() {
     ]);
     assert_eq!(code, 0, "{result}");
     let id = result["request_id"].as_str().unwrap();
-    let lifecycle = format!("state/placement-grants/{id}.lifecycle.json");
-    let proof = rig.read(&lifecycle);
-    fs::remove_file(rig.dir.join(&lifecycle)).unwrap();
+    let lifecycle = rig.preparation_record("state", "lifecycle", id);
+    let proof = lifecycle.read();
+    lifecycle.delete();
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
-    assert!(
-        rig.dir
-            .join(format!("state/placement-grants/{id}.json"))
-            .exists()
-    );
-    rig.put(&lifecycle, &proof);
+    assert!(rig.preparation_record("state", "grant", id).exists());
+    lifecycle.put(&proof);
     serve(&rig);
-    assert!(
-        !rig.dir
-            .join(format!("state/placement-grants/{id}.json"))
-            .exists()
-    );
+    assert!(!rig.preparation_record("state", "grant", id).exists());
 }
 
 #[test]
@@ -404,11 +385,11 @@ fn r1a_deleted_grant_replay_without_expectation_never_allocates() {
     ]);
     assert_eq!(code, 0, "{result}");
     let id = result["request_id"].as_str().unwrap();
-    let grant = rig.read(&format!("state/placement-grants/{id}.json"));
+    let grant = rig.preparation_record("state", "grant", id).read();
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
     let before = rig.log("herdr.log");
-    let holds = rig.read("state/placements.json");
+    let holds = rig.reservations();
     for expected in [Value::Null, grant.clone()] {
         let replay = json!({"envelope":grant["envelope"],"expected_grant":expected});
         assert_eq!(
@@ -427,12 +408,8 @@ fn r1a_deleted_grant_replay_without_expectation_never_allocates() {
             .0,
             2
         );
-        assert!(
-            !rig.dir
-                .join(format!("state/placement-grants/{id}.json"))
-                .exists()
-        );
-        assert_eq!(rig.read("state/placements.json"), holds);
+        assert!(!rig.preparation_record("state", "grant", id).exists());
+        assert_eq!(rig.reservations(), holds);
     }
     assert_eq!(rig.json(&["place", "--resume", id]).0, 2);
     assert_eq!(
@@ -447,7 +424,7 @@ fn r1a_unknown_cancelled_ticket_remains_unsettled_despite_age() {
     let issued = rig.now_ms();
     clock(&rig, issued);
     rig.config("free_core_fraction_min = 2\n");
-    rig.snapshot("state/host.json", issued, 0.0, 8);
+    rig.snapshot("state", issued, 0.0, 8);
     let (code, queued) = rig.json(&["agent", "--name", "cancelled", "--message", "test"]);
     assert_eq!(code, 1, "{queued}");
     let ticket = queued["ticket"].as_str().unwrap();
@@ -467,21 +444,21 @@ fn r1a_unknown_cancelled_ticket_remains_unsettled_despite_age() {
 #[test]
 fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() {
     let rig = Rig::short("r1-local-job");
-    rig.snapshot("state/host.json", rig.now_ms(), 0.0, 8);
+    rig.snapshot("state", rig.now_ms(), 0.0, 8);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let (code, result) = rig.json(&["run", "--host", "local", "--", "true"]);
     assert_eq!(code, 0, "{result}");
     let id = result["id"].as_str().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if rig.read(&format!("state/jobs/{id}.json"))["ended_ms"].is_number() {
+        if rig.job(id)["ended_ms"].is_number() {
             break;
         }
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
     serve(&rig);
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(id);
     assert_eq!(
         attempt["ordinary_release"]["certificate"]["binding"],
         json!({"kind":"none"}),
@@ -494,8 +471,8 @@ fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() 
     let finished = attempt["finished_ms"].as_u64().unwrap();
     clock(&rig, finished + WINDOW + 1);
     serve(&rig);
-    assert!(!rig.dir.join(format!("state/launches/{id}.json")).exists());
-    assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(rig.launch_record(id, "receipt").is_null());
+    assert!(!rig.has_admission(id));
     assert_eq!(rig.items(), json!([]));
 }
 
@@ -522,21 +499,15 @@ fn r1a_failed_placement_expires_after_exact_origin_and_host_completion() {
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
     assert!(
-        !rig.dir
-            .join(format!("state/preparation-receipts/{id}.json"))
-            .exists(),
+        !rig.preparation_record("state", "receipt", id).exists(),
         "{}\nadmission:{}\npreparation:{}\nlifecycle:{}",
         rig.log("retention-output"),
-        rig.log(&format!("state/admissions/{id}.json")),
-        rig.log(&format!("state/preparation-receipts/{id}.json")),
-        rig.log(&format!("state/placement-grants/{id}.lifecycle.json"))
+        rig.admission(id),
+        rig.preparation_record("state", "receipt", id).read(),
+        rig.preparation_record("state", "lifecycle", id).read()
     );
-    assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
-    assert!(
-        !rig.dir
-            .join(format!("state/placement-grants/{id}.json"))
-            .exists()
-    );
+    assert!(!rig.has_admission(id));
+    assert!(!rig.preparation_record("state", "grant", id).exists());
 }
 
 #[test]
@@ -560,10 +531,10 @@ fn r1a_abandoned_acknowledged_unit_expires_without_recovery_reenqueue() {
         .unwrap();
     clock(&rig, finished + WINDOW);
     serve(&rig);
-    assert!(rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(rig.has_admission(id));
     clock(&rig, finished + WINDOW + 1);
     serve(&rig);
-    assert!(!rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(!rig.has_admission(id));
     assert_eq!(
         rig.json(&[
             "unit",

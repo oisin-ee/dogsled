@@ -258,13 +258,11 @@ fn p3_deletion_only_close_preserves_deletions() {
 }
 
 fn operations(rig: &Rig) -> Vec<Value> {
-    let dir = rig.dir.join("state/preservation-operations");
-    if !dir.exists() {
-        return Vec::new();
-    }
-    fs::read_dir(dir)
+    rig.state(&["preservation-operations"])
+        .as_object()
         .unwrap()
-        .map(|entry| serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap())
+        .values()
+        .cloned()
         .collect()
 }
 
@@ -283,7 +281,7 @@ fn p3_snapshot_failure_keeps_live_work() {
         fs::write(tree.join("draft"), b"live work\n").unwrap();
         let index = git(&tree, &["write-tree"]);
         if phase == "intent" {
-            fs::write(rig.dir.join("state/preservation-operations"), b"blocked").unwrap();
+            rig.fault_host_store("preservation", true);
         } else {
             let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
                 .map(|dir| dir.join("git"))
@@ -585,12 +583,12 @@ fn p3_requestless_close_adopts_only_its_matching_launch_request() {
         let repo = rig.dir.join("home/repo");
         rig.put_items(&json!([]));
         super::close::unfinished_launch(&rig, "origin-launch", &tree, "w2:p1");
-        let mut launch = rig.read("state/launches/origin-launch.progress.json");
+        let mut launch = rig.launch_progress("origin-launch");
         launch["confirmed"] = json!(true);
         launch["terminal"] = json!("term_child");
-        rig.put("state/launches/origin-launch.progress.json", &launch);
-        rig.put(
-            "state/launches/origin-launch.json",
+        rig.put_launch_progress("origin-launch", &launch);
+        rig.put_launch(
+            "origin-launch",
             &json!({"host":"local","name":"worker","pane":"w2:p1"}),
         );
         let args = &["host", "close", "w2:p1", "--json"];
@@ -838,30 +836,78 @@ fn p3_replacement_or_head_drift_never_adopts_new_work() {
     }
 }
 
-fn protected_state(rig: &Rig) -> Vec<(PathBuf, Vec<u8>)> {
-    [
-        "preparations.json",
-        "preparation-receipts/original.json",
-        "preparation-receipts/original.disposition.json",
-        "admissions/original.json",
-        "placement-grants/original.json",
-        "launches/original.json",
-        "tasks/original.json",
-    ]
-    .into_iter()
-    .map(|name| {
-        let path = rig.dir.join("state").join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let bytes = format!("{{\"original\":\"{name}\"}}\n").into_bytes();
-        fs::write(&path, &bytes).unwrap();
-        (path, bytes)
-    })
-    .collect()
+/// A minimal admission that preservation must leave untouched.
+fn original_admission() -> Value {
+    json!({"request":{"id":"original","action":{"type":"place"},"host":null,"branch":null,
+        "base":null,"cwd":"/","repository":null,"workspace":null,"workspace_name":null,
+        "owner":"w1:p1"},"launch":null,"error":null})
 }
-fn assert_protected(state: &[(PathBuf, Vec<u8>)]) {
-    for (path, bytes) in state {
+
+struct ProtectedState {
+    files: Vec<(PathBuf, Vec<u8>)>,
+    launch: Value,
+    claims: Value,
+    preparation: Vec<(&'static str, Value)>,
+}
+
+fn protected_state(rig: &Rig) -> ProtectedState {
+    rig.put_admission("original", &original_admission());
+    let launch = json!({"original":"launch"});
+    rig.put_launch("original", &launch);
+    let tree = json!({"repo":"/repo","path":"/repo/tree","branch":"original","head":"head","request_id":"original"});
+    rig.preparation_record("state", "claims", "")
+        .put(&json!([tree]));
+    let request = json!(["/repo", "original", null]);
+    let binding = json!({"request_id":"original","request":request,"claim":{"request_id":"original","tree":tree},"prepared":null});
+    let receipt = json!({"version":1,"request":request,"prepared":null,"binding":binding});
+    let disposition = json!({"request":{"version":1,"binding":binding,"policy":{"kind":"prohibit","basis":"placement_returned"},"outcome":"unknown"},"progress":"fenced"});
+    let grant = json!({"version":3,"envelope":{"version":3,"request":original_admission()["request"],"host":{"id":"local","label":"local"},"reservation":"original"},"reservation":{"id":"original","created_ms":1},"headroom":{"host":"local","headroom":2.0,"eligible":true,"live_agents":1},"materialized":true});
+    for (kind, value) in [
+        ("receipt", receipt),
+        ("disposition", disposition),
+        ("grant", grant),
+    ] {
+        rig.preparation_record("state", kind, "original")
+            .put(&value);
+    }
+    let preparation = ["receipt", "disposition", "grant"]
+        .into_iter()
+        .map(|kind| {
+            (
+                kind,
+                rig.preparation_record("state", kind, "original").read(),
+            )
+        })
+        .collect();
+    let files = ["tasks/original.json"]
+        .into_iter()
+        .map(|name| {
+            let path = rig.dir.join("state").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = format!("{{\"original\":\"{name}\"}}\n").into_bytes();
+            fs::write(&path, &bytes).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    ProtectedState {
+        files,
+        launch,
+        claims: rig.preparations(),
+        preparation,
+    }
+}
+fn assert_protected(rig: &Rig, state: &ProtectedState) {
+    for (path, bytes) in &state.files {
         assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
     }
+    assert_eq!(rig.preparations(), state.claims);
+    for (kind, value) in &state.preparation {
+        assert_eq!(
+            &rig.preparation_record("state", kind, "original").read(),
+            value
+        );
+    }
+    assert_eq!(rig.launch("original"), state.launch);
 }
 
 #[test]
@@ -909,7 +955,8 @@ fn p2_list_and_show_survive_original_checkout_removal() {
     let (code, result) = restore(&rig, &repo, &snapshot, &restored, &[]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(fs::read(restored.join("file")).unwrap(), b"raw\0\xff\n");
-    assert_protected(&state);
+    assert_protected(&rig, &state);
+    assert_eq!(rig.admission("original"), original_admission());
 }
 
 fn restore(rig: &Rig, repo: &Path, snapshot: &Value, to: &Path, extra: &[&str]) -> (i32, Value) {
@@ -955,7 +1002,8 @@ fn p2_restore_preserves_index_worktree_and_raw_bytes() {
     assert_eq!(before, git(&repo, &["status", "--porcelain=v1"]));
     assert_eq!(fs::read(repo.join("file")).unwrap(), b"raw\0\xff\n");
     assert_eq!(git(&to, &["rev-parse", "HEAD"]), snapshot["head"]["commit"]);
-    assert_protected(&state);
+    assert_protected(&rig, &state);
+    assert_eq!(rig.admission("original"), original_admission());
 }
 
 #[test]
@@ -1321,7 +1369,7 @@ fn p2_recovery_refs_remain_local_and_pinned() {
     rig.config(
         "free_core_fraction_min = 0.0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0.0\n",
     );
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),

@@ -25,13 +25,13 @@ fn bounded(mut command: Command) -> Output {
 #[test]
 fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
     let rig = Rig::new("stop-gate");
-    rig.snapshot("state/host.json", now(), 1.0, 8);
-    let mut host = rig.read("state/host.json");
+    rig.snapshot("state", now(), 1.0, 8);
+    let mut host = rig.host();
     host["probe"]["agent_panes"][0]["worktree"] = json!({
         "path":"/t","branch":"feat/x","ahead":0,"dirty":true,"landed":true,"head":"h","base":"b"
     });
     host["probe"]["agent_panes"][0]["done"] = json!(true);
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     let mut items = json!([
         {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
          "name":"worker","created_ms":1,"closed_ms":null},
@@ -61,7 +61,7 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
     host["probe"]["agent_panes"][0]["worktree"]["ahead"] = json!(1);
     host["probe"]["agent_panes"][0]["worktree"]["landed"] = json!(false);
     host["probe"]["agent_panes"][0]["state"] = json!("done");
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     assert!(gate().contains("worker (+1)"));
     assert_eq!(gate(), "");
     // Closed children, working writers and clean landed writers do not block.
@@ -72,12 +72,12 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
     rig.put_items(&items);
     for state in ["working", "blocked", "unknown"] {
         host["probe"]["agent_panes"][0]["state"] = json!(state);
-        rig.put("state/host.json", &host);
+        rig.put_host(&host);
         assert_eq!(gate(), "");
     }
     host["probe"]["agent_panes"][0]["state"] = json!("idle");
     host["probe"]["agent_panes"][0]["worktree"]["landed"] = json!(true);
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     assert_eq!(gate(), "");
     // A missing owner never falls back to the fleet's children.
     let out = rig
@@ -128,7 +128,7 @@ fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
     let rig = Rig::new("context-output");
     // A minute-old snapshot renders its age as `1m` for half a minute either side, so the brief
     // stays identical across the calls below however slowly a loaded machine runs them.
-    rig.snapshot("state/host.json", now() - 60_000, 1.0, 8);
+    rig.snapshot("state", now() - 60_000, 1.0, 8);
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     for harness in ["claude", "codex", "pi"] {
         for event in ["SessionStart", "UserPromptSubmit"] {
@@ -154,7 +154,7 @@ fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
 #[test]
 fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
     let rig = Rig::new("context-failure");
-    rig.snapshot("state/host.json", now(), 1.0, 8);
+    rig.snapshot("state", now(), 1.0, 8);
     let mut cmd = rig.cmd(&["hook", "context", "--harness", "claude"]);
     cmd.env("HERDR_ENV", "1");
     let out = bounded(cmd);
@@ -193,14 +193,14 @@ fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
 #[test]
 fn context_names_only_the_callers_children_with_work_to_land() {
     let rig = Rig::new("context-close");
-    rig.snapshot("state/host.json", now(), 1.0, 8);
+    rig.snapshot("state", now(), 1.0, 8);
     // The snapshot's idle agent is in pane w1:p1. Both items name it; only one is the caller's.
-    let mut host = rig.read("state/host.json");
+    let mut host = rig.host();
     host["probe"]["agent_panes"][0]["worktree"] = json!({
         "path":"/t","branch":"feat/x","ahead":2,"dirty":false,"landed":false,"head":"h","base":"b"
     });
     host["probe"]["agent_panes"][0]["done"] = json!(true);
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     rig.put_items(&json!([
         {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
          "name":"worker","created_ms":1,"closed_ms":null},
@@ -234,7 +234,7 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     );
     // A finished reader with nothing to land is not named.
     host["probe"]["agent_panes"][0]["worktree"]["ahead"] = json!(0);
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
     cmd.env("HERDR_ENV", "1");
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
@@ -249,11 +249,11 @@ fn status_rows_derive_lifecycle_even_without_a_published_label() {
         ("done", "stopped"),
         ("blocked", "blocked"),
     ] {
-        rig.snapshot("state/host.json", now(), 1.0, 8);
-        let mut host = rig.read("state/host.json");
+        rig.snapshot("state", now(), 1.0, 8);
+        let mut host = rig.host();
         host["probe"]["agent_panes"][0]["state"] = json!(terminal);
         host["probe"]["agent_panes"][0]["lifecycle"] = json!("done");
-        rig.put("state/host.json", &host);
+        rig.put_host(&host);
         let output = rig.run(&["status"]);
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
@@ -267,12 +267,12 @@ fn status_rows_derive_lifecycle_even_without_a_published_label() {
 #[test]
 fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
     let rig = Rig::new("context-lifecycle");
-    rig.snapshot("state/host.json", now(), 1.0, 8);
-    let mut host = rig.read("state/host.json");
+    rig.snapshot("state", now(), 1.0, 8);
+    let mut host = rig.host();
     host["probe"]["agent_panes"] = json!([{
         "pane":"w1:p1","agent":"pi","state":"unknown","name":null
     }]);
-    rig.put("state/host.json", &host);
+    rig.put_host(&host);
     rig.put_items(
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),
@@ -291,7 +291,7 @@ fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
 #[test]
 fn an_unobserved_child_is_unknown_and_never_claims_a_landed_result() {
     let rig = Rig::new("context-starting");
-    rig.snapshot("state/host.json", now(), 1.0, 8);
+    rig.snapshot("state", now(), 1.0, 8);
     rig.put_items(
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p2","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),

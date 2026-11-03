@@ -1,13 +1,25 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { realpathSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import dogsled, { VERSION, versionMismatch } from "./index.ts";
+
+// Todo publication uses stdin through the real process API, not ExtensionAPI.exec.
+const publicationDirectory = mkdtempSync(join(tmpdir(), "dogsled-publisher-"));
+const previousBinary = process.env["DOGSLED_BIN"];
+const publicationBinary = join(publicationDirectory, "dogsled");
+writeFileSync(publicationBinary, "#!/bin/sh\ncat >/dev/null\n", { mode: 0o700 });
+process.env["DOGSLED_BIN"] = publicationBinary;
+after(() => {
+	if (previousBinary === undefined) delete process.env["DOGSLED_BIN"];
+	else process.env["DOGSLED_BIN"] = previousBinary;
+	rmSync(publicationDirectory, { recursive: true, force: true });
+});
 
 type Handler = (event: any, ctx: any) => Promise<any> | void;
 const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
@@ -61,7 +73,6 @@ function rig() {
 			if (args[0] === "hook") assert.equal(options?.timeout, 6_000);
 			const stdout = args[0] === "hook" ? (args[1] === "gate" ? gate : context)
 				: args[0] === "board" && args.includes("--open") ? JSON.stringify(opened)
-				: args[0] === "board" && args.includes("--todo-path") ? JSON.stringify({ path: "/nonexistent-dogsled-todo/pane.json", width: 48, height: 10_000 })
 				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
 				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-dogsled-inbox", file: "t.json" })

@@ -17,7 +17,7 @@ fn start_line<'a>(log: &'a str, name: &str) -> &'a str {
 #[test]
 fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
     let rig = Rig::new("profile-argv");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     profile(
         &rig,
         "reviewer",
@@ -105,7 +105,7 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
 #[test]
 fn an_ambiguous_launch_is_reconciled_with_backoff_without_repeating_the_task() {
     let rig = Rig::new("launch-retry");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     fs::write(rig.dir.join("clock"), now().to_string()).unwrap();
     // Herdr's start fails once.
     rig.script(
@@ -155,7 +155,7 @@ fn an_ambiguous_launch_is_reconciled_with_backoff_without_repeating_the_task() {
 #[test]
 fn a_3kb_task_launches_on_a_line_herdr_accepts() {
     let rig = Rig::new("long-task");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let task = "word ".repeat(600);
     let (code, result) = rig.json(&["agent", "--name", "long", "--message", &task]);
     assert_eq!(code, 0, "{result}");
@@ -169,7 +169,7 @@ fn a_3kb_task_launches_on_a_line_herdr_accepts() {
 #[test]
 fn a_multiline_task_goes_through_a_file() {
     let rig = Rig::new("multiline-task");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     // A multi-line task goes through a file: Herdr refuses an argument with a newline.
     let mut cmd = rig.cmd(&["agent", "--name", "multi", "--message-file", "-", "--json"]);
     let mut child = cmd
@@ -204,7 +204,7 @@ fn typed_line(rig: &Rig) -> String {
 fn a_3kb_task_is_typed_as_a_short_line_for_every_kind() {
     for kind in ["pi", "claude", "codex"] {
         let rig = Rig::new(&format!("typed-{kind}"));
-        rig.snapshot("state/host.json", now(), 0.0, 8);
+        rig.snapshot("state", now(), 0.0, 8);
         let task = "word ".repeat(600);
         let (code, result) = rig.json(&[
             "agent",
@@ -234,7 +234,7 @@ fn quotes_backticks_and_newlines_reach_the_task_file_unchanged() {
     let task = "it's \"quoted\" and `ticked` $HOME $(x)\nsecond 'line'\n\\ end\n";
     for kind in ["pi", "claude", "codex"] {
         let rig = Rig::new(&format!("exact-{kind}"));
-        rig.snapshot("state/host.json", now(), 0.0, 8);
+        rig.snapshot("state", now(), 0.0, 8);
         let (code, result) = rig.json(&[
             "agent",
             "--kind",
@@ -264,7 +264,7 @@ fn a_peer_launch_is_not_refused_for_a_long_caller_path() {
     // The caller's state directory is long; the peer's own paths are what its line holds.
     let rig = Rig::new("long-caller-path");
     rig.peer();
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let prefix = rig.dir.join("d".repeat(200));
     let deep = prefix.join("e".repeat(485 - prefix.as_os_str().len() - 1));
     assert_eq!(deep.as_os_str().len(), 485);

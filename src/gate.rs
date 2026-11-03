@@ -1,15 +1,13 @@
 //! The stop gate: an owner about to end its turn hears once about its finished children with
 //! branches ready to merge. A prompt line is easy to skip; a continued turn is not.
 //!
-//! Each owner's reminded sets live in `gate.json`. The gate speaks once per distinct set,
+//! Each owner's reminded sets live in typed database tables. The gate speaks once per distinct set,
 //! even when children change back to an earlier state. Closing all owner items clears that history.
 
 use crate::board::{Board, Group};
 use crate::error::Result;
 use crate::ledger::Ledger;
-use std::collections::{BTreeMap, BTreeSet};
-
-const FILE: &str = "gate.json";
+use std::collections::BTreeSet;
 
 /// A cleanup reminder has its own history, independent of the owner's open children.
 #[derive(Debug)]
@@ -115,7 +113,7 @@ pub fn notices(
         notices.push(Notice {
             key: "unlinked",
             signature: holds.iter().map(|s| (s.clone(), None, false)).collect(),
-            text: format!("Cleanup holds worktrees that Git can no longer remove:\n{}\nThe owner decides what happens to each directory. Report it to the user; do not delete it yourself. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on it, and do not edit {} by hand.", holds.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("worktrees.json").display()),
+            text: format!("Cleanup holds worktrees that Git can no longer remove:\n{}\nThe owner decides what happens to each directory. Report it to the user; do not delete it yourself. Never use `git worktree remove --force`, `git clean`, or `rm -rf` on it, and do not edit {} by hand.", holds.into_iter().collect::<Vec<_>>().join("\n"), ledger.dir.join("state.db").display()),
         });
     }
     if !landed_dirty.is_empty() {
@@ -238,17 +236,21 @@ pub fn deliver(
     notices: &[Notice],
     emit: impl FnOnce(Option<&str>) -> Result<()>,
 ) -> Result<()> {
-    ledger.with_lock("gate", || {
-        let mut heard: BTreeMap<String, BTreeSet<Signature>> = ledger.read(FILE)?.unwrap_or_default();
+    crate::store::write(ledger, |tx| {
+        let mut heard = crate::host_store::gate(tx)?;
         let current = signature(board);
         let mut messages = Vec::new();
         for notice in notices {
-            let sets = heard.entry(format!("cleanup:{}:{owner}", notice.key)).or_default();
+            let sets = heard
+                .entry(format!("cleanup:{}:{owner}", notice.key))
+                .or_default();
             if sets.insert(notice.signature.clone()) {
                 messages.push(notice.text.clone());
             }
         }
-        if board.rows.is_empty() { heard.remove(owner); }
+        if board.rows.is_empty() {
+            heard.remove(owner);
+        }
         if let Some(names) = board.land_names()
             && heard.entry(owner.to_owned()).or_default().insert(current)
         {
@@ -264,7 +266,7 @@ pub fn deliver(
         }
         let text = messages.join("\n\n");
         emit((!text.is_empty()).then_some(text.as_str()))?;
-        ledger.write(FILE, &heard)
+        crate::host_store::replace_gate(tx, &heard)
     })
 }
 
@@ -521,12 +523,11 @@ mod tests {
         let child = item("child", "w1:p1");
         crate::items::record(&ledger, child.clone()).unwrap();
         // The custody moved to another pane: the origin owner hears nothing about it.
-        ledger
-            .write(
-                "custody.json",
-                &vec![custody(&child, "w1:p2", Some("custodian-session"))],
-            )
-            .unwrap();
+        crate::host_store::put_custodies(
+            &ledger,
+            &[custody(&child, "w1:p2", Some("custodian-session"))],
+        )
+        .unwrap();
         let shell = shell_in_tree(&[("w1:p1", "origin-session"), ("w1:p2", "custodian-session")]);
         assert!(
             findings_for(&ledger, &shell, "w1:p1").failures.is_empty(),
