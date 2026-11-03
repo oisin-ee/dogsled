@@ -155,40 +155,22 @@ fn remote_lane_failures_reach_full_brief_and_context_status() {
 }
 
 #[test]
-fn children_lane_does_not_wait_for_a_busy_handoff_lane() {
-    let rig = Rig::new("service-children-handoff-busy");
+fn handoff_passes_take_no_handoff_file_lock() {
+    let rig = Rig::new("service-handoff-no-file-lock");
+    rig.done("missing-terminal", "gone:p1", 10);
+    // Both the handoff lane and the children lane run a handoff pass here.
     serve(&rig);
-    // Stand in for a handoff lane that holds its lock through a long close.
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(rig.dir.join("state/handoff.lock"))
-        .unwrap();
-    lock.lock().unwrap();
-    let started = i64::try_from(now()).unwrap();
-    let mut child = rig.start(&["serve", "--interval", "1"]);
-    let deadline = Instant::now() + PROCESS_DEADLINE;
-    let error = loop {
-        assert!(
-            Instant::now() < deadline,
-            "children lane did not finish a pass"
-        );
-        let db = rig.database();
-        db.busy_timeout(Duration::from_secs(5)).unwrap();
-        if let Ok(error) = db.query_row::<Option<String>, _, _>(
-            "SELECT error FROM service_lanes WHERE lane = 'children' AND last_ms >= ?1",
-            [started],
-            |row| row.get(0),
-        ) {
-            break error;
-        }
-        drop(db);
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    child.owned.terminate();
-    lock.unlock().unwrap();
-    assert_eq!(error, None);
+    serve(&rig);
+    assert!(!rig.dir.join("state/handoff.lock").exists());
+    let failing = lanes(&rig);
+    assert!(
+        failing
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|lane| lane["lane"] != "children" && lane["lane"] != "handoff"),
+        "{failing}"
+    );
 }
 
 #[test]

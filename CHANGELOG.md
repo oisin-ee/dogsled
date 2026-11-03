@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-- The children lane no longer waits for `handoff.lock`. Before, it waited while the handoff lane held the lock through a long close, and failed with `deadline reached: lock handoff.lock`. It now runs handoff only when the lock is free and otherwise imports durable handoffs. `serve --once` starts the children lane after the handoff lane, so one pass still imports that pass's handoffs.
+- `handoff.lock` is gone. Before, the children lane waited for it while the handoff lane held it through a long close, and failed with `deadline reached: lock handoff.lock`. Handoff passes are now serialized inside `serve`, which `service.lock` already makes the only one on a host. The children lane skips its pass when the handoff lane is running one, and imports durable handoffs. Mark expiry no longer waits for a handoff pass. `serve --once` starts the children lane after the handoff lane, so one pass still imports that pass's handoffs. Existing `handoff.lock` files are unused and can be deleted.
 
 ## 0.31.0 - 2026-11-03
 
