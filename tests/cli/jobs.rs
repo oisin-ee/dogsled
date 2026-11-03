@@ -1271,9 +1271,9 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     assert!(rig.run(&["serve", "--once"]).status.success());
     let tickets = rig.tickets();
     assert_eq!(tickets[0]["id"], first["ticket"]);
-    assert_eq!(tickets[0]["state"], "admitted");
+    assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
     assert_eq!(tickets[1]["state"], "cancelled");
-    assert_eq!(tickets[2]["state"], "admitted");
+    assert_eq!(tickets[2]["state"], "admitted", "{tickets}");
     // The owner has no inbox reader yet, so nothing tells it, and nothing types into it.
     assert_eq!(tickets[0]["notified"], false);
     // Once it reads its inbox, the notice arrives there, while the owner still works.
@@ -1912,4 +1912,449 @@ fn a_list_during_the_expiry_does_not_fail() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn settle_job_resources(rig: &Rig) {
+    for _ in 0..2 {
+        let mut service = rig.start(&["serve", "--once", "--interval", "1"]);
+        assert!(service.wait().success(), "{:?}", service.output());
+    }
+}
+
+fn assert_job_holds_cleared(rig: &Rig, id: &str) {
+    let (code, board) = rig.json(&["board", "--owner", "w1:p1"]);
+    assert_eq!(code, 0, "{board}");
+    for row in board["rows"].as_array().unwrap() {
+        assert!(
+            row.get("holds").is_none_or(|holds| holds == &json!([])),
+            "{board}"
+        );
+    }
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert!(
+        snapshot["holds"].as_array().unwrap().is_empty(),
+        "{id}: {snapshot}"
+    );
+}
+
+#[test]
+fn settled_local_jobs_release_holds_without_discarding_replay_evidence() {
+    for exit in [0, 7] {
+        let rig = Rig::short(&format!("settled-job-{exit}"));
+        rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+        rig.snapshot("state", now(), 0.0, 8);
+        let mut command = rig.start(&[
+            "run",
+            "--host",
+            "local",
+            "--wait",
+            "--",
+            "sh",
+            "-c",
+            &format!("echo result; exit {exit}"),
+        ]);
+        let status = command.wait();
+        let (stdout, stderr) = command.output();
+        assert_eq!(status.code(), Some(exit), "{stderr}");
+        let result: Value = serde_json::from_str(&stdout).unwrap();
+        let id = result["id"].as_str().unwrap();
+        settle_job_resources(&rig);
+        assert_job_holds_cleared(&rig, id);
+        assert!(rig.admission(id)["finished_ms"].is_number());
+        assert!(rig.admission(id)["ordinary_release"]["acknowledgement"].is_object());
+        assert!(!rig.validity(id).is_null());
+        assert!(!rig.launch_record(id, "receipt").is_null());
+    }
+}
+
+fn settled_peer_rig(name: &str) -> (Rig, fs::File) {
+    let rig = Rig::short(name);
+    rig.peer();
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    rig.snapshot("state", now(), 0.0, 8);
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    let out = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    rig.snapshot("peer-state", now(), 0.0, 8);
+    let mut probe = rig.peer_state(&["host"]);
+    probe["sampled_ms"] = json!("__sampled_ms__");
+    fs::write(rig.dir.join("peer-probe.json"), probe.to_string()).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &script.replace(
+            "case \"$*\" in",
+            // The scripted probe is fresh at each RPC, independent of test-runner load.
+            r#"sampled=$(date +%s)
+sed "s/\"__sampled_ms__\"/${sampled}000/" "$RIG/peer-probe.json" |
+  DOGSLED_STATE="$RIG/peer-state" "$RIG_DOGSLED" --json state host --put >/dev/null
+case "$*" in
+  *'host snapshot'*)
+    DOGSLED_STATE="$RIG/peer-state" "$RIG_DOGSLED" --json host snapshot ;;
+  *)
+    for remote do :; done
+    remote=${remote#* host }
+    DOGSLED_STATE="$RIG/peer-state" sh -c '"$RIG_DOGSLED" host '"$remote"
+    exit $? ;;
+"#,
+        ),
+    );
+    rig.snapshot("peer-state", now(), 0.0, 8);
+    let service = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(rig.dir.join("peer-state/service.lock"))
+        .unwrap();
+    service.try_lock().unwrap();
+    (rig, service)
+}
+
+#[test]
+fn settled_remote_job_releases_holds_on_both_hosts() {
+    let (rig, _peer_service) = settled_peer_rig("settled-peer-job");
+    let mut command = rig.start(&[
+        "run",
+        "--host",
+        "netcup",
+        "--wait",
+        "--max",
+        "10s",
+        "--",
+        "sh",
+        "-c",
+        "echo peer-result",
+    ]);
+    let status = command.wait();
+    let (stdout, stderr) = command.output();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    let job: Value = serde_json::from_str(&stdout).unwrap();
+    let id = job["id"].as_str().unwrap();
+    settle_job_resources(&rig);
+    assert_job_holds_cleared(&rig, id);
+    let out = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let snapshot: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+    assert!(rig.peer_launch_record(id, "release").is_object());
+}
+
+#[test]
+fn peer_refused_job_reports_once_and_releases_holds() {
+    let (rig, peer_service) = settled_peer_rig("settled-refused-job");
+    peer_service.unlock().unwrap();
+    let missing = rig.dir.join("missing");
+    // A shared non-repository cwd is removed on the peer after reservation, before ingress.
+    fs::create_dir(&missing).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &script.replace(
+            "case \"$*\" in",
+            r#"case "$*" in
+  *'host launch'*)
+    rmdir "$RIG/missing"
+    for remote do :; done
+    remote=${remote#* host }
+    DOGSLED_STATE="$RIG/peer-state" sh -c '"$RIG_DOGSLED" host '"$remote"
+    exit $? ;;
+"#,
+        ),
+    );
+    let mut command = rig.start(&[
+        "run",
+        "--host",
+        "netcup",
+        "--cwd",
+        missing.to_str().unwrap(),
+        "--max",
+        "10s",
+        "--",
+        "true",
+    ]);
+    let status = command.wait();
+    let (stdout, stderr) = command.output();
+    assert_eq!(status.code(), Some(1), "{stdout}\n{stderr}");
+    peer_service.try_lock().unwrap();
+    rig.expire_cache();
+    settle_job_resources(&rig);
+    let tickets = rig.tickets();
+    let ticket = &tickets[0];
+    assert_eq!(ticket["state"], "failed", "{tickets}");
+    let id = ticket["request"]["id"].as_str().unwrap();
+    assert!(
+        ticket["error"]
+            .as_str()
+            .unwrap()
+            .contains("remote command failed"),
+        "{ticket}"
+    );
+    assert!(
+        rig.peer_launch_record(id, "progress")["error"]
+            .as_str()
+            .unwrap()
+            .contains("execution directory disappeared")
+    );
+    settle_job_resources(&rig);
+    assert_job_holds_cleared(&rig, id);
+    let out = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let snapshot: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+    let before = rig.admission(id);
+    settle_job_resources(&rig);
+    assert_eq!(rig.admission(id), before);
+}
+
+#[test]
+fn peer_allocation_refusal_settles_its_non_executable_intent() {
+    let (rig, _peer_service) = settled_peer_rig("settled-allocation-refusal");
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script(
+        "herdr",
+        &script.replace(
+            "case \"$*\" in",
+            r#"case "$*" in
+  'tab create'*|'workspace create'*) echo allocation-refused >&2; exit 2 ;;
+"#,
+        ),
+    );
+    let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let tickets = rig.tickets();
+    assert_eq!(tickets[0]["state"], "failed", "{tickets}");
+    let id = tickets[0]["request"]["id"].as_str().unwrap();
+    let job = rig.peer_state(&["job", id]);
+    assert_eq!(job["state"], "blocked", "{job}");
+    assert!(job["started_ms"].is_null(), "{job}");
+    assert!(job["ended_ms"].is_number(), "{job}");
+    settle_job_resources(&rig);
+    assert_job_holds_cleared(&rig, id);
+    let output = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let snapshot: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+}
+
+fn assert_unstarted_transport_failure_stays_held(rig: &Rig) {
+    let healthy = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &healthy.replace(
+            "case \"$*\" in",
+            r#"case "$*" in
+  *'host release-unstarted'*) echo transport-ambiguous >&2; exit 255 ;;
+"#,
+        ),
+    );
+    settle_job_resources(rig);
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert_ne!(snapshot["holds"], json!([]));
+    assert_eq!(
+        rig.peer_state(&["reservations"]).as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        rig.run(&["prune", "--yes", "resources"]).status.code(),
+        Some(2)
+    );
+    rig.script("ssh", &healthy);
+}
+
+#[test]
+fn peer_reserve_failure_releases_unstarted_evidence_and_fences_dispatch() {
+    for queued in [false, true] {
+        let (rig, peer_service) = settled_peer_rig(&format!("settled-reserve-refusal-{queued}"));
+        if queued {
+            peer_service.unlock().unwrap();
+        }
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        rig.script(
+            "ssh",
+            &script.replace(
+                "case \"$*\" in",
+                r#"case "$*" in
+  *'host reserve'*)
+    for remote do :; done
+    remote=${remote#* host }
+    DOGSLED_STATE="$RIG/peer-state" sh -c '"$RIG_DOGSLED" host '"$remote" > /dev/null
+    echo peer-refused >&2
+    exit 2 ;;
+"#,
+            ),
+        );
+        let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
+        assert_eq!(
+            output.status.code(),
+            Some(if queued { 1 } else { 2 }),
+            "{output:?}"
+        );
+        if queued {
+            peer_service.try_lock().unwrap();
+        }
+        rig.expire_cache();
+        if !queued {
+            assert_unstarted_transport_failure_stays_held(&rig);
+        }
+        settle_job_resources(&rig);
+        let tickets = rig.tickets();
+        let ticket = &tickets[0];
+        assert_eq!(ticket["state"], "failed", "{ticket}");
+        let id = ticket["request"]["id"].as_str().unwrap();
+        assert_job_holds_cleared(&rig, id);
+        let out = rig
+            .cmd(&["host", "snapshot"])
+            .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let snapshot: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+        assert_eq!(rig.peer_state(&["reservations"]), json!([]));
+        let validity = ticket["request"]["action"]["validity"].clone();
+        let launch = json!({"id":id,"validity":validity,"action":ticket["request"]["action"],"host":"8103",
+        "cwd":rig.dir.join("home"),"workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":ticket["request"]["owner_host"]});
+        let out = rig
+            .cmd(&[
+                "host",
+                "launch",
+                "--job-validity",
+                "2",
+                "--request",
+                &launch.to_string(),
+            ])
+            .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("future dispatch prohibited"),
+            "{out:?}"
+        );
+        let created = validity["created_ms"].as_u64().unwrap().to_string();
+        let out = rig
+            .cmd(&[
+                "host",
+                "reserve",
+                "--id",
+                id,
+                "--job-validity",
+                "2",
+                "--job-created-ms",
+                &created,
+            ])
+            .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("future dispatch prohibited"),
+            "{out:?}"
+        );
+    }
+}
+
+#[test]
+fn stopped_job_releases_holds_after_terminal_capture() {
+    let rig = Rig::short("settled-stopped-job");
+    startup_herdr(&rig);
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    rig.snapshot("state", now(), 0.0, 8);
+    let (code, result) = rig.json(&["run", "--host", "local", "--", "sh", "-c", "sleep 90"]);
+    assert_eq!(code, 0, "{result}");
+    let id = result["id"].as_str().unwrap();
+    let mut wrapper = rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "stopped job wrapper");
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert_ne!(snapshot["holds"], json!([]));
+    for hold in snapshot["holds"].as_array().unwrap() {
+        assert_eq!(hold["owner"], "w1:p1", "{hold}");
+        assert_eq!(hold["owner_pane"], "w1:p1", "{hold}");
+    }
+    let (code, doctor) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{doctor}");
+    for hold in snapshot["holds"].as_array().unwrap() {
+        assert!(
+            doctor["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["class"] == "resources" && entry["id"] == hold["resource"] }),
+            "{hold}: {doctor}"
+        );
+    }
+    assert_eq!(
+        rig.run(&["prune", "--yes", "resources"]).status.code(),
+        Some(2)
+    );
+    assert!(rig.job(id)["ended_ms"].is_null());
+    assert!(rig.run(&["stop", id]).status.success());
+    let mut command = rig.start(&["wait", id, "--max", "10s"]);
+    assert!(!command.wait().success(), "{:?}", command.output());
+    assert_eq!(rig.job(id)["reason"], "stopped");
+    assert!(!wrapper.wait().success());
+    let output = rig.run(&["prune", "--yes", "resources"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_job_holds_cleared(&rig, id);
+}
+
+#[test]
+fn peer_reservation_records_agent_owner_and_refuses_missing_owner() {
+    let rig = Rig::new("reserve-job-owner");
+    rig.snapshot("state", now(), 0.0, 8);
+    let created = rig.now_ms().to_string();
+    let args = [
+        "--json",
+        "host",
+        "reserve",
+        "--preparation-protocol",
+        "1",
+        "--id",
+        "owned",
+        "--job-validity",
+        "2",
+        "--job-created-ms",
+        &created,
+    ];
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dogsled"));
+    rig.rig_env(&mut command);
+    let out = command.args(args).output().unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(rig.validity("owned").is_null());
+    let (code, _) = rig.json(&[
+        "host",
+        "reserve",
+        "--id",
+        "owned",
+        "--job-validity",
+        "2",
+        "--job-created-ms",
+        &created,
+    ]);
+    assert!([0, 3].contains(&code));
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert_ne!(snapshot["holds"], json!([]));
+    for hold in snapshot["holds"].as_array().unwrap() {
+        assert_eq!(hold["owner"], "w1:p1", "{hold}");
+        assert_eq!(hold["owner_pane"], "w1:p1", "{hold}");
+    }
 }

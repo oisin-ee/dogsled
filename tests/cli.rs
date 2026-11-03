@@ -808,6 +808,9 @@ esac
         let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
         cmd.env("DOGSLED_BIN", env!("CARGO_BIN_EXE_dogsled"));
         cmd.args(args);
+        if args.windows(2).any(|w| w == ["host", "reserve"]) && !args.contains(&"--owner") {
+            cmd.args(["--owner", "w1:p1", "--owner-host", "origin"]);
+        }
         // Fixtures speak the current wire unless a test explicitly selects another version.
         if args.windows(2).any(|w| {
             w[0] == "host" && matches!(w[1], "reserve" | "prepare" | "launch" | "prepared")
@@ -1401,6 +1404,19 @@ esac
 
     fn put_validity(&self, id: &str, value: &Value) {
         self.put_state(&["state", "validity", id, "--put"], value);
+    }
+
+    /// Caller provenance normally published by the reserve ingress.
+    fn put_request_owner(&self, id: &str, owner: &str, host: &str) {
+        assert_eq!(
+            self.database()
+                .execute(
+                    "UPDATE job_validity SET owner = ?2, owner_host = ?3 WHERE id = ?1",
+                    rusqlite::params![id, owner, host],
+                )
+                .unwrap(),
+            1
+        );
     }
 
     fn put_cancellation(&self, id: &str, value: &Value) {

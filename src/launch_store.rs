@@ -35,6 +35,9 @@ fn progress_row(row: &Row<'_>) -> Result<Progress> {
         Some("validity") => Some(PreflightRefusal::Validity {
             detail: required(row, "preflight_detail")?,
         }),
+        Some("job") => Some(PreflightRefusal::Job {
+            detail: required(row, "preflight_detail")?,
+        }),
         _ => None,
     };
     let origin_release = decoded(row, "origin_release_certificate")?
@@ -122,6 +125,10 @@ fn save_progress(tx: &Transaction<'_>, id: &str, progress: &Progress) -> Result<
         }
         Some(PreflightRefusal::Validity { detail }) => {
             columns.text("preflight_kind", Some("validity"));
+            columns.text("preflight_detail", Some(detail));
+        }
+        Some(PreflightRefusal::Job { detail }) => {
+            columns.text("preflight_kind", Some("job"));
             columns.text("preflight_detail", Some(detail));
         }
         None => (),
@@ -484,7 +491,7 @@ pub(crate) const SCHEMA: &str = concat!(
         closed_ms INTEGER CHECK (closed_ms >= 0),
         result_message BLOB NOT NULL,
         error TEXT,
-        preflight_kind TEXT CHECK (preflight_kind IN ('line_budget', 'validity')),
+        preflight_kind TEXT CHECK (preflight_kind IN ('line_budget', 'validity', 'job')),
         preflight_bytes INTEGER CHECK (preflight_bytes >= 0),
         preflight_detail TEXT,
         terminal_receipt_message BLOB,
@@ -492,7 +499,7 @@ pub(crate) const SCHEMA: &str = concat!(
         origin_release_certificate BLOB,
         origin_release_accepted_ms INTEGER CHECK (origin_release_accepted_ms >= 0),
         CHECK ((preflight_kind = 'line_budget') = (preflight_bytes IS NOT NULL)),
-        CHECK ((preflight_kind = 'validity') = (preflight_detail IS NOT NULL)),
+        CHECK ((preflight_kind IN ('validity', 'job')) = (preflight_detail IS NOT NULL)),
         CHECK ((origin_release_certificate IS NULL) = (origin_release_accepted_ms IS NULL))
     ) STRICT;
     CREATE INDEX launch_progress_pane ON launch_progress (pane);

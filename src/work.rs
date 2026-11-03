@@ -249,7 +249,12 @@ pub(crate) fn references_released(ledger: &Ledger, id: &str) -> Result<bool> {
             "retention admission identity changed",
         ));
     }
-    if cancellation(ledger, &request)?.is_some_and(|saved| saved.release == "pending") {
+    if let Some(saved) = cancellation(ledger, &request)?
+        && (saved.release == "pending"
+            || (matches!(request.action, Action::Job { .. })
+                && saved.outcome == crate::prepare::disposition::Outcome::NotStarted
+                && crate::job_store::unstarted_finished(ledger, id)?.is_none()))
+    {
         return Ok(false);
     }
     if let Some(unit) = &attempt.unit {
@@ -502,6 +507,7 @@ pub(crate) fn check_launch_validity(ledger: &Ledger, launch: &Launch) -> Result<
 }
 
 pub(crate) fn launch_validity(ledger: &Ledger, launch: &Launch) -> Result<Option<jobs::Validity>> {
+    jobs::reject_unstarted(ledger, &launch.id)?;
     let saved = jobs::request_validity(ledger, &launch.id)?;
     if !matches!(launch.action, Action::Job { .. }) {
         jobs::match_request_validity(saved, launch.validity)?;
@@ -518,7 +524,12 @@ fn record_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
         }
         jobs::record_request_validity(ledger, &request.id, *validity)?;
     }
-    Ok(())
+    crate::job_store::remember_owner(
+        ledger,
+        &request.id,
+        &request.owner,
+        request.owner_host.as_deref(),
+    )
 }
 
 /// Check a request against this host's clock. A request that may not start new execution
@@ -1103,7 +1114,7 @@ pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> 
 /// One bounded pass. Released and held records cost no host call and no queue write.
 /// At most `REPAIR_BATCH` releases are attempted, least recently attempted first, and
 /// every changed ticket is saved in one queue write at the end.
-fn repair_cancellations(fleet: &Fleet) -> Result<()> {
+pub(crate) fn repair_cancellations(fleet: &Fleet) -> Result<()> {
     let records = crate::job_store::cancellations(fleet.ledger)?;
     let mut tickets = queue(fleet.ledger)?;
     let mut projected = Vec::new();
@@ -1710,7 +1721,13 @@ fn launch_job(
     // executable: an allocation that stops here stays uncertain, and no other
     // allocation may take the job over.
     jobs::publish_intent(ledger, &job)?;
-    let (pane, terminal) = pane(shell, launch)?;
+    let (pane, terminal) = match pane(shell, launch) {
+        Ok(allocated) => allocated,
+        Err(error) => {
+            jobs::refuse_intent(ledger, &job, &error.to_string())?;
+            return Err(error);
+        }
+    };
     // Allocation blocks, so the request can expire during it. The recheck runs before the
     // executable claim is published and before the command is dispatched. A refusal writes
     // no receipt, releases no preparation, and retires only the pane this attempt
@@ -1721,6 +1738,7 @@ fn launch_job(
         {
             eprintln!("dogsled pane close: {error}");
         }
+        jobs::refuse_intent(ledger, &job, &refusal.to_string())?;
         return Err(refusal);
     }
     // The pane is known, so the claim becomes executable. The wrapper reads it
@@ -1768,6 +1786,7 @@ pub fn receive_launch(
     now: u64,
     peer_validity: Option<u32>,
 ) -> Result<Value> {
+    jobs::reject_unstarted(ledger, &launch.id)?;
     if let Action::Job { validity, .. } = &launch.action
         && peer_validity == Some(jobs::VALIDITY_PROTOCOL_VERSION)
         && !queued_request(ledger, &launch.id)?
@@ -1802,6 +1821,12 @@ pub fn receive_launch(
                 Ok(())
             })?;
     }
+    crate::job_store::remember_owner(
+        ledger,
+        &launch.id,
+        &launch.owner,
+        launch.owner_host.as_deref(),
+    )?;
     launch_with_ingress(ledger, shell, launch, now, peer_validity, true)
 }
 
@@ -1874,6 +1899,7 @@ fn launch_with_ingress(
                     .ok_or_else(|| crate::worktree::refuse("historical final launch disappeared"));
             }
             // The preparation gate can wait behind a completed dispatch.
+            jobs::reject_unstarted(ledger, &launch.id)?;
             crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
             if let Some(result) = replay_launch(ledger, launch)? {
                 return Ok(result);
@@ -1883,6 +1909,15 @@ fn launch_with_ingress(
                 jobs::receive_request_validity(ledger, &launch.id, launch.validity)?;
             }
             let result = launch_owned(ledger, shell, launch);
+            if matches!(launch.action, Action::Job { .. })
+                && let Err(error) = &result
+                && !matches!(error, Error::Deadline(_))
+            {
+                crate::launch::job_refused(ledger, launch, error)?;
+                if crate::launch::job_refusal(ledger, launch)?.is_some() {
+                    crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
+                }
+            }
             launch_test_barrier("COMPLETED_GATE")?;
             result
         })
@@ -2003,6 +2038,9 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
 }
 
 fn replay_launch(ledger: &Ledger, launch: &Launch) -> Result<Option<Value>> {
+    if let Some(failed) = crate::launch::job_refusal(ledger, launch)? {
+        return Err(Error::Invalid(failed));
+    }
     if matches!(launch.action, Action::Agent { .. }) {
         return crate::launch::replay(ledger, launch);
     }
@@ -2264,7 +2302,19 @@ pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value
             placement::record(fleet.ledger, request)?;
             return Ok(None);
         }
-        perform_locked(fleet, request, now)
+        let result = perform_locked(fleet, request, now);
+        if let Err(error) = &result
+            && matches!(request.action, Action::Job { .. })
+            && !matches!(error, Error::Launch(_))
+        {
+            let ticket = enqueue(fleet.ledger, request.clone(), false, now)?;
+            update_ticket(fleet.ledger, &ticket, |ticket| {
+                ticket.state = "failed".into();
+                ticket.error = Some(error.to_string());
+                ticket.diagnostic = error.diagnostic().cloned();
+            })?;
+        }
+        result
     })
 }
 
@@ -2406,6 +2456,7 @@ fn restored_request(ledger: &Ledger, request: &Request) -> Result<Request> {
 }
 
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    record_request_validity(fleet.ledger, request)?;
     admission_completion(fleet.ledger, &request.id)?;
     if let Some(result) = retained_admission(fleet, request)? {
         return Ok(Some(result));
@@ -2503,7 +2554,7 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
             save_result(fleet.ledger, id, attempt, &result)?;
             return Ok(Some(result));
         }
-        if attempt.unit.is_none() {
+        if attempt.unit.is_none() && (attempt.launch.is_some() || attempt.result.is_some()) {
             return Err(Error::Invalid("admission has no selected host".into()));
         }
     }
@@ -2518,22 +2569,39 @@ fn save_result(ledger: &Ledger, id: &str, mut attempt: Attempt, result: &Value) 
 }
 
 fn begin(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
-    let placed = placement(fleet, request, request.host.as_deref(), now)?;
-    let Placement::Placed { host, .. } = placed else {
-        return Ok(None);
-    };
     let mut attempt = Attempt {
         ordinary_release: None,
         request: serde_json::to_value(request)?,
         finished_ms: None,
         placement: None,
-        host: Some(host.clone()),
+        host: None,
         launch: None,
         error: None,
         diagnostic: None,
         unit: crate::admissions::get(fleet.ledger, &request.id)?.and_then(|a| a.unit),
         result: None,
     };
+    if matches!(request.action, Action::Job { .. }) {
+        crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
+    }
+    let placed = match placement(fleet, request, request.host.as_deref(), now) {
+        Ok(placed) => placed,
+        Err(error) => {
+            attempt.host = crate::job_store::selection(fleet.ledger, &request.id)?
+                .map(|id| fleet.find(&id).cloned())
+                .transpose()?;
+            attempt.error = Some(error.to_string());
+            attempt.diagnostic = error.diagnostic().cloned();
+            if matches!(request.action, Action::Job { .. }) {
+                crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
+            }
+            return Err(error);
+        }
+    };
+    let Placement::Placed { host, .. } = placed else {
+        return Ok(None);
+    };
+    attempt.host = Some(host.clone());
     crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
     let prepared = prepare_launch(fleet, request, &host);
     let launch_request = match prepared {
@@ -3056,6 +3124,110 @@ fn reconcile_finished(ledger: &Ledger) -> Result<()> {
     Ok(())
 }
 
+/// Failed ordinary jobs with a saved pre-dispatch witness use the same durable
+/// prohibition and preparation-release protocol as cancelled requests.
+pub(crate) fn settle_failed_jobs(ledger: &Ledger) -> Result<()> {
+    for ticket in queue(ledger)? {
+        if ticket.state != "failed" || !matches!(ticket.request.action, Action::Job { .. }) {
+            continue;
+        }
+        crate::admissions::lock(ledger, &ticket.request.id, || {
+            if crate::admissions::get(ledger, &ticket.request.id)?
+                .is_some_and(|attempt| attempt.unit.is_none() && attempt.launch.is_none())
+                && no_launch_proof(ledger, &ticket)?
+                && let Some(saved) = cancellation(ledger, &ticket.request)?
+            {
+                project_cancellation(ledger, &saved)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn release_unstarted_jobs(fleet: &Fleet) -> Result<()> {
+    for saved in crate::job_store::cancellations(fleet.ledger)? {
+        let request = &saved.ticket.request;
+        if !matches!(request.action, Action::Job { .. })
+            || saved.outcome != crate::prepare::disposition::Outcome::NotStarted
+            || saved.release == "pending"
+            || crate::job_store::unstarted_finished(fleet.ledger, &request.id)?.is_some()
+        {
+            continue;
+        }
+        let result = (|| {
+            let proven = crate::admissions::lock(fleet.ledger, &request.id, || {
+                no_launch_proof(fleet.ledger, &saved.ticket)
+            })?;
+            if !proven {
+                return Err(Error::Invalid("unstarted origin proof changed".into()));
+            }
+            let validity = request_validity(fleet.ledger, request)?
+                .ok_or_else(|| Error::Invalid("unstarted release validity missing".into()))?;
+            let proof = jobs::UnstartedRelease {
+                id: request.id.clone(),
+                validity,
+                owner: request.owner.clone(),
+                owner_host: request
+                    .owner_host
+                    .clone()
+                    .ok_or_else(|| Error::Invalid("unstarted origin missing".into()))?,
+            };
+            let selected = saved
+                .admission
+                .as_ref()
+                .and_then(|value| value.pointer("/host/id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .or(crate::job_store::selection(fleet.ledger, &request.id)?);
+            let host = fleet.find(selected.as_deref().unwrap_or(crate::hosts::LOCAL))?;
+            let ack = fleet.release_unstarted(host, &proof)?;
+            if ack.request != proof {
+                return Err(crate::unit_transport::conflict(
+                    "unstarted acknowledgement changed",
+                ));
+            }
+            let mut finished = None;
+            jobs::finish_once(fleet.ledger, &mut finished, Some(validity.created_ms))?;
+            crate::job_store::finish_unstarted(
+                fleet.ledger,
+                &request.id,
+                finished.ok_or_else(|| Error::Invalid("unstarted completion missing".into()))?,
+            )
+        })();
+        if let Err(error) = result {
+            eprintln!("dogsled unstarted release {}: {error}", request.id);
+        }
+    }
+    Ok(())
+}
+
+/// A retained row is not ownership once its owner has validated completion and
+/// released every dependent reference. Observation does not create proof.
+pub(crate) fn settled(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
+    if crate::admissions::exists(ledger, id)? {
+        return Ok(admission_completion(ledger, id)?.is_some() && references_released(ledger, id)?);
+    }
+    if crate::launch::ordinary_released(ledger, id, now)? {
+        return references_released(ledger, id);
+    }
+    if let Some(finished) = crate::job_store::unstarted_finished(ledger, id)? {
+        return Ok(jobs::completion_time(
+            ledger,
+            Some(finished),
+            jobs::request_validity(ledger, id)?.map(|v| v.created_ms),
+            true,
+        )?
+        .is_some());
+    }
+    if let Some(saved) = crate::job_store::cancellation(ledger, id)? {
+        return Ok(saved.completion_version == Some(1)
+            && saved.finished_ms.is_some()
+            && saved.outcome == crate::prepare::disposition::Outcome::NotStarted
+            && saved.release == "not_needed");
+    }
+    Ok(false)
+}
+
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     reconcile_finished(fleet.ledger)?;
     crate::launch::release_owned(fleet)?;
@@ -3109,7 +3281,9 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     })?;
     // After admission and outside its lock: each record takes its own request lock,
     // so release work never delays admission of unrelated tickets.
-    repair_cancellations(fleet)
+    settle_failed_jobs(fleet.ledger)?;
+    repair_cancellations(fleet)?;
+    release_unstarted_jobs(fleet)
 }
 
 pub fn job_host<'a>(fleet: &'a Fleet<'_>, id: &str, now: u64) -> Result<&'a Host> {

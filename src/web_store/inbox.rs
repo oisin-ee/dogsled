@@ -196,16 +196,35 @@ pub(crate) fn put_sent(tx: &Transaction<'_>, records: &[Sent]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn failures(tx: &Transaction<'_>) -> Result<BTreeMap<String, String>> {
+pub(crate) fn failures(
+    tx: &Transaction<'_>,
+) -> Result<BTreeMap<String, crate::inbox::NotificationFailure>> {
     Ok(tx
-        .prepare_cached("SELECT id, reason FROM notification_failures ORDER BY id")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .prepare_cached(
+            "SELECT id, reason, owner, owner_host FROM notification_failures ORDER BY id",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                crate::inbox::NotificationFailure {
+                    reason: row.get(1)?,
+                    owner: row.get(2)?,
+                    owner_host: row.get(3)?,
+                },
+            ))
+        })?
         .collect::<rusqlite::Result<_>>()?)
 }
 
-pub(crate) fn put_failure(tx: &Transaction<'_>, id: &str, reason: &str) -> Result<()> {
+pub(crate) fn put_failure(
+    tx: &Transaction<'_>,
+    id: &str,
+    failure: &crate::inbox::NotificationFailure,
+) -> Result<()> {
     let mut columns = Columns::default();
     columns.text("id", Some(id));
-    columns.text("reason", Some(reason));
+    columns.text("reason", Some(&failure.reason));
+    columns.text("owner", Some(&failure.owner));
+    columns.text("owner_host", Some(&failure.owner_host));
     columns.upsert(tx, "notification_failures", "id")
 }

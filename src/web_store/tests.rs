@@ -84,23 +84,32 @@ fn sent_and_failure_tables_round_trip_and_clear_updates() -> Result<()> {
         "from":{"name":"lead","pane":"o","terminal":"sender","host":"local"}, "kind":"task", "created_ms":1,
         "state":"failed", "reason":"gone", "check":{"attempts":3,"next_ms":99}
     }))?;
+    let mut failure = crate::inbox::NotificationFailure {
+        reason: "failed".into(),
+        owner: "w1:p1".into(),
+        owner_host: "origin".into(),
+    };
     write(&ledger, |tx| {
         inbox::put_sent(tx, std::slice::from_ref(&sent))?;
-        inbox::put_failure(tx, "event", "failed")
+        inbox::put_failure(tx, "event", &failure)
     })?;
     assert_eq!(read(&ledger, inbox::sent)?, vec![sent.clone()]);
-    assert_eq!(read(&ledger, inbox::failures)?["event"], "failed");
+    let saved = read(&ledger, inbox::failures)?;
+    assert_eq!(saved["event"].reason, "failed");
+    assert_eq!(saved["event"].owner, "w1:p1");
+    assert_eq!(saved["event"].owner_host, "origin");
     sent.name = None;
     sent.harness = None;
     sent.reason = None;
     sent.from = crate::inbox::Sender::default();
+    failure.reason = "changed".into();
     write(&ledger, |tx| {
         inbox::put_sent(tx, std::slice::from_ref(&sent))?;
-        inbox::put_failure(tx, "event", "changed")
+        inbox::put_failure(tx, "event", &failure)
     })?;
     assert_eq!(read(&ledger, inbox::sent)?, vec![sent.clone()]);
-    assert_eq!(read(&ledger, inbox::failures)?["event"], "changed");
-    assert!(write(&ledger, |tx| inbox::put_failure(tx, "", "bad")).is_err());
+    assert_eq!(read(&ledger, inbox::failures)?["event"].reason, "changed");
+    assert!(write(&ledger, |tx| inbox::put_failure(tx, "", &failure)).is_err());
     assert_eq!(read(&ledger, inbox::failures)?.len(), 1);
     let mut bad = sent.clone();
     bad.created_ms = u64::MAX;

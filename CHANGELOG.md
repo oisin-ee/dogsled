@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
+
 ## 0.30.0 - 2026-11-02
 
 - Store launch receipts, progress, releases, seeds, and continuation receipts in typed SQLite tables.

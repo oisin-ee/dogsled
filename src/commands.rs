@@ -75,6 +75,70 @@ pub enum Placement {
     },
 }
 
+/// Resource pruning retries the lifecycle owner; it never deletes unproved evidence.
+pub(crate) fn prune(
+    fleet: &Fleet,
+    host: &Host,
+    plan: &crate::cleanup::Plan,
+    now: u64,
+) -> Result<crate::cleanup::Applied> {
+    let mut ordinary = crate::cleanup::Plan::default();
+    ordinary.entries.extend(
+        plan.entries
+            .iter()
+            .filter(|entry| entry.class != "resources")
+            .cloned(),
+    );
+    let resources: Vec<_> = plan
+        .entries
+        .iter()
+        .filter(|entry| entry.class == "resources")
+        .collect();
+    if !resources.is_empty() {
+        crate::work::settle_failed_jobs(fleet.ledger)?;
+        crate::work::repair_cancellations(fleet)?;
+        crate::launch::release_owned(fleet)?;
+        crate::jobs::expire(fleet.ledger, now)?;
+    }
+    let mut applied: crate::cleanup::Applied = if host.is_local() {
+        crate::cleanup::apply(&fleet.node(), &ordinary, now)?
+    } else {
+        fleet.remote_setup(
+            host,
+            &[
+                "prune".into(),
+                "--plan".into(),
+                serde_json::to_string(&ordinary)?,
+            ],
+        )?
+    };
+    if !resources.is_empty() {
+        let held = if host.is_local() {
+            crate::holds::local(fleet.ledger, &host.id, now, fleet.policy.reservation_ttl_ms)?
+        } else {
+            fleet
+                .remote::<crate::node::SnapshotReport>(host, &["snapshot".into()])?
+                .holds
+        };
+        for resource in resources {
+            if let Some(hold) = held.iter().find(|hold| hold.resource == resource.id) {
+                let detail = format!("{} remains held: {}", resource.id, hold.display());
+                applied.failures.push(detail.clone());
+                applied.failure_entries.push(crate::cleanup::Failure {
+                    entry: resource.clone(),
+                    detail,
+                });
+            } else {
+                applied.results.push(format!(
+                    "{}: ownership released; replay evidence follows normal retention",
+                    resource.id
+                ));
+            }
+        }
+    }
+    Ok(applied)
+}
+
 /// Admission expiry has already proved completion and released every dependant.
 pub(crate) fn expire_selection(ledger: &crate::ledger::Ledger, id: &str) -> Result<()> {
     crate::job_store::put_selection(ledger, id, None)

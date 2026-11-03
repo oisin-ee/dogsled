@@ -736,7 +736,21 @@ fn processes(shell: &dyn Shell, panes: &[Pane], plan: &mut Plan) -> Result<()> {
 }
 
 pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
-    survey(node, Scope::Prune, now)
+    let mut plan = survey(node, Scope::Prune, now)?;
+    for hold in crate::holds::local(
+        node.ledger,
+        crate::hosts::LOCAL,
+        now,
+        node.thresholds.reservation_ttl_ms,
+    )? {
+        plan.entries.push(entry(
+            "resources",
+            hold.resource.clone(),
+            hold.display(),
+            false,
+        ));
+    }
+    Ok(plan)
 }
 
 /// The readable repositories with their worktrees and fresh loss evidence. A missing or

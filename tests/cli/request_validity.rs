@@ -1348,9 +1348,14 @@ fn a_host_launch_that_expires_during_the_pane_allocation_dispatches_nothing() {
     let herdr = rig.log("herdr.log");
     assert!(!herdr.contains("pane run"), "{herdr}");
     assert!(rig.launch_record("job-1", "receipt").is_null());
-    // The preparation was not released.
-    let preparations = rig.preparations();
-    assert_eq!(preparations.as_array().unwrap().len(), 1, "{preparations}");
+    // The producer proves that its non-executable intent never dispatched, so the
+    // matching preparation can finish without inventing a process exit.
+    assert_eq!(rig.preparations(), json!([]));
+    let job = rig.job("job-1");
+    assert_eq!(job["state"], "blocked");
+    assert!(job["started_ms"].is_null());
+    assert!(job["exit"].is_null());
+    assert!(job["ended_ms"].is_number());
     // The pane this attempt allocated was retired.
     assert!(herdr.contains("pane close w2:p1"), "{herdr}");
 }
