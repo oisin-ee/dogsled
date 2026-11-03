@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Running commands and services switch to the newest recorded Dogsled executable without a manual restart. Live MCP sessions keep their connection and pending request.
+
 ## 0.30.0 - 2026-11-02
 
 - Store launch receipts, progress, releases, seeds, and continuation receipts in typed SQLite tables.

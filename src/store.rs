@@ -10,11 +10,23 @@ use crate::ledger::Ledger;
 /// empty: earlier records are not read or converted.
 const VERSION: i64 = 2;
 
+fn supported_version() -> i64 {
+    if cfg!(debug_assertions)
+        && crate::upgrade::reported_version() != env!("CARGO_PKG_VERSION")
+        && let Ok(version) = std::env::var("DOGSLED_TEST_SCHEMA_VERSION")
+        && let Ok(version) = version.parse()
+    {
+        return version;
+    }
+    VERSION
+}
+
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
     [
         crate::tables::SCHEMA,
         crate::tables::SERVICE_LANES_SCHEMA,
+        crate::tables::WRITER_SCHEMA,
         crate::admissions::SCHEMA,
         crate::launch_store::SCHEMA,
         crate::web_store::SCHEMA,
@@ -27,15 +39,21 @@ pub(crate) fn schema() -> String {
 }
 
 fn create(connection: &Connection) -> Result<()> {
-    connection.execute_batch(&format!("{}PRAGMA user_version = {VERSION};", schema()))?;
+    connection.execute_batch(&format!(
+        "{}PRAGMA user_version = {};",
+        schema(),
+        supported_version()
+    ))?;
     Ok(())
 }
 
 fn version(connection: &Connection) -> Result<i64> {
+    crate::upgrade::guard(connection)?;
     let version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > VERSION {
+    let supported = supported_version();
+    if version > supported {
         return Err(Error::Invalid(format!(
-            "state.db schema version {version} is newer than supported version {VERSION}"
+            "state.db schema version {version} is newer than supported version {supported}"
         )));
     }
     Ok(version)
@@ -58,19 +76,25 @@ fn database(ledger: &Ledger) -> Result<std::path::PathBuf> {
 fn open(ledger: &Ledger) -> Result<Connection> {
     let path = database(ledger)?;
     std::fs::create_dir_all(&ledger.dir)?;
-    let mut connection = Connection::open(path)?;
+    let mut connection = Connection::open(&path)?;
     connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
     // Refuse a newer schema before changing persistent connection settings.
     let current = version(&connection)?;
     connection.execute_batch("PRAGMA synchronous=FULL;")?;
-    if current < VERSION {
+    if current < supported_version() {
         // Two fresh openers deadlock upgrading SHARED to EXCLUSIVE for WAL; SQLite returns BUSY without calling the busy handler.
         ledger.with_lock("state-db", || {
             let current = version(&connection)?;
             connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
-            if current < VERSION {
+            if current < supported_version() {
                 // An older store starts again empty. Nothing reads or converts it.
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                // Recheck inside the write transaction: another binary may have opened
+                // and registered since the schema check above.
+                if version(&tx)? == supported_version() {
+                    tx.commit()?;
+                    return Ok(());
+                }
                 let tables: Vec<String> = tx
                     .prepare(
                         "SELECT name FROM sqlite_schema
@@ -82,6 +106,8 @@ fn open(ledger: &Ledger) -> Result<Connection> {
                     tx.execute_batch(&format!("DROP TABLE \"{table}\""))?;
                 }
                 create(&tx)?;
+                // Publish the replacement schema and its executable owner atomically.
+                crate::tables::save_writer(&tx, &crate::upgrade::self_writer()?)?;
                 tx.commit()?;
             }
             Ok(())
@@ -90,6 +116,7 @@ fn open(ledger: &Ledger) -> Result<Connection> {
         connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
     }
     connection.execute_batch("PRAGMA foreign_keys=ON;")?;
+    crate::upgrade::register(&mut connection, &path)?;
     Ok(connection)
 }
 
@@ -148,7 +175,7 @@ fn identity(path: &std::path::Path) -> Result<Option<Identity>> {
 fn connection(ledger: &Ledger, path: &std::path::Path) -> Result<(Identity, Connection)> {
     if let Some((cached, connection)) = CONNECTIONS.with_borrow_mut(|open| open.remove(path))
         && identity(path)? == Some(cached)
-        && version(&connection)? == VERSION
+        && version(&connection)? == supported_version()
     {
         return Ok((cached, connection));
     }
@@ -185,6 +212,7 @@ fn transact<T>(
         let (opened, mut connection) = connection(ledger, &path)?;
         connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
         let tx = connection.transaction_with_behavior(behavior)?;
+        crate::upgrade::guard(&tx)?;
         let result = f(&tx)?;
         tx.commit()?;
         CONNECTIONS.with_borrow_mut(|open| open.insert(path, (opened, connection)));
@@ -485,8 +513,21 @@ mod tests {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_millis(50));
-        let error = write(&ledger, |_| Ok(())).unwrap_err();
+        // Give setup a generous command budget. Verify the timeout the store installs,
+        // then refuse a genuine lock conflict immediately, without racing that deadline.
+        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_secs(10));
+        let error = read(&ledger, |contender| {
+            let timeout: i64 = contender.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            assert!(
+                (1..=10_000).contains(&timeout),
+                "SQLite timeout {timeout} exceeds the command budget"
+            );
+            contender.execute_batch(
+                "PRAGMA busy_timeout=0; CREATE TABLE deadline_contender (id INTEGER)",
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
         assert!(
             matches!(error, Error::Deadline(ref detail) if detail == "state.db busy"),
             "{error}"

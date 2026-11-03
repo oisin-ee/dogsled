@@ -5,6 +5,8 @@
 //! pane in `HERDR_PANE_ID`, which the harness passes to this server. Tokio stays in this file;
 //! each call runs the synchronous code on a blocking thread.
 
+mod handover;
+
 use crate::cli::WorkArgs;
 use crate::config::Policy;
 use crate::error::Error;
@@ -666,7 +668,19 @@ impl Server {
 impl ServerHandler for Server {}
 
 /// Serve the tools on stdin and stdout until the client disconnects.
-pub fn serve(policy: Policy, ledger: Ledger, home: String) -> crate::error::Result<()> {
+pub fn serve(
+    policy: Policy,
+    ledger: Ledger,
+    home: String,
+    resume: Option<&str>,
+) -> crate::error::Result<()> {
+    let resume: handover::Resume = resume
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    let peer = resume.peer.clone();
+    let transport = handover::Stdio::new(ledger.clone(), resume)?;
+    let failure = std::sync::Arc::clone(&transport.failure);
     let server = Server {
         context: std::sync::Arc::new(Context {
             policy,
@@ -678,14 +692,31 @@ pub fn serve(policy: Policy, ledger: Ledger, home: String) -> crate::error::Resu
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let service = server
-            .serve(rmcp::transport::stdio())
-            .await
-            .map_err(|e| Error::Invalid(format!("mcp: {e}")))?;
+        let service = if peer.is_some() {
+            rmcp::service::serve_directly(server, transport, peer)
+        } else {
+            match server.serve(transport).await {
+                Ok(service) => service,
+                Err(error) => {
+                    return Err(failure
+                        .lock()
+                        .map_err(|error| Error::Invalid(error.to_string()))?
+                        .take()
+                        .unwrap_or_else(|| Error::Invalid(format!("mcp: {error}"))));
+                }
+            }
+        };
         service
             .waiting()
             .await
             .map_err(|e| Error::Invalid(format!("mcp: {e}")))?;
+        if let Some(error) = failure
+            .lock()
+            .map_err(|error| Error::Invalid(error.to_string()))?
+            .take()
+        {
+            return Err(error);
+        }
         Ok(())
     })
 }

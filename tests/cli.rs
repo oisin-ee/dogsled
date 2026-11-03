@@ -63,6 +63,8 @@ mod transcripts;
 mod unit_requests;
 #[path = "cli/unit_seeded.rs"]
 mod unit_seeded;
+#[path = "cli/upgrade_handover.rs"]
+mod upgrade_handover;
 #[path = "cli/watchdog.rs"]
 mod watchdog;
 #[path = "cli/web_state.rs"]
