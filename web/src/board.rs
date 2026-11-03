@@ -5,7 +5,6 @@ use portal_types::agents::AgentView;
 use portal_types::{BoardView, GroupView, RowView, TodoView};
 
 use crate::app::{InboxItem, InboxKind, InboxSelection};
-use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::item::{Item, ItemContent, ItemSize, ItemTitle, ItemVariant};
 use crate::components::sidebar::{
     SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton,
@@ -25,6 +24,16 @@ pub struct NavigationRepo {
     pub to_land: usize,
 }
 
+impl NavigationRepo {
+    pub fn agent_count(&self) -> usize {
+        self.rows
+            .iter()
+            .flat_map(|row| std::iter::once(row).chain(&row.workers))
+            .filter(|row| row.role != "job")
+            .count()
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct NavigationRow {
     pub pane: Option<String>,
@@ -35,6 +44,7 @@ pub struct NavigationRow {
     pub worker: bool,
     pub unseen: bool,
     pub workers: Vec<NavigationRow>,
+    pub progress: Option<(usize, usize)>,
 }
 
 /// Ledger rows are workers; Herdr agents without a ledger row are leads.
@@ -66,6 +76,13 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 worker: false,
                 unseen: false,
                 workers: Vec::new(),
+                progress: todo_progress(
+                    board
+                        .repos
+                        .iter()
+                        .flat_map(|repo| &repo.todos)
+                        .find(|todo| todo.pane == agent.pane),
+                ),
             });
     }
     for repo in &board.repos {
@@ -112,6 +129,18 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
     navigation
 }
 
+fn todo_progress(todo: Option<&TodoView>) -> Option<(usize, usize)> {
+    let todo = todo?;
+    let total = todo.sections.iter().map(|section| section.count).sum();
+    let completed = todo
+        .sections
+        .iter()
+        .filter(|section| section.status == portal_types::TodoStatusView::Completed)
+        .map(|section| section.count)
+        .sum();
+    Some((completed, total))
+}
+
 fn repository_group(
     groups: &mut Vec<NavigationRepo>,
     repository: Option<String>,
@@ -156,6 +185,11 @@ fn navigation_row(row: &RowView, todos: &[TodoView]) -> NavigationRow {
         worker: true,
         unseen: row.unseen,
         workers: Vec::new(),
+        progress: todo_progress(
+            todos
+                .iter()
+                .find(|todo| row.pane.as_deref() == Some(&todo.pane)),
+        ),
     }
 }
 
@@ -191,18 +225,14 @@ fn task_title(title: &str) -> String {
 
 #[component]
 pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
-    let count = group
-        .rows
-        .iter()
-        .map(|row| 1 + row.workers.len())
-        .sum::<usize>();
+    let count = group.agent_count();
     let branches = group.to_land;
     rsx! {
         SidebarGroup {
             if let Some(repository) = group.repository {
                 SidebarGroupLabel { title: "{repository}",
-                    "{repository_name(&repository)} · {count} "
-                    if count == 1 { "agent" } else { "agents" }
+                    span { "{repository_name(&repository)}" }
+                    span { "{count}" }
                 }
             }
             SidebarGroupContent {
@@ -225,7 +255,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                         SidebarMenuItem {
                             Item { variant: ItemVariant::Muted, size: ItemSize::Sm,
                                 ItemContent {
-                                    ItemTitle { "To land · {branches} " if branches == 1 { "branch" } else { "branches" } }
+                                    ItemTitle { "{branches} " if branches == 1 { "branch to land" } else { "branches to land" } }
                                 }
                             }
                         }
@@ -240,6 +270,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
 fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
     let mut selected = use_context::<Signal<Option<String>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
+    let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
     let pending = inbox.iter().find(|item| {
         Some(&item.selection.pane) == row.pane.as_ref()
             && (!row.worker || item.selection.kind == InboxKind::Prompt)
@@ -247,47 +278,36 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
     let tag = pending.map(|item| item.selection.kind);
     let needs_owner = tag == Some(InboxKind::Prompt) || row.unseen;
     let worker_status = worker_status(&row, tag);
+    let label = tag.map_or_else(
+        || row.title.clone(),
+        |kind| format!("{} · {}", row.title, kind.tag()),
+    );
     let is_selected = row.pane.is_some() && selected() == row.pane;
-    let dot = if row.worker {
-        if needs_owner {
-            BadgeVariant::Destructive
-        } else {
-            BadgeVariant::Outline
-        }
-    } else if tag.is_some() {
-        BadgeVariant::Destructive
+    let status = if needs_owner || (!row.worker && tag.is_some()) {
+        "waiting"
+    } else if !row.worker && matches!(row.state.as_str(), "working" | "running") {
+        "running"
     } else {
-        match row.state.as_str() {
-            "working" | "running" => BadgeVariant::Primary,
-            "done" | "closed" => BadgeVariant::Secondary,
-            _ => BadgeVariant::Outline,
-        }
+        "muted"
     };
     let size = if row.worker {
         SidebarMenuButtonSize::Sm
     } else {
         SidebarMenuButtonSize::Default
     };
-    // The library ellipsizes the last `span` of a menu button, so the title goes last.
     let body = rsx! {
-        Badge { variant: dot, aria_hidden: true, "●" }
-        if row.worker {
-            Badge { variant: if needs_owner { BadgeVariant::Destructive } else { BadgeVariant::Secondary },
-                "{worker_status}"
-            }
-        } else {
-            Badge { variant: BadgeVariant::Secondary, "{row.role}" if !row.host.is_empty() { " · {row.host}" } }
-            if let Some(kind) = tag {
-                Badge { variant: BadgeVariant::Outline, "{kind.tag()}" }
-            }
-        }
-        span { "{row.title}" }
+        span { class: "agent-dot", "data-status": status, aria_hidden: "true" }
+        span { class: "agent-title", "{row.title}" }
+        if row.worker { small { "{worker_status}" } }
+        else if let Some((done, total)) = row.progress { small { "{done}/{total}" } }
     };
     rsx! {
         SidebarMenuButton {
             is_active: is_selected,
+            "data-worker": row.worker,
+            "data-needs-owner": needs_owner,
             size,
-            title: "{row.title}",
+            title: "{label}",
             r#as: move |attributes: Vec<Attribute>| {
                 let body = body.clone();
                 match row.pane.clone() {
@@ -298,6 +318,7 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
                             onclick: move |_| {
                                 selected.set(Some(pane.clone()));
                                 selection.set(None);
+                                panel.set(crate::app::LeadPanel::Chat);
                             },
                             ..attributes,
                             {body}
@@ -373,6 +394,29 @@ mod shell_tests {
         assert!(rows[1].workers[0].worker);
         assert_eq!(rows[2].pane.as_deref(), Some("orphan"));
         assert!(rows[2].worker);
+        Ok(())
+    }
+
+    #[test]
+    fn navigation_counts_agents_without_removing_jobs() -> Result<(), serde_json::Error> {
+        let mut nested_job = row("sh", Some("lead-a"), "working")?;
+        nested_job.kind = "job".to_owned();
+        let mut standalone_job = row("pnpm", None, "working")?;
+        standalone_job.kind = "job".to_owned();
+        let groups = navigation_groups(
+            &board(vec![
+                row("worker-b", Some("lead-a"), "working")?,
+                nested_job,
+                standalone_job,
+            ]),
+            &agents()?,
+        );
+        let repo = &groups.repos[0];
+        assert_eq!(repo.agent_count(), 3);
+        assert_eq!(repo.rows.len(), 3);
+        assert_eq!(repo.rows[0].workers.len(), 2);
+        assert!(repo.rows[0].workers.iter().any(|row| row.role == "job"));
+        assert!(repo.rows.iter().any(|row| row.role == "job"));
         Ok(())
     }
 
