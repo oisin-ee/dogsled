@@ -112,17 +112,33 @@ impl AppState {
 /// The command deadline does not apply here: a server runs until it is told
 /// to stop.
 pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: Option<u16>) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let outcome = runtime.block_on(run(ledger, policy, home, port.unwrap_or(policy.web.port)));
-    drop(runtime);
-    crate::upgrade::check(ledger)?;
-    outcome
+    loop {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let outcome = runtime.block_on(run(ledger, policy, home, port.unwrap_or(policy.web.port)));
+        drop(runtime);
+        let Some(writer) = outcome? else {
+            return Ok(());
+        };
+        match crate::upgrade::handover(&writer, None) {
+            Err(error) if matches!(error.root(), crate::error::Error::NewerWriter(_)) => {
+                eprintln!("dogsled web upgrade: {error}");
+            }
+            result => {
+                return result;
+            }
+        }
+    }
 }
 
 /// The server's own work: read the board, publish it, and serve it.
-async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<()> {
+async fn run(
+    ledger: &Ledger,
+    policy: &Policy,
+    home: &str,
+    port: u16,
+) -> Result<Option<crate::tables::Writer>> {
     run_until(ledger, policy, home, port, System::default(), shutdown()).await
 }
 
@@ -134,7 +150,7 @@ async fn run_until(
     port: u16,
     shell: impl crate::shell::Shell + 'static,
     stopping: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<()> {
+) -> Result<Option<crate::tables::Writer>> {
     // The first payload is empty: a read that fails must not keep the server
     // from starting. The reader replaces it within a tick.
     let (sender, receiver) = watch::channel(empty_payload());
@@ -142,7 +158,7 @@ async fn run_until(
     let port = state.port;
     // The reader runs on a blocking thread, like the sidebar's reader. It reads
     // the cached state and never probes.
-    let reader = spawn_reader(
+    let (reader, mut upgrade) = spawn_reader(
         shell,
         ledger.clone(),
         policy.clone(),
@@ -157,15 +173,14 @@ async fn run_until(
     let outcome = serve_until(listener, state, stopping).await;
     // A normal shutdown must not wait for a blocked shell read. An upgrade instead
     // drains the reader before exec, so none of its work crosses the image boundary.
-    if matches!(
-        crate::upgrade::newer(ledger)?,
-        crate::upgrade::Boundary::Ready(_)
-    ) {
+    outcome?;
+    let writer = upgrade.try_recv().ok();
+    if writer.is_some() {
         reader
             .join()
             .map_err(|_| crate::error::Error::Invalid("web reader failed".into()))?;
     }
-    Ok(outcome?)
+    Ok(writer)
 }
 
 /// Stop every response before waiting for the HTTP connections to drain.
@@ -284,8 +299,20 @@ fn spawn_reader(
     home: String,
     sender: watch::Sender<String>,
     stop: CancellationToken,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || reader(&shell, &ledger, &policy, &home, &sender, &stop))
+) -> (
+    std::thread::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<crate::tables::Writer>,
+) {
+    let (upgrade, receiver) = tokio::sync::oneshot::channel();
+    let handle = std::thread::spawn(move || {
+        if let Some(writer) = reader(&shell, &ledger, &policy, &home, &sender, &stop) {
+            // Publish the boundary's writer before stopping HTTP. Normal shutdown
+            // must neither wait for the reader nor restart on a pending probe.
+            let _ = upgrade.send(writer);
+            stop.cancel();
+        }
+    });
+    (handle, receiver)
 }
 
 /// Rebuild the board every two seconds and publish it when it changed.
@@ -299,17 +326,14 @@ fn reader(
     home: &str,
     sender: &watch::Sender<String>,
     stop: &CancellationToken,
-) {
+) -> Option<crate::tables::Writer> {
     let mut last = String::new();
     // The fleet is discovered once and kept, like the sidebar's reader keeps
     // it. A failed discovery is tried again on the next tick.
     let mut fleet: Option<crate::hosts::Fleet<'_>> = None;
     while !stop.is_cancelled() {
         match crate::upgrade::newer(ledger) {
-            Ok(crate::upgrade::Boundary::Ready(_)) => {
-                stop.cancel();
-                break;
-            }
+            Ok(crate::upgrade::Boundary::Ready(writer)) => return Some(writer),
             Ok(crate::upgrade::Boundary::Current) => {}
             Ok(crate::upgrade::Boundary::Pending(error)) => {
                 eprintln!("dogsled web upgrade: {error}");
@@ -347,6 +371,7 @@ fn reader(
             std::thread::sleep(TICK);
         }
     }
+    None
 }
 
 /// Read the board the way the sidebar does: the cached fleet status, the board

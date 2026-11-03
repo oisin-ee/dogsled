@@ -198,9 +198,18 @@ pub fn command(
     home: &str,
     owner: Option<String>,
 ) -> Result<()> {
-    let outcome = run(shell, ledger, policy, home, owner);
-    crate::upgrade::check(ledger)?;
-    outcome
+    let owner = board::owner(owner, false)?.unwrap_or_default();
+    loop {
+        let writer = run(shell, ledger, policy, home, &owner)?;
+        match crate::upgrade::handover(&writer, None) {
+            Err(error) if matches!(error.root(), Error::NewerWriter(_)) => {
+                eprintln!("dogsled sidebar upgrade: {error}");
+            }
+            result => {
+                return result;
+            }
+        }
+    }
 }
 
 fn run(
@@ -208,11 +217,10 @@ fn run(
     ledger: &Ledger,
     policy: &Policy,
     home: &str,
-    owner: Option<String>,
-) -> Result<()> {
-    let owner = board::owner(owner, false)?.unwrap_or_default();
-    let mut model = Model::from_saved(model::load(ledger, &owner));
-    let saved_card = model::load(ledger, &owner).and_then(|s| s.selected_card);
+    owner: &str,
+) -> Result<crate::tables::Writer> {
+    let mut model = Model::from_saved(model::load(ledger, owner));
+    let saved_card = model::load(ledger, owner).and_then(|s| s.selected_card);
     let pal = palette::Palette::load_default();
     let (tx, rx) = mpsc::channel();
     let stop = AtomicBool::new(false);
@@ -223,12 +231,12 @@ fn run(
     let mut first = true;
     let mut next_upgrade = Instant::now();
     std::thread::scope(|scope| {
-        scope.spawn(|| reader(&shell, ledger, policy, home, &owner, &tx, &stop));
-        let outcome = (|| -> Result<()> {
+        scope.spawn(|| reader(&shell, ledger, policy, home, owner, &tx, &stop));
+        let outcome = (|| -> Result<crate::tables::Writer> {
             loop {
                 if Instant::now() >= next_upgrade {
                     match crate::upgrade::newer(ledger)? {
-                        crate::upgrade::Boundary::Ready(_) => return Ok(()),
+                        crate::upgrade::Boundary::Ready(writer) => return Ok(writer),
                         crate::upgrade::Boundary::Current => {}
                         crate::upgrade::Boundary::Pending(error) => {
                             model.notice = Some(error.to_string());
@@ -275,17 +283,16 @@ fn run(
                     };
                     if effect != Effect::None {
                         let tx = tx.clone();
-                        let owner = owner.clone();
                         let (shell, ledger, policy) = (shell, ledger, policy);
                         scope.spawn(move || {
-                            let message = perform(effect, shell, ledger, policy, home, &owner)
+                            let message = perform(effect, shell, ledger, policy, home, owner)
                                 .map_or_else(|e| Msg::Notice(e.to_string()), Msg::Notice);
                             let _ = tx.send(message);
                         });
                     }
                     let saved = model.saved();
                     if saved != last_saved {
-                        model::save(ledger, &owner, &saved);
+                        model::save(ledger, owner, &saved);
                         last_saved = saved;
                     }
                 }

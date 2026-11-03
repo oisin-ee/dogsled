@@ -98,8 +98,17 @@ impl Stdio {
                 peer,
                 pending: Some(line.into()),
             })?;
-            crate::upgrade::handover(&writer, Some(&resume))?;
-            return Ok(None);
+            match crate::upgrade::handover(&writer, Some(&resume)) {
+                Err(error) if matches!(error.root(), Error::NewerWriter(_)) => {
+                    // No input was dispatched or consumed by a failed exec. Let this
+                    // request fail under the guard and retry at the next input boundary.
+                    eprintln!("dogsled mcp upgrade: {error}");
+                }
+                result => {
+                    result?;
+                    return Ok(None);
+                }
+            }
         }
         let message: ClientJsonRpcMessage = serde_json::from_str(line)?;
         if let JsonRpcMessage::Request(request) = &message {

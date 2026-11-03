@@ -191,11 +191,22 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
 }
 
 pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
-    let outcome = node
-        .ledger
-        .with_lock("service", || run(node, policy, interval, once));
-    crate::upgrade::check(node.ledger)?;
-    outcome
+    loop {
+        let writer = node
+            .ledger
+            .with_lock("service", || run(node, policy, interval, once))?;
+        let Some(writer) = writer else {
+            return Ok(());
+        };
+        match crate::upgrade::handover(&writer, None) {
+            Err(error) if matches!(error.root(), Error::NewerWriter(_)) => {
+                eprintln!("dogsled service upgrade: {error}");
+            }
+            result => {
+                return result;
+            }
+        }
+    }
 }
 
 /// Start eligible action lanes without coupling their scheduling to publication or input.
@@ -224,7 +235,26 @@ fn start_lanes(
     }
 }
 
-fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
+/// A refusal aborts publication before starting more work; only the loop owns retries.
+fn publish(node: &Node<'_>, requested: &mut bool) -> Result<()> {
+    // The socket only reduces latency. Recover requests on every publication pass.
+    *requested |= crate::sweep::pending(node.ledger)?;
+    node.tick(now_ms())?;
+    if let Err(error) = crate::board::collect_todos(node.ledger) {
+        if matches!(error.root(), Error::NewerWriter(_)) {
+            return Err(error);
+        }
+        eprintln!("dogsled service: todo intake failed: {error}");
+    }
+    Ok(())
+}
+
+fn run(
+    node: &Node<'_>,
+    policy: &Policy,
+    interval: Duration,
+    once: bool,
+) -> Result<Option<crate::tables::Writer>> {
     let (send, recv) = mpsc::channel();
     let _listener = match Listener::start(node.ledger, send.clone()) {
         Ok(listener) => Some(listener),
@@ -241,8 +271,8 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut next = Instant::now();
     let outcome = (|| {
         loop {
-            let current = match crate::upgrade::newer(node.ledger)? {
-                crate::upgrade::Boundary::Ready(_) => return Ok(()),
+            let mut current = match crate::upgrade::newer(node.ledger)? {
+                crate::upgrade::Boundary::Ready(writer) => return Ok(Some(writer)),
                 crate::upgrade::Boundary::Current => true,
                 crate::upgrade::Boundary::Pending(error) => {
                     eprintln!("dogsled service upgrade: {error}");
@@ -251,13 +281,17 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                 }
             };
             if current {
-                // The socket only reduces latency. Recover requests on every publication pass.
-                requested |= crate::sweep::pending(node.ledger)?;
-                node.tick(now_ms())?;
-                if let Err(error) = crate::board::collect_todos(node.ledger) {
-                    eprintln!("dogsled service: todo intake failed: {error}");
+                match publish(node, &mut requested) {
+                    Ok(()) => {
+                        start_lanes(node, policy, once, &mut workers, completed, &send);
+                    }
+                    Err(error) if matches!(error.root(), Error::NewerWriter(_)) => {
+                        eprintln!("dogsled service pass: {error}");
+                        current = false;
+                        next = Instant::now();
+                    }
+                    Err(error) => return Err(error),
                 }
-                start_lanes(node, policy, once, &mut workers, completed, &send);
             }
             next += interval;
             loop {
@@ -281,7 +315,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     }));
                 }
                 if current && once && completed.iter().all(|done| *done) && sweep.is_none() {
-                    return Ok(());
+                    return Ok(None);
                 }
                 match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
                     Ok(Event::Sweep) => requested = true,

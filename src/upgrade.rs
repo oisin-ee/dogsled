@@ -50,7 +50,7 @@ pub(crate) fn is_newer(writer: &Writer) -> Result<bool> {
 }
 
 pub(crate) fn refusal(writer: &Writer, reason: impl std::fmt::Display) -> Error {
-    Error::Invalid(format!(
+    Error::NewerWriter(format!(
         "state.db writer dogsled {} at {} is newer than this dogsled {}; handover failed: {reason}",
         writer.version,
         writer.executable,
@@ -72,6 +72,15 @@ enum Validation {
 
 /// This query deliberately knows nothing about the rest of the database's schema.
 pub(crate) fn newer(ledger: &Ledger) -> Result<Boundary> {
+    match boundary(ledger) {
+        // A writer can change while a stale registration is being replaced. Its
+        // transaction guard has the same retry semantics as an inconclusive probe.
+        Err(error) if matches!(error.root(), Error::NewerWriter(_)) => Ok(Boundary::Pending(error)),
+        result => result,
+    }
+}
+
+fn boundary(ledger: &Ledger) -> Result<Boundary> {
     let path = ledger.dir.join("state.db");
     if !path.try_exists()? {
         return Ok(Boundary::Current);
@@ -97,7 +106,8 @@ pub(crate) fn newer(ledger: &Ledger) -> Result<Boundary> {
 
 /// Store transactions refuse a newer owner; they never exec with locks or work live.
 pub(crate) fn guard(connection: &Connection) -> Result<()> {
-    crate::store::schema_version(connection)?;
+    // Ownership must be classified even if the newer writer also changed schema.
+    // A running owner retries at its boundary; stale writers still cannot open it.
     if let Some(writer) = crate::tables::writer(connection)?
         && is_newer(&writer)?
         && matches!(validated(&writer)?, Validation::Valid)
@@ -107,6 +117,7 @@ pub(crate) fn guard(connection: &Connection) -> Result<()> {
             "the command must hand over between units of work",
         ));
     }
+    crate::store::schema_version(connection)?;
     Ok(())
 }
 
@@ -369,6 +380,10 @@ mod tests {
         let tx = connection.transaction().unwrap();
         crate::tables::save_writer(&tx, &writer).unwrap();
         tx.commit().unwrap();
+        // A schema change inside the pass must not hide the newer-writer refusal.
+        connection
+            .pragma_update(None, "user_version", i32::MAX)
+            .unwrap();
         for (body, expected) in [
             ("exec sleep 60", "deadline reached"),
             ("exit 1", "did not exit successfully"),
@@ -380,8 +395,9 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let error = guard(&connection).unwrap_err().to_string();
-            assert!(error.contains(expected), "{error}");
+            let error = guard(&connection).unwrap_err();
+            assert!(matches!(error.root(), Error::NewerWriter(_)), "{error}");
+            assert!(error.to_string().contains(expected), "{error}");
             let recorded = crate::tables::writer(&connection).unwrap().unwrap();
             assert_eq!(recorded.version, writer.version);
             assert_eq!(recorded.executable, writer.executable);
