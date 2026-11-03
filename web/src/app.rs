@@ -14,7 +14,7 @@ use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
 use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::button::{Button, ButtonVariant};
-use crate::components::item::ItemGroup;
+use crate::components::item::{Item, ItemContent, ItemGroup, ItemSize, ItemTitle, ItemVariant};
 use crate::components::progress::Progress;
 use crate::components::scroll_area::ScrollArea;
 use crate::components::sidebar::{Sidebar, SidebarCollapsible, SidebarHeader, SidebarProvider};
@@ -316,7 +316,9 @@ pub fn App() -> Element {
                                 RepoGroup { key: "{index}:{group.repository:?}", group, inbox: items.clone() }
                             }
                             if groups.finished_without_repository > 0 {
-                                Status { "{groups.finished_without_repository} finished branches have no repository — see Land and clean up" }
+                                Item { variant: ItemVariant::Muted, size: ItemSize::Sm, "data-part": "finished-branches",
+                                    ItemContent { ItemTitle { "{groups.finished_without_repository} finished branches have no repository" } }
+                                }
                             }
                         },
                         None => rsx! { Skeleton { role: "status", aria_label: "Loading agents" } },
@@ -403,12 +405,12 @@ pub(crate) fn InboxSidebar(
     rsx! {
         Sidebar { class: "console-inbox", collapsible: SidebarCollapsible::None, aria_label: "Waiting on you",
             SidebarHeader { class: "console-column-header", h2 { "Waiting on you" }
-                Badge { class: "inbox-count", variant: BadgeVariant::Secondary, "data-waiting": waiting, "{label}" }
+                Badge { "data-part": "inbox-count", variant: BadgeVariant::Secondary, "data-waiting": waiting, "{label}" }
             }
             ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
                 if let Some(message) = &error { Alert { "Inbox unavailable: {message}. Reload to retry." } }
                 if loading && error.is_none() { Skeleton { role: "status", aria_label: "Loading inbox" } }
-                else if error.is_none() && count == Some(0) { Status { "Nothing is waiting on you." } }
+                else if error.is_none() && count == Some(0) { Status { "data-part": "column-empty", "Nothing is waiting on you." } }
                 else { InboxList { items, elapsed_ms, agents, reachable } }
             }
         }

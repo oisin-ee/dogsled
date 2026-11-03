@@ -104,6 +104,10 @@ fn empty_inbox_keeps_its_heading_and_zero_count() {
     assert!(html.contains(">0</span>"));
     assert!(html.contains("Nothing is waiting on you."));
     assert!(!html.contains("portal-inbox"));
+    assert!(html.contains(r#"data-part="column-empty""#), "{html}");
+    assert!(html.contains(r#"role="status""#), "{html}");
+    assert!(html.contains(r#"data-slot="item""#), "{html}");
+    assert_badge_class(&html, "inbox-count");
 }
 
 #[test]
@@ -155,7 +159,8 @@ fn review_root(props: (u32, u32, bool)) -> Element {
         decision: None,
     };
     rsx! { crate::review_view::ReviewEditor { initial, embedded: true,
-    lead: "Move state · lead · dogsled", on_close: |_| {}, on_done: |_| {} } }
+    lead: "Move state into typed SQLite with a very long task title", role: "lead",
+    repository: "github.com/oisin-ee/dogsled", on_close: |_| {}, on_done: |_| {} } }
 }
 
 fn question_root() -> Element {
@@ -190,6 +195,18 @@ fn embedded_review_has_one_header_and_revision_aware_tabs() -> Result<(), Box<dy
         dom.rebuild_in_place();
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("Typed SQLite state store"), "{html}");
+        assert!(html.contains(r#"class="review-lead-title""#), "{html}");
+        assert!(
+            html.contains(">Move state into typed SQLite with a very long task title</span>"),
+            "{html}"
+        );
+        assert!(html.contains(">· lead</span>"), "{html}");
+        assert!(html.contains(">· dogsled</span>"), "{html}");
+        assert!(!html.contains("github.com/oisin-ee/dogsled"), "{html}");
+        assert!(
+            html.contains(r#"class="review-prose markdown-body""#),
+            "{html}"
+        );
         assert!(html.contains(r#"aria-label="Close plan review""#), "{html}");
         assert!(html.contains(">Plan</button>"), "{html}");
         assert_eq!(html.contains(">Changes</button>"), revisions > 1, "{html}");
@@ -252,6 +269,103 @@ fn question_form_counts_answers_and_renders_markdown_content() {
     }
     assert!(!html.contains("**Rust**"), "{html}");
     assert!(!html.contains("**one**"), "{html}");
+    assert_badge_class(&html, "recommended-badge");
+}
+
+fn badge_root() -> Element {
+    rsx! { crate::components::badge::Badge { "Component class baseline" } }
+}
+
+fn assert_badge_class(html: &str, part: &str) {
+    let baseline = dioxus_ssr::render(&VirtualDom::prebuilt(badge_root));
+    let class = baseline
+        .split("class=\"")
+        .nth(1)
+        .and_then(|value| value.split('"').next());
+    let tag = html.split('<').find(|tag| {
+        tag.starts_with("span ")
+            && tag
+                .split('>')
+                .next()
+                .is_some_and(|attributes| attributes.contains(&format!("data-part=\"{part}\"")))
+    });
+    assert!(class.is_some_and(|class| tag.is_some_and(|tag| tag.contains(&format!("class=\"{class}\"")))), "missing official badge class for {part}: {html}");
+}
+
+fn todos_root() -> Element {
+    use portal_types::{TodoChildView, TodoItemView, TodoSectionView, TodoStatusView, TodoView};
+    let item = |status, text: &str| TodoItemView {
+        status,
+        text: text.to_owned(),
+        description: Some(format!("{text} description")),
+        review: false,
+        unit: Some("worker".to_owned()),
+        children: vec![TodoChildView {
+            status,
+            text: format!("{text} child"),
+            description: Some(format!("{text} child description")),
+            unit: Some("worker".to_owned()),
+        }],
+    };
+    let todos = vec![TodoView {
+        session: "session".to_owned(),
+        branch: None,
+        revision: 1,
+        current: "Work".to_owned(),
+        pane: "pane".to_owned(),
+        sections: vec![
+            TodoSectionView {
+                status: TodoStatusView::Pending,
+                count: 0,
+                items: vec![],
+            },
+            TodoSectionView {
+                status: TodoStatusView::InProgress,
+                count: 1,
+                items: vec![item(TodoStatusView::InProgress, "Active")],
+            },
+            TodoSectionView {
+                status: TodoStatusView::Completed,
+                count: 1,
+                items: vec![item(TodoStatusView::Completed, "Done")],
+            },
+            TodoSectionView {
+                status: TodoStatusView::Abandoned,
+                count: 1,
+                items: vec![item(TodoStatusView::Abandoned, "Dropped")],
+            },
+        ],
+    }];
+    rsx! { crate::agent_view::Todos { todos, workers: vec![("worker".to_owned(), "Assigned worker".to_owned())] } }
+}
+
+#[test]
+fn todos_count_all_items_and_hide_empty_sections() {
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(todos_root));
+    assert!(html.contains(">1 of 3</span>"), "{html}");
+    assert!(!html.contains("Pending · 0"), "{html}");
+    // AccordionContent mounts its body in the browser; SSR covers the section triggers.
+    for text in ["In progress · 1", "Completed · 1", "Abandoned · 1"] {
+        assert!(html.contains(text), "missing {text}: {html}");
+    }
+}
+
+fn empty_todos_root() -> Element {
+    rsx! { crate::agent_view::Todos { todos: Vec::new(), workers: Vec::new() } }
+}
+
+#[test]
+fn empty_todos_use_muted_column_copy_without_sections() {
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(empty_todos_root));
+    assert!(html.contains(">0 of 0</span>"), "{html}");
+    assert!(
+        html.contains("No todos are recorded for this agent."),
+        "{html}"
+    );
+    assert!(html.contains(r#"data-part="column-empty""#), "{html}");
+    assert!(html.contains(r#"role="status""#), "{html}");
+    assert!(html.contains(r#"data-slot="item""#), "{html}");
+    assert!(!html.contains("Pending"), "{html}");
 }
 
 #[test]

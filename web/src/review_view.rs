@@ -96,6 +96,8 @@ pub fn ReviewView(
     #[props(default)] review_id: Option<String>,
     #[props(default)] embedded: bool,
     #[props(default)] lead: String,
+    #[props(default)] role: String,
+    #[props(default)] repository: String,
     #[props(default)] on_close: EventHandler<()>,
 ) -> Element {
     let local_selected = use_signal(|| None::<String>);
@@ -160,7 +162,7 @@ pub fn ReviewView(
         if let Some(message) = error() { Alert { "{message}" } }
         if let Some(id) = current {
             ReviewLoader {
-                key: "{id}", id, tick: tick(), embedded, lead, on_close,
+                key: "{id}", id, tick: tick(), embedded, lead, role, repository, on_close,
                 on_done: move |id: String| list.write().retain(|item| item.id != id),
             }
         } else if loading() {
@@ -177,6 +179,8 @@ fn ReviewLoader(
     tick: u64,
     embedded: bool,
     lead: String,
+    role: String,
+    repository: String,
     on_close: EventHandler<()>,
     on_done: EventHandler<String>,
 ) -> Element {
@@ -197,7 +201,7 @@ fn ReviewLoader(
             if value.decision.is_some() {
                 Status { "This review is closed." }
             } else {
-                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, lead, on_close, on_done }
+                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, lead, role, repository, on_close, on_done }
             }
         } else { Status { "Loading plan…" } }
     }
@@ -643,6 +647,8 @@ pub(crate) fn ReviewEditor(
     initial: Review,
     embedded: bool,
     #[props(default)] lead: String,
+    #[props(default)] role: String,
+    #[props(default)] repository: String,
     #[props(default)] on_close: EventHandler<()>,
     on_done: EventHandler<String>,
 ) -> Element {
@@ -863,7 +869,15 @@ pub(crate) fn ReviewEditor(
                 header { class: "review-header",
                     div { class: "review-heading",
                         h1 { "{title}" }
-                        p { "Revision {n}" if !lead.is_empty() { " · {lead}" } }
+                        p {
+                            span { "Revision {n}" }
+                            if !lead.is_empty() {
+                                span { aria_hidden: "true", "·" }
+                                span { class: "review-lead-title", title: "{lead}", "{lead}" }
+                            }
+                            if !role.is_empty() { span { "· {role}" } }
+                            if !repository.is_empty() { span { "· {crate::board::repository_name(&repository)}" } }
+                        }
                     }
                     TabList { aria_label: "Review view",
                         TabTrigger { value: "plan", index: 0usize, "Plan" }
@@ -880,7 +894,7 @@ pub(crate) fn ReviewEditor(
                 div { class: "review-body",
                     TabContent { class: "review-document console-scroll", value: "plan", index: 0usize,
                         // innerHTML needs a host element of its own, with no other children.
-                        div { class: "review-prose", id: "review-plan", tabindex: "0", aria_label: "Plan text",
+                        div { class: "review-prose markdown-body", id: "review-plan", tabindex: "0", aria_label: "Plan text",
                             onmouseup: move |_| select(), onkeyup: move |_| select(), dangerous_inner_html: rendered }
                     }
                     if has_changes {

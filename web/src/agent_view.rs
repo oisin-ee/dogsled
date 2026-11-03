@@ -533,7 +533,8 @@ fn AgentSession(
                 div { class: "pending-review",
                     if let Some(RequestTab::Review(id)) = &pending {
                         ReviewView { review_id: id.clone(), embedded: true,
-                            lead: format!("{title} · {role} · {}", current.as_ref().and_then(|agent| agent.repository.as_deref()).unwrap_or("Unknown repository")),
+                            lead: title.clone(), role: role.to_owned(),
+                            repository: current.as_ref().and_then(|agent| agent.repository.clone()).unwrap_or_else(|| "Unknown repository".to_owned()),
                             on_close: move |_| choice.set(Some((review_identity.clone(), Tab::Conversation))),
                         }
                     }
@@ -634,7 +635,7 @@ fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool)
             for (index, turn) in turns.iter().enumerate() {
                 article { key: "{index}", class: if turn.role == Role::User { "conversation-owner" } else { "conversation-agent" },
                     aria_label: if turn.role == Role::User { "You" } else { "Agent" },
-                    div { dangerous_inner_html: crate::review_view::render_markdown(&turn.text) }
+                    div { class: "markdown-body", dangerous_inner_html: crate::review_view::render_markdown(&turn.text) }
                 }
             }
             if working { Status { "Working…" } }
@@ -826,12 +827,23 @@ fn BlockedPanel(
 }
 
 #[component]
-fn Todos(todos: Vec<TodoView>, workers: Vec<(String, String)>) -> Element {
+pub(crate) fn Todos(todos: Vec<TodoView>, workers: Vec<(String, String)>) -> Element {
+    let total: usize = todos
+        .iter()
+        .flat_map(|todo| &todo.sections)
+        .map(|section| section.count)
+        .sum();
+    let completed: usize = todos
+        .iter()
+        .flat_map(|todo| &todo.sections)
+        .filter(|section| section.status == TodoStatusView::Completed)
+        .map(|section| section.count)
+        .sum();
     rsx! {
         section { class: "todo-panel", aria_label: "Agent todos",
-            header { class: "console-column-header", h2 { "Todos" } }
+            header { class: "console-column-header", h2 { "Todos" } span { "{completed} of {total}" } }
             ScrollArea { class: "console-scroll todo-list", direction: ScrollDirection::Vertical,
-                if todos.is_empty() { Status { "No todos are recorded for this agent." } }
+                if total == 0 { Status { "data-part": "column-empty", "No todos are recorded for this agent." } }
                 for todo in todos {
                     {
                         let mut sections = todo.sections;
@@ -841,7 +853,7 @@ fn Todos(todos: Vec<TodoView>, workers: Vec<(String, String)>) -> Element {
                         });
                         rsx! {
                             Accordion { key: "{todo.session}", allow_multiple_open: true, horizontal: false,
-                                for (position, section) in sections.into_iter().enumerate() {
+                                for (position, section) in sections.into_iter().filter(|section| !section.items.is_empty()).enumerate() {
                                     {
                                         let mut items = section.items;
                                         if section.status == TodoStatusView::Completed { items.reverse(); }
@@ -855,17 +867,24 @@ fn Todos(todos: Vec<TodoView>, workers: Vec<(String, String)>) -> Element {
                                                                 ItemMedia { span { class: "todo-indicator", aria_label: status_label(item.status) } }
                                                                 ItemContent {
                                                                     ItemTitle { class: "todo-title", "{item.text}" }
-                                                                    if let Some(worker) = item.unit.as_ref().and_then(|unit| workers.iter().find(|(id, _)| id == unit)) {
-                                                                        ItemDescription { "{worker.1}" }
+                                                                    if matches!(item.status, TodoStatusView::InProgress | TodoStatusView::Pending) {
+                                                                        if let Some(worker) = item.unit.as_ref().and_then(|unit| workers.iter().find(|(id, _)| id == unit)) {
+                                                                            ItemDescription { "{worker.1}" }
+                                                                        }
+                                                                        if let Some(description) = item.description { ItemDescription { "{description}" } }
                                                                     }
-                                                                    if let Some(description) = item.description { ItemDescription { "{description}" } }
                                                                     ItemGroup {
                                                                         for child in item.children {
                                                                             Item { class: "todo-item", "data-status": status_class(child.status), size: ItemSize::Sm,
                                                                                 ItemMedia { span { class: "todo-indicator", aria_label: status_label(child.status) } }
                                                                                 ItemContent {
                                                                                     ItemTitle { class: "todo-title", "{child.text}" }
-                                                                                    if let Some(description) = child.description { ItemDescription { "{description}" } }
+                                                                                    if matches!(child.status, TodoStatusView::InProgress | TodoStatusView::Pending) {
+                                                                                        if let Some(worker) = child.unit.as_ref().and_then(|unit| workers.iter().find(|(id, _)| id == unit)) {
+                                                                                            ItemDescription { "{worker.1}" }
+                                                                                        }
+                                                                                        if let Some(description) = child.description { ItemDescription { "{description}" } }
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         }

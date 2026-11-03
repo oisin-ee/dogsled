@@ -285,7 +285,7 @@ pub(crate) fn AskForm(
                         values,
                     }
                 }
-                Card { class: "question-rejection", aria_label: "Reject interview",
+                Card { "data-part": "question-rejection", aria_label: "Reject interview",
                     CardContent {
                         Item {
                             ItemContent {
@@ -621,7 +621,7 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
     };
 
     rsx! {
-        Card { class: "question-block",
+        Card { "data-part": "question-block",
             role: if panel { None } else { Some("group") },
             aria_labelledby: if panel { None } else { Some(label.clone()) },
             CardHeader {
@@ -800,7 +800,7 @@ fn ChoiceOption(
                         span { "{label}" }
                     }
                 }
-                if recommended { Badge { class: "recommended-badge", "Recommended" } }
+                if recommended { Badge { "data-part": "recommended-badge", "Recommended" } }
             }
             if let Some(content) = content {
                 div { class: "question-option-content", ContentBlock { content } }

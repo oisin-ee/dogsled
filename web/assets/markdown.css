@@ -1,103 +1,75 @@
 /* Keep Markdown above late-loaded component sheets without styling controls. */
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) {
+.console-provider .console-shell .markdown-body {
   min-width: 0;
   color: var(--console-text);
   line-height: 1.75;
   overflow-wrap: anywhere;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  > :first-child {
+.console-provider .console-shell .markdown-body > :first-child {
   margin-top: 0;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  > :last-child {
+.console-provider .console-shell .markdown-body > :last-child {
   margin-bottom: 0;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(h1, h2, h3, h4, h5, h6) {
+.console-provider .console-shell .markdown-body :is(h1, h2, h3, h4, h5, h6) {
   margin: 1.5em 0 0.5em;
   color: var(--console-text);
   font-weight: 600;
   text-wrap: pretty;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) h1 {
+.console-provider .console-shell .markdown-body h1 {
   font-size: 1.5rem;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) h2 {
+.console-provider .console-shell .markdown-body h2 {
   font-size: 1.25rem;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) h3 {
+.console-provider .console-shell .markdown-body h3 {
   font-size: 1.125rem;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(h4, h5, h6) {
+.console-provider .console-shell .markdown-body :is(h4, h5, h6) {
   font-size: 1rem;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(p, ul, ol, blockquote, pre, table) {
+.console-provider .console-shell .markdown-body :is(p, ul, ol, blockquote, pre, table) {
   margin: 0.75em 0;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) p {
+.console-provider .console-shell .markdown-body p {
   text-wrap: pretty;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(ul, ol) {
+.console-provider .console-shell .markdown-body :is(ul, ol) {
   padding-left: 1.5em;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) ul {
+.console-provider .console-shell .markdown-body ul {
   list-style: disc;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) ol {
+.console-provider .console-shell .markdown-body ol {
   list-style: decimal;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) li + li {
+.console-provider .console-shell .markdown-body li + li {
   margin-top: 0.25em;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  li
-  > :is(ul, ol) {
+.console-provider .console-shell .markdown-body li > :is(ul, ol) {
   margin-block: 0.25em;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  li:has(> input[type="checkbox"]) {
+.console-provider .console-shell .markdown-body li:has(> input[type="checkbox"]) {
   list-style: none;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  input[type="checkbox"] {
+.console-provider .console-shell .markdown-body input[type="checkbox"] {
   width: 1em;
   height: 1em;
   margin: 0 0.5em 0 -1.5em;
@@ -105,44 +77,41 @@
   vertical-align: middle;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) del {
+.console-provider .console-shell .markdown-body del {
   color: var(--console-muted);
   text-decoration: line-through;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) blockquote {
+.console-provider .console-shell .markdown-body blockquote {
   padding-left: 1em;
   border-left: 1px solid var(--console-line);
   color: var(--console-muted);
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) a {
+.console-provider .console-shell .markdown-body a {
   color: var(--console-text);
   text-decoration: underline;
   text-decoration-color: var(--console-accent);
   text-underline-offset: 0.2em;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) a:hover {
+.console-provider .console-shell .markdown-body a:hover {
   text-decoration-color: currentColor;
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(code, pre) {
+.console-provider .console-shell .markdown-body :is(code, pre) {
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 0.875em;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) code {
+.console-provider .console-shell .markdown-body code {
   padding: 0.1em 0.3em;
   border-radius: 4px;
   background: var(--console-raised);
   color: var(--console-text);
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) pre {
+.console-provider .console-shell .markdown-body pre {
   max-width: 100%;
   padding: 12px 16px;
   border: 1px solid var(--console-line);
@@ -156,7 +125,7 @@
   scrollbar-color: var(--console-dim) var(--console-raised);
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) pre code {
+.console-provider .console-shell .markdown-body pre code {
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -164,7 +133,7 @@
   font-size: inherit;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) table {
+.console-provider .console-shell .markdown-body table {
   display: block;
   max-width: 100%;
   width: 100%;
@@ -173,68 +142,55 @@
   scrollbar-color: var(--console-dim) var(--console-bg);
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(th, td) {
+.console-provider .console-shell .markdown-body :is(th, td) {
   padding: 8px 12px;
+  overflow-wrap: break-word;
   border-bottom: 1px solid var(--console-line);
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) th {
+.console-provider .console-shell .markdown-body th {
   font-weight: 600;
+  text-align: start;
   white-space: nowrap;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) img {
+.console-provider .console-shell .markdown-body img {
   max-width: 100%;
   height: auto;
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) hr {
+.console-provider .console-shell .markdown-body hr {
   margin-block: 1.5em;
   border: 0;
   border-top: 1px solid var(--console-line);
 }
 
-.console-provider .console-shell :is(.conversation-turns > article > div, #review-plan) mark {
+.console-provider .console-shell .markdown-body mark {
   background: var(--console-waiting);
   color: var(--console-bg);
 }
 
 /* syntect scopes use separate prefixed classes for each scope atom. */
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  .syn-comment {
+.console-provider .console-shell .markdown-body .syn-comment {
   color: var(--console-muted);
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(.syn-keyword, .syn-storage) {
+.console-provider .console-shell .markdown-body :is(.syn-keyword, .syn-storage) {
   color: color-mix(in srgb, var(--console-accent) 55%, var(--console-text));
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(.syn-string, .syn-markup.syn-inserted) {
+.console-provider .console-shell .markdown-body :is(.syn-string, .syn-markup.syn-inserted) {
   color: var(--console-running);
 }
 
 .console-provider
   .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
+  .markdown-body
   :is(.syn-constant, .syn-entity.syn-name, .syn-support.syn-function) {
   color: var(--console-waiting);
 }
 
-.console-provider
-  .console-shell
-  :is(.conversation-turns > article > div, #review-plan)
-  :is(.syn-invalid, .syn-markup.syn-deleted) {
+.console-provider .console-shell .markdown-body :is(.syn-invalid, .syn-markup.syn-deleted) {
   color: var(--console-muted);
   text-decoration: underline wavy var(--console-waiting);
 }
