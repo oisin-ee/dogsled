@@ -470,6 +470,53 @@ fn running_serve_hands_over_between_passes_with_the_same_pid() {
     }
 }
 
+/// Hold tick after the loop boundary and pending-sweep read, before its store writes.
+fn serve_inside_pass(rig: &Rig, executable: &Path) -> Owned {
+    rig.script(
+        "df",
+        "#!/bin/sh\ntouch \"$RIG/inside-pass\"\nwhile ! test -f \"$RIG/release-pass\"; do sleep 0.01; done\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 100 10 90 10%% /\\n'\n",
+    );
+    let mut command = command(rig, &["serve", "--interval", "1"], executable);
+    command
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(rig.dir.join("service-stderr")).unwrap());
+    let owned = Owned::spawn(&mut command);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while !rig.dir.join("inside-pass").exists() {
+        assert!(
+            !process_gone(owned.pid),
+            "service exited: {}",
+            rig.log("service-stderr")
+        );
+        assert!(Instant::now() < deadline, "service did not enter its pass");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    owned
+}
+
+#[test]
+fn running_serve_hands_over_after_guard_refuses_inside_a_pass() {
+    let rig = Rig::short("upgrade-serve-guard");
+    let executable = replacement(&rig);
+    let mut owned = serve_inside_pass(&rig, &executable);
+    let pid = owned.pid;
+    record(&rig, &executable, NEW_VERSION);
+    fs::write(rig.dir.join("release-pass"), "release").unwrap();
+    wait_for_image(&mut owned, &executable);
+    assert_eq!(owned.child_mut().id(), pid);
+    assert!(
+        rig.log("service-stderr").contains("dogsled service pass:"),
+        "guard did not refuse inside the pass: {}",
+        rig.log("service-stderr")
+    );
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while samples(&rig) == 0 {
+        assert!(!process_gone(pid), "new service exited");
+        assert!(Instant::now() < deadline, "new service did not publish");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn running_serve_retries_an_unsuccessful_probe_without_replacing_the_writer() {
     let rig = Rig::short("upgrade-serve-pending");
@@ -483,24 +530,11 @@ fn running_serve_retries_an_unsuccessful_probe_without_replacing_the_writer() {
             ready.display(), executable.display()
         ),
     );
-    let mut command = command(&rig, &["serve", "--interval", "1"], &executable);
-    let journal = rig.dir.join("service-stderr");
-    command
-        .stdout(Stdio::null())
-        .stderr(fs::File::create(&journal).unwrap());
-    let mut owned = Owned::spawn(&mut command);
+    let mut owned = serve_inside_pass(&rig, &executable);
     let pid = owned.pid;
     let deadline = Instant::now() + PROCESS_DEADLINE;
-    while samples(&rig) == 0 {
-        assert!(
-            !process_gone(pid),
-            "service exited: {}",
-            rig.log("service-stderr")
-        );
-        assert!(Instant::now() < deadline, "service did not start");
-        std::thread::sleep(Duration::from_millis(10));
-    }
     record(&rig, &probe, NEW_VERSION);
+    fs::write(rig.dir.join("release-pass"), "release").unwrap();
     while !rig
         .log("service-stderr")
         .contains("dogsled service upgrade:")
@@ -513,6 +547,12 @@ fn running_serve_retries_an_unsuccessful_probe_without_replacing_the_writer() {
         assert!(Instant::now() < deadline, "service did not probe");
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(
+        rig.log("service-stderr").contains("dogsled service pass:"),
+        "guard did not refuse inside the pass: {}",
+        rig.log("service-stderr")
+    );
+    assert_eq!(samples(&rig), 0, "the guarded pass published a sample");
     let writer: String = rig
         .database()
         .query_row("SELECT executable FROM store_writer", [], |row| row.get(0))
@@ -528,6 +568,56 @@ fn running_serve_retries_an_unsuccessful_probe_without_replacing_the_writer() {
         assert!(Instant::now() < deadline, "new service did not publish");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn running_serve_reprobes_a_failed_exec_without_spinning() {
+    let rig = Rig::short("upgrade-serve-exec-failed");
+    let executable = replacement(&rig);
+    // Removing the probe itself before it exits forces exec to fail after the
+    // successful --version result has been cached. No scheduler race is needed.
+    rig.script(
+        "vanishing-version",
+        &format!("#!/bin/sh\nrm -- \"$0\"\nprintf '%s\\n' 'dogsled {NEW_VERSION}'\n"),
+    );
+    let probe = rig.dir.join("bin/vanishing-version");
+    let mut owned = serve_inside_pass(&rig, &executable);
+    let pid = owned.pid;
+    record(&rig, &probe, NEW_VERSION);
+    fs::write(rig.dir.join("release-pass"), "release").unwrap();
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while !rig
+        .log("service-stderr")
+        .contains("dogsled service upgrade:")
+    {
+        assert!(
+            !process_gone(pid),
+            "service exited: {}",
+            rig.log("service-stderr")
+        );
+        assert!(Instant::now() < deadline, "service did not attempt exec");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!probe.exists(), "the validated executable was not removed");
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        assert!(
+            !process_gone(pid),
+            "service exited: {}",
+            rig.log("service-stderr")
+        );
+        assert_eq!(
+            rig.log("service-stderr")
+                .matches("dogsled service upgrade:")
+                .count(),
+            1,
+            "service retried exec without invalidating its cached validation"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_current_writer(&rig);
+    assert!(samples(&rig) > 0, "service did not resume publication");
+    assert_eq!(owned.child_mut().id(), pid);
 }
 
 #[test]
@@ -671,6 +761,9 @@ fn inconclusive_mcp_probe_preserves_the_session_and_retries_next_input() {
     record(&rig, &probe, NEW_VERSION);
     client.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}));
     assert!(client.receive(3)["tools"].is_array());
+    // A guarded tool may fail, but it must not close the negotiated session.
+    client.send(&json!({"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"status","arguments":{}}}));
+    assert_eq!(client.receive(30)["isError"], true);
     let writer: String = rig
         .database()
         .query_row("SELECT executable FROM store_writer", [], |row| row.get(0))

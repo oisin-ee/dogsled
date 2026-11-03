@@ -53,6 +53,9 @@ pub enum Error {
     UnknownMachine(String),
     #[error("every eligible host is full")]
     Full,
+    /// A newer recorded writer blocks this unit of work, not its running process.
+    #[error("{0}")]
+    NewerWriter(String),
     #[error("{0}")]
     Invalid(String),
     #[error("deadline reached: {0}")]
