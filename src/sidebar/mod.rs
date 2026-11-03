@@ -227,8 +227,13 @@ fn run(
         let outcome = (|| -> Result<()> {
             loop {
                 if Instant::now() >= next_upgrade {
-                    if crate::upgrade::newer(ledger)?.is_some() {
-                        return Ok(());
+                    match crate::upgrade::newer(ledger)? {
+                        crate::upgrade::Boundary::Ready(_) => return Ok(()),
+                        crate::upgrade::Boundary::Current => {}
+                        crate::upgrade::Boundary::Pending(error) => {
+                            model.notice = Some(error.to_string());
+                            notice_until = Some(Instant::now() + NOTICE);
+                        }
                     }
                     next_upgrade = Instant::now() + REFRESH;
                 }

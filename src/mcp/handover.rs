@@ -78,7 +78,12 @@ impl Stdio {
             .pending
             .as_deref()
             .ok_or_else(|| Error::Invalid("mcp input disappeared".into()))?;
-        if let Some(writer) = crate::upgrade::newer(&self.ledger)? {
+        let boundary = crate::upgrade::newer(&self.ledger)?;
+        if let crate::upgrade::Boundary::Pending(error) = &boundary {
+            // Dispatch this input under the store guard; retry at the next input boundary.
+            eprintln!("dogsled mcp upgrade: {error}");
+        }
+        if let crate::upgrade::Boundary::Ready(writer) = boundary {
             // The line is not dispatched yet. Existing requests finish once; only this
             // undispatched line and the negotiated peer state cross the exec boundary.
             loop {

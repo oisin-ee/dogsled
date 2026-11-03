@@ -27,7 +27,9 @@ pub(crate) fn reported_version() -> &'static str {
         // Release binaries never honor this override.
         if cfg!(debug_assertions)
             && let Some(path) = std::env::var_os("DOGSLED_TEST_VERSION_EXE")
-            && std::env::current_exe().ok() == std::fs::canonicalize(path).ok()
+            && let Ok(current) = std::env::current_exe().and_then(std::fs::canonicalize)
+            && let Ok(path) = std::fs::canonicalize(path)
+            && current == path
             && let Ok(version) = std::env::var("DOGSLED_TEST_VERSION")
         {
             return version;
@@ -56,26 +58,40 @@ pub(crate) fn refusal(writer: &Writer, reason: impl std::fmt::Display) -> Error 
     ))
 }
 
+pub(crate) enum Boundary {
+    Current,
+    Ready(Writer),
+    Pending(Error),
+}
+
+#[derive(Clone, Copy)]
+enum Validation {
+    Valid,
+    Stale,
+}
+
 /// This query deliberately knows nothing about the rest of the database's schema.
-pub(crate) fn newer(ledger: &Ledger) -> Result<Option<Writer>> {
+pub(crate) fn newer(ledger: &Ledger) -> Result<Boundary> {
     let path = ledger.dir.join("state.db");
     if !path.try_exists()? {
-        return Ok(None);
+        return Ok(Boundary::Current);
     }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.busy_timeout(ledger.budget.remaining("state.db writer")?)?;
     match crate::tables::writer(&connection)? {
         Some(writer) if is_newer(&writer).map_err(|error| refusal(&writer, error))? => {
-            if validated(&writer)? {
-                return Ok(Some(writer));
+            match validated(&writer) {
+                Ok(Validation::Valid) => return Ok(Boundary::Ready(writer)),
+                Ok(Validation::Stale) => {}
+                Err(error) => return Ok(Boundary::Pending(error)),
             }
             crate::store::schema_version(&connection)?;
             drop(connection);
             // Opening the store replaces a stale owner under its write transaction.
             crate::store::write(ledger, |_| Ok(()))?;
-            Ok(None)
+            Ok(Boundary::Current)
         }
-        _ => Ok(None),
+        _ => Ok(Boundary::Current),
     }
 }
 
@@ -84,7 +100,7 @@ pub(crate) fn guard(connection: &Connection) -> Result<()> {
     crate::store::schema_version(connection)?;
     if let Some(writer) = crate::tables::writer(connection)?
         && is_newer(&writer)?
-        && validated(&writer)?
+        && matches!(validated(&writer)?, Validation::Valid)
     {
         return Err(refusal(
             &writer,
@@ -186,51 +202,78 @@ pub(crate) fn verify_target() -> Result<()> {
     Ok(())
 }
 
-/// Validate before leaving the old image. The version probe has a bounded lifetime.
-pub(crate) fn validate(writer: &Writer) -> Result<()> {
-    let check = || -> Result<()> {
-        if !is_newer(writer)? {
-            return Err(Error::Invalid("replacement is not strictly newer".into()));
+/// A timeout or unsuccessful launch cannot prove that the recorded writer is stale.
+fn probe(writer: &Writer) -> Result<Validation> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = Path::new(&writer.executable);
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Validation::Stale);
         }
-        let path = Path::new(&writer.executable);
-        if !path.is_absolute() || std::fs::canonicalize(path)? != path {
-            return Err(Error::Invalid(
-                "replacement path is not absolute and canonical".into(),
-            ));
-        }
-        let output = System::default().run_bounded(
-            &writer.executable,
-            &["--version".into()],
-            std::time::Duration::from_secs(2),
-        )?;
-        if !output.ok() || output.stdout.trim() != format!("dogsled {}", writer.version) {
-            return Err(Error::Invalid(
-                "replacement --version does not match the recorded version".into(),
-            ));
-        }
-        Ok(())
+        Err(error) => return Err(error.into()),
     };
-    check().map_err(|error| refusal(writer, error))
+    if !path.is_absolute() || canonical != path {
+        return Ok(Validation::Stale);
+    }
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Ok(Validation::Stale);
+    }
+    let output = match System::default().run_bounded(
+        &writer.executable,
+        &["--version".into()],
+        std::time::Duration::from_secs(10),
+    ) {
+        Err(Error::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(nix::errno::Errno::ENOEXEC as i32) =>
+        {
+            return Ok(Validation::Stale);
+        }
+        output => output?,
+    };
+    if !output.ok() {
+        return Err(Error::Invalid(
+            "replacement --version did not exit successfully; ownership is unverified".into(),
+        ));
+    }
+    Ok(
+        if output.stdout.trim() == format!("dogsled {}", writer.version) {
+            Validation::Valid
+        } else {
+            Validation::Stale
+        },
+    )
 }
 
-/// A process probes each recorded executable/version pair only once, including failures.
-fn validated(writer: &Writer) -> Result<bool> {
-    type Validations = std::sync::Mutex<std::collections::HashMap<(String, String), bool>>;
+/// Cache definite outcomes once per executable/version pair. Retry inconclusive probes.
+fn validated(writer: &Writer) -> Result<Validation> {
+    type Validations = std::sync::Mutex<std::collections::HashMap<(String, String), Validation>>;
     static VALIDATED: OnceLock<Validations> = OnceLock::new();
     let mut validations = VALIDATED
         .get_or_init(Validations::default)
         .lock()
         .map_err(|error| Error::Invalid(error.to_string()))?;
-    Ok(*validations
-        .entry((writer.executable.clone(), writer.version.clone()))
-        .or_insert_with(|| validate(writer).is_ok()))
+    let key = (writer.executable.clone(), writer.version.clone());
+    if let Some(validation) = validations.get(&key) {
+        return Ok(*validation);
+    }
+    let validation = probe(writer).map_err(|error| refusal(writer, error))?;
+    validations.insert(key, validation);
+    Ok(validation)
 }
 
 /// Replace the image, retaining PID, standard streams, environment, and original argv.
 /// MCP supplies only its negotiated state and an undispatched input message.
 pub(crate) fn handover(writer: &Writer, resume: Option<&str>) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
-    validate(writer)?;
+    if !is_newer(writer)? || matches!(validated(writer)?, Validation::Stale) {
+        return Err(refusal(
+            writer,
+            "replacement is not a valid newer executable",
+        ));
+    }
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
     // A later upgrade replaces, rather than appends to, the previous resume argument.
     if resume.is_some()
@@ -254,10 +297,11 @@ pub(crate) fn handover(writer: &Writer, resume: Option<&str>) -> Result<()> {
 }
 
 pub(crate) fn check(ledger: &Ledger) -> Result<()> {
-    if let Some(writer) = newer(ledger)? {
-        handover(&writer, None)?;
+    match newer(ledger)? {
+        Boundary::Current => Ok(()),
+        Boundary::Ready(writer) => handover(&writer, None),
+        Boundary::Pending(error) => Err(error),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -270,6 +314,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(crate::ledger::new_id());
         std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
         let executable = dir.join("probe");
         let probes = dir.join("probes");
         std::fs::write(
@@ -301,6 +346,48 @@ mod tests {
             }
         }
         assert_eq!(std::fs::read_to_string(probes).unwrap().lines().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn inconclusive_probes_keep_the_guard_and_are_not_cached() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let executable = dir.join("probe");
+        let probes = dir.join("probes");
+        let writer = Writer {
+            executable: executable.to_str().unwrap().into(),
+            version: "999.0.0".into(),
+        };
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(crate::tables::WRITER_SCHEMA)
+            .unwrap();
+        let tx = connection.transaction().unwrap();
+        crate::tables::save_writer(&tx, &writer).unwrap();
+        tx.commit().unwrap();
+        for (body, expected) in [
+            ("exec sleep 60", "deadline reached"),
+            ("exit 1", "did not exit successfully"),
+            ("echo 'dogsled 999.0.0'", "command must hand over"),
+        ] {
+            std::fs::write(
+                &executable,
+                format!("#!/bin/sh\necho probe >> '{}'\n{body}\n", probes.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let error = guard(&connection).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            let recorded = crate::tables::writer(&connection).unwrap().unwrap();
+            assert_eq!(recorded.version, writer.version);
+            assert_eq!(recorded.executable, writer.executable);
+        }
+        assert!(matches!(validated(&writer).unwrap(), Validation::Valid));
+        assert_eq!(std::fs::read_to_string(probes).unwrap().lines().count(), 3);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

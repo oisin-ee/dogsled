@@ -157,7 +157,10 @@ async fn run_until(
     let outcome = serve_until(listener, state, stopping).await;
     // A normal shutdown must not wait for a blocked shell read. An upgrade instead
     // drains the reader before exec, so none of its work crosses the image boundary.
-    if crate::upgrade::newer(ledger)?.is_some() {
+    if matches!(
+        crate::upgrade::newer(ledger)?,
+        crate::upgrade::Boundary::Ready(_)
+    ) {
         reader
             .join()
             .map_err(|_| crate::error::Error::Invalid("web reader failed".into()))?;
@@ -303,11 +306,14 @@ fn reader(
     let mut fleet: Option<crate::hosts::Fleet<'_>> = None;
     while !stop.is_cancelled() {
         match crate::upgrade::newer(ledger) {
-            Ok(Some(_)) => {
+            Ok(crate::upgrade::Boundary::Ready(_)) => {
                 stop.cancel();
                 break;
             }
-            Ok(None) => {}
+            Ok(crate::upgrade::Boundary::Current) => {}
+            Ok(crate::upgrade::Boundary::Pending(error)) => {
+                eprintln!("dogsled web upgrade: {error}");
+            }
             Err(error) => {
                 eprintln!("dogsled web upgrade: {error}");
                 stop.cancel();

@@ -198,6 +198,32 @@ pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -
     outcome
 }
 
+/// Start eligible action lanes without coupling their scheduling to publication or input.
+fn start_lanes(
+    node: &Node<'_>,
+    policy: &Policy,
+    once: bool,
+    workers: &mut [Option<std::thread::JoinHandle<()>>; LANES.len()],
+    completed: [bool; LANES.len()],
+    send: &mpsc::Sender<Event>,
+) {
+    for (lane, worker) in workers.iter_mut().enumerate() {
+        if worker.is_none() && (!once || !completed[lane]) {
+            let mut ledger = node.ledger.clone();
+            ledger.budget = crate::budget::Budget::default();
+            let policy = policy.clone();
+            let home = node.home.to_owned();
+            let send = send.clone();
+            *worker = Some(std::thread::spawn(move || {
+                let _ = send.send(Event::Finished(
+                    lane,
+                    actions(&ledger, &policy, home, LANES[lane]),
+                ));
+            }));
+        }
+    }
+}
+
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
     let _listener = match Listener::start(node.ledger, send.clone()) {
@@ -215,34 +241,27 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut next = Instant::now();
     let outcome = (|| {
         loop {
-            if crate::upgrade::newer(node.ledger)?.is_some() {
-                return Ok(());
-            }
-            // The socket only reduces latency. Recover pending requests on every publication
-            // iteration, including when the socket cannot bind or a notification was lost.
-            requested |= crate::sweep::pending(node.ledger)?;
-            node.tick(now_ms())?;
-            if let Err(error) = crate::board::collect_todos(node.ledger) {
-                eprintln!("dogsled service: todo intake failed: {error}");
-            }
-            for (lane, worker) in workers.iter_mut().enumerate() {
-                if worker.is_none() && (!once || !completed[lane]) {
-                    let mut ledger = node.ledger.clone();
-                    ledger.budget = crate::budget::Budget::default();
-                    let policy = policy.clone();
-                    let home = node.home.to_owned();
-                    let send = send.clone();
-                    *worker = Some(std::thread::spawn(move || {
-                        let _ = send.send(Event::Finished(
-                            lane,
-                            actions(&ledger, &policy, home, LANES[lane]),
-                        ));
-                    }));
+            let current = match crate::upgrade::newer(node.ledger)? {
+                crate::upgrade::Boundary::Ready(_) => return Ok(()),
+                crate::upgrade::Boundary::Current => true,
+                crate::upgrade::Boundary::Pending(error) => {
+                    eprintln!("dogsled service upgrade: {error}");
+                    next = Instant::now();
+                    false
                 }
+            };
+            if current {
+                // The socket only reduces latency. Recover requests on every publication pass.
+                requested |= crate::sweep::pending(node.ledger)?;
+                node.tick(now_ms())?;
+                if let Err(error) = crate::board::collect_todos(node.ledger) {
+                    eprintln!("dogsled service: todo intake failed: {error}");
+                }
+                start_lanes(node, policy, once, &mut workers, completed, &send);
             }
             next += interval;
             loop {
-                if requested && sweep.is_none() {
+                if current && requested && sweep.is_none() {
                     requested = false;
                     let mut ledger = node.ledger.clone();
                     ledger.budget = crate::budget::Budget::default();
@@ -261,7 +280,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                         let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
                     }));
                 }
-                if once && completed.iter().all(|done| *done) && sweep.is_none() {
+                if current && once && completed.iter().all(|done| *done) && sweep.is_none() {
                     return Ok(());
                 }
                 match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {

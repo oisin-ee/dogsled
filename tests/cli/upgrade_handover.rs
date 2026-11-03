@@ -6,7 +6,16 @@ const NEW_VERSION: &str = "0.31.0";
 fn replacement(rig: &Rig) -> PathBuf {
     let path = rig.dir.join("new-dogsled");
     fs::copy(env!("CARGO_BIN_EXE_dogsled"), &path).unwrap();
-    fs::canonicalize(path).unwrap()
+    let path = fs::canonicalize(path).unwrap();
+    // Synthetic writer rows stand in for an image that has already run and registered.
+    // A fresh copy's first launch can exceed the production version-probe budget.
+    let mut command = isolated(&path);
+    override_version(&mut command, &path);
+    command.arg("--version");
+    let (status, text) = output(command);
+    assert!(status.success(), "{text}");
+    assert_eq!(text.trim(), format!("dogsled {NEW_VERSION}"));
+    path
 }
 
 fn override_version(command: &mut Command, executable: &Path) {
@@ -31,12 +40,12 @@ fn command(rig: &Rig, args: &[&str], executable: &Path) -> Command {
 }
 
 fn output(mut command: Command) -> (std::process::ExitStatus, String) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "upgrade-output-{}",
-        std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "upgrade-output-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let error_path = path.with_extension("err");
     command
@@ -71,6 +80,29 @@ fn old_cli_executes_the_newest_writer_and_preserves_arguments() {
         .query_row("SELECT executable FROM store_writer", [], |row| row.get(0))
         .unwrap();
     assert_eq!(path, executable.to_str().unwrap());
+}
+
+#[test]
+fn version_override_requires_the_same_executable() {
+    let rig = Rig::short("upgrade-version-identity");
+    let executable = replacement(&rig);
+    let alias = rig.dir.join("new-link");
+    std::os::unix::fs::symlink(&executable, &alias).unwrap();
+    for (expected, version) in [
+        (&alias, NEW_VERSION),
+        (
+            &PathBuf::from(env!("CARGO_BIN_EXE_dogsled")),
+            env!("CARGO_PKG_VERSION"),
+        ),
+        (&rig.dir.join("missing"), env!("CARGO_PKG_VERSION")),
+    ] {
+        let mut command = isolated(&alias);
+        override_version(&mut command, expected);
+        command.arg("--version");
+        let (status, text) = output(command);
+        assert!(status.success(), "{text}");
+        assert_eq!(text.trim(), format!("dogsled {version}"));
+    }
 }
 
 #[test]
@@ -290,18 +322,29 @@ fn an_inherited_exec_guard_does_not_block_a_new_child_cli() {
 }
 
 #[test]
-fn a_hung_version_probe_recovers_within_its_budget() {
+fn a_hung_version_probe_preserves_the_writer_within_its_budget() {
     let rig = Rig::short("upgrade-probe-timeout");
     let executable = rig.dir.join("bin/hung-version");
     rig.script("hung-version", "#!/bin/sh\nexec sleep 60\n");
     record(&rig, &executable, NEW_VERSION);
     let started = Instant::now();
-    let text = assert_stale_recovered(&rig, &executable, &["state", "items"]);
+    let (status, text) = output(rig.cmd(&["state", "items"]));
+    assert!(!status.success(), "{text}");
+    assert!(text.contains("deadline reached"), "{text}");
     assert!(
         started.elapsed() < Duration::from_secs(15),
         "probe exceeded its budget: {text}"
     );
-    assert!(text.contains("stale"), "{text}");
+    let writer: (String, String) = rig
+        .database()
+        .query_row("SELECT version, executable FROM store_writer", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(
+        writer,
+        (NEW_VERSION.into(), executable.to_str().unwrap().into())
+    );
 }
 
 #[test]
@@ -370,6 +413,66 @@ fn running_serve_hands_over_between_passes_with_the_same_pid() {
     let deadline = Instant::now() + PROCESS_DEADLINE;
     while rig.log("state/samples.jsonl").lines().count() <= before {
         assert!(!process_gone(owned.pid), "new service exited");
+        assert!(Instant::now() < deadline, "new service did not publish");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn running_serve_retries_an_unsuccessful_probe_without_replacing_the_writer() {
+    let rig = Rig::short("upgrade-serve-pending");
+    let executable = replacement(&rig);
+    let probe = rig.dir.join("bin/pending-version");
+    let ready = rig.dir.join("ready");
+    rig.script(
+        "pending-version",
+        &format!(
+            "#!/bin/sh\nif test \"$1\" = --version; then\n  if ! test -f '{}'; then exit 1; fi\n  echo 'dogsled {NEW_VERSION}'; exit\nfi\nexec '{}' \"$@\"\n",
+            ready.display(), executable.display()
+        ),
+    );
+    let mut command = command(&rig, &["serve", "--interval", "1"], &executable);
+    let journal = rig.dir.join("service-stderr");
+    command
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&journal).unwrap());
+    let mut owned = Owned::spawn(&mut command);
+    let pid = owned.pid;
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while rig.log("state/samples.jsonl").is_empty() {
+        assert!(
+            !process_gone(pid),
+            "service exited: {}",
+            rig.log("service-stderr")
+        );
+        assert!(Instant::now() < deadline, "service did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    record(&rig, &probe, NEW_VERSION);
+    while !rig
+        .log("service-stderr")
+        .contains("dogsled service upgrade:")
+    {
+        assert!(
+            !process_gone(pid),
+            "service exited: {}",
+            rig.log("service-stderr")
+        );
+        assert!(Instant::now() < deadline, "service did not probe");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let writer: String = rig
+        .database()
+        .query_row("SELECT executable FROM store_writer", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(writer, probe.to_str().unwrap());
+    fs::write(ready, "ready").unwrap();
+    wait_for_image(&mut owned, &executable);
+    assert_eq!(owned.child_mut().id(), pid);
+    let before = rig.log("state/samples.jsonl").lines().count();
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while rig.log("state/samples.jsonl").lines().count() <= before {
+        assert!(!process_gone(pid), "new service exited");
         assert!(Instant::now() < deadline, "new service did not publish");
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -490,6 +593,50 @@ impl Drop for Mcp {
             reader.join().unwrap();
         }
     }
+}
+
+#[test]
+fn inconclusive_mcp_probe_preserves_the_session_and_retries_next_input() {
+    let rig = Rig::short("upgrade-mcp-pending");
+    let executable = replacement(&rig);
+    let probe = rig.dir.join("bin/pending-version");
+    let ready = rig.dir.join("ready");
+    rig.script(
+        "pending-version",
+        &format!(
+            "#!/bin/sh\nif test \"$1\" = --version; then\n  if ! test -f '{}'; then exec sleep 60; fi\n  echo 'dogsled {NEW_VERSION}'; exit\nfi\nexec '{}' \"$@\"\n",
+            ready.display(), executable.display()
+        ),
+    );
+    let mut client = Mcp::start(&rig, &executable);
+    let pid = client.owned.pid;
+    client.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"upgrade-test","version":"0"}
+    }}));
+    assert_eq!(client.receive(1)["serverInfo"]["name"], "dogsled");
+    client.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    // This request has no store effects; even a pending probe must preserve the session.
+    client.send(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+    assert!(client.receive(2)["tools"].is_array());
+    record(&rig, &probe, NEW_VERSION);
+    client.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}));
+    assert!(client.receive(3)["tools"].is_array());
+    let writer: String = rig
+        .database()
+        .query_row("SELECT executable FROM store_writer", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(writer, probe.to_str().unwrap());
+    assert_eq!(client.owned.child_mut().id(), pid);
+    fs::write(ready, "ready").unwrap();
+    client.send(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"status","arguments":{}}}));
+    assert_ne!(client.receive(4)["isError"], true);
+    wait_for_image(&mut client.owned, &executable);
+    assert_eq!(client.owned.child_mut().id(), pid);
+    let version: String = rig
+        .database()
+        .query_row("SELECT version FROM store_writer", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, NEW_VERSION);
 }
 
 #[test]
