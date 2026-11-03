@@ -732,7 +732,7 @@ fn settle(
             None => return Ok(()),
         },
         // Never use rejected/unknown host evidence to authorize a fallback import.
-        Err(error @ Error::Invalid(_)) => {
+        Err(error) if matches!(error.root(), Error::Invalid(_)) => {
             eprintln!(
                 "dogsled unit evidence {}: {error}",
                 unit.execution.request_id
@@ -755,7 +755,7 @@ fn settle(
     };
     match imported {
         Ok(()) => Ok(()),
-        Err(error @ Error::Invalid(_)) => {
+        Err(error) if matches!(error.root(), Error::Invalid(_)) => {
             eprintln!(
                 "dogsled unit evidence {}: {error}",
                 unit.execution.request_id
@@ -1469,7 +1469,7 @@ mod stopped_tests {
         let (ledger, receipt) = admission(true);
         let before = admissions::value(&ledger, ID).unwrap();
         let error = import_receipt(&ledger, ID, receipt).unwrap_err();
-        assert!(matches!(error, Error::Invalid(_)), "{error}");
+        assert!(matches!(error.root(), Error::Invalid(_)), "{error}");
         assert_eq!(admissions::value(&ledger, ID).unwrap(), before);
         let attempt = admissions::get(&ledger, ID).unwrap().unwrap();
         let unit = attempt.unit.unwrap();

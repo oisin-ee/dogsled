@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(
     name = "dogsled",
-    version,
+    version = crate::upgrade::reported_version(),
     about = "Host status and placement for Herdr agents",
     propagate_version = true
 )]
@@ -19,6 +19,9 @@ pub struct Cli {
     /// Remaining caller budget propagated across SSH.
     #[arg(long, global = true, hide = true)]
     pub budget_ms: Option<u64>,
+    /// Internal negotiated MCP state across an executable handover.
+    #[arg(long, global = true, hide = true)]
+    pub mcp_resume: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -132,7 +135,7 @@ pub enum Command {
         host: Option<String>,
         #[arg(long)]
         yes: bool,
-        #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "targets", "disk", "processes"])]
+        #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "targets", "disk", "processes", "resources"])]
         classes: Vec<String>,
     },
     /// Reserve capacity on the host with the most headroom.
@@ -418,7 +421,7 @@ pub enum StateCommand {
     DoneIdentity {
         pane: String,
     },
-    /// Print the SQL schema of `state.db`.
+    /// Print the SQL script that creates `state.db`: its schema and version.
     Schema,
     /// Print every admission, oldest first.
     Admissions,
@@ -819,9 +822,17 @@ pub enum HostCommand {
         #[arg(long)]
         input: String,
     },
+    ReleaseUnstarted {
+        #[arg(long)]
+        input: String,
+    },
     Reserve {
         #[arg(long)]
         id: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        owner_host: String,
         /// Versioned placement expectation; never falls back to TTL-only admission.
         #[arg(long, conflicts_with_all = ["job_validity", "job_created_ms"])]
         placement_replay: Option<String>,

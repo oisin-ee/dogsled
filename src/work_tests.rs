@@ -570,7 +570,7 @@ fn place_request(ledger: &Ledger, id: &str) -> Request {
         workspace: None,
         workspace_name: None,
         owner: "owner".into(),
-        owner_host: None,
+        owner_host: Some("origin".into()),
     }
 }
 
@@ -1064,7 +1064,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
     .unwrap();
     // Without an existing hold, the refusal changes no capacity record.
     let error = node
-        .reserve("expired", now, Some(expired))
+        .reserve("expired", now, Some(expired), "w1:p1", "origin")
         .expect_err("an expired request is refused");
     assert!(error.to_string().contains("older than 30 days"), "{error}");
     assert!(
@@ -1080,7 +1080,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
     crate::job_store::put_reservations(&ledger, &holds).unwrap();
     let before = crate::job_store::reservations(&ledger).unwrap();
     let error = node
-        .reserve("expired", now, Some(expired))
+        .reserve("expired", now, Some(expired), "w1:p1", "origin")
         .expect_err("an expired request is refused");
     assert!(error.to_string().contains("older than 30 days"), "{error}");
     let after = crate::job_store::reservations(&ledger).unwrap();

@@ -1,7 +1,7 @@
 //! Typed host-owned jobs, request authority, and capacity reservations.
 
 use rusqlite::types::Value as Sql;
-use rusqlite::{Row, Transaction};
+use rusqlite::{OptionalExtension, Row, Transaction};
 
 use crate::error::{Error, Result};
 use crate::jobs::{Clock, ExecutionScope, Job, Startup, Validity};
@@ -56,7 +56,10 @@ CREATE TABLE job_args (
 CREATE TABLE job_validity (
     id TEXT PRIMARY KEY CHECK (length(id) > 0 AND id NOT GLOB '*[^A-Za-z0-9-]*'),
     version INTEGER NOT NULL CHECK (version BETWEEN 0 AND 4294967295),
-    created_ms INTEGER NOT NULL CHECK (created_ms >= 0)
+    created_ms INTEGER NOT NULL CHECK (created_ms >= 0),
+    owner TEXT CHECK (owner IS NULL OR length(owner) > 0),
+    owner_host TEXT,
+    unstarted_finished_ms INTEGER CHECK (unstarted_finished_ms >= 0)
 ) STRICT;
 CREATE INDEX job_validity_created ON job_validity (created_ms);
 CREATE TABLE request_ingress (
@@ -325,6 +328,97 @@ pub(crate) fn request_stop(ledger: &Ledger, id: &str, requested: bool) -> Result
     })
 }
 
+/// Immutable custody provenance survives independent retention of request artifacts.
+pub(crate) fn remember_owner(
+    ledger: &Ledger,
+    id: &str,
+    owner: &str,
+    origin_host: Option<&str>,
+) -> Result<()> {
+    crate::jobs::validate_id(id)?;
+    store::write(ledger, |tx| {
+        let existing: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT owner, owner_host FROM job_validity WHERE id = ?1 AND owner IS NOT NULL",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if existing.as_ref().is_some_and(|(saved, origin)| {
+            saved != owner
+                || origin
+                    .as_deref()
+                    .zip(origin_host)
+                    .is_some_and(|(a, b)| a != b)
+        }) {
+            return Err(crate::error::Error::Invalid("request owner changed".into()));
+        }
+        tx.execute(
+            "UPDATE job_validity SET owner = ?2, owner_host = COALESCE(owner_host, ?3) WHERE id = ?1",
+            rusqlite::params![id, owner, origin_host],
+        )?;
+        Ok(())
+    })
+}
+
+pub(crate) struct RequestOwner {
+    pub id: String,
+    pub owner: String,
+    pub owner_host: Option<String>,
+}
+
+pub(crate) fn owners(ledger: &Ledger) -> Result<Vec<RequestOwner>> {
+    store::read(ledger, |tx| {
+        let mut statement = tx.prepare_cached(
+            "SELECT id, owner, owner_host FROM job_validity WHERE owner IS NOT NULL ORDER BY id",
+        )?;
+        Ok(statement
+            .query_map([], |row| {
+                Ok(RequestOwner {
+                    id: row.get(0)?,
+                    owner: row.get(1)?,
+                    owner_host: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+}
+
+pub(crate) fn owner(ledger: &Ledger, id: &str) -> Result<(String, String)> {
+    let owner = owners(ledger)?
+        .into_iter()
+        .find(|owner| owner.id == id)
+        .ok_or_else(|| {
+            crate::error::Error::Invalid("reservation request has no recorded owner".into())
+        })?;
+    let host = owner.owner_host.ok_or_else(|| {
+        crate::error::Error::Invalid("reservation request has no recorded owner host".into())
+    })?;
+    Ok((owner.owner, host))
+}
+
+pub(crate) fn unstarted_finished(ledger: &Ledger, id: &str) -> Result<Option<u64>> {
+    store::read(ledger, |tx| {
+        tx.query_row(
+            "SELECT unstarted_finished_ms FROM job_validity WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(rows::unsigned)
+        .transpose()
+    })
+}
+
+pub(crate) fn finish_unstarted(ledger: &Ledger, id: &str, finished: u64) -> Result<()> {
+    store::write(ledger, |tx| {
+        tx.execute("UPDATE job_validity SET unstarted_finished_ms = COALESCE(unstarted_finished_ms, ?2) WHERE id = ?1",
+            rusqlite::params![id, rows::integer(finished)?])?;
+        Ok(())
+    })
+}
+
 pub(crate) fn validity(tx: &Transaction<'_>, id: &str) -> Result<Option<Validity>> {
     let mut statement =
         tx.prepare_cached("SELECT version, created_ms FROM job_validity WHERE id = ?1")?;
@@ -337,11 +431,12 @@ pub(crate) fn validity(tx: &Transaction<'_>, id: &str) -> Result<Option<Validity
 
 pub(crate) fn put_validity(tx: &Transaction<'_>, id: &str, validity: Validity) -> Result<()> {
     crate::jobs::validate_id(id)?;
-    let mut columns = Columns::default();
-    columns.text("id", Some(id));
-    columns.number("version", Some(u64::from(validity.version)))?;
-    columns.number("created_ms", Some(validity.created_ms))?;
-    columns.upsert(tx, "job_validity", "id")
+    tx.execute(
+        "INSERT INTO job_validity (id, version, created_ms) VALUES (?1, ?2, ?3)
+         ON CONFLICT (id) DO UPDATE SET version = excluded.version, created_ms = excluded.created_ms",
+        rusqlite::params![id, validity.version, rows::integer(validity.created_ms)?],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn validities(ledger: &Ledger) -> Result<Vec<(String, Validity)>> {
@@ -366,8 +461,17 @@ pub(crate) fn validities(ledger: &Ledger) -> Result<Vec<(String, Validity)>> {
 
 /// The caller has excluded admissions, preparations, tickets, and launch owners.
 pub(crate) fn expire_validity_in(tx: &rusqlite::Transaction<'_>, id: &str, now: u64) -> Result<()> {
+    let finished: Option<i64> = tx
+        .query_row(
+            "SELECT unstarted_finished_ms FROM job_validity WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let finished = finished.map(rows::unsigned).transpose()?;
     if validity(tx, id)?.is_some_and(|validity| {
-        now.saturating_sub(validity.created_ms) > crate::jobs::RECORD_KEEP_MS
+        now.saturating_sub(finished.unwrap_or(validity.created_ms)) > crate::jobs::RECORD_KEEP_MS
     }) && load(tx, id)?
         .is_none_or(|job| matches!(crate::jobs::expiry(&job, now), crate::jobs::Expiry::Record))
     {
@@ -632,6 +736,15 @@ pub(crate) fn reservations(ledger: &Ledger) -> Result<Vec<Reservation>> {
             });
         }
         Ok(values)
+    })
+}
+
+pub(crate) fn release_reservation(ledger: &Ledger, id: &str) -> Result<()> {
+    ledger.with_lock("host", || {
+        store::write(ledger, |tx| {
+            tx.execute("DELETE FROM placements WHERE id = ?1", [id])?;
+            Ok(())
+        })
     })
 }
 

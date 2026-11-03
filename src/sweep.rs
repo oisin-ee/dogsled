@@ -842,7 +842,9 @@ mod liveness_tests {
                         .reserve(
                             "new",
                             61_000,
-                            Some(crate::jobs::Validity::new(crate::ledger::now_ms()))
+                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                            "w1:p1",
+                            "origin",
                         )?
                         .reserved
                 );

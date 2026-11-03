@@ -788,7 +788,7 @@ fn corrupt_cancellation_holds_only_its_committed_unit() {
 
         rig.put_validity("unrelated-place", &rig.job_validity());
         unrelated["request"] = json!({"id":"unrelated-place","validity":rig.job_validity(),"action":{"type":"place"},
-            "host":"local","cwd":rig.dir.join("home"),"owner":"w1:p1"});
+            "host":"local","cwd":rig.dir.join("home"),"owner":"w1:p1","owner_host":"local"});
         queue.as_array_mut().unwrap().push(unrelated);
         rig.put_tickets(&queue);
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
@@ -1018,7 +1018,7 @@ fn unprovable_committed_unit_holds_only_itself_and_peers_are_admitted() {
     rig.put_validity("peer-place", &rig.job_validity());
     rig.put_tickets(&json!([{"id":"peer-ticket","request":{"id":"peer-place",
         "validity":rig.job_validity(),"action":{"type":"place"},"host":"local",
-        "cwd":rig.dir.join("home"),"owner":"w1:p1"},"created_ms":now(),"state":"pending",
+        "cwd":rig.dir.join("home"),"owner":"w1:p1","owner_host":"local"},"created_ms":now(),"state":"pending",
         "waiting":false,"waiting_until_ms":null,"notified":false,"result":null,"error":null}]));
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     rig.snapshot("state", now(), 0.0, 2);

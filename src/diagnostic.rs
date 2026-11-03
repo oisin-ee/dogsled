@@ -1,4 +1,4 @@
-//! Credential-safe preparation diagnostics. Peer text never becomes a message.
+//! Credential-safe launch and placement diagnostics. Peer text never becomes a message.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -16,10 +16,10 @@ pub enum Operation {
 impl Operation {
     pub fn from_args(args: &[String]) -> Self {
         match args.first().map(String::as_str) {
-            Some("prepare") => Self::Prepare,
+            Some("prepare" | "prepared" | "preparation-lookup") => Self::Prepare,
             Some("checkout") => Self::Checkout,
             Some("launch") => Self::Launch,
-            Some("reserve") => Self::Reserve,
+            Some("reserve" | "placement-finished") => Self::Reserve,
             _ => Self::Other,
         }
     }
@@ -37,7 +37,182 @@ pub enum Cause {
     /// The preparation failed and its outcome could not be recorded. The intent stays
     /// uncertain, so this cause says so instead of naming a preparation failure.
     OutcomeUnrecorded,
+    ExecutionDirectoryMissing,
+    CheckoutUnavailable,
+    RequestChanged,
+    ProtocolUnsupported,
+    PreparationBindingMissing,
+    PreparationBindingMismatch,
+    PreparationHeld,
+    PreparationInterrupted,
+    PreparationContradictory,
+    LaunchReceiptMissing,
+    LaunchReceiptMismatch,
+    JobClaimUnresolved,
+    JobClaimExists,
+    PaneUnavailable,
+    PaneIdentityMismatch,
+    PaneBusy,
+    WorkspaceUnavailable,
+    BranchInvalid,
+    ProfileInvalid,
+    CommandTooLong,
+    StartupUncertain,
+    LaunchRefused,
+    InvalidRequest,
+    ValidityUnprovable,
+    RequestExpired,
+    RequestFromFuture,
+    ValidityClockUnavailable,
+    IoFailed,
+    StateFailed,
+    InvalidPayload,
+    ConfigInvalid,
+    CommandFailed,
+    HerdrUnavailable,
     Unavailable,
+}
+
+impl Cause {
+    fn is_common(self) -> bool {
+        !matches!(
+            self,
+            Self::BaseUnavailable
+                | Self::BranchExists
+                | Self::WorkspaceOccupied
+                | Self::CloneFailed
+                | Self::SetupFailed
+                | Self::OutcomeUnrecorded
+                | Self::Unavailable
+        )
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::ExecutionDirectoryMissing => "execution directory does not exist",
+            Self::CheckoutUnavailable => {
+                "checkout is missing, unreadable, or has no captured identity"
+            }
+            Self::RequestChanged => "request identity or ownership changed",
+            Self::ProtocolUnsupported => "unsupported launch or preparation protocol",
+            Self::PreparationBindingMissing => {
+                "preparation receipt is missing its binding; claim remains held"
+            }
+            Self::PreparationBindingMismatch => {
+                "preparation binding changed; ownership remains unresolved"
+            }
+            Self::PreparationHeld => {
+                "preparation disposition remains held; execution is prohibited"
+            }
+            Self::PreparationInterrupted => {
+                "request stopped during preparation; inspect this host before resubmitting"
+            }
+            Self::PreparationContradictory => {
+                "request has a contradictory preparation receipt; inspect this host"
+            }
+            Self::LaunchReceiptMissing => {
+                "final launch receipt disappeared or has no dispatch evidence"
+            }
+            Self::LaunchReceiptMismatch => {
+                "saved launch receipt does not match this request, host, command, or pane"
+            }
+            Self::JobClaimUnresolved => {
+                "job has an unresolved claim; inspect that host before resubmitting"
+            }
+            Self::JobClaimExists => {
+                "job has a claim but no saved launch receipt; inspect that host before resubmitting"
+            }
+            Self::PaneUnavailable => "launch pane or terminal identity is unavailable",
+            Self::PaneIdentityMismatch => "launch terminal changed; refusing to take it over",
+            Self::PaneBusy => "pane is busy or belongs to another agent; refusing to take it over",
+            Self::WorkspaceUnavailable => "caller workspace name or root pane is unavailable",
+            Self::BranchInvalid => "requested branch name is invalid",
+            Self::ProfileInvalid => "agent profile is invalid or incompatible with the launch",
+            Self::CommandTooLong => "agent command exceeds the launch line budget",
+            Self::StartupUncertain => {
+                "startup outcome is unknown; inspect this host before resubmitting"
+            }
+            Self::LaunchRefused => "native agent startup refused the launch",
+            Self::InvalidRequest => "launch request is invalid",
+            Self::ValidityUnprovable => "request validity is unprovable",
+            Self::RequestExpired => "request expired; submit a new request",
+            Self::RequestFromFuture => "request creation time is ahead of this host clock",
+            Self::ValidityClockUnavailable => "request validity clock is unavailable",
+            Self::IoFailed => "host filesystem operation failed",
+            Self::StateFailed => "host state could not be read or written",
+            Self::InvalidPayload => "request or retained state has an invalid payload",
+            Self::ConfigInvalid => "repository or host configuration is invalid",
+            Self::CommandFailed => "host command failed",
+            Self::HerdrUnavailable => "no Herdr server is reachable on this host",
+            Self::BaseUnavailable => {
+                "requested base unavailable; provide a commit available on the selected host"
+            }
+            Self::BranchExists => "branch exists; omit --base",
+            Self::WorkspaceOccupied => {
+                "workspace occupied; inspect the selected host before resubmitting"
+            }
+            Self::CheckoutIdentityMismatch => {
+                "checkout identity mismatch; inspect the selected checkout"
+            }
+            Self::CloneFailed => {
+                "the peer could not clone the repository; check repository access on the selected host"
+            }
+            Self::SetupFailed => {
+                "repository setup command failed; inspect setup on the selected host"
+            }
+            Self::OutcomeUnrecorded => {
+                "the preparation failed and its cause was not recorded; \
+                 inspect this host before resubmitting"
+            }
+            Self::Unavailable => "remote command failed",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::ExecutionDirectoryMissing => "execution_directory_missing",
+            Self::CheckoutUnavailable => "checkout_unavailable",
+            Self::RequestChanged => "request_changed",
+            Self::ProtocolUnsupported => "protocol_unsupported",
+            Self::PreparationBindingMissing => "preparation_binding_missing",
+            Self::PreparationBindingMismatch => "preparation_binding_mismatch",
+            Self::PreparationHeld => "preparation_held",
+            Self::PreparationInterrupted => "preparation_interrupted",
+            Self::PreparationContradictory => "preparation_contradictory",
+            Self::LaunchReceiptMissing => "launch_receipt_missing",
+            Self::LaunchReceiptMismatch => "launch_receipt_mismatch",
+            Self::JobClaimUnresolved => "job_claim_unresolved",
+            Self::JobClaimExists => "job_claim_exists",
+            Self::PaneUnavailable => "pane_unavailable",
+            Self::PaneIdentityMismatch => "pane_identity_mismatch",
+            Self::PaneBusy => "pane_busy",
+            Self::WorkspaceUnavailable => "workspace_unavailable",
+            Self::BranchInvalid => "branch_invalid",
+            Self::ProfileInvalid => "profile_invalid",
+            Self::CommandTooLong => "command_too_long",
+            Self::StartupUncertain => "startup_uncertain",
+            Self::LaunchRefused => "launch_refused",
+            Self::InvalidRequest => "invalid_request",
+            Self::ValidityUnprovable => "validity_unprovable",
+            Self::RequestExpired => "request_expired",
+            Self::RequestFromFuture => "request_from_future",
+            Self::ValidityClockUnavailable => "validity_clock_unavailable",
+            Self::IoFailed => "io_failed",
+            Self::StateFailed => "state_failed",
+            Self::InvalidPayload => "invalid_payload",
+            Self::ConfigInvalid => "config_invalid",
+            Self::CommandFailed => "command_failed",
+            Self::HerdrUnavailable => "herdr_unavailable",
+            Self::BaseUnavailable => "base_unavailable",
+            Self::BranchExists => "branch_exists",
+            Self::WorkspaceOccupied => "workspace_occupied",
+            Self::CheckoutIdentityMismatch => "checkout_identity_mismatch",
+            Self::CloneFailed => "clone_failed",
+            Self::SetupFailed => "setup_failed",
+            Self::OutcomeUnrecorded => "outcome_unrecorded",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +235,8 @@ pub struct Context {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occupancy: Option<Occupancy>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_worktree_removed: bool,
@@ -71,9 +248,15 @@ impl Context {
             branch: branch.filter(|s| safe_ref(s)).map(str::to_owned),
             base: base.filter(|s| safe_ref(s)).map(str::to_owned),
             workspace: workspace.filter(|s| safe_path(s)).map(str::to_owned),
+            directory: None,
             occupancy: None,
             new_worktree_removed: false,
         }
+    }
+
+    pub fn directory(mut self, directory: &str) -> Self {
+        self.directory = safe_path(directory).then(|| directory.to_owned());
+        self
     }
 
     pub fn occupied(mut self, occupancy: Occupancy) -> Self {
@@ -90,6 +273,7 @@ impl Context {
         self.branch.as_deref().is_none_or(safe_ref)
             && self.base.as_deref().is_none_or(safe_ref)
             && self.workspace.as_deref().is_none_or(safe_path)
+            && self.directory.as_deref().is_none_or(safe_path)
     }
 }
 
@@ -160,6 +344,35 @@ impl Diagnostic {
         }
     }
 
+    /// Project every peer failure into a typed envelope. No source text enters it.
+    pub fn for_error(error: &crate::error::Error, args: &[String]) -> Self {
+        use crate::error::{Error, Refusal};
+        let mut diagnostic = error.diagnostic().cloned().unwrap_or_else(|| {
+            let cause = match error.root() {
+                Error::Io(_) => Cause::IoFailed,
+                Error::Json(_) | Error::Parse { .. } => Cause::InvalidPayload,
+                Error::Sqlite(_) => Cause::StateFailed,
+                Error::Config { .. } => Cause::ConfigInvalid,
+                Error::Command { .. } => Cause::CommandFailed,
+                Error::Refused { code, .. } => match code {
+                    Refusal::JobExpired => Cause::RequestExpired,
+                    Refusal::JobFromFuture => Cause::RequestFromFuture,
+                    Refusal::JobClockUnavailable => Cause::ValidityClockUnavailable,
+                    Refusal::JobValidityUnsupported => Cause::ProtocolUnsupported,
+                    Refusal::JobValidityUnprovable => Cause::ValidityUnprovable,
+                    Refusal::CloneFailed => Cause::CloneFailed,
+                    _ => Cause::InvalidRequest,
+                },
+                Error::Launch(_) => Cause::StartupUncertain,
+                Error::Deadline(_) | Error::Ssh { .. } | Error::Peer { .. } => Cause::Unavailable,
+                _ => Cause::InvalidRequest,
+            };
+            Self::new(Operation::Other, cause, Context::default())
+        });
+        diagnostic.operation = Operation::from_args(args);
+        diagnostic
+    }
+
     pub fn request(mut self, request: Option<&str>) -> Self {
         self.request_id = request.filter(|s| safe_id(s)).map(str::to_owned);
         self
@@ -205,8 +418,20 @@ impl Diagnostic {
                         d.cause,
                         Cause::CheckoutIdentityMismatch | Cause::CloneFailed | Cause::SetupFailed
                     ),
-                    _ => false,
+                    Operation::Launch | Operation::Reserve | Operation::Other => false,
                 }
+                || (d.version == 1
+                    && d.operation == operation
+                    && d.context.valid()
+                    && d.request_id.as_deref().is_none_or(safe_id)
+                    && matches!(
+                        operation,
+                        Operation::Prepare
+                            | Operation::Checkout
+                            | Operation::Launch
+                            | Operation::Reserve
+                    )
+                    && d.cause.is_common())
         });
         let mut diagnostic = valid.unwrap_or_else(|| {
             let mut d = Self::new(operation, Cause::Unavailable, Context::default());
@@ -229,6 +454,14 @@ impl Diagnostic {
             let mut context = Context::new(arg("--branch"), arg("--base"), arg("--path"));
             context.occupancy = diagnostic.context.occupancy;
             context.new_worktree_removed = diagnostic.context.new_worktree_removed;
+            // A launch's cwd is already mapped by the origin. Never import a peer path.
+            if operation == Operation::Launch
+                && let Some(input) = arg("--request")
+                && let Ok(launch) = serde_json::from_str::<serde_json::Value>(input)
+                && let Some(cwd) = launch["cwd"].as_str()
+            {
+                context = context.directory(cwd);
+            }
             diagnostic.context = context;
         }
         diagnostic.host = Some(host.to_owned());
@@ -240,41 +473,35 @@ impl Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self.cause {
-            Cause::BaseUnavailable => {
-                "requested base unavailable; provide a commit available on the selected host"
+        let message = self.cause.message();
+        let code = self.cause.code();
+        if self.cause != Cause::Unavailable
+            && let Some(host) = &self.host
+        {
+            let operation = match self.operation {
+                Operation::Prepare => "preparation",
+                Operation::Checkout => "checkout",
+                Operation::Launch => "launch",
+                Operation::Reserve => "placement",
+                Operation::Other => "operation",
+            };
+            write!(f, "{host} refused the {operation}: {code}: ")?;
+        } else {
+            if let Some(host) = &self.host {
+                write!(f, "{host}: ")?;
             }
-            Cause::BranchExists => "branch exists; omit --base",
-            Cause::WorkspaceOccupied => {
-                "workspace occupied; inspect the selected host before resubmitting"
+            write!(f, "{:?}: {code}: ", self.operation)?;
+        }
+        if self.cause == Cause::ExecutionDirectoryMissing {
+            write!(f, "execution directory")?;
+            if let Some(directory) = &self.context.directory {
+                write!(f, " {directory}")?;
             }
-            Cause::CheckoutIdentityMismatch => {
-                "checkout identity mismatch; inspect the selected checkout"
+            write!(f, " does not exist")?;
+            if let Some(host) = &self.host {
+                write!(f, " on {host}")?;
             }
-            Cause::CloneFailed => {
-                "the peer could not clone the repository; check repository access on the selected host"
-            }
-            Cause::SetupFailed => {
-                "repository setup command failed; inspect setup on the selected host"
-            }
-            Cause::OutcomeUnrecorded => {
-                "the preparation failed and its cause was not recorded; \
-                 inspect this host before resubmitting"
-            }
-            Cause::Unavailable => "remote command failed",
-        };
-        let code = match self.cause {
-            Cause::BaseUnavailable => "base_unavailable",
-            Cause::BranchExists => "branch_exists",
-            Cause::WorkspaceOccupied => "workspace_occupied",
-            Cause::CheckoutIdentityMismatch => "checkout_identity_mismatch",
-            Cause::CloneFailed => "clone_failed",
-            Cause::SetupFailed => "setup_failed",
-            Cause::OutcomeUnrecorded => "outcome_unrecorded",
-            Cause::Unavailable => "unavailable",
-        };
-        write!(f, "{:?}: {code}: ", self.operation)?;
-        if self.cause == Cause::BranchExists
+        } else if self.cause == Cause::BranchExists
             && let Some(branch) = &self.context.branch
         {
             write!(f, "branch {branch} exists; omit --base")?;
@@ -300,6 +527,11 @@ impl fmt::Display for Diagnostic {
         }
         if let Some(workspace) = &self.context.workspace {
             write!(f, "; workspace {workspace}")?;
+        }
+        if self.cause != Cause::ExecutionDirectoryMissing
+            && let Some(directory) = &self.context.directory
+        {
+            write!(f, "; directory {directory}")?;
         }
         if let Some(status) = self.status {
             write!(f, "; status {status}")?;

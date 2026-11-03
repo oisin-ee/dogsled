@@ -82,6 +82,8 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
     assert_eq!(rig.preparations(), json!([]));
     let claims = json!([{ "repo":"/tmp/repo","path":"/tmp/held","branch":"feat/x","head":"","request_id":"request-held" }]);
     rig.preparation_record("state", "claims", "").put(&claims);
+    rig.put_validity("request-held", &rig.job_validity());
+    rig.put_request_owner("request-held", "w1:p1", "local");
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0, "{status}");
     let holds = status["holds"].as_array().unwrap();
@@ -90,7 +92,8 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
         .find(|h| h["code"] == "preparation_claim")
         .unwrap();
     assert!(held["resource"].as_str().unwrap().contains("/tmp/held"));
-    assert_eq!(held["owner"], "request-held");
+    assert_eq!(held["owner"], "w1:p1");
+    assert_eq!(held["owner_pane"], "w1:p1");
     assert!(
         held["reason"]
             .as_str()
@@ -141,6 +144,8 @@ fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
         &json!({"version":3,"envelope":{"version":3,"request":request,"host":{"id":"local","label":"local"},"reservation":"place-held"},"reservation":{"id":"place-held","created_ms":1},"headroom":{"host":"local","headroom":2.0,"eligible":true,"live_agents":1},"materialized":true}),
     );
     rig.put_validity("place-held", &json!({"version":1,"created_ms":1}));
+    rig.put_validity("live-capacity", &rig.job_validity());
+    rig.put_request_owner("live-capacity", "w1:p1", "local");
     rig.put_reservations(&json!([
         {"id":"live-capacity","created_ms":now()},
         {"id":"expired-capacity","created_ms":0}

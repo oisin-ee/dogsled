@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use rusqlite::types::Value as Sql;
-use rusqlite::{Row, Transaction};
+use rusqlite::{Connection, OptionalExtension as _, Row, Transaction};
 use serde::Serialize;
 
 use crate::error::Result;
@@ -13,6 +13,52 @@ use crate::rows::{
     self, Columns, diagnostic_sql, list, number, request_sql, required, text, unsigned,
 };
 use crate::work::Ticket;
+
+/// Stable across application schema versions, so older executables can find their successor.
+pub(crate) const WRITER_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS store_writer (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    version TEXT NOT NULL,
+    executable TEXT NOT NULL
+) STRICT;";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Writer {
+    pub version: String,
+    pub executable: String,
+}
+
+pub(crate) fn writer(connection: &Connection) -> Result<Option<Writer>> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'store_writer')",
+        [], |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    Ok(connection
+        .query_row(
+            "SELECT version, executable FROM store_writer WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(Writer {
+                    version: row.get(0)?,
+                    executable: row.get(1)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub(crate) fn save_writer(tx: &Transaction<'_>, writer: &Writer) -> Result<()> {
+    tx.execute(
+        "INSERT INTO store_writer (singleton, version, executable) VALUES (1, ?1, ?2)
+         ON CONFLICT (singleton) DO UPDATE SET version = excluded.version, executable = excluded.executable
+         WHERE version != excluded.version OR executable != excluded.executable",
+        [&writer.version, &writer.executable],
+    )?;
+    Ok(())
+}
 
 pub(crate) const SCHEMA: &str = concat!(
     "

@@ -563,12 +563,21 @@ impl Node<'_> {
         id: &str,
         now: u64,
         job_validity: Option<crate::jobs::Validity>,
+        owner: &str,
+        owner_host: &str,
     ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
+        if owner.is_empty() || owner_host.is_empty() {
+            return Err(crate::error::Error::Invalid(
+                "reservation requires owner and owner host".into(),
+            ));
+        }
         self.ledger.with_lock("host", || {
+            crate::jobs::reject_unstarted(self.ledger, id)?;
             // Publish request authority before the hold, for jobs too: a later checkout or
             // launch for this id matches it, and never sees a hold without authority.
             crate::jobs::receive_request_validity(self.ledger, id, job_validity)?;
+            crate::job_store::remember_owner(self.ledger, id, owner, Some(owner_host))?;
             if crate::preparation_store::grants::get(self.ledger, id)?.is_some() {
                 return Err(crate::unit_transport::conflict(
                     "placement reservation requires its replay envelope",
@@ -767,7 +776,7 @@ mod tests {
         let validity = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         std::thread::scope(|scope| {
             let calls: Vec<_> = (0..4)
-                .map(|_| scope.spawn(|| node.reserve("same", 100, validity)))
+                .map(|_| scope.spawn(|| node.reserve("same", 100, validity, "w1:p1", "origin")))
                 .collect();
             for call in calls {
                 assert!(call.join().unwrap().unwrap().reserved);
@@ -779,7 +788,7 @@ mod tests {
         assert_eq!(holds[0].created_ms, 100);
         // An existing hold is not new admission and does not need a fresh probe.
         assert!(
-            node.reserve("same", 100 + STALE_MS + 1, validity)
+            node.reserve("same", 100 + STALE_MS + 1, validity, "w1:p1", "origin")
                 .unwrap()
                 .reserved
         );
@@ -790,13 +799,19 @@ mod tests {
         let another = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         assert!(
             !node
-                .reserve("another", 100 + STALE_MS + 1, another)
+                .reserve("another", 100 + STALE_MS + 1, another, "w1:p1", "origin")
                 .unwrap()
                 .reserved
         );
         assert!(
             !node
-                .reserve("same", 100 + policy.reservation_ttl_ms, validity)
+                .reserve(
+                    "same",
+                    100 + policy.reservation_ttl_ms,
+                    validity,
+                    "w1:p1",
+                    "origin"
+                )
                 .unwrap()
                 .reserved
         );
