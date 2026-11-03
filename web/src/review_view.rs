@@ -14,7 +14,7 @@ use gloo_net::http::{Request, RequestBuilder, Response};
 use js_sys::wasm_bindgen::JsCast;
 use portal_types::reviews::{
     Annotation, AnnotationsBody, ApproveBody, ChangeKind, DiffView, GeneralBody, Review,
-    ReviewList, ReviewSummary,
+    ReviewList, ReviewSummary, plan_title,
 };
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use serde::de::DeserializeOwned;
@@ -253,31 +253,6 @@ fn safe_url(url: &str) -> bool {
 /// Markdown as safe HTML: raw HTML stays text and unsafe links are dropped.
 pub(crate) fn render_markdown(source: &str) -> String {
     render_plan(source, &[])
-}
-
-/// The first Markdown heading supplies the review title, without inline markup.
-fn plan_title(source: &str) -> Option<String> {
-    let mut title = None::<String>;
-    for event in Parser::new(source) {
-        match event {
-            Event::Start(Tag::Heading { .. }) => title = Some(String::new()),
-            Event::End(TagEnd::Heading(_)) => {
-                return title.filter(|title| !title.trim().is_empty());
-            }
-            Event::Text(text) | Event::Code(text) => {
-                if let Some(title) = &mut title {
-                    title.push_str(&text);
-                }
-            }
-            Event::SoftBreak | Event::HardBreak if title.is_some() => {
-                if let Some(title) = &mut title {
-                    title.push(' ');
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Keep the original escaped events until an entire fence can be highlighted safely.
