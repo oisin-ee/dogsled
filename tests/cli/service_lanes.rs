@@ -52,11 +52,11 @@ fn lane_status_write_failure_does_not_stop_service() {
     assert!(journal.contains(lane_error), "{journal}");
     assert!(journal.contains(recording_error), "{journal}");
 
-    let before = rig.log("state/samples.jsonl").lines().count();
+    let before = rig.state(&["samples"]).as_array().unwrap().len();
     let mut child = rig.start(&["serve", "--interval", "1"]);
     let deadline = Instant::now() + PROCESS_DEADLINE;
     // Observe publication passes, rather than assuming how long each pass takes.
-    while rig.log("state/samples.jsonl").lines().count() < before + 4 {
+    while rig.state(&["samples"]).as_array().unwrap().len() < before + 4 {
         assert!(Instant::now() < deadline, "service did not keep publishing");
         std::thread::yield_now();
     }

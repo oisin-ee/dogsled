@@ -190,6 +190,7 @@ pub fn local(
         Error::Invalid(
             "request validity is unprovable; provisioning requires its original request".into(),
         )
+        .because(Cause::ValidityUnprovable)
     })?;
     crate::jobs::receive_request_validity(ledger, id, Some(validity))?;
     let check = || {

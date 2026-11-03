@@ -2,6 +2,7 @@
 //! `teardown`, `git worktree remove`, the branch when it is integrated, and the anchor workspace
 //! after the last child. `close` and `prune` share these rules.
 
+use crate::diagnostic::Cause;
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 use crate::probe::Pane;
@@ -48,7 +49,9 @@ fn generation(gitdir: &Path) -> Result<Option<String>> {
         Ok(text) => {
             let id = text.trim();
             if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(refuse("malformed checkout generation"));
+                return Err(
+                    refuse("malformed checkout generation").because(Cause::CheckoutUnavailable)
+                );
             }
             Ok(Some(id.into()))
         }
@@ -66,7 +69,8 @@ impl Guard {
         self.check_repository(shell, &tree.checkout)?;
         validate_identity(shell, &tree)?;
         if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
-            return Err(refuse("HEAD moved during checkout observation"));
+            return Err(refuse("HEAD moved during checkout observation")
+                .because(Cause::CheckoutIdentityMismatch));
         }
         Ok(Some(tree))
     }
@@ -82,7 +86,8 @@ impl Guard {
         }
         validate_identity(shell, &tree)?;
         if snapshot(shell, path)?.is_none_or(|now| now.head != tree.head) {
-            return Err(refuse("HEAD moved during checkout discovery"));
+            return Err(refuse("HEAD moved during checkout discovery")
+                .because(Cause::CheckoutIdentityMismatch));
         }
         Ok(Some(tree))
     }
@@ -94,8 +99,9 @@ impl Guard {
         } else {
             use std::io::Write as _;
             let mut bytes = [0u8; 16];
-            getrandom::fill(&mut bytes)
-                .map_err(|error| Error::Invalid(format!("checkout generation: {error}")))?;
+            getrandom::fill(&mut bytes).map_err(|error| {
+                Error::Invalid(format!("checkout generation: {error}")).because(Cause::IoFailed)
+            })?;
             let id = bytes
                 .iter()
                 .fold(String::with_capacity(32), |mut id, byte| {
@@ -115,7 +121,10 @@ impl Guard {
                     id
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    generation(gitdir)?.ok_or_else(|| refuse("checkout generation disappeared"))?
+                    generation(gitdir)?.ok_or_else(|| {
+                        refuse("checkout generation disappeared")
+                            .because(Cause::CheckoutUnavailable)
+                    })?
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -136,18 +145,21 @@ impl Guard {
         pin: &Pin,
     ) -> Result<Linked> {
         pin.validate(before)?;
-        let now = linked_or_detached(shell, &before.path)?
-            .ok_or_else(|| refuse("checkout identity is unreadable"))?;
+        let now = linked_or_detached(shell, &before.path)?.ok_or_else(|| {
+            refuse("checkout identity is unreadable").because(Cause::CheckoutUnavailable)
+        })?;
         let mut expected = before.tree();
         expected.identity.clone_from(&now.identity);
         if before.identity.is_some()
             || expected.drift(&now.tree()) == crate::cleanup::Drift::Identity
             || resolved(&before.gitdir) != resolved(&now.gitdir)
         {
-            return Err(refuse("worktree identity changed"));
+            return Err(
+                refuse("worktree identity changed").because(Cause::CheckoutIdentityMismatch)
+            );
         }
         if before.head != now.head {
-            return Err(refuse("HEAD moved before close"));
+            return Err(refuse("HEAD moved before close").because(Cause::CheckoutIdentityMismatch));
         }
         self.check_repository(shell, &before.checkout)?;
         pin.validate(before)?;
@@ -159,7 +171,8 @@ impl Guard {
         pin.validate(before)?;
         validate_identity(shell, &tree)?;
         if snapshot(shell, &before.path)?.is_none_or(|now| now.head != before.head) {
-            return Err(refuse("HEAD moved during checkout discovery"));
+            return Err(refuse("HEAD moved during checkout discovery")
+                .because(Cause::CheckoutIdentityMismatch));
         }
         pin.validate(before)?;
         Ok(tree)
@@ -167,7 +180,9 @@ impl Guard {
 
     pub fn check_repository(&self, shell: &dyn Shell, checkout: &Path) -> Result<()> {
         if common_dir(shell, checkout)?.canonicalize()? != self.common {
-            return Err(refuse("repository identity changed"));
+            return Err(
+                refuse("repository identity changed").because(Cause::CheckoutIdentityMismatch)
+            );
         }
         Ok(())
     }
@@ -215,7 +230,9 @@ impl Pin {
             let original = file.metadata()?;
             let current = std::fs::metadata(path)?;
             if original.dev() != current.dev() || original.ino() != current.ino() {
-                return Err(refuse("worktree identity changed"));
+                return Err(
+                    refuse("worktree identity changed").because(Cause::CheckoutIdentityMismatch)
+                );
             }
         }
         Ok(())
@@ -270,6 +287,16 @@ fn git(shell: &dyn Shell, dir: &Path, args: &[&str]) -> Result<crate::shell::Out
     shell.run("git", &git_words(dir, args))
 }
 
+/// The execution directory must exist before allocating or starting a pane.
+pub fn require_execution_directory(directory: &str) -> Result<()> {
+    if !Path::new(directory).is_dir() {
+        return Err(refuse("execution directory disappeared")
+            .because(Cause::ExecutionDirectoryMissing)
+            .in_directory(directory));
+    }
+    Ok(())
+}
+
 pub fn refuse(message: &str) -> Error {
     Error::Invalid(format!("refuse: {message}; nothing was closed"))
 }
@@ -313,14 +340,15 @@ pub fn linked(shell: &dyn Shell, cwd: &str) -> Result<Option<Linked>> {
 pub fn head_sha(shell: &dyn Shell, path: &str) -> Result<String> {
     let out = git(shell, Path::new(path), &["rev-parse", "HEAD"])?;
     if !out.ok() {
-        return Err(Error::Invalid(format!(
-            "{path}: cannot read HEAD: {}",
-            out.stderr.trim()
-        )));
+        return Err(
+            Error::Invalid(format!("{path}: cannot read HEAD: {}", out.stderr.trim()))
+                .because(Cause::CheckoutUnavailable),
+        );
     }
     let head = out.stdout.trim().to_string();
     if head.is_empty() {
-        return Err(Error::Invalid(format!("{path}: HEAD names no commit")));
+        return Err(Error::Invalid(format!("{path}: HEAD names no commit"))
+            .because(Cause::CheckoutUnavailable));
     }
     Ok(head)
 }
@@ -545,7 +573,7 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
         }
         let branch = git(shell, Path::new(cwd), &["symbolic-ref", "--short", "HEAD"])?;
         if !branch.ok() {
-            return Err(refuse("cannot read checkout HEAD"));
+            return Err(refuse("cannot read checkout HEAD").because(Cause::CheckoutUnavailable));
         }
         let tip = git(
             shell,
@@ -563,9 +591,10 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
     };
     let lines: Vec<&str> = output.lines().map(str::trim).collect();
     let [common, dir, top, head, branch] = lines[..] else {
-        return Err(Error::Invalid(format!(
-            "git rev-parse in {cwd} returned unexpected output"
-        )));
+        return Err(
+            Error::Invalid(format!("git rev-parse in {cwd} returned unexpected output"))
+                .because(Cause::InvalidPayload),
+        );
     };
     if linked_only && same(common, dir) {
         return Ok(None);
@@ -574,7 +603,9 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
     let checkout = if common.file_name().is_some_and(|name| name == ".git") {
         common
             .parent()
-            .ok_or_else(|| refuse("Git common directory has no parent"))?
+            .ok_or_else(|| {
+                refuse("Git common directory has no parent").because(Cause::CheckoutUnavailable)
+            })?
             .to_path_buf()
     } else {
         common.clone()
@@ -609,7 +640,8 @@ pub fn list(shell: &dyn Shell, checkout: &Path) -> Result<Vec<Listed>> {
             "cannot list worktrees in {}: {}",
             checkout.display(),
             out.stderr.trim()
-        )));
+        ))
+        .because(Cause::CheckoutUnavailable));
     }
     let mut result: Vec<Listed> = Vec::new();
     for line in out.stdout.lines() {
@@ -650,7 +682,8 @@ pub fn validate_identity(shell: &dyn Shell, tree: &Linked) -> Result<()> {
                 || resolved(&now.checkout) != resolved(&tree.checkout)
         })
     {
-        return Err(refuse(&format!("{}: worktree identity changed", tree.path)));
+        return Err(refuse(&format!("{}: worktree identity changed", tree.path))
+            .because(Cause::CheckoutIdentityMismatch));
     }
     Ok(())
 }
@@ -868,7 +901,8 @@ pub fn common_dir(shell: &dyn Shell, checkout: &Path) -> Result<PathBuf> {
             "{} is not a Git checkout: {}",
             checkout.display(),
             out.stderr.trim()
-        )));
+        ))
+        .because(Cause::CheckoutUnavailable));
     }
     Ok(dir.into())
 }

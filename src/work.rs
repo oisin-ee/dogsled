@@ -18,12 +18,14 @@ pub(crate) use placement::{
 
 use crate::checkout::Repository;
 use crate::commands::{self, Placement};
+use crate::diagnostic::Cause;
 use crate::error::{Error, Result};
 use crate::hosts::{Fleet, Host};
 use crate::items::{self, Item};
 use crate::jobs::{self, Job};
 use crate::ledger::{Ledger, new_id};
 use crate::shell::{Shell, quote};
+use crate::worktree::Linked;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -144,8 +146,28 @@ pub(crate) fn queued_request(ledger: &Ledger, id: &str) -> Result<bool> {
     crate::store::read(ledger, |tx| crate::tables::queued_request(tx, id))
 }
 
-fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
-    crate::store::write(ledger, |tx| crate::tables::sync_tickets(tx, tickets))
+/// The queue inside the caller's write transaction, as `queue` would return it.
+fn tickets_in(tx: &rusqlite::Transaction<'_>) -> Result<Vec<Ticket>> {
+    let mut tickets = crate::tables::tickets(tx)?;
+    for ticket in &mut tickets {
+        end_expired_wait(ticket);
+    }
+    Ok(tickets)
+}
+
+/// Read the queue, change it, and save it in one write transaction.
+fn change_queue<T>(
+    ledger: &Ledger,
+    change: impl FnOnce(&rusqlite::Transaction<'_>, &mut Vec<Ticket>) -> Result<(T, bool)>,
+) -> Result<T> {
+    crate::store::write(ledger, |tx| {
+        let mut tickets = tickets_in(tx)?;
+        let (result, changed) = change(tx, &mut tickets)?;
+        if changed {
+            crate::tables::sync_tickets(tx, &tickets)?;
+        }
+        Ok(result)
+    })
 }
 
 /// Job tickets expire only with a conclusively terminal local job record. Missing
@@ -153,10 +175,9 @@ fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
 /// without a ticket, job record, or launch receipt.
 pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
     expire_admissions(ledger, now)?;
-    ledger.with_lock("queue", || {
-        let mut tickets = queue(ledger)?;
+    change_queue(ledger, |tx, tickets| {
         let mut expired = Vec::new();
-        for ticket in &tickets {
+        for ticket in tickets.iter() {
             let cancelled_without_admission =
                 cancellation(ledger, &ticket.request)?.is_some_and(|saved| {
                     saved.completion_version == Some(1)
@@ -171,7 +192,7 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                     .is_some_and(|job| matches!(jobs::expiry(&job, now), jobs::Expiry::Record));
             if (terminal_job || cancelled_without_admission)
                 && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
-                && ticket_completion(ledger, ticket)?
+                && ticket_completion_in(ledger, tx, ticket)?
                     .is_some_and(|finished| now.saturating_sub(finished) > jobs::RECORD_KEEP_MS)
             {
                 if cancellation(ledger, &ticket.request)?
@@ -180,18 +201,22 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                     continue;
                 }
                 expired.push(ticket.id.clone());
-                crate::job_store::remove_cancellation(ledger, &ticket.request.id)?;
+                crate::job_store::remove_cancellation_in(tx, &ticket.request.id)?;
             }
         }
-        if !expired.is_empty() {
-            tickets.retain(|t| !expired.contains(&t.id));
-            save_queue(ledger, &tickets)?;
-        }
-        expire_request_sidecars(ledger, now, &tickets)
+        let changed = !expired.is_empty();
+        tickets.retain(|t| !expired.contains(&t.id));
+        expire_request_sidecars(ledger, tx, now, tickets)?;
+        Ok(((), changed))
     })
 }
 
-fn expire_request_sidecars(ledger: &Ledger, now: u64, tickets: &[Ticket]) -> Result<()> {
+fn expire_request_sidecars(
+    ledger: &Ledger,
+    tx: &rusqlite::Transaction<'_>,
+    now: u64,
+    tickets: &[Ticket],
+) -> Result<()> {
     for (id, _) in crate::job_store::validities(ledger)? {
         let id = id.as_str();
         let admission_owner = crate::admissions::exists(ledger, id)?;
@@ -203,7 +228,7 @@ fn expire_request_sidecars(ledger: &Ledger, now: u64, tickets: &[Ticket]) -> Res
         {
             continue;
         }
-        crate::job_store::expire_validity(ledger, id, now)?;
+        crate::job_store::expire_validity_in(tx, id, now)?;
     }
     Ok(())
 }
@@ -249,7 +274,12 @@ pub(crate) fn references_released(ledger: &Ledger, id: &str) -> Result<bool> {
             "retention admission identity changed",
         ));
     }
-    if cancellation(ledger, &request)?.is_some_and(|saved| saved.release == "pending") {
+    if let Some(saved) = cancellation(ledger, &request)?
+        && (saved.release == "pending"
+            || (matches!(request.action, Action::Job { .. })
+                && saved.outcome == crate::prepare::disposition::Outcome::NotStarted
+                && crate::job_store::unstarted_finished(ledger, id)?.is_none()))
+    {
         return Ok(false);
     }
     if let Some(unit) = &attempt.unit {
@@ -425,36 +455,44 @@ fn expire_admission(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
         }
         crate::prepare::expire_record(ledger, id, now)?;
         commands::expire_selection(ledger, id)?;
-        ledger.with_lock("queue", || {
-            let mut tickets = queue(ledger)?;
+        change_queue(ledger, |tx, tickets| {
             for ticket in tickets.iter().filter(|ticket| ticket.request.id == id) {
-                if ticket_completion(ledger, ticket)?
+                if ticket_completion_in(ledger, tx, ticket)?
                     .is_none_or(|finished| now.saturating_sub(finished) <= jobs::RECORD_KEEP_MS)
                 {
-                    return Ok(());
+                    return Ok(((), false));
                 }
             }
             tickets.retain(|ticket| ticket.request.id != id);
-            save_queue(ledger, &tickets)?;
-            crate::job_store::remove_cancellation(ledger, id)?;
-            crate::admissions::remove(ledger, id)
+            crate::job_store::remove_cancellation_in(tx, id)?;
+            crate::admissions::remove_in(tx, id)?;
+            Ok(((), true))
         })?;
         crate::custody::locked(ledger, id, |_| crate::custody::forget_released(ledger, id))
     })
 }
 
-pub(crate) fn ticket_completion(ledger: &Ledger, ticket: &Ticket) -> Result<Option<u64>> {
+/// When a terminal ticket finished, checked inside the caller's write transaction.
+fn ticket_completion_in(
+    ledger: &Ledger,
+    tx: &rusqlite::Transaction<'_>,
+    ticket: &Ticket,
+) -> Result<Option<u64>> {
     if ticket.finished_ms.is_none() {
         return Ok(None);
     }
-    let pending =
-        cancellation(ledger, &ticket.request)?.is_some_and(|saved| saved.release == "pending");
-    jobs::completion_time(
-        ledger,
+    jobs::completion_time_in(
+        tx,
         ticket.finished_ms,
         Some(ticket.created_ms),
-        matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled") && !pending,
+        ticket_terminal(ledger, ticket)?,
     )
+}
+
+fn ticket_terminal(ledger: &Ledger, ticket: &Ticket) -> Result<bool> {
+    let pending =
+        cancellation(ledger, &ticket.request)?.is_some_and(|saved| saved.release == "pending");
+    Ok(matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled") && !pending)
 }
 
 pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
@@ -502,6 +540,7 @@ pub(crate) fn check_launch_validity(ledger: &Ledger, launch: &Launch) -> Result<
 }
 
 pub(crate) fn launch_validity(ledger: &Ledger, launch: &Launch) -> Result<Option<jobs::Validity>> {
+    jobs::reject_unstarted(ledger, &launch.id)?;
     let saved = jobs::request_validity(ledger, &launch.id)?;
     if !matches!(launch.action, Action::Job { .. }) {
         jobs::match_request_validity(saved, launch.validity)?;
@@ -518,7 +557,12 @@ fn record_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
         }
         jobs::record_request_validity(ledger, &request.id, *validity)?;
     }
-    Ok(())
+    crate::job_store::remember_owner(
+        ledger,
+        &request.id,
+        &request.owner,
+        request.owner_host.as_deref(),
+    )
 }
 
 /// Check a request against this host's clock. A request that may not start new execution
@@ -542,31 +586,32 @@ fn validity_refusal(error: Error, id: &str) -> Error {
 }
 
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
-    ledger.with_lock("queue", || {
-        jobs::validate_id(&request.id)?;
-        let mut tickets = queue(ledger)?;
-        if !tickets.iter().any(|t| t.request.id == request.id) {
-            // Publish the atomic sidecar before the ticket becomes visible. Existing
-            // tickets never recover missing evidence from their inline copy.
-            record_request_validity(ledger, &request)?;
-        }
-        check_request_validity(ledger, &request)?;
+    jobs::validate_id(&request.id)?;
+    // Publish the immutable sidecar before the ticket becomes visible. Existing tickets
+    // never recover missing evidence from their inline copy.
+    record_request_validity(ledger, &request)?;
+    check_request_validity(ledger, &request)?;
+    let saved = match &request.action {
+        Action::Job { .. } => Some(jobs::request_validity(ledger, &request.id)?),
+        _ => None,
+    };
+    change_queue(ledger, |_, tickets| {
         if let Some(ticket) = tickets.iter_mut().find(|t| t.request.id == request.id) {
             let mut queued = ticket.request.clone();
-            if let Action::Job { validity, .. } = &mut queued.action {
-                *validity = jobs::request_validity(ledger, &queued.id)?;
+            if let (Action::Job { validity, .. }, Some(saved)) = (&mut queued.action, saved) {
+                *validity = saved;
             }
             if serde_json::to_value(&queued)? != serde_json::to_value(&request)? {
                 return Err(crate::unit_transport::conflict("queued request changed"));
             }
             let id = ticket.id.clone();
             // Placement may have queued the refusal before the caller selected a wait.
-            if waiting && !ticket.waiting {
+            let changed = waiting && !ticket.waiting;
+            if changed {
                 ticket.waiting = true;
                 ticket.waiting_until_ms = waiting_until(ledger, now);
-                save_queue(ledger, &tickets)?;
             }
-            return Ok(id);
+            return Ok((id, changed));
         }
         let id = new_id();
         tickets.push(Ticket {
@@ -584,8 +629,7 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             diagnostic: None,
             retry: crate::backoff::Backoff::default(),
         });
-        save_queue(ledger, &tickets)?;
-        Ok(id)
+        Ok((id, true))
     })
 }
 
@@ -922,12 +966,8 @@ fn validate_cancellation_admission(request: &Request, admission: Option<&Value>)
 
 fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
     project_attempt(ledger, saved)?;
-    ledger.with_lock("queue", || {
-        let mut tickets = queue(ledger)?;
-        if project_ticket(&mut tickets, saved)? {
-            save_queue(ledger, &tickets)?;
-        }
-        Ok(())
+    change_queue(ledger, |_, tickets| {
+        Ok(((), project_ticket(tickets, saved)?))
     })
 }
 
@@ -978,21 +1018,11 @@ fn project_ticket(tickets: &mut [Ticket], saved: &Cancellation) -> Result<bool> 
 }
 
 pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
-    let original = ledger.with_lock("queue", || {
-        queue(ledger)?
-            .into_iter()
-            .find(|t| t.id == id)
-            .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
-    })?;
+    let original = queued_ticket(ledger, id)?;
     launch_test_barrier("CANCEL_BEFORE_ADMISSION")?;
     crate::admissions::lock(ledger, &original.request.id, || {
         launch_test_barrier("CANCEL_ENTERED_ADMISSION")?;
-        let ticket = ledger.with_lock("queue", || {
-            queue(ledger)?
-                .into_iter()
-                .find(|t| t.id == id)
-                .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
-        })?;
+        let ticket = queued_ticket(ledger, id)?;
         if serde_json::to_value(&original.request)? != serde_json::to_value(&ticket.request)? {
             return Err(crate::unit_transport::conflict(
                 "ticket changed while cancelling",
@@ -1103,7 +1133,7 @@ pub(crate) fn no_launch_proof(ledger: &Ledger, ticket: &Ticket) -> Result<bool> 
 /// One bounded pass. Released and held records cost no host call and no queue write.
 /// At most `REPAIR_BATCH` releases are attempted, least recently attempted first, and
 /// every changed ticket is saved in one queue write at the end.
-fn repair_cancellations(fleet: &Fleet) -> Result<()> {
+pub(crate) fn repair_cancellations(fleet: &Fleet) -> Result<()> {
     let records = crate::job_store::cancellations(fleet.ledger)?;
     let mut tickets = queue(fleet.ledger)?;
     let mut projected = Vec::new();
@@ -1128,21 +1158,17 @@ fn repair_cancellations(fleet: &Fleet) -> Result<()> {
     if projected.is_empty() {
         return Ok(());
     }
-    fleet.ledger.with_lock("queue", || {
-        let mut tickets = queue(fleet.ledger)?;
+    change_queue(fleet.ledger, |_, tickets| {
         let mut changed = false;
         for saved in &projected {
-            match project_ticket(&mut tickets, saved) {
+            match project_ticket(tickets, saved) {
                 Ok(projected) => changed |= projected,
                 Err(error) => {
                     eprintln!("dogsled cancellation {}: {error}", saved.ticket.request.id);
                 }
             }
         }
-        if changed {
-            save_queue(fleet.ledger, &tickets)?;
-        }
-        Ok(())
+        Ok(((), changed))
     })
 }
 
@@ -1393,7 +1419,10 @@ pub fn workspace(shell: &dyn Shell, id: &str) -> Result<String> {
         .and_then(|rows| rows.iter().find(|w| w["workspace_id"] == id))
         .and_then(|w| w["label"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("caller workspace {id} has no label")))
+        .ok_or_else(|| {
+            Error::Invalid(format!("caller workspace {id} has no label"))
+                .because(Cause::WorkspaceUnavailable)
+        })
 }
 
 fn herdr(shell: &dyn Shell, args: &[String]) -> Result<Value> {
@@ -1402,12 +1431,7 @@ fn herdr(shell: &dyn Shell, args: &[String]) -> Result<Value> {
 }
 
 pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option<String>)> {
-    if !std::path::Path::new(&launch.cwd).is_dir() {
-        return Err(Error::Invalid(format!(
-            "{}: cwd does not exist: {}",
-            launch.host, launch.cwd
-        )));
-    }
+    crate::worktree::require_execution_directory(&launch.cwd)?;
     if let Some(pane) = &launch.pane {
         return Ok((pane.clone(), launch.terminal.clone()));
     }
@@ -1424,7 +1448,10 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
         .pointer("/result/root_pane/pane_id")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("herdr create returned no root pane: {value}")))?;
+        .ok_or_else(|| {
+            Error::Invalid(format!("herdr create returned no root pane: {value}"))
+                .because(Cause::WorkspaceUnavailable)
+        })?;
     let terminal = value
         .pointer("/result/root_pane/terminal_id")
         .and_then(Value::as_str)
@@ -1441,7 +1468,10 @@ fn live_terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
         .1
         .get(pane)
         .cloned()
-        .ok_or_else(|| Error::Invalid(format!("{pane}: cannot establish launch terminal identity")))
+        .ok_or_else(|| {
+            Error::Invalid(format!("{pane}: cannot establish launch terminal identity"))
+                .because(Cause::PaneUnavailable)
+        })
 }
 
 /// Retire a pane this launch allocated. Only that pane is closed, and only after the same
@@ -1458,30 +1488,35 @@ pub(crate) fn retire_pane(shell: &dyn Shell, pane: &str, terminal: Option<&str>)
             .iter()
             .any(|p| p.pane_id == pane && p.focused)
     {
-        return Err(Error::Invalid(format!("{pane}: caller or focused pane")));
+        return Err(
+            Error::Invalid(format!("{pane}: caller or focused pane")).because(Cause::PaneBusy)
+        );
     }
     let Some(expected) = terminal.filter(|id| !id.is_empty()) else {
-        return Err(Error::Invalid(format!(
-            "{pane}: the launch recorded no terminal identity"
-        )));
+        return Err(
+            Error::Invalid(format!("{pane}: the launch recorded no terminal identity"))
+                .because(Cause::PaneUnavailable),
+        );
     };
     if live_terminal(shell, pane)? != expected {
-        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed"))
+            .because(Cause::PaneIdentityMismatch));
     }
     if crate::probe::agent_list(shell)?
         .iter()
         .any(|agent| agent.pane == pane)
     {
-        return Err(Error::Invalid(format!(
-            "{pane}: an agent now owns the pane"
-        )));
+        return Err(
+            Error::Invalid(format!("{pane}: an agent now owns the pane")).because(Cause::PaneBusy),
+        );
     }
     if crate::probe::foreground(shell, pane)?.is_some() {
-        return Err(Error::Invalid(format!("{pane}: the pane is busy")));
+        return Err(Error::Invalid(format!("{pane}: the pane is busy")).because(Cause::PaneBusy));
     }
     // Inspection must not authorize closing a replacement terminal.
     if live_terminal(shell, pane)? != expected {
-        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed"))
+            .because(Cause::PaneIdentityMismatch));
     }
     shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
     Ok(())
@@ -1501,10 +1536,10 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
     let workspace = if let Some(id) = &launch.workspace {
         Some(id.clone())
     } else {
-        let name = launch
-            .workspace_name
-            .as_ref()
-            .ok_or_else(|| Error::Invalid("caller workspace name is required".into()))?;
+        let name = launch.workspace_name.as_ref().ok_or_else(|| {
+            Error::Invalid("caller workspace name is required".into())
+                .because(Cause::WorkspaceUnavailable)
+        })?;
         let value = herdr(shell, &["workspace".into(), "list".into()])?;
         value
             .pointer("/result/workspaces")
@@ -1519,10 +1554,9 @@ fn callers(shell: &dyn Shell, launch: &Launch) -> Result<Vec<String>> {
             "workspace".into(),
             "create".into(),
             "--label".into(),
-            launch
-                .workspace_name
-                .clone()
-                .ok_or_else(|| Error::Invalid("missing workspace name".into()))?,
+            launch.workspace_name.clone().ok_or_else(|| {
+                Error::Invalid("missing workspace name".into()).because(Cause::WorkspaceUnavailable)
+            })?,
         ],
     })
 }
@@ -1571,13 +1605,15 @@ pub(crate) fn correlate(
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another request",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     if saved["host"] != json!(launch.host) {
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another host",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     // The receipt's own evidence is the first check. A receipt that names another command
     // or another request dispatched another job, whether or not its job record remains.
@@ -1588,7 +1624,8 @@ pub(crate) fn correlate(
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another command or request",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     // The job record is a second check, not a prerequisite. The prune removes a terminal
     // job record and keeps its receipt, so the receipt carries the replay alone.
@@ -1600,7 +1637,7 @@ pub(crate) fn correlate(
             return Err(Error::Invalid(format!(
                 "job {} has a legacy launch receipt without request evidence; inspect that host before resubmitting",
                 launch.id
-            )));
+            )).because(Cause::LaunchReceiptMissing));
         }
         // A complete receipt also names the pane it dispatched into. Without it the receipt
         // proves no dispatch, so a replay refuses.
@@ -1612,21 +1649,23 @@ pub(crate) fn correlate(
             return Err(Error::Invalid(format!(
                 "job {} has a launch receipt without a pane; inspect that host before resubmitting",
                 launch.id
-            )));
+            ))
+            .because(Cause::LaunchReceiptMissing));
         }
         return Ok(());
     };
     if job.id != launch.id {
-        return Err(Error::Invalid(format!(
-            "job {} claim belongs to job {}",
-            launch.id, job.id
-        )));
+        return Err(
+            Error::Invalid(format!("job {} claim belongs to job {}", launch.id, job.id))
+                .because(Cause::LaunchReceiptMismatch),
+        );
     }
     if saved["pane"] != json!(job.pane) {
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another pane",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     if job.cmd != cmd
         || job.cwd != launch.cwd
@@ -1639,7 +1678,8 @@ pub(crate) fn correlate(
         return Err(Error::Invalid(format!(
             "job {} has a saved launch receipt for another command or request",
             launch.id
-        )));
+        ))
+        .because(Cause::LaunchReceiptMismatch));
     }
     Ok(())
 }
@@ -1652,7 +1692,8 @@ fn require_unclaimed(ledger: &Ledger, id: &str) -> Result<()> {
                 "job {} has an unresolved claim; inspect that host before resubmitting: {}",
                 id,
                 held.reason.unwrap_or_else(|| "outcome unknown".into())
-            )));
+            ))
+            .because(Cause::JobClaimUnresolved));
         }
         jobs::Ownership::Pending(_)
         | jobs::Ownership::Started(_)
@@ -1665,7 +1706,7 @@ fn require_unclaimed(ledger: &Ledger, id: &str) -> Result<()> {
         // overwrites nothing, saves no receipt, and releases no preparation.
         return Err(Error::Invalid(format!(
             "job {id} has a claim but no saved launch receipt; inspect that host before resubmitting"
-        )));
+        )).because(Cause::JobClaimExists));
     }
     Ok(())
 }
@@ -1710,7 +1751,13 @@ fn launch_job(
     // executable: an allocation that stops here stays uncertain, and no other
     // allocation may take the job over.
     jobs::publish_intent(ledger, &job)?;
-    let (pane, terminal) = pane(shell, launch)?;
+    let (pane, terminal) = match pane(shell, launch) {
+        Ok(allocated) => allocated,
+        Err(error) => {
+            jobs::refuse_intent(ledger, &job, &error.to_string())?;
+            return Err(error);
+        }
+    };
     // Allocation blocks, so the request can expire during it. The recheck runs before the
     // executable claim is published and before the command is dispatched. A refusal writes
     // no receipt, releases no preparation, and retires only the pane this attempt
@@ -1721,6 +1768,7 @@ fn launch_job(
         {
             eprintln!("dogsled pane close: {error}");
         }
+        jobs::refuse_intent(ledger, &job, &refusal.to_string())?;
         return Err(refusal);
     }
     // The pane is known, so the claim becomes executable. The wrapper reads it
@@ -1768,6 +1816,7 @@ pub fn receive_launch(
     now: u64,
     peer_validity: Option<u32>,
 ) -> Result<Value> {
+    jobs::reject_unstarted(ledger, &launch.id)?;
     if let Action::Job { validity, .. } = &launch.action
         && peer_validity == Some(jobs::VALIDITY_PROTOCOL_VERSION)
         && !queued_request(ledger, &launch.id)?
@@ -1791,7 +1840,8 @@ pub fn receive_launch(
                         return Err(Error::Invalid(format!(
                             "job {} request validity changed",
                             launch.id
-                        )));
+                        ))
+                        .because(Cause::RequestChanged));
                     }
                     None if crate::launch_store::receipt(ledger, &launch.id)?.is_none() => {
                         jobs::check_validity(ledger, validity.as_ref())?;
@@ -1802,6 +1852,12 @@ pub fn receive_launch(
                 Ok(())
             })?;
     }
+    crate::job_store::remember_owner(
+        ledger,
+        &launch.id,
+        &launch.owner,
+        launch.owner_host.as_deref(),
+    )?;
     launch_with_ingress(ledger, shell, launch, now, peer_validity, true)
 }
 
@@ -1852,14 +1908,18 @@ fn launch_with_ingress(
                 }
                 crate::prepare::disposition::replay_guarded(ledger, shell, launch)
             })?;
-        return replay?.ok_or_else(|| Error::Invalid("final launch receipt disappeared".into()));
+        return replay?.ok_or_else(|| {
+            Error::Invalid("final launch receipt disappeared".into())
+                .because(Cause::LaunchReceiptMissing)
+        });
     }
     if !matches!(launch.action, Action::Job { .. })
         && peer_validity != Some(jobs::REQUEST_VALIDITY_PROTOCOL_VERSION)
     {
-        return Err(Error::Invalid(
-            "unsupported non-job request validity protocol".into(),
-        ));
+        return Err(
+            Error::Invalid("unsupported non-job request validity protocol".into())
+                .because(Cause::ProtocolUnsupported),
+        );
     }
     if matches!(launch.action, Action::Job { .. }) {
         require_unclaimed(ledger, &launch.id)?;
@@ -1870,10 +1930,13 @@ fn launch_with_ingress(
         .with_lock(&launch.id, || {
             launch_test_barrier("ENTERED_GATE")?;
             if crate::prepare::validate_launch_binding(ledger, launch)?.legacy_final {
-                return replay_launch(ledger, launch)?
-                    .ok_or_else(|| crate::worktree::refuse("historical final launch disappeared"));
+                return replay_launch(ledger, launch)?.ok_or_else(|| {
+                    crate::worktree::refuse("historical final launch disappeared")
+                        .because(Cause::LaunchReceiptMissing)
+                });
             }
             // The preparation gate can wait behind a completed dispatch.
+            jobs::reject_unstarted(ledger, &launch.id)?;
             crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
             if let Some(result) = replay_launch(ledger, launch)? {
                 return Ok(result);
@@ -1883,6 +1946,15 @@ fn launch_with_ingress(
                 jobs::receive_request_validity(ledger, &launch.id, launch.validity)?;
             }
             let result = launch_owned(ledger, shell, launch);
+            if matches!(launch.action, Action::Job { .. })
+                && let Err(error) = &result
+                && !matches!(error, Error::Deadline(_))
+            {
+                crate::launch::job_refused(ledger, launch, error)?;
+                if crate::launch::job_refusal(ledger, launch)?.is_some() {
+                    crate::prepare::disposition::replay_guarded(ledger, shell, launch)?;
+                }
+            }
             launch_test_barrier("COMPLETED_GATE")?;
             result
         })
@@ -1904,8 +1976,8 @@ pub(crate) fn launch_test_barrier(phase: &str) -> Result<()> {
 
 fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<Value> {
     let job = matches!(launch.action, Action::Job { .. });
-    if job && !std::path::Path::new(&launch.cwd).is_dir() {
-        return Err(crate::worktree::refuse("execution directory disappeared"));
+    if job {
+        crate::worktree::require_execution_directory(&launch.cwd)?;
     }
     let (_, saved) = launch_checkout(ledger, launch)?;
     let before = if job {
@@ -1913,10 +1985,7 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
     } else {
         None
     };
-    let pin = before
-        .as_ref()
-        .map(crate::worktree::Linked::pin)
-        .transpose()?;
+    let pin = before.as_ref().map(Linked::pin).transpose()?;
     let repo = saved.as_ref().map(|t| std::path::PathBuf::from(&t.repo));
     let common = crate::worktree::common_dir(shell, std::path::Path::new(&launch.cwd));
     if repo.is_none() && before.is_none() && common.is_err() {
@@ -1945,47 +2014,55 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
             check_launch_validity(ledger, launch)?;
         }
         if current != saved {
-            return Err(crate::worktree::refuse(
-                "launch checkout changed while waiting",
-            ));
+            return Err(
+                crate::worktree::refuse("launch checkout changed while waiting")
+                    .because(Cause::CheckoutIdentityMismatch),
+            );
         }
         if recorded && saved.is_none() {
-            return Err(crate::worktree::refuse(
-                "recorded launch has no checkout identity",
-            ));
+            return Err(
+                crate::worktree::refuse("recorded launch has no checkout identity")
+                    .because(Cause::CheckoutUnavailable),
+            );
         }
         let live = if let Some(saved) = &saved {
-            let live = crate::worktree::snapshot(shell, &launch.cwd)?
-                .ok_or_else(|| crate::worktree::refuse("prepared checkout disappeared"))?;
+            let live = crate::worktree::snapshot(shell, &launch.cwd)?.ok_or_else(|| {
+                crate::worktree::refuse("prepared checkout disappeared")
+                    .because(Cause::CheckoutUnavailable)
+            })?;
             crate::worktree::validate_identity(shell, &live)?;
             if saved.identity != live.identity
                 || saved.branch != live.branch
                 || !crate::worktree::same(&saved.path, &live.path)
             {
-                return Err(crate::worktree::refuse(
-                    "prepared checkout identity changed",
-                ));
+                return Err(
+                    crate::worktree::refuse("prepared checkout identity changed")
+                        .because(Cause::CheckoutIdentityMismatch),
+                );
             }
             Some(live)
         } else if let Some(before) = &before {
-            let pin = pin
-                .as_ref()
-                .ok_or_else(|| crate::worktree::refuse("checkout is unpinned"))?;
+            let pin = pin.as_ref().ok_or_else(|| {
+                crate::worktree::refuse("checkout is unpinned").because(Cause::CheckoutUnavailable)
+            })?;
             pin.validate(before)?;
-            let observed = crate::worktree::snapshot(shell, &launch.cwd)?
-                .ok_or_else(|| crate::worktree::refuse("checkout disappeared"))?;
+            let observed = crate::worktree::snapshot(shell, &launch.cwd)?.ok_or_else(|| {
+                crate::worktree::refuse("checkout disappeared").because(Cause::CheckoutUnavailable)
+            })?;
             if before.identity.is_some()
                 && before.tree().drift(&observed.tree()) != crate::cleanup::Drift::Same
             {
-                return Err(crate::worktree::refuse(
-                    "checkout identity changed before launch",
-                ));
+                return Err(
+                    crate::worktree::refuse("checkout identity changed before launch")
+                        .because(Cause::CheckoutIdentityMismatch),
+                );
             }
             if before.gitdir != observed.gitdir
                 || before.head != observed.head
                 || before.branch != observed.branch
             {
-                return Err(crate::worktree::refuse("checkout changed before launch"));
+                return Err(crate::worktree::refuse("checkout changed before launch")
+                    .because(Cause::CheckoutIdentityMismatch));
             }
             // Both directory inodes are pinned across the wait. Fresh discovery may create
             // the first generation, but must never replace a known pre-lock identity.
@@ -1993,7 +2070,8 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
             pin.validate(before)?;
             live
         } else if job {
-            return Err(crate::worktree::refuse("repository checkout is unreadable"));
+            return Err(crate::worktree::refuse("repository checkout is unreadable")
+                .because(Cause::CheckoutUnavailable));
         } else {
             guard.discover(shell, &launch.cwd)?
         };
@@ -2003,6 +2081,9 @@ fn launch_owned(ledger: &Ledger, shell: &dyn Shell, launch: &Launch) -> Result<V
 }
 
 fn replay_launch(ledger: &Ledger, launch: &Launch) -> Result<Option<Value>> {
+    if let Some(failed) = crate::launch::job_refusal(ledger, launch)? {
+        return Err(Error::Invalid(failed));
+    }
     if matches!(launch.action, Action::Agent { .. }) {
         return crate::launch::replay(ledger, launch);
     }
@@ -2032,9 +2113,10 @@ fn launch_checkout(
         .zip(captured.as_ref())
         .is_some_and(|(prepared, saved)| prepared.identity != saved.identity)
     {
-        return Err(crate::worktree::refuse(
-            "preparation and launch checkout identities differ",
-        ));
+        return Err(
+            crate::worktree::refuse("preparation and launch checkout identities differ")
+                .because(Cause::CheckoutIdentityMismatch),
+        );
     }
     Ok((recorded, preparation.or(captured)))
 }
@@ -2101,11 +2183,15 @@ fn launch_guarded(
                     checkout,
                 )?,
                 Action::Agent { .. } => {
-                    return Err(Error::Invalid(
-                        "agent launch must use its receipt owner".into(),
-                    ));
+                    return Err(
+                        Error::Invalid("agent launch must use its receipt owner".into())
+                            .because(Cause::RequestChanged),
+                    );
                 }
-                Action::Place => return Err(Error::Invalid("place does not launch a pane".into())),
+                Action::Place => {
+                    return Err(Error::Invalid("place does not launch a pane".into())
+                        .because(Cause::InvalidRequest));
+                }
             };
             if let Some(checkout) = checkout {
                 result["checkout"] = serde_json::to_value(checkout)?;
@@ -2231,13 +2317,15 @@ pub(crate) fn agent_argv(
         "claude" | "codex" => {
             return Err(Error::Invalid(
                 "profiles configure Pi children; omit --profile or use --kind pi".into(),
-            ));
+            )
+            .because(Cause::ProfileInvalid));
         }
         other => {
             return Err(Error::Invalid(format!(
                 "kind {other} cannot take its task at launch; use one of {}",
                 KINDS.join(", ")
-            )));
+            ))
+            .because(Cause::InvalidRequest));
         }
     };
     args.push(task);
@@ -2250,6 +2338,7 @@ pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
          types it as one terminal line, which holds at most 1024 bytes; the task is not on \
          it, so shorten the name, the profile's flags or the state directory's path"
     ))
+    .because(Cause::CommandTooLong)
 }
 
 /// A new request runs now only when no ticket that could take one of its hosts waits ahead of
@@ -2264,7 +2353,19 @@ pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value
             placement::record(fleet.ledger, request)?;
             return Ok(None);
         }
-        perform_locked(fleet, request, now)
+        let result = perform_locked(fleet, request, now);
+        if let Err(error) = &result
+            && matches!(request.action, Action::Job { .. })
+            && !matches!(error, Error::Launch(_))
+        {
+            let ticket = enqueue(fleet.ledger, request.clone(), false, now)?;
+            update_ticket(fleet.ledger, &ticket, |ticket| {
+                ticket.state = "failed".into();
+                ticket.error = Some(error.to_string());
+                ticket.diagnostic = error.diagnostic().cloned();
+            })?;
+        }
+        result
     })
 }
 
@@ -2406,6 +2507,7 @@ fn restored_request(ledger: &Ledger, request: &Request) -> Result<Request> {
 }
 
 pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    record_request_validity(fleet.ledger, request)?;
     admission_completion(fleet.ledger, &request.id)?;
     if let Some(result) = retained_admission(fleet, request)? {
         return Ok(Some(result));
@@ -2499,15 +2601,30 @@ pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Resu
                 .launch
                 .as_ref()
                 .ok_or_else(|| Error::Invalid("missing prepared launch".into()))?;
-            let result = finish(fleet, request, &host, launch, now)?;
+            let result = finish(fleet, request, &host, launch, now);
+            let result = record_launch_outcome(fleet.ledger, id, &mut attempt, result)?;
             save_result(fleet.ledger, id, attempt, &result)?;
             return Ok(Some(result));
         }
-        if attempt.unit.is_none() {
+        if attempt.unit.is_none() && (attempt.launch.is_some() || attempt.result.is_some()) {
             return Err(Error::Invalid("admission has no selected host".into()));
         }
     }
     begin(fleet, request, now)
+}
+
+fn record_launch_outcome(
+    ledger: &Ledger,
+    id: &str,
+    attempt: &mut Attempt,
+    outcome: Result<Value>,
+) -> Result<Value> {
+    if let Err(error) = &outcome {
+        attempt.error = Some(error.to_string());
+        attempt.diagnostic = error.diagnostic().cloned();
+        crate::admissions::put(ledger, id, attempt)?;
+    }
+    outcome
 }
 
 fn save_result(ledger: &Ledger, id: &str, mut attempt: Attempt, result: &Value) -> Result<()> {
@@ -2518,22 +2635,39 @@ fn save_result(ledger: &Ledger, id: &str, mut attempt: Attempt, result: &Value) 
 }
 
 fn begin(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
-    let placed = placement(fleet, request, request.host.as_deref(), now)?;
-    let Placement::Placed { host, .. } = placed else {
-        return Ok(None);
-    };
     let mut attempt = Attempt {
         ordinary_release: None,
         request: serde_json::to_value(request)?,
         finished_ms: None,
         placement: None,
-        host: Some(host.clone()),
+        host: None,
         launch: None,
         error: None,
         diagnostic: None,
         unit: crate::admissions::get(fleet.ledger, &request.id)?.and_then(|a| a.unit),
         result: None,
     };
+    if matches!(request.action, Action::Job { .. }) {
+        crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
+    }
+    let placed = match placement(fleet, request, request.host.as_deref(), now) {
+        Ok(placed) => placed,
+        Err(error) => {
+            attempt.host = crate::job_store::selection(fleet.ledger, &request.id)?
+                .map(|id| fleet.find(&id).cloned())
+                .transpose()?;
+            attempt.error = Some(error.to_string());
+            attempt.diagnostic = error.diagnostic().cloned();
+            if matches!(request.action, Action::Job { .. }) {
+                crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
+            }
+            return Err(error);
+        }
+    };
+    let Placement::Placed { host, .. } = placed else {
+        return Ok(None);
+    };
+    attempt.host = Some(host.clone());
     crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
     let prepared = prepare_launch(fleet, request, &host);
     let launch_request = match prepared {
@@ -2547,7 +2681,8 @@ fn begin(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     };
     attempt.launch = Some(launch_request.clone());
     crate::admissions::put(fleet.ledger, &request.id, &attempt)?;
-    let result = finish(fleet, request, &host, &launch_request, now)?;
+    let result = finish(fleet, request, &host, &launch_request, now);
+    let result = record_launch_outcome(fleet.ledger, &request.id, &mut attempt, result)?;
     save_result(fleet.ledger, &request.id, attempt, &result)?;
     Ok(Some(result))
 }
@@ -2630,8 +2765,10 @@ fn prepared_launch(
     } else if host.is_local() {
         request.cwd.clone()
     } else if let (Some(checkout), Some(repo)) = (checkout, &request.repository) {
-        let relative = std::path::Path::new(&request.cwd)
-            .strip_prefix(&repo.working_root)
+        let cwd = std::path::Path::new(&request.cwd).canonicalize()?;
+        let working_root = std::path::Path::new(&repo.working_root).canonicalize()?;
+        let relative = cwd
+            .strip_prefix(&working_root)
             .map_err(|_| Error::Invalid("repository cwd is outside its working root".into()))?;
         std::path::Path::new(&checkout)
             .join(relative)
@@ -2838,9 +2975,17 @@ fn item(
     })
 }
 
+/// One ticket by its ticket id.
+fn queued_ticket(ledger: &Ledger, id: &str) -> Result<Ticket> {
+    queue(ledger)?
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
+}
+
 fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) -> Result<Ticket> {
-    ledger.with_lock("queue", || {
-        let mut tickets = queue(ledger)?;
+    let floor = jobs::clock_floor(ledger)?;
+    change_queue(ledger, |tx, tickets| {
         let ticket = tickets
             .iter_mut()
             .find(|t| t.id == id)
@@ -2851,12 +2996,10 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
             && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
             && cancellation(ledger, &ticket.request)?.is_none_or(|saved| saved.release != "pending")
         {
-            jobs::finish_once(ledger, &mut ticket.finished_ms, Some(ticket.created_ms))?;
-            ticket_completion(ledger, ticket)?;
+            jobs::finish_once_in(tx, floor, &mut ticket.finished_ms, Some(ticket.created_ms))?;
+            ticket_completion_in(ledger, tx, ticket)?;
         }
-        let result = ticket.clone();
-        save_queue(ledger, &tickets)?;
-        Ok(result)
+        Ok((ticket.clone(), true))
     })
 }
 
@@ -3056,6 +3199,110 @@ fn reconcile_finished(ledger: &Ledger) -> Result<()> {
     Ok(())
 }
 
+/// Failed ordinary jobs with a saved pre-dispatch witness use the same durable
+/// prohibition and preparation-release protocol as cancelled requests.
+pub(crate) fn settle_failed_jobs(ledger: &Ledger) -> Result<()> {
+    for ticket in queue(ledger)? {
+        if ticket.state != "failed" || !matches!(ticket.request.action, Action::Job { .. }) {
+            continue;
+        }
+        crate::admissions::lock(ledger, &ticket.request.id, || {
+            if crate::admissions::get(ledger, &ticket.request.id)?
+                .is_some_and(|attempt| attempt.unit.is_none() && attempt.launch.is_none())
+                && no_launch_proof(ledger, &ticket)?
+                && let Some(saved) = cancellation(ledger, &ticket.request)?
+            {
+                project_cancellation(ledger, &saved)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn release_unstarted_jobs(fleet: &Fleet) -> Result<()> {
+    for saved in crate::job_store::cancellations(fleet.ledger)? {
+        let request = &saved.ticket.request;
+        if !matches!(request.action, Action::Job { .. })
+            || saved.outcome != crate::prepare::disposition::Outcome::NotStarted
+            || saved.release == "pending"
+            || crate::job_store::unstarted_finished(fleet.ledger, &request.id)?.is_some()
+        {
+            continue;
+        }
+        let result = (|| {
+            let proven = crate::admissions::lock(fleet.ledger, &request.id, || {
+                no_launch_proof(fleet.ledger, &saved.ticket)
+            })?;
+            if !proven {
+                return Err(Error::Invalid("unstarted origin proof changed".into()));
+            }
+            let validity = request_validity(fleet.ledger, request)?
+                .ok_or_else(|| Error::Invalid("unstarted release validity missing".into()))?;
+            let proof = jobs::UnstartedRelease {
+                id: request.id.clone(),
+                validity,
+                owner: request.owner.clone(),
+                owner_host: request
+                    .owner_host
+                    .clone()
+                    .ok_or_else(|| Error::Invalid("unstarted origin missing".into()))?,
+            };
+            let selected = saved
+                .admission
+                .as_ref()
+                .and_then(|value| value.pointer("/host/id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .or(crate::job_store::selection(fleet.ledger, &request.id)?);
+            let host = fleet.find(selected.as_deref().unwrap_or(crate::hosts::LOCAL))?;
+            let ack = fleet.release_unstarted(host, &proof)?;
+            if ack.request != proof {
+                return Err(crate::unit_transport::conflict(
+                    "unstarted acknowledgement changed",
+                ));
+            }
+            let mut finished = None;
+            jobs::finish_once(fleet.ledger, &mut finished, Some(validity.created_ms))?;
+            crate::job_store::finish_unstarted(
+                fleet.ledger,
+                &request.id,
+                finished.ok_or_else(|| Error::Invalid("unstarted completion missing".into()))?,
+            )
+        })();
+        if let Err(error) = result {
+            eprintln!("dogsled unstarted release {}: {error}", request.id);
+        }
+    }
+    Ok(())
+}
+
+/// A retained row is not ownership once its owner has validated completion and
+/// released every dependent reference. Observation does not create proof.
+pub(crate) fn settled(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
+    if crate::admissions::exists(ledger, id)? {
+        return Ok(admission_completion(ledger, id)?.is_some() && references_released(ledger, id)?);
+    }
+    if crate::launch::ordinary_released(ledger, id, now)? {
+        return references_released(ledger, id);
+    }
+    if let Some(finished) = crate::job_store::unstarted_finished(ledger, id)? {
+        return Ok(jobs::completion_time(
+            ledger,
+            Some(finished),
+            jobs::request_validity(ledger, id)?.map(|v| v.created_ms),
+            true,
+        )?
+        .is_some());
+    }
+    if let Some(saved) = crate::job_store::cancellation(ledger, id)? {
+        return Ok(saved.completion_version == Some(1)
+            && saved.finished_ms.is_some()
+            && saved.outcome == crate::prepare::disposition::Outcome::NotStarted
+            && saved.release == "not_needed");
+    }
+    Ok(false)
+}
+
 pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     reconcile_finished(fleet.ledger)?;
     crate::launch::release_owned(fleet)?;
@@ -3109,7 +3356,9 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     })?;
     // After admission and outside its lock: each record takes its own request lock,
     // so release work never delays admission of unrelated tickets.
-    repair_cancellations(fleet)
+    settle_failed_jobs(fleet.ledger)?;
+    repair_cancellations(fleet)?;
+    release_unstarted_jobs(fleet)
 }
 
 pub fn job_host<'a>(fleet: &'a Fleet<'_>, id: &str, now: u64) -> Result<&'a Host> {

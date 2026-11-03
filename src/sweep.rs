@@ -208,9 +208,7 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
         finished_ms,
         applied,
     };
-    node.ledger
-        .append_line("sweeps.jsonl", &report, finished_ms.saturating_sub(KEEP_MS))?;
-    crate::host_store::put_report(node.ledger, &report)
+    crate::host_store::record_report(node.ledger, &report, finished_ms.saturating_sub(KEEP_MS))
 }
 
 /// Settle each open agent item: an owned child that finished, and an orphan that is idle or
@@ -844,7 +842,9 @@ mod liveness_tests {
                         .reserve(
                             "new",
                             61_000,
-                            Some(crate::jobs::Validity::new(crate::ledger::now_ms()))
+                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+                            "w1:p1",
+                            "origin",
                         )?
                         .reserved
                 );

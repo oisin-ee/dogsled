@@ -493,9 +493,16 @@ pub fn outbox(ledger: &Ledger) -> Result<Vec<Sent>> {
     crate::store::read(ledger, records_store::sent)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct NotificationFailure {
+    pub reason: String,
+    pub owner: String,
+    pub owner_host: String,
+}
+
 pub(crate) fn notification_failures(
     ledger: &Ledger,
-) -> Result<std::collections::BTreeMap<String, String>> {
+) -> Result<std::collections::BTreeMap<String, NotificationFailure>> {
     crate::store::read(ledger, records_store::failures)
 }
 
@@ -1190,15 +1197,25 @@ pub fn notify_child(
     now: u64,
 ) -> Result<bool> {
     let result = crate::custody::locked(fleet.ledger, &child.item.id, |custody| {
-        fleet.ledger.with_lock("items", || {
-            let custodian = child.validate(fleet.ledger, id, custody)?;
-            notify_custodian(fleet, reports, &custodian, id, kind, text, now)
-        })
+        let custodian = child.validate(fleet.ledger, id, custody)?;
+        notify_custodian(fleet, reports, &custodian, id, kind, text, now)
     });
     match result {
         Err(Error::Invalid(reason) | Error::Refused { detail: reason, .. }) => {
             crate::store::write(fleet.ledger, |tx| {
-                records_store::put_failure(tx, id, &reason)
+                let owner = custodian_of(
+                    &child.custody.clone().into_iter().collect::<Vec<_>>(),
+                    &child.item,
+                );
+                records_store::put_failure(
+                    tx,
+                    id,
+                    &NotificationFailure {
+                        reason: reason.clone(),
+                        owner: owner.pane,
+                        owner_host: hostname(),
+                    },
+                )
             })?;
             eprintln!("dogsled notification {id}: {reason}");
             Ok(false)
@@ -1497,7 +1514,11 @@ mod tests {
             );
             assert_eq!(received(&rig.ledger, "replacement_owner").unwrap().len(), 0);
             let failures = notification_failures(&rig.ledger).unwrap();
-            assert!(failures[event].contains("subject expired or missing"));
+            assert!(
+                failures[event]
+                    .reason
+                    .contains("subject expired or missing")
+            );
         }
         assert!(
             shell.calls.lock().unwrap().is_empty(),

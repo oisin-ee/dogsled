@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.31.0 - 2026-11-03
+
+- Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
+- Remote launch errors show the host and the typed refusal reason, including a missing execution directory, instead of reporting an SSH failure.
+- Probe samples and cleanup pass history are typed `state.db` tables, `samples` and `host_report`. Dogsled no longer writes `samples.jsonl` or `sweeps.jsonl`, and no state record is a JSON file.
+- Items and queued tickets change in one SQLite write transaction. The `items.lock` and `queue.lock` files are gone, so a close no longer waits on a file lock to record an item. Kernel locks remain only where they guard work outside `state.db`: panes, checkouts, peer hosts, the quota service, and the capacity publication protocol.
+- A write to `state.db` that starts inside another write on the same thread fails at once. Before, it waited for itself until its deadline.
+- Running commands and services switch to the newest valid recorded Dogsled executable without a manual restart. Live MCP sessions keep their connection and pending request. Missing or invalid executables no longer block a compatible store. Debug builds do not register in the default state directory without an explicit override.
+- `state.db` is now schema version 4. A host with an older `state.db` starts again with an empty store. Let queued work finish before you upgrade a host. Delete the old `samples.jsonl`, `sweeps.jsonl`, `items.lock`, and `queue.lock` files after you upgrade.
+
 ## 0.30.0 - 2026-11-02
 
 - Store launch receipts, progress, releases, seeds, and continuation receipts in typed SQLite tables.
@@ -368,7 +378,6 @@ Wrangle replaces Shepherdr for delegation: one board, one inbox, and children th
 - Probe `busy`, `cpu_ticks`, and `memory.pressure_level`; status lines show busy cores over cores. With a finite cgroup limit the probe reports whichever of the cgroup and `/proc/meminfo` has less free memory.
 - Append every probe to `~/.local/state/wrangle/samples.jsonl` (seven-day window) so thresholds can be re-scored on real data.
 
-||||||| 7178211
 ## 0.7.3 - 2026-10-15
 
 - Find a stacked branch as integrated when each branch in the stack landed as its own squash. A branch whose commits split into consecutive runs, each applied by one commit on the default branch, is integrated; doctor names every applying commit.

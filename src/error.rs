@@ -40,6 +40,9 @@ pub enum Error {
         /// Set when the peer answered with one of dogsled's own refusal codes.
         refusal: Option<Refusal>,
     },
+    /// SSH succeeded and the peer returned an operation error, not a transport failure.
+    #[error("{target} refused the operation")]
+    Peer { target: String },
     /// A refusal dogsled itself raises. `detail` is for this host's own output; a peer sends
     /// only `code`, and the caller shows the code's fixed message.
     #[error("{detail}")]
@@ -63,7 +66,7 @@ pub enum Error {
         output: String,
     },
     /// Safe diagnostics wrap the original classification, never replacing it.
-    #[error("{}{diagnostic}", diagnostic_prefix(source))]
+    #[error("{}", diagnostic_message(source, diagnostic))]
     Diagnostic {
         #[source]
         source: Box<Error>,
@@ -183,6 +186,27 @@ impl Error {
         }
     }
 
+    /// Add a fixed cause at its owner without replacing a more specific child cause.
+    /// The RPC boundary supplies the operation and invocation context.
+    pub fn because(self, cause: crate::diagnostic::Cause) -> Self {
+        if self.diagnostic().is_some() {
+            self
+        } else {
+            self.with_diagnostic(crate::diagnostic::Diagnostic::new(
+                crate::diagnostic::Operation::Other,
+                cause,
+                crate::diagnostic::Context::default(),
+            ))
+        }
+    }
+
+    pub fn in_directory(mut self, directory: &str) -> Self {
+        if let Self::Diagnostic { diagnostic, .. } = &mut self {
+            diagnostic.context = diagnostic.context.clone().directory(directory);
+        }
+        self
+    }
+
     pub fn correlate(mut self, request: Option<&str>) -> Self {
         if let Self::Diagnostic { diagnostic, .. } = &mut self {
             **diagnostic = (**diagnostic).clone().request(request);
@@ -236,12 +260,15 @@ impl Error {
 
     /// Structured tool errors retain text for older consumers.
     pub fn tool_message(&self) -> String {
-        self.diagnostic().map_or_else(
-            || self.to_string(),
-            |diagnostic| {
-                serde_json::json!({"error":self.to_string(),"diagnostic":diagnostic}).to_string()
-            },
-        )
+        self.diagnostic()
+            .filter(|diagnostic| diagnostic.operation != crate::diagnostic::Operation::Other)
+            .map_or_else(
+                || self.to_string(),
+                |diagnostic| {
+                    serde_json::json!({"error":self.to_string(),"diagnostic":diagnostic})
+                        .to_string()
+                },
+            )
     }
 
     #[must_use]
@@ -338,6 +365,15 @@ impl RetainedFailure {
 /// belongs to the diagnostic, which shows it already. Every other cause can carry
 /// third-party detail, such as another user's worktree lock reason, so it stays
 /// withheld.
+fn diagnostic_message(source: &Error, diagnostic: &crate::diagnostic::Diagnostic) -> String {
+    // Owner annotations do not change local error text. The RPC boundary projects them
+    // into the invocation's operation before any text crosses the trust boundary.
+    if diagnostic.operation == crate::diagnostic::Operation::Other {
+        return source.to_string();
+    }
+    format!("{}{diagnostic}", diagnostic_prefix(source))
+}
+
 fn diagnostic_prefix(source: &Error) -> String {
     match source.root() {
         Error::Ssh { .. } | Error::Deadline(_) | Error::Parse { .. } => format!("{source}; "),
@@ -377,6 +413,16 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("unknown base origin/x"), "{text}");
         assert!(text.contains("base_unavailable"), "{text}");
+    }
+
+    #[test]
+    fn local_annotations_keep_plain_tool_errors() {
+        let error = Error::Invalid("invalid branch".into()).because(Cause::BranchInvalid);
+        assert_eq!(error.tool_message(), "invalid branch");
+        assert!(error.diagnostic().is_some());
+        let error = error.with_diagnostic(diagnostic(Cause::BranchInvalid));
+        let value: serde_json::Value = serde_json::from_str(&error.tool_message()).unwrap();
+        assert_eq!(value["diagnostic"]["cause"], "branch_invalid");
     }
 
     /// A cause that carries third-party detail stays withheld. Another user's worktree

@@ -9,10 +9,10 @@ use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
 
 pub const STALE_MS: u64 = 30_000;
-/// Probe samples older than this are dropped from `samples.jsonl`.
+/// Probe samples older than this are dropped from the `samples` table.
 pub const SAMPLE_KEEP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-/// One line of `samples.jsonl`: what admission saw at each tick, so the
+/// One row of the `samples` table: what admission saw at each tick, so the
 /// thresholds can be re-scored on weeks of data instead of minutes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
@@ -28,6 +28,94 @@ pub struct Sample {
     pub live_agents: usize,
     pub free_cores: f64,
     pub eligible: bool,
+}
+
+pub(crate) const SAMPLES_SCHEMA: &str = r"CREATE TABLE samples (
+ ts_ms INTEGER NOT NULL CHECK (ts_ms >= 0),
+ cores INTEGER NOT NULL CHECK (cores >= 0),
+ busy REAL,
+ load1 REAL NOT NULL,
+ memory_used_bytes INTEGER NOT NULL CHECK (memory_used_bytes >= 0),
+ memory_total_bytes INTEGER NOT NULL CHECK (memory_total_bytes >= 0),
+ pressure_level INTEGER CHECK (pressure_level BETWEEN 0 AND 255),
+ disk_free_percent REAL NOT NULL,
+ reservations INTEGER NOT NULL CHECK (reservations >= 0),
+ live_agents INTEGER NOT NULL CHECK (live_agents >= 0),
+ free_cores REAL NOT NULL,
+ eligible INTEGER NOT NULL CHECK (eligible IN (0,1))
+) STRICT;
+CREATE INDEX samples_ts ON samples(ts_ms);
+";
+
+fn sql_count(value: impl TryInto<i64>) -> Result<i64> {
+    value
+        .try_into()
+        .map_err(|_| crate::error::Error::Invalid("sample value out of range".into()))
+}
+
+fn stored<T: TryFrom<i64>>(value: i64) -> rusqlite::Result<T> {
+    T::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
+}
+
+/// Append one sample and drop samples older than `keep_from_ms`.
+fn record_sample(ledger: &Ledger, sample: &Sample, keep_from_ms: u64) -> Result<()> {
+    let row = (
+        sql_count(sample.ts_ms)?,
+        sql_count(sample.cores)?,
+        sql_count(sample.memory_used_bytes)?,
+        sql_count(sample.memory_total_bytes)?,
+        sql_count(sample.reservations)?,
+        sql_count(sample.live_agents)?,
+    );
+    let keep_from = sql_count(keep_from_ms)?;
+    crate::store::write(ledger, |tx| {
+        tx.execute(
+            "INSERT INTO samples (ts_ms, cores, busy, load1, memory_used_bytes,
+             memory_total_bytes, pressure_level, disk_free_percent, reservations, live_agents,
+             free_cores, eligible) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                row.0,
+                row.1,
+                sample.busy,
+                sample.load1,
+                row.2,
+                row.3,
+                sample.pressure_level,
+                sample.disk_free_percent,
+                row.4,
+                row.5,
+                sample.free_cores,
+                sample.eligible,
+            ],
+        )?;
+        tx.execute("DELETE FROM samples WHERE ts_ms < ?1", [keep_from])?;
+        Ok(())
+    })
+}
+
+/// Every retained sample, oldest first.
+pub(crate) fn samples(ledger: &Ledger) -> Result<Vec<Sample>> {
+    crate::store::read(ledger, |tx| {
+        Ok(tx
+            .prepare("SELECT * FROM samples ORDER BY ts_ms, rowid")?
+            .query_map([], |row| {
+                Ok(Sample {
+                    ts_ms: stored(row.get("ts_ms")?)?,
+                    cores: stored(row.get("cores")?)?,
+                    busy: row.get("busy")?,
+                    load1: row.get("load1")?,
+                    memory_used_bytes: stored(row.get("memory_used_bytes")?)?,
+                    memory_total_bytes: stored(row.get("memory_total_bytes")?)?,
+                    pressure_level: row.get("pressure_level")?,
+                    disk_free_percent: row.get("disk_free_percent")?,
+                    reservations: stored(row.get("reservations")?)?,
+                    live_agents: stored(row.get("live_agents")?)?,
+                    free_cores: row.get("free_cores")?,
+                    eligible: row.get("eligible")?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -288,8 +376,7 @@ impl Node<'_> {
             free_cores: headroom.headroom,
             eligible: headroom.eligible,
         };
-        self.ledger
-            .append_line("samples.jsonl", &sample, now.saturating_sub(SAMPLE_KEEP_MS))
+        record_sample(self.ledger, &sample, now.saturating_sub(SAMPLE_KEEP_MS))
     }
 
     fn live_reservations(&self, now: u64) -> Result<Vec<Reservation>> {
@@ -476,12 +563,21 @@ impl Node<'_> {
         id: &str,
         now: u64,
         job_validity: Option<crate::jobs::Validity>,
+        owner: &str,
+        owner_host: &str,
     ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
+        if owner.is_empty() || owner_host.is_empty() {
+            return Err(crate::error::Error::Invalid(
+                "reservation requires owner and owner host".into(),
+            ));
+        }
         self.ledger.with_lock("host", || {
+            crate::jobs::reject_unstarted(self.ledger, id)?;
             // Publish request authority before the hold, for jobs too: a later checkout or
             // launch for this id matches it, and never sees a hold without authority.
             crate::jobs::receive_request_validity(self.ledger, id, job_validity)?;
+            crate::job_store::remember_owner(self.ledger, id, owner, Some(owner_host))?;
             if crate::preparation_store::grants::get(self.ledger, id)?.is_some() {
                 return Err(crate::unit_transport::conflict(
                     "placement reservation requires its replay envelope",
@@ -620,6 +716,35 @@ mod tests {
         }
     }
 
+    fn sample(ts_ms: u64) -> Sample {
+        Sample {
+            ts_ms,
+            cores: 4,
+            busy: Some(0.25),
+            load1: 1.5,
+            memory_used_bytes: 3,
+            memory_total_bytes: 8,
+            pressure_level: Some(1),
+            disk_free_percent: 50.0,
+            reservations: 2,
+            live_agents: 1,
+            free_cores: 2.5,
+            eligible: true,
+        }
+    }
+
+    #[test]
+    fn samples_keep_a_bounded_window_of_typed_rows() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        for ts in [1_000, 2_000, 3_000] {
+            record_sample(&ledger, &sample(ts), 0).unwrap();
+        }
+        record_sample(&ledger, &sample(4_000), 2_000).unwrap();
+        let kept = samples(&ledger).unwrap();
+        assert_eq!(kept, [sample(2_000), sample(3_000), sample(4_000)]);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
     #[test]
     fn same_id_reservation_is_atomic_and_does_not_extend_or_duplicate_the_hold() {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
@@ -651,7 +776,7 @@ mod tests {
         let validity = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         std::thread::scope(|scope| {
             let calls: Vec<_> = (0..4)
-                .map(|_| scope.spawn(|| node.reserve("same", 100, validity)))
+                .map(|_| scope.spawn(|| node.reserve("same", 100, validity, "w1:p1", "origin")))
                 .collect();
             for call in calls {
                 assert!(call.join().unwrap().unwrap().reserved);
@@ -663,7 +788,7 @@ mod tests {
         assert_eq!(holds[0].created_ms, 100);
         // An existing hold is not new admission and does not need a fresh probe.
         assert!(
-            node.reserve("same", 100 + STALE_MS + 1, validity)
+            node.reserve("same", 100 + STALE_MS + 1, validity, "w1:p1", "origin")
                 .unwrap()
                 .reserved
         );
@@ -674,13 +799,19 @@ mod tests {
         let another = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         assert!(
             !node
-                .reserve("another", 100 + STALE_MS + 1, another)
+                .reserve("another", 100 + STALE_MS + 1, another, "w1:p1", "origin")
                 .unwrap()
                 .reserved
         );
         assert!(
             !node
-                .reserve("same", 100 + policy.reservation_ttl_ms, validity)
+                .reserve(
+                    "same",
+                    100 + policy.reservation_ttl_ms,
+                    validity,
+                    "w1:p1",
+                    "origin"
+                )
                 .unwrap()
                 .reserved
         );
