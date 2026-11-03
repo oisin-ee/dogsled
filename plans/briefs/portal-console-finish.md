@@ -11,7 +11,7 @@ The merged console matches the approved sketches at the places below. The lead s
 - **Contract:** `.impeccable/surfaces/web.md`: palette, type, radii; no shadows or gradients; yellow only for "waiting on you".
 - **Sketches:** `.impeccable/mocks/decision/v6-console.html` (main screen) and `v6-console-review.html` (plan review), with their `.png` captures.
 - **Cascade rule:** component `#[css_module]` sheets load after the portal sheets. Scope every override of a component element under `.console-provider .console-shell`. Do not use `!important` or IDs in selectors.
-- **Components:** do not edit `web/src/components/` or `web/assets/dx-components-theme.css`.
+- **Components:** do not edit `web/src/components/` or `web/assets/dx-components-theme.css`. Do not replace a component use with a plain element; change its look with CSS. Plain `span`s inside an existing label or header are fine.
 
 ## Edits
 
@@ -35,10 +35,10 @@ The merged console matches the approved sketches at the places below. The lead s
    - The wide header shows `n of m` at the right, as the sketch's `28 of 32` does. Count completed todos against all todos, as the narrow `Todos n/m` tab already does.
    - Do not render a section that has no items, such as `Pending · 0`.
    - Completed and abandoned items show their title only, in muted text, with no description or worker line. In-progress and pending items keep their worker line and description.
-   - The empty state `No todos are recorded for this agent.` is muted 13px text with the column padding, like the notes margin's `Select text in the plan to add a note.`, not a raised panel. Do the same for the inbox empty state `Nothing is waiting on you.`. Style it in the column CSS, not in `notice.rs`.
+   - The empty state `No todos are recorded for this agent.` looks like muted 13px text with the column padding, like the notes margin's `Select text in the plan to add a note.`, not a raised panel. Do the same for the inbox empty state `Nothing is waiting on you.`. Keep the `Status` component (it renders `Item` and sets `role="status"`). Give it `"data-part": "column-empty"`, and override its background, border and padding in the column CSS, not in `notice.rs`.
 7. **Agents sidebar** (`RepoGroup` in `board.rs`, and `app.rs`).
    - A repository group header reads `dogsled` on the left and the agent count on the right, as in the sketch, not `dogsled · 4 agents`.
-   - `29 finished branches have no repository — see Land and clean up` is a large raised panel at the end of the list, and no `Land and clean up` section exists any more. Render it as a muted row in the style of the `n branches to land` row, without the dead reference: `29 finished branches have no repository`.
+   - `29 finished branches have no repository — see Land and clean up` is a large raised panel at the end of the list, and no `Land and clean up` section exists any more. Render it with the same components as the `n branches to land` row (`Item`, `ItemVariant::Muted`, `ItemSize::Sm`, `ItemContent`, `ItemTitle`), with `"data-part": "finished-branches"`, and without the dead reference: `29 finished branches have no repository`.
 8. **Markdown tables and the plan ID** (`markdown.css`).
    - Header cells are centred by the browser default. The sketch aligns them to the start. Set `text-align: start` on `th`.
    - The container sets `overflow-wrap: anywhere`, so in a narrow table column a long token such as `r-1793628516452-21481-9995` splits between digits over four lines. In table cells use `overflow-wrap: break-word`; the table already scrolls sideways.
