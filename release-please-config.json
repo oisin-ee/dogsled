@@ -14,7 +14,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name == 'dogsled')].version"
+          "jsonpath": "$.package[?(@.name.value == 'dogsled')].version"
         },
         "package.json",
         "packages/oisinpi/package.json",
