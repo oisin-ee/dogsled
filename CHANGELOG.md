@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.31.1 - 2026-11-03
 
 - Running services, web portals, sidebars, and MCP sessions keep running when a newer writer blocks work inside a pass or request. Failed executable replacements are re-probed, with retries paced by the service interval, UI tick, or next MCP input.
 
