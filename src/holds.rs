@@ -416,29 +416,9 @@ fn records(ledger: &Ledger, directory: &str) -> Result<Vec<(String, Option<Value
             })
             .collect();
     }
-    let store = ledger.child(directory);
-    let entries = match std::fs::read_dir(&store.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut records = Vec::new();
-    for entry in entries {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if std::path::Path::new(&name)
-            .extension()
-            .is_none_or(|ext| ext != "json")
-        {
-            continue;
-        }
-        match store.read(&name) {
-            Ok(Some(value)) => records.push((name, Some(value))),
-            Ok(None) => (), // Concurrent retention removed the record.
-            Err(_) => records.push((name, None)),
-        }
-    }
-    records.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(records)
+    Err(crate::error::Error::Invalid(format!(
+        "state.db has no {directory} records"
+    )))
 }
 
 fn text<'a>(value: &'a Value, path: &str) -> &'a str {

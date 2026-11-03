@@ -144,8 +144,28 @@ pub(crate) fn queued_request(ledger: &Ledger, id: &str) -> Result<bool> {
     crate::store::read(ledger, |tx| crate::tables::queued_request(tx, id))
 }
 
-fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
-    crate::store::write(ledger, |tx| crate::tables::sync_tickets(tx, tickets))
+/// The queue inside the caller's write transaction, as `queue` would return it.
+fn tickets_in(tx: &rusqlite::Transaction<'_>) -> Result<Vec<Ticket>> {
+    let mut tickets = crate::tables::tickets(tx)?;
+    for ticket in &mut tickets {
+        end_expired_wait(ticket);
+    }
+    Ok(tickets)
+}
+
+/// Read the queue, change it, and save it in one write transaction.
+fn change_queue<T>(
+    ledger: &Ledger,
+    change: impl FnOnce(&rusqlite::Transaction<'_>, &mut Vec<Ticket>) -> Result<(T, bool)>,
+) -> Result<T> {
+    crate::store::write(ledger, |tx| {
+        let mut tickets = tickets_in(tx)?;
+        let (result, changed) = change(tx, &mut tickets)?;
+        if changed {
+            crate::tables::sync_tickets(tx, &tickets)?;
+        }
+        Ok(result)
+    })
 }
 
 /// Job tickets expire only with a conclusively terminal local job record. Missing
@@ -153,10 +173,10 @@ fn save_queue(ledger: &Ledger, tickets: &[Ticket]) -> Result<()> {
 /// without a ticket, job record, or launch receipt.
 pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
     expire_admissions(ledger, now)?;
-    ledger.with_lock("queue", || {
-        let mut tickets = queue(ledger)?;
+    let floor = jobs::clock_floor(ledger)?;
+    change_queue(ledger, |tx, tickets| {
         let mut expired = Vec::new();
-        for ticket in &tickets {
+        for ticket in tickets.iter() {
             let cancelled_without_admission =
                 cancellation(ledger, &ticket.request)?.is_some_and(|saved| {
                     saved.completion_version == Some(1)
@@ -171,7 +191,7 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                     .is_some_and(|job| matches!(jobs::expiry(&job, now), jobs::Expiry::Record));
             if (terminal_job || cancelled_without_admission)
                 && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
-                && ticket_completion(ledger, ticket)?
+                && ticket_completion_in(ledger, tx, floor, ticket)?
                     .is_some_and(|finished| now.saturating_sub(finished) > jobs::RECORD_KEEP_MS)
             {
                 if cancellation(ledger, &ticket.request)?
@@ -180,18 +200,22 @@ pub(crate) fn expire_requests(ledger: &Ledger, now: u64) -> Result<()> {
                     continue;
                 }
                 expired.push(ticket.id.clone());
-                crate::job_store::remove_cancellation(ledger, &ticket.request.id)?;
+                crate::job_store::remove_cancellation_in(tx, &ticket.request.id)?;
             }
         }
-        if !expired.is_empty() {
-            tickets.retain(|t| !expired.contains(&t.id));
-            save_queue(ledger, &tickets)?;
-        }
-        expire_request_sidecars(ledger, now, &tickets)
+        let changed = !expired.is_empty();
+        tickets.retain(|t| !expired.contains(&t.id));
+        expire_request_sidecars(ledger, tx, now, tickets)?;
+        Ok(((), changed))
     })
 }
 
-fn expire_request_sidecars(ledger: &Ledger, now: u64, tickets: &[Ticket]) -> Result<()> {
+fn expire_request_sidecars(
+    ledger: &Ledger,
+    tx: &rusqlite::Transaction<'_>,
+    now: u64,
+    tickets: &[Ticket],
+) -> Result<()> {
     for (id, _) in crate::job_store::validities(ledger)? {
         let id = id.as_str();
         let admission_owner = crate::admissions::exists(ledger, id)?;
@@ -203,7 +227,7 @@ fn expire_request_sidecars(ledger: &Ledger, now: u64, tickets: &[Ticket]) -> Res
         {
             continue;
         }
-        crate::job_store::expire_validity(ledger, id, now)?;
+        crate::job_store::expire_validity_in(tx, id, now)?;
     }
     Ok(())
 }
@@ -425,36 +449,47 @@ fn expire_admission(ledger: &Ledger, id: &str, now: u64) -> Result<()> {
         }
         crate::prepare::expire_record(ledger, id, now)?;
         commands::expire_selection(ledger, id)?;
-        ledger.with_lock("queue", || {
-            let mut tickets = queue(ledger)?;
+        let floor = jobs::clock_floor(ledger)?;
+        change_queue(ledger, |tx, tickets| {
             for ticket in tickets.iter().filter(|ticket| ticket.request.id == id) {
-                if ticket_completion(ledger, ticket)?
+                if ticket_completion_in(ledger, tx, floor, ticket)?
                     .is_none_or(|finished| now.saturating_sub(finished) <= jobs::RECORD_KEEP_MS)
                 {
-                    return Ok(());
+                    return Ok(((), false));
                 }
             }
             tickets.retain(|ticket| ticket.request.id != id);
-            save_queue(ledger, &tickets)?;
-            crate::job_store::remove_cancellation(ledger, id)?;
-            crate::admissions::remove(ledger, id)
+            crate::job_store::remove_cancellation_in(tx, id)?;
+            crate::admissions::remove_in(tx, id)?;
+            Ok(((), true))
         })?;
         crate::custody::locked(ledger, id, |_| crate::custody::forget_released(ledger, id))
     })
 }
 
-pub(crate) fn ticket_completion(ledger: &Ledger, ticket: &Ticket) -> Result<Option<u64>> {
+/// When a terminal ticket finished, checked inside the caller's write transaction.
+fn ticket_completion_in(
+    ledger: &Ledger,
+    tx: &rusqlite::Transaction<'_>,
+    floor: u64,
+    ticket: &Ticket,
+) -> Result<Option<u64>> {
     if ticket.finished_ms.is_none() {
         return Ok(None);
     }
-    let pending =
-        cancellation(ledger, &ticket.request)?.is_some_and(|saved| saved.release == "pending");
-    jobs::completion_time(
-        ledger,
+    jobs::completion_time_in(
+        tx,
+        floor,
         ticket.finished_ms,
         Some(ticket.created_ms),
-        matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled") && !pending,
+        ticket_terminal(ledger, ticket)?,
     )
+}
+
+fn ticket_terminal(ledger: &Ledger, ticket: &Ticket) -> Result<bool> {
+    let pending =
+        cancellation(ledger, &ticket.request)?.is_some_and(|saved| saved.release == "pending");
+    Ok(matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled") && !pending)
 }
 
 pub fn queue(ledger: &Ledger) -> Result<Vec<Ticket>> {
@@ -542,31 +577,32 @@ fn validity_refusal(error: Error, id: &str) -> Error {
 }
 
 pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Result<String> {
-    ledger.with_lock("queue", || {
-        jobs::validate_id(&request.id)?;
-        let mut tickets = queue(ledger)?;
-        if !tickets.iter().any(|t| t.request.id == request.id) {
-            // Publish the atomic sidecar before the ticket becomes visible. Existing
-            // tickets never recover missing evidence from their inline copy.
-            record_request_validity(ledger, &request)?;
-        }
-        check_request_validity(ledger, &request)?;
+    jobs::validate_id(&request.id)?;
+    // Publish the immutable sidecar before the ticket becomes visible. Existing tickets
+    // never recover missing evidence from their inline copy.
+    record_request_validity(ledger, &request)?;
+    check_request_validity(ledger, &request)?;
+    let saved = match &request.action {
+        Action::Job { .. } => Some(jobs::request_validity(ledger, &request.id)?),
+        _ => None,
+    };
+    change_queue(ledger, |_, tickets| {
         if let Some(ticket) = tickets.iter_mut().find(|t| t.request.id == request.id) {
             let mut queued = ticket.request.clone();
-            if let Action::Job { validity, .. } = &mut queued.action {
-                *validity = jobs::request_validity(ledger, &queued.id)?;
+            if let (Action::Job { validity, .. }, Some(saved)) = (&mut queued.action, saved) {
+                *validity = saved;
             }
             if serde_json::to_value(&queued)? != serde_json::to_value(&request)? {
                 return Err(crate::unit_transport::conflict("queued request changed"));
             }
             let id = ticket.id.clone();
             // Placement may have queued the refusal before the caller selected a wait.
-            if waiting && !ticket.waiting {
+            let changed = waiting && !ticket.waiting;
+            if changed {
                 ticket.waiting = true;
                 ticket.waiting_until_ms = waiting_until(ledger, now);
-                save_queue(ledger, &tickets)?;
             }
-            return Ok(id);
+            return Ok((id, changed));
         }
         let id = new_id();
         tickets.push(Ticket {
@@ -584,8 +620,7 @@ pub fn enqueue(ledger: &Ledger, request: Request, waiting: bool, now: u64) -> Re
             diagnostic: None,
             retry: crate::backoff::Backoff::default(),
         });
-        save_queue(ledger, &tickets)?;
-        Ok(id)
+        Ok((id, true))
     })
 }
 
@@ -922,12 +957,8 @@ fn validate_cancellation_admission(request: &Request, admission: Option<&Value>)
 
 fn project_cancellation(ledger: &Ledger, saved: &Cancellation) -> Result<()> {
     project_attempt(ledger, saved)?;
-    ledger.with_lock("queue", || {
-        let mut tickets = queue(ledger)?;
-        if project_ticket(&mut tickets, saved)? {
-            save_queue(ledger, &tickets)?;
-        }
-        Ok(())
+    change_queue(ledger, |_, tickets| {
+        Ok(((), project_ticket(tickets, saved)?))
     })
 }
 
@@ -978,21 +1009,11 @@ fn project_ticket(tickets: &mut [Ticket], saved: &Cancellation) -> Result<bool> 
 }
 
 pub fn cancel(ledger: &Ledger, id: &str) -> Result<Value> {
-    let original = ledger.with_lock("queue", || {
-        queue(ledger)?
-            .into_iter()
-            .find(|t| t.id == id)
-            .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
-    })?;
+    let original = queued_ticket(ledger, id)?;
     launch_test_barrier("CANCEL_BEFORE_ADMISSION")?;
     crate::admissions::lock(ledger, &original.request.id, || {
         launch_test_barrier("CANCEL_ENTERED_ADMISSION")?;
-        let ticket = ledger.with_lock("queue", || {
-            queue(ledger)?
-                .into_iter()
-                .find(|t| t.id == id)
-                .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
-        })?;
+        let ticket = queued_ticket(ledger, id)?;
         if serde_json::to_value(&original.request)? != serde_json::to_value(&ticket.request)? {
             return Err(crate::unit_transport::conflict(
                 "ticket changed while cancelling",
@@ -1128,21 +1149,17 @@ fn repair_cancellations(fleet: &Fleet) -> Result<()> {
     if projected.is_empty() {
         return Ok(());
     }
-    fleet.ledger.with_lock("queue", || {
-        let mut tickets = queue(fleet.ledger)?;
+    change_queue(fleet.ledger, |_, tickets| {
         let mut changed = false;
         for saved in &projected {
-            match project_ticket(&mut tickets, saved) {
+            match project_ticket(tickets, saved) {
                 Ok(projected) => changed |= projected,
                 Err(error) => {
                     eprintln!("dogsled cancellation {}: {error}", saved.ticket.request.id);
                 }
             }
         }
-        if changed {
-            save_queue(fleet.ledger, &tickets)?;
-        }
-        Ok(())
+        Ok(((), changed))
     })
 }
 
@@ -2838,9 +2855,17 @@ fn item(
     })
 }
 
+/// One ticket by its ticket id.
+fn queued_ticket(ledger: &Ledger, id: &str) -> Result<Ticket> {
+    queue(ledger)?
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| Error::Invalid(format!("unknown ticket {id}")))
+}
+
 fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) -> Result<Ticket> {
-    ledger.with_lock("queue", || {
-        let mut tickets = queue(ledger)?;
+    let floor = jobs::clock_floor(ledger)?;
+    change_queue(ledger, |tx, tickets| {
         let ticket = tickets
             .iter_mut()
             .find(|t| t.id == id)
@@ -2851,12 +2876,10 @@ fn update_ticket(ledger: &Ledger, id: &str, update: impl FnOnce(&mut Ticket)) ->
             && matches!(ticket.state.as_str(), "admitted" | "failed" | "cancelled")
             && cancellation(ledger, &ticket.request)?.is_none_or(|saved| saved.release != "pending")
         {
-            jobs::finish_once(ledger, &mut ticket.finished_ms, Some(ticket.created_ms))?;
-            ticket_completion(ledger, ticket)?;
+            jobs::finish_once_in(tx, floor, &mut ticket.finished_ms, Some(ticket.created_ms))?;
+            ticket_completion_in(ledger, tx, floor, ticket)?;
         }
-        let result = ticket.clone();
-        save_queue(ledger, &tickets)?;
-        Ok(result)
+        Ok((ticket.clone(), true))
     })
 }
 

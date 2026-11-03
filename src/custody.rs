@@ -339,23 +339,21 @@ pub fn locked<T>(
 
 /// Record the custody of `item` at its origin, when this host holds none.
 ///
-/// The record is written under the custody lock, so a concurrent claim sees it whole.
+/// The record is written in one write transaction, so a concurrent claim sees it whole.
 pub fn ensure(ledger: &Ledger, item: &Item) -> Result<Custody> {
-    ledger.with_lock(LOCK, || {
-        crate::store::write(ledger, |tx| {
-            let mut records = crate::host_store::custodies_rows(tx)?;
-            if let Some(existing) = records
-                .iter()
-                .find(|record| record.item == item.id)
-                .cloned()
-            {
-                return Ok(existing);
-            }
-            let record = Custody::origin(item);
-            records.push(record.clone());
-            crate::host_store::replace_custodies(tx, &records)?;
-            Ok(record)
-        })
+    crate::store::write(ledger, |tx| {
+        let mut records = crate::host_store::custodies_rows(tx)?;
+        if let Some(existing) = records
+            .iter()
+            .find(|record| record.item == item.id)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+        let record = Custody::origin(item);
+        records.push(record.clone());
+        crate::host_store::replace_custodies(tx, &records)?;
+        Ok(record)
     })
 }
 

@@ -8,7 +8,7 @@ use crate::ledger::Ledger;
 
 /// The schema version this binary creates. A store with an older version starts again
 /// empty: earlier records are not read or converted.
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -22,6 +22,7 @@ pub(crate) fn schema() -> String {
         crate::preparation_store::SCHEMA,
         crate::host_store::SCHEMA,
         crate::host_store::PEER_SCHEMA,
+        crate::node::SAMPLES_SCHEMA,
     ]
     .concat()
 }
@@ -126,6 +127,31 @@ thread_local! {
         std::cell::RefCell::default();
     /// The empty schema that a read sees when the host has no store yet.
     static EMPTY: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) };
+    /// Stores with a write transaction open on this thread. SQLite has one writer, so a
+    /// second write from inside the first could only wait for itself.
+    static WRITING: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>> =
+        std::cell::RefCell::default();
+}
+
+/// Marks a store as written by this thread until dropped, including on unwind.
+struct Writing(std::path::PathBuf);
+
+impl Writing {
+    fn enter(path: &std::path::Path) -> Result<Self> {
+        if !WRITING.with_borrow_mut(|open| open.insert(path.to_path_buf())) {
+            return Err(Error::Invalid(format!(
+                "{} write started inside another write on the same thread",
+                path.display()
+            )));
+        }
+        Ok(Self(path.to_path_buf()))
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        WRITING.with_borrow_mut(|open| open.remove(&self.0));
+    }
 }
 
 /// Close this thread's cached connections.
@@ -182,6 +208,10 @@ fn transact<T>(
             EMPTY.set(Some(connection));
             return result;
         }
+        let _writing = match behavior {
+            TransactionBehavior::Deferred => None,
+            _ => Some(Writing::enter(&path)?),
+        };
         let (opened, mut connection) = connection(ledger, &path)?;
         connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
         let tx = connection.transaction_with_behavior(behavior)?;
@@ -350,7 +380,7 @@ mod tests {
         std::fs::create_dir_all(&ledger.dir).unwrap();
         let path = ledger.dir.join("state.db");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("PRAGMA user_version=3;").unwrap();
+        connection.execute_batch("PRAGMA user_version=4;").unwrap();
         drop(connection);
         let before = std::fs::read(&path).unwrap();
         for error in [
