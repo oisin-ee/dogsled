@@ -62,7 +62,6 @@ mod transcript;
 mod unit_reply;
 mod unit_request;
 mod unit_transport;
-mod upgrade;
 mod watchdog;
 mod web;
 mod web_store;
@@ -263,7 +262,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             return unit_request::run(&fleet, command);
         }
-        Command::Mcp => mcp::serve(policy, ledger, home, cli.mcp_resume.as_deref())?,
+        Command::Mcp => mcp::serve(policy, ledger, home)?,
 
         Command::Drop { id, host } => {
             let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
@@ -501,12 +500,6 @@ fn hook(
 
 /// Recovery needs no Herdr discovery for local operations.
 fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
-    upgrade::verify_target()?;
-    // Even commands that do not open a full store must prefer its newest writer.
-    upgrade::check(&Ledger {
-        budget,
-        ..Ledger::new(ledger::default_dir())
-    })?;
     if let Command::TodoPublish { ref pane, clear } = cli.command {
         let ledger = Ledger {
             budget,
