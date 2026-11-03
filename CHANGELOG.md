@@ -2,10 +2,6 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
-
-- Running services, web portals, sidebars, and MCP sessions keep running when a newer writer blocks work inside a pass or request. Failed executable replacements are re-probed, with retries paced by the service interval, UI tick, or next MCP input.
-
 ## 0.31.0 - 2026-11-03
 
 - Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
