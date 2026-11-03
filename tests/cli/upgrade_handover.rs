@@ -1,7 +1,8 @@
 use super::*;
 use std::io::{BufRead as _, BufReader, Write as _};
 
-const NEW_VERSION: &str = "0.31.0";
+// Far above any real release, so a package version bump never equals it.
+const NEW_VERSION: &str = "999.0.0";
 
 fn replacement(rig: &Rig) -> PathBuf {
     let path = rig.dir.join("new-dogsled");
@@ -340,6 +341,12 @@ fn a_lying_version_probe_cannot_loop_into_an_older_image() {
             env!("CARGO_BIN_EXE_dogsled")
         ),
     );
+    // A new file's first launch on macOS waits for the system's executable assessment,
+    // which the rest of this suite's fresh copies can push past the probe budget.
+    let mut warm = isolated(&executable);
+    warm.arg("--version");
+    let (status, text) = output(warm);
+    assert!(status.success(), "{text}");
     record(&rig, &executable, NEW_VERSION);
     let (status, text) = output(rig.cmd(&["state", "items"]));
     assert!(!status.success(), "{text}");

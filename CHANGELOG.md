@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 0.31.0 - 2026-11-03
 
 - Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
 - Remote launch errors show the host and the typed refusal reason, including a missing execution directory, instead of reporting an SSH failure.
