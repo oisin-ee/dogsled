@@ -618,39 +618,39 @@ pub(crate) fn expire(ledger: &Ledger, now: u64) -> Result<()> {
         return Ok(());
     }
     let (panes, _) = crate::cleanup::pane_snapshot(&crate::shell::System::default())?;
+    // A pass never rewrites a removed mark (`save`) and skips closed marks, so expiry needs
+    // no handoff serialization.
     ledger.with_lock("custody", || {
-        ledger.with_lock("handoff", || {
-            marks_transaction(ledger, |tx| {
-                let mut marks: Marks = crate::host_store::marks_rows(tx)?;
-                let mut expired = Vec::new();
-                for (key, mark) in &marks {
-                    let Some(closed) = mark.closed_ms else {
-                        continue;
-                    };
-                    let Some(id) = mark.item.as_deref() else {
-                        continue;
-                    };
-                    if !panes.iter().any(|pane| pane.pane_id == mark.pane)
-                        && now.saturating_sub(closed) > crate::jobs::RECORD_KEEP_MS
-                        && closed >= mark.marked_ms
-                        && mark.sealed.is_some()
-                        && mark.native_done
-                        && mark.reply.as_ref().is_some_and(|reply| reply.done)
-                        && (mark.dropped_ms.is_some()
-                            || mark.branch.as_ref().is_none_or(|branch| branch.landed))
-                        && crate::work::references_released(ledger, id)?
-                        && !crate::items::retained(ledger, id, now)?
-                        && !crate::launch::retained_execution(ledger, id)?
-                    {
-                        expired.push(key.clone());
-                    }
+        marks_transaction(ledger, |tx| {
+            let mut marks: Marks = crate::host_store::marks_rows(tx)?;
+            let mut expired = Vec::new();
+            for (key, mark) in &marks {
+                let Some(closed) = mark.closed_ms else {
+                    continue;
+                };
+                let Some(id) = mark.item.as_deref() else {
+                    continue;
+                };
+                if !panes.iter().any(|pane| pane.pane_id == mark.pane)
+                    && now.saturating_sub(closed) > crate::jobs::RECORD_KEEP_MS
+                    && closed >= mark.marked_ms
+                    && mark.sealed.is_some()
+                    && mark.native_done
+                    && mark.reply.as_ref().is_some_and(|reply| reply.done)
+                    && (mark.dropped_ms.is_some()
+                        || mark.branch.as_ref().is_none_or(|branch| branch.landed))
+                    && crate::work::references_released(ledger, id)?
+                    && !crate::items::retained(ledger, id, now)?
+                    && !crate::launch::retained_execution(ledger, id)?
+                {
+                    expired.push(key.clone());
                 }
-                if expired.is_empty() {
-                    return Ok(());
-                }
-                marks.retain(|key, _| !expired.contains(key));
-                crate::host_store::replace_marks(tx, &marks)
-            })
+            }
+            if expired.is_empty() {
+                return Ok(());
+            }
+            marks.retain(|key, _| !expired.contains(key));
+            crate::host_store::replace_marks(tx, &marks)
         })
     })
 }
@@ -887,12 +887,34 @@ impl HandoffWarnings {
 /// Child-host action lane, independent of fleet discovery, owner availability and sweeps.
 /// Keep the result durably before closing; the owner's children lane imports it afterwards.
 pub fn handoff(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
-    ledger.with_lock("handoff", || {
-        let mut warnings = HandoffWarnings::default();
-        let result = handoff_locked(ledger, shell, now, &mut warnings);
-        warnings.report(ledger, result.is_ok())?;
-        result
-    })
+    let _pass = PASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    handoff_pass(ledger, shell, now)
+}
+
+/// One handoff pass at a time in this process. Only `serve` runs passes, and `service.lock`
+/// makes it the only `serve` on the host, so no file lock is needed. Mark rows change in
+/// their own `state.db` transactions; pane and checkout removal take the close locks.
+static PASS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run a handoff pass only when no other pass is running. A running pass is the handoff
+/// lane doing this work, possibly through a long close; waiting for it adds nothing.
+pub fn handoff_if_free(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<bool> {
+    let _pass = match PASS.try_lock() {
+        Ok(pass) => pass,
+        Err(std::sync::TryLockError::Poisoned(pass)) => pass.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+    };
+    handoff_pass(ledger, shell, now)?;
+    Ok(true)
+}
+
+fn handoff_pass(ledger: &Ledger, shell: &dyn crate::shell::Shell, now: u64) -> Result<()> {
+    let mut warnings = HandoffWarnings::default();
+    let result = handoff_locked(ledger, shell, now, &mut warnings);
+    warnings.report(ledger, result.is_ok())?;
+    result
 }
 
 /// Checkout absence alone never establishes completion. Reconciliation needs the saved

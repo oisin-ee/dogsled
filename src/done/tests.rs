@@ -501,6 +501,19 @@ fn ledger() -> Ledger {
     Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
 }
 
+#[test]
+fn busy_handoff_pass_is_skipped_without_waiting() {
+    let ledger = ledger();
+    let shell = Fake::default();
+    let running = PASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(!handoff_if_free(&ledger, &shell, 1).unwrap());
+    drop(running);
+    assert!(handoff_if_free(&ledger, &shell, 1).unwrap());
+    assert!(!ledger.dir.join("handoff.lock").exists());
+}
+
 fn agent(state: &str) -> Agent {
     Agent {
         pane: "w2:p1".into(),

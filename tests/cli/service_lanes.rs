@@ -155,6 +155,25 @@ fn remote_lane_failures_reach_full_brief_and_context_status() {
 }
 
 #[test]
+fn handoff_passes_take_no_handoff_file_lock() {
+    let rig = Rig::new("service-handoff-no-file-lock");
+    rig.done("missing-terminal", "gone:p1", 10);
+    // Both the handoff lane and the children lane run a handoff pass here.
+    serve(&rig);
+    serve(&rig);
+    assert!(!rig.dir.join("state/handoff.lock").exists());
+    let failing = lanes(&rig);
+    assert!(
+        failing
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|lane| lane["lane"] != "children" && lane["lane"] != "handoff"),
+        "{failing}"
+    );
+}
+
+#[test]
 fn repeated_handoff_warning_prints_once_across_lane_threads() {
     let rig = Rig::new("service-handoff-warning");
     rig.done("missing-terminal", "gone:p1", 10);
