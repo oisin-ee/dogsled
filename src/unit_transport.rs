@@ -105,6 +105,7 @@ pub fn digest_hex(bytes: &[u8]) -> String {
 
 pub fn conflict(message: &str) -> Error {
     Error::Invalid(format!("REQUEST_CONFLICT: {message}"))
+        .because(crate::diagnostic::Cause::RequestChanged)
 }
 
 #[derive(Debug, Deserialize)]

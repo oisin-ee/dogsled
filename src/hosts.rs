@@ -154,52 +154,6 @@ impl std::fmt::Display for Failure {
 /// in an `Error`, a ticket, a handoff, a unit record, or a log line.
 pub const SSH_DEBUG_FILE: &str = "DOGSLED_SSH_DEBUG_FILE";
 
-/// The cause a peer named in a plain prepare failure, without any of the peer's own text.
-/// The names come from this caller's arguments, never from the peer's message.
-fn prepare_cause(value: &serde_json::Value, args: &[String]) -> Option<String> {
-    if value.get("diagnostic").is_some() {
-        return None;
-    }
-    let message = value["error"].as_str()?.trim();
-    let arg = |flag: &str| {
-        args.windows(2)
-            .find(|pair| pair[0] == flag)
-            .map(|pair| pair[1].clone())
-    };
-    if message.starts_with("unknown base") || message.contains("requested base unavailable") {
-        let base = arg("--base").filter(|base| safe_ref(base))?;
-        return Some(format!("unknown base {base}"));
-    }
-    if message.starts_with("branch ") && message.ends_with(" exists; omit --base") {
-        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
-        return Some(format!("branch {branch} exists; omit --base"));
-    }
-    if message == "branch exists; omit --base" {
-        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
-        return Some(format!("branch {branch} exists; omit --base"));
-    }
-    if message.contains("workspace") && message.contains("already open") {
-        return Some("workspace already open".to_owned());
-    }
-    if message.contains("workspace")
-        && (message.contains("already shows") || message.contains("is occupied"))
-    {
-        return Some("workspace occupied".to_owned());
-    }
-    None
-}
-
-/// A reference that carries no origin, no credential, and no path.
-fn safe_ref(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && !value.starts_with('-')
-        && !value.contains("..")
-        && value
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"/_-.~^".contains(&c))
-}
-
 fn record_ssh_detail(target: &str, detail: &str) {
     let Some(path) = std::env::var_os(SSH_DEBUG_FILE) else {
         return;
@@ -449,6 +403,14 @@ impl<'a> Fleet<'a> {
         out: &crate::shell::Output,
     ) -> Result<T> {
         let operation = crate::diagnostic::Operation::from_args(args);
+        if out.status == SSH_FAILED {
+            record_ssh_detail(&host.label, &out.stderr);
+            return Err(Error::Ssh {
+                target: host.label.clone(),
+                failure: Failure::of_ssh(out.status, &out.stderr),
+                refusal: None,
+            });
+        }
         if out.status != 0 && out.status != 1 {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 && value["deadline"] == true
@@ -485,37 +447,22 @@ impl<'a> Fleet<'a> {
                 failure: Failure::of_ssh(out.status, &out.stderr),
                 refusal,
             };
-            // Legacy refusals retain their fixed messages. Transport categories remain
-            // retryable without interpreting a peer envelope.
             let value = serde_json::from_str::<serde_json::Value>(&out.stdout).ok();
-            if out.status == SSH_FAILED
-                || (refusal.is_some()
-                    && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none()))
-            {
-                return Err(error);
-            }
             let diagnostic = crate::diagnostic::Diagnostic::remote(
                 value.as_ref().and_then(|v| v.get("diagnostic")),
                 args,
                 Some(out.status),
                 &host.label,
             );
-            // A prepare failure may name its cause in a plain message, such as an unknown
-            // base. The cause reaches the ticket as the error itself, and the peer's own
-            // text stays in the debug file.
-            if operation == crate::diagnostic::Operation::Prepare
-                && refusal.is_none()
-                && let Some(value) = value.as_ref()
-                && let Some(cause) = prepare_cause(value, args)
-            {
-                return Err(Error::Invalid(format!("ssh {}: {cause}", host.label)));
-            }
             if operation == crate::diagnostic::Operation::Other
                 && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none())
             {
                 return Err(error);
             }
-            return Err(error.with_diagnostic(diagnostic));
+            return Err(Error::Peer {
+                target: host.label.clone(),
+            }
+            .with_diagnostic(diagnostic));
         }
         serde_json::from_str(&out.stdout).map_err(|_| {
             Error::Parse {
@@ -1438,34 +1385,19 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         };
-        assert_eq!(
-            read(format!("{{\"error\":\"unknown base {SECRET}\"}}")),
-            "ssh peer: unknown base origin/x"
-        );
-        assert_eq!(
-            read("{\"error\":\"branch worker exists; omit --base\"}".to_owned(),),
-            "ssh peer: branch worker exists; omit --base"
-        );
-        assert_eq!(
-            read("{\"error\":\"branch exists; omit --base\"}".to_owned()),
-            "ssh peer: branch worker exists; omit --base"
-        );
-        assert_eq!(
-            read("{\"error\":\"requested base unavailable on this host\"}".to_owned()),
-            "ssh peer: unknown base origin/x"
-        );
-        assert_eq!(
-            read("{\"error\":\"workspace already open\"}".to_owned()),
-            "ssh peer: workspace already open"
-        );
-        assert_eq!(
-            read("{\"error\":\"Herdr workspace w8 already shows the checkout\"}".to_owned()),
-            "ssh peer: workspace occupied"
-        );
-        assert_eq!(
-            read("{\"error\":\"workspace path is occupied\"}".to_owned()),
-            "ssh peer: workspace occupied"
-        );
+        // Same-release peers must send an envelope. Never infer a cause from text.
+        for message in [
+            "unknown base origin/x",
+            "branch worker exists; omit --base",
+            "workspace already open",
+        ] {
+            let shown = read(serde_json::json!({"error":message}).to_string());
+            assert!(
+                shown.contains("peer supplied no diagnostic envelope"),
+                "{shown}"
+            );
+            assert!(!shown.contains("ssh peer"), "{shown}");
+        }
         // A peer's own text never reaches the error, and an unknown cause stays hidden.
         for stdout in [
             format!("{{\"error\":\"{SECRET}\"}}"),

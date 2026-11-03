@@ -1,6 +1,7 @@
 //! Host-owned agent launches. Persist the pane before starting, and reconcile that
 //! exact terminal after an interrupted response; never allocate a second writer.
 
+use crate::diagnostic::Cause;
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 use crate::shell::Shell;
@@ -65,9 +66,10 @@ impl Progress {
                 || self.stopped.is_some()
                 || self.error.as_ref() != Some(detail)
             {
-                return Err(crate::worktree::refuse(
-                    "inconsistent validity refusal provenance",
-                ));
+                return Err(
+                    crate::worktree::refuse("inconsistent validity refusal provenance")
+                        .because(Cause::LaunchReceiptMismatch),
+                );
             }
             return Ok(Some(detail));
         }
@@ -75,9 +77,10 @@ impl Progress {
             return Ok(None);
         };
         let Action::Agent { kind, .. } = &self.request.action else {
-            return Err(crate::worktree::refuse(
-                "preflight refusal is not an agent launch",
-            ));
+            return Err(
+                crate::worktree::refuse("preflight refusal is not an agent launch")
+                    .because(Cause::LaunchReceiptMismatch),
+            );
         };
         let expected = work::line_budget_error(kind, bytes).to_string();
         if bytes <= work::LINE_BUDGET
@@ -89,9 +92,10 @@ impl Progress {
             || self.terminal != self.request.terminal
             || self.error.as_deref() != Some(expected.as_str())
         {
-            return Err(crate::worktree::refuse(
-                "inconsistent preflight refusal provenance",
-            ));
+            return Err(
+                crate::worktree::refuse("inconsistent preflight refusal provenance")
+                    .because(Cause::LaunchReceiptMismatch),
+            );
         }
         Ok(self.error.as_deref())
     }
@@ -104,9 +108,10 @@ pub(crate) fn retention_completion(ledger: &Ledger, id: &str) -> Result<Option<u
         return Ok(None);
     };
     if progress.request.id != id {
-        return Err(crate::worktree::refuse(
-            "launch completion identity changed",
-        ));
+        return Err(
+            crate::worktree::refuse("launch completion identity changed")
+                .because(Cause::LaunchReceiptMismatch),
+        );
     }
     if let Some(stopped) = &progress.stopped
         && (stopped.launch != progress.request
@@ -114,16 +119,15 @@ pub(crate) fn retention_completion(ledger: &Ledger, id: &str) -> Result<Option<u
             || !progress.attempted
             || progress.terminal_receipt.is_some())
     {
-        return Err(crate::worktree::refuse(
-            "stopped completion provenance changed",
-        ));
+        return Err(
+            crate::worktree::refuse("stopped completion provenance changed")
+                .because(Cause::LaunchReceiptMismatch),
+        );
     }
     if let Some(receipt) = &progress.terminal_receipt {
-        let seed = progress
-            .request
-            .unit
-            .as_ref()
-            .ok_or_else(|| crate::worktree::refuse("terminal seed missing"))?;
+        let seed = progress.request.unit.as_ref().ok_or_else(|| {
+            crate::worktree::refuse("terminal seed missing").because(Cause::LaunchReceiptMissing)
+        })?;
         crate::unit_transport::validate_seed(seed, id, &progress.request.owner)?;
         if !progress.confirmed
             || !progress.attempted
@@ -131,9 +135,10 @@ pub(crate) fn retention_completion(ledger: &Ledger, id: &str) -> Result<Option<u
             || receipt.ack.unit_ref != seed.binding.contract
             || receipt.ack.digest != seed.exported.digest
         {
-            return Err(crate::worktree::refuse(
-                "terminal completion provenance changed",
-            ));
+            return Err(
+                crate::worktree::refuse("terminal completion provenance changed")
+                    .because(Cause::LaunchReceiptMismatch),
+            );
         }
     }
     let terminal = progress.preflight_failure()?.is_some()
@@ -1379,16 +1384,19 @@ pub fn replay(ledger: &Ledger, request: &Launch) -> Result<Option<Value>> {
         return Err(Error::Invalid(format!(
             "launch {} changed after it was recorded",
             request.id
-        )));
+        ))
+        .because(Cause::RequestChanged));
     }
     match crate::launch_store::receipt_as::<Receipt>(ledger, &request.id)? {
         Some(Receipt::Started(result)) => Ok(Some(result)),
-        Some(Receipt::Refused { failed }) => Err(Error::Invalid(failed)),
+        Some(Receipt::Refused { failed }) => {
+            Err(Error::Invalid(failed).because(Cause::LaunchRefused))
+        }
         None => {
             if let Some(progress) = saved
                 && let Some(failed) = progress.preflight_failure()?
             {
-                return Err(Error::Invalid(failed.into()));
+                return Err(Error::Invalid(failed.into()).because(Cause::LaunchRefused));
             }
             Ok(None)
         }
@@ -1405,7 +1413,9 @@ pub fn checkout_for_request(
         return Ok((false, None));
     };
     if saved.request != *request {
-        return Err(crate::worktree::refuse("launch request changed"));
+        return Err(
+            crate::worktree::refuse("launch request changed").because(Cause::RequestChanged)
+        );
     }
     Ok((
         true,
@@ -1513,11 +1523,14 @@ pub fn agent_guarded(
             return Err(Error::Invalid(format!(
                 "launch {} changed after it was recorded",
                 request.id
-            )));
+            ))
+            .because(Cause::RequestChanged));
         }
         match crate::launch_store::receipt_as::<Receipt>(ledger, &file)? {
             Some(Receipt::Started(result)) => return Ok(result),
-            Some(Receipt::Refused { failed }) => return Err(Error::Invalid(failed)),
+            Some(Receipt::Refused { failed }) => {
+                return Err(Error::Invalid(failed).because(Cause::LaunchRefused));
+            }
             None => (),
         }
         if let Some(progress) = &saved
@@ -1530,7 +1543,7 @@ pub fn agent_guarded(
                     failed: failed.into(),
                 },
             )?;
-            return Err(Error::Invalid(failed.into()));
+            return Err(Error::Invalid(failed.into()).because(Cause::LaunchRefused));
         }
         let mut progress = if let Some(progress) = saved {
             progress
@@ -1543,6 +1556,7 @@ pub fn agent_guarded(
                 "launch {} stopped while creating its pane; inspect the host before resubmitting",
                 request.id
             ))
+            .because(Cause::StartupUncertain)
         })?;
         // A confirmed start must not run again, even if the agent finished and exited.
         if !progress.confirmed {
@@ -1613,7 +1627,8 @@ fn refused(
     Ok(Error::Invalid(match closed {
         Ok(()) => failed,
         Err(close) => format!("{failed}; its pane stays open: {close}"),
-    }))
+    })
+    .because(Cause::LaunchRefused))
 }
 
 /// Typed local preflight and final native refusals prove that no agent was started.
@@ -1622,7 +1637,8 @@ pub(crate) fn refused_before_start(ledger: &Ledger, request: &Launch) -> Result<
     let receipt = crate::launch_store::receipt_as::<Receipt>(ledger, &request.id)?;
     let Some(progress) = crate::launch_store::progress(ledger, &request.id)? else {
         return if matches!(receipt, Some(Receipt::Refused { .. })) {
-            Err(crate::worktree::refuse("refusal has no launch provenance"))
+            Err(crate::worktree::refuse("refusal has no launch provenance")
+                .because(Cause::LaunchReceiptMissing))
         } else {
             Ok(false)
         };
@@ -1642,9 +1658,10 @@ pub(crate) fn refused_before_start(ledger: &Ledger, request: &Launch) -> Result<
         || (!preflight && progress.pane.as_deref().is_none_or(str::is_empty))
         || (!preflight && progress.terminal.as_deref().is_none_or(str::is_empty))
     {
-        return Err(crate::worktree::refuse(
-            "refusal has inconsistent launch provenance",
-        ));
+        return Err(
+            crate::worktree::refuse("refusal has inconsistent launch provenance")
+                .because(Cause::LaunchReceiptMismatch),
+        );
     }
     Ok(true)
 }
@@ -1655,26 +1672,38 @@ fn close_refused_pane(shell: &dyn Shell, pane: &str, expected: &str) -> Result<(
             .iter()
             .any(|p| p.pane_id == pane && p.focused)
     {
-        return Err(Error::Invalid(format!("{pane}: caller or focused pane")));
+        return Err(
+            Error::Invalid(format!("{pane}: caller or focused pane")).because(Cause::PaneBusy)
+        );
     }
     if terminal(shell, pane)? != expected {
-        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed"))
+            .because(Cause::PaneIdentityMismatch));
     }
     if crate::probe::agent_list(shell)?
         .iter()
         .any(|agent| agent.pane == pane)
     {
-        return Err(Error::Invalid(format!(
-            "{pane}: an agent now owns the pane"
-        )));
+        return Err(
+            Error::Invalid(format!("{pane}: an agent now owns the pane")).because(Cause::PaneBusy),
+        );
     }
     idle(shell, pane)?;
     // Inspection must not authorize closing a replacement terminal.
     if terminal(shell, pane)? != expected {
-        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed"))
+            .because(Cause::PaneIdentityMismatch));
     }
     shell.run_ok("herdr", &["pane".into(), "close".into(), pane.into()])?;
     Ok(())
+}
+
+/// Profile lookup errors belong to the selected launch profile, not command output.
+fn launch_profile(selected: Option<&str>) -> Result<Option<crate::profiles::Profile>> {
+    selected
+        .map(crate::profiles::load)
+        .transpose()
+        .map_err(|error| error.because(Cause::ProfileInvalid))
 }
 
 fn allocate(
@@ -1692,17 +1721,18 @@ fn allocate(
         ..
     } = &request.action
     else {
-        return Err(Error::Invalid("not an agent launch".into()));
+        return Err(Error::Invalid("not an agent launch".into()).because(Cause::InvalidRequest));
     };
     if request.pane.is_some() && request.terminal.as_deref().is_none_or(str::is_empty) {
         return Err(Error::Invalid(format!(
             "launch {}: prepared pane has no terminal identity; refusing to take it over",
             request.id
-        )));
+        ))
+        .because(Cause::PaneUnavailable));
     }
     // Validate profile/argv before creating a pane. An allocating state without a
     // pane is deliberately not retried after a crash: its ownership is uncertain.
-    let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
+    let profile = launch_profile(profile.as_deref())?;
     // Encode first so a budget refusal has typed, durable proof of no dispatch.
     let argv = work::agent_argv(
         kind,
@@ -1829,14 +1859,15 @@ fn start_or_reconcile(
         profile,
     } = &request.action
     else {
-        return Err(Error::Invalid("not an agent launch".into()));
+        return Err(Error::Invalid("not an agent launch".into()).because(Cause::InvalidRequest));
     };
     let current = terminal(shell, pane)?;
     if progress.terminal.as_deref() != Some(current.as_str()) {
         return Err(Error::Invalid(format!(
             "launch {}: terminal for {pane} changed or was not recorded; refusing to take it over",
             request.id
-        )));
+        ))
+        .because(Cause::PaneIdentityMismatch));
     }
     let existing = crate::probe::agent_list(shell)?
         .into_iter()
@@ -1850,7 +1881,8 @@ fn start_or_reconcile(
             return Err(Error::Invalid(format!(
                 "launch {}: {pane} has another agent; refusing to take it over",
                 request.id
-            )));
+            ))
+            .because(Cause::PaneBusy));
         }
         return Ok(());
     }
@@ -1878,7 +1910,7 @@ fn start_or_reconcile(
     work::check_launch_validity(ledger, request)?;
     // Native agent.start owns shell readiness and its atomic busy refusal. An eager
     // process snapshot here rejects startup before that supported boundary can run.
-    let profile = profile.as_deref().map(crate::profiles::load).transpose()?;
+    let profile = launch_profile(profile.as_deref())?;
     let receipts = ledger.child("launches");
     let files = work::Files::write(&receipts.dir, &request.id, message)?;
     let seed_flags = seed_flags(ledger, request, profile.as_ref())?;
@@ -1999,7 +2031,7 @@ fn validate_seed<'a>(
             )
         })
     }) {
-        return Err(Error::Invalid("PROFILE_INVALID: managed units require fresh persisted sessions; profile session/seed flags are incompatible".into()));
+        return Err(Error::Invalid("PROFILE_INVALID: managed units require fresh persisted sessions; profile session/seed flags are incompatible".into()).because(Cause::ProfileInvalid));
     }
     Ok(expected)
 }
@@ -2174,8 +2206,10 @@ pub fn unit_receipts(
             };
             match unit_receipt(ledger, shell, execution) {
                 Ok(evidence) => entry.evidence = evidence,
-                Err(Error::Invalid(reason)) => entry.invalid = Some(reason),
-                Err(error) => entry.failed = Some(error.to_string()),
+                Err(error) => match error.root() {
+                    Error::Invalid(reason) => entry.invalid = Some(reason.clone()),
+                    _ => entry.failed = Some(error.to_string()),
+                },
             }
             entry
         })
@@ -2323,22 +2357,26 @@ fn pane_proof(
 }
 
 fn idle(shell: &dyn Shell, pane: &str) -> Result<()> {
-    let info = crate::probe::process_info(shell, pane)?
-        .ok_or_else(|| Error::Invalid(format!("pane {pane} disappeared before startup")))?;
-    let shell_pid = info["shell_pid"]
-        .as_u64()
-        .ok_or_else(|| Error::Invalid(format!("{pane}: no shell process identity")))?;
-    let foreground = info["foreground_processes"]
-        .as_array()
-        .ok_or_else(|| Error::Invalid(format!("{pane}: no foreground process information")))?;
+    let info = crate::probe::process_info(shell, pane)?.ok_or_else(|| {
+        Error::Invalid(format!("pane {pane} disappeared before startup"))
+            .because(Cause::PaneUnavailable)
+    })?;
+    let shell_pid = info["shell_pid"].as_u64().ok_or_else(|| {
+        Error::Invalid(format!("{pane}: no shell process identity")).because(Cause::PaneUnavailable)
+    })?;
+    let foreground = info["foreground_processes"].as_array().ok_or_else(|| {
+        Error::Invalid(format!("{pane}: no foreground process information"))
+            .because(Cause::PaneUnavailable)
+    })?;
     if foreground.is_empty()
         || foreground
             .iter()
             .any(|p| p["pid"].as_u64() != Some(shell_pid))
     {
-        return Err(Error::Invalid(format!(
-            "{pane} is busy; refusing to start another process"
-        )));
+        return Err(
+            Error::Invalid(format!("{pane} is busy; refusing to start another process"))
+                .because(Cause::PaneBusy),
+        );
     }
     Ok(())
 }
@@ -2346,7 +2384,8 @@ fn idle(shell: &dyn Shell, pane: &str) -> Result<()> {
 fn same_terminal(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
     let current = terminal(shell, pane)?;
     if current != expected {
-        return Err(Error::Invalid(format!("{pane}: launch terminal changed")));
+        return Err(Error::Invalid(format!("{pane}: launch terminal changed"))
+            .because(Cause::PaneIdentityMismatch));
     }
     Ok(())
 }
@@ -2360,7 +2399,10 @@ fn terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
         .and_then(|panes| panes.iter().find(|p| p["pane_id"] == pane))
         .and_then(|p| p["terminal_id"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| Error::Invalid(format!("{pane}: cannot establish launch terminal identity")))
+        .ok_or_else(|| {
+            Error::Invalid(format!("{pane}: cannot establish launch terminal identity"))
+                .because(Cause::PaneUnavailable)
+        })
 }
 
 #[cfg(test)]

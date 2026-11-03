@@ -138,13 +138,13 @@ case "$*" in
  *'host reserve'*)
    for remote do :; done
    sh -c "$RIG/bin/peer-fixture $remote" ;;
- *'host checkout'*) printf '%s\n' '{"error":"netcup: clone https://example.invalid/repo.git failed: credentials","code":"CLONE_FAILED"}'; exit 2 ;;
+ *'host checkout'*) printf '%s\n' '{"error":"netcup: clone https://example.invalid/repo.git failed: credentials","diagnostic":{"version":1,"operation":"checkout","cause":"clone_failed","context":{}}}'; exit 2 ;;
  *) echo 'must not prepare after clone failure' >&2; exit 2 ;;
 esac
 "#);
     let (code, error) = rig.json(&args);
     assert_eq!(code, 2);
-    // The peer's code maps to a fixed message; its own text, which can hold a secret, is hidden.
+    // The typed cause maps to a fixed message; the peer's own text stays hidden.
     let message = error["error"].as_str().unwrap();
     assert!(
         message.contains("could not clone the repository"),

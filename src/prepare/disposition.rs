@@ -109,6 +109,7 @@ impl Claim {
 
 fn conflict() -> Error {
     crate::worktree::refuse("preparation disposition correlation or ownership changed")
+        .because(crate::diagnostic::Cause::PreparationBindingMismatch)
 }
 
 /// Read-only, request-gated historical capture. Missing checkout identity stays missing.
@@ -311,12 +312,14 @@ fn binding(ledger: &Ledger, id: &str) -> Result<Option<Binding>> {
         return Ok(None);
     };
     if receipt.version.is_some_and(|version| version != VERSION) {
-        return Err(crate::worktree::refuse(
-            "unsupported preparation receipt version",
-        ));
+        return Err(
+            crate::worktree::refuse("unsupported preparation receipt version")
+                .because(crate::diagnostic::Cause::ProtocolUnsupported),
+        );
     }
     let saved = receipt.binding.ok_or_else(|| {
         crate::worktree::refuse("preparation receipt is missing its binding; claim remains held")
+            .because(crate::diagnostic::Cause::PreparationBindingMissing)
     })?;
     if saved.request_id != id
         || saved.claim.request_id != id
@@ -395,7 +398,10 @@ pub fn retired(ledger: &Ledger, id: &str) -> Result<bool> {
 /// Called under the request's preparation lock, before any discovery or side effect.
 pub fn allow_preparation(ledger: &Ledger, id: &str) -> Result<()> {
     if read(ledger, id)?.is_some() {
-        return Err(conflict());
+        return Err(
+            crate::worktree::refuse("preparation disposition remains held")
+                .because(crate::diagnostic::Cause::PreparationHeld),
+        );
     }
     Ok(())
 }

@@ -124,9 +124,24 @@ fn main() -> ExitCode {
                 if let Error::Refused { code, .. } = error.root() {
                     body["code"] = code.code().into();
                 }
-                if let Some(diagnostic) = error.diagnostic() {
+                let diagnostic = if peer {
+                    let args: Vec<String> = std::env::args()
+                        .skip(1)
+                        .skip_while(|arg| arg != "host")
+                        .skip(1)
+                        .collect();
+                    let diagnostic = diagnostic::Diagnostic::for_error(&error, &args);
+                    (diagnostic.operation != diagnostic::Operation::Other).then_some(diagnostic)
+                } else {
+                    error.diagnostic().cloned()
+                };
+                if let Some(diagnostic) = diagnostic {
                     body["diagnostic"] = serde_json::json!(diagnostic);
-                    if peer {
+                    if peer
+                        && error
+                            .diagnostic()
+                            .is_some_and(|d| d.operation != diagnostic::Operation::Other)
+                    {
                         body["error"] = diagnostic.to_string().into();
                     }
                 }

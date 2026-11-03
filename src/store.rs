@@ -485,8 +485,21 @@ mod tests {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_millis(50));
-        let error = write(&ledger, |_| Ok(())).unwrap_err();
+        // Give setup a generous command budget. Verify the timeout the store installs,
+        // then refuse a genuine lock conflict immediately, without racing that deadline.
+        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_secs(10));
+        let error = read(&ledger, |contender| {
+            let timeout: i64 = contender.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            assert!(
+                (1..=10_000).contains(&timeout),
+                "SQLite timeout {timeout} exceeds the command budget"
+            );
+            contender.execute_batch(
+                "PRAGMA busy_timeout=0; CREATE TABLE deadline_contender (id INTEGER)",
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
         assert!(
             matches!(error, Error::Deadline(ref detail) if detail == "state.db busy"),
             "{error}"

@@ -641,7 +641,10 @@ impl Server {
                 crate::runtime::start(fleet, request, false)
             })();
             outcome.map_err(|error| {
-                if error.diagnostic().is_some() {
+                if error
+                    .diagnostic()
+                    .is_some_and(|d| d.operation != crate::diagnostic::Operation::Other)
+                {
                     error.correlate(Some(&id))
                 } else {
                     Error::Invalid(format!("placement request {id}: {error}"))

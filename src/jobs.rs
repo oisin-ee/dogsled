@@ -1187,9 +1187,7 @@ fn validate_startup(
             job.id
         )));
     };
-    if !std::path::Path::new(&job.cwd).is_dir() {
-        return Err(crate::worktree::refuse("execution directory disappeared"));
-    }
+    crate::worktree::require_execution_directory(&job.cwd)?;
     match scope {
         ExecutionScope::Git { checkout } => {
             let identity = checkout
