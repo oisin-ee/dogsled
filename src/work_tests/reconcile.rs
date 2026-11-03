@@ -62,7 +62,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
         shell.on(&remote(&["snapshot".into()]), &capable_snapshot(&current));
         let launch: work::Launch = serde_json::from_value(json!({
             "id":request.id,"validity":request.validity,"action":request.action,"host":"peer","cwd":"/",
-            "owner":"owner","pane":null,"workspace":null,"workspace_name":null
+            "owner":"owner","owner_host":"origin","pane":null,"workspace":null,"workspace_name":null
         }))
         .unwrap();
         let receipt = json!({"host":"peer","pane":"child","launch_confirmed_ms":22_000});
@@ -157,7 +157,7 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
         }))
         .unwrap(),
     );
-    ledger.write("host.json", &current).unwrap();
+    crate::host_store::put_snapshot(&ledger, &current).unwrap();
     items::record(
         &ledger,
         Item {
@@ -201,7 +201,7 @@ fn a_running_job_stays_open_until_a_sample_after_its_launch_lacks_its_pane() {
         }))
         .unwrap(),
     );
-    ledger.write("host.json", &current).unwrap();
+    crate::host_store::put_snapshot(&ledger, &current).unwrap();
     items::record(
         &ledger,
         Item {

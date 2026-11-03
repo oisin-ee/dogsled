@@ -7,6 +7,9 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
+# Publish only through an explicit dispatch after the release PR passes CI.
+dispatch-releases = true
+pr-run-mode = "skip"
 # The installers to generate for each app
 installers = []
 # Target platforms to build apps for (Rust target-triple syntax)
@@ -21,3 +24,7 @@ publish-jobs = ["./publish-npm"]
 github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token = "write" } }
 # Dotfiles installs these templates; dist only bundles them beside the binary.
 include = ["plugin/services/dogsled.service", "plugin/services/dev.dogsled.plist", "plugin/services/dev.dogsled.web.plist"]
+
+# GitHub retires the macos-14 image on 2026-11-02 and fails its jobs during brownouts.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

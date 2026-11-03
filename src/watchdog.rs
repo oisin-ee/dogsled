@@ -76,45 +76,45 @@ pub fn age(ms: u64) -> String {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Event {
-    signature: String,
-    last_ms: u64,
-    urgent: bool,
+pub(crate) struct Event {
+    pub(crate) signature: String,
+    pub(crate) last_ms: u64,
+    pub(crate) urgent: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct State {
-    last_scan_ms: Option<u64>,
-    sent: BTreeMap<String, u64>,
-    events: BTreeMap<String, Event>,
-    marks: BTreeMap<String, String>,
-    notified: BTreeMap<String, u64>,
+pub(crate) struct State {
+    pub(crate) last_scan_ms: Option<u64>,
+    pub(crate) sent: BTreeMap<String, u64>,
+    pub(crate) events: BTreeMap<String, Event>,
+    pub(crate) marks: BTreeMap<String, String>,
+    pub(crate) notified: BTreeMap<String, u64>,
     #[serde(default)]
-    stopped: BTreeMap<String, StoppedEpisode>,
+    pub(crate) stopped: BTreeMap<String, StoppedEpisode>,
     #[serde(default)]
-    prompted_after: BTreeMap<String, PromptHistory>,
+    pub(crate) prompted_after: BTreeMap<String, PromptHistory>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct StoppedEpisode {
-    pane: String,
-    agent_session: String,
-    turn: crate::done::Turn,
-    message_id: Option<String>,
-    attempts: u8,
-    delivered: bool,
-    prompted_after: Option<u64>,
+pub(crate) struct StoppedEpisode {
+    pub(crate) pane: String,
+    pub(crate) agent_session: String,
+    pub(crate) turn: crate::done::Turn,
+    pub(crate) message_id: Option<String>,
+    pub(crate) attempts: u8,
+    pub(crate) delivered: bool,
+    pub(crate) prompted_after: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PromptHistory {
-    prompted_after: u64,
-    turn: crate::done::Turn,
-    working_turn: Option<crate::done::Turn>,
+pub(crate) struct PromptHistory {
+    pub(crate) prompted_after: u64,
+    pub(crate) turn: crate::done::Turn,
+    pub(crate) working_turn: Option<crate::done::Turn>,
     #[serde(default)]
-    last_observed_working: bool,
+    pub(crate) last_observed_working: bool,
     #[serde(default)]
-    last_observed_ms: Option<u64>,
+    pub(crate) last_observed_ms: Option<u64>,
 }
 
 impl PromptHistory {
@@ -147,9 +147,9 @@ impl PromptHistory {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Parent {
-    transcript: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Parent {
+    pub(crate) transcript: Option<String>,
 }
 
 pub fn register_parent(ledger: &Ledger, shell: &dyn crate::shell::Shell, pane: &str) -> Result<()> {
@@ -157,10 +157,10 @@ pub fn register_parent(ledger: &Ledger, shell: &dyn crate::shell::Shell, pane: &
         .into_iter()
         .find(|a| a.pane == pane)
         .and_then(|a| a.transcript);
-    ledger.with_lock("parents", || {
-        let mut panes: BTreeMap<String, Parent> = ledger.read("parents.json")?.unwrap_or_default();
+    crate::store::write(ledger, |tx| {
+        let mut panes = crate::host_store::parents_rows(tx)?;
         panes.insert(pane.into(), Parent { transcript });
-        ledger.write("parents.json", &panes)
+        crate::host_store::replace_parents(tx, &panes)
     })
 }
 
@@ -182,9 +182,8 @@ pub fn turn_ended(state: crate::lifecycle::State) -> bool {
 }
 
 fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
-    ledger.with_lock("parents", || {
-        let mut parents: BTreeMap<String, Parent> =
-            ledger.read("parents.json")?.unwrap_or_default();
+    crate::store::write(ledger, |tx| {
+        let mut parents = crate::host_store::parents_rows(tx)?;
         parents.retain(|pane, parent| {
             probe.agent_panes.iter().any(|agent| {
                 agent.pane == *pane
@@ -204,7 +203,7 @@ fn parents(ledger: &Ledger, probe: &Probe) -> Result<BTreeMap<String, Parent>> {
                     .and_then(|a| a.transcript.clone());
             }
         }
-        ledger.write("parents.json", &parents)?;
+        crate::host_store::replace_parents(tx, &parents)?;
         Ok(parents)
     })
 }
@@ -251,7 +250,7 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
                 // Herdr has no idempotency key. Persist the attempt before the effect:
                 // an interrupted notification is visible on disk and never repeats.
                 state.notified.insert(agent.pane.clone(), since);
-                fleet.ledger.write("watchdog.json", state)?;
+                crate::host_store::put_watchdog(fleet.ledger, state)?;
                 fleet.shell.run_ok(
                     "herdr",
                     &[
@@ -286,7 +285,7 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
             }
             state.notified.remove(&agent.pane);
         }
-        fleet.ledger.write("watchdog.json", state)?;
+        crate::host_store::put_watchdog(fleet.ledger, state)?;
     }
     Ok(())
 }
@@ -683,7 +682,7 @@ fn stopped_prompts(
         // The durable id, attempt budget and fresh history precede the put, even if it
         // succeeds and the process dies before recording success. A possible delivery
         // starts the prompt window; inbox retries deduplicate the id.
-        fleet.ledger.write("watchdog.json", state)?;
+        crate::host_store::put_watchdog(fleet.ledger, state)?;
         let put = put_stopped_prompt(fleet, reports, &host.host, agent, &id, now);
         if matches!(put, Ok(true))
             && let Some(episode) = state.stopped.get_mut(&item.id)
@@ -703,7 +702,7 @@ fn stopped_prompts(
         }
         // A failed delivery is represented by the undelivered episode, not a tick
         // failure that prevents other children or the owner view from progressing.
-        fleet.ledger.write("watchdog.json", state)?;
+        crate::host_store::put_watchdog(fleet.ledger, state)?;
     }
     Ok(())
 }
@@ -714,7 +713,7 @@ pub fn stopped_activity(
     status: &crate::commands::Status,
     now: u64,
 ) -> Result<BTreeMap<String, String>> {
-    let state: State = ledger.read("watchdog.json")?.unwrap_or_default();
+    let state: State = crate::host_store::watchdog(ledger)?.unwrap_or_default();
     Ok(status
         .items
         .iter()
@@ -751,12 +750,12 @@ pub fn stopped_activity(
 pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
     crate::items::deliver_signals(fleet, reports, now)?;
     fleet.ledger.with_lock("watchdog", || {
-        let mut state: State = fleet.ledger.read("watchdog.json")?.unwrap_or_default();
+        let mut state: State = crate::host_store::watchdog(fleet.ledger)?.unwrap_or_default();
         let items = crate::items::list(fleet.ledger)?;
         stopped_prompts(fleet, reports, &items, &mut state, now)?;
         capture_events(&mut state, &items, reports, now);
         // Persist observed events before reconciliation, including between scan deadlines.
-        fleet.ledger.write("watchdog.json", &state)?;
+        crate::host_store::put_watchdog(fleet.ledger, &state)?;
         marks(fleet, reports, &mut state, now)?;
         if state
             .last_scan_ms
@@ -765,7 +764,7 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
             return Ok(());
         }
         state.last_scan_ms = Some(now);
-        fleet.ledger.write("watchdog.json", &state)?;
+        crate::host_store::put_watchdog(fleet.ledger, &state)?;
         // A check-in reaches the pane that holds the child now. The custody record names
         // that pane, so a child a lead has claimed is reported to its custodian.
         let records = crate::custody::list(fleet.ledger)?;
@@ -843,7 +842,7 @@ pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
                     event.urgent = false;
                 }
             }
-            fleet.ledger.write("watchdog.json", &state)?;
+            crate::host_store::put_watchdog(fleet.ledger, &state)?;
         }
         Ok(())
     })

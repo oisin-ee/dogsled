@@ -9,8 +9,8 @@ const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a
 /// One `serve --once` pass. It must succeed; its stderr is the journal.
 fn serve(rig: &Rig) -> String {
     rig.config("free_core_fraction_min = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    if !rig.dir.join("state/host.json").exists() {
-        rig.snapshot("state/host.json", NOW, 0.0, 1);
+    if rig.state(&["host"]).is_null() {
+        rig.snapshot("state", NOW, 0.0, 1);
     }
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     let journal = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -86,8 +86,8 @@ fn serve_closes_ended_job_deleted_directory_and_old_shells_but_keeps_unfinished_
     fs::write(rig.dir.join("busy"), "w4:p2\n").unwrap();
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
     let job = |id: &str, pane: &str, ended: Option<u64>| {
-        rig.put(
-            &format!("state/jobs/{id}.json"),
+        rig.put_job(
+            id,
             &json!({"id":id,"cmd":["true"],"cwd":home,"host":"h","owner":"w1:p1","pane":pane,
                 "state":if ended.is_some() {"idle"} else {"working"},"exit":ended.map(|_| 0),
                 "signal":null,"reason":null,"started_ms":NOW - 60_000,"ended_ms":ended,
@@ -99,13 +99,13 @@ fn serve_closes_ended_job_deleted_directory_and_old_shells_but_keeps_unfinished_
     job("r-5", "w5:p1", Some(NOW - 1_000));
     job("r-6", "w5:p2", Some(NOW - 1_000));
     // The last sample saw w4:p3 idle and w6:p1's agent idle for two days.
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"][0]["pane"] = json!("w6:p1");
     snapshot["probe"]["agent_panes"][0]["state_since_ms"] = json!(1);
     snapshot["probe"]["panes"] = json!([{"pane_id":"w4:p3","workspace_id":"w4","cwd":home,
         "idle_shell":true,"idle_since_ms":1}]);
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     let journal = requested_sweep(&rig);
     let log = rig.log("herdr.log");
     for (kind, id) in [
@@ -128,7 +128,7 @@ fn serve_closes_ended_job_deleted_directory_and_old_shells_but_keeps_unfinished_
         assert!(!log.contains(&format!("workspace close {kept}\n")), "{log}");
     }
     // The job records stay until they expire. The fake close retains the idle shell fixture.
-    assert!(rig.dir.join("state/jobs/r-1.json").exists());
+    assert!(!rig.job("r-1").is_null());
     let (_, plan) = rig.json(&["doctor"]);
     assert!(
         plan["entries"]
@@ -152,18 +152,15 @@ fn sweep_keeps_retryable_launches_and_recovers_final_shells_without_rewriting_ev
                 "pane_id":"w2:p2","terminal_id":"term_launch","workspace_id":"w2","cwd":tree
             }]}}),
         );
-        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         let progress = json!({"request":{"id":"final","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
             "host":"local","cwd":tree,"owner":"w1:p1"},"pane":"w2:p2","terminal":"term_launch",
             "attempted":state != "unattempted","confirmed":false,"result":{},"error":"response lost"});
-        rig.put("state/launches/final.progress.json", &progress);
+        rig.put_launch_progress("final", &progress);
+        let progress = rig.launch_progress("final");
         if state == "refused" {
-            rig.put(
-                "state/launches/final.json",
-                &json!({"failed":"agent_pane_busy"}),
-            );
+            rig.put_launch("final", &json!({"failed":"agent_pane_busy"}));
         }
-        let receipt = fs::read(rig.dir.join("state/launches/final.json")).ok();
+        let receipt = rig.launch_record("final", "receipt");
         let journal = requested_sweep(&rig);
         let log = rig.log("herdr.log");
         assert_eq!(
@@ -173,11 +170,8 @@ fn sweep_keeps_retryable_launches_and_recovers_final_shells_without_rewriting_ev
         );
         assert!(!log.contains("workspace close w2"), "{log}");
         assert!(tree.join("keep").exists());
-        assert_eq!(rig.read("state/launches/final.progress.json"), progress);
-        assert_eq!(
-            fs::read(rig.dir.join("state/launches/final.json")).ok(),
-            receipt
-        );
+        assert_eq!(rig.launch_progress("final"), progress);
+        assert_eq!(rig.launch_record("final", "receipt"), receipt);
     }
 }
 
@@ -214,23 +208,22 @@ fn fifteen_minute_shells(launch: Option<&str>) {
     }
     let mut evidence = Vec::new();
     if let Some(state) = launch {
-        fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
         for (index, pane) in live.iter_mut().enumerate() {
             pane["terminal_id"] = json!(format!("term_restored_{index}"));
             let id = format!("obsolete-{index}");
-            let progress_path = format!("state/launches/{id}.progress.json");
-            rig.put(&progress_path, &json!({
+            let progress_path = id.clone();
+            rig.put_launch_progress(&progress_path, &json!({
                 "request":{"id":id,"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
                     "host":"local","cwd":home,"owner":"w1:p1"},
                 "pane":pane["pane_id"],"terminal":format!("term_old_{index}"),
                 "attempted":true,"confirmed":false,"result":{},"error":"response lost"
             }));
-            let receipt_path = format!("state/launches/{id}.json");
+            let receipt_path = id.clone();
             if state == "refused" {
-                rig.put(&receipt_path, &json!({"failed":"agent_pane_busy"}));
+                rig.put_launch(&receipt_path, &json!({"failed":"agent_pane_busy"}));
             }
-            for path in [progress_path, receipt_path] {
-                evidence.push((path.clone(), fs::read(rig.dir.join(&path)).ok()));
+            for (id, record) in [(progress_path, "progress"), (receipt_path, "receipt")] {
+                evidence.push((id.clone(), record, rig.launch_record(&id, record)));
             }
         }
     }
@@ -246,14 +239,14 @@ fn fifteen_minute_shells(launch: Option<&str>) {
     rig.done("term_parent", "parent", 1);
     rig.put_items(&json!([{"id":"child","kind":"agent","host":"remote","pane":"remote-child","owner_pane":"parent","created_ms":1}]));
     fs::write(rig.dir.join("busy"), "busy\n").unwrap();
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["panes"] = json!(live);
     snapshot["probe"]["agent_panes"] = json!([
         {"pane":"agent","agent":"pi","state":"idle","state_since_ms":1},
         {"pane":"parent","agent":"pi","state":"idle","state_since_ms":1}
     ]);
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
     let (code, plan) = rig.json(&["doctor"]);
     assert_eq!(code, 0, "{plan}");
     let candidates: Vec<_> = plan["entries"]
@@ -277,8 +270,8 @@ fn fifteen_minute_shells(launch: Option<&str>) {
     for kept in ["young", "focused", "busy", "w1:p1", "agent", "parent"] {
         assert!(!log.contains(&format!("pane close {kept}\n")), "{log}");
     }
-    for (path, bytes) in evidence {
-        assert_eq!(fs::read(rig.dir.join(&path)).ok(), bytes, "{path}");
+    for (id, record, value) in evidence {
+        assert_eq!(rig.launch_record(&id, record), value, "{id}");
     }
 }
 
@@ -337,6 +330,7 @@ fn an_idle_agent_that_has_not_called_done_holds_its_worktree() {
 fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     let rig = watchdog_rig("sweep-worktree");
     let tree = rig.dir.join("home/repo/tree");
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "swept-child");
     let kept = |rig: &Rig, why: &str| {
         let journal = requested_sweep(rig);
         assert!(
@@ -433,7 +427,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
         )),
         "{journal}"
     );
-    assert_eq!(rig.read("state/worktrees.json"), json!([]));
+    assert_eq!(rig.state(&["worktrees"]), json!([]));
 }
 
 /// A Herdr whose `process-info` reports a root process for each pane. A pane named in
@@ -471,14 +465,14 @@ fn idle_snapshot(rig: &Rig, pane: &str) {
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":pane,"workspace_id":"w3","cwd":home}]}}),
     );
-    rig.snapshot("state/host.json", NOW, 0.0, 1);
-    let mut snapshot = rig.read("state/host.json");
+    rig.snapshot("state", NOW, 0.0, 1);
+    let mut snapshot = rig.host();
     snapshot["probe"]["agent_panes"] = json!([]);
     snapshot["probe"]["panes"] = json!([{
         "pane_id":pane,"workspace_id":"w3","cwd":home,
         "idle_shell":true,"idle_since_ms":NOW - 48 * 60 * 60 * 1000
     }]);
-    rig.put("state/host.json", &snapshot);
+    rig.put_host(&snapshot);
 }
 
 #[test]
@@ -639,6 +633,7 @@ fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
     );
     idle_snapshot(&rig, "w3:p1");
     let tree = rig.dir.join("home/repo/tree");
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "busy-child");
     rig.put(
         "panes.json",
         &json!({"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3","cwd":tree}]}}),
@@ -650,7 +645,7 @@ fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
     assert!(journal.contains(&format!("skipped: {hold}")), "{journal}");
     assert!(journal.contains(busy), "{journal}");
     assert!(tree.join(".git").exists());
-    assert_eq!(rig.read("state/worktrees.json")[0]["path"], json!(tree));
+    assert_eq!(rig.state(&["worktrees"])[0]["path"], json!(tree));
     let herdr = rig.log("herdr.log");
     let git = rig.log("git.log");
     assert!(!herdr.contains("pane close w3:p1"), "{herdr}");
@@ -659,13 +654,13 @@ fn a_post_plan_busy_checkout_hold_omits_command_secrets_from_sweep_reports() {
     for output in [&journal, &herdr, &git] {
         assert!(!output.contains("sweep-argv-secret"), "{output}");
     }
-    let latest = rig.read("state/sweep.json");
-    let history = fs::read_to_string(rig.dir.join("state/sweeps.jsonl")).unwrap();
-    assert!(!history.contains("sweep-argv-secret"), "{history}");
-    let reports: Vec<Value> = history
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let latest = rig.state(&["sweep"]);
+    let history = rig.state(&["sweeps"]);
+    assert!(
+        !history.to_string().contains("sweep-argv-secret"),
+        "{history}"
+    );
+    let reports = history.as_array().unwrap().clone();
     assert!(!reports.is_empty(), "{history}");
     assert_eq!(reports.last().unwrap(), &latest);
     for report in std::iter::once(&latest).chain(&reports) {
@@ -707,7 +702,7 @@ fn prune_keeps_a_pane_whose_root_process_runs_a_command() {
 fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones() {
     let (rig, tree) = close_rig("sweep-branches");
     let repo = rig.dir.join("home/repo");
-    rig.put("state/repositories.json", &json!([repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo]));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     let branch = |name: &str| {
         let path = rig.dir.join(format!("home/{name}"));
@@ -722,7 +717,9 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     };
     for name in ["done", "local", "pushed"] {
         branch(name);
+        super::sweep_ownership::record_closed_branch(&rig, &repo, name);
     }
+    super::sweep_ownership::record_closed_checkout(&rig, &tree, "branch-child");
     // `done` is squash-merged but on no remote: both scopes remove it.
     git(&repo, &["merge", "-q", "--squash", "done"]);
     git(&repo, &["commit", "-q", "-m", "done (#1)"]);
@@ -753,6 +750,13 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     git(&local, &["commit", "-q", "-m", "local only"]);
     let dirty = detached("dirty");
     fs::write(dirty.join("scratch"), "x").unwrap();
+    for (name, path) in [
+        ("pushed-child", &pushed),
+        ("local-child", &local),
+        ("dirty-child", &dirty),
+    ] {
+        super::sweep_ownership::record_closed_checkout(&rig, path, name);
+    }
     let journal = requested_sweep(&rig);
     assert!(!branch_exists(&rig, "pushed"), "{journal}");
     assert!(
@@ -770,7 +774,7 @@ fn serve_sweeps_pushed_branches_and_detached_worktrees_and_keeps_unpushed_ones()
     );
     assert!(
         !tree.exists(),
-        "a fresh worktree without a preparation hold loses nothing"
+        "a recorded closed child's worktree without a preparation hold loses nothing"
     );
     // Local-only commits and dirty files stay.
     for kept in [&local, &dirty] {
@@ -831,8 +835,8 @@ fn the_sweep_classifies_a_child_by_its_current_custodian_not_its_origin_owner() 
     // The origin owner is gone, but a lead claimed the child. The custodian lives and runs
     // its session, so the child is not an orphan.
     child_with_owner_session(&rig, "w9:p1", Some("owner-session"));
-    rig.put(
-        "state/custody.json",
+    rig.put_state(
+        &["state", "custody", "--put"],
         &json!([{"item":"i1","host":"local","owner_pane":"w9:p1","owner_session":"owner-session",
             "custodian_pane":"w1:p1","custodian_session":"claimant-session","revision":1,
             "claims":[{"id":"claim-1","claimant_pane":"w1:p1","claimant_session":"claimant-session",
@@ -918,10 +922,10 @@ fn a_child_with_an_unreadable_custody_record_stays_listed_as_unknown() {
             "name":"second","created_ms":1,"closed_ms":null}
     ]));
     // The custody file is corrupt, so no child's record can be read.
-    fs::write(rig.dir.join("state/custody.json"), "{ this is not json").unwrap();
+    rig.fault_host_store("custody", false);
     // The sweep already kept the second child, so its age does not start again.
-    rig.put(
-        "state/orphans.json",
+    rig.put_state(
+        &["state", "orphans", "--put"],
         &json!([{"item":"i2","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
             "name":"second","reason":"owner w9:p2 is gone; the child is working",
             "since_ms":42}]),
@@ -962,16 +966,16 @@ fn a_child_whose_custody_cannot_be_written_stays_unknown_and_the_other_is_still_
             "name":"second","created_ms":1,"closed_ms":null}
     ]));
     // The first child has a custody record, so it is classified: its owner is gone.
-    rig.put(
-        "state/custody.json",
+    rig.put_state(
+        &["state", "custody", "--put"],
         &json!([{"item":"i1","host":"local","owner_pane":"w9:p1","custodian_pane":"w9:p1",
             "claims":[]}]),
     );
-    // The custody lock cannot be opened, so the record of the second child cannot be
+    // The custody table refuses writes, so the record of the second child cannot be
     // written. The record that is there still reads.
-    fs::create_dir_all(rig.dir.join("state/custody.lock")).unwrap();
-    rig.put(
-        "state/orphans.json",
+    rig.fault_host_store("custody", true);
+    rig.put_state(
+        &["state", "orphans", "--put"],
         &json!([{"item":"i2","host":"local","pane":"w2:p2","owner_pane":"w9:p2",
             "name":"second","reason":"owner w9:p2 is gone; the child is working",
             "since_ms":42}]),
@@ -1061,9 +1065,14 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     untouched(&rig, "not done");
     // Done, but dirty.
     rig.done("term_child", "w2:p1", 1);
-    let mut marks = rig.read("state/done.json");
-    marks["term_child"]["reply"] = json!({"seq":1,"text":"Finished","captured_ms":1,"done":true});
-    rig.put("state/done.json", &marks);
+    let mut marks = rig.state(&["done"]);
+    marks
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .find(|mark| mark["pane"] == "w2:p1")
+        .unwrap()["reply"] = json!({"seq":1,"text":"Finished","captured_ms":1,"done":true});
+    rig.put_done(&marks);
     fs::write(tree.join("note"), "x").unwrap();
     serve(&rig);
     assert!(
@@ -1109,8 +1118,8 @@ fn stopped_orphan(rig: &Rig, tree: &Path) {
     let mut agents = rig.read("agents.json");
     agents["result"]["agents"][1]["agent_session"] = json!({"kind":"path","value":transcript});
     rig.put("agents.json", &agents);
-    rig.put(
-        "state/watchdog.json",
+    rig.put_state(
+        &["state", "watchdog", "--put"],
         &json!({
             "last_scan_ms":null,"sent":{},"events":{},"marks":{},"notified":{},
             "stopped":{"i1":{"pane":"w2:p1","agent_session":transcript,
@@ -1177,7 +1186,7 @@ fn p3_dirty_stopped_orphan_is_saved_without_task_completion() {
     assert!(item["reply"].is_null());
     assert_ne!(item["native_done"], true);
     assert!(item["closed_ms"].is_u64());
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
 }
 
 #[test]
@@ -1220,7 +1229,7 @@ fn protected_orphan_lifecycles_never_close() {
             "asking" => {
                 let agents = rig.read("agents.json");
                 let session = agents["result"]["agents"][1]["agent_session"]["value"].clone();
-                rig.put("state/done.json", &json!({"term_child":{
+                rig.put_done( &json!({"term_child":{
                     "pane":"w2:p1","session":session,"marked_ms":1,
                     "signal":{"kind":"ask","text":"Need an answer","event_id":"ask-1",
                         "turn":{"state_change_seq":1,"state_since_ms":null},"session":session,"recorded_ms":1,"cleared_ms":null}
@@ -1251,22 +1260,18 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
     stopped_orphan(&rig, &tree);
     fs::write(tree.join("dirty"), b"unsettled work\n").unwrap();
     let id = execution["requestId"].as_str().unwrap();
-    let path = format!("state/admissions/{id}.json");
-    let attempt = source.read(&path);
-    fs::create_dir_all(rig.dir.join("state/admissions")).unwrap();
-    rig.put(&path, &attempt);
-    fs::create_dir_all(rig.dir.join("state/launches")).unwrap();
-    for suffix in [".json", ".progress.json", ".unit.json"] {
-        let file = format!("state/launches/{id}{suffix}");
-        rig.put(&file, &source.read(&file));
+    let attempt = source.admission(id);
+    rig.put_admission(id, &attempt);
+    for record in ["receipt", "progress", "seed"] {
+        rig.put_launch_record(id, record, &source.launch_record(id, record));
     }
     let mut items = rig.items();
     items[0]["id"] = json!(id);
     rig.put_items(&items);
-    let mut watchdog = rig.read("state/watchdog.json");
+    let mut watchdog = rig.state(&["watchdog"]);
     let episode = watchdog["stopped"]["i1"].clone();
     watchdog["stopped"] = json!({id:episode});
-    rig.put("state/watchdog.json", &watchdog);
+    rig.put_state(&["state", "watchdog", "--put"], &watchdog);
     serve(&rig);
     assert!(!tree.exists());
     let item = &rig.items()[0];
@@ -1280,13 +1285,13 @@ fn stopped_orphan_resource_close_leaves_the_unit_unresolved_across_sweeps() {
     assert!(item["reply"].is_null());
     for _ in 0..2 {
         serve(&rig);
-        let saved = rig.read(&path);
+        let saved = rig.admission(id);
         assert_eq!(saved, attempt);
         assert!(saved["unit"]["returned"].is_null());
         assert!(saved["unit"]["stopped"].is_null());
         assert!(saved["unit"]["not_started"].is_null());
         assert!(saved["unit"]["settlement_ack"].is_null());
-        assert!(rig.read(&format!("state/launches/{id}.progress.json"))["stopped"].is_null());
+        assert!(rig.launch_progress(id)["stopped"].is_null());
     }
 }
 
@@ -1303,7 +1308,7 @@ fn host_stopped_orphan_close_rechecks_session_turn_and_lifecycle() {
     ] {
         let (rig, tree) = close_rig(&format!("host-stopped-{changed}"));
         stopped_orphan(&rig, &tree);
-        let episode = rig.read("state/watchdog.json")["stopped"]["i1"].clone();
+        let episode = rig.state(&["watchdog"])["stopped"]["i1"].clone();
         let mut agents = rig.read("agents.json");
         match changed {
             "session" => {
@@ -1323,7 +1328,7 @@ fn host_stopped_orphan_close_rechecks_session_turn_and_lifecycle() {
             }
             "asking" => {
                 let session = &episode["agent_session"];
-                rig.put("state/done.json", &json!({"term_child":{
+                rig.put_done(&json!({"term_child":{
                     "pane":"w2:p1","session":session,"marked_ms":1,
                     "signal":{"kind":"ask","text":"Need input","event_id":"ask",
                         "turn":episode["turn"],"session":session,"recorded_ms":1,"cleared_ms":null}
@@ -1365,7 +1370,7 @@ fn remote_stopped_orphan_flag_cannot_override_host_launch_progress() {
         if progress == "ambiguous" {
             super::close::unfinished_launch(&rig, "competing", &tree, "w2:p1");
         }
-        let episode = rig.read("state/watchdog.json")["stopped"]["i1"].clone();
+        let episode = rig.state(&["watchdog"])["stopped"]["i1"].clone();
         // Forge stopped evidence at the owner. The real peer must check its own launch facts.
         let mut remote = rig.read("remote.json");
         remote["probe"]["agent_panes"][0] = json!({
@@ -1426,7 +1431,7 @@ fn sweep_keeps_stopped_looking_children_with_published_launch_progress() {
             super::close::unfinished_launch(&rig, "competing", &tree, "w2:p1");
         }
         let journal = serve(&rig);
-        let snapshot = rig.read("state/host.json");
+        let snapshot = rig.host();
         let agent = snapshot["probe"]["agent_panes"]
             .as_array()
             .unwrap()
@@ -1458,9 +1463,9 @@ fn serve_closes_a_remote_stopped_orphan_with_explicit_correlated_permission() {
     });
     remote["probe"]["panes"] = json!([{"pane_id":"w2:p1"}]);
     rig.put("remote.json", &remote);
-    let mut watchdog = rig.read("state/watchdog.json");
+    let mut watchdog = rig.state(&["watchdog"]);
     watchdog["stopped"]["i1"]["agent_session"] = json!("remote-session");
-    rig.put("state/watchdog.json", &watchdog);
+    rig.put_state(&["state", "watchdog", "--put"], &watchdog);
     rig.script("ssh", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/ssh.log"
 case "$*" in
@@ -1532,10 +1537,10 @@ esac
 fn build_output_is_report_only_for_serve_and_removed_by_prune_when_unused() {
     let (rig, tree) = close_rig("sweep-targets");
     let repo = rig.dir.join("home/repo").canonicalize().unwrap();
-    rig.put("state/repositories.json", &json!([repo]));
+    rig.put_state(&["state", "repositories", "--put"], &json!([repo]));
     // The main checkout shows in no workspace; the worktree's panes hold it.
     rig.put(
-        "worktrees.json",
+        "herdr-worktrees",
         &json!({"result":{"worktrees":[
             {"path":repo,"open_workspace_id":null,"is_linked_worktree":false},
             {"path":tree,"open_workspace_id":"w2","is_linked_worktree":true}
@@ -1642,7 +1647,7 @@ fn open_child_origin_session(name: &str, live_session: Option<&str>) -> (Rig, Pa
     rig.put("agents.json", &agents);
     let (code, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert_eq!((code, claimed), (0, json!([])));
-    assert!(!rig.dir.join("state/custody.json").exists());
+    assert_eq!(rig.state(&["custody"]), json!([]));
     (rig, tree)
 }
 
@@ -1655,13 +1660,13 @@ fn an_open_child_reply_reaches_its_matching_origin_owner_session() {
     assert!(item_open(&rig));
     assert!(tree.exists());
     assert!(!rig.log("herdr.log").contains("close"));
-    let custody = rig.read("state/custody.json");
+    let custody = rig.state(&["custody"]);
     assert_eq!(custody[0]["custodian_pane"], "w1:p1", "{custody}");
     assert_eq!(
         custody[0]["custodian_session"], "origin-session",
         "{custody}"
     );
-    let inbox = rig.read("state/inbox/term_lead.json");
+    let inbox = rig.inbox("term_lead");
     assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
     assert_eq!(inbox[0]["kind"], "reply");
     assert_eq!(inbox[0]["pane"], "w1:p1");
@@ -1716,7 +1721,7 @@ fn assert_origin_reply_held(rig: &Rig, tree: &Path, expected_status: &str) {
         "{reply}"
     );
     assert!(reply["reported_ms"].is_null(), "{reply}");
-    let custody = rig.read("state/custody.json");
+    let custody = rig.state(&["custody"]);
     assert_eq!(custody[0]["custodian_pane"], "w1:p1", "{custody}");
     assert_eq!(
         custody[0]["custodian_session"], "origin-session",
@@ -1902,7 +1907,7 @@ fn a_finished_childs_reply_reaches_its_owners_inbox_once() {
     serve(&rig);
     serve(&rig);
     assert!(item_open(&rig));
-    let inbox = rig.read("state/inbox/term_lead.json");
+    let inbox = rig.inbox("term_lead");
     assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
     assert_eq!(inbox[0]["kind"], "reply");
     assert_eq!(inbox[0]["from"]["name"], "dogsled");
@@ -1942,7 +1947,7 @@ fn a_child_that_waits_for_input_stays_open_and_its_owner_hears_its_question() {
     assert!(item_open(&rig));
     assert!(tree.exists());
     assert!(!rig.log("herdr.log").contains("close"));
-    let inbox = rig.read("state/inbox/term_lead.json");
+    let inbox = rig.inbox("term_lead");
     assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
     let text = inbox[0]["text"].as_str().unwrap();
     assert!(
@@ -1977,5 +1982,5 @@ fn a_child_that_waits_for_input_stays_open_and_its_owner_hears_its_question() {
         stderr.contains("still owns open work: grandchild"),
         "{stderr}"
     );
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
 }

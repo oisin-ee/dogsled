@@ -37,8 +37,13 @@ fn p3_dirty_done_still_refuses() {
     let before = git(&tree, &["status", "--porcelain"]);
     let out = done(&rig);
     assert!(!out.status.success());
-    assert!(!rig.dir.join("state/done.json").exists());
-    assert!(!rig.dir.join("state/preservation-operations").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
+    assert!(
+        rig.state(&["preservation-operations"])
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(git(&tree, &["for-each-ref", "refs/dogsled/recovery/"]), "");
     assert_eq!(before, git(&tree, &["status", "--porcelain"]));
     assert!(rig.items()[0]["reply"].is_null());
@@ -53,14 +58,14 @@ fn done_refuses_uncommitted_untracked_deleted_and_unheld_work_without_a_mark() {
     let out = done(&rig);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("Commit or preserve"));
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
     fs::remove_file(tree.join("scratch")).unwrap();
     fs::write(tree.join("dogsled.toml"), "changed").unwrap();
     assert!(!done(&rig).status.success());
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
     fs::remove_file(tree.join("dogsled.toml")).unwrap();
     assert!(!done(&rig).status.success());
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
     git(&tree, &["checkout", "HEAD", "--", "dogsled.toml"]);
     git(&tree, &["checkout", "--detach"]);
     // A detached checkout has no branch to land, so a commit no ref holds is unheld work.
@@ -72,7 +77,7 @@ fn done_refuses_uncommitted_untracked_deleted_and_unheld_work_without_a_mark() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not held"), "{stderr}");
     assert!(stderr.contains("Preserve the work"), "{stderr}");
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
 }
 
 /// A child in a detached checkout whose commit the default branch holds. Its handoff removes
@@ -99,7 +104,7 @@ fn done_hands_off_a_held_detached_checkout_without_inventing_a_branch() {
         String::from_utf8_lossy(&out.stderr)
     );
     // The mark records a detached checkout: no branch, and no branch to land.
-    let marks = rig.read("state/done.json");
+    let marks = rig.state(&["done"]);
     let mark = marks.as_object().unwrap().values().next().unwrap();
     assert_eq!(mark["detached"], true, "{mark}");
     assert!(mark["branch"].is_null(), "{mark}");
@@ -174,19 +179,18 @@ fn a_teardown_commit_in_the_handoff_keeps_the_checkout_its_lock_panes_and_item()
 fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
     let (rig, tree) = close_rig("done-inbox");
     worker(&rig, &tree, "working");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
-    let mut host = rig.read("state/host.json");
+    rig.snapshot("state", now(), 0.0, 8);
+    let mut host = rig.host();
     host["probe"]["agent_panes"] = json!([{"pane":"w2:p1","agent":"pi","state":"working","name":"worker","terminal_id":"term_child"}]);
-    rig.put("state/host.json", &host);
-    fs::create_dir_all(rig.dir.join("state/inbox")).unwrap();
-    rig.put(
-        "state/inbox/term_child.reader.json",
+    rig.put_host(&host);
+    rig.put_inbox_reader(
+        "term_child",
         &json!({"pane":"w2:p1","harness":"pi","registered_ms":1}),
     );
     assert!(done(&rig).status.success());
     let (code, _) = rig.json(&["send", "worker", "--message", "more work during this turn"]);
     assert_eq!(code, 0);
-    assert_eq!(rig.read("state/done.json"), json!({}));
+    assert_eq!(rig.state(&["done"]), json!({}));
     // The existing pending record also cancels a new mark if the child claims it mid-turn.
     assert!(done(&rig).status.success());
     let out = rig
@@ -195,7 +199,7 @@ fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert_eq!(rig.read("state/done.json"), json!({}));
+    assert_eq!(rig.state(&["done"]), json!({}));
     assert!(done(&rig).status.success());
     worker(&rig, &tree, "idle");
     // The published snapshot is deliberately stale-working; live state must win.
@@ -207,20 +211,14 @@ fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
             .unwrap()
             .contains("worker finished; start a new child for more work")
     );
-    assert_eq!(
-        rig.read("state/inbox/term_child.json")
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(rig.inbox("term_child").as_array().unwrap().len(), 1);
     let out = rig
         .cmd(&["inbox", "claim", "--harness", "pi"])
         .env("HERDR_PANE_ID", "w2:p1")
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert_eq!(rig.read("state/done.json").as_object().unwrap().len(), 1);
+    assert_eq!(rig.state(&["done"]).as_object().unwrap().len(), 1);
 }
 
 #[test]
@@ -242,20 +240,17 @@ fn unprovable_disappeared_child_does_not_block_the_next_handoff() {
             "pane_id":"w9:p1","workspace_id":"w9","cwd":rig.dir
         }));
     rig.put("panes.json", &panes);
-    rig.put(
-        "state/done.json",
-        &json!({
-            "0-missing": {
-                "pane":"w9:p1","item":"missing","after":9,"sealed":10,"marked_ms":1,
-                "native_done":true,
-                "reply":{"seq":10,"text":"unproven checkout","captured_ms":2,"done":true}
-            },
-            "term_child": {
-                "pane":"w2:p1","after":9,"sealed":10,"marked_ms":1,"native_done":true,
-                "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}
-            }
-        }),
-    );
+    rig.put_done(&json!({
+        "0-missing": {
+            "pane":"w9:p1","item":"missing","after":9,"sealed":10,"marked_ms":1,
+            "native_done":true,
+            "reply":{"seq":10,"text":"unproven checkout","captured_ms":2,"done":true}
+        },
+        "term_child": {
+            "pane":"w2:p1","after":9,"sealed":10,"marked_ms":1,"native_done":true,
+            "reply":{"seq":10,"text":"sealed handoff","captured_ms":2,"done":true}
+        }
+    }));
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -276,7 +271,7 @@ fn unprovable_disappeared_child_does_not_block_the_next_handoff() {
     let items = rig.items();
     assert!(items[0]["closed_ms"].is_u64(), "{items}");
     assert!(items[1]["closed_ms"].is_null(), "{items}");
-    let marks = rig.read("state/done.json");
+    let marks = rig.state(&["done"]);
     let missing = marks
         .as_object()
         .unwrap()
@@ -297,7 +292,7 @@ fn done_refuses_a_queued_ticket_before_writing() {
     let out = done(&rig);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("queued q"));
-    assert!(!rig.dir.join("state/done.json").exists());
+    assert!(rig.state(&["done"]).as_object().unwrap().is_empty());
 }
 
 #[test]
@@ -354,7 +349,7 @@ fn handoff_closes_only_its_pane_when_a_busy_agent_shares_the_checkout() {
 /// The lifecycle state a host publishes for its agents. The host derives it from the
 /// evidence it holds; a reader must never have to derive it again.
 fn published_lifecycle(rig: &Rig, pane: &str) -> Value {
-    let host = rig.read("state/host.json");
+    let host = rig.host();
     host["probe"]["agent_panes"]
         .as_array()
         .unwrap()
@@ -370,7 +365,7 @@ fn published_lifecycle(rig: &Rig, pane: &str) -> Value {
 fn the_host_publishes_a_lifecycle_state_beside_the_raw_terminal_state() {
     let (rig, tree) = close_rig("done-lifecycle");
     worker(&rig, &tree, "working");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -416,7 +411,7 @@ fn an_accepted_handoff_publishes_finishing_until_the_final_reply_is_saved() {
     let (rig, tree) = close_rig("done-handoff");
     worker(&rig, &tree, "idle");
     rig.done("term_child", "w2:p1", 10);
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -438,14 +433,11 @@ fn a_recorded_final_handoff_publishes_done_and_keeps_the_raw_terminal_state() {
     worker(&rig, &tree, "idle");
     rig.done("term_child", "w2:p1", 10);
     // The mark keeps the final reply of the sealed turn.
-    rig.put(
-        "state/done.json",
-        &json!({"terminal": {
-            "pane":"w2:p1","after":9,"sealed":10,"marked_ms":1,
-            "reply":{"seq":10,"text":"the final reply","captured_ms":2,"done":true}
-        }}),
-    );
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.put_done(&json!({"terminal": {
+        "pane":"w2:p1","after":9,"sealed":10,"marked_ms":1,
+        "reply":{"seq":10,"text":"the final reply","captured_ms":2,"done":true}
+    }}));
+    rig.snapshot("state", now(), 0.0, 8);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
@@ -458,7 +450,7 @@ fn a_recorded_final_handoff_publishes_done_and_keeps_the_raw_terminal_state() {
     assert_eq!(published["handoff"], "recorded", "{published}");
 
     // Closing an ordinary child must not turn its saved handoff into an expired unit.
-    assert!(rig.read("state/items.json")[0]["closed_ms"].is_number());
+    assert!(rig.items()[0]["closed_ms"].is_number());
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),

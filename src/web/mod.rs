@@ -58,8 +58,8 @@ pub struct AppState {
     /// The portal's own token. A request that carries it as a `Bearer`
     /// credential passes the guard's origin rule.
     token: guard::Token,
-    /// The portal's own directory. Every file the portal keeps lives under it,
-    /// so the routes never read a process-global state root.
+    /// The host ledger. Portal records share its typed SQLite database,
+    /// so routes never read a process-global state root.
     web: Ledger,
     /// The questions that wait for an answer, with the waiters of the long
     /// polls.
@@ -71,9 +71,8 @@ pub struct AppState {
 impl AppState {
     /// The state of a portal that serves on the given port.
     ///
-    /// The `web` ledger is the portal's own directory. The questions of the
-    /// portal live under it, so a new state over the same directory sees the
-    /// questions that wait.
+    /// The `web` ledger names the host database. A new state over the same
+    /// ledger sees the questions that wait.
     #[must_use]
     pub fn new(
         board: watch::Receiver<String>,
@@ -82,7 +81,7 @@ impl AppState {
         token: guard::Token,
         web: Ledger,
     ) -> Self {
-        let questions = store::Store::new(web.child("questions"));
+        let questions = store::Store::new(web.clone());
         Self {
             board,
             port,
@@ -116,7 +115,10 @@ pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: Option<u16>) ->
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run(ledger, policy, home, port.unwrap_or(policy.web.port)))
+    let outcome = runtime.block_on(run(ledger, policy, home, port.unwrap_or(policy.web.port)));
+    drop(runtime);
+    crate::upgrade::check(ledger)?;
+    outcome
 }
 
 /// The server's own work: read the board, publish it, and serve it.
@@ -140,7 +142,7 @@ async fn run_until(
     let port = state.port;
     // The reader runs on a blocking thread, like the sidebar's reader. It reads
     // the cached state and never probes.
-    let _reader = spawn_reader(
+    let reader = spawn_reader(
         shell,
         ledger.clone(),
         policy.clone(),
@@ -152,7 +154,18 @@ async fn run_until(
         "dogsled web on http://127.0.0.1:{port} (token in {})",
         token::path(ledger).display()
     );
-    Ok(serve_until(listener, state, stopping).await?)
+    let outcome = serve_until(listener, state, stopping).await;
+    // A normal shutdown must not wait for a blocked shell read. An upgrade instead
+    // drains the reader before exec, so none of its work crosses the image boundary.
+    if matches!(
+        crate::upgrade::newer(ledger)?,
+        crate::upgrade::Boundary::Ready(_)
+    ) {
+        reader
+            .join()
+            .map_err(|_| crate::error::Error::Invalid("web reader failed".into()))?;
+    }
+    Ok(outcome?)
 }
 
 /// Stop every response before waiting for the HTTP connections to drain.
@@ -166,7 +179,10 @@ async fn serve_until(
     let _cancel = stop.clone().drop_guard();
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
-            stopping.await;
+            tokio::select! {
+                () = stopping => {},
+                () = stop.cancelled() => {},
+            }
             stop.cancel();
         })
         .await
@@ -196,7 +212,7 @@ async fn listen(
         port,
         agents,
         guard::Token::new(token::token(ledger)?),
-        ledger.child("web"),
+        ledger.clone(),
     );
     Ok((listener, state))
 }
@@ -289,6 +305,21 @@ fn reader(
     // it. A failed discovery is tried again on the next tick.
     let mut fleet: Option<crate::hosts::Fleet<'_>> = None;
     while !stop.is_cancelled() {
+        match crate::upgrade::newer(ledger) {
+            Ok(crate::upgrade::Boundary::Ready(_)) => {
+                stop.cancel();
+                break;
+            }
+            Ok(crate::upgrade::Boundary::Current) => {}
+            Ok(crate::upgrade::Boundary::Pending(error)) => {
+                eprintln!("dogsled web upgrade: {error}");
+            }
+            Err(error) => {
+                eprintln!("dogsled web upgrade: {error}");
+                stop.cancel();
+                break;
+            }
+        }
         if fleet.is_none() {
             fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home.to_owned()).ok();
         }
@@ -377,7 +408,7 @@ mod tests {
             crate::ledger::Ledger::new(
                 std::env::temp_dir().join(format!("dogsled-web-{}", crate::ledger::new_id())),
             )
-            .child("web"),
+            .clone(),
         )
     }
 

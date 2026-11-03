@@ -47,9 +47,7 @@ pub struct Orphan {
     pub custodian_pane: Option<String>,
 }
 
-const FILE: &str = "orphans.json";
 /// Why each finished child with an owner stays open, so the journal logs only changes.
-const LANDING: &str = "landing.json";
 /// A reply longer than this is cut; the transcript keeps all of it.
 const REPLY_MAX: usize = 32 * 1024;
 
@@ -105,7 +103,7 @@ fn cut(text: &str, path: &str) -> String {
 
 /// The orphans the last sweep kept, for status and check-ins. A closed item is no longer one.
 pub fn list(ledger: &Ledger) -> Result<Vec<Orphan>> {
-    let orphans: Vec<Orphan> = ledger.read(FILE)?.unwrap_or_default();
+    let orphans: Vec<Orphan> = crate::host_store::orphans(ledger)?;
     let open: BTreeSet<String> = crate::items::list(ledger)?
         .into_iter()
         .filter(|i| i.closed_ms.is_none())
@@ -117,8 +115,6 @@ pub fn list(ledger: &Ledger) -> Result<Vec<Orphan>> {
         .collect())
 }
 
-const REQUEST: &str = "sweep-request.json";
-const LAST: &str = "sweep.json";
 pub const SOCKET: &str = "sweep.sock";
 const KEEP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -133,11 +129,11 @@ pub struct Report {
 }
 
 pub fn latest(ledger: &Ledger) -> Result<Option<Report>> {
-    ledger.read(LAST)
+    crate::host_store::report(ledger)
 }
 
 pub fn pending(ledger: &Ledger) -> Result<bool> {
-    Ok(ledger.read::<String>(REQUEST)?.is_some())
+    Ok(crate::host_store::sweep_request(ledger)?.is_some())
 }
 
 /// Request cleanup without preventing either Stop hook from delivering existing messages.
@@ -150,9 +146,7 @@ pub fn request_at_stop(ledger: &Ledger) {
 /// Durable first, wake second. A stopped service consumes the request when it starts.
 /// The hook never waits for the survey or a reply from the service.
 pub fn request(ledger: &Ledger) -> Result<()> {
-    ledger.with_lock("sweep-request", || {
-        ledger.write(REQUEST, &crate::ledger::new_id())
-    })?;
+    crate::host_store::put_sweep_request(ledger, &crate::ledger::new_id())?;
     let socket = std::os::unix::net::UnixDatagram::unbound()?;
     socket.set_nonblocking(true)?;
     match socket.send_to(b"sweep", ledger.dir.join(SOCKET)) {
@@ -175,16 +169,11 @@ pub fn request(ledger: &Ledger) -> Result<()> {
 /// during cleanup: hooks must remain fast, and a concurrent request must not be lost.
 pub fn requested(node: &crate::node::Node<'_>) -> Result<()> {
     loop {
-        let Some(id) = node.ledger.read::<String>(REQUEST)? else {
+        let Some(id) = crate::host_store::sweep_request(node.ledger)? else {
             return Ok(());
         };
         pass(node, crate::ledger::now_ms())?;
-        node.ledger.with_lock("sweep-request", || {
-            if node.ledger.read::<String>(REQUEST)?.as_ref() == Some(&id) {
-                std::fs::remove_file(node.ledger.dir.join(REQUEST))?;
-            }
-            Ok(())
-        })?;
+        crate::host_store::consume_sweep_request(node.ledger, &id)?;
     }
 }
 
@@ -219,9 +208,7 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
         finished_ms,
         applied,
     };
-    node.ledger
-        .append_line("sweeps.jsonl", &report, finished_ms.saturating_sub(KEEP_MS))?;
-    node.ledger.write(LAST, &report)
+    crate::host_store::record_report(node.ledger, &report, finished_ms.saturating_sub(KEEP_MS))
 }
 
 /// Settle each open agent item: an owned child that finished, and an orphan that is idle or
@@ -235,10 +222,7 @@ pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
         .into_iter()
         .filter(|i| i.closed_ms.is_none() && i.kind == "agent")
         .collect();
-    let previous: BTreeMap<String, Orphan> = fleet
-        .ledger
-        .read::<Vec<Orphan>>(FILE)?
-        .unwrap_or_default()
+    let previous: BTreeMap<String, Orphan> = crate::host_store::orphans(fleet.ledger)?
         .into_iter()
         .map(|o| (o.item.clone(), o))
         .collect();
@@ -287,7 +271,7 @@ pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
     if kept.is_empty() && previous.is_empty() {
         return Ok(());
     }
-    fleet.ledger.write(FILE, &kept)
+    crate::host_store::put_orphans(fleet.ledger, &kept)
 }
 
 /// The children of this host, split by what their custody proves.
@@ -643,7 +627,7 @@ fn tell(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {
 
 /// Settle each owned child, and journal why one stays open when the reason changes.
 fn landing(fleet: &Fleet, owned: &[&Item], reports: &[HostReport], now: u64) -> Result<()> {
-    let previous: BTreeMap<String, String> = fleet.ledger.read(LANDING)?.unwrap_or_default();
+    let previous: BTreeMap<String, String> = crate::host_store::landing(fleet.ledger)?;
     let mut kept = BTreeMap::new();
     for item in owned {
         let Some(reason) = finish(fleet, item, reports, now) else {
@@ -658,7 +642,7 @@ fn landing(fleet: &Fleet, owned: &[&Item], reports: &[HostReport], now: u64) -> 
         kept.insert(item.id.clone(), reason);
     }
     if kept != previous {
-        fleet.ledger.write(LANDING, &kept)?;
+        crate::host_store::put_landing(fleet.ledger, &kept)?;
     }
     Ok(())
 }
@@ -809,7 +793,7 @@ mod liveness_tests {
             "memory":{"used_bytes":0,"total_bytes":8_589_934_592_u64},"disk_free_percent":50,
             "agents":{"total":1,"by_status":{"idle":1}},"agent_panes":[agent],"reservations":[],"panes":[]
         }})).unwrap();
-        ledger.write("host.json", &snapshot).unwrap();
+        crate::host_store::put_snapshot(&ledger, &snapshot).unwrap();
         let item = Item {
             id: "child".into(),
             kind: "agent".into(),
@@ -824,12 +808,14 @@ mod liveness_tests {
             ..Item::default()
         };
         crate::store::put_items(&ledger, &vec![item.clone()]).unwrap();
-        ledger
-            .write(
-                "done.json",
-                &json!({"child":{"pane":"w99:p1","after":1,"sealed":2,"marked_ms":1}}),
+        crate::host_store::put_marks(
+            &ledger,
+            &serde_json::from_value(
+                json!({"child":{"pane":"w99:p1","after":1,"sealed":2,"marked_ms":1}}),
             )
-            .unwrap();
+            .unwrap(),
+        )
+        .unwrap();
         shell.on("herdr pane list", r#"{"result":{"panes":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle"}]}}"#)
             .on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle","terminal_id":"child","completion_seq":2}]}}"#)
             .on("herdr workspace list", r#"{"result":{"workspaces":[]}}"#)
@@ -857,14 +843,15 @@ mod liveness_tests {
                             "new",
                             61_000,
                             Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                            false
+                            "w1:p1",
+                            "origin",
                         )?
                         .reserved
                 );
                 assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
                 assert!(crate::items::list(&ledger)?[0].closed_ms.is_some());
                 // The same old observation cannot close an agent after its done mark disappears.
-                ledger.write("done.json", &json!({}))?;
+                crate::host_store::put_marks(&ledger, &serde_json::from_value(json!({})).unwrap())?;
                 assert!(
                     settle(&fleet, &item, "owner w98:p1 is gone", &reports, 61_000)
                         .unwrap()

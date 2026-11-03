@@ -5,7 +5,9 @@
 
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
-use crate::node::{Node, Snapshot};
+use crate::node::Node;
+#[cfg(test)]
+use crate::node::Snapshot;
 use crate::probe::{Agent, Pane};
 use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
@@ -255,16 +257,14 @@ impl Seen {
 }
 
 pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
-    ledger.with_lock("repositories", || {
-        let mut repos: BTreeSet<String> = ledger.read("repositories.json")?.unwrap_or_default();
+    crate::store::write(ledger, |tx| {
+        let mut repos = crate::host_store::repositories_rows(tx)?;
         repos.insert(tree.repo.clone());
-        ledger.write("repositories.json", &repos)
-    })?;
-    ledger.with_lock("worktrees", || {
-        let mut trees: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
+        crate::host_store::replace_repositories(tx, &repos)?;
+        let mut trees = crate::host_store::trees_rows(tx)?;
         trees.retain(|t| !crate::worktree::same(&t.path, &tree.path));
         trees.push(tree);
-        ledger.write("worktrees.json", &trees)
+        crate::host_store::replace_trees(tx, &trees)
     })
 }
 
@@ -421,8 +421,8 @@ fn repositories(
     workspaces: &[Workspace],
     plan: &mut Plan,
 ) -> Result<BTreeSet<String>> {
-    let recorded: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-    let mut repos: BTreeSet<String> = node.ledger.read("repositories.json")?.unwrap_or_default();
+    let recorded: Vec<Tree> = crate::host_store::trees(node.ledger)?;
+    let mut repos: BTreeSet<String> = crate::host_store::repositories(node.ledger)?;
     repos.extend(recorded.iter().map(|t| t.repo.clone()));
     repos.retain(|repo| {
         if !missing(repo) {
@@ -431,7 +431,7 @@ fn repositories(
         plan.entries.push(entry(
             "repositories",
             repo.clone(),
-            "missing remembered repository; drops stale entries from repositories.json and worktrees.json".into(),
+            "missing remembered repository; drops stale entries from repository and worktree tables".into(),
             true,
         ));
         false
@@ -736,7 +736,21 @@ fn processes(shell: &dyn Shell, panes: &[Pane], plan: &mut Plan) -> Result<()> {
 }
 
 pub fn doctor(node: &Node<'_>, now: u64) -> Result<Plan> {
-    survey(node, Scope::Prune, now)
+    let mut plan = survey(node, Scope::Prune, now)?;
+    for hold in crate::holds::local(
+        node.ledger,
+        crate::hosts::LOCAL,
+        now,
+        node.thresholds.reservation_ttl_ms,
+    )? {
+        plan.entries.push(entry(
+            "resources",
+            hold.resource.clone(),
+            hold.display(),
+            false,
+        ));
+    }
+    Ok(plan)
 }
 
 /// The readable repositories with their worktrees and fresh loss evidence. A missing or
@@ -754,12 +768,7 @@ fn readable(
     let mut trees = Vec::new();
     let mut evidence = BTreeMap::new();
     // An unreadable registry hides no candidate: Git's list still drives removal.
-    let recorded: Vec<Tree> = node
-        .ledger
-        .read("worktrees.json")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let recorded: Vec<Tree> = crate::host_store::trees(node.ledger).unwrap_or_default();
     for repo in repos {
         let discovered =
             crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&repo), |guard| {
@@ -840,14 +849,111 @@ fn readable(
                 repo.clone(),
                 format!(
                     "{error}; repository entry {repo}; check {} and {} and cleanup.repositories",
-                    node.ledger.dir.join("repositories.json").display(),
-                    node.ledger.dir.join("worktrees.json").display()
+                    node.ledger.dir.join("state.db").display(),
+                    node.ledger.dir.join("state.db").display()
                 ),
                 false,
             )),
         }
     }
     (usable, trees, evidence)
+}
+
+/// Ownership evidence is loaded once per survey, then shared by all candidate lookups.
+struct Ownership {
+    items: Vec<crate::items::Item>,
+    marks: Vec<crate::done::Mark>,
+    registered: Vec<Tree>,
+    requests: Vec<(crate::work::Launch, Option<Tree>)>,
+}
+
+impl Ownership {
+    fn load(ledger: &Ledger) -> Result<Self> {
+        let items = crate::items::list(ledger)?;
+        let marks = crate::done::list(ledger)?;
+        let registered = crate::host_store::trees(ledger)?;
+        let requests = crate::launch::requests(ledger)?
+            .into_iter()
+            .filter(|request| matches!(request.action, crate::work::Action::Agent { .. }))
+            .map(|request| {
+                let (_, captured) = crate::launch::checkout_for_request(ledger, &request)?;
+                Ok((request, captured))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            items,
+            marks,
+            registered,
+            requests,
+        })
+    }
+
+    /// Automatic removal needs recorded child ownership, not just safe Git content. Discovery
+    /// can create a generation marker for any checkout, so a marker alone proves no ownership.
+    fn sweep_hold(&self, tree: &Tree) -> Option<&'static str> {
+        let mut closed = false;
+        for (request, captured) in &self.requests {
+            let Some(captured) = captured.as_ref().filter(|captured| {
+                captured.identity.as_ref().is_some_and(|identity| {
+                    identity.common != identity.gitdir && !identity.generation.is_empty()
+                }) && crate::worktree::same(&captured.repo, &tree.repo)
+                    && captured.branch == tree.branch
+                    && (tree.path.is_empty()
+                        || (crate::worktree::same(&captured.path, &tree.path)
+                            && captured.identity == tree.identity))
+            }) else {
+                continue;
+            };
+            let item = self.items.iter().find(|item| {
+                item.id == request.id && item.host == crate::hosts::LOCAL && item.kind == "agent"
+            });
+            let ended = item.map_or_else(
+                || {
+                    self.marks.iter().any(|mark| {
+                        mark.item.as_deref() == Some(request.id.as_str())
+                            && request.pane.as_deref() == Some(mark.pane.as_str())
+                            && mark.closed_ms.is_some()
+                    })
+                },
+                |item| item.closed_ms.is_some(),
+            );
+            if !ended {
+                return Some("recorded child is not closed");
+            }
+            closed |= self
+                .registered
+                .iter()
+                .chain(
+                    request
+                        .preparation
+                        .iter()
+                        .map(|binding| &binding.claim.tree),
+                )
+                .any(|saved| {
+                    saved.identity == captured.identity
+                        && crate::worktree::same(&saved.repo, &captured.repo)
+                        && crate::worktree::same(&saved.path, &captured.path)
+                        && saved.branch == captured.branch
+                });
+        }
+        if tree.path.is_empty() {
+            for item in self.items.iter().filter(|item| {
+                item.host == crate::hosts::LOCAL
+                    && item.kind == "agent"
+                    && item.branch.as_ref().is_some_and(|branch| {
+                        crate::worktree::same(&branch.repo, &tree.repo)
+                            && branch.name == tree.branch
+                    })
+            }) {
+                if item.closed_ms.is_none() {
+                    return Some("recorded child is not closed");
+                }
+                closed = true;
+            }
+        }
+        (!closed)
+            .then_some("not a recorded checkout or branch of a closed child; use dogsled prune")
+    }
 }
 
 /// The cleanup plan for `scope`. In `Sweep` scope a worktree that cannot be checked is skipped,
@@ -860,8 +966,19 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
     let repos = repositories(node, &seen.panes, &seen.workspaces, &mut plan)?;
     let (repos, trees, evidence) = readable(node, repos, &mut plan);
     seen.evidence = evidence;
+    let ownership = (scope == Scope::Sweep)
+        .then(|| Ownership::load(node.ledger))
+        .transpose()?;
     let mut closing = Closing::default();
-    let found = parallel(&trees, |tree| disposition(node, tree, &seen));
+    let found = parallel(&trees, |tree| {
+        let mut found = disposition(node, tree, &seen)?;
+        if let Some(reason) = ownership.as_ref().and_then(|owned| owned.sweep_hold(tree)) {
+            found.removable = false;
+            found.detail.push_str("; held: ");
+            found.detail.push_str(reason);
+        }
+        Ok(found)
+    });
     let mut removed = BTreeSet::new();
     for (tree, found) in trees.iter().zip(found) {
         let found = match found {
@@ -921,6 +1038,17 @@ pub fn survey(node: &Node<'_>, scope: Scope, now: u64) -> Result<Plan> {
             ));
         }
     }
+    if let Some(ownership) = &ownership {
+        for candidate in plan.entries.iter_mut().filter(|e| e.class == "branches") {
+            if let Some(tree) = &candidate.tree
+                && let Some(reason) = ownership.sweep_hold(tree)
+            {
+                candidate.removable = false;
+                candidate.detail.push_str("; held: ");
+                candidate.detail.push_str(reason);
+            }
+        }
+    }
     idle(node, now, &seen, &closing, &mut plan)?;
     if scope == Scope::Sweep {
         return Ok(plan);
@@ -950,10 +1078,7 @@ fn prune_only(node: &Node<'_>, seen: &Seen, now: u64, plan: &mut Plan) -> Result
         }
     }
     // Only registered worktrees are dogsled-owned disk paths.
-    let owned = node
-        .ledger
-        .read::<Vec<Tree>>("worktrees.json")?
-        .unwrap_or_default();
+    let owned = crate::host_store::trees(node.ledger)?;
     disk(node, &owned, plan)?;
     processes(node.shell, &seen.panes, plan)
 }
@@ -1278,10 +1403,7 @@ fn idle_panes(node: &Node<'_>, now: u64, seen: &Seen) -> Result<BTreeMap<String,
     let mut idle = BTreeMap::new();
     let jobs = crate::jobs::list(node.ledger)?;
     let items = crate::items::list(node.ledger)?;
-    let snapshot = node
-        .ledger
-        .read::<Snapshot>("host.json")?
-        .filter(|s| s.fresh(now));
+    let snapshot = crate::host_store::snapshot(node.ledger)?.filter(|s| s.fresh(now));
     for pane in panes
         .iter()
         .filter(|p| eligible(p) && p.agent.is_none() && !agents.iter().any(|a| a.pane == p.pane_id))
@@ -1499,11 +1621,7 @@ fn pane_holds(usage: &Usage, seen: &Seen, decider: Decider) -> Vec<String> {
 /// reported age is not held: that is the existing rule.
 fn young_shells(node: &Node<'_>, usage: &Usage) -> Result<Vec<String>> {
     let now = crate::ledger::now_ms();
-    let Some(snapshot) = node
-        .ledger
-        .read::<Snapshot>("host.json")?
-        .filter(|s| s.fresh(now))
-    else {
+    let Some(snapshot) = crate::host_store::snapshot(node.ledger)?.filter(|s| s.fresh(now)) else {
         return Ok(Vec::new());
     };
     Ok(usage
@@ -1768,12 +1886,7 @@ fn unless_gone<T>(
 /// that a later survey plans for a missing registered worktree. An unregistered one needs no
 /// entry.
 fn vanished(node: &Node<'_>, tree: &Tree) -> Option<Entry> {
-    let recorded: Vec<Tree> = node
-        .ledger
-        .read("worktrees.json")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let recorded: Vec<Tree> = crate::host_store::trees(node.ledger).unwrap_or_default();
     recorded
         .into_iter()
         .find(|t| crate::worktree::same(&t.path, &tree.path))
@@ -1887,19 +2000,29 @@ fn validate_tree(
 
 /// Reconcile only the registration of the checkout that this operation captured.
 pub fn forget_matching(ledger: &Ledger, tree: &Tree) -> Result<()> {
-    ledger.with_lock("worktrees", || {
-        let mut recorded: Vec<Tree> = ledger.read("worktrees.json")?.unwrap_or_default();
+    crate::store::write(ledger, |tx| {
+        let mut recorded = crate::host_store::trees_rows(tx)?;
         recorded.retain(|record| {
             !crate::worktree::same(&record.path, &tree.path)
                 || record.identity != tree.identity
                 || !crate::worktree::same(&record.repo, &tree.repo)
                 || record.branch != tree.branch
         });
-        ledger.write("worktrees.json", &recorded)
+        crate::host_store::replace_trees(tx, &recorded)
     })
 }
 
-fn remove_tree(guard: &crate::worktree::Guard, node: &Node<'_>, tree: &Tree) -> Result<Outcome> {
+fn remove_tree(
+    guard: &crate::worktree::Guard,
+    node: &Node<'_>,
+    tree: &Tree,
+    scope: Scope,
+) -> Result<Outcome> {
+    if scope == Scope::Sweep
+        && let Some(reason) = Ownership::load(node.ledger)?.sweep_hold(tree)
+    {
+        return Ok(Outcome::Skipped(format!("refuse {}: {reason}", tree.path)));
+    }
     let (held, evidence) = match validate_tree(guard, node, tree)? {
         Recheck::Removable(held, evidence) => (held, evidence),
         Recheck::Refused(reason) => return Ok(Outcome::Skipped(reason)),
@@ -1975,36 +2098,33 @@ fn remove_tree(guard: &crate::worktree::Guard, node: &Node<'_>, tree: &Tree) -> 
 }
 
 fn drop_repository(node: &Node<'_>, repo: &str) -> Result<String> {
-    node.ledger.with_lock("repositories", || {
-        node.ledger.with_lock("worktrees", || {
-            if !missing(repo) {
-                return Err(Error::Invalid(format!(
-                    "refuse {repo}: the repository is no longer missing"
-                )));
-            }
-            let mut repos: BTreeSet<String> =
-                node.ledger.read("repositories.json")?.unwrap_or_default();
-            let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
-            repos.remove(repo);
-            // An existing worktree may still hold content even when its main checkout is gone.
-            trees.retain(|tree| !crate::worktree::same(&tree.repo, repo) || !missing(&tree.path));
-            node.ledger.write("worktrees.json", &trees)?;
-            node.ledger.write("repositories.json", &repos)
-        })
+    crate::store::write(node.ledger, |tx| {
+        if !missing(repo) {
+            return Err(Error::Invalid(format!(
+                "refuse {repo}: the repository is no longer missing"
+            )));
+        }
+        let mut repos: BTreeSet<String> = crate::host_store::repositories_rows(tx)?;
+        let mut trees = crate::host_store::trees_rows(tx)?;
+        repos.remove(repo);
+        // An existing worktree may still hold content even when its main checkout is gone.
+        trees.retain(|tree| !crate::worktree::same(&tree.repo, repo) || !missing(&tree.path));
+        crate::host_store::replace_trees(tx, &trees)?;
+        crate::host_store::replace_repositories(tx, &repos)
     })?;
     Ok(format!("dropped stale repository registration {repo}"))
 }
 
 fn drop_registration(node: &Node<'_>, path: &str) -> Result<String> {
-    node.ledger.with_lock("worktrees", || {
-        let mut trees: Vec<Tree> = node.ledger.read("worktrees.json")?.unwrap_or_default();
+    crate::store::write(node.ledger, |tx| {
+        let mut trees = crate::host_store::trees_rows(tx)?;
         if !missing(path) {
             return Err(Error::Invalid(format!(
                 "refuse {path}: the worktree is no longer missing"
             )));
         }
         trees.retain(|t| !crate::worktree::same(&t.path, path));
-        node.ledger.write("worktrees.json", &trees)
+        crate::host_store::replace_trees(tx, &trees)
     })?;
     Ok(format!("dropped the stale registration of {path}"))
 }
@@ -2190,12 +2310,22 @@ pub(crate) fn apply_survey(node: &Node<'_>, plan: &Plan, now: u64) -> Applied {
         .iter()
         .filter(|e| e.removable && SWEPT.contains(&e.class.as_str()))
     {
-        applied.record(entry, apply_one(node, plan, entry, now));
+        applied.record(entry, apply_scoped(node, plan, entry, now, Scope::Sweep));
     }
     applied
 }
 
 fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Result<Outcome> {
+    apply_scoped(node, actual, requested, now, Scope::Prune)
+}
+
+fn apply_scoped(
+    node: &Node<'_>,
+    actual: &Plan,
+    requested: &Entry,
+    now: u64,
+    scope: Scope,
+) -> Result<Outcome> {
     if requested.removable
         && requested.class == "worktrees"
         && let Some(tree) = &requested.tree
@@ -2204,7 +2334,7 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             node.shell,
             node.ledger,
             Path::new(&tree.repo),
-            |guard| remove_tree(guard, node, tree),
+            |guard| remove_tree(guard, node, tree, scope),
         );
     }
     if matches!(requested.class.as_str(), "disk" | "processes") {
@@ -2276,12 +2406,7 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
             None => drop_registration(node, &candidate.id).map(Outcome::Done),
         },
         "branches" => match &requested.tree {
-            Some(tree) => crate::worktree::with_lifecycle(
-                node.shell,
-                node.ledger,
-                Path::new(&tree.repo),
-                |_| delete_branch(node.shell, tree),
-            ),
+            Some(tree) => remove_branch(node, tree, scope),
             None => Err(Error::Invalid("a branch entry has no branch".into())),
         },
         "workspaces" => close_workspace(node, &candidate.id, now),
@@ -2291,6 +2416,20 @@ fn apply_one(node: &Node<'_>, actual: &Plan, requested: &Entry, now: u64) -> Res
         "targets" => remove_target(&candidate.id).map(Outcome::Done),
         _ => Err(Error::Invalid("unknown cleanup class".into())),
     }
+}
+
+fn remove_branch(node: &Node<'_>, tree: &Tree, scope: Scope) -> Result<Outcome> {
+    crate::worktree::with_lifecycle(node.shell, node.ledger, Path::new(&tree.repo), |_| {
+        if scope == Scope::Sweep
+            && let Some(reason) = Ownership::load(node.ledger)?.sweep_hold(tree)
+        {
+            return Ok(Outcome::Skipped(format!(
+                "refuse {}: {reason}",
+                tree.branch
+            )));
+        }
+        delete_branch(node.shell, tree)
+    })
 }
 
 /// Re-check a planned workspace close against a fresh survey under the cleanup lock.
@@ -2549,7 +2688,7 @@ mod tests {
                 },
                 jobs: vec![],
             };
-            self.ledger.write("host.json", &snapshot).unwrap();
+            crate::host_store::put_snapshot(&self.ledger, &snapshot).unwrap();
         }
 
         fn plan(&self) -> Plan {
@@ -2603,25 +2742,17 @@ mod tests {
             && e.detail.contains("cleanup.repositories")));
         // Surveying must not change registrations; only applying the candidate may do so.
         assert_eq!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::repositories(&rig.ledger).unwrap(),
             BTreeSet::from([missing.clone()])
         );
         apply_one(&rig.node(), &plan, stale, 100).unwrap();
         assert!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
+            crate::host_store::repositories(&rig.ledger)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             [] as [Tree; 0]
         );
         let mut next = Plan::default();
@@ -2671,14 +2802,7 @@ mod tests {
         );
         let planned = doctor(&rig.node(), 100).unwrap();
         assert!(planned.entries.iter().any(|e| e.id == repo && e.removable));
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap().len(), 1);
         let applied = sweep(&rig.node(), 100).unwrap();
         assert!(applied.failures.is_empty(), "{:?}", applied.failures);
         assert!(applied.results.iter().any(|result| result.contains(&repo)));
@@ -2695,16 +2819,11 @@ mod tests {
                 .any(|e| e.detail.contains("cleanup.repositories"))
         );
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             [] as [Tree; 0]
         );
         assert!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
+            crate::host_store::repositories(&rig.ledger)
                 .unwrap()
                 .is_empty()
         );
@@ -2741,30 +2860,14 @@ mod tests {
         let stale = plan.entries.iter().find(|e| e.id == repo).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
         assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap()
-                .len(),
-            2
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap().len(), 2);
         std::fs::remove_dir(&repo).unwrap();
         apply_one(&rig.node(), &plan, stale, 100).unwrap();
         assert_eq!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::repositories(&rig.ledger).unwrap(),
             BTreeSet::from([surviving])
         );
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
-            [live_tree]
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap(), [live_tree]);
     }
 
     #[test]
@@ -2782,13 +2885,7 @@ mod tests {
         remember(&rig.ledger, tree.clone()).unwrap();
         drop_repository(&rig.node(), &tree.repo).unwrap();
         assert!(path.is_dir());
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
-            [tree]
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap(), [tree]);
     }
 
     #[test]
@@ -2805,7 +2902,7 @@ mod tests {
             .into_iter()
             .map(|path| path.display().to_string())
             .collect();
-        rig.ledger.write("repositories.json", &paths).unwrap();
+        crate::host_store::put_repositories(&rig.ledger, &paths).unwrap();
         let mut plan = Plan::default();
         let repos = repositories(&rig.node(), &[], &[], &mut plan).unwrap();
         let resolved: BTreeSet<_> = paths
@@ -2821,13 +2918,7 @@ mod tests {
             assert!(plan.entries.iter().any(|e| e.id == *path && !e.removable));
             assert!(!plan.entries.iter().any(|e| e.id == *path && e.removable));
         }
-        assert_eq!(
-            rig.ledger
-                .read::<BTreeSet<String>>("repositories.json")
-                .unwrap()
-                .unwrap(),
-            paths
-        );
+        assert_eq!(crate::host_store::repositories(&rig.ledger).unwrap(), paths);
     }
 
     #[test]
@@ -2857,13 +2948,7 @@ mod tests {
         );
         assert!(result.unwrap().contains(&tree.repo));
         assert!(plan.entries.iter().all(|e| !e.removable));
-        assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
-            [tree]
-        );
+        assert_eq!(crate::host_store::trees(&rig.ledger).unwrap(), [tree]);
     }
 
     #[test]
@@ -2886,19 +2971,13 @@ mod tests {
         std::fs::create_dir(&tree.path).unwrap();
         assert!(apply_one(&rig.node(), &plan, stale, 100).is_err());
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             std::slice::from_ref(&tree)
         );
         std::fs::remove_dir(&tree.path).unwrap();
         apply_one(&rig.node(), &plan, stale, 100).unwrap();
         assert_eq!(
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap(),
+            crate::host_store::trees(&rig.ledger).unwrap(),
             [] as [Tree; 0]
         );
         assert!(repo.is_dir());
@@ -2941,12 +3020,7 @@ mod tests {
         let plan = Plan {
             entries: vec![planned.clone()],
         };
-        let registered = || {
-            rig.ledger
-                .read::<Vec<Tree>>("worktrees.json")
-                .unwrap()
-                .unwrap()
-        };
+        let registered = || crate::host_store::trees(&rig.ledger).unwrap();
 
         // Unlisted but still on disk: it may hold content, so the refusal stays.
         std::fs::create_dir_all(&tree.path).unwrap();

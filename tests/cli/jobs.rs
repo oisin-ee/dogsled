@@ -67,37 +67,36 @@ fn transferred_preparation_allows_only_its_existing_job_owner() {
         let args = ["host", "launch", "--job-validity", "2", "--request", &text];
         if variant == "before-fence" {
             assert!(
-                !rig.dir
-                    .join("state/preparation-receipts/startup.disposition.json")
+                !rig.preparation_record("state", "disposition", "startup")
                     .exists()
             );
             let (code, result) = rig.json(&args);
             assert_eq!(code, 0, "{result}");
-            assert_eq!(rig.read("state/preparations.json"), json!([]));
+            assert_eq!(rig.preparations(), json!([]));
         }
-        let transfer = rig.read("state/preparation-receipts/startup.disposition.json");
+        let transfer = rig
+            .preparation_record("state", "disposition", "startup")
+            .read();
         assert_eq!(transfer["request"]["policy"]["kind"], "transfer");
-        let mut job = rig.read("state/jobs/startup.json");
+        let mut job = rig.job("startup");
         assert_eq!(job["state"], "pending");
         assert_eq!(transfer["request"]["policy"]["job"], job);
         match variant {
             "owner" => {
                 job["owner"] = json!("replacement");
-                rig.put("state/jobs/startup.json", &job);
+                rig.put_job("startup", &job);
             }
             "identity" => {
                 job["startup"]["checkout"]["identity"]["generation"] = json!("0".repeat(32));
-                rig.put("state/jobs/startup.json", &job);
+                rig.put_job("startup", &job);
             }
             "unrelated" => {
                 job["id"] = json!("unrelated");
-                rig.put("state/jobs/unrelated.json", &job);
+                rig.put_job("unrelated", &job);
             }
-            "missing-transfer" => fs::remove_file(
-                rig.dir
-                    .join("state/preparation-receipts/startup.disposition.json"),
-            )
-            .unwrap(),
+            "missing-transfer" => rig
+                .preparation_record("state", "disposition", "startup")
+                .delete(),
             _ => (),
         }
         let mut wrapper = if variant == "unrelated" {
@@ -118,26 +117,18 @@ fn transferred_preparation_allows_only_its_existing_job_owner() {
                 assert!(status.success(), "{}", rig.log("wrapper-error"));
                 assert_eq!(rig.log("command-marker"), "once\n");
                 assert_transferred_job_replay(&rig, &request, &transfer);
-                let disposition = fs::read(
-                    rig.dir
-                        .join("state/preparation-receipts/startup.disposition.json"),
-                )
-                .unwrap();
-                let receipt = fs::read(rig.dir.join("state/launches/startup.json")).unwrap();
+                let disposition = rig
+                    .preparation_record("state", "disposition", "startup")
+                    .read();
+                let receipt = rig.launch_record("startup", "receipt");
                 let (code, result) = rig.json(&args);
                 assert_eq!(code, 0, "{result}");
                 assert_eq!(
-                    fs::read(
-                        rig.dir
-                            .join("state/preparation-receipts/startup.disposition.json")
-                    )
-                    .unwrap(),
+                    rig.preparation_record("state", "disposition", "startup")
+                        .read(),
                     disposition
                 );
-                assert_eq!(
-                    fs::read(rig.dir.join("state/launches/startup.json")).unwrap(),
-                    receipt
-                );
+                assert_eq!(rig.launch_record("startup", "receipt"), receipt);
                 let mut duplicate = rig.spawn_recorded(
                     &rig.dir.join("startup-wrapper"),
                     "duplicate transferred wrapper",
@@ -147,7 +138,7 @@ fn transferred_preparation_allows_only_its_existing_job_owner() {
             } else {
                 assert!(!status.success(), "{variant}");
                 assert!(!rig.dir.join("command-marker").exists(), "{variant}");
-                assert_eq!(rig.read("state/jobs/startup.json"), job);
+                assert_eq!(rig.job("startup"), job);
             }
             continue;
         };
@@ -161,8 +152,10 @@ fn assert_transferred_job_replay(rig: &Rig, request: &Value, transfer: &Value) {
     let text = request.to_string();
     let (code, result) = rig.json(&["host", "launch", "--job-validity", "2", "--request", &text]);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(rig.read("state/preparations.json"), json!([]));
-    let completed = rig.read("state/preparation-receipts/startup.disposition.json");
+    assert_eq!(rig.preparations(), json!([]));
+    let completed = rig
+        .preparation_record("state", "disposition", "startup")
+        .read();
     assert_eq!(completed["progress"], "released");
     assert_eq!(completed["request"], transfer["request"]);
     assert_eq!(rig.log("herdr.log"), calls);
@@ -196,13 +189,13 @@ fn pending_startup(rig: &Rig, tree: &Path) -> Value {
     ]);
     assert_eq!(code, 0, "{result}");
     register_startup_tree(rig, &result["checkout"]);
-    let job = rig.read("state/jobs/startup.json");
+    let job = rig.job("startup");
     assert_eq!(job["startup"]["checkout"], result["checkout"]);
     job
 }
 
 fn register_startup_tree(rig: &Rig, checkout: &Value) {
-    rig.put("state/worktrees.json", &json!([checkout]));
+    rig.put_state(&["state", "worktrees", "--put"], &json!([checkout]));
     close::git(
         &PathBuf::from(checkout["repo"].as_str().unwrap()),
         &["update-ref", "refs/remotes/origin/main", "HEAD"],
@@ -261,7 +254,7 @@ fn dispatch_before_removal_keeps_pending_job_checkout() {
     ]);
     assert_eq!(code, 0, "{result}");
     register_startup_tree(&rig, &result["checkout"]);
-    let job = rig.read("state/jobs/startup.json");
+    let job = rig.job("startup");
     assert_eq!(job["startup"]["checkout"], result["checkout"], "{job}");
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     // Apply a pre-dispatch plan, not merely a survey that already sees the Job hold.
@@ -301,8 +294,8 @@ fn removal_before_dispatch_refuses_stale_job_startup() {
         &request.to_string(),
     ]);
     assert_eq!(code, 2, "{refusal}");
-    assert!(!rig.dir.join("state/jobs/startup.json").exists());
-    assert!(!rig.dir.join("state/launches/startup.json").exists());
+    assert!(rig.job("startup").is_null());
+    assert!(rig.launch_record("startup", "receipt").is_null());
     assert!(!rig.dir.join("startup-wrapper").exists());
     assert!(!rig.log("herdr.log").contains("tab create"));
 }
@@ -352,7 +345,7 @@ fn exec_refuses_replacement_checkout_at_same_path() {
         );
         assert!(!rig.dir.join("command-marker").exists());
         assert!(!rig.dir.join("state/jobs/startup.log").exists());
-        assert!(rig.read("state/jobs/startup.json")["ended_ms"].is_null());
+        assert!(rig.job("startup")["ended_ms"].is_null());
         assert!(
             !marker.exists(),
             "refusal manufactured replacement identity"
@@ -385,7 +378,7 @@ fn exec_waits_for_repository_gate_before_starting() {
         format!("{out}{err}").contains("dogsled-lifecycle.lock"),
         "{out}{err}"
     );
-    assert_eq!(rig.read("state/jobs/startup.json"), pending);
+    assert_eq!(rig.job("startup"), pending);
     assert!(!rig.dir.join("state/jobs/startup.log").exists());
     assert!(!rig.dir.join("command-marker").exists());
     lock.unlock().unwrap();
@@ -429,7 +422,7 @@ fn exec_waits_for_repository_gate_before_starting() {
         .unwrap();
     preparation.try_lock().unwrap();
     preparation.unlock().unwrap();
-    let job = rig.read("state/jobs/runtime.json");
+    let job = rig.job("runtime");
     let mut duplicate = rig.start(&[
         "--budget-ms",
         "5000",
@@ -447,7 +440,7 @@ fn exec_waits_for_repository_gate_before_starting() {
         format!("{out}{err}").contains("execution wrapper"),
         "{out}{err}"
     );
-    assert_eq!(rig.read("state/jobs/runtime.json"), job);
+    assert_eq!(rig.job("runtime"), job);
     writeln!(go.hold(), "go").unwrap();
     assert!(wrapper.wait().success());
 }
@@ -497,7 +490,7 @@ fn nonterminal_job_holds_survive_failed_ticket_and_missing_pane() {
             job.as_object_mut().unwrap().remove("startup");
             job["cwd"] = json!(tree.join("subdir"));
         }
-        rig.put("state/jobs/startup.json", &job);
+        rig.put_job("startup", &job);
         rig.put("panes.json", &json!({"result":{"panes":[]}}));
         let request = startup_request(&rig, &tree);
         rig.put_tickets(&json!([{"request":request,"id":"startup","state":"failed","created_ms":rig.now_ms(),"waiting":false,"waiting_until_ms":null,"notified":true,"result":null,"error":"dispatch failed"}]));
@@ -521,9 +514,9 @@ fn nonterminal_job_holds_survive_failed_ticket_and_missing_pane() {
 fn historical_claim_without_startup_identity_is_readable_but_cannot_run() {
     let rig = Rig::new("startup-legacy-claim");
     rig.claim("legacy", &["sh", "-c", "touch \"$RIG/command-marker\""]);
-    let mut job = rig.read("state/jobs/legacy.json");
+    let mut job = rig.job("legacy");
     job.as_object_mut().unwrap().remove("startup");
-    rig.put("state/jobs/legacy.json", &job);
+    rig.put_job("legacy", &job);
     let out = rig.run(&[
         "exec",
         "legacy",
@@ -535,7 +528,7 @@ fn historical_claim_without_startup_identity_is_readable_but_cannot_run() {
     assert_eq!(out.status.code(), Some(2));
     assert!(!rig.dir.join("command-marker").exists());
     assert!(!rig.dir.join("state/jobs/legacy.log").exists());
-    assert_eq!(rig.read("state/jobs/legacy.json"), job);
+    assert_eq!(rig.job("legacy"), job);
 }
 
 #[test]
@@ -569,7 +562,7 @@ fn v1_only_host_refuses_jobs_before_dispatch() {
     ]);
     assert_eq!(code, 2, "{refused}");
     assert_eq!(refused["code"], "JOB_VALIDITY_UNSUPPORTED", "{refused}");
-    assert!(!rig.dir.join("state/jobs/startup.json").exists());
+    assert!(rig.job("startup").is_null());
     assert!(!rig.log("herdr.log").contains("pane run"));
 }
 
@@ -596,7 +589,7 @@ fn terminal(id: &str, ended_ms: u64) -> Value {
 /// Write a job record and its log into a rig.
 fn put_job(rig: &Rig, id: &str, job: &Value, output: &str) {
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    rig.put(&format!("state/jobs/{id}.json"), job);
+    rig.put_job(id, job);
     fs::write(
         rig.dir.join(format!("state/jobs/{id}.log")),
         format!("{output}\n"),
@@ -625,14 +618,14 @@ fn prune_old_job(state: &str, reversed: bool, kept: bool) {
     );
     let out = rig.run(&["prune", "--yes", "jobs"]);
     assert!(out.status.success(), "{out:?}");
-    let record = rig.dir.join("state/jobs/old.json");
+    let record = rig.job("old");
     // A terminal job releases its checkout after a day, not its thirty-day record.
-    assert!(record.exists(), "{out:?}");
+    assert!(!record.is_null(), "{out:?}");
     assert!(rig.dir.join("state/jobs/old.log").exists());
     if !kept {
         job["output_expired"] = json!(true);
     }
-    assert_eq!(rig.read("state/jobs/old.json"), job);
+    assert_eq!(rig.job("old"), job);
     let out = rig.run(&["prune", "--yes", "worktrees"]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(tree.exists(), kept, "{out:?}");
@@ -684,14 +677,14 @@ fn stop_ends_a_pending_job_that_never_started() {
 
     let output = rig.run(&["stop", "pending"]);
     assert!(output.status.success(), "{output:?}");
-    let stopped = rig.read("state/jobs/pending.json");
+    let stopped = rig.job("pending");
     assert_eq!(stopped["state"], "blocked");
     assert_eq!(stopped["reason"], "stopped");
     assert!(stopped["ended_ms"].as_u64().is_some());
     assert!(stopped["started_ms"].is_null());
     assert!(stopped["exit"].is_null());
     assert!(stopped["signal"].is_null());
-    assert_eq!(rig.read("state/jobs/pending.stop"), json!(true));
+    assert_eq!(rig.stop_requested("pending"), json!(true));
 
     let output = rig.run(&["exec", "pending", "--", "sh", "-c", &command]);
     assert_eq!(output.status.code(), Some(2));
@@ -700,19 +693,19 @@ fn stop_ends_a_pending_job_that_never_started() {
         "{output:?}"
     );
     assert!(!marker.exists());
-    assert_eq!(rig.read("state/jobs/pending.json"), stopped);
+    assert_eq!(rig.job("pending"), stopped);
 
     // A started job must let its capture loop stop the process and record its end.
     rig.claim("started", &["sh", "-c", &command]);
-    let mut started = rig.read("state/jobs/started.json");
+    let mut started = rig.job("started");
     started["state"] = json!("working");
     started["started_ms"] = json!(100);
-    rig.put("state/jobs/started.json", &started);
+    rig.put_job("started", &started);
     let output = rig.run(&["stop", "started"]);
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(rig.read("state/jobs/started.json"), started);
+    assert_eq!(rig.job("started"), started);
     assert!(started["ended_ms"].is_null());
-    assert_eq!(rig.read("state/jobs/started.stop"), json!(true));
+    assert_eq!(rig.stop_requested("started"), json!(true));
 }
 
 /// A wrapper runs nothing when its claim is missing, corrupt, for another command, already
@@ -733,9 +726,13 @@ fn exec_without_an_executable_claim_never_runs_the_command() {
     );
     assert!(!marker.exists());
 
-    // A corrupt record proves nothing, and never runs.
-    fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    fs::write(rig.dir.join("state/jobs/corrupt.json"), "not json").unwrap();
+    // Malformed input cannot become an executable claim.
+    assert!(
+        !rig.write_state(&["state", "job", "corrupt", "--put"], &json!("not a job"))
+            .status
+            .success()
+    );
+    assert!(rig.job("corrupt").is_null());
     let output = rig.run(&["exec", "corrupt", "--", "sh", "-c", &command]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!marker.exists());
@@ -748,38 +745,38 @@ fn exec_without_an_executable_claim_never_runs_the_command() {
 
     // A claim that already started never runs a second time.
     rig.claim("already-started", &["sh", "-c", &command]);
-    let mut started = rig.read("state/jobs/already-started.json");
+    let mut started = rig.job("already-started");
     started["started_ms"] = json!(100);
     started["state"] = json!("working");
-    rig.put("state/jobs/already-started.json", &started);
+    rig.put_job("already-started", &started);
     let output = rig.run(&["exec", "already-started", "--", "sh", "-c", &command]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!marker.exists());
 
     // A claim that ended never runs again.
     rig.claim("already-ended", &["sh", "-c", &command]);
-    let mut ended = rig.read("state/jobs/already-ended.json");
+    let mut ended = rig.job("already-ended");
     ended["ended_ms"] = json!(101);
     ended["state"] = json!("idle");
-    rig.put("state/jobs/already-ended.json", &ended);
+    rig.put_job("already-ended", &ended);
     let output = rig.run(&["exec", "already-ended", "--", "sh", "-c", &command]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!marker.exists());
 
     // An uncertain claim authorizes nothing.
     rig.claim("uncertain-claim", &["sh", "-c", &command]);
-    let mut uncertain = rig.read("state/jobs/uncertain-claim.json");
+    let mut uncertain = rig.job("uncertain-claim");
     uncertain["state"] = json!("uncertain");
-    rig.put("state/jobs/uncertain-claim.json", &uncertain);
+    rig.put_job("uncertain-claim", &uncertain);
     let output = rig.run(&["exec", "uncertain-claim", "--", "sh", "-c", &command]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!marker.exists());
 
     // A pre-allocation intent is not executable either.
     rig.claim("intent-only", &["sh", "-c", &command]);
-    let mut intent = rig.read("state/jobs/intent-only.json");
+    let mut intent = rig.job("intent-only");
     intent["state"] = json!("claiming");
-    rig.put("state/jobs/intent-only.json", &intent);
+    rig.put_job("intent-only", &intent);
     let output = rig.run(&["exec", "intent-only", "--", "sh", "-c", &command]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!marker.exists());
@@ -808,29 +805,30 @@ fn exec_refuses_a_record_that_embeds_another_job() {
     // B's own directory exists, so B is a valid, executable claim of its own.
     fs::create_dir_all(rig.dir.join("home/other")).unwrap();
     fs::create_dir_all(rig.dir.join("state/jobs")).unwrap();
-    // A.json holds B's identity. Its command matches the request, so only the identity
-    // can refuse it.
+    // The typed publication refuses B's identity under A before either can execute.
     let a = json!({"id":"B","cmd":["sh","-c",&command],"cwd":home,"host":"local","owner":"w1:p1",
         "pane":"w2:p1","state":"pending","exit":Value::Null,"signal":Value::Null,"reason":Value::Null,
         "started_ms":Value::Null,"ended_ms":Value::Null,"timeout_ms":Value::Null,"idle_timeout_ms":Value::Null});
-    rig.put("state/jobs/A.json", &a);
+    let refused = rig.write_state(&["state", "job", "A", "--put"], &a);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("identity changed"));
     // B.json is a valid, executable claim of its own, with its own cwd, options, and pane.
     let b = json!({"id":"B","cmd":["sh","-c",&command],"cwd":format!("{home}/other"),"host":"local",
         "owner":"w1:p1","pane":"w3:p1","state":"pending","exit":Value::Null,"signal":Value::Null,
         "reason":Value::Null,"started_ms":Value::Null,"ended_ms":Value::Null,"timeout_ms":json!(1000),
         "idle_timeout_ms":Value::Null});
-    rig.put("state/jobs/B.json", &b);
+    rig.put_job("B", &b);
     let output = rig.run(&["exec", "A", "--", "sh", "-c", &command]);
     assert_eq!(output.status.code(), Some(2));
     // Both records are unchanged: A is not B, and B was never started.
-    assert_eq!(rig.read("state/jobs/A.json"), a);
-    assert_eq!(rig.read("state/jobs/B.json"), b);
+    assert!(rig.job("A").is_null());
+    assert_eq!(rig.job("B"), b);
     // No process, log, or pane ran for either job.
     assert!(!marker.exists());
     assert!(!rig.dir.join("state/jobs/A.log").exists());
     assert!(!rig.dir.join("state/jobs/B.log").exists());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("belongs to job B"), "{stderr}");
+    assert!(stderr.contains("no claim to run"), "{stderr}");
     let herdr = rig.log("herdr.log");
     assert!(!herdr.contains("pane run"), "{herdr}");
     assert!(!herdr.contains("pane close"), "{herdr}");
@@ -855,17 +853,17 @@ fn exec_refuses_an_incomplete_or_conflicting_pending_claim() {
     );
     // A pending claim that already carries a terminal result is not executable.
     rig.claim("carried-exit", &["sh", "-c", &command]);
-    let mut carried = rig.read("state/jobs/carried-exit.json");
+    let mut carried = rig.job("carried-exit");
     carried["exit"] = json!(0);
-    rig.put("state/jobs/carried-exit.json", &carried);
+    rig.put_job("carried-exit", &carried);
     rig.claim("carried-signal", &["sh", "-c", &command]);
-    let mut carried = rig.read("state/jobs/carried-signal.json");
+    let mut carried = rig.job("carried-signal");
     carried["signal"] = json!(15);
-    rig.put("state/jobs/carried-signal.json", &carried);
+    rig.put_job("carried-signal", &carried);
     rig.claim("carried-reason", &["sh", "-c", &command]);
-    let mut carried = rig.read("state/jobs/carried-reason.json");
+    let mut carried = rig.job("carried-reason");
     carried["reason"] = json!("timeout");
-    rig.put("state/jobs/carried-reason.json", &carried);
+    rig.put_job("carried-reason", &carried);
     // A pending claim without a directory, a host, or an owner is incomplete.
     for (id, field) in [
         ("no-cwd", "cwd"),
@@ -873,9 +871,9 @@ fn exec_refuses_an_incomplete_or_conflicting_pending_claim() {
         ("no-owner", "owner"),
     ] {
         rig.claim(id, &["sh", "-c", &command]);
-        let mut claim = rig.read(&format!("state/jobs/{id}.json"));
+        let mut claim = rig.job(id);
         claim[field] = json!("");
-        rig.put(&format!("state/jobs/{id}.json"), &claim);
+        rig.put_job(id, &claim);
     }
 
     for id in [
@@ -887,11 +885,11 @@ fn exec_refuses_an_incomplete_or_conflicting_pending_claim() {
         "no-host",
         "no-owner",
     ] {
-        let before = rig.read(&format!("state/jobs/{id}.json"));
+        let before = rig.job(id);
         let output = rig.run(&["exec", id, "--", "sh", "-c", &command]);
         assert_eq!(output.status.code(), Some(2), "{id}");
         // The record is unchanged: nothing started, nothing ended, nothing ran.
-        assert_eq!(rig.read(&format!("state/jobs/{id}.json")), before, "{id}");
+        assert_eq!(rig.job(id), before, "{id}");
         assert!(
             !rig.dir.join(format!("state/jobs/{id}.log")).exists(),
             "{id}"
@@ -915,7 +913,7 @@ fn exec_refuses_options_that_differ_from_the_claim() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let job = rig.read("state/jobs/claimed.json");
+    let job = rig.job("claimed");
     assert!(job["started_ms"].is_null());
     assert!(job["ended_ms"].is_null());
 }
@@ -923,7 +921,7 @@ fn exec_refuses_options_that_differ_from_the_claim() {
 #[test]
 fn run_wait_captures_exit_output_metadata_and_owner() {
     let rig = Rig::new("run-wait");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let output = rig.run(&[
         "run",
         "--wait",
@@ -943,15 +941,16 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     // wait returns the terminal record; the asynchronous wrapper still reports/closes.
     let deadline = Instant::now() + PROCESS_DEADLINE;
     let at_close = loop {
-        if let Ok(bytes) = fs::read(rig.dir.join(format!("at-close/{id}.json")))
-            && let Ok(record) = serde_json::from_slice::<Value>(&bytes)
+        if let Ok(bytes) = fs::read(rig.dir.join("at-close/jobs.json"))
+            && let Ok(records) = serde_json::from_slice::<Vec<Value>>(&bytes)
+            && let Some(record) = records.into_iter().find(|job| job["id"] == id)
         {
             break record;
         }
         assert!(Instant::now() < deadline, "wrapper did not close its pane");
         std::thread::yield_now();
     };
-    let job = rig.read(&format!("state/jobs/{id}.json"));
+    let job = rig.job(id);
     assert_eq!(job["exit"], 3);
     assert_eq!(job["state"], "blocked");
     let log = rig.log(&format!("state/jobs/{id}.log"));
@@ -981,7 +980,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
         id
     );
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/host.json")["jobs"][0]["exit"], 3);
+    assert_eq!(rig.host()["jobs"][0]["exit"], 3);
     assert!(rig.items()[0]["closed_ms"].is_number());
 }
 
@@ -991,7 +990,7 @@ fn exec_signal_and_timeouts_persist_terminal_result_and_kill_descendants() {
     rig.claim("signal", &["sh", "-c", "kill -TERM $$"]);
     let out = rig.run(&["exec", "signal", "--", "sh", "-c", "kill -TERM $$"]);
     assert_eq!(out.status.code(), Some(143));
-    assert_eq!(rig.read("state/jobs/signal.json")["signal"], 15);
+    assert_eq!(rig.job("signal")["signal"], 15);
     for (id, flag, reason) in [
         ("timed", "--timeout", "timeout"),
         ("silent", "--idle-timeout", "idle-timeout"),
@@ -1025,7 +1024,7 @@ fn exec_signal_and_timeouts_persist_terminal_result_and_kill_descendants() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let result = rig.read(&format!("state/jobs/{id}.json"));
+        let result = rig.job(id);
         assert_eq!(result["reason"], reason);
         assert_eq!(result["signal"], 9);
         let pid = String::from_utf8(out.stdout).unwrap().trim().to_owned();
@@ -1041,7 +1040,7 @@ fn exec_signal_and_timeouts_persist_terminal_result_and_kill_descendants() {
     }
     rig.claim("ok", &["true"]);
     assert!(rig.run(&["exec", "ok", "--", "true"]).status.success());
-    assert_eq!(rig.read("state/jobs/ok.json")["exit"], 0);
+    assert_eq!(rig.job("ok")["exit"], 0);
     // A claim that already started never runs a second time.
     assert_eq!(
         rig.run(&["exec", "ok", "--", "true"]).status.code(),
@@ -1054,7 +1053,7 @@ fn exec_signal_and_timeouts_persist_terminal_result_and_kill_descendants() {
             .code(),
         Some(2)
     );
-    assert!(rig.read("state/jobs/bad.json")["ended_ms"].is_number());
+    assert!(rig.job("bad")["ended_ms"].is_number());
 }
 
 #[test]
@@ -1071,11 +1070,11 @@ fn exec_close_failure_preserves_final_record_exit_and_logs() {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("dogsled pane close:"), "{stderr}");
         assert!(stderr.contains("close-refused"), "{stderr}");
-        let job = rig.read(&format!("state/jobs/{id}.json"));
+        let job = rig.job(id);
         assert_eq!(job["exit"], code);
         assert_eq!(job["reason"], Value::Null);
         assert!(job["ended_ms"].is_number());
-        assert_eq!(rig.read(&format!("at-close/{id}.json")), job);
+        assert_eq!(rig.at_close(id), job);
         assert_eq!(rig.run(&["wait", id]).status.code(), Some(code));
         assert_eq!(rig.run(&["logs", id]).stdout, b"kept\n");
     }
@@ -1093,8 +1092,8 @@ fn exec_closes_after_a_spawn_error_and_skips_close_without_a_pane() {
     );
     let output = rig.run(&["exec", "spawn-error", "--", "missing-command-xyz"]);
     assert_eq!(output.status.code(), Some(2));
-    let job = rig.read("state/jobs/spawn-error.json");
-    assert_eq!(rig.read("at-close/spawn-error.json"), job);
+    let job = rig.job("spawn-error");
+    assert_eq!(rig.at_close("spawn-error"), job);
     assert!(job["ended_ms"].is_number());
     assert!(job["reason"].is_string());
     assert!(rig.log("herdr.log").ends_with("pane close w1:p1\n"));
@@ -1109,7 +1108,7 @@ fn exec_closes_after_a_spawn_error_and_skips_close_without_a_pane() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(!rig.log("herdr.log").contains("pane close"));
-    let job = rig.read("state/jobs/no-pane.json");
+    let job = rig.job("no-pane");
     assert!(job["started_ms"].is_null(), "{job}");
     assert!(job["ended_ms"].is_null(), "{job}");
     assert!(!rig.dir.join("state/jobs/no-pane.log").exists());
@@ -1128,7 +1127,7 @@ fn exec_closes_after_a_spawn_error_and_skips_close_without_a_pane() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(rig.read("state/jobs/no-current-pane.json")["ended_ms"].is_number());
+    assert!(rig.job("no-current-pane")["ended_ms"].is_number());
     assert!(rig.log("herdr.log").contains("pane close w2:p1"));
 }
 
@@ -1139,12 +1138,12 @@ fn wait_max_and_stop_use_durable_local_job_state() {
     let mut job = complete("running");
     job["ended_ms"] = Value::Null;
     job["exit"] = Value::Null;
-    rig.put("state/jobs/running.json", &job);
+    rig.put_job("running", &job);
     let out = rig.run(&["wait", "running", "--max", "0ms"]);
     assert_eq!(out.status.code(), Some(124));
     assert_eq!(out.stdout, b"still running\n");
     assert!(rig.run(&["stop", "running"]).status.success());
-    assert_eq!(rig.read("state/jobs/running.stop"), true);
+    assert_eq!(rig.stop_requested("running"), true);
     assert_eq!(rig.run(&["stop", "../escape"]).status.code(), Some(2));
 }
 
@@ -1153,7 +1152,7 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
     let rig = Rig::new("agent");
     let confirmed = now();
     fs::write(rig.dir.join("clock"), confirmed.to_string()).unwrap();
-    rig.snapshot("state/host.json", confirmed, 0.0, 8);
+    rig.snapshot("state", confirmed, 0.0, 8);
     let (code, result) = rig.json(&[
         "agent",
         "--kind",
@@ -1204,7 +1203,7 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
 fn concurrent_item_and_queue_writers_keep_every_record() {
     let rig = Rig::new("concurrent-items-queue");
     let barrier = std::sync::Barrier::new(8);
-    rig.snapshot("state/host.json", now(), 99.0, 2);
+    rig.snapshot("state", now(), 99.0, 2);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|i| {
@@ -1230,7 +1229,7 @@ fn concurrent_item_and_queue_writers_keep_every_record() {
 fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     let rig = Rig::new("queue-admit");
     rig.config("free_core_fraction_min = 2\n");
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let (_, first) = rig.json(&["place"]);
     let (_, second) = rig.json(&[
         "agent",
@@ -1272,9 +1271,9 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     assert!(rig.run(&["serve", "--once"]).status.success());
     let tickets = rig.tickets();
     assert_eq!(tickets[0]["id"], first["ticket"]);
-    assert_eq!(tickets[0]["state"], "admitted");
+    assert_eq!(tickets[0]["state"], "admitted", "{tickets}");
     assert_eq!(tickets[1]["state"], "cancelled");
-    assert_eq!(tickets[2]["state"], "admitted");
+    assert_eq!(tickets[2]["state"], "admitted", "{tickets}");
     // The owner has no inbox reader yet, so nothing tells it, and nothing types into it.
     assert_eq!(tickets[0]["notified"], false);
     // Once it reads its inbox, the notice arrives there, while the owner still works.
@@ -1438,15 +1437,15 @@ fn a_job_log_expires_after_a_day() {
     set_clock(&rig, ended + LOG_WINDOW_MS);
     serve(&rig);
     assert_eq!(log_of(&rig, "aged").as_deref(), Some("the output\n"));
-    assert!(rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.job("aged").is_null());
     // One millisecond more: the log is gone and the record says so.
     set_clock(&rig, ended + LOG_WINDOW_MS + 1);
     serve(&rig);
     assert_eq!(log_of(&rig, "aged").as_deref(), Some("output expired\n"));
-    let job = rig.read("state/jobs/aged.json");
+    let job = rig.job("aged");
     assert_eq!(job["output_expired"], true, "{job}");
     // The record itself is still there: only a day passed.
-    assert!(rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.job("aged").is_null());
 }
 
 /// A job's record goes after 30 days. It stays at exactly 30 days, and it goes at 30
@@ -1460,11 +1459,11 @@ fn a_job_record_expires_after_thirty_days() {
     // Exactly 30 days: the record stays.
     set_clock(&rig, ended + RECORD_WINDOW_MS);
     serve(&rig);
-    assert!(rig.dir.join("state/jobs/aged.json").exists());
+    assert!(!rig.job("aged").is_null());
     // One millisecond more: the record and its log are gone.
     set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
     serve(&rig);
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
 }
 
@@ -1474,10 +1473,7 @@ fn retention_clock_rollback_preserves_exact_boundaries() {
     let rig = Rig::new("retention-clock-rollback");
     let ended = now();
     let high_water = ended + LOG_WINDOW_MS + 1;
-    rig.put(
-        "state/job-validity-clock.json",
-        &json!({"version":1,"high_water_ms":high_water}),
-    );
+    rig.put_clock(&json!({"version":1,"high_water_ms":high_water}));
     set_clock(&rig, ended - 1_000);
     put_job(&rig, "aged", &terminal("aged", ended), "old output");
     put_job(
@@ -1505,11 +1501,8 @@ fn retention_clock_rollback_preserves_exact_boundaries() {
         Some("day output\n")
     );
     assert_eq!(log_of(&rig, "future").as_deref(), Some("future output\n"));
-    assert!(rig.dir.join("state/jobs/month-boundary.json").exists());
-    assert_eq!(
-        rig.read("state/job-validity-clock.json")["high_water_ms"],
-        high_water
-    );
+    assert!(!rig.job("month-boundary").is_null());
+    assert_eq!(rig.clock()["high_water_ms"], high_water);
 }
 
 /// A running job never expires. Its age changes nothing.
@@ -1525,7 +1518,7 @@ fn a_running_job_never_expires() {
     job["state"] = json!("working");
     put_job(&rig, "running", &job, "the output");
     serve(&rig);
-    assert!(rig.dir.join("state/jobs/running.json").exists());
+    assert!(!rig.job("running").is_null());
     assert_eq!(log_of(&rig, "running").as_deref(), Some("the output\n"));
 }
 
@@ -1542,7 +1535,7 @@ fn an_uncertain_job_never_expires() {
     job["reason"] = json!("dispatch outcome unknown");
     put_job(&rig, "uncertain", &job, "the output");
     serve(&rig);
-    assert!(rig.dir.join("state/jobs/uncertain.json").exists());
+    assert!(!rig.job("uncertain").is_null());
     assert_eq!(log_of(&rig, "uncertain").as_deref(), Some("the output\n"));
 }
 
@@ -1643,12 +1636,7 @@ fn local_stream_expiry_after_partial_output_prints_the_full_marker_once() {
     // Publish the same transition as retention atomically, while the reader follows.
     let mut expired = terminal("aged", now());
     expired["output_expired"] = json!(true);
-    rig.put("state/jobs/aged.json.new", &expired);
-    fs::rename(
-        rig.dir.join("state/jobs/aged.json.new"),
-        rig.dir.join("state/jobs/aged.json"),
-    )
-    .unwrap();
+    rig.put_job("aged", &expired);
     assert_stream_expired_once(&rig, &mut reader);
 }
 
@@ -1660,7 +1648,7 @@ fn remote_stream_expiry_after_partial_output_prints_the_full_marker_once() {
     running["ended_ms"] = Value::Null;
     running["exit"] = Value::Null;
     running["state"] = json!("working");
-    rig.put("peer-state/jobs/aged.json", &running);
+    rig.put_peer_state(&["job", "aged", "--put"], &running);
     fs::write(
         rig.dir.join("peer-state/jobs/aged.log"),
         "output already consumed before retention\n",
@@ -1668,7 +1656,7 @@ fn remote_stream_expiry_after_partial_output_prints_the_full_marker_once() {
     .unwrap();
     let mut reader = partially_read_logs(&rig);
     // The owner keeps its item after remote retention removes the record.
-    fs::remove_file(rig.dir.join("peer-state/jobs/aged.json")).unwrap();
+    rig.peer_state(&["job", "aged", "--delete"]);
     assert_stream_expired_once(&rig, &mut reader);
     assert!(!rig.log("ssh.log").contains("host launch"));
 }
@@ -1680,7 +1668,7 @@ fn expired_item_rig(name: &str) -> Rig {
     put_job(&rig, "aged", &terminal("aged", ended), "old output");
     set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
     serve(&rig);
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
     rig.put_items(&json!([{
         "id":"aged","kind":"job","host":"local","pane":"w2:p1",
@@ -1695,7 +1683,7 @@ fn expired_record_read_reports_expiry_to_the_owner() {
     let (code, read) = rig.json(&["read", "aged"]);
     assert_eq!(code, 0, "{read}");
     assert_eq!(read["tail"], EXPIRED, "{read}");
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
 }
 
 #[test]
@@ -1704,7 +1692,7 @@ fn expired_record_tail_reports_expiry_to_the_owner() {
     let (code, tail) = rig.json(&["host", "tail", "job", "aged"]);
     assert_eq!(code, 0, "{tail}");
     assert_eq!(tail, EXPIRED, "{tail}");
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
 }
 
 #[test]
@@ -1728,7 +1716,7 @@ fn expired_record_logs_report_expiry_to_the_owner() {
     assert_eq!(end["bytes"], json!([]), "{end}");
     assert_eq!(end["done"], true, "{end}");
     assert_eq!(rig.json(&["host", "logs", "unknown"]).0, 2);
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
 }
 
@@ -1760,7 +1748,7 @@ fn remote_expired_record_read_reports_expiry_to_the_owner() {
     let (code, read) = rig.json(&["read", "aged"]);
     assert_eq!(code, 0, "{read}");
     assert_eq!(read["tail"], EXPIRED, "{read}");
-    assert!(!rig.dir.join("peer-state/jobs/aged.json").exists());
+    assert!(rig.peer_state(&["job", "aged"]).is_null());
     assert!(!rig.log("ssh.log").contains("host launch"));
 }
 
@@ -1787,7 +1775,7 @@ fn remote_expired_record_logs_report_expiry_to_the_owner_once() {
         let (stdout, stderr) = command.output();
         assert_eq!(stdout, format!("{EXPIRED}\n"), "{stderr}");
     }
-    assert!(!rig.dir.join("peer-state/jobs/aged.json").exists());
+    assert!(rig.peer_state(&["job", "aged"]).is_null());
     assert!(!rig.dir.join("peer-state/jobs/aged.log").exists());
     assert!(!rig.log("ssh.log").contains("host launch"));
 }
@@ -1882,15 +1870,15 @@ fn a_second_expiry_pass_changes_nothing() {
     put_job(&rig, "aged", &terminal("aged", ended), "the output");
     set_clock(&rig, ended + RECORD_WINDOW_MS + 1);
     serve(&rig);
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
     // A second pass at the same time is a no-op.
     serve(&rig);
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
     assert!(!rig.dir.join("state/jobs/aged.log").exists());
     // And a pass at a later time is a no-op too.
     set_clock(&rig, ended + 100 * RECORD_WINDOW_MS);
     serve(&rig);
-    assert!(!rig.dir.join("state/jobs/aged.json").exists());
+    assert!(rig.job("aged").is_null());
 }
 
 /// A list that runs while the expiry runs does not fail. The record is either there or
@@ -1924,4 +1912,453 @@ fn a_list_during_the_expiry_does_not_fail() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn settle_job_resources(rig: &Rig) {
+    for _ in 0..2 {
+        let mut service = rig.start(&["serve", "--once", "--interval", "1"]);
+        assert!(service.wait().success(), "{:?}", service.output());
+    }
+}
+
+fn assert_job_holds_cleared(rig: &Rig, id: &str) {
+    let (code, board) = rig.json(&["board", "--owner", "w1:p1"]);
+    assert_eq!(code, 0, "{board}");
+    for row in board["rows"].as_array().unwrap() {
+        assert!(
+            row.get("holds").is_none_or(|holds| holds == &json!([])),
+            "{board}"
+        );
+    }
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert!(
+        snapshot["holds"].as_array().unwrap().is_empty(),
+        "{id}: {snapshot}"
+    );
+}
+
+#[test]
+fn settled_local_jobs_release_holds_without_discarding_replay_evidence() {
+    for exit in [0, 7] {
+        let rig = Rig::short(&format!("settled-job-{exit}"));
+        rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+        rig.snapshot("state", now(), 0.0, 8);
+        let mut command = rig.start(&[
+            "run",
+            "--host",
+            "local",
+            "--wait",
+            "--",
+            "sh",
+            "-c",
+            &format!("echo result; exit {exit}"),
+        ]);
+        let status = command.wait();
+        let (stdout, stderr) = command.output();
+        assert_eq!(status.code(), Some(exit), "{stderr}");
+        let result: Value = serde_json::from_str(&stdout).unwrap();
+        let id = result["id"].as_str().unwrap();
+        settle_job_resources(&rig);
+        assert_job_holds_cleared(&rig, id);
+        assert!(rig.admission(id)["finished_ms"].is_number());
+        assert!(rig.admission(id)["ordinary_release"]["acknowledgement"].is_object());
+        assert!(!rig.validity(id).is_null());
+        assert!(!rig.launch_record(id, "receipt").is_null());
+    }
+}
+
+fn settled_peer_rig(name: &str) -> (Rig, fs::File) {
+    let rig = Rig::short(name);
+    rig.peer();
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    rig.snapshot("state", now(), 0.0, 8);
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    let out = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    rig.snapshot("peer-state", now(), 0.0, 8);
+    let mut probe = rig.peer_state(&["host"]);
+    probe["sampled_ms"] = json!("__sampled_ms__");
+    fs::write(rig.dir.join("peer-probe.json"), probe.to_string()).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &script.replace(
+            "case \"$*\" in",
+            // The scripted probe is fresh at each RPC, independent of test-runner load.
+            r#"sampled=$(date +%s)
+sed "s/\"__sampled_ms__\"/${sampled}000/" "$RIG/peer-probe.json" |
+  DOGSLED_STATE="$RIG/peer-state" "$RIG_DOGSLED" --json state host --put >/dev/null
+case "$*" in
+  *'host snapshot'*)
+    DOGSLED_STATE="$RIG/peer-state" "$RIG_DOGSLED" --json host snapshot ;;
+  *)
+    for remote do :; done
+    remote=${remote#* host }
+    DOGSLED_STATE="$RIG/peer-state" sh -c '"$RIG_DOGSLED" host '"$remote"
+    exit $? ;;
+"#,
+        ),
+    );
+    rig.snapshot("peer-state", now(), 0.0, 8);
+    let service = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(rig.dir.join("peer-state/service.lock"))
+        .unwrap();
+    service.try_lock().unwrap();
+    (rig, service)
+}
+
+#[test]
+fn settled_remote_job_releases_holds_on_both_hosts() {
+    let (rig, _peer_service) = settled_peer_rig("settled-peer-job");
+    let mut command = rig.start(&[
+        "run",
+        "--host",
+        "netcup",
+        "--wait",
+        "--max",
+        "10s",
+        "--",
+        "sh",
+        "-c",
+        "echo peer-result",
+    ]);
+    let status = command.wait();
+    let (stdout, stderr) = command.output();
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    let job: Value = serde_json::from_str(&stdout).unwrap();
+    let id = job["id"].as_str().unwrap();
+    settle_job_resources(&rig);
+    assert_job_holds_cleared(&rig, id);
+    let out = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let snapshot: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+    assert!(rig.peer_launch_record(id, "release").is_object());
+}
+
+#[test]
+fn peer_refused_job_reports_once_and_releases_holds() {
+    let (rig, peer_service) = settled_peer_rig("settled-refused-job");
+    peer_service.unlock().unwrap();
+    let missing = rig.dir.join("missing");
+    // A shared non-repository cwd is removed on the peer after reservation, before ingress.
+    fs::create_dir(&missing).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &script.replace(
+            "case \"$*\" in",
+            r#"case "$*" in
+  *'host launch'*)
+    rmdir "$RIG/missing"
+    for remote do :; done
+    remote=${remote#* host }
+    DOGSLED_STATE="$RIG/peer-state" sh -c '"$RIG_DOGSLED" host '"$remote"
+    exit $? ;;
+"#,
+        ),
+    );
+    let mut command = rig.start(&[
+        "run",
+        "--host",
+        "netcup",
+        "--cwd",
+        missing.to_str().unwrap(),
+        "--max",
+        "10s",
+        "--",
+        "true",
+    ]);
+    let status = command.wait();
+    let (stdout, stderr) = command.output();
+    assert_eq!(status.code(), Some(1), "{stdout}\n{stderr}");
+    peer_service.try_lock().unwrap();
+    rig.expire_cache();
+    settle_job_resources(&rig);
+    let tickets = rig.tickets();
+    let ticket = &tickets[0];
+    assert_eq!(ticket["state"], "failed", "{tickets}");
+    let id = ticket["request"]["id"].as_str().unwrap();
+    assert_eq!(
+        ticket["diagnostic"]["cause"], "execution_directory_missing",
+        "{ticket}"
+    );
+    assert!(
+        ticket["error"]
+            .as_str()
+            .unwrap()
+            .contains("netcup refused the launch: execution_directory_missing"),
+        "{ticket}"
+    );
+    assert!(
+        rig.peer_launch_record(id, "progress")["error"]
+            .as_str()
+            .unwrap()
+            .contains("execution directory disappeared")
+    );
+    settle_job_resources(&rig);
+    assert_job_holds_cleared(&rig, id);
+    let out = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let snapshot: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+    let before = rig.admission(id);
+    settle_job_resources(&rig);
+    assert_eq!(rig.admission(id), before);
+}
+
+#[test]
+fn peer_allocation_refusal_settles_its_non_executable_intent() {
+    let (rig, _peer_service) = settled_peer_rig("settled-allocation-refusal");
+    let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
+    rig.script(
+        "herdr",
+        &script.replace(
+            "case \"$*\" in",
+            r#"case "$*" in
+  'tab create'*|'workspace create'*) echo allocation-refused >&2; exit 2 ;;
+"#,
+        ),
+    );
+    let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let tickets = rig.tickets();
+    assert_eq!(tickets[0]["state"], "failed", "{tickets}");
+    let id = tickets[0]["request"]["id"].as_str().unwrap();
+    let job = rig.peer_state(&["job", id]);
+    assert_eq!(job["state"], "blocked", "{job}");
+    assert!(job["started_ms"].is_null(), "{job}");
+    assert!(job["ended_ms"].is_number(), "{job}");
+    settle_job_resources(&rig);
+    assert_job_holds_cleared(&rig, id);
+    let output = rig
+        .cmd(&["host", "snapshot"])
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let snapshot: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+}
+
+fn assert_unstarted_transport_failure_stays_held(rig: &Rig) {
+    let healthy = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.script(
+        "ssh",
+        &healthy.replace(
+            "case \"$*\" in",
+            r#"case "$*" in
+  *'host release-unstarted'*) echo transport-ambiguous >&2; exit 255 ;;
+"#,
+        ),
+    );
+    settle_job_resources(rig);
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert_ne!(snapshot["holds"], json!([]));
+    assert_eq!(
+        rig.peer_state(&["reservations"]).as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        rig.run(&["prune", "--yes", "resources"]).status.code(),
+        Some(2)
+    );
+    rig.script("ssh", &healthy);
+}
+
+#[test]
+fn peer_reserve_failure_releases_unstarted_evidence_and_fences_dispatch() {
+    for queued in [false, true] {
+        let (rig, peer_service) = settled_peer_rig(&format!("settled-reserve-refusal-{queued}"));
+        if queued {
+            peer_service.unlock().unwrap();
+        }
+        let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+        rig.script(
+            "ssh",
+            &script.replace(
+                "case \"$*\" in",
+                r#"case "$*" in
+  *'host reserve'*)
+    for remote do :; done
+    remote=${remote#* host }
+    DOGSLED_STATE="$RIG/peer-state" sh -c '"$RIG_DOGSLED" host '"$remote" > /dev/null
+    echo peer-refused >&2
+    exit 2 ;;
+"#,
+            ),
+        );
+        let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
+        assert_eq!(
+            output.status.code(),
+            Some(if queued { 1 } else { 2 }),
+            "{output:?}"
+        );
+        if queued {
+            peer_service.try_lock().unwrap();
+        }
+        rig.expire_cache();
+        if !queued {
+            assert_unstarted_transport_failure_stays_held(&rig);
+        }
+        settle_job_resources(&rig);
+        let tickets = rig.tickets();
+        let ticket = &tickets[0];
+        assert_eq!(ticket["state"], "failed", "{ticket}");
+        let id = ticket["request"]["id"].as_str().unwrap();
+        assert_job_holds_cleared(&rig, id);
+        let out = rig
+            .cmd(&["host", "snapshot"])
+            .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let snapshot: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(snapshot["holds"], json!([]), "{snapshot}");
+        assert_eq!(rig.peer_state(&["reservations"]), json!([]));
+        let validity = ticket["request"]["action"]["validity"].clone();
+        let launch = json!({"id":id,"validity":validity,"action":ticket["request"]["action"],"host":"8103",
+        "cwd":rig.dir.join("home"),"workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":ticket["request"]["owner_host"]});
+        let out = rig
+            .cmd(&[
+                "host",
+                "launch",
+                "--job-validity",
+                "2",
+                "--request",
+                &launch.to_string(),
+            ])
+            .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("future dispatch prohibited"),
+            "{out:?}"
+        );
+        let created = validity["created_ms"].as_u64().unwrap().to_string();
+        let out = rig
+            .cmd(&[
+                "host",
+                "reserve",
+                "--id",
+                id,
+                "--job-validity",
+                "2",
+                "--job-created-ms",
+                &created,
+            ])
+            .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("future dispatch prohibited"),
+            "{out:?}"
+        );
+    }
+}
+
+#[test]
+fn stopped_job_releases_holds_after_terminal_capture() {
+    let rig = Rig::short("settled-stopped-job");
+    startup_herdr(&rig);
+    rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    rig.snapshot("state", now(), 0.0, 8);
+    let (code, result) = rig.json(&["run", "--host", "local", "--", "sh", "-c", "sleep 90"]);
+    assert_eq!(code, 0, "{result}");
+    let id = result["id"].as_str().unwrap();
+    let mut wrapper = rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "stopped job wrapper");
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert_ne!(snapshot["holds"], json!([]));
+    for hold in snapshot["holds"].as_array().unwrap() {
+        assert_eq!(hold["owner"], "w1:p1", "{hold}");
+        assert_eq!(hold["owner_pane"], "w1:p1", "{hold}");
+    }
+    let (code, doctor) = rig.json(&["doctor"]);
+    assert_eq!(code, 0, "{doctor}");
+    for hold in snapshot["holds"].as_array().unwrap() {
+        assert!(
+            doctor["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["class"] == "resources" && entry["id"] == hold["resource"] }),
+            "{hold}: {doctor}"
+        );
+    }
+    assert_eq!(
+        rig.run(&["prune", "--yes", "resources"]).status.code(),
+        Some(2)
+    );
+    assert!(rig.job(id)["ended_ms"].is_null());
+    assert!(rig.run(&["stop", id]).status.success());
+    let mut command = rig.start(&["wait", id, "--max", "10s"]);
+    assert!(!command.wait().success(), "{:?}", command.output());
+    assert_eq!(rig.job(id)["reason"], "stopped");
+    assert!(!wrapper.wait().success());
+    let output = rig.run(&["prune", "--yes", "resources"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_job_holds_cleared(&rig, id);
+}
+
+#[test]
+fn peer_reservation_records_agent_owner_and_refuses_missing_owner() {
+    let rig = Rig::new("reserve-job-owner");
+    rig.snapshot("state", now(), 0.0, 8);
+    let created = rig.now_ms().to_string();
+    let args = [
+        "--json",
+        "host",
+        "reserve",
+        "--preparation-protocol",
+        "1",
+        "--id",
+        "owned",
+        "--job-validity",
+        "2",
+        "--job-created-ms",
+        &created,
+    ];
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dogsled"));
+    rig.rig_env(&mut command);
+    let out = command.args(args).output().unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(rig.validity("owned").is_null());
+    let (code, _) = rig.json(&[
+        "host",
+        "reserve",
+        "--id",
+        "owned",
+        "--job-validity",
+        "2",
+        "--job-created-ms",
+        &created,
+    ]);
+    assert!([0, 3].contains(&code));
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert_ne!(snapshot["holds"], json!([]));
+    for hold in snapshot["holds"].as_array().unwrap() {
+        assert_eq!(hold["owner"], "w1:p1", "{hold}");
+        assert_eq!(hold["owner_pane"], "w1:p1", "{hold}");
+    }
 }

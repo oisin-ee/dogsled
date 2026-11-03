@@ -35,6 +35,8 @@ impl Host {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostReport {
+    #[serde(default)]
+    pub service_lanes: Vec<crate::tables::ServiceLane>,
     #[serde(flatten)]
     pub host: Host,
     pub service: String,
@@ -152,52 +154,6 @@ impl std::fmt::Display for Failure {
 /// in an `Error`, a ticket, a handoff, a unit record, or a log line.
 pub const SSH_DEBUG_FILE: &str = "DOGSLED_SSH_DEBUG_FILE";
 
-/// The cause a peer named in a plain prepare failure, without any of the peer's own text.
-/// The names come from this caller's arguments, never from the peer's message.
-fn prepare_cause(value: &serde_json::Value, args: &[String]) -> Option<String> {
-    if value.get("diagnostic").is_some() {
-        return None;
-    }
-    let message = value["error"].as_str()?.trim();
-    let arg = |flag: &str| {
-        args.windows(2)
-            .find(|pair| pair[0] == flag)
-            .map(|pair| pair[1].clone())
-    };
-    if message.starts_with("unknown base") || message.contains("requested base unavailable") {
-        let base = arg("--base").filter(|base| safe_ref(base))?;
-        return Some(format!("unknown base {base}"));
-    }
-    if message.starts_with("branch ") && message.ends_with(" exists; omit --base") {
-        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
-        return Some(format!("branch {branch} exists; omit --base"));
-    }
-    if message == "branch exists; omit --base" {
-        let branch = arg("--branch").filter(|branch| safe_ref(branch))?;
-        return Some(format!("branch {branch} exists; omit --base"));
-    }
-    if message.contains("workspace") && message.contains("already open") {
-        return Some("workspace already open".to_owned());
-    }
-    if message.contains("workspace")
-        && (message.contains("already shows") || message.contains("is occupied"))
-    {
-        return Some("workspace occupied".to_owned());
-    }
-    None
-}
-
-/// A reference that carries no origin, no credential, and no path.
-fn safe_ref(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && !value.starts_with('-')
-        && !value.contains("..")
-        && value
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"/_-.~^".contains(&c))
-}
-
 fn record_ssh_detail(target: &str, detail: &str) {
     let Some(path) = std::env::var_os(SSH_DEBUG_FILE) else {
         return;
@@ -296,30 +252,32 @@ fn parse_machine_list(text: &str) -> Result<Vec<Host>> {
         .collect())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Cached {
-    fetched_ms: u64,
-    source: Vec<String>,
-    snapshot: Option<Snapshot>,
-    reachable: bool,
-    available: bool,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Cached {
     #[serde(default)]
-    running: Option<bool>,
+    pub(crate) service_lanes: Vec<crate::tables::ServiceLane>,
+    pub(crate) fetched_ms: u64,
+    pub(crate) source: Vec<String>,
+    pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) reachable: bool,
+    pub(crate) available: bool,
     #[serde(default)]
-    handoffs: Vec<crate::done::Mark>,
+    pub(crate) running: Option<bool>,
     #[serde(default)]
-    holds: Vec<crate::holds::Hold>,
+    pub(crate) handoffs: Vec<crate::done::Mark>,
+    #[serde(default)]
+    pub(crate) holds: Vec<crate::holds::Hold>,
     /// Safe words for a reachable host only; an unreachable one carries its `failure`.
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    failure: Option<Failure>,
+    pub(crate) failure: Option<Failure>,
     /// Consecutive failed reads: an unreachable peer is asked again with backoff, not on
     /// every cache expiry.
     #[serde(default)]
-    retry: crate::backoff::Backoff,
+    pub(crate) retry: crate::backoff::Backoff,
     /// The job validity protocol the peer speaks. A peer without it cannot run a job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    job_validity: Option<u32>,
+    pub(crate) job_validity: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -445,6 +403,14 @@ impl<'a> Fleet<'a> {
         out: &crate::shell::Output,
     ) -> Result<T> {
         let operation = crate::diagnostic::Operation::from_args(args);
+        if out.status == SSH_FAILED {
+            record_ssh_detail(&host.label, &out.stderr);
+            return Err(Error::Ssh {
+                target: host.label.clone(),
+                failure: Failure::of_ssh(out.status, &out.stderr),
+                refusal: None,
+            });
+        }
         if out.status != 0 && out.status != 1 {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout)
                 && value["deadline"] == true
@@ -481,37 +447,22 @@ impl<'a> Fleet<'a> {
                 failure: Failure::of_ssh(out.status, &out.stderr),
                 refusal,
             };
-            // Legacy refusals retain their fixed messages. Transport categories remain
-            // retryable without interpreting a peer envelope.
             let value = serde_json::from_str::<serde_json::Value>(&out.stdout).ok();
-            if out.status == SSH_FAILED
-                || (refusal.is_some()
-                    && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none()))
-            {
-                return Err(error);
-            }
             let diagnostic = crate::diagnostic::Diagnostic::remote(
                 value.as_ref().and_then(|v| v.get("diagnostic")),
                 args,
                 Some(out.status),
                 &host.label,
             );
-            // A prepare failure may name its cause in a plain message, such as an unknown
-            // base. The cause reaches the ticket as the error itself, and the peer's own
-            // text stays in the debug file.
-            if operation == crate::diagnostic::Operation::Prepare
-                && refusal.is_none()
-                && let Some(value) = value.as_ref()
-                && let Some(cause) = prepare_cause(value, args)
-            {
-                return Err(Error::Invalid(format!("ssh {}: {cause}", host.label)));
-            }
             if operation == crate::diagnostic::Operation::Other
                 && value.as_ref().is_none_or(|v| v.get("diagnostic").is_none())
             {
                 return Err(error);
             }
-            return Err(error.with_diagnostic(diagnostic));
+            return Err(Error::Peer {
+                target: host.label.clone(),
+            }
+            .with_diagnostic(diagnostic));
         }
         serde_json::from_str(&out.stdout).map_err(|_| {
             Error::Parse {
@@ -579,6 +530,25 @@ impl<'a> Fleet<'a> {
         }
     }
 
+    pub(crate) fn release_unstarted(
+        &self,
+        host: &Host,
+        request: &crate::jobs::UnstartedRelease,
+    ) -> Result<crate::jobs::UnstartedAck> {
+        if host.is_local() {
+            crate::jobs::release_unstarted(self.ledger, request)
+        } else {
+            self.remote(
+                host,
+                &[
+                    "release-unstarted".into(),
+                    "--input".into(),
+                    serde_json::to_string(request)?,
+                ],
+            )
+        }
+    }
+
     pub fn reserve(
         &self,
         host: &Host,
@@ -588,6 +558,7 @@ impl<'a> Fleet<'a> {
         placement: Option<&crate::node::PlacementReplay>,
         nonjob: bool,
     ) -> Result<ReserveOutcome> {
+        let (owner, owner_host) = crate::job_store::owner(self.ledger, id)?;
         if let Some(replay) = placement {
             replay.validate(id)?;
             if replay.envelope.host != *host || validity.is_some() {
@@ -600,7 +571,7 @@ impl<'a> Fleet<'a> {
             return if let Some(envelope) = placement {
                 self.node().reserve_placement(envelope, now)
             } else {
-                self.node().reserve(id, now, validity, nonjob)
+                self.node().reserve(id, now, validity, &owner, &owner_host)
             };
         }
         if nonjob {
@@ -628,6 +599,10 @@ impl<'a> Fleet<'a> {
             crate::prepare::disposition::VERSION.to_string(),
             "--id".into(),
             id.into(),
+            "--owner".into(),
+            owner,
+            "--owner-host".into(),
+            owner_host,
             "--free-core-fraction-min".into(),
             t.free_core_fraction_min.to_string(),
             "--memory-reserve-bytes".into(),
@@ -711,6 +686,7 @@ impl<'a> Fleet<'a> {
     fn read_host(&self, host: &Host, now: u64) -> HostReport {
         let result = if host.is_local() {
             self.node().snapshot().map(|report| Cached {
+                service_lanes: report.service_lanes,
                 fetched_ms: now,
                 source: Vec::new(),
                 snapshot: report.snapshot,
@@ -728,6 +704,7 @@ impl<'a> Fleet<'a> {
             self.cached_peer(host, now)
         };
         let cached = result.unwrap_or_else(|e| Cached {
+            service_lanes: Vec::new(),
             fetched_ms: now,
             source: Vec::new(),
             snapshot: None,
@@ -786,6 +763,7 @@ impl<'a> Fleet<'a> {
             headroom
         });
         HostReport {
+            service_lanes: cached.service_lanes,
             host: host.clone(),
             service: if running { "up" } else { "down" }.into(),
             reachable: cached.reachable,
@@ -812,19 +790,19 @@ impl<'a> Fleet<'a> {
         if host.is_local() {
             return Ok(());
         }
-        let name = Self::peer_file(host);
-        self.ledger.with_lock(&name, || {
-            let file = format!("{name}.json");
-            if let Some(mut cached) = self.ledger.read::<Cached>(&file)? {
-                cached.retry.reset();
-                cached.fetched_ms = 0;
-                self.ledger.write(&file, &cached)?;
-            }
-            Ok(())
+        self.ledger.with_lock(&Self::peer_lock(host), || {
+            crate::store::write(self.ledger, |tx| {
+                if let Some(mut cached) = crate::host_store::peer_row(tx, &host.id)? {
+                    cached.retry.reset();
+                    cached.fetched_ms = 0;
+                    crate::host_store::put_peer_row(tx, &host.id, &cached)?;
+                }
+                Ok(())
+            })
         })
     }
 
-    fn peer_file(host: &Host) -> String {
+    fn peer_lock(host: &Host) -> String {
         // Hex encoding prevents host ids from becoming path components.
         let key = host
             .id
@@ -842,14 +820,11 @@ impl<'a> Fleet<'a> {
     }
 
     fn cached_peer(&self, host: &Host, now: u64) -> Result<Cached> {
-        let name = Self::peer_file(host);
-        let file = format!("{name}.json");
         let source = self.remote_argv(host, &["snapshot".into()]);
-        self.ledger.with_lock(&name, || {
-            let previous: Option<Cached> = self
-                .ledger
-                .read::<Cached>(&file)?
-                .filter(|c| c.source == source);
+        // Serialize the SSH process for this peer, never all host database writes.
+        self.ledger.with_lock(&Self::peer_lock(host), || {
+            let previous =
+                crate::host_store::peer(self.ledger, &host.id)?.filter(|c| c.source == source);
             if let Some(cached) = &previous
                 && now.saturating_sub(cached.fetched_ms) < CACHE_MS
             {
@@ -864,80 +839,47 @@ impl<'a> Fleet<'a> {
             let previous_holds = previous
                 .as_ref()
                 .map_or_else(Vec::new, |cached| cached.holds.clone());
-            let (
-                snapshot,
-                reachable,
-                available,
-                running,
-                handoffs,
-                holds,
-                error,
-                failure,
-                job_validity,
-            ) = match self.remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
+            let mut cached = match self
+                .remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
             {
-                Ok(Some(report)) => {
-                    let available = report.snapshot.is_some();
-                    (
-                        report
-                            .snapshot
-                            .or_else(|| previous.and_then(|c| c.snapshot)),
-                        true,
-                        available,
-                        report.running,
-                        report.handoffs,
-                        report.holds,
-                        None,
-                        None,
-                        report.job_validity,
-                    )
-                }
-                Ok(None) => (
-                    previous.and_then(|c| c.snapshot),
-                    true,
-                    false,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    Some("host.json is missing; service: down".into()),
-                    None,
-                    None,
-                ),
-                Err(e) => (
-                    previous.and_then(|c| c.snapshot),
-                    false,
-                    false,
-                    None,
-                    Vec::new(),
-                    previous_holds
+                Ok(Some(report)) => Cached {
+                    available: report.snapshot.is_some(),
+                    snapshot: report
+                        .snapshot
+                        .or_else(|| previous.and_then(|c| c.snapshot)),
+                    reachable: true,
+                    running: report.running,
+                    handoffs: report.handoffs,
+                    holds: report.holds,
+                    service_lanes: report.service_lanes,
+                    job_validity: report.job_validity,
+                    ..Cached::default()
+                },
+                Ok(None) => Cached {
+                    snapshot: previous.and_then(|c| c.snapshot),
+                    reachable: true,
+                    error: Some("host snapshot is missing; service: down".into()),
+                    ..Cached::default()
+                },
+                Err(e) => Cached {
+                    snapshot: previous.and_then(|c| c.snapshot),
+                    holds: previous_holds
                         .into_iter()
                         .map(crate::holds::Hold::unavailable)
                         .collect(),
-                    None,
-                    Some(Failure::of(&e)),
-                    None,
-                ),
+                    failure: Some(Failure::of(&e)),
+                    ..Cached::default()
+                },
             };
-            if reachable {
+            if cached.reachable {
                 retry.reset();
             } else {
                 retry.fail(now, &host.id);
             }
-            let cached = Cached {
-                fetched_ms: now,
-                source: source.clone(),
-                snapshot,
-                reachable,
-                available,
-                running,
-                handoffs,
-                holds,
-                error,
-                failure,
-                retry,
-                job_validity,
-            };
-            self.ledger.write(&file, &cached)?;
+            cached.fetched_ms = now;
+            cached.source.clone_from(&source);
+            cached.retry = retry;
+            crate::host_store::put_peer(self.ledger, &host.id, &cached)?;
             Ok(cached)
         })
     }
@@ -1332,10 +1274,8 @@ mod tests {
             let printed = serde_json::to_string(&report).unwrap();
             assert!(!printed.contains("EXAMPLE_SECRET"), "{printed}");
             assert!(!format!("{report:?}").contains("EXAMPLE_SECRET"));
-            let cache = std::fs::read_to_string(
-                ledger.dir.join(format!("{}.json", Fleet::peer_file(&host))),
-            )
-            .unwrap();
+            let cache = serde_json::to_string(&crate::host_store::peer(&ledger, &host.id).unwrap())
+                .unwrap();
             assert!(!cache.contains("EXAMPLE_SECRET"), "{cache}");
             std::fs::remove_dir_all(ledger.dir).unwrap();
         }
@@ -1469,34 +1409,19 @@ mod tests {
                 .unwrap_err()
                 .to_string()
         };
-        assert_eq!(
-            read(format!("{{\"error\":\"unknown base {SECRET}\"}}")),
-            "ssh peer: unknown base origin/x"
-        );
-        assert_eq!(
-            read("{\"error\":\"branch worker exists; omit --base\"}".to_owned(),),
-            "ssh peer: branch worker exists; omit --base"
-        );
-        assert_eq!(
-            read("{\"error\":\"branch exists; omit --base\"}".to_owned()),
-            "ssh peer: branch worker exists; omit --base"
-        );
-        assert_eq!(
-            read("{\"error\":\"requested base unavailable on this host\"}".to_owned()),
-            "ssh peer: unknown base origin/x"
-        );
-        assert_eq!(
-            read("{\"error\":\"workspace already open\"}".to_owned()),
-            "ssh peer: workspace already open"
-        );
-        assert_eq!(
-            read("{\"error\":\"Herdr workspace w8 already shows the checkout\"}".to_owned()),
-            "ssh peer: workspace occupied"
-        );
-        assert_eq!(
-            read("{\"error\":\"workspace path is occupied\"}".to_owned()),
-            "ssh peer: workspace occupied"
-        );
+        // Same-release peers must send an envelope. Never infer a cause from text.
+        for message in [
+            "unknown base origin/x",
+            "branch worker exists; omit --base",
+            "workspace already open",
+        ] {
+            let shown = read(serde_json::json!({"error":message}).to_string());
+            assert!(
+                shown.contains("peer supplied no diagnostic envelope"),
+                "{shown}"
+            );
+            assert!(!shown.contains("ssh peer"), "{shown}");
+        }
         // A peer's own text never reaches the error, and an unknown cause stays hidden.
         for stdout in [
             format!("{{\"error\":\"{SECRET}\"}}"),
@@ -1532,8 +1457,7 @@ mod tests {
             "snapshot": null, "reachable": false, "available": false,
             "error": format!("ssh peer: exit 255: {SECRET}")
         });
-        ledger
-            .write(&format!("{}.json", Fleet::peer_file(&host)), &old)
+        crate::host_store::put_peer(&ledger, &host.id, &serde_json::from_value(old).unwrap())
             .unwrap();
         let report = fleet.status(100).unwrap().remove(0);
         assert_eq!(report.condition(), "unreachable: other");

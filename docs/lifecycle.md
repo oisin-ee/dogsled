@@ -255,6 +255,10 @@ Cancellation records intent under the admission lock. Dispatch rechecks that int
 After admission, cancellation returns `status: "too_late"` with the saved result.
 Cancellation never stops a process.
 An unreachable host leaves release pending.
+The service retries a pending release after admission, outside the admission lock, at most 16 per pass.
+A cancellation with no saved preparation identity is held as `cancellation_held`. Its release stays pending.
+The service retries a held release only when its admission, preparation, or retirement records change.
+An acknowledged `retire-preparation` for the same request releases it with `release: "retired"`.
 A saved launch remains possibly executed until durable evidence proves otherwise.
 Only no-launch proof permits `not_started`.
 
@@ -262,7 +266,7 @@ Only no-launch proof permits `not_started`.
 After host acknowledgement, it reports `outcome: "unknown"`, `future_dispatch: "prohibited"`, and `ownership: "released"`.
 It also reports `task: "unresolved"`.
 Retirement never removes a checkout, kills a process, or settles a task.
-Claims without request IDs are unsupported.
+Every preparation claim names its request. Status reports a claim without a request ID as `unreadable`.
 
 For a separately authorized operator cleanup, the CLI accepts `--cleanup` with the required `--reason`.
 This override records the actor and authority for a historical claim without owner provenance.

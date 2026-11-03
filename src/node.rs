@@ -9,10 +9,10 @@ use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
 
 pub const STALE_MS: u64 = 30_000;
-/// Probe samples older than this are dropped from `samples.jsonl`.
+/// Probe samples older than this are dropped from the `samples` table.
 pub const SAMPLE_KEEP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-/// One line of `samples.jsonl`: what admission saw at each tick, so the
+/// One row of the `samples` table: what admission saw at each tick, so the
 /// thresholds can be re-scored on weeks of data instead of minutes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
@@ -30,6 +30,94 @@ pub struct Sample {
     pub eligible: bool,
 }
 
+pub(crate) const SAMPLES_SCHEMA: &str = r"CREATE TABLE samples (
+ ts_ms INTEGER NOT NULL CHECK (ts_ms >= 0),
+ cores INTEGER NOT NULL CHECK (cores >= 0),
+ busy REAL,
+ load1 REAL NOT NULL,
+ memory_used_bytes INTEGER NOT NULL CHECK (memory_used_bytes >= 0),
+ memory_total_bytes INTEGER NOT NULL CHECK (memory_total_bytes >= 0),
+ pressure_level INTEGER CHECK (pressure_level BETWEEN 0 AND 255),
+ disk_free_percent REAL NOT NULL,
+ reservations INTEGER NOT NULL CHECK (reservations >= 0),
+ live_agents INTEGER NOT NULL CHECK (live_agents >= 0),
+ free_cores REAL NOT NULL,
+ eligible INTEGER NOT NULL CHECK (eligible IN (0,1))
+) STRICT;
+CREATE INDEX samples_ts ON samples(ts_ms);
+";
+
+fn sql_count(value: impl TryInto<i64>) -> Result<i64> {
+    value
+        .try_into()
+        .map_err(|_| crate::error::Error::Invalid("sample value out of range".into()))
+}
+
+fn stored<T: TryFrom<i64>>(value: i64) -> rusqlite::Result<T> {
+    T::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
+}
+
+/// Append one sample and drop samples older than `keep_from_ms`.
+fn record_sample(ledger: &Ledger, sample: &Sample, keep_from_ms: u64) -> Result<()> {
+    let row = (
+        sql_count(sample.ts_ms)?,
+        sql_count(sample.cores)?,
+        sql_count(sample.memory_used_bytes)?,
+        sql_count(sample.memory_total_bytes)?,
+        sql_count(sample.reservations)?,
+        sql_count(sample.live_agents)?,
+    );
+    let keep_from = sql_count(keep_from_ms)?;
+    crate::store::write(ledger, |tx| {
+        tx.execute(
+            "INSERT INTO samples (ts_ms, cores, busy, load1, memory_used_bytes,
+             memory_total_bytes, pressure_level, disk_free_percent, reservations, live_agents,
+             free_cores, eligible) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                row.0,
+                row.1,
+                sample.busy,
+                sample.load1,
+                row.2,
+                row.3,
+                sample.pressure_level,
+                sample.disk_free_percent,
+                row.4,
+                row.5,
+                sample.free_cores,
+                sample.eligible,
+            ],
+        )?;
+        tx.execute("DELETE FROM samples WHERE ts_ms < ?1", [keep_from])?;
+        Ok(())
+    })
+}
+
+/// Every retained sample, oldest first.
+pub(crate) fn samples(ledger: &Ledger) -> Result<Vec<Sample>> {
+    crate::store::read(ledger, |tx| {
+        Ok(tx
+            .prepare("SELECT * FROM samples ORDER BY ts_ms, rowid")?
+            .query_map([], |row| {
+                Ok(Sample {
+                    ts_ms: stored(row.get("ts_ms")?)?,
+                    cores: stored(row.get("cores")?)?,
+                    busy: row.get("busy")?,
+                    load1: row.get("load1")?,
+                    memory_used_bytes: stored(row.get("memory_used_bytes")?)?,
+                    memory_total_bytes: stored(row.get("memory_total_bytes")?)?,
+                    pressure_level: row.get("pressure_level")?,
+                    disk_free_percent: row.get("disk_free_percent")?,
+                    reservations: stored(row.get("reservations")?)?,
+                    live_agents: stored(row.get("live_agents")?)?,
+                    free_cores: row.get("free_cores")?,
+                    eligible: row.get("eligible")?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub sampled_ms: u64,
@@ -41,6 +129,9 @@ pub struct Snapshot {
 /// Live host response. Snapshot fields stay at the top level for older readers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotReport {
+    /// Current failures, read from the host-owned typed lane table.
+    #[serde(default)]
+    pub service_lanes: Vec<crate::tables::ServiceLane>,
     #[serde(flatten)]
     pub snapshot: Option<Snapshot>,
     /// Absent on peers predating lock-based liveness.
@@ -108,18 +199,26 @@ pub struct GrantCompletion {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct GrantLifecycle {
-    proof: GrantCompletion,
-    finished_ms: Option<u64>,
+pub(crate) struct GrantLifecycle {
+    pub(crate) proof: GrantCompletion,
+    pub(crate) finished_ms: Option<u64>,
 }
 
 /// One complete origin expectation. Neither transport nor recovery may reconstruct it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementReservation {
     pub version: u32,
+    #[serde(deserialize_with = "placement_request")]
     pub request: serde_json::Value,
     pub host: crate::hosts::Host,
     pub reservation: String,
+}
+
+fn placement_request<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> std::result::Result<serde_json::Value, D::Error> {
+    let request = crate::work::Request::deserialize(decoder)?;
+    serde_json::to_value(request).map_err(serde::de::Error::custom)
 }
 
 impl PlacementReservation {
@@ -223,7 +322,8 @@ impl Node<'_> {
 
     pub fn snapshot(&self) -> Result<SnapshotReport> {
         Ok(SnapshotReport {
-            snapshot: self.ledger.read("host.json")?,
+            service_lanes: crate::store::read(self.ledger, crate::tables::failing_lanes)?,
+            snapshot: crate::host_store::snapshot(self.ledger)?,
             running: Some(self.ledger.locked("service")?),
             handoffs: crate::done::list(self.ledger)?,
             job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
@@ -242,7 +342,7 @@ impl Node<'_> {
     pub fn tick(&self, now: u64) -> Result<()> {
         let mut probe = observed_probe(self.ledger, self.shell, self.home)?;
         self.ledger.with_lock("host", || {
-            let previous: Option<Snapshot> = self.ledger.read("host.json")?;
+            let previous: Option<Snapshot> = crate::host_store::snapshot(self.ledger)?;
             crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);
             if probe.busy.is_none() {
                 probe.busy = busy_since(&probe, previous.as_ref().map(|s| &s.probe));
@@ -250,8 +350,8 @@ impl Node<'_> {
             probe.reservations = self.live_reservations(now)?;
             let headroom = evaluate(&probe, &self.thresholds);
             self.append_sample(&probe, &headroom, now)?;
-            self.ledger.write(
-                "host.json",
+            crate::host_store::put_snapshot(
+                self.ledger,
                 &Snapshot {
                     sampled_ms: now,
                     probe,
@@ -276,15 +376,14 @@ impl Node<'_> {
             free_cores: headroom.headroom,
             eligible: headroom.eligible,
         };
-        self.ledger
-            .append_line("samples.jsonl", &sample, now.saturating_sub(SAMPLE_KEEP_MS))
+        record_sample(self.ledger, &sample, now.saturating_sub(SAMPLE_KEEP_MS))
     }
 
     fn live_reservations(&self, now: u64) -> Result<Vec<Reservation>> {
         let reservations = self
             .ledger
             .reservations(now, self.thresholds.reservation_ttl_ms)?;
-        self.ledger.write("placements.json", &reservations)?;
+        crate::job_store::put_reservations(self.ledger, &reservations)?;
         Ok(reservations)
     }
 
@@ -292,14 +391,10 @@ impl Node<'_> {
     /// runs while capacity is locked, and a retired request cannot repair a delayed grant.
     pub fn grant_completion(&self, id: &str) -> Result<Option<u64>> {
         crate::jobs::validate_id(id)?;
-        let grants = self.ledger.child("placement-grants");
-        let Some(lifecycle) = grants.read::<GrantLifecycle>(&format!("{id}.lifecycle.json"))?
-        else {
+        let Some(lifecycle) = crate::preparation_store::lifecycles::get(self.ledger, id)? else {
             return Ok(None);
         };
-        if grants
-            .read::<PlacementGrant>(&format!("{id}.json"))?
-            .as_ref()
+        if crate::preparation_store::grants::get(self.ledger, id)?.as_ref()
             != Some(&lifecycle.proof.grant)
         {
             return Err(crate::unit_transport::conflict(
@@ -322,15 +417,13 @@ impl Node<'_> {
         crate::work::validate_placement_completion(proof)?;
         self.ledger.child("preparation-receipts").with_lock(id, || {
             self.ledger.with_lock("host", || {
-                let grants = self.ledger.child("placement-grants");
-                let saved = grants.read::<PlacementGrant>(&format!("{id}.json"))?;
+                let saved = crate::preparation_store::grants::get(self.ledger, id)?;
                 if saved.as_ref() != Some(&proof.grant) {
                     return Err(crate::unit_transport::conflict(
                         "grant completion identity changed",
                     ));
                 }
-                let file = format!("{id}.lifecycle.json");
-                if let Some(saved) = grants.read::<GrantLifecycle>(&file)? {
+                if let Some(saved) = crate::preparation_store::lifecycles::get(self.ledger, id)? {
                     if saved.proof != *proof || saved.finished_ms.is_none() {
                         return Err(crate::unit_transport::conflict(
                             "grant completion provenance changed",
@@ -340,8 +433,9 @@ impl Node<'_> {
                 } else {
                     let mut finished_ms = None;
                     crate::jobs::finish_once(self.ledger, &mut finished_ms, None)?;
-                    grants.write(
-                        &file,
+                    crate::preparation_store::lifecycles::put(
+                        self.ledger,
+                        id,
                         &GrantLifecycle {
                             proof: proof.clone(),
                             finished_ms,
@@ -374,11 +468,9 @@ impl Node<'_> {
         let envelope = &replay.envelope;
         let request: crate::work::Request = serde_json::from_value(envelope.request.clone())?;
         crate::work::check_request_validity(self.ledger, &request)?;
-        let grants = self.ledger.child("placement-grants");
-        let file = format!("{}.json", envelope.reservation);
-        let saved = grants.read::<PlacementGrant>(&file)?;
+        let saved = crate::preparation_store::grants::get(self.ledger, &envelope.reservation)?;
         validate_expected_grant(replay, saved.as_ref())?;
-        let raw: Vec<Reservation> = self.ledger.read("placements.json")?.unwrap_or_default();
+        let raw = crate::job_store::reservations(self.ledger)?;
         let mut grant = if let Some(grant) = saved {
             if grant.version != PLACEMENT_VERSION
                 || grant.envelope != *envelope
@@ -406,10 +498,7 @@ impl Node<'_> {
                 ));
             }
             let reservations = self.live_reservations(now)?;
-            let mut snapshot = self
-                .ledger
-                .read::<Snapshot>("host.json")?
-                .filter(|s| s.fresh(now));
+            let mut snapshot = crate::host_store::snapshot(self.ledger)?.filter(|s| s.fresh(now));
             let headroom = snapshot.as_mut().map(|s| {
                 s.probe.reservations = reservations;
                 evaluate(&s.probe, &self.thresholds)
@@ -437,7 +526,7 @@ impl Node<'_> {
                 headroom,
                 materialized: false,
             };
-            grants.write(&file, &grant)?;
+            crate::preparation_store::grants::put(self.ledger, &envelope.reservation, &grant)?;
             crate::unit_request::crash_point("placement-grant-intent");
             grant
         };
@@ -454,10 +543,10 @@ impl Node<'_> {
             {
                 holds.push(grant.reservation.clone());
             }
-            self.ledger.write("placements.json", &holds)?;
+            crate::job_store::put_reservations(self.ledger, &holds)?;
             crate::unit_request::crash_point("placement-hold-published");
             grant.materialized = true;
-            grants.write(&file, &grant)?;
+            crate::preparation_store::grants::put(self.ledger, &envelope.reservation, &grant)?;
         }
         Ok(ReserveOutcome {
             reserved: true,
@@ -474,19 +563,22 @@ impl Node<'_> {
         id: &str,
         now: u64,
         job_validity: Option<crate::jobs::Validity>,
-        nonjob: bool,
+        owner: &str,
+        owner_host: &str,
     ) -> Result<ReserveOutcome> {
         crate::jobs::validate_id(id)?;
+        if owner.is_empty() || owner_host.is_empty() {
+            return Err(crate::error::Error::Invalid(
+                "reservation requires owner and owner host".into(),
+            ));
+        }
         self.ledger.with_lock("host", || {
-            if nonjob {
-                crate::jobs::receive_request_validity(self.ledger, id, job_validity)?;
-            }
-            if self
-                .ledger
-                .child("placement-grants")
-                .read::<serde_json::Value>(&format!("{id}.json"))?
-                .is_some()
-            {
+            crate::jobs::reject_unstarted(self.ledger, id)?;
+            // Publish request authority before the hold, for jobs too: a later checkout or
+            // launch for this id matches it, and never sees a hold without authority.
+            crate::jobs::receive_request_validity(self.ledger, id, job_validity)?;
+            crate::job_store::remember_owner(self.ledger, id, owner, Some(owner_host))?;
+            if crate::preparation_store::grants::get(self.ledger, id)?.is_some() {
                 return Err(crate::unit_transport::conflict(
                     "placement reservation requires its replay envelope",
                 ));
@@ -505,10 +597,8 @@ impl Node<'_> {
                     placement: None,
                 });
             }
-            let Some(mut snapshot) = self
-                .ledger
-                .read::<Snapshot>("host.json")?
-                .filter(|s| s.fresh(now))
+            let Some(mut snapshot) =
+                crate::host_store::snapshot(self.ledger)?.filter(|s| s.fresh(now))
             else {
                 return Ok(ReserveOutcome {
                     reserved: false,
@@ -525,9 +615,8 @@ impl Node<'_> {
                     id: id.into(),
                     created_ms: now,
                 });
-                self.ledger
-                    .write("placements.json", &snapshot.probe.reservations)?;
-                self.ledger.write("host.json", &snapshot)?;
+                crate::job_store::put_reservations(self.ledger, &snapshot.probe.reservations)?;
+                crate::host_store::put_snapshot(self.ledger, &snapshot)?;
             }
             Ok(ReserveOutcome {
                 reserved: headroom.eligible,
@@ -542,12 +631,10 @@ impl Node<'_> {
 /// durable origin-terminal proof before forgetting a placement grant.
 pub(crate) fn expire_grant(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
     ledger.with_lock("host", || {
-        let grants = ledger.child("placement-grants");
-        let Some(grant) = grants.read::<PlacementGrant>(&format!("{id}.json"))? else {
+        let Some(grant) = crate::preparation_store::grants::get(ledger, id)? else {
             return Ok(true);
         };
-        let Some(lifecycle) = grants.read::<GrantLifecycle>(&format!("{id}.lifecycle.json"))?
-        else {
+        let Some(lifecycle) = crate::preparation_store::lifecycles::get(ledger, id)? else {
             return Ok(false);
         };
         if lifecycle.proof.grant != grant {
@@ -566,28 +653,15 @@ pub(crate) fn expire_grant(ledger: &Ledger, id: &str, now: u64) -> Result<bool> 
         {
             return Ok(false);
         }
-        crate::jobs::remove(&grants.dir.join(format!("{id}.json")))?;
-        crate::jobs::remove(&grants.dir.join(format!("{id}.lifecycle.json")))?;
+        crate::preparation_store::grants::remove(ledger, id)?;
+        crate::preparation_store::lifecycles::remove(ledger, id)?;
         Ok(true)
     })
 }
 
 pub(crate) fn expire_grants(ledger: &Ledger, now: u64) -> Result<()> {
-    let grants = ledger.child("placement-grants");
-    let entries = match std::fs::read_dir(&grants.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(id) = name.strip_suffix(".lifecycle.json") else {
-            continue;
-        };
-        if crate::jobs::validate_id(id).is_err() {
-            continue;
-        }
+    for id in crate::preparation_store::lifecycles::ids(ledger)? {
+        let id = id.as_str();
         let result = ledger.child("preparation-receipts").with_lock(id, || {
             if expire_grant(ledger, id, now)? {
                 crate::prepare::expire_record(ledger, id, now)?;
@@ -606,7 +680,7 @@ pub fn observed_probe(ledger: &Ledger, shell: &dyn Shell, home: &str) -> Result<
     let mut probe = probe::local(shell, home)?;
     // Transcript and Git reads stay outside the lock, so a reservation never waits on them.
     // Reading the last snapshot without the lock is safe: writes replace it atomically.
-    let last: Option<Snapshot> = ledger.read("host.json")?;
+    let last: Option<Snapshot> = crate::host_store::snapshot(ledger)?;
     crate::facts::observe(shell, &mut probe, last.as_ref().map(|s| &s.probe));
     // Publish launch progress before deriving states, including pending and contended launches.
     for agent in &mut probe.agent_panes {
@@ -642,6 +716,35 @@ mod tests {
         }
     }
 
+    fn sample(ts_ms: u64) -> Sample {
+        Sample {
+            ts_ms,
+            cores: 4,
+            busy: Some(0.25),
+            load1: 1.5,
+            memory_used_bytes: 3,
+            memory_total_bytes: 8,
+            pressure_level: Some(1),
+            disk_free_percent: 50.0,
+            reservations: 2,
+            live_agents: 1,
+            free_cores: 2.5,
+            eligible: true,
+        }
+    }
+
+    #[test]
+    fn samples_keep_a_bounded_window_of_typed_rows() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        for ts in [1_000, 2_000, 3_000] {
+            record_sample(&ledger, &sample(ts), 0).unwrap();
+        }
+        record_sample(&ledger, &sample(4_000), 2_000).unwrap();
+        let kept = samples(&ledger).unwrap();
+        assert_eq!(kept, [sample(2_000), sample(3_000), sample(4_000)]);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
     #[test]
     fn same_id_reservation_is_atomic_and_does_not_extend_or_duplicate_the_hold() {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
@@ -657,62 +760,46 @@ mod tests {
             home: "/",
             cleanup: &policy.cleanup,
         };
-        ledger
-            .write(
-                "host.json",
-                &Snapshot {
-                    sampled_ms: 100,
-                    probe: Probe {
-                        busy: Some(0.0),
-                        ..probe(None)
-                    },
-                    jobs: Vec::new(),
+        crate::host_store::put_snapshot(
+            &ledger,
+            &Snapshot {
+                sampled_ms: 100,
+                probe: Probe {
+                    busy: Some(0.0),
+                    ..probe(None)
                 },
-            )
-            .unwrap();
+                jobs: Vec::new(),
+            },
+        )
+        .unwrap();
+        // One request has one creation time; every replay carries the same stamp.
+        let validity = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         std::thread::scope(|scope| {
             let calls: Vec<_> = (0..4)
-                .map(|_| {
-                    scope.spawn(|| {
-                        node.reserve(
-                            "same",
-                            100,
-                            Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                            false,
-                        )
-                    })
-                })
+                .map(|_| scope.spawn(|| node.reserve("same", 100, validity, "w1:p1", "origin")))
                 .collect();
             for call in calls {
                 assert!(call.join().unwrap().unwrap().reserved);
             }
         });
-        let holds: Vec<Reservation> = ledger.read("placements.json").unwrap().unwrap();
+        let holds = crate::job_store::reservations(&ledger).unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].id, "same");
         assert_eq!(holds[0].created_ms, 100);
         // An existing hold is not new admission and does not need a fresh probe.
         assert!(
-            node.reserve(
-                "same",
-                100 + STALE_MS + 1,
-                Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                false
-            )
-            .unwrap()
-            .reserved
+            node.reserve("same", 100 + STALE_MS + 1, validity, "w1:p1", "origin")
+                .unwrap()
+                .reserved
         );
-        let holds: Vec<Reservation> = ledger.read("placements.json").unwrap().unwrap();
+        let holds = crate::job_store::reservations(&ledger).unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].created_ms, 100);
+        // Another request carries its own stamp.
+        let another = Some(crate::jobs::Validity::new(crate::ledger::now_ms()));
         assert!(
             !node
-                .reserve(
-                    "another",
-                    100 + STALE_MS + 1,
-                    Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                    false
-                )
+                .reserve("another", 100 + STALE_MS + 1, another, "w1:p1", "origin")
                 .unwrap()
                 .reserved
         );
@@ -721,8 +808,9 @@ mod tests {
                 .reserve(
                     "same",
                     100 + policy.reservation_ttl_ms,
-                    Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
-                    false
+                    validity,
+                    "w1:p1",
+                    "origin"
                 )
                 .unwrap()
                 .reserved

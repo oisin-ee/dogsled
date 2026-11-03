@@ -38,12 +38,12 @@ pub(super) fn interrupted_placement(boundary: &str) -> (Rig, PathBuf, String) {
         .find_map(|line| line.strip_prefix("placement request "))
         .unwrap()
         .to_owned();
-    assert!(rig.dir.join(format!("state/admissions/{id}.json")).exists());
+    assert!(rig.has_admission(&id));
     (rig, repo, id)
 }
 
 fn queue_interrupted(rig: &Rig, id: &str) {
-    let request = rig.read(&format!("state/admissions/{id}.json"))["request"].clone();
+    let request = rig.admission(id)["request"].clone();
     rig.put_tickets(&json!([{"id":"cancel-ticket","request":request,
         "created_ms":rig.origin_ms,"state":"pending","waiting":false,"notified":false,
         "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
@@ -55,29 +55,26 @@ fn cancellation_rejects_another_requests_saved_disposition() {
     let (rig, _, id) = interrupted_placement("placement-result-saved");
     let (other, _, other_id) = interrupted_placement("placement-result-saved");
     queue_interrupted(&rig, &id);
-    let file = format!("state/admissions/{id}.json");
-    let mut admission = rig.read(&file);
-    admission["placement"]["saved"]["disposition"] = other
-        .read(&format!("state/admissions/{other_id}.json"))["placement"]["saved"]["disposition"]
-        .clone();
-    rig.put(&file, &admission);
-    let claims = rig.read("state/preparations.json");
-    let other_claims = other.read("state/preparations.json");
+    let mut admission = rig.admission(&id);
+    admission["placement"]["saved"]["disposition"] =
+        other.admission(&other_id)["placement"]["saved"]["disposition"].clone();
+    rig.put_admission(&id, &admission);
+    let claims = rig.preparations();
+    let other_claims = other.preparation_record("state", "claims", "").read();
     assert_eq!(rig.json(&["cancel", "cancel-ticket"]).0, 2);
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read("state/preparations.json"), claims);
-    assert_eq!(other.read("state/preparations.json"), other_claims);
+    assert_eq!(rig.preparations(), claims);
+    assert_eq!(
+        other.preparation_record("state", "claims", "").read(),
+        other_claims
+    );
     assert!(
         rig.tickets()[0]["error"]
             .as_str()
             .unwrap()
             .contains("disposition")
     );
-    assert!(
-        !rig.dir
-            .join(format!("state/preparation-receipts/{id}.disposition.json"))
-            .exists()
-    );
+    assert!(!rig.preparation_record("state", "disposition", &id).exists());
     assert!(!rig.log("ssh.log").contains("host prepared"));
 }
 
@@ -102,10 +99,10 @@ fn cancellation_after_placement_result_saved_is_too_late() {
     assert_eq!(code, 2, "{cancelled}");
     assert_eq!(cancelled["status"], "too_late");
     assert_eq!(rig.tickets()[0]["state"], "pending");
-    let file = format!("state/admissions/{id}.json");
-    let result = rig.read(&file)["placement"]["saved"]["result"].clone();
+    let result = rig.admission(&id)["placement"]["saved"]["result"].clone();
     assert_eq!(
-        rig.read("state/preparations.json")
+        rig.preparation_record("state", "claims", "")
+            .read()
             .as_array()
             .unwrap()
             .len(),
@@ -113,22 +110,58 @@ fn cancellation_after_placement_result_saved_is_too_late() {
     );
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.tickets()[0]["state"], "admitted");
-    assert_eq!(rig.read("state/preparations.json"), json!([]));
-    assert_eq!(rig.read(&file)["placement"]["phase"], "completed");
-    let receipt_file = format!("state/preparation-receipts/{id}.disposition.json");
-    let receipt = rig.read(&receipt_file);
+    assert_eq!(rig.preparations(), json!([]));
+    assert_eq!(rig.admission(&id)["placement"]["phase"], "completed");
+    let receipt_file = rig.preparation_record("state", "disposition", &id);
+    let receipt = receipt_file.read();
     assert_eq!(receipt["progress"], "released");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(rig.read(&receipt_file), receipt);
+    assert_eq!(receipt_file.read(), receipt);
     assert_eq!(rig.json(&["place", "--resume", &id]), (0, result));
 }
 
+/// Every state file's bytes. The database counts by its rows: SQLite may checkpoint its
+/// WAL into `state.db` on any close, which changes bytes but no record.
 fn state_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    state_bytes_except(path, &[])
+}
+fn state_bytes_except(path: &Path, excluded_tables: &[&str]) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     for entry in fs::read_dir(path).unwrap() {
         let path = entry.unwrap().path();
-        if path.is_dir() {
-            files.extend(state_bytes(&path));
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "state.db-wal" || name == "state.db-shm" {
+            continue;
+        }
+        if name == "state.db" {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            let tables: Vec<String> = connection
+                .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            let mut rows = Vec::new();
+            for table in tables {
+                if excluded_tables.contains(&table.as_str()) {
+                    continue;
+                }
+                let mut statement = connection
+                    .prepare(&format!("SELECT * FROM \"{table}\""))
+                    .unwrap();
+                let width = statement.column_count();
+                let mut cursor = statement.query([]).unwrap();
+                while let Some(row) = cursor.next().unwrap() {
+                    let values: Vec<rusqlite::types::Value> =
+                        (0..width).map(|i| row.get(i).unwrap()).collect();
+                    rows.push(format!("{table}: {values:?}"));
+                }
+            }
+            rows.sort();
+            files.push((path, rows.join("\n").into_bytes()));
+        } else if path.is_dir() {
+            files.extend(state_bytes_except(&path, excluded_tables));
         } else {
             files.push((path.clone(), fs::read(path).unwrap()));
         }
@@ -139,29 +172,30 @@ fn state_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 fn lookup_fixture(case: &str) -> (Rig, String, Value) {
     let (rig, _, id) = interrupted_placement("placement-preparation-received");
-    let admission = rig.read(&format!("state/admissions/{id}.json"));
+    let admission = rig.admission(&id);
     let grant = saved_grant(&admission);
     let mut transport = grant["envelope"].clone();
     transport["expected_grant"] = grant;
     let mut query = json!({"version":1,"placement":transport,
         "preparation":admission["placement"]["preparation"],"binding":null});
-    let file = format!("state/preparation-receipts/{id}.json");
-    let mut receipt = rig.read(&file);
+    let file = rig.preparation_record("state", "receipt", &id);
+    let mut receipt = file.read();
     match case {
         "absent" => {
-            fs::remove_file(rig.dir.join(&file)).unwrap();
-            rig.put("state/preparations.json", &json!([]));
+            file.delete();
+            rig.preparation_record("state", "claims", "")
+                .put(&json!([]));
         }
         "incomplete" => {
             receipt["prepared"] = Value::Null;
             receipt["binding"] = Value::Null;
-            rig.put(&file, &receipt);
+            file.put(&receipt);
         }
         "failed" => {
             receipt["prepared"] = Value::Null;
             receipt["binding"]["prepared"] = Value::Null;
             receipt["failure"] = json!({"operation":"prepare","kind":"other","request_id":id,"detail_withheld":true});
-            rig.put(&file, &receipt);
+            file.put(&receipt);
         }
         "disposition" => {
             let input = rig.disposition_request(&id);
@@ -169,9 +203,18 @@ fn lookup_fixture(case: &str) -> (Rig, String, Value) {
         }
         "unsupported" => {
             receipt["version"] = json!(99);
-            rig.put(&file, &receipt);
+            file.put(&receipt);
         }
-        "corrupt" => fs::write(rig.dir.join(&file), "{broken").unwrap(),
+        "corrupt" => {
+            let before = file.read();
+            assert!(
+                !rig.put_preparation_refused("state", "receipt", &id, &json!("{broken"))
+                    .status
+                    .success()
+            );
+            assert_eq!(file.read(), before);
+            rig.state(&["fault", "preparations"]);
+        }
         "mismatch" => {
             query["binding"] = receipt["binding"].clone();
             query["binding"]["claim"]["tree"]["head"] = json!("changed");
@@ -187,7 +230,7 @@ fn assert_nonplacement_lookup(case: &str, state: &str, outcome: Option<&str>) {
     request["action"] = json!({"type":"agent","kind":"pi","name":"lookup","message":"read only"});
     let query = json!({"version":1,"request":request,
         "host":placement["placement"]["host"],"preparation":placement["preparation"],"binding":placement["binding"]});
-    fs::remove_file(rig.dir.join(format!("state/placement-grants/{id}.json"))).unwrap();
+    rig.preparation_record("state", "grant", &id).delete();
     let before = state_bytes(&rig.dir.join("state"));
     let (code, reply) = rig.json(&[
         "host",
@@ -291,7 +334,7 @@ fn queued_placement_accepts_symlinked_repository_root() {
             "id":"alias-ticket","request":{"id":"alias-request","validity":request_authority(&rig,"alias-request"),"action":{"type":"place"},
                 "host":"local","branch":"alias-branch","base":"main","cwd":aliased_repo,
                 "repository":{"path":aliased_repo,"origin":"https://example.invalid/repo.git","relative":"repo space","working_root":aliased_repo},
-                "workspace":null,"workspace_name":null,"owner":"w1:p1"},
+                "workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":"local"},
             "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
             "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
         }]),
@@ -326,15 +369,11 @@ fn cancellation_basis_refuses_invalid_operation_or_request_without_releasing_cla
             "another-request"
         });
         intent["policy"] = json!({"kind":"prohibit","basis":{"cancelled":basis}});
-        let claims = rig.read("state/preparations.json");
+        let claims = rig.preparations();
         let (code, _) = rig.json(&["host", "prepared", "--input", &intent.to_string()]);
         assert_eq!(code, 2);
-        assert_eq!(rig.read("state/preparations.json"), claims);
-        assert!(
-            !rig.dir
-                .join(format!("state/preparation-receipts/{id}.disposition.json"))
-                .exists()
-        );
+        assert_eq!(rig.preparations(), claims);
+        assert!(!rig.preparation_record("state", "disposition", &id).exists());
     }
 }
 
@@ -376,7 +415,7 @@ fn preparation_lookup_rejects_mismatched_binding() {
             "host" => query["placement"]["host"]["target"] = json!("changed-target"),
             _ => {
                 query["binding"] =
-                    rig.read(&format!("state/preparation-receipts/{id}.json"))["binding"].clone();
+                    rig.preparation_record("state", "receipt", &id).read()["binding"].clone();
                 query["binding"]["claim"]["request_id"] = json!("foreign");
             }
         }
@@ -481,17 +520,16 @@ fn lost_placement_reply(marker: &str) {
     ]);
     assert_eq!(code, 1, "{first}");
     let id = first["request_id"].as_str().unwrap();
-    let original = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
-    let grant = rig.read(&format!("peer-state/placement-grants/{id}.json"));
-    let saved = rig.read(&format!("state/admissions/{id}.json"));
+    let original = rig.preparation_record("peer-state", "receipt", id).read();
+    let grant = rig.preparation_record("peer-state", "grant", id).read();
+    let saved = rig.admission(id);
     let result = if marker == "lose-release" {
         assert_eq!(first["status"], "pending_release");
         assert_eq!(saved["placement"]["phase"], "result_saved");
         assert_eq!(saved["placement"]["saved"]["result"], first["result"]);
         assert_eq!(
-            rig.read(&format!(
-                "peer-state/preparation-receipts/{id}.disposition.json"
-            ))["progress"],
+            rig.preparation_record("peer-state", "disposition", id)
+                .read()["progress"],
             "released"
         );
         Some(first["result"].clone())
@@ -510,11 +548,11 @@ fn lost_placement_reply(marker: &str) {
         assert_eq!(resumed, result);
     }
     assert_eq!(
-        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        outcome_identity(rig.preparation_record("peer-state", "receipt", id).read()),
         outcome_identity(original)
     );
     assert_eq!(
-        rig.read(&format!("peer-state/placement-grants/{id}.json")),
+        rig.preparation_record("peer-state", "grant", id).read(),
         grant
     );
     let log = rig.log("ssh.log");
@@ -530,7 +568,10 @@ fn lost_placement_reply(marker: &str) {
     let before = rig.log("ssh.log");
     assert_eq!(rig.json(&["place", "--resume", id]), (0, resumed));
     assert_eq!(rig.log("ssh.log"), before);
-    assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
+    assert_eq!(
+        rig.preparation_record("peer-state", "claims", "").read(),
+        json!([])
+    );
 }
 
 #[test]
@@ -552,22 +593,18 @@ fn review_verified_absent_preparation_resends_original_delivery() {
     ]);
     assert_eq!(code, 1, "{first}");
     let id = first["request_id"].as_str().unwrap();
-    assert!(
-        !rig.dir
-            .join(format!("peer-state/preparation-receipts/{id}.json"))
-            .exists()
-    );
-    let original = rig.read(&format!("state/admissions/{id}.json"));
-    let grant = rig.read(&format!("peer-state/placement-grants/{id}.json"));
+    assert!(!rig.preparation_record("peer-state", "receipt", id).exists());
+    let original = rig.admission(id);
+    let grant = rig.preparation_record("peer-state", "grant", id).read();
     let (code, resumed) = rig.json(&["place", "--resume", id]);
     assert_eq!(code, 0, "{resumed}");
     assert_eq!(resumed["request_id"], id);
     assert_eq!(
-        rig.read(&format!("peer-state/placement-grants/{id}.json")),
+        rig.preparation_record("peer-state", "grant", id).read(),
         grant
     );
     assert_eq!(
-        rig.read(&format!("state/admissions/{id}.json"))["placement"]["saved"]["prepared"]["preparation"],
+        rig.admission(id)["placement"]["saved"]["prepared"]["preparation"],
         original["placement"]["preparation"]
     );
     assert_eq!(rig.log("setup.log").lines().count(), 1);
@@ -609,23 +646,23 @@ fn review_failed_preparation_finishes_matching_failure_disposition() {
         .lines()
         .find_map(|line| line.strip_prefix("placement request "))
         .unwrap();
-    let original = rig.read(&format!("state/preparation-receipts/{id}.json"));
+    let original = rig.preparation_record("state", "receipt", id).read();
     assert!(original["failure"].is_object());
-    assert_eq!(rig.read("state/preparations.json")[0]["request_id"], id);
+    assert_eq!(rig.preparations()[0]["request_id"], id);
     let other = json!({"request_id":"other","path":"/other","repo":"/other","branch":"other","head":"other"});
-    let mut held = rig.read("state/preparations.json");
+    let mut held = rig.preparations();
     held.as_array_mut().unwrap().push(other.clone());
-    rig.put("state/preparations.json", &held);
+    rig.preparation_record("state", "claims", "").put(&held);
     let before = rig.log("setup.log");
     let (code, failure) = rig.json(&["place", "--resume", id]);
     assert_eq!(code, 2, "{failure}");
-    assert_eq!(rig.read("state/preparations.json"), json!([other.clone()]));
+    assert_eq!(rig.preparations(), json!([other.clone()]));
     assert_eq!(failure["request_id"], id);
     assert_eq!(
         failure["diagnostic"]["cause"],
         original["failure"]["diagnostic"]["cause"]
     );
-    let disposition = rig.read(&format!("state/preparation-receipts/{id}.disposition.json"));
+    let disposition = rig.preparation_record("state", "disposition", id).read();
     assert_eq!(disposition["request"]["binding"], original["binding"]);
     assert_eq!(
         disposition["request"]["policy"]["basis"],
@@ -633,16 +670,16 @@ fn review_failed_preparation_finishes_matching_failure_disposition() {
     );
     assert_eq!(disposition["progress"], "released");
     assert_eq!(
-        outcome_identity(rig.read(&format!("state/preparation-receipts/{id}.json"))),
+        outcome_identity(rig.preparation_record("state", "receipt", id).read()),
         outcome_identity(original)
     );
     assert_eq!(rig.json(&["place", "--resume", id]), (2, failure));
     assert_eq!(
-        rig.read(&format!("state/preparation-receipts/{id}.disposition.json")),
+        rig.preparation_record("state", "disposition", id).read(),
         disposition
     );
     assert_eq!(rig.log("setup.log"), before);
-    assert_eq!(rig.read("state/preparations.json"), json!([other]));
+    assert_eq!(rig.preparations(), json!([other]));
 }
 
 #[test]
@@ -670,8 +707,8 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
     ]);
     assert_eq!(code, 1, "{first}");
     let id = first["request_id"].as_str().unwrap();
-    let original = rig.read(&format!("peer-state/preparation-receipts/{id}.json"));
-    let grant = rig.read(&format!("peer-state/placement-grants/{id}.json"));
+    let original = rig.preparation_record("peer-state", "receipt", id).read();
+    let grant = rig.preparation_record("peer-state", "grant", id).read();
     let (code, resumed) = rig.json(&["place", "--resume", id]);
     assert_eq!(code, 0, "{resumed}");
     assert_eq!(resumed["path"], original["prepared"]["path"]);
@@ -681,11 +718,11 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
     assert_eq!(rig.log("ssh.log").matches("host reserve ").count(), 1);
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
     assert_eq!(
-        outcome_identity(rig.read(&format!("peer-state/preparation-receipts/{id}.json"))),
+        outcome_identity(rig.preparation_record("peer-state", "receipt", id).read()),
         outcome_identity(original)
     );
     assert_eq!(
-        rig.read(&format!("peer-state/placement-grants/{id}.json")),
+        rig.preparation_record("peer-state", "grant", id).read(),
         grant
     );
 }
@@ -704,8 +741,8 @@ fn concurrent_cli_resume_and_service_replay_once() {
     use std::io::Write as _;
     let (rig, _, id) = interrupted_placement("placement-preparation-received");
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
-    let original = rig.read(&format!("state/admissions/{id}.json"));
-    let grant = rig.read(&format!("state/placement-grants/{id}.json"));
+    let original = rig.admission(&id);
+    let grant = rig.preparation_record("state", "grant", &id).read();
     rig.put_tickets(&json!([{"id":"resume-ticket","request":original["request"],
         "created_ms":rig.origin_ms,"state":"pending","waiting":false,"notified":false,
         "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
@@ -744,7 +781,7 @@ fn concurrent_cli_resume_and_service_replay_once() {
     for fifo in &ready {
         read_fifo(fifo.path(), "placement contender before admission");
     }
-    assert_eq!(rig.read(&format!("state/admissions/{id}.json")), original);
+    assert_eq!(rig.admission(&id), original);
     for fifo in &mut go_holds {
         fifo.write_all(b"go\n").unwrap();
     }
@@ -757,19 +794,10 @@ fn concurrent_cli_resume_and_service_replay_once() {
     assert_eq!(queue.as_array().unwrap().len(), 1);
     assert_eq!(queue[0]["state"], "admitted", "{queue}");
     assert_eq!(queue[0]["result"], returned);
-    assert_eq!(
-        rig.read(&format!("state/admissions/{id}.json"))["placement"]["saved"]["result"],
-        returned
-    );
-    assert_eq!(
-        rig.read(&format!("state/placement-grants/{id}.json")),
-        grant
-    );
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
-    assert_eq!(rig.read("state/preparations.json"), json!([]));
+    assert_eq!(rig.admission(&id)["placement"]["saved"]["result"], returned);
+    assert_eq!(rig.preparation_record("state", "grant", &id).read(), grant);
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
+    assert_eq!(rig.preparations(), json!([]));
     assert_eq!(rig.log("setup.log").lines().count(), 1);
     assert_eq!(rig.log("herdr.log").matches("worktree open").count(), 1);
 }
@@ -777,37 +805,28 @@ fn concurrent_cli_resume_and_service_replay_once() {
 #[test]
 fn branchless_completed_resume_skips_repository_capacity_and_preparation() {
     let rig = Rig::short("branchless-resume");
-    rig.snapshot("state/host.json", rig.origin_ms, 0.0, 8);
+    rig.snapshot("state", rig.origin_ms, 0.0, 8);
     let (code, placed) = rig.json(&["place", "--host", "local"]);
     assert_eq!(code, 0, "{placed}");
     assert!(placed["path"].is_null());
     assert!(placed["pane_id"].is_null());
     let id = placed["request_id"].as_str().unwrap();
-    let before = state_bytes(&rig.dir.join("state"));
+    let excluded_tables = [
+        "host_snapshot",
+        "host_snapshot_probe_agents_by_status",
+        "host_snapshot_probe_agent_panes",
+        "host_snapshot_probe_reservations",
+        "host_snapshot_probe_panes",
+        "host_snapshot_jobs",
+    ];
+    let before = state_bytes_except(&rig.dir.join("state"), &excluded_tables);
     rig.script("git", "#!/bin/sh\necho must-not-discover >&2\nexit 3\n");
-    rig.snapshot("state/host.json", rig.origin_ms, 1000.0, 1);
+    rig.snapshot("state", rig.origin_ms, 1000.0, 1);
     let out = rig.json(&["place", "--resume", id]);
     assert_eq!(out, (0, placed.clone()));
-    let after = state_bytes(&rig.dir.join("state"));
-    assert_eq!(
-        before
-            .into_iter()
-            .filter(|(p, _)| !p.ends_with("host.json"))
-            .collect::<Vec<_>>(),
-        after
-            .into_iter()
-            .filter(|(p, _)| !p.ends_with("host.json"))
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        !fs::read_dir(rig.dir.join("state/preparation-receipts"))
-            .unwrap()
-            .any(|entry| entry
-                .unwrap()
-                .path()
-                .extension()
-                .is_some_and(|e| e == "json"))
-    );
+    let after = state_bytes_except(&rig.dir.join("state"), &excluded_tables);
+    assert_eq!(before, after);
+    assert_eq!(rig.state(&["preparation", "receipt"]), json!([]));
     assert!(!rig.log("herdr.log").contains("worktree open"));
 }
 
@@ -829,24 +848,23 @@ fn resume_refuses_unknown_or_changed_requests_without_effects() {
         match case {
             "unknown" => resume_id = "unknown-placement".into(),
             "action" => {
-                let file = format!("state/admissions/{id}.json");
-                let mut saved = rig.read(&file);
+                let mut saved = rig.admission(&id);
                 saved["request"]["action"] =
                     json!({"type":"job","cmd":["true"],"timeout_ms":null,"idle_timeout_ms":null});
-                rig.put(&file, &saved);
+                rig.put_admission(&id, &saved);
             }
             "claim" => {
-                let file = format!("state/preparation-receipts/{id}.json");
-                let mut saved = rig.read(&file);
+                let file = rig.preparation_record("state", "receipt", &id);
+                let mut saved = file.read();
                 saved["binding"]["claim"]["request_id"] = json!("foreign");
-                rig.put(&file, &saved);
+                file.put(&saved);
             }
             "incomplete" => {
-                let file = format!("state/preparation-receipts/{id}.json");
-                let mut saved = rig.read(&file);
+                let file = rig.preparation_record("state", "receipt", &id);
+                let mut saved = file.read();
                 saved["prepared"] = Value::Null;
                 saved["binding"] = Value::Null;
-                rig.put(&file, &saved);
+                file.put(&saved);
             }
             _ => {}
         }
@@ -896,8 +914,8 @@ esac
             .contains("deadline reached"),
         "{error}"
     );
-    assert!(!rig.dir.join("state/placement-grants").exists());
-    assert!(!rig.dir.join("state/placements.json").exists());
+    assert_eq!(rig.state(&["preparation", "grant"]), json!([]));
+    assert_eq!(rig.reservations(), json!([]));
     let log = rig.log("ssh.log");
     assert!(!log.contains("host reserve"), "{log}");
     assert!(!log.contains("host prepare"), "{log}");
@@ -905,9 +923,8 @@ esac
 }
 
 fn request_authority(rig: &Rig, id: &str) -> Value {
-    fs::create_dir_all(rig.dir.join("state/job-validity")).unwrap();
     let stamp = json!({"version":1,"created_ms":rig.now_ms()});
-    rig.put(&format!("state/job-validity/{id}.json"), &stamp);
+    rig.put_validity(id, &stamp);
     stamp
 }
 
@@ -932,7 +949,7 @@ fn reserve_delivery(rig: &Rig, envelope: &Value) -> (i32, Value) {
 pub(super) fn real_reservation_peer(rig: &Rig, pause: bool) {
     rig.peer();
     fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
-    rig.snapshot("peer-state/host.json", rig.origin_ms, 0.0, 16);
+    rig.snapshot("peer-state", rig.origin_ms, 0.0, 16);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     let barrier = if pause {
         "printf 'reserve\\n' > \"$RIG/reserve.ready\"; read go < \"$RIG/reserve.go\""
@@ -970,17 +987,13 @@ fn placement_request_is_recorded_before_reservation() {
     let mut release = go.hold();
     let mut child = rig.start(&["place", "--host", "netcup"]);
     assert!(read_fifo_within(ready.path(), "reserve ingress", PROCESS_DEADLINE).is_some());
-    let files: Vec<_> = fs::read_dir(rig.dir.join("state/admissions"))
-        .unwrap()
-        .map(|f| f.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
+    let files = rig.admissions().as_array().unwrap().clone();
     assert_eq!(
         files.len(),
         1,
         "complete admission must precede reservation"
     );
-    let attempt: Value = serde_json::from_slice(&fs::read(&files[0]).unwrap()).unwrap();
+    let attempt = files[0].clone();
     assert_eq!(attempt["request"]["action"]["type"], "place");
     assert_eq!(attempt["placement"]["phase"], "selection_pending");
     assert_eq!(
@@ -1007,14 +1020,14 @@ fn lost_reply_replay(after_ttl: bool) {
     assert_eq!(code, 1, "{queued}");
     let ticket = rig.tickets()[0].clone();
     let id = ticket["request"]["id"].as_str().unwrap();
-    let grant_path = format!("peer-state/placement-grants/{id}.json");
-    let original = rig.read(&grant_path);
-    let hold = rig.read("peer-state/placements.json");
+    let grant_path = rig.preparation_record("peer-state", "grant", id);
+    let original = grant_path.read();
+    let hold = rig.peer_state(&["reservations"]);
     assert_eq!(original["reservation"], hold[0]);
     let retry = ticket["retry"]["next_ms"].as_u64().unwrap();
     let later = if after_ttl { retry + 100_000 } else { retry };
     fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
-    rig.snapshot("peer-state/host.json", later, 1000.0, 16);
+    rig.snapshot("peer-state", later, 1000.0, 16);
     let output = rig.run(&["serve", "--once"]);
     assert!(
         output.status.success(),
@@ -1023,8 +1036,8 @@ fn lost_reply_replay(after_ttl: bool) {
     );
     let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
-    assert_eq!(rig.read(&grant_path), original);
-    let holds = rig.read("peer-state/placements.json");
+    assert_eq!(grant_path.read(), original);
+    let holds = rig.peer_state(&["reservations"]);
     if after_ttl {
         assert_eq!(holds, json!([]));
     } else {
@@ -1067,12 +1080,12 @@ fn acknowledged_remote_placement(name: &str) -> (Rig, String) {
         .as_str()
         .unwrap()
         .to_owned();
-    let attempt = rig.read(&format!("state/admissions/{id}.json"));
+    let attempt = rig.admission(&id);
     assert_eq!(attempt["placement"]["phase"], "preparation_pending");
     assert_eq!(attempt["placement"]["preparation"]["request_id"], id);
     assert_eq!(
         attempt["placement"]["grant"],
-        rig.read(&format!("peer-state/placement-grants/{id}.json"))
+        rig.preparation_record("peer-state", "grant", &id).read()
     );
     (rig, id)
 }
@@ -1080,21 +1093,18 @@ fn acknowledged_remote_placement(name: &str) -> (Rig, String) {
 #[test]
 fn acknowledged_placement_grant_replays_after_real_ttl_without_readmission() {
     let (rig, id) = acknowledged_remote_placement("placement-ack-ttl");
-    let grant_path = format!("peer-state/placement-grants/{id}.json");
-    let grant = rig.read(&grant_path);
-    let original_hold = rig.read("peer-state/placements.json");
+    let grant_path = rig.preparation_record("peer-state", "grant", &id);
+    let grant = grant_path.read();
+    let original_hold = rig.peer_state(&["reservations"]);
     let later = original_hold[0]["created_ms"].as_u64().unwrap() + 100_000;
     fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
-    rig.snapshot("peer-state/host.json", later, 1000.0, 16);
+    rig.snapshot("peer-state", later, 1000.0, 16);
     assert!(rig.run(&["serve", "--once"]).status.success());
     let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
-    assert_eq!(rig.read(&grant_path), grant);
-    assert_eq!(
-        saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
-        grant
-    );
-    assert_eq!(rig.read("peer-state/placements.json"), original_hold);
+    assert_eq!(grant_path.read(), grant);
+    assert_eq!(saved_grant(&rig.admission(&id)), grant);
+    assert_eq!(rig.peer_state(&["reservations"]), original_hold);
     let log = rig.log("ssh.log");
     assert_eq!(log.matches("host reserve").count(), 1, "{log}");
     assert_eq!(log.matches("host prepare ").count(), 1, "{log}");
@@ -1104,14 +1114,14 @@ fn acknowledged_placement_grant_replays_after_real_ttl_without_readmission() {
 #[test]
 fn acknowledged_placement_missing_grant_never_allocates_after_ttl() {
     let (rig, id) = acknowledged_remote_placement("placement-missing-grant");
-    let grant_path = format!("peer-state/placement-grants/{id}.json");
-    let grant = rig.read(&grant_path);
+    let grant_path = rig.preparation_record("peer-state", "grant", &id);
+    let grant = grant_path.read();
     let later = grant["reservation"]["created_ms"].as_u64().unwrap() + 100_000;
     fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
-    rig.snapshot("peer-state/host.json", later, 0.0, 16);
-    rig.put("peer-state/placements.json", &json!([]));
-    fs::remove_file(rig.dir.join(&grant_path)).unwrap();
-    let before = rig.read("peer-state/placements.json");
+    rig.snapshot("peer-state", later, 0.0, 16);
+    rig.put_peer_state(&["reservations", "--put"], &json!([]));
+    grant_path.delete();
+    let before = rig.peer_state(&["reservations"]);
     assert!(rig.run(&["serve", "--once"]).status.success());
     let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "failed", "{ticket}");
@@ -1120,12 +1130,9 @@ fn acknowledged_placement_missing_grant_never_allocates_after_ttl() {
         "{ticket}"
     );
     assert_eq!(rig.log("ssh.log").matches("host reserve").count(), 1);
-    assert!(!rig.dir.join(&grant_path).exists());
-    assert_eq!(rig.read("peer-state/placements.json"), before);
-    assert_eq!(
-        saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
-        grant
-    );
+    assert!(!grant_path.exists());
+    assert_eq!(rig.peer_state(&["reservations"]), before);
+    assert_eq!(saved_grant(&rig.admission(&id)), grant);
     let log = rig.log("ssh.log");
     assert_eq!(log.matches("host checkout").count(), 1, "{log}");
     assert!(!log.contains("host prepare "), "{log}");
@@ -1134,7 +1141,7 @@ fn acknowledged_placement_missing_grant_never_allocates_after_ttl() {
 #[test]
 fn queued_preparation_pending_recovers_the_acknowledged_grant() {
     let (rig, id) = acknowledged_remote_placement("placement-selected-recovery");
-    let grant = rig.read(&format!("peer-state/placement-grants/{id}.json"));
+    let grant = rig.preparation_record("peer-state", "grant", &id).read();
     let mut queue = rig.tickets();
     queue[0]["state"] = json!("admitting");
     let next = queue[0]["retry"]["next_ms"].as_u64().unwrap();
@@ -1146,10 +1153,7 @@ fn queued_preparation_pending_recovers_the_acknowledged_grant() {
     assert!(rig.run(&["serve", "--once"]).status.success());
     let ticket = rig.tickets()[0].clone();
     assert_eq!(ticket["state"], "admitted", "{ticket}");
-    assert_eq!(
-        saved_grant(&rig.read(&format!("state/admissions/{id}.json"))),
-        grant
-    );
+    assert_eq!(saved_grant(&rig.admission(&id)), grant);
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
 }
 
@@ -1179,20 +1183,16 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.tickets()[0]["state"], "admitted");
-    assert!(
-        !rig.dir
-            .join(format!("state/cancellations/{id}.json"))
-            .exists()
-    );
+    assert!(rig.cancellation(id).is_null());
     assert_eq!(
-        rig.read(&format!("state/admissions/{id}.json"))["placement"]["saved"]["result"],
+        rig.admission(id)["placement"]["saved"]["result"],
         result["result"]
     );
-    assert_eq!(rig.read("peer-state/preparations.json"), json!([]));
     assert_eq!(
-        rig.read(&format!("state/admissions/{id}.json"))["placement"]["phase"],
-        "completed"
+        rig.preparation_record("peer-state", "claims", "").read(),
+        json!([])
     );
+    assert_eq!(rig.admission(id)["placement"]["phase"], "completed");
     assert_eq!(rig.log("ssh.log").matches("host prepared ").count(), 2);
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
 }
@@ -1201,7 +1201,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
 fn result_is_durable_before_host_release() {
     let (rig, repo) = place_rig("result-before-release");
     let request = json!({"id":"durable-placement","validity":request_authority(&rig,"durable-placement"),"action":{"type":"place"},"host":"local",
-        "branch":"durable","base":"main","cwd":repo,"owner":"w1:p1",
+        "branch":"durable","base":"main","cwd":repo,"owner":"w1:p1","owner_host":"local",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
     rig.put_tickets(&json!([{"id":"durable-ticket","request":request,
@@ -1214,7 +1214,7 @@ fn result_is_durable_before_host_release() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(86), "{out:?}");
-    let saved = rig.read("state/admissions/durable-placement.json");
+    let saved = rig.admission("durable-placement");
     let result = &saved["placement"]["saved"]["result"];
     assert!(
         result.is_object(),
@@ -1222,17 +1222,17 @@ fn result_is_durable_before_host_release() {
     );
     assert_eq!(result["request_id"], "durable-placement");
     assert_eq!(result["reservation"], "durable-placement");
-    let receipt = rig.read("state/preparation-receipts/durable-placement.json");
+    let receipt = rig
+        .preparation_record("state", "receipt", "durable-placement")
+        .read();
     assert_eq!(result["path"], receipt["prepared"]["path"]);
     assert_eq!(result["pane_id"], receipt["prepared"]["pane_id"]);
     assert_eq!(
-        rig.read("state/preparation-receipts/durable-placement.disposition.json")["progress"],
+        rig.preparation_record("state", "disposition", "durable-placement")
+            .read()["progress"],
         "fenced"
     );
-    assert_eq!(
-        rig.read("state/preparations.json")[0]["request_id"],
-        "durable-placement"
-    );
+    assert_eq!(rig.preparations()[0]["request_id"], "durable-placement");
 }
 
 #[test]
@@ -1250,7 +1250,7 @@ fn placement_crash_boundaries_replay_one_result() {
     ] {
         let (rig, repo) = place_rig(boundary);
         let request = json!({"id":"queued-placement", "validity":request_authority(&rig,"queued-placement"), "action":{"type":"place"}, "host":"local",
-        "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1",
+        "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1","owner_host":"local",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
             "origin":"https://example.invalid/repo.git"}});
         rig.put_tickets(&json!([{"id":"placement-ticket", "request":request,
@@ -1281,23 +1281,26 @@ fn placement_crash_boundaries_replay_one_result() {
         assert_eq!(rig.tickets()[0]["state"], "admitting");
         let receipt = if boundary == "placement-host-selected" {
             assert!(
-                !rig.dir
-                    .join("state/preparation-receipts/queued-placement.json")
+                !rig.preparation_record("state", "receipt", "queued-placement")
                     .exists()
             );
             assert!(!rig.dir.join("setup.log").exists());
             None
         } else {
-            let receipt = rig.read("state/preparation-receipts/queued-placement.json");
+            let receipt = rig
+                .preparation_record("state", "receipt", "queued-placement")
+                .read();
             assert!(!receipt["prepared"].is_null());
             assert_eq!(rig.log("setup.log").lines().count(), 1);
             Some(receipt)
         };
-        let grant = rig.read("state/placement-grants/queued-placement.json");
+        let grant = rig
+            .preparation_record("state", "grant", "queued-placement")
+            .read();
         assert!(rig.run(&["serve", "--once"]).status.success());
         let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["state"], "admitted", "{ticket}");
-        let final_attempt = rig.read("state/admissions/queued-placement.json");
+        let final_attempt = rig.admission("queued-placement");
         assert_eq!(final_attempt["placement"]["phase"], "completed");
         assert_eq!(
             ticket["result"],
@@ -1308,18 +1311,22 @@ fn placement_crash_boundaries_replay_one_result() {
             (0, ticket["result"].clone())
         );
         if let Some(mut receipt) = receipt {
-            let mut completed = rig.read("state/preparation-receipts/queued-placement.json");
+            let mut completed = rig
+                .preparation_record("state", "receipt", "queued-placement")
+                .read();
             assert!(completed["finished_ms"].is_u64());
             completed.as_object_mut().unwrap().remove("finished_ms");
             receipt.as_object_mut().unwrap().remove("finished_ms");
             assert_eq!(completed, receipt);
         }
         assert_eq!(
-            rig.read("state/placement-grants/queued-placement.json"),
+            rig.preparation_record("state", "grant", "queued-placement")
+                .read(),
             grant
         );
         assert_eq!(
-            rig.read("state/preparation-receipts/queued-placement.disposition.json")["progress"],
+            rig.preparation_record("state", "disposition", "queued-placement")
+                .read()["progress"],
             "released"
         );
         assert_eq!(rig.log("setup.log").lines().count(), 1);
@@ -1331,27 +1338,26 @@ fn placement_crash_boundaries_replay_one_result() {
 fn acknowledged_placement_rejects_mutated_grant_or_hold_identity() {
     for changed in ["grant", "hold", "both"] {
         let (rig, id) = acknowledged_remote_placement(changed);
-        let grant_path = format!("peer-state/placement-grants/{id}.json");
-        let mut grant = rig.read(&grant_path);
-        let mut holds = rig.read("peer-state/placements.json");
-        let admission_path = format!("state/admissions/{id}.json");
-        let admission = rig.read(&admission_path);
+        let grant_path = rig.preparation_record("peer-state", "grant", &id);
+        let mut grant = grant_path.read();
+        let mut holds = rig.peer_state(&["reservations"]);
+        let admission = rig.admission(&id);
         if changed != "hold" {
             grant["reservation"]["created_ms"] = json!(1);
-            rig.put(&grant_path, &grant);
+            grant_path.put(&grant);
         }
         if changed != "grant" {
             holds[0]["created_ms"] = json!(1);
-            rig.put("peer-state/placements.json", &holds);
+            rig.put_peer_state(&["reservations", "--put"], &holds);
         }
         let next = rig.tickets()[0]["retry"]["next_ms"].as_u64().unwrap();
         fs::write(rig.dir.join("clock"), next.to_string()).unwrap();
         assert!(rig.run(&["serve", "--once"]).status.success());
         let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["state"], "failed", "{changed}: {ticket}");
-        assert_eq!(rig.read(&admission_path), admission);
-        assert_eq!(rig.read(&grant_path), grant);
-        assert_eq!(rig.read("peer-state/placements.json"), holds);
+        assert_eq!(rig.admission(&id), admission);
+        assert_eq!(grant_path.read(), grant);
+        assert_eq!(rig.peer_state(&["reservations"]), holds);
         let log = rig.log("ssh.log");
         assert_eq!(log.matches("host checkout").count(), 1, "{log}");
         assert!(!log.contains("host prepare "), "{log}");
@@ -1363,7 +1369,7 @@ fn acknowledged_placement_rejects_mutated_grant_or_hold_identity() {
 fn concurrent_reservation_replays_publish_one_hold() {
     use std::io::Write as _;
     let rig = Rig::short("placement-concurrent");
-    rig.snapshot("state/host.json", rig.origin_ms, 0.0, 8);
+    rig.snapshot("state", rig.origin_ms, 0.0, 8);
     let envelope = placement_envelope(&rig, "same-grant").to_string();
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -1413,8 +1419,7 @@ fn concurrent_reservation_replays_publish_one_hold() {
         .unwrap();
     assert!(matches!(prep.try_lock(), Err(fs::TryLockError::WouldBlock)));
     assert!(
-        !rig.dir
-            .join("state/placement-grants/same-grant.json")
+        !rig.preparation_record("state", "grant", "same-grant")
             .exists()
     );
     for release in &mut go_holds {
@@ -1431,20 +1436,19 @@ fn concurrent_reservation_replays_publish_one_hold() {
         .collect();
     assert_eq!(replies[0], replies[1]);
     assert_eq!(replies[0]["placement"]["grant"]["materialized"], true);
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
 }
 
 #[test]
 fn reservation_replay_rejects_changed_identity_and_old_peer() {
     let rig = Rig::short("placement-conflicts");
-    rig.snapshot("state/host.json", rig.origin_ms, 0.0, 8);
+    rig.snapshot("state", rig.origin_ms, 0.0, 8);
     let original = placement_envelope(&rig, "same-grant");
     assert_eq!(reserve_delivery(&rig, &original).0, 0);
-    let hold = rig.read("state/placements.json");
-    let grant = rig.read("state/placement-grants/same-grant.json");
+    let hold = rig.reservations();
+    let grant = rig
+        .preparation_record("state", "grant", "same-grant")
+        .read();
     for change in ["request", "target", "version", "missing"] {
         let mut changed = original.clone();
         match change {
@@ -1457,8 +1461,12 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
             _ => unreachable!(),
         }
         assert_eq!(reserve_delivery(&rig, &changed).0, 2, "{change}");
-        assert_eq!(rig.read("state/placements.json"), hold);
-        assert_eq!(rig.read("state/placement-grants/same-grant.json"), grant);
+        assert_eq!(rig.reservations(), hold);
+        assert_eq!(
+            rig.preparation_record("state", "grant", "same-grant")
+                .read(),
+            grant
+        );
     }
     let peer = Rig::short("placement-old-peer");
     peer.peer();
@@ -1493,26 +1501,26 @@ fn retired_placement_cannot_repair_capacity_through_delayed_delivery() {
     let (code, placed) = place(&rig, &repo, "retired", None);
     assert_eq!(code, 0, "{placed}");
     let id = placed["reservation"].as_str().unwrap();
-    let grant_path = format!("state/placement-grants/{id}.json");
-    let grant = rig.read(&grant_path);
+    let grant_path = rig.preparation_record("state", "grant", id);
+    let grant = grant_path.read();
     let envelope = grant["envelope"].clone();
-    let before = rig.read("state/placements.json");
+    let before = rig.reservations();
     let log = rig.log("herdr.log");
     let (code, error) = reserve_delivery(&rig, &envelope);
     assert_eq!(code, 2, "{error}");
-    assert_eq!(rig.read(&grant_path), grant);
-    assert_eq!(rig.read("state/placements.json"), before);
+    assert_eq!(grant_path.read(), grant);
+    assert_eq!(rig.reservations(), before);
     assert_eq!(rig.log("herdr.log"), log);
     // Neither omitting the placement envelope nor losing publication progress can
     // downgrade the request into the old TTL admission path.
     assert_eq!(rig.json(&["host", "reserve", "--id", id]).0, 2);
     let mut interrupted = grant.clone();
     interrupted["materialized"] = json!(false);
-    rig.put(&grant_path, &interrupted);
-    rig.put("state/placements.json", &json!([]));
+    grant_path.put(&interrupted);
+    rig.put_reservations(&json!([]));
     assert_eq!(reserve_delivery(&rig, &envelope).0, 2);
-    assert_eq!(rig.read(&grant_path), interrupted);
-    assert_eq!(rig.read("state/placements.json"), json!([]));
+    assert_eq!(grant_path.read(), interrupted);
+    assert_eq!(rig.reservations(), json!([]));
 }
 
 #[test]
@@ -1520,7 +1528,7 @@ fn reservation_publication_crashes_recover_the_original_timestamp() {
     for boundary in ["placement-grant-intent", "placement-hold-published"] {
         let rig = Rig::short(boundary);
         fs::write(rig.dir.join("clock"), "1000").unwrap();
-        rig.snapshot("state/host.json", 1000, 0.0, 8);
+        rig.snapshot("state", 1000, 0.0, 8);
         let envelope = placement_envelope(&rig, "crashed-grant");
         let output = rig
             .cmd(&[
@@ -1540,18 +1548,21 @@ fn reservation_publication_crashes_recover_the_original_timestamp() {
             "{boundary}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let intent = rig.read("state/placement-grants/crashed-grant.json");
+        let intent = rig
+            .preparation_record("state", "grant", "crashed-grant")
+            .read();
         assert_eq!(intent["reservation"]["created_ms"], 1000);
         assert_eq!(intent["materialized"], false);
         fs::write(rig.dir.join("clock"), "2000").unwrap();
-        rig.snapshot("state/host.json", 2000, 1000.0, 8);
+        rig.snapshot("state", 2000, 1000.0, 8);
         assert_eq!(reserve_delivery(&rig, &envelope).0, 0);
         assert_eq!(
-            rig.read("state/placements.json"),
+            rig.reservations(),
             json!([{"id":"crashed-grant","created_ms":1000}])
         );
         assert_eq!(
-            rig.read("state/placement-grants/crashed-grant.json")["materialized"],
+            rig.preparation_record("state", "grant", "crashed-grant")
+                .read()["materialized"],
             true
         );
     }
@@ -1604,7 +1615,9 @@ pub(super) fn place_rig_with(name: &str, config: &str) -> (Rig, PathBuf) {
     fs::write(repo.join("dogsled.toml"), config).unwrap();
     git(&repo, &["add", "dogsled.toml"]);
     git(&repo, &["commit", "-q", "-m", "init"]);
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    let at = now();
+    fs::write(rig.dir.join("clock"), at.to_string()).unwrap();
+    rig.snapshot("state", at, 0.0, 8);
     rig.script(
         "herdr",
         r#"#!/bin/sh
@@ -1635,7 +1648,7 @@ esac
 
 /// Each call starts with no reservations, so admission never decides a test's outcome.
 fn place(rig: &Rig, repo: &Path, branch: &str, base: Option<&str>) -> (i32, Value) {
-    rig.put("state/placements.json", &json!([]));
+    rig.put_reservations(&json!([]));
     let mut args = vec![
         "place",
         "--branch",
@@ -1691,11 +1704,8 @@ fn place_creates_a_locked_worktree_runs_setup_opens_it_and_records_the_anchor() 
         "w7\n"
     );
     // The worktree is registered for doctor, and a reservation holds the capacity.
-    assert_eq!(rig.read("state/worktrees.json")[0]["path"], json!(tree));
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(rig.state(&["worktrees"])[0]["path"], json!(tree));
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
     // A second child does not replace the anchor: the workspace was open before it.
     fs::write(repo.join(".git/agent-worktree-anchor"), "kept\n").unwrap();
     assert_eq!(place(&rig, &repo, "feat/b", None).0, 0);
@@ -1842,10 +1852,7 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert!(!locks(&repo).contains("feat-x"));
     assert_eq!(git(&repo, &["branch", "--list", "feat/x"]), "");
     assert!(!rig.log("herdr.log").contains("worktree open"));
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
     // A branch that existed before placement stays.
     git(&repo, &["branch", "kept"]);
     assert_eq!(place(&rig, &repo, "kept", None).0, 2);
@@ -1867,10 +1874,7 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert_eq!(git(&repo, &["branch", "--list", "invalid-config"]), "");
     assert_eq!(rig.log("setup.log"), setup);
     assert!(!rig.log("herdr.log").contains("worktree open"));
-    assert_eq!(
-        rig.read("state/placements.json").as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
 }
 
 #[test]

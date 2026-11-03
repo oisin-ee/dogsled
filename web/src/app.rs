@@ -1,6 +1,10 @@
 //! The persistent portal shell, repository navigation, and cross-agent inbox.
 
+use std::time::Duration;
+
 use dioxus::prelude::*;
+use dioxus_primitives::scroll_area::ScrollDirection;
+use dioxus_sdk_time::{sleep, use_interval};
 use portal_types::BoardView;
 use portal_types::agents::AgentView as Agent;
 use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
@@ -8,11 +12,44 @@ use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 use crate::agent_view::{AgentView, Draft};
 use crate::api;
 use crate::board::{RepoGroup, navigation_groups, repository_name};
+use crate::components::badge::{Badge, BadgeVariant};
+use crate::components::button::{Button, ButtonVariant};
+use crate::components::item::{Item, ItemContent, ItemGroup, ItemSize, ItemTitle, ItemVariant};
+use crate::components::progress::Progress;
+use crate::components::scroll_area::ScrollArea;
+use crate::components::sidebar::{Sidebar, SidebarCollapsible, SidebarHeader, SidebarProvider};
+use crate::components::skeleton::Skeleton;
+use crate::components::tabs::{TabContent, TabList, TabTrigger, Tabs};
 use crate::conversations::Conversations;
+use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon};
+
+#[derive(Clone, Copy)]
+pub struct ConsoleWidth(pub Signal<u32>);
+use crate::notice::{Alert, Status};
+
+/// The time between two reads of the board and the agents.
+const RETRY: Duration = Duration::from_secs(2);
 
 const COMPONENTS_CSS: Asset = asset!("/assets/dx-components-theme.css");
-const COMPONENTS_THEME_CSS: Asset = asset!("/assets/components-theme.css");
-const MAIN_CSS: Asset = asset!("/assets/main.css");
+const CONSOLE_CSS: Asset = asset!("/assets/console.css");
+const MARKDOWN_CSS: Asset = asset!("/assets/markdown.css");
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LeadPanel {
+    Agents,
+    Chat,
+    Todos,
+}
+
+impl LeadPanel {
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Agents => "agents",
+            Self::Chat => "chat",
+            Self::Todos => "todos",
+        }
+    }
+}
 
 /// The pending item the owner picked from the inbox. The shell passes it to
 /// `AgentView` as its `review` or `question` prop.
@@ -32,14 +69,6 @@ pub enum InboxKind {
 }
 
 impl InboxKind {
-    pub fn css(self) -> &'static str {
-        match self {
-            Self::Prompt => "prompt",
-            Self::Question => "question",
-            Self::Review => "plan",
-            Self::UnseenWorker => "idle",
-        }
-    }
     pub fn tag(self) -> &'static str {
         match self {
             Self::Prompt => "Prompt",
@@ -173,7 +202,30 @@ pub fn App() -> Element {
     let mut board = use_signal(|| None::<BoardView>);
     let mut board_error = use_signal(|| None::<String>);
     let mut stream_paused = use_signal(|| false);
-    let mut inbox_open = use_signal(|| false);
+    let mut panel = use_context_provider(|| Signal::new(LeadPanel::Chat));
+    let mut width = use_context_provider(|| ConsoleWidth(Signal::new(1440))).0;
+    use_effect(move || {
+        spawn(async move {
+            let mut eval = document::eval(
+                r#"
+                window.__consoleResizeHandler = () => dioxus.send(window.innerWidth);
+                window.addEventListener('resize', window.__consoleResizeHandler);
+                window.__consoleResizeHandler();
+            "#,
+            );
+            while let Ok(value) = eval.recv::<u32>().await {
+                width.set(value);
+                if value >= 1100 && *panel.peek() == LeadPanel::Agents {
+                    panel.set(LeadPanel::Chat);
+                }
+            }
+        });
+    });
+    use_drop(|| {
+        let _ = document::eval(
+            "window.removeEventListener('resize', window.__consoleResizeHandler); delete window.__consoleResizeHandler;",
+        );
+    });
     let mut agents = use_signal(Vec::<Agent>::new);
     let mut agent_error = use_signal(|| None::<String>);
     let mut inbox_state = use_signal(InboxState::default);
@@ -206,9 +258,7 @@ pub fn App() -> Element {
             if let Err(message) = result {
                 board_error.set(Some(message));
             }
-            if pause().await.is_err() {
-                break;
-            }
+            sleep(RETRY).await;
         }
     });
 
@@ -222,22 +272,10 @@ pub fn App() -> Element {
                 }
                 Err(message) => agent_error.set(Some(message)),
             }
-            if let Err(message) = pause().await {
-                agent_error.set(Some(format!(
-                    "Agent refresh stopped: {message}. Reload the page."
-                )));
-                break;
-            }
+            sleep(RETRY).await;
         }
     });
-    use_future(move || async move {
-        loop {
-            now.set(clock_ms());
-            if pause().await.is_err() {
-                break;
-            }
-        }
-    });
+    use_interval(RETRY, move |()| now.set(clock_ms()));
 
     let inbox = use_memo(move || inbox_state.read().items());
     use_effect(move || {
@@ -256,39 +294,51 @@ pub fn App() -> Element {
     let view = board();
     let items = inbox();
     let state = inbox_state();
-    // Red only when something waits; an empty or unread inbox stays quiet.
-    let waiting = state.count().is_some_and(|count| count > 0);
-    let count = state
-        .count()
-        .map_or_else(|| "—".to_owned(), |count| count.to_string());
     let elapsed_ms = now().saturating_sub(state.received_ms);
     let groups = view.as_ref().map(|view| navigation_groups(view, &agents()));
+    let agent_count = groups.as_ref().map_or(0, |groups| {
+        groups
+            .repos
+            .iter()
+            .map(|repo| repo.agent_count())
+            .sum::<usize>()
+    });
+
+    let navigation = rsx! {
+            Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
+                SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" } }
+                ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
+                    if let Some(message) = board_error() { Alert { "Board updates unavailable: {message}" } }
+                    if let Some(message) = agent_error() { Status { title: "{message}", "Herdr is not reachable. The board still works." } }
+                    match groups {
+                        Some(groups) => rsx! {
+                            for (index, group) in groups.repos.into_iter().enumerate() {
+                                RepoGroup { key: "{index}:{group.repository:?}", group, inbox: items.clone() }
+                            }
+                            if groups.finished_without_repository > 0 {
+                                Item { variant: ItemVariant::Muted, size: ItemSize::Sm, "data-part": "finished-branches",
+                                    ItemContent { ItemTitle { "{groups.finished_without_repository} finished branches have no repository" } }
+                                }
+                            }
+                        },
+                        None => rsx! { Skeleton { role: "status", aria_label: "Loading agents" } },
+                    }
+                }
+            }
+    };
 
     rsx! {
         document::Stylesheet { href: COMPONENTS_CSS }
-        document::Stylesheet { href: COMPONENTS_THEME_CSS }
-        document::Stylesheet { href: MAIN_CSS }
-        document::Link { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" }
-        div { class: "app", onkeydown: move |event| {
-                if event.key() == Key::Escape { inbox_open.set(false); }
-            },
-            header { class: "top-bar",
-                h1 { a { href: "/", aria_label: "Homepage", "Dogsled" } }
-                button { r#type: "button", class: if inbox_open() { "shell-button inbox-toggle on" } else { "shell-button inbox-toggle" },
-                    aria_expanded: inbox_open(), aria_controls: "portal-inbox",
-                    onclick: move |_| inbox_open.toggle(),
-                    "Inbox" b { class: if waiting { "waiting" } else { "" }, "{count}" }
-                }
-                div { class: "shell-notices", role: "status",
-                    if stream_paused() { span { "Live updates paused, retrying" } }
-                    if let Some(message) = &state.error {
-                        span { class: "inbox-error", title: "{message}", "Inbox unavailable: {message}. Reload to retry." }
-                    }
-                    if let Some(message) = agent_error() {
-                        span { title: "{message}", "Herdr is not reachable. The board still works." }
-                    }
-                }
-                div { class: "hosts", aria_label: "Host load",
+        document::Stylesheet { href: CONSOLE_CSS }
+        document::Stylesheet { href: MARKDOWN_CSS }
+        document::Stylesheet { href: asset!("/assets/review.css") }
+        SidebarProvider { class: "console-provider",
+        Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
+            on_value_change: move |value: String| panel.set(match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, _ => LeadPanel::Chat }),
+            header { class: "console-topbar",
+                a { href: "/", aria_label: "Homepage", "Dogsled" }
+                if stream_paused() { Status { "Live updates paused, retrying" } }
+                div { class: "console-hosts", aria_label: "Host load",
                     if let Some(view) = &view {
                         for host in &view.hosts {
                             {
@@ -296,9 +346,9 @@ pub fn App() -> Element {
                                 let load = busy.map_or(0.0, |busy| if host.cores == 0 { 0.0 } else { (busy / f64::from(host.cores) * 100.0).clamp(0.0, 100.0) });
                                 let value = busy.map_or_else(|| format!("—/{}", host.cores), |busy| format!("{busy:.0}/{}", host.cores));
                                 rsx! {
-                                    span { key: "{host.label}", class: "host-load", title: "{host.label}: {host.service}",
-                                        "{host.label}"
-                                        i { aria_hidden: true, style: "--host-load: {load}%", b {} }
+                                    div { class: "console-host", key: "{host.label}", title: "{host.label}: {host.service}",
+                                        span { "{host.label}" }
+                                        Progress { value: Some(load), max: 100.0, aria_label: "{host.label} CPU load" }
                                         span { "{value}" }
                                     }
                                 }
@@ -307,73 +357,81 @@ pub fn App() -> Element {
                     }
                 }
             }
-            nav { class: "board", aria_label: "Repositories and agents",
-                if let Some(message) = board_error() { p { class: "error", "Board updates unavailable: {message}" } }
-                match groups {
-                    Some(groups) => rsx! {
-                        for (index, group) in groups.repos.into_iter().enumerate() {
-                            RepoGroup { key: "{index}:{group.repository:?}", group, inbox: items.clone() }
-                        }
-                        if groups.finished_without_repository > 0 {
-                            p { class: "finished-branches", "{groups.finished_without_repository} finished branches have no repository — see Land and clean up" }
-                        }
-                    },
-                    None => rsx! { p { class: "empty", "Loading agents…" } },
-                }
+            InboxSidebar { count: state.count(), loading: state.snapshot.is_none(), error: state.error.clone(),
+                items: items.clone(), elapsed_ms, agents: agents(), reachable: agent_error().is_none() }
+            if width() >= 1100 { {navigation.clone()} } else {
+                TabContent { class: "console-agents-tab", value: "agents", index: 0usize, {navigation.clone()} }
             }
-            main { class: "centre",
+            main { class: "console-main",
                 match selected() {
                     Some(pane) => {
                         let picked = selection().filter(|item| item.pane == pane);
                         let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());
                         let review = pick(InboxKind::Review);
                         let question = pick(InboxKind::Question);
-                        rsx! { AgentView { key: "{pane}", pane, review, question } }
+                        rsx! { AgentView { key: "{pane}", pane, review, question, agent_count } }
                     }
-                    None => rsx! {
-                        section { class: "welcome",
-                            if !items.is_empty() {
-                                h2 { "Waiting on you" }
-                                InboxList { items: items.clone(), elapsed_ms, inbox_open }
-                            } else if state.error.is_some() {
-                                p { class: "error", "Inbox unavailable. Reload to retry." }
-                            } else if state.snapshot.is_none() || view.is_none() {
-                                p { class: "empty", "Loading agents…" }
-                            } else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
-                                h2 { "No agents are running" }
-                                p { class: "empty", "Start an agent with " code { "dogsled spawn" } "." }
-                            } else {
-                                h2 { "Select an agent" }
-                                p { class: "empty", "Choose an agent in the navigation to open its work." }
-                            }
+                    None => rsx! { div { class: "empty-lead",
+                        if width() < 1100 {
+                            header { class: "lead-header", TabList { aria_label: "Lead view", TabTrigger { value: "agents", index: 0usize, "Agents {agent_count}" } TabTrigger { value: "chat", index: 1usize, "Chat" } } }
                         }
-                    },
+                        TabContent { class: "empty-chat", value: "chat", index: 1usize,
+                        div { class: "console-empty",
+                        if view.is_none() { Skeleton { role: "status", aria_label: "Loading agents" } }
+                        else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
+                            h1 { "No agents are running" }
+                            p { "Start an agent with " code { "dogsled spawn" } "." }
+                        } else { h1 { "Select an agent" } p { "Choose an agent or a waiting item to open its work." } }
+                    } } } },
                 }
             }
-            if inbox_open() {
-                section { class: "inbox-panel", id: "portal-inbox", aria_label: "Inbox",
-                    h2 { "Inbox" span { "Everything waiting on you" } }
-                    if let Some(message) = &state.error { p { class: "error", "Inbox unavailable: {message}. Reload to retry." } }
-                    if state.snapshot.is_none() && state.error.is_none() {
-                        p { class: "empty", "Loading inbox…" }
-                    } else if state.count() == Some(0) && state.error.is_none() {
-                        p { class: "inbox-empty", "Nothing is waiting on you." }
-                    } else {
-                        InboxList { items, elapsed_ms, inbox_open }
-                    }
-                    p { class: "inbox-foot", "Selecting an item opens that agent with the item in front." }
-                }
+        }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn InboxSidebar(
+    count: Option<usize>,
+    loading: bool,
+    error: Option<String>,
+    items: Vec<InboxItem>,
+    elapsed_ms: u64,
+    agents: Vec<Agent>,
+    reachable: bool,
+) -> Element {
+    let label = count.map_or_else(|| "—".to_owned(), |count| count.to_string());
+    let waiting = count.is_some_and(|count| count > 0);
+    rsx! {
+        Sidebar { class: "console-inbox", collapsible: SidebarCollapsible::None, aria_label: "Waiting on you",
+            SidebarHeader { class: "console-column-header", h2 { "Waiting on you" }
+                Badge { "data-part": "inbox-count", variant: BadgeVariant::Secondary, "data-waiting": waiting, "{label}" }
+            }
+            ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
+                if let Some(message) = &error { Alert { "Inbox unavailable: {message}. Reload to retry." } }
+                if loading && error.is_none() { Skeleton { role: "status", aria_label: "Loading inbox" } }
+                else if error.is_none() && count == Some(0) { Status { "data-part": "column-empty", "Nothing is waiting on you." } }
+                else { InboxList { items, elapsed_ms, agents, reachable } }
             }
         }
     }
 }
 
 #[component]
-fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool>) -> Element {
+pub(crate) fn InboxList(
+    items: Vec<InboxItem>,
+    elapsed_ms: u64,
+    agents: Vec<Agent>,
+    reachable: bool,
+) -> Element {
     let mut selected = use_context::<Signal<Option<String>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
+    let mut panel = use_context::<Signal<LeadPanel>>();
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
     rsx! {
-        div { class: "inbox-list",
+        if let Some(message) = error() { Alert { "{message}" } }
+        ItemGroup { class: "inbox-list",
             for item in items {
                 {
                     let kind = item.selection.kind;
@@ -381,19 +439,58 @@ fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool
                         .unwrap_or("Agent task");
                     let repository = item.repository.as_deref().map(repository_name);
                     let age = age(item.age_ms.saturating_add(elapsed_ms));
+                    let open = selection().as_ref() == Some(&item.selection);
+                    let options = agents.iter().find(|agent| agent.pane == item.selection.pane)
+                        .and_then(|agent| agent.blocked.as_ref()).map(|prompt| prompt.options.clone()).unwrap_or_default();
                     rsx! {
-                        button { key: "{kind:?}:{item.selection.id}", class: "inbox-item", r#type: "button",
-                            onclick: move |_| {
-                                selected.set(Some(item.selection.pane.clone()));
-                                selection.set(Some(item.selection.clone()));
-                                inbox_open.set(false);
-                            },
-                            span { class: "inbox-kind {kind.css()}", "{kind.label()}" }
-                            div { class: "inbox-description",
-                                div { class: "inbox-title", "{item.title}" }
-                                div { class: "inbox-agent", "{title}" if let Some(repository) = repository { " · {repository}" } }
+                        div { class: "inbox-row", key: "{kind:?}:{item.selection.id}", "data-open": open,
+                            Button { class: "inbox-item", variant: ButtonVariant::Ghost, r#type: "button",
+                                aria_current: open.then_some("true"),
+                                onclick: {
+                                    let item = item.clone();
+                                    move |_| {
+                                        selected.set(Some(item.selection.pane.clone()));
+                                        selection.set(Some(item.selection.clone()));
+                                        panel.set(LeadPanel::Chat);
+                                    }
+                                },
+                                span { class: "inbox-kind",
+                                    match kind {
+                                        InboxKind::Review => rsx! { FileText { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                        InboxKind::Question => rsx! { CircleQuestionMark { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                        InboxKind::Prompt => rsx! { CornerDownLeft { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                        InboxKind::UnseenWorker => rsx! { Moon { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
+                                    }
+                                    "{kind.label()}" span { class: "inbox-age", "{age}" }
+                                }
+                                span { class: "inbox-title", "{item.title}" }
+                                span { class: "inbox-meta", "{title}" if let Some(repository) = repository { " · {repository}" } }
                             }
-                            span { class: "inbox-age", "{age}" }
+                            if kind == InboxKind::Prompt && !options.is_empty() {
+                                div { class: "inbox-keys",
+                                    for option in options {
+                                        {
+                                            let pane = item.selection.pane.clone();
+                                            let send_key = option.key.clone();
+                                            rsx! {
+                                                Button { key: "{option.key}", variant: ButtonVariant::Secondary, r#type: "button",
+                                                    disabled: !reachable || busy() || !crate::agent_view::allowed_key(&option.key),
+                                                    title: "{option.label}", aria_label: "{option.label}",
+                                                    onclick: move |_| {
+                                                        let pane = pane.clone(); let key = send_key.clone();
+                                                        async move {
+                                                            if busy() || !reachable { return; }
+                                                            busy.set(true);
+                                                            error.set(api::send_key(&pane, &key).await.err());
+                                                            busy.set(false);
+                                                        }
+                                                    }, "{option.key}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -402,7 +499,7 @@ fn InboxList(items: Vec<InboxItem>, elapsed_ms: u64, mut inbox_open: Signal<bool
     }
 }
 
-fn clock_ms() -> u64 {
+pub(crate) fn clock_ms() -> u64 {
     js_sys::Date::now().max(0.0) as u64
 }
 
@@ -413,17 +510,6 @@ fn age(ms: u64) -> String {
         seconds @ 3600..=86399 => format!("{} h", seconds / 3600),
         seconds => format!("{} d", seconds / 86400),
     }
-}
-
-async fn pause() -> Result<(), String> {
-    let mut timer = document::eval(
-        "await new Promise(resolve => setTimeout(resolve, 2000)); dioxus.send(true);",
-    );
-    timer
-        .recv::<bool>()
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

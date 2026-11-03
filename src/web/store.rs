@@ -1,16 +1,6 @@
-//! The portal's question store: the questions that wait for an answer.
-//!
-//! Every question is one JSON file under the portal's `questions` directory,
-//! so a pending question survives a restart. The files are the only source of
-//! truth. The waiters are only a wake-up: a long poll reads the file, and
-//! sleeps until a write or a delete wakes it. A wake-up that comes early or
-//! twice costs one more read.
-//!
-//! The answers stay in the file until the question is withdrawn, so a poll
-//! that never reaches the client costs one more poll and never an answer.
+//! Durable portal questions and in-process wake-ups for long polls.
 
 use std::collections::HashMap;
-use std::fs;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -21,17 +11,17 @@ use tokio::sync::watch;
 use crate::error::{Error, Result};
 use crate::ledger::{self, Ledger};
 
-/// The name of the lock that guards the question files.
-const LOCK: &str = "questions";
-
-/// A question in its file: the form, and the answers once the owner gave them.
+use crate::web_store::questions as records;
+/// A durable question, its resolution, and the resolution time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Entry {
-    pending: Pending,
+pub(crate) struct Entry {
+    pub(crate) pending: Pending,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    answers: Option<Vec<ResponseItem>>,
+    pub(crate) answers: Option<Vec<ResponseItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    rejection: Option<Rejection>,
+    pub(crate) rejection: Option<Rejection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) answered_ms: Option<u64>,
 }
 
 impl Entry {
@@ -100,8 +90,9 @@ impl Store {
                 },
                 answers: None,
                 rejection: None,
+                answered_ms: None,
             };
-            ledger.with_lock(LOCK, || ledger.write(&file(&id), &entry))?;
+            crate::store::write(&ledger, |tx| records::put(tx, &entry))?;
             Ok(id)
         })
         .await
@@ -110,20 +101,7 @@ impl Store {
     /// The questions that wait for an answer, oldest first.
     pub async fn list(&self) -> Result<Vec<Pending>> {
         let ledger = self.ledger.clone();
-        run(move || {
-            let mut pending: Vec<Pending> = load_all(&ledger)?
-                .into_iter()
-                .filter(|entry| !entry.resolved())
-                .map(|entry| entry.pending)
-                .collect();
-            pending.sort_by(|left, right| {
-                left.created_ms
-                    .cmp(&right.created_ms)
-                    .then_with(|| left.id.cmp(&right.id))
-            });
-            Ok(pending)
-        })
-        .await
+        run(move || crate::store::read(&ledger, records::pending)).await
     }
 
     /// Keep the owner's answers and wake the long poll of the question.
@@ -143,8 +121,8 @@ impl Store {
         let ledger = self.ledger.clone();
         let owned = id.to_owned();
         let outcome = run(move || {
-            ledger.with_lock(LOCK, || {
-                let Some(mut entry) = ledger.read::<Entry>(&file(&owned))? else {
+            crate::store::write(&ledger, |tx| {
+                let Some(mut entry) = records::get(tx, &owned)? else {
                     return Ok(Answered::Gone);
                 };
                 if entry.resolved() {
@@ -154,7 +132,8 @@ impl Store {
                     Resolution::Answers(responses) => entry.answers = Some(responses),
                     Resolution::Rejected(rejection) => entry.rejection = Some(rejection),
                 }
-                ledger.write(&file(&owned), &entry)?;
+                entry.answered_ms = Some(ledger::now_ms());
+                records::put(tx, &entry)?;
                 Ok(Answered::Saved)
             })
         })
@@ -173,14 +152,14 @@ impl Store {
         let ledger = self.ledger.clone();
         let owned = id.to_owned();
         let outcome = run(move || {
-            ledger.with_lock(LOCK, || {
-                let Some(entry) = ledger.read::<Entry>(&file(&owned))? else {
+            crate::store::write(&ledger, |tx| {
+                let Some(entry) = records::get(tx, &owned)? else {
                     return Ok(Answered::Gone);
                 };
                 if entry.resolved() {
                     return Ok(Answered::Already);
                 }
-                remove(&ledger, &owned)?;
+                records::remove(tx, &owned)?;
                 Ok(Answered::Saved)
             })
         })
@@ -199,7 +178,8 @@ impl Store {
         }
         let ledger = self.ledger.clone();
         let owned = id.to_owned();
-        let removed = run(move || ledger.with_lock(LOCK, || remove(&ledger, &owned))).await?;
+        let removed =
+            run(move || crate::store::write(&ledger, |tx| records::remove(tx, &owned))).await?;
         self.wake(id);
         self.forget(id);
         Ok(removed)
@@ -245,8 +225,8 @@ impl Store {
         let ledger = self.ledger.clone();
         let owned = id.to_owned();
         run(move || {
-            ledger.with_lock(LOCK, || {
-                let Some(entry) = ledger.read::<Entry>(&file(&owned))? else {
+            crate::store::read(&ledger, |tx| {
+                let Some(entry) = records::get(tx, &owned)? else {
                     return Ok(Some(Poll::Gone));
                 };
                 if !entry.resolved() {
@@ -309,47 +289,13 @@ async fn run<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'stati
     }
 }
 
-/// The file name of a question.
-fn file(id: &str) -> String {
-    format!("{id}.json")
-}
-
-/// Whether the id can name a file of ours. The ids the store makes hold
-/// letters, digits and dashes only.
-fn valid_id(id: &str) -> bool {
+/// Whether an id belongs to the portal question namespace.
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-/// Delete the file of a question. Return whether it was there.
-fn remove(ledger: &Ledger, id: &str) -> Result<bool> {
-    match fs::remove_file(ledger.dir.join(file(id))) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Read every question the store holds.
-fn load_all(ledger: &Ledger) -> Result<Vec<Entry>> {
-    let entries = match fs::read_dir(&ledger.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut found = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = fs::read(&path)?;
-        found.push(serde_json::from_slice(&bytes)?);
-    }
-    Ok(found)
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[cfg(test)]

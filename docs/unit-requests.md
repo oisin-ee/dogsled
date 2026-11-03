@@ -30,7 +30,7 @@ Errors contain `{error:{code,message}}`. Transport conflicts use `REQUEST_CONFLI
 
 ## Durable transitions
 
-Prepare atomically writes `admissions/<requestId>.json` before returning. An owner-scoped lock serializes origin lookup and ID allocation. The lookup scans admission records, without another index.
+Prepare writes the admission row for `<requestId>` to the `admissions` table in `state.db` before it returns. An owner-scoped lock serializes origin lookup and ID allocation. The lookup reads only the caller's admissions, through the table's owner index. `unit settlements` reads only the caller's unsettled admissions, through the same index.
 
 The same owner and complete `UnitRef` return the same request. Changed placement conflicts. Prepare never reserves capacity, creates a checkout, or starts a worker.
 
@@ -161,7 +161,7 @@ The command accepts the input only when all of these conditions are true:
 
 - The caller is the pane in `execution.ownerId`, on this host.
 - Herdr reports a Pi agent in that pane now, and the header of its transcript names the admission's origin `sessionId`. An earlier snapshot, an environment value, or a log line is not evidence.
-- The original admission is in `admissions/<request>.json` on this host. It is committed, and it is not abandoned, returned, or settled. Its export and binding validate, and it selected this host.
+- The original admission is in the `admissions` table on this host. It is committed, and it is not abandoned, returned, or settled. Its export and binding validate, and it selected this host.
 - The admitted request and the saved launch have no owner host. The saved launch is equal to the host launch record, field by field. The committed envelope is equal to the launch seed and to `launches/<request>.unit.json`.
 - The launch is started and confirmed, and it has no terminal receipt. The pane, terminal, Pi name, and done mark agree with the launch. The launch item is open, and it is the only open item of the pane.
 - The worker terminal has an inbox reader.

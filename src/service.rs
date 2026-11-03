@@ -34,6 +34,62 @@ const LANES: [Lane; 7] = [
     Lane::Quota,
 ];
 
+impl Lane {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Watchdog => "watchdog",
+            Self::Admission => "admission",
+            Self::Children => "children",
+            Self::Handoff => "handoff",
+            Self::Inbox => "inbox",
+            Self::Retention => "retention",
+            Self::Quota => "quota",
+        }
+    }
+}
+
+#[derive(Default)]
+struct LaneDiagnostics {
+    unrecorded: std::collections::BTreeMap<&'static str, (Option<String>, String)>,
+}
+
+impl LaneDiagnostics {
+    fn record(&mut self, ledger: &Ledger, lane: Lane, result: Result<()>) {
+        let error = result.err().map(|error| error.to_string());
+        match crate::store::write(ledger, |tx| {
+            crate::tables::record_lane(tx, lane.name(), error.as_deref(), now_ms())
+        }) {
+            Ok(changed) => {
+                self.unrecorded.remove(lane.name());
+                if changed {
+                    if let Some(error) = error {
+                        eprintln!("dogsled service lane {}: {error}", lane.name());
+                    } else {
+                        eprintln!("dogsled service lane {}: recovered", lane.name());
+                    }
+                }
+            }
+            Err(recording_error) => {
+                let current = (error, recording_error.to_string());
+                let previous = self.unrecorded.get(lane.name());
+                if previous.map(|old| &old.0) != Some(&current.0)
+                    && let Some(error) = &current.0
+                {
+                    eprintln!("dogsled service lane {}: {error}", lane.name());
+                }
+                if previous.map(|old| &old.1) != Some(&current.1) {
+                    eprintln!(
+                        "dogsled service lane {}: cannot record lane status: {}",
+                        lane.name(),
+                        current.1
+                    );
+                }
+                self.unrecorded.insert(lane.name(), current);
+            }
+        }
+    }
+}
+
 enum Event {
     Finished(usize, Result<()>),
     Sweep,
@@ -135,8 +191,37 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
 }
 
 pub fn serve(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
-    node.ledger
-        .with_lock("service", || run(node, policy, interval, once))
+    let outcome = node
+        .ledger
+        .with_lock("service", || run(node, policy, interval, once));
+    crate::upgrade::check(node.ledger)?;
+    outcome
+}
+
+/// Start eligible action lanes without coupling their scheduling to publication or input.
+fn start_lanes(
+    node: &Node<'_>,
+    policy: &Policy,
+    once: bool,
+    workers: &mut [Option<std::thread::JoinHandle<()>>; LANES.len()],
+    completed: [bool; LANES.len()],
+    send: &mpsc::Sender<Event>,
+) {
+    for (lane, worker) in workers.iter_mut().enumerate() {
+        if worker.is_none() && (!once || !completed[lane]) {
+            let mut ledger = node.ledger.clone();
+            ledger.budget = crate::budget::Budget::default();
+            let policy = policy.clone();
+            let home = node.home.to_owned();
+            let send = send.clone();
+            *worker = Some(std::thread::spawn(move || {
+                let _ = send.send(Event::Finished(
+                    lane,
+                    actions(&ledger, &policy, home, LANES[lane]),
+                ));
+            }));
+        }
+    }
 }
 
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
@@ -152,82 +237,86 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut requested = false;
     let mut workers: [Option<std::thread::JoinHandle<()>>; LANES.len()] = Default::default();
     let mut completed = [false; LANES.len()];
+    let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
-    loop {
-        // The socket only reduces latency. Recover pending requests on every publication
-        // iteration, including when the socket cannot bind or a notification was lost.
-        requested |= crate::sweep::pending(node.ledger)?;
-        node.tick(now_ms())?;
-        if let Err(error) = crate::board::collect_todos(node.ledger) {
-            eprintln!("dogsled service: todo intake failed: {error}");
-        }
-        for (lane, worker) in workers.iter_mut().enumerate() {
-            if worker.is_none() && (!once || !completed[lane]) {
-                let mut ledger = node.ledger.clone();
-                ledger.budget = crate::budget::Budget::default();
-                let policy = policy.clone();
-                let home = node.home.to_owned();
-                let send = send.clone();
-                *worker = Some(std::thread::spawn(move || {
-                    let _ = send.send(Event::Finished(
-                        lane,
-                        actions(&ledger, &policy, home, LANES[lane]),
-                    ));
-                }));
-            }
-        }
-        next += interval;
+    let outcome = (|| {
         loop {
-            if requested && sweep.is_none() {
-                requested = false;
-                let mut ledger = node.ledger.clone();
-                ledger.budget = crate::budget::Budget::default();
-                let policy = policy.clone();
-                let home = node.home.to_owned();
-                let send = send.clone();
-                sweep = Some(std::thread::spawn(move || {
-                    let shell = System::default();
-                    let node = Node {
-                        shell: &shell,
-                        ledger: &ledger,
-                        thresholds: (&policy).into(),
-                        home: &home,
-                        cleanup: &policy.cleanup,
-                    };
-                    let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
-                }));
-            }
-            if once && completed.iter().all(|done| *done) && sweep.is_none() {
-                return Ok(());
-            }
-            match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
-                Ok(Event::Sweep) => requested = true,
-                Ok(Event::Swept(result)) => {
-                    if let Some(handle) = sweep.take() {
-                        handle
-                            .join()
-                            .map_err(|_| Error::Invalid("service sweep worker failed".into()))?;
-                    }
-                    if let Err(error) = result {
-                        eprintln!("dogsled service sweep: {error}");
-                    }
+            let current = match crate::upgrade::newer(node.ledger)? {
+                crate::upgrade::Boundary::Ready(_) => return Ok(()),
+                crate::upgrade::Boundary::Current => true,
+                crate::upgrade::Boundary::Pending(error) => {
+                    eprintln!("dogsled service upgrade: {error}");
+                    next = Instant::now();
+                    false
                 }
-                Ok(Event::Finished(lane, result)) => {
-                    if let Some(handle) = workers[lane].take() {
-                        handle
-                            .join()
-                            .map_err(|_| Error::Invalid("service action worker failed".into()))?;
-                    }
-                    completed[lane] = true;
-                    if let Err(error) = result {
-                        eprintln!("dogsled service lane {:?}: {error}", LANES[lane]);
-                    }
+            };
+            if current {
+                // The socket only reduces latency. Recover requests on every publication pass.
+                requested |= crate::sweep::pending(node.ledger)?;
+                node.tick(now_ms())?;
+                if let Err(error) = crate::board::collect_todos(node.ledger) {
+                    eprintln!("dogsled service: todo intake failed: {error}");
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Error::Invalid("service worker disconnected".into()));
+                start_lanes(node, policy, once, &mut workers, completed, &send);
+            }
+            next += interval;
+            loop {
+                if current && requested && sweep.is_none() {
+                    requested = false;
+                    let mut ledger = node.ledger.clone();
+                    ledger.budget = crate::budget::Budget::default();
+                    let policy = policy.clone();
+                    let home = node.home.to_owned();
+                    let send = send.clone();
+                    sweep = Some(std::thread::spawn(move || {
+                        let shell = System::default();
+                        let node = Node {
+                            shell: &shell,
+                            ledger: &ledger,
+                            thresholds: (&policy).into(),
+                            home: &home,
+                            cleanup: &policy.cleanup,
+                        };
+                        let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
+                    }));
+                }
+                if current && once && completed.iter().all(|done| *done) && sweep.is_none() {
+                    return Ok(());
+                }
+                match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
+                    Ok(Event::Sweep) => requested = true,
+                    Ok(Event::Swept(result)) => {
+                        if let Some(handle) = sweep.take() {
+                            handle.join().map_err(|_| {
+                                Error::Invalid("service sweep worker failed".into())
+                            })?;
+                        }
+                        if let Err(error) = result {
+                            eprintln!("dogsled service sweep: {error}");
+                        }
+                    }
+                    Ok(Event::Finished(lane, result)) => {
+                        if let Some(handle) = workers[lane].take() {
+                            handle.join().map_err(|_| {
+                                Error::Invalid("service action worker failed".into())
+                            })?;
+                        }
+                        completed[lane] = true;
+                        diagnostics.record(node.ledger, LANES[lane], result);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(Error::Invalid("service worker disconnected".into()));
+                    }
                 }
             }
         }
+    })();
+    // No worker or service lock can cross exec: their external effects must finish.
+    for handle in workers.into_iter().flatten().chain(sweep) {
+        handle
+            .join()
+            .map_err(|_| Error::Invalid("service worker failed while draining".into()))?;
     }
+    outcome
 }

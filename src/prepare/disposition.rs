@@ -102,13 +102,14 @@ impl Claim {
     fn pending(&self) -> Pending {
         Pending {
             tree: self.tree.clone(),
-            request_id: Some(self.request_id.clone()),
+            request_id: self.request_id.clone(),
         }
     }
 }
 
 fn conflict() -> Error {
     crate::worktree::refuse("preparation disposition correlation or ownership changed")
+        .because(crate::diagnostic::Cause::PreparationBindingMismatch)
 }
 
 /// Read-only, request-gated historical capture. Missing checkout identity stays missing.
@@ -127,14 +128,10 @@ pub fn historical(ledger: &Ledger, id: &str) -> Result<Historical> {
 }
 
 fn historical_guarded(ledger: &Ledger, id: &str) -> Result<Historical> {
-    let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-    let claims: Vec<_> = records
-        .iter()
-        .filter(|p| p.request_id.as_deref() == Some(id))
-        .collect();
-    let receipts = ledger.child("preparation-receipts");
-    let provenance = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
-    let disposition = receipts.read::<Receipt>(&file(id))?;
+    let records = crate::preparation_store::pending_for(ledger, id)?;
+    let claims: Vec<_> = records.iter().filter(|p| p.request_id == *id).collect();
+    let provenance = crate::preparation_store::receipts::value(ledger, id)?;
+    let disposition = crate::preparation_store::dispositions::get(ledger, id)?;
     let binding = match claims.as_slice() {
         [claim] => {
             let receipt = provenance
@@ -225,13 +222,12 @@ fn matches_binding(ledger: &Ledger, request: &Request) -> Result<bool> {
         if audit.request_id != *id || request.binding.claim.request_id != *id {
             return Ok(false);
         }
-        let receipts = ledger.child("preparation-receipts");
-        let current = receipts.read::<serde_json::Value>(&format!("{id}.json"))?;
+        let current = crate::preparation_store::receipts::value(ledger, id)?;
         if current == *provenance {
             return Ok(true);
         }
         // Completion may add only the timestamp proved by this exact released fence.
-        let released = receipts.read::<Receipt>(&file(id))?;
+        let released = crate::preparation_store::dispositions::get(ledger, id)?;
         if let Some(released) = released
             && released.request == *request
             && released.progress == Progress::Released
@@ -304,30 +300,26 @@ fn retirement_guarded(
     operation()
 }
 
-fn file(id: &str) -> String {
-    format!("{id}.disposition.json")
-}
-
 /// The preparation outcome owns the binding. Missing historical identity is never repaired.
 fn binding(ledger: &Ledger, id: &str) -> Result<Option<Binding>> {
     crate::jobs::validate_id(id)?;
-    let receipt = ledger
-        .child("preparation-receipts")
-        .read::<super::PreparationReceipt>(&format!("{id}.json"))?;
+    let receipt = crate::preparation_store::receipts::get(ledger, id)?;
     let Some(receipt) = receipt else {
-        let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        if pending.iter().any(|p| p.request_id.as_deref() == Some(id)) {
+        let pending = crate::preparation_store::pending_for(ledger, id)?;
+        if pending.iter().any(|p| p.request_id == *id) {
             return Err(conflict());
         }
         return Ok(None);
     };
     if receipt.version.is_some_and(|version| version != VERSION) {
-        return Err(crate::worktree::refuse(
-            "unsupported preparation receipt version",
-        ));
+        return Err(
+            crate::worktree::refuse("unsupported preparation receipt version")
+                .because(crate::diagnostic::Cause::ProtocolUnsupported),
+        );
     }
     let saved = receipt.binding.ok_or_else(|| {
         crate::worktree::refuse("preparation receipt is missing its binding; claim remains held")
+            .because(crate::diagnostic::Cause::PreparationBindingMissing)
     })?;
     if saved.request_id != id
         || saved.claim.request_id != id
@@ -366,9 +358,7 @@ pub(crate) fn retention_completion(ledger: &Ledger, id: &str) -> Result<Option<u
 }
 
 fn read(ledger: &Ledger, id: &str) -> Result<Option<Receipt>> {
-    let receipt = ledger
-        .child("preparation-receipts")
-        .read::<Receipt>(&file(id))?;
+    let receipt = crate::preparation_store::dispositions::get(ledger, id)?;
     if let Some(receipt) = &receipt
         && ((receipt.finished_ms.is_some() && receipt.progress != Progress::Released)
             || receipt.request.version != VERSION
@@ -382,9 +372,7 @@ fn read(ledger: &Ledger, id: &str) -> Result<Option<Receipt>> {
 
 /// Read-only retirement evidence is a resource fence, never a no-launch witness.
 pub fn retired(ledger: &Ledger, id: &str) -> Result<bool> {
-    let raw = ledger
-        .child("preparation-receipts")
-        .read::<serde_json::Value>(&file(id))?;
+    let raw = crate::preparation_store::dispositions::value(ledger, id)?;
     // Historical non-retirement dispositions keep their existing evidence rules.
     // Only this new basis adds a resource-only exclusion to settlement.
     if raw
@@ -410,7 +398,10 @@ pub fn retired(ledger: &Ledger, id: &str) -> Result<bool> {
 /// Called under the request's preparation lock, before any discovery or side effect.
 pub fn allow_preparation(ledger: &Ledger, id: &str) -> Result<()> {
     if read(ledger, id)?.is_some() {
-        return Err(conflict());
+        return Err(
+            crate::worktree::refuse("preparation disposition remains held")
+                .because(crate::diagnostic::Cause::PreparationHeld),
+        );
     }
     Ok(())
 }
@@ -420,14 +411,8 @@ pub(super) fn allow_fresh(ledger: &Ledger, id: &str) -> Result<()> {
     allow_preparation(ledger, id)?;
     if binding(ledger, id)?.is_some()
         || crate::jobs::record(ledger, id)?.is_some()
-        || ledger
-            .child("launches")
-            .read::<serde_json::Value>(&format!("{id}.json"))?
-            .is_some()
-        || ledger
-            .child("launches")
-            .read::<serde_json::Value>(&format!("{id}.progress.json"))?
-            .is_some()
+        || crate::launch_store::receipt(ledger, id)?.is_some()
+        || crate::launch_store::progress_value(ledger, id)?.is_some()
     {
         return Err(conflict());
     }
@@ -483,17 +468,13 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
     if request.version != VERSION || !matches_binding(ledger, request)? {
         return Err(conflict());
     }
-    let receipts = ledger.child("preparation-receipts");
     let existing = read(ledger, id)?;
     if existing.as_ref().is_some_and(|r| r.request != *request) {
         return Err(conflict());
     }
-    ledger.with_lock("preparations", || {
-        let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        let matching: Vec<_> = pending
-            .iter()
-            .filter(|p| p.request_id.as_deref() == Some(id))
-            .collect();
+    crate::store::read(ledger, |tx| {
+        let pending = crate::preparation_store::pending_request_rows(tx, id)?;
+        let matching: Vec<_> = pending.iter().filter(|p| p.request_id == *id).collect();
         match matching.as_slice() {
             [claim] if **claim == request.binding.claim.pending() => (),
             [] if existing.is_some() => (),
@@ -506,8 +487,9 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
         .is_none_or(|r| r.progress != Progress::Released)
     {
         if existing.is_none() {
-            receipts.write(
-                &file(id),
+            crate::preparation_store::dispositions::put(
+                ledger,
+                id,
                 &Receipt {
                     finished_ms: None,
                     request: request.clone(),
@@ -520,8 +502,9 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
         crate::unit_request::crash_point("preparation-claim-released");
         let mut finished_ms = existing.as_ref().and_then(|receipt| receipt.finished_ms);
         crate::jobs::finish_once(ledger, &mut finished_ms, None)?;
-        receipts.write(
-            &file(id),
+        crate::preparation_store::dispositions::put(
+            ledger,
+            id,
             &Receipt {
                 finished_ms,
                 request: request.clone(),
@@ -533,8 +516,8 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
         }
     } else {
         // A released receipt cannot authorize removal of a recreated claim.
-        let pending: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-        if pending.iter().any(|p| p.request_id.as_deref() == Some(id)) {
+        let pending = crate::preparation_store::pending_for(ledger, id)?;
+        if pending.iter().any(|p| p.request_id == *id) {
             return Err(conflict());
         }
     }
@@ -552,10 +535,8 @@ fn apply(ledger: &Ledger, request: &Request) -> Result<Acknowledgement> {
 }
 
 fn finish_preparation(ledger: &Ledger, request: &Request, finished: u64) -> Result<()> {
-    let receipts = ledger.child("preparation-receipts");
-    let file = format!("{}.json", request.binding.request_id);
-    let Some(mut preparation) = receipts.read::<serde_json::Value>(&file)? else {
-        // Identified legacy claims can retire without inventing an outcome receipt.
+    let id = &request.binding.request_id;
+    let Some(mut preparation) = crate::preparation_store::receipts::get(ledger, id)? else {
         return if matches!(
             request.policy,
             Policy::Prohibit {
@@ -567,13 +548,12 @@ fn finish_preparation(ledger: &Ledger, request: &Request, finished: u64) -> Resu
             Err(conflict())
         };
     };
-    let fields = preparation.as_object_mut().ok_or_else(conflict)?;
-    match fields.get("finished_ms").filter(|value| !value.is_null()) {
+    match preparation.finished_ms {
         None => {
-            fields.insert("finished_ms".into(), finished.into());
-            receipts.write(&file, &preparation)
+            preparation.finished_ms = Some(finished);
+            crate::preparation_store::receipts::put(ledger, id, &preparation)
         }
-        Some(value) if value.as_u64() == Some(finished) => Ok(()),
+        Some(value) if value == finished => Ok(()),
         Some(_) => Err(conflict()),
     }
 }
@@ -632,11 +612,9 @@ fn dispose_guarded(
         return Err(conflict());
     }
     if let Some(saved) = &saved {
-        let held = ledger.with_lock("preparations", || {
-            let records: Vec<Pending> = ledger.read("preparations.json")?.unwrap_or_default();
-            Ok(records
-                .iter()
-                .any(|record| record.request_id.as_deref() == Some(id)))
+        let held = crate::store::read(ledger, |tx| {
+            let records = crate::preparation_store::pending_request_rows(tx, id)?;
+            Ok(records.iter().any(|record| record.request_id == *id))
         })?;
         // The matching fence already captured validated host proof. A removed claim
         // needs no current repository or launch observation to finish acknowledgement.
@@ -674,7 +652,6 @@ fn validate_policy(
 ) -> Result<()> {
     let binding = &request.binding;
     let id = &binding.request_id;
-    let receipts = ledger.child("launches");
     match &request.policy {
         Policy::Prohibit {
             basis: Basis::PlacementReturned,
@@ -682,12 +659,8 @@ fn validate_policy(
             if request.outcome != Outcome::Unknown
                 || binding.prepared.is_none()
                 || crate::jobs::record(ledger, id)?.is_some()
-                || receipts
-                    .read::<serde_json::Value>(&format!("{id}.json"))?
-                    .is_some()
-                || receipts
-                    .read::<serde_json::Value>(&format!("{id}.progress.json"))?
-                    .is_some()
+                || crate::launch_store::receipt(ledger, id)?.is_some()
+                || crate::launch_store::progress_value(ledger, id)?.is_some()
             {
                 return Err(conflict());
             }
@@ -713,9 +686,7 @@ fn validate_policy(
             basis: Basis::UnitRefused { launch },
         } => {
             match_launch(binding, launch)?;
-            let saved = receipts
-                .read::<serde_json::Value>(&format!("{id}.json"))?
-                .ok_or_else(conflict)?;
+            let saved = crate::launch_store::receipt(ledger, id)?.ok_or_else(conflict)?;
             if saved
                 .get("failed")
                 .and_then(serde_json::Value::as_str)
@@ -735,9 +706,7 @@ fn validate_policy(
         }
         Policy::Transfer { launch, pane, job } => {
             match_launch(binding, launch)?;
-            let saved = receipts
-                .read::<serde_json::Value>(&format!("{id}.json"))?
-                .ok_or_else(conflict)?;
+            let saved = crate::launch_store::receipt(ledger, id)?.ok_or_else(conflict)?;
             if request.outcome != Outcome::PossiblyExecuted || saved["pane"].as_str() != Some(pane)
             {
                 return Err(conflict());
@@ -827,9 +796,7 @@ pub fn replay_guarded(
     } else {
         // Historical outcomes carry no release authority. A correlated final launch
         // still replays read-only, leaving its preparation claim held.
-        if ledger
-            .child("preparation-receipts")
-            .read::<super::PreparationReceipt>(&format!("{}.json", launch.id))?
+        if crate::preparation_store::receipts::get(ledger, &launch.id)?
             .is_some_and(|receipt| receipt.version.is_none() && receipt.binding.is_none())
         {
             return Ok(());
@@ -838,10 +805,7 @@ pub fn replay_guarded(
             return Ok(());
         };
         if !crate::launch::refused_before_start(ledger, launch)? {
-            let Some(result) = ledger
-                .child("launches")
-                .read::<serde_json::Value>(&format!("{}.json", launch.id))?
-            else {
+            let Some(result) = crate::launch_store::receipt(ledger, &launch.id)? else {
                 return Ok(());
             };
             return crate::worktree::with_lifecycle(shell, ledger, &binding.request.0, |_guard| {
@@ -932,10 +896,7 @@ pub fn transfer_guarded(
         .filter(|p| !p.is_empty())
         .ok_or_else(conflict)?
         .to_owned();
-    let saved = ledger
-        .child("launches")
-        .read::<serde_json::Value>(&format!("{}.json", launch.id))?
-        .ok_or_else(conflict)?;
+    let saved = crate::launch_store::receipt(ledger, &launch.id)?.ok_or_else(conflict)?;
     if saved != *result {
         return Err(conflict());
     }
@@ -1058,10 +1019,7 @@ pub fn allow_startup(ledger: &Ledger, job: &crate::jobs::Job) -> Result<()> {
             if !same_job_owner(&owner, job) {
                 return Err(conflict());
             }
-            let receipt = ledger
-                .child("launches")
-                .read::<serde_json::Value>(&format!("{}.json", job.id))?
-                .ok_or_else(conflict)?;
+            let receipt = crate::launch_store::receipt(ledger, &job.id)?.ok_or_else(conflict)?;
             let crate::work::Action::Job {
                 cmd,
                 timeout_ms,
@@ -1189,24 +1147,21 @@ mod tests {
     }
 
     fn seed(ledger: &Ledger, request: &Request) {
-        ledger
-            .child("preparation-receipts")
-            .write(
-                "a.json",
-                &super::super::PreparationReceipt {
-                    finished_ms: None,
-                    validity: None,
-                    version: Some(VERSION),
-                    request: request.binding.request.clone(),
-                    prepared: request.binding.prepared.clone(),
-                    failure: None,
-                    binding: Some(request.binding.clone()),
-                },
-            )
-            .unwrap();
-        ledger
-            .write("preparations.json", &vec![request.binding.claim.pending()])
-            .unwrap();
+        crate::preparation_store::receipts::put(
+            ledger,
+            "a",
+            &super::super::PreparationReceipt {
+                finished_ms: None,
+                validity: None,
+                version: Some(VERSION),
+                request: request.binding.request.clone(),
+                prepared: request.binding.prepared.clone(),
+                failure: None,
+                binding: Some(request.binding.clone()),
+            },
+        )
+        .unwrap();
+        crate::preparation_store::put_pending(ledger, &[request.binding.claim.pending()]).unwrap();
     }
 
     #[test]
@@ -1245,39 +1200,32 @@ mod tests {
                 "contradiction" => {
                     let mut previous = original.clone();
                     previous.outcome = Outcome::PossiblyExecuted;
-                    ledger
-                        .child("preparation-receipts")
-                        .write(
-                            "a.disposition.json",
-                            &Receipt {
-                                finished_ms: None,
-                                request: previous,
-                                progress: Progress::Fenced,
-                            },
-                        )
-                        .unwrap();
+                    crate::preparation_store::dispositions::put(
+                        &ledger,
+                        "a",
+                        &Receipt {
+                            finished_ms: None,
+                            request: previous,
+                            progress: Progress::Fenced,
+                        },
+                    )
+                    .unwrap();
                 }
                 _ => unreachable!(),
             }
-            let paths = [
-                ledger.dir.join("preparations.json"),
-                ledger.dir.join("preparation-receipts/a.json"),
-                ledger.dir.join("preparation-receipts/a.disposition.json"),
-            ];
-            let before: Vec<_> = paths
-                .iter()
-                .map(std::fs::read)
-                .map(std::result::Result::ok)
-                .collect();
+            let snapshot = || {
+                serde_json::json!({
+                    "claims":crate::preparation_store::pending(&ledger).unwrap(),
+                    "receipt":crate::preparation_store::receipts::value(&ledger, "a").unwrap(),
+                    "disposition":crate::preparation_store::dispositions::value(&ledger, "a").unwrap(),
+                })
+            };
+            let before = snapshot();
             assert!(
                 dispose(&ledger, &crate::shell::Fake::new(), &changed).is_err(),
                 "{mismatch}"
             );
-            let after: Vec<_> = paths
-                .iter()
-                .map(std::fs::read)
-                .map(std::result::Result::ok)
-                .collect();
+            let after = snapshot();
             assert_eq!(before, after, "{mismatch}");
             std::fs::remove_dir_all(ledger.dir).unwrap();
         }
@@ -1288,40 +1236,27 @@ mod tests {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let request = request();
         seed(&ledger, &request);
-        ledger
-            .write("preparations.json", &Vec::<Pending>::new())
-            .unwrap();
+        crate::preparation_store::put_pending(&ledger, &[]).unwrap();
         assert!(apply(&ledger, &request).is_err());
         assert!(
-            !ledger
-                .dir
-                .join("preparation-receipts/a.disposition.json")
-                .exists()
+            crate::preparation_store::dispositions::get(&ledger, "a")
+                .unwrap()
+                .is_none()
         );
-        ledger
-            .child("preparation-receipts")
-            .write(
-                "a.disposition.json",
-                &Receipt {
-                    finished_ms: None,
-                    request: request.clone(),
-                    progress: Progress::Fenced,
-                },
-            )
-            .unwrap();
+        crate::preparation_store::dispositions::put(
+            &ledger,
+            "a",
+            &Receipt {
+                finished_ms: None,
+                request: request.clone(),
+                progress: Progress::Fenced,
+            },
+        )
+        .unwrap();
         assert!(apply(&ledger, &request).unwrap().released);
-        ledger
-            .write("preparations.json", &vec![request.binding.claim.pending()])
-            .unwrap();
+        crate::preparation_store::put_pending(&ledger, &[request.binding.claim.pending()]).unwrap();
         assert!(apply(&ledger, &request).is_err());
-        assert_eq!(
-            ledger
-                .read::<Vec<Pending>>("preparations.json")
-                .unwrap()
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(crate::preparation_store::pending(&ledger).unwrap().len(), 1);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
@@ -1329,51 +1264,42 @@ mod tests {
     fn disposition_releases_only_the_matching_preparation_claim() {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let request = request();
-        ledger
-            .child("preparation-receipts")
-            .write(
-                "a.json",
-                &super::super::PreparationReceipt {
-                    finished_ms: None,
-                    validity: None,
-                    version: Some(VERSION),
-                    request: request.binding.request.clone(),
-                    prepared: request.binding.prepared.clone(),
-                    failure: None,
-                    binding: Some(request.binding.clone()),
-                },
-            )
-            .unwrap();
-        let immutable: serde_json::Value = ledger
-            .child("preparation-receipts")
-            .read("a.json")
+        crate::preparation_store::receipts::put(
+            &ledger,
+            "a",
+            &super::super::PreparationReceipt {
+                finished_ms: None,
+                validity: None,
+                version: Some(VERSION),
+                request: request.binding.request.clone(),
+                prepared: request.binding.prepared.clone(),
+                failure: None,
+                binding: Some(request.binding.clone()),
+            },
+        )
+        .unwrap();
+        let immutable: serde_json::Value = crate::preparation_store::receipts::value(&ledger, "a")
             .unwrap()
             .unwrap();
         let first = request.binding.claim.pending();
         let mut other = first.clone();
-        other.request_id = Some("b".into());
-        ledger
-            .write("preparations.json", &vec![first, other.clone()])
-            .unwrap();
+        other.request_id = "b".into();
+        crate::preparation_store::put_pending(&ledger, &[first, other.clone()]).unwrap();
         let ack = apply(&ledger, &request).unwrap();
         assert!(ack.released);
         assert_eq!(ack.binding, request.binding);
         assert_eq!(
-            ledger
-                .read::<Vec<Pending>>("preparations.json")
-                .unwrap()
-                .unwrap(),
+            crate::preparation_store::pending(&ledger).unwrap(),
             vec![other]
         );
         assert_eq!(
             dispose(&ledger, &crate::shell::Fake::new(), &request).unwrap(),
             ack
         );
-        let mut settled: serde_json::Value = ledger
-            .child("preparation-receipts")
-            .read("a.json")
-            .unwrap()
-            .unwrap();
+        let mut settled: serde_json::Value =
+            crate::preparation_store::receipts::value(&ledger, "a")
+                .unwrap()
+                .unwrap();
         assert!(settled["finished_ms"].as_u64().is_some());
         settled.as_object_mut().unwrap().remove("finished_ms");
         assert_eq!(settled, immutable);

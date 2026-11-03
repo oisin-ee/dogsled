@@ -1,53 +1,65 @@
-//! Per-host transactional storage. Record shapes belong to the callers.
-
-use std::collections::HashMap;
+//! Per-host transactional storage: the connection, the schema version, and transactions.
+//! Each table's typed rows belong to its module.
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
-use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 
-const SCHEMA: &str = "
-CREATE TABLE items (
-    seq INTEGER PRIMARY KEY,
-    record TEXT NOT NULL CHECK (json_valid(record)),
-    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,
-    host TEXT GENERATED ALWAYS AS (json_extract(record, '$.host')) STORED NOT NULL,
-    pane TEXT GENERATED ALWAYS AS (json_extract(record, '$.pane')) STORED NOT NULL,
-    closed_ms INTEGER GENERATED ALWAYS AS (json_extract(record, '$.closed_ms')) STORED
-);
-CREATE INDEX items_open_pane ON items (host, pane) WHERE closed_ms IS NULL;
-CREATE TABLE tickets (
-    seq INTEGER PRIMARY KEY,
-    record TEXT NOT NULL CHECK (json_valid(record)),
-    id TEXT GENERATED ALWAYS AS (json_extract(record, '$.id')) STORED NOT NULL UNIQUE,
-    request_id TEXT GENERATED ALWAYS AS (json_extract(record, '$.request.id')) STORED NOT NULL UNIQUE,
-    state TEXT GENERATED ALWAYS AS (json_extract(record, '$.state')) STORED NOT NULL
-);
-PRAGMA user_version = 1;
-";
+/// The schema version this binary creates. A store with an older version starts again
+/// empty: earlier records are not read or converted.
+const VERSION: i64 = 4;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Table {
-    Items,
-    Tickets,
+fn supported_version() -> i64 {
+    if cfg!(debug_assertions)
+        && crate::upgrade::reported_version() != env!("CARGO_PKG_VERSION")
+        && let Ok(version) = std::env::var("DOGSLED_TEST_SCHEMA_VERSION")
+        && let Ok(version) = version.parse()
+    {
+        return version;
+    }
+    VERSION
 }
 
-impl Table {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Items => "items",
-            Self::Tickets => "tickets",
-        }
-    }
+/// The whole `state.db` schema.
+pub(crate) fn schema() -> String {
+    [
+        crate::tables::SCHEMA,
+        crate::tables::SERVICE_LANES_SCHEMA,
+        crate::tables::WRITER_SCHEMA,
+        crate::admissions::SCHEMA,
+        crate::launch_store::SCHEMA,
+        crate::web_store::SCHEMA,
+        crate::job_store::SCHEMA,
+        crate::preparation_store::SCHEMA,
+        crate::host_store::SCHEMA,
+        crate::host_store::PEER_SCHEMA,
+        crate::node::SAMPLES_SCHEMA,
+    ]
+    .concat()
+}
+
+/// The script that creates a fresh store: the schema, then its version.
+pub(crate) fn creation() -> String {
+    format!("{}PRAGMA user_version = {};", schema(), supported_version())
+}
+
+fn create(connection: &Connection) -> Result<()> {
+    connection.execute_batch(&creation())?;
+    Ok(())
 }
 
 fn version(connection: &Connection) -> Result<i64> {
+    crate::upgrade::guard(connection)?;
+    schema_version(connection)
+}
+
+pub(crate) fn schema_version(connection: &Connection) -> Result<i64> {
     let version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > 1 {
+    let supported = supported_version();
+    if version > supported {
         return Err(Error::Invalid(format!(
-            "state.db schema version {version} is newer than supported version 1"
+            "state.db schema version {version} is newer than supported version {supported}"
         )));
     }
     Ok(version)
@@ -70,19 +82,40 @@ fn database(ledger: &Ledger) -> Result<std::path::PathBuf> {
 fn open(ledger: &Ledger) -> Result<Connection> {
     let path = database(ledger)?;
     std::fs::create_dir_all(&ledger.dir)?;
-    let mut connection = Connection::open(path)?;
+    let mut connection = Connection::open(&path)?;
     connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
     // Refuse a newer schema before changing persistent connection settings.
     let current = version(&connection)?;
-    connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-    if current == 0 {
+    connection.execute_batch("PRAGMA synchronous=FULL;")?;
+    if current < supported_version() {
         // Two fresh openers deadlock upgrading SHARED to EXCLUSIVE for WAL; SQLite returns BUSY without calling the busy handler.
         ledger.with_lock("state-db", || {
             let current = version(&connection)?;
             connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
-            if current == 0 {
+            if current < supported_version() {
+                // An older store starts again empty. Nothing reads or converts it.
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                tx.execute_batch(SCHEMA)?;
+                // Recheck inside the write transaction: another binary may have opened
+                // and registered since the schema check above.
+                if version(&tx)? == supported_version() {
+                    tx.commit()?;
+                    return Ok(());
+                }
+                let tables: Vec<String> = tx
+                    .prepare(
+                        "SELECT name FROM sqlite_schema
+                         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                    )?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for table in tables {
+                    tx.execute_batch(&format!("DROP TABLE \"{table}\""))?;
+                }
+                create(&tx)?;
+                // Publish the replacement schema and its executable owner atomically.
+                if crate::upgrade::registration_allowed(&path)? {
+                    crate::tables::save_writer(&tx, &crate::upgrade::self_writer()?)?;
+                }
                 tx.commit()?;
             }
             Ok(())
@@ -90,6 +123,8 @@ fn open(ledger: &Ledger) -> Result<Connection> {
     } else {
         connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
     }
+    connection.execute_batch("PRAGMA foreign_keys=ON;")?;
+    crate::upgrade::register(&mut connection, &path)?;
     Ok(connection)
 }
 
@@ -116,106 +151,145 @@ pub(crate) fn write<T>(
     transact(ledger, TransactionBehavior::Immediate, f)
 }
 
+/// The file a cached connection opened. A replaced or removed `state.db` has a new identity.
+type Identity = (u64, u64);
+
+thread_local! {
+    /// Open connections, reused by later transactions on this thread. A connection is taken
+    /// out for one transaction, so a nested transaction opens its own.
+    static CONNECTIONS: std::cell::RefCell<std::collections::HashMap<std::path::PathBuf, (Identity, Connection)>> =
+        std::cell::RefCell::default();
+    /// The empty schema that a read sees when the host has no store yet.
+    static EMPTY: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) };
+    /// Stores with a write transaction open on this thread. SQLite has one writer, so a
+    /// second write from inside the first could only wait for itself.
+    static WRITING: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>> =
+        std::cell::RefCell::default();
+}
+
+/// Marks a store as written by this thread until dropped, including on unwind.
+struct Writing(std::path::PathBuf);
+
+impl Writing {
+    fn enter(path: &std::path::Path) -> Result<Self> {
+        if !WRITING.with_borrow_mut(|open| open.insert(path.to_path_buf())) {
+            return Err(Error::Invalid(format!(
+                "{} write started inside another write on the same thread",
+                path.display()
+            )));
+        }
+        Ok(Self(path.to_path_buf()))
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        WRITING.with_borrow_mut(|open| open.remove(&self.0));
+    }
+}
+
+/// Close this thread's cached connections.
+#[cfg(test)]
+pub(crate) fn release() {
+    CONNECTIONS.with_borrow_mut(std::collections::HashMap::clear);
+}
+
+fn identity(path: &std::path::Path) -> Result<Option<Identity>> {
+    use std::os::unix::fs::MetadataExt as _;
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A connection to this ledger's store: the cached one when it still opens the same file
+/// at the supported version, otherwise a new one.
+fn connection(ledger: &Ledger, path: &std::path::Path) -> Result<(Identity, Connection)> {
+    if let Some((cached, mut connection)) = CONNECTIONS.with_borrow_mut(|open| open.remove(path))
+        && identity(path)? == Some(cached)
+        && version(&connection)? == supported_version()
+    {
+        crate::upgrade::register(&mut connection, path)?;
+        return Ok((cached, connection));
+    }
+    let connection = open(ledger)?;
+    let opened =
+        identity(path)?.ok_or_else(|| Error::Invalid(format!("{} disappeared", path.display())))?;
+    Ok((opened, connection))
+}
+
 fn transact<T>(
     ledger: &Ledger,
     behavior: TransactionBehavior,
     f: impl FnOnce(&Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
     (|| {
-        let mut connection = if matches!(behavior, TransactionBehavior::Deferred)
-            && !database(ledger)?.try_exists()?
-        {
-            // A read never creates the store: a host without one has empty tables.
-            let connection = Connection::open_in_memory()?;
-            connection.execute_batch(SCHEMA)?;
-            connection
-        } else {
-            open(ledger)?
+        let path = database(ledger)?;
+        if matches!(behavior, TransactionBehavior::Deferred) && identity(&path)?.is_none() {
+            // A read never creates the store: a host without one has empty tables. The
+            // read is rolled back, so the shared empty schema stays empty.
+            let mut connection = if let Some(connection) = EMPTY.take() {
+                connection
+            } else {
+                let connection = Connection::open_in_memory()?;
+                create(&connection)?;
+                connection
+            };
+            let result = (|| {
+                let tx = connection.transaction_with_behavior(behavior)?;
+                f(&tx)
+            })();
+            EMPTY.set(Some(connection));
+            return result;
+        }
+        let _writing = match behavior {
+            TransactionBehavior::Deferred => None,
+            _ => Some(Writing::enter(&path)?),
         };
+        let (opened, mut connection) = connection(ledger, &path)?;
         connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
         let tx = connection.transaction_with_behavior(behavior)?;
+        crate::upgrade::guard(&tx)?;
         let result = f(&tx)?;
         tx.commit()?;
+        CONNECTIONS.with_borrow_mut(|open| open.insert(path, (opened, connection)));
         Ok(result)
     })()
     .map_err(classify)
 }
 
-pub(crate) fn rows<T: DeserializeOwned>(tx: &Transaction<'_>, table: Table) -> Result<Vec<T>> {
-    let mut statement = tx.prepare(&format!("SELECT record FROM {} ORDER BY seq", table.name()))?;
-    let records = statement.query_map([], |row| row.get::<_, String>(0))?;
-    records
-        .map(|record| Ok(serde_json::from_str(&record?)?))
-        .collect()
-}
-
-pub(crate) fn sync<T: Serialize>(tx: &Transaction<'_>, table: Table, records: &[T]) -> Result<()> {
-    let name = table.name();
-    let mut statement = tx.prepare(&format!("SELECT id, record, seq FROM {name}"))?;
-    let mut stored: HashMap<String, (String, i64)> = statement
-        .query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))))?
-        .collect::<std::result::Result<_, _>>()?;
-    let mut seq = stored.values().map(|(_, seq)| *seq).max().unwrap_or(0);
-    for record in records {
-        let record = serde_json::to_string(record)?;
-        let value: serde_json::Value = serde_json::from_str(&record)?;
-        let id = value["id"]
-            .as_str()
-            .ok_or_else(|| Error::Invalid("store record has no string id".into()))?;
-        if let Some((old, _)) = stored.remove(id) {
-            if old != record {
-                tx.execute(
-                    &format!("UPDATE {name} SET record = ?1 WHERE id = ?2"),
-                    (&record, id),
-                )?;
-            }
-        } else {
-            seq += 1;
-            tx.execute(
-                &format!("INSERT INTO {name} (seq, record) VALUES (?1, ?2)"),
-                (seq, &record),
-            )?;
-        }
-    }
-    for id in stored.keys() {
-        tx.execute(&format!("DELETE FROM {name} WHERE id = ?1"), [id])?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
-pub(crate) fn put_items(ledger: &Ledger, records: &impl Serialize) -> Result<()> {
-    replace(ledger, Table::Items, records)
-}
-
-#[cfg(test)]
-pub(crate) fn put_tickets(ledger: &Ledger, records: &impl Serialize) -> Result<()> {
-    replace(ledger, Table::Tickets, records)
-}
-
-#[cfg(test)]
-fn replace(ledger: &Ledger, table: Table, records: &impl Serialize) -> Result<()> {
-    let records: Vec<serde_json::Value> = serde_json::from_value(serde_json::to_value(records)?)?;
+pub(crate) fn put_items(ledger: &Ledger, records: &impl serde::Serialize) -> Result<()> {
+    let items: Vec<crate::items::Item> = serde_json::from_value(serde_json::to_value(records)?)?;
     write(ledger, |tx| {
-        tx.execute(&format!("DELETE FROM {}", table.name()), [])?;
-        sync(tx, table, &records)
+        tx.execute("DELETE FROM items", [])?;
+        crate::tables::sync_items(tx, &items)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn put_tickets(ledger: &Ledger, records: &impl serde::Serialize) -> Result<()> {
+    let tickets: Vec<crate::work::Ticket> = serde_json::from_value(serde_json::to_value(records)?)?;
+    write(ledger, |tx| {
+        tx.execute("DELETE FROM tickets", [])?;
+        crate::tables::sync_tickets(tx, &tickets)
     })
 }
 
 #[cfg(test)]
 pub(crate) fn items(ledger: &Ledger) -> Result<serde_json::Value> {
     read(ledger, |tx| {
-        Ok(serde_json::to_value(rows::<serde_json::Value>(
-            tx,
-            Table::Items,
-        )?)?)
+        Ok(serde_json::to_value(crate::tables::items(tx)?)?)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use crate::items::Item;
+    use crate::tables::{sync_items, sync_tickets};
+    use serde_json::json;
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
 
@@ -223,14 +297,21 @@ mod tests {
         Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
     }
 
-    fn item(id: &str) -> Value {
-        json!({"id":id,"host":"local","pane":id,"closed_ms":null})
+    fn item(id: &str) -> Item {
+        Item {
+            id: id.into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: id.into(),
+            owner_pane: "w1:p1".into(),
+            ..Item::default()
+        }
     }
 
-    fn stored(ledger: &Ledger) -> Vec<(i64, String)> {
+    fn stored(ledger: &Ledger) -> Vec<(i64, Option<i64>)> {
         read(ledger, |tx| {
             Ok(tx
-                .prepare("SELECT seq, record FROM items ORDER BY seq")?
+                .prepare("SELECT seq, closed_ms FROM items ORDER BY seq")?
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<std::result::Result<_, _>>()?)
         })
@@ -243,18 +324,18 @@ mod tests {
         let mut records = vec![item("first"), item("second"), item("third")];
         write(&ledger, |tx| {
             tx.execute_batch("CREATE TABLE updates (id TEXT); CREATE TRIGGER item_updates AFTER UPDATE ON items BEGIN INSERT INTO updates VALUES (new.id); END;")?;
-            sync(tx, Table::Items, &records)
+            sync_items(tx, &records)
         }).unwrap();
         let before = stored(&ledger);
-        records[1]["closed_ms"] = json!(100);
-        write(&ledger, |tx| sync(tx, Table::Items, &records)).unwrap();
+        records[1].closed_ms = Some(100);
+        write(&ledger, |tx| sync_items(tx, &records)).unwrap();
         let after = stored(&ledger);
         assert_eq!(before[0], after[0]);
         assert_eq!(before[2], after[2]);
         assert_eq!(before[1].0, after[1].0);
-        assert_ne!(before[1].1, after[1].1);
+        assert_eq!(after[1].1, Some(100));
         assert_eq!(items(&ledger).unwrap(), json!(records));
-        write(&ledger, |tx| sync(tx, Table::Items, &records)).unwrap();
+        write(&ledger, |tx| sync_items(tx, &records)).unwrap();
         let updates: Vec<String> = read(&ledger, |tx| {
             Ok(tx
                 .prepare("SELECT id FROM updates")?
@@ -272,7 +353,7 @@ mod tests {
         put_items(&ledger, &vec![item("first"), item("second")]).unwrap();
         let before = stored(&ledger);
         write(&ledger, |tx| {
-            sync(tx, Table::Items, &[item("second"), item("third")])
+            sync_items(tx, &[item("second"), item("third")])
         })
         .unwrap();
         let after = stored(&ledger);
@@ -286,12 +367,58 @@ mod tests {
     }
 
     #[test]
+    fn every_item_field_survives_a_round_trip() {
+        let ledger = ledger();
+        let mut full = item("full");
+        full.owner_session = Some("session".into());
+        full.name = Some("worker".into());
+        full.closed_ms = Some(9);
+        full.reply = Some(crate::items::Reply {
+            seq: 3,
+            result_id: Some("result".into()),
+            text: "FINAL".into(),
+            captured_ms: 4,
+            reported_ms: Some(5),
+            done: true,
+        });
+        full.signal = Some(crate::items::ItemSignal {
+            kind: crate::lifecycle::Signal::Ask,
+            text: "why?".into(),
+            event_id: "event".into(),
+            recorded_ms: 6,
+            session: None,
+            reported_ms: None,
+        });
+        full.native_done = true;
+        full.branch = Some(crate::done::Branch {
+            repo: "/repo".into(),
+            name: "feat/x".into(),
+            ahead: 2,
+            landed: false,
+        });
+        full.recovery = Some(crate::preservation::Recovery {
+            host: "local".into(),
+            repository: "/repo".into(),
+            id: "recovery".into(),
+            pinned_oid: "0".repeat(40),
+            predecessors: vec!["1".repeat(40), "2".repeat(40)],
+            operation: "close".into(),
+            item: Some("full".into()),
+        });
+        put_items(&ledger, &vec![full.clone()]).unwrap();
+        assert_eq!(items(&ledger).unwrap(), json!([full]));
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
     fn newer_version_refuses_reads_and_writes_without_changing_database() {
         let ledger = ledger();
         std::fs::create_dir_all(&ledger.dir).unwrap();
         let path = ledger.dir.join("state.db");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("PRAGMA user_version=2;").unwrap();
+        connection
+            .execute_batch(&format!("PRAGMA user_version={};", VERSION + 1))
+            .unwrap();
         drop(connection);
         let before = std::fs::read(&path).unwrap();
         for error in [
@@ -301,6 +428,26 @@ mod tests {
             assert!(matches!(error, Error::Invalid(_)), "{error}");
         }
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn an_older_store_starts_again_empty() {
+        let ledger = ledger();
+        std::fs::create_dir_all(&ledger.dir).unwrap();
+        let connection = Connection::open(ledger.dir.join("state.db")).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE items (seq INTEGER PRIMARY KEY, record TEXT);
+                 INSERT INTO items (record) VALUES ('{{}}');
+                 PRAGMA user_version={};",
+                VERSION - 1
+            ))
+            .unwrap();
+        drop(connection);
+        assert_eq!(items(&ledger).unwrap(), json!([]));
+        write(&ledger, |tx| sync_items(tx, &[item("new")])).unwrap();
+        assert_eq!(items(&ledger).unwrap(), json!([item("new")]));
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
@@ -317,9 +464,9 @@ mod tests {
                         barrier.wait();
                         for index in 0..10 {
                             write(ledger, |tx| {
-                                let mut records: Vec<Value> = rows(tx, Table::Items)?;
+                                let mut records = crate::tables::items(tx)?;
                                 records.push(item(&format!("{thread}-{index}")));
-                                sync(tx, Table::Items, &records)
+                                sync_items(tx, &records)
                             })
                             .unwrap();
                         }
@@ -350,28 +497,28 @@ mod tests {
     fn reading_an_absent_store_creates_nothing() {
         let ledger = ledger();
         assert_eq!(items(&ledger).unwrap(), json!([]));
-        let tickets: Vec<Value> = read(&ledger, |tx| rows(tx, Table::Tickets)).unwrap();
-        assert_eq!(tickets, [] as [Value; 0]);
+        assert!(read(&ledger, crate::tables::tickets).unwrap().is_empty());
         assert!(!ledger.dir.exists());
     }
 
     #[test]
     fn failed_write_rolls_back_both_collections() {
         let ledger = ledger();
+        let request = crate::admissions::fixtures::request("request", "w1:p1", None);
+        let ticket: crate::work::Ticket = serde_json::from_value(json!({
+            "id":"ticket","request":request,"created_ms":1,"state":"pending","waiting":false,
+            "waiting_until_ms":null,"notified":false,"result":null,"error":null
+        }))
+        .unwrap();
         let error = write(&ledger, |tx| {
-            sync(tx, Table::Items, &[item("item")])?;
-            sync(
-                tx,
-                Table::Tickets,
-                &[json!({"id":"ticket","request":{"id":"request"},"state":"pending"})],
-            )?;
+            sync_items(tx, &[item("item")])?;
+            sync_tickets(tx, &[ticket])?;
             Err::<(), _>(Error::Invalid("abort".into()))
         })
         .unwrap_err();
         assert!(matches!(error, Error::Invalid(_)));
         assert_eq!(items(&ledger).unwrap(), json!([]));
-        let tickets: Vec<Value> = read(&ledger, |tx| rows(tx, Table::Tickets)).unwrap();
-        assert_eq!(tickets, [] as [Value; 0]);
+        assert!(read(&ledger, crate::tables::tickets).unwrap().is_empty());
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
@@ -407,8 +554,21 @@ mod tests {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_millis(50));
-        let error = write(&ledger, |_| Ok(())).unwrap_err();
+        // Give setup a generous command budget. Verify the timeout the store installs,
+        // then refuse a genuine lock conflict immediately, without racing that deadline.
+        ledger.budget = crate::budget::Budget::until(Instant::now() + Duration::from_secs(10));
+        let error = read(&ledger, |contender| {
+            let timeout: i64 = contender.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            assert!(
+                (1..=10_000).contains(&timeout),
+                "SQLite timeout {timeout} exceeds the command budget"
+            );
+            contender.execute_batch(
+                "PRAGMA busy_timeout=0; CREATE TABLE deadline_contender (id INTEGER)",
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
         assert!(
             matches!(error, Error::Deadline(ref detail) if detail == "state.db busy"),
             "{error}"

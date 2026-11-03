@@ -41,7 +41,7 @@ fn wrapper_termination_kills_command_group_and_records_result() {
             .success()
     );
     assert_eq!(child.wait().code(), Some(137));
-    assert_eq!(rig.read("state/jobs/wrapper.json")["reason"], "signal 15");
+    assert_eq!(rig.job("wrapper")["reason"], "signal 15");
 }
 
 #[test]
@@ -75,13 +75,13 @@ fn stop_kills_running_process_after_child_output_without_test_sleep() {
     assert_eq!(line, "ready\n");
     assert!(rig.run(&["stop", "stoppable"]).status.success());
     assert_eq!(child.wait().code(), Some(137));
-    assert_eq!(rig.read("state/jobs/stoppable.json")["reason"], "stopped");
+    assert_eq!(rig.job("stoppable")["reason"], "stopped");
 }
 
 #[test]
 fn waiting_queue_caller_observes_service_admission_without_sleep() {
     let rig = Rig::new("queue-wait");
-    rig.snapshot("state/host.json", now(), 99.0, 1);
+    rig.snapshot("state", now(), 99.0, 1);
     // Queueing, the service pass, and observing admission each need scheduling
     // headroom. This is only a failure bound: the output handshake drives progress.
     let admission_deadline = format!("{}s", (PROCESS_DEADLINE * 3).as_secs());
@@ -117,7 +117,7 @@ fn remote_repository_clone_precedes_prepare_and_failures_do_not_fall_back() {
     let repo = rig.dir.join("home/repo");
     repository(&repo);
     rig.peer();
-    rig.snapshot("state/host.json", now(), 0.0, 8);
+    rig.snapshot("state", now(), 0.0, 8);
     let args = [
         "place",
         "--host",
@@ -138,13 +138,13 @@ case "$*" in
  *'host reserve'*)
    for remote do :; done
    sh -c "$RIG/bin/peer-fixture $remote" ;;
- *'host checkout'*) printf '%s\n' '{"error":"netcup: clone https://example.invalid/repo.git failed: credentials","code":"CLONE_FAILED"}'; exit 2 ;;
+ *'host checkout'*) printf '%s\n' '{"error":"netcup: clone https://example.invalid/repo.git failed: credentials","diagnostic":{"version":1,"operation":"checkout","cause":"clone_failed","context":{}}}'; exit 2 ;;
  *) echo 'must not prepare after clone failure' >&2; exit 2 ;;
 esac
 "#);
     let (code, error) = rig.json(&args);
     assert_eq!(code, 2);
-    // The peer's code maps to a fixed message; its own text, which can hold a secret, is hidden.
+    // The typed cause maps to a fixed message; the peer's own text stays hidden.
     let message = error["error"].as_str().unwrap();
     assert!(
         message.contains("could not clone the repository"),
@@ -152,7 +152,7 @@ esac
     );
     assert!(!message.contains("credentials"), "{error}");
     assert_eq!(rig.log("ssh.log").matches("host prepare ").count(), 1);
-    assert!(!rig.dir.join("state/placements.json").exists());
+    assert_eq!(rig.reservations(), json!([]));
 }
 
 #[test]

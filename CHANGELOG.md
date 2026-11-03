@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.31.0 - 2026-11-03
+
+- Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
+- Remote launch errors show the host and the typed refusal reason, including a missing execution directory, instead of reporting an SSH failure.
+- Probe samples and cleanup pass history are typed `state.db` tables, `samples` and `host_report`. Dogsled no longer writes `samples.jsonl` or `sweeps.jsonl`, and no state record is a JSON file.
+- Items and queued tickets change in one SQLite write transaction. The `items.lock` and `queue.lock` files are gone, so a close no longer waits on a file lock to record an item. Kernel locks remain only where they guard work outside `state.db`: panes, checkouts, peer hosts, the quota service, and the capacity publication protocol.
+- A write to `state.db` that starts inside another write on the same thread fails at once. Before, it waited for itself until its deadline.
+- Running commands and services switch to the newest valid recorded Dogsled executable without a manual restart. Live MCP sessions keep their connection and pending request. Missing or invalid executables no longer block a compatible store. Debug builds do not register in the default state directory without an explicit override.
+- `state.db` is now schema version 4. A host with an older `state.db` starts again with an empty store. Let queued work finish before you upgrade a host. Delete the old `samples.jsonl`, `sweeps.jsonl`, `items.lock`, and `queue.lock` files after you upgrade.
+
+## 0.30.0 - 2026-11-02
+
+- Store launch receipts, progress, releases, seeds, and continuation receipts in typed SQLite tables.
+- Web questions, reviews, attachment metadata, inboxes, outboxes, boards, sidebar preferences, and todo publications use typed SQLite tables. Pi publishes todo snapshots through the CLI. Credential files and agent-readable image artifacts stay as files.
+- Store preparation claims, receipts, grants, expectations, and retirements in typed SQLite tables.
+- Store jobs, request validity, cancellations, placement selections, reservations, and the validity clock in typed SQLite tables.
+- Store host snapshots, handoffs, cleanup, custody, watchdog, quota, and preservation state in typed SQLite tables.
+- Status and prompt context show failing service lanes on each host, including when the failure started and how often it repeated. Service errors and handoff warnings print only when they change or recover.
+- Admissions move from one JSON file per request into typed tables in `state.db`: one `admissions` row per request, with child tables for job arguments, declined placements, custody acknowledgements, and reviews. Each field Dogsled reads is its own column. Peer protocol messages, such as commit inputs, receipts, and release certificates, are kept as the exact bytes exchanged, because their digests and replay depend on them.
+- `dogsled unit settlements`, which every Pi session runs every 10 seconds, reads only the caller's unsettled units, through an index. Before, it read every admission file several times per call and reread the whole queue for each failed or cancelled ticket, so about 11 sessions kept about 11 cores busy.
+- `state.db` is now schema version 2. A host with an older `state.db` starts again with an empty store. Admission files and older store contents are not read. Let queued work finish before you upgrade a host.
+- Items and queued tickets are typed tables too, with each field in its own column.
+
+## 0.29.3 - 2026-11-02
+
+- `dogsled close` resumes an interrupted preservation close after completed teardown, final capture, or normalization without repeating completed effects. A matching origin request can resume a requestless close for the same launch. Other identity changes still refuse the retry. Unknown teardown outcomes and interrupted normalization still retain the checkout.
+- Automatic cleanup removes only recorded checkouts and branches of closed children. Checkout identity must match the recorded Git directories and generation. Worktrees and branches that Dogsled did not create stay intact, even when clean and pushed. Explicit `dogsled prune` keeps its existing behavior.
+
+## 0.29.2 - 2026-11-02
+
+- The web portal builds its controls from the official Dioxus components and runs no hand-written scripts. Before, it used hand-written markup and `document::eval` scripts. Timers, conversation scrolling, image upload, and the marking of annotated passages are now Rust.
+- The web portal has no style sheet of its own. Colors, fonts, and the page frame come from the Dioxus components theme, so the portal follows the system light or dark setting. Before, it used a fixed Catppuccin palette.
+- The conversation is no longer a box with a fixed height. The page of the selected agent scrolls and follows the newest turn.
+
+## 0.29.1 - 2026-10-30
+
+- Admission works again when one committed unit cannot be queued. Before, a unit request saved without request validity, for example by an older `dogsled mcp`, made the service's recovery step fail on every tick, so no request was admitted on that host. Now the service logs that request and holds it alone.
+- Remote jobs that need a checkout start again. Before, a job reservation took its hold without publishing the request's validity, so the following `host checkout` refused it as unprovable on every remote host.
+- A session's board, sidebar, and banner show only the resource holds that the session owns. Before, every hold without an owner pane appeared in every session as a blocked card. `dogsled board --all` and `dogsled status` still show every hold.
+- Every preparation claim must name its request. Dogsled no longer reads requestless claims or reports the `legacy_preparation` hold; status reports such a record as `unreadable`.
+
+## 0.29.0 - 2026-10-29
+
+- Each host keeps its items and its queue in one SQLite database, `state.db`, in its state directory. A change writes only the rows that changed, in one transaction. Before, each change rewrote all of `items.json` or `queue.json`, which stalled tickets once those files grew to several megabytes.
+- The new store starts empty. It does not read `items.json`, `queue.json`, or `queue-format.json`. Open items and queued tickets from 0.28.1 are not carried over. Let queued work finish before you upgrade a host.
+- Dogsled expires released terminal lifecycle records. It keeps output for 24 hours and removes terminal metadata only after 30 days. Explicit prune no longer deletes job JSON at the output deadline.
+- Ordinary and agent reference releases use version 2 certificates, with an explicit variant for no binding. Version 1 release contracts are unchanged.
+- Recorded ordinary handoffs stay readable after their closure.
+- Cancelled requests that cannot be released no longer block the queue. Before, the service retried every one of them before each admission pass, so new work could wait for hours.
+  - A cancellation with no saved preparation identity is held. Its release stays pending. `dogsled status` and the board show it as `cancellation_held`, with `dogsled retire-preparation <request-id>` as the command that releases it. The service retries it only when its admission, preparation, or retirement records change.
+  - Admission runs first in each service pass. Cancellation repair runs after it, outside the admission lock, and tries at most 16 releases per pass. It saves all changed tickets in one queue write.
+
 ## 0.28.1 - 2026-10-29
 
 - The npm packages publish again. The 0.28.0 release built its binaries and GitHub release, but its npm job stopped before it published anything, so 0.28.0 is not on npm. `actions/setup-node` started pnpm caching on its own, because `package.json` names pnpm, and proto had not installed pnpm yet.
@@ -326,7 +378,6 @@ Wrangle replaces Shepherdr for delegation: one board, one inbox, and children th
 - Probe `busy`, `cpu_ticks`, and `memory.pressure_level`; status lines show busy cores over cores. With a finite cgroup limit the probe reports whichever of the cgroup and `/proc/meminfo` has less free memory.
 - Append every probe to `~/.local/state/wrangle/samples.jsonl` (seven-day window) so thresholds can be re-scored on real data.
 
-||||||| 7178211
 ## 0.7.3 - 2026-10-15
 
 - Find a stacked branch as integrated when each branch in the stack landed as its own squash. A branch whose commits split into consecutive runs, each applied by one commit on the default branch, is integrated; doctor names every applying commit.

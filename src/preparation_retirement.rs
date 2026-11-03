@@ -35,12 +35,12 @@ pub struct Audit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Intent {
-    version: u32,
-    request: Option<Value>,
-    disposition: disposition::Request,
-    acknowledgement: Option<disposition::Acknowledgement>,
-    error: Option<String>,
+pub(crate) struct Intent {
+    pub(crate) version: u32,
+    pub(crate) request: Option<Value>,
+    pub(crate) disposition: disposition::Request,
+    pub(crate) acknowledgement: Option<disposition::Acknowledgement>,
+    pub(crate) error: Option<String>,
 }
 
 fn conflict(message: &str) -> crate::error::Error {
@@ -135,9 +135,7 @@ fn authority(
     if item.owner_pane != pane || item.owner_session.as_deref() != Some(session) {
         return Err(conflict("retirement caller is not the recorded owner"));
     }
-    let admission = ledger
-        .child("admissions")
-        .read::<Value>(&format!("{id}.json"))?
+    let admission = crate::admissions::get_as::<Value>(ledger, id)?
         .ok_or_else(|| conflict("missing origin host provenance"))?;
     if admission["request"]["owner_host"].as_str() != Some(actor.host.as_str()) {
         return Err(conflict("retirement owner host changed"));
@@ -150,10 +148,7 @@ fn authority(
 /// The origin intent, not a terminal ticket, fences every new caller dispatch.
 /// This function never supplies execution or no-launch evidence.
 pub fn prohibited(ledger: &Ledger, request: &crate::work::Request) -> Result<bool> {
-    let Some(intent) = ledger
-        .child("preparation-retirements")
-        .read::<Intent>(&format!("{}.json", request.id))?
-    else {
+    let Some(intent) = crate::preparation_store::retirements::get(ledger, &request.id)? else {
         return Ok(false);
     };
     let captured = audit(&intent)?;
@@ -165,6 +160,21 @@ pub fn prohibited(ledger: &Ledger, request: &crate::work::Request) -> Result<boo
     {
         return Err(conflict("retirement originating request changed"));
     }
+    Ok(true)
+}
+
+/// Whether the host acknowledged this request's retirement, which releases its
+/// preparation ownership. A changed request is a conflict, never a release.
+pub fn released(ledger: &Ledger, request: &crate::work::Request) -> Result<bool> {
+    if !prohibited(ledger, request)? {
+        return Ok(false);
+    }
+    let intent = crate::preparation_store::retirements::get(ledger, &request.id)?
+        .ok_or_else(|| conflict("retirement record disappeared"))?;
+    let Some(ack) = &intent.acknowledgement else {
+        return Ok(false);
+    };
+    crate::prepare::validate_ack(&intent.disposition, ack)?;
     Ok(true)
 }
 
@@ -180,10 +190,10 @@ pub fn retire(
     if reason.trim().is_empty() {
         return Err(conflict("retirement requires a nonempty reason"));
     }
-    fleet.ledger.child("admissions").with_lock(id, || {
-        let store = fleet.ledger.child("preparation-retirements");
-        let file = format!("{id}.json");
-        let mut intent = if let Some(saved) = store.read::<Intent>(&file)? {
+    crate::admissions::lock(fleet.ledger, id, || {
+        let mut intent = if let Some(saved) =
+            crate::preparation_store::retirements::get(fleet.ledger, id)?
+        {
             let captured = audit(&saved)?;
             if captured.request_id != id
                 || captured.reason != reason
@@ -195,7 +205,7 @@ pub fn retire(
             }
             saved
         } else {
-            let admission = fleet.ledger.child("admissions").read::<Value>(&file)?;
+            let admission = crate::admissions::value(fleet.ledger, id)?;
             let expected_request = admission.as_ref().and_then(|a| a.get("request")).cloned();
             let host = select_host(fleet, admission.as_ref(), selected)?;
             let (actor, captured_authority) =
@@ -266,7 +276,7 @@ pub fn retire(
                 {
                     return Err(conflict("retirement custody changed during capture"));
                 }
-                store.write(&file, &saved)
+                crate::preparation_store::retirements::put(fleet.ledger, id, &saved)
             })?;
             crate::unit_request::crash_point("retirement-intent-saved");
             saved
@@ -337,11 +347,7 @@ fn validate_origin(
             "retirement historical preparation does not match its origin",
         ));
     }
-    if let Some(query) =
-        fleet
-            .ledger
-            .child("preparation-expectations")
-            .read::<crate::prepare::PreparationLookup>(&format!("{}.json", request.id))?
+    if let Some(query) = crate::preparation_store::expectations::get(fleet.ledger, &request.id)?
         && (serde_json::to_value(query.request)? != serde_json::to_value(request)?
             || query.host != *host
             || query.binding.as_ref().is_some_and(|saved| saved != binding))
@@ -353,10 +359,7 @@ fn validate_origin(
 
 fn finish(fleet: &Fleet, intent: &mut Intent) -> Result<()> {
     let captured = audit(intent)?.clone();
-    let current = fleet
-        .ledger
-        .child("admissions")
-        .read::<Value>(&format!("{}.json", captured.request_id))?
+    let current = crate::admissions::value(fleet.ledger, &captured.request_id)?
         .and_then(|a| a.get("request").cloned());
     if current != intent.request {
         return Err(conflict("retirement originating request changed"));
@@ -377,10 +380,7 @@ fn finish(fleet: &Fleet, intent: &mut Intent) -> Result<()> {
             intent.error = Some(error.to_string());
         }
     }
-    fleet
-        .ledger
-        .child("preparation-retirements")
-        .write(&format!("{}.json", captured.request_id), intent)?;
+    crate::preparation_store::retirements::put(fleet.ledger, &captured.request_id, intent)?;
     crate::unit_request::crash_point("retirement-acknowledgement-saved");
     Ok(())
 }
@@ -400,23 +400,11 @@ fn result(intent: &Intent) -> Result<Value> {
 /// Service replay uses only saved authority and exact envelopes. One damaged operation
 /// never blocks unrelated requests; its durable fence and visible error remain.
 pub fn recover(fleet: &Fleet) -> Result<()> {
-    let store = fleet.ledger.child("preparation-retirements");
-    let entries = match std::fs::read_dir(&store.dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let file = entry.file_name().to_string_lossy().into_owned();
-        let Some(id) = file.strip_suffix(".json") else {
-            continue;
-        };
-        if crate::jobs::validate_id(id).is_err() {
-            continue;
-        }
-        let repaired = fleet.ledger.child("admissions").with_lock(id, || {
-            let Some(mut saved) = store.read::<Intent>(&file)? else {
+    for id in crate::preparation_store::retirements::ids(fleet.ledger)? {
+        let id = id.as_str();
+        let repaired = crate::admissions::lock(fleet.ledger, id, || {
+            let Some(mut saved) = crate::preparation_store::retirements::get(fleet.ledger, id)?
+            else {
                 return Ok(());
             };
             if audit(&saved)?.request_id != id {
