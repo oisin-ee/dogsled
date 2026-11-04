@@ -1,6 +1,6 @@
 # One observer per host
 
-Status: problem measured 2026-11-04 on v0.32.0. Design not yet written.
+Status: problem measured 2026-11-04 on v0.32.0. Writer brief O1–O13: `plans/briefs/observation.md`. Three decisions are open (see the brief).
 
 ## Problem
 
