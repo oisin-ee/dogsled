@@ -128,7 +128,7 @@ impl Collector {
                 Err(error),
             ),
         };
-        let (headroom, status, todos) = match &host {
+        let (headroom, status) = match &host {
             Ok(host) => {
                 let headroom = host
                     .snapshot
@@ -156,18 +156,15 @@ impl Collector {
                     retry_ms: None,
                     job_validity: host.job_validity,
                 };
-                (
-                    Ok(headroom),
-                    status(node.ledger, vec![report], now),
-                    todos(node.ledger),
-                )
+                (Ok(headroom), status(node.ledger, vec![report], now))
             }
             Err(error) => {
                 let dependency =
                     || crate::error::Error::Invalid(format!("host collection failed: {error}"));
-                (Err(dependency()), Err(dependency()), Err(dependency()))
+                (Err(dependency()), Err(dependency()))
             }
         };
+        let todos = todos(node.ledger);
         self.record("host", now, host);
         self.record("headroom", now, headroom);
         self.record("status", now, status);

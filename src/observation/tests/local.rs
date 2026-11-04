@@ -221,9 +221,12 @@ fn failed_collection_retains_values_and_times_then_recovers() {
     let failed = publisher.replace(collection.input).unwrap();
     assert_eq!(failed.published_ms, 200);
     assert_eq!(failed.local, old.local);
-    assert_eq!(failed.sources.local, old.sources.local);
+    for domain in ["host", "headroom", "status"] {
+        assert_eq!(failed.sources.local[domain], old.sources.local[domain]);
+    }
+    assert_eq!(failed.sources.local["todos"], 200);
     assert_eq!(failed.local_revision, old.local_revision);
-    assert_eq!(failed.gaps.len(), 4);
+    assert_eq!(failed.gaps.len(), 3);
     assert!(
         failed
             .gaps
@@ -256,12 +259,49 @@ fn cold_collection_failure_is_not_empty_success() {
     let collection = Collector::default().collect(&fixture.node(), 100);
     assert!(collection.sample.is_err());
     let input = collection.input;
-    assert!(input.local.is_empty());
-    assert!(input.sources.local.is_empty());
-    assert_eq!(input.gaps.len(), 4);
-    for domain in ["host", "headroom", "status", "todos"] {
+    assert_eq!(input.local.len(), 1);
+    assert_eq!(input.local["todos"], json!([]));
+    assert_eq!(input.sources.local, BTreeMap::from([("todos".into(), 100)]));
+    assert_eq!(input.gaps.len(), 3);
+    for domain in ["host", "headroom", "status"] {
         assert!(input.gaps.iter().any(|gap| gap.domain == domain));
     }
+}
+
+#[test]
+fn failed_host_capture_still_imports_and_publishes_todos() {
+    let fixture = Fixture::new();
+    fixture.seed_todo();
+    let pending = crate::prepare::Pending {
+        request_id: "ownerless".into(),
+        tree: crate::cleanup::Tree {
+            repo: "/execution-host/repository".into(),
+            path: "/execution-host/checkout".into(),
+            branch: "pending-branch".into(),
+            head: String::new(),
+            identity: None,
+        },
+    };
+    crate::preparation_store::put_pending(&fixture.ledger, &[pending]).unwrap();
+    assert_eq!(crate::board::cached_todos(&fixture.ledger).unwrap(), []);
+    let collection = Collector::default().collect(&fixture.node(), 100);
+    collection.sample.unwrap();
+    let mut publisher = Publisher::new().unwrap();
+    let frame = publisher.replace(collection.input).unwrap();
+    assert_eq!(frame.local.len(), 1);
+    assert_eq!(frame.local["todos"][0]["revision"], 7);
+    assert_eq!(frame.local["todos"][0]["pane"], "worker");
+    assert_eq!(frame.sources.local, BTreeMap::from([("todos".into(), 100)]));
+    assert_eq!(frame.gaps.len(), 3);
+    for domain in ["host", "headroom", "status"] {
+        let gap = frame.gaps.iter().find(|gap| gap.domain == domain).unwrap();
+        assert_eq!(gap.availability, super::super::Availability::Failed);
+        assert!(gap.detail.contains("has no recorded owner pane"));
+    }
+    assert_eq!(
+        crate::board::cached_todos(&fixture.ledger).unwrap().len(),
+        1
+    );
 }
 
 #[test]
