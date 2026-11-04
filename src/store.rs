@@ -8,7 +8,7 @@ use crate::ledger::Ledger;
 
 /// The schema version this binary creates. A store with an older version starts again
 /// empty: earlier records are not read or converted.
-const VERSION: i64 = 4;
+const VERSION: i64 = 5;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -17,6 +17,7 @@ pub(crate) fn schema() -> String {
         crate::tables::SERVICE_LANES_SCHEMA,
         crate::admissions::SCHEMA,
         crate::launch_store::SCHEMA,
+        crate::lead_store::SCHEMA,
         crate::web_store::SCHEMA,
         crate::job_store::SCHEMA,
         crate::preparation_store::SCHEMA,
@@ -393,8 +394,13 @@ mod tests {
         for error in [
             read(&ledger, |_| Ok(())).unwrap_err(),
             write(&ledger, |_| Ok(())).unwrap_err(),
+            crate::lead_store::list(&ledger).unwrap_err(),
         ] {
             assert!(matches!(error, Error::Invalid(_)), "{error}");
+            assert!(error.to_string().contains(&format!(
+                "schema version {} is newer than supported version {VERSION}",
+                VERSION + 1
+            )));
         }
         assert_eq!(std::fs::read(&path).unwrap(), before);
         std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -463,10 +469,35 @@ mod tests {
     }
 
     #[test]
+    fn lead_schema_is_created_at_the_supported_version() {
+        let ledger = ledger();
+        write(&ledger, |tx| {
+            let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            assert_eq!(version, VERSION);
+            assert_eq!(version, 5);
+            assert!(!crate::lead_store::exists_in(tx, "absent")?);
+            let columns: Vec<String> = tx
+                .prepare("PRAGMA table_info(leads)")?
+                .query_map([], |row| row.get(1))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert!(columns.iter().any(|column| column == "terminal"));
+            assert!(columns.iter().any(|column| column == "close_requested_ms"));
+            assert!(!columns.iter().any(|column| column == "owner_pane"));
+            Ok(())
+        })
+        .unwrap();
+        assert!(crate::lead_store::list(&ledger).unwrap().is_empty());
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
     fn reading_an_absent_store_creates_nothing() {
         let ledger = ledger();
         assert_eq!(items(&ledger).unwrap(), json!([]));
         assert!(read(&ledger, crate::tables::tickets).unwrap().is_empty());
+        assert!(crate::lead_store::list(&ledger).unwrap().is_empty());
+        assert!(crate::lead_store::get(&ledger, "absent").unwrap().is_none());
+        assert!(!read(&ledger, |tx| crate::lead_store::exists_in(tx, "absent")).unwrap());
         assert!(!ledger.dir.exists());
     }
 
