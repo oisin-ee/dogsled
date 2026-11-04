@@ -24,6 +24,14 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ObservationCommand {
+    /// Print the current publication as one JSON line; never reconstruct missing state.
+    Current,
+    /// Stream complete JSON publications until the publisher disconnects.
+    Subscribe,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Inspect and restore local, pinned recovery snapshots.
     Recovery {
@@ -40,6 +48,11 @@ pub enum Command {
         interval: u64,
         #[arg(long)]
         once: bool,
+    },
+    /// Read or subscribe to the service's immutable observation publication.
+    Observation {
+        #[command(subcommand)]
+        command: ObservationCommand,
     },
     /// Read all hosts' snapshots, with a shared 10-second peer cache.
     Status {

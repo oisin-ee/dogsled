@@ -44,6 +44,8 @@ mod loss_tests;
 mod machines;
 mod mcp;
 mod node;
+#[cfg_attr(not(test), expect(dead_code, reason = "producer wiring follows in O3"))]
+mod observation;
 mod plan;
 mod preparation_retirement;
 mod preparation_store;
@@ -531,6 +533,9 @@ fn hook(
 
 /// Recovery needs no Herdr discovery for local operations.
 fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    if let Command::Observation { command } = cli.command {
+        return observation::command(&command);
+    }
     if let Command::TodoPublish { ref pane, clear } = cli.command {
         let ledger = Ledger {
             budget,
