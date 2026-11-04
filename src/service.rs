@@ -266,13 +266,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                 let send = send.clone();
                 sweep = Some(std::thread::spawn(move || {
                     let shell = System::default();
-                    let node = Node {
-                        shell: &shell,
-                        ledger: &ledger,
-                        thresholds: (&policy).into(),
-                        home: &home,
-                        cleanup: &policy.cleanup,
-                    };
+                    let node = Node::new(&shell, &ledger, &policy, &home);
                     let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
                 }));
             }

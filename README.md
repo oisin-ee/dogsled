@@ -514,7 +514,7 @@ An identity change (repository, path, or branch), a missing entry, a command err
 `--json` returns `{results,skipped,failures}`. A result names the removed path and the closed panes. A failed `teardown` command's error includes its last lines of output.
 
 Placement records repositories in `repositories.json`, independently of `worktrees.json`. Repository registrations survive the last worktree removal.
-Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, and `cleanup.repositories`. It never scans the whole home directory.
+Doctor also discovers repositories from the caller, live pane directories, Herdr workspaces, `repos`, and `cleanup.repositories`. It never scans the whole home directory.
 An absent remembered repository produces a removable `repositories` entry. Prune and the sweep recheck absence under the registry locks, then remove only stale records.
 Existing worktree records stay. Configured paths, discovered paths, unreadable paths, and dangling symlinks remain report-only. Doctor changes no registrations.
 
@@ -593,9 +593,29 @@ reservation_load = 1.0
 reservation_ttl_ms = 90000
 remote_command = ["mise", "x", "--", "dogsled"]
 
+[[repos]]
+path = "~/dev/dogsled"
+origin = "git@github.com:oisin-ee/dogsled.git"
+
 [cleanup]
 repositories = []  # for example "~/.config/mise"; `~/` is the home directory
 ```
+
+Each `[[repos]]` entry stores an origin and a checkout path with a `~/` prefix.
+Doctor checks these paths as well as `cleanup.repositories`.
+
+```sh
+dogsled repo add                 # add the repository in the current directory
+dogsled repo add ~/dev/dogsled   # add a repository by path
+dogsled repo list --json
+dogsled repo remove git@github.com:oisin-ee/dogsled.git
+```
+
+`repo add` reads the main checkout and its `origin` remote.
+It refuses repositories outside the home directory and duplicate repository identities, including SSH and HTTPS variants.
+`repo remove` accepts an origin or a checkout path and refuses an unknown entry.
+Both commands preserve comments and key order in the selected configuration file.
+They create a missing file and write through configuration symlinks.
 
 Host policy has no worktree hooks. A `[hooks]` table is an unknown key, so it is an error. Worktree setup and teardown belong to each repository.
 

@@ -294,6 +294,9 @@ pub enum Command {
     /// The saved Herdr machines dogsled uses as hosts.
     #[command(subcommand)]
     Machine(MachineCommand),
+    /// Configure the repositories available on the fleet.
+    #[command(subcommand)]
+    Repo(RepoCommand),
     /// Send a message to an agent on any host, through its inbox. Nothing types into its
     /// terminal; an agent without an inbox reader gets nothing, and you hear so at once.
     Send {
@@ -584,6 +587,16 @@ pub enum UnitCommand {
         #[arg(long)]
         input: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RepoCommand {
+    /// Add a repository, or the current directory when no path is given.
+    Add { path: Option<String> },
+    /// Remove a repository by origin or checkout path.
+    Remove { selector: String },
+    /// Show the configured repositories.
+    List,
 }
 
 #[derive(Debug, Subcommand)]

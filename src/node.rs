@@ -1,6 +1,6 @@
 //! Local service steps and reservation ownership. No SSH enters this module.
 
-use crate::config::Thresholds;
+use crate::config::{Policy, Thresholds};
 use crate::error::Result;
 use crate::ledger::{Ledger, Reservation};
 use crate::plan::{Headroom, evaluate};
@@ -310,9 +310,26 @@ pub struct Node<'a> {
     pub thresholds: Thresholds,
     pub home: &'a str,
     pub cleanup: &'a crate::config::Cleanup,
+    pub repos: &'a [crate::config::Repo],
 }
 
-impl Node<'_> {
+impl<'a> Node<'a> {
+    pub fn new(
+        shell: &'a dyn Shell,
+        ledger: &'a Ledger,
+        policy: &'a Policy,
+        home: &'a str,
+    ) -> Self {
+        Self {
+            shell,
+            ledger,
+            thresholds: Thresholds::from(policy),
+            home,
+            cleanup: &policy.cleanup,
+            repos: &policy.repos,
+        }
+    }
+
     pub fn release_references(
         &self,
         certificate: &crate::launch::ReferenceRelease,
@@ -753,13 +770,7 @@ mod tests {
             memory_reserve_bytes: 0,
             ..crate::config::Policy::default()
         };
-        let node = Node {
-            shell: &shell,
-            ledger: &ledger,
-            thresholds: Thresholds::from(&policy),
-            home: "/",
-            cleanup: &policy.cleanup,
-        };
+        let node = Node::new(&shell, &ledger, &policy, "/");
         crate::host_store::put_snapshot(
             &ledger,
             &Snapshot {

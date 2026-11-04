@@ -167,6 +167,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 tokio-stream = { version = "0.1.19", default-features = false, features = ["sync"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["rt"] }
 toml = "1.1.6"
+toml_edit = "0.25.18"
 todo-core = { workspace = true, features = ["schema"] }
 
 [dev-dependencies]

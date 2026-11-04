@@ -320,13 +320,7 @@ impl<'a> Fleet<'a> {
     }
 
     pub fn node(&self) -> Node<'_> {
-        Node {
-            shell: self.shell,
-            ledger: self.ledger,
-            thresholds: self.thresholds(),
-            home: &self.home,
-            cleanup: &self.policy.cleanup,
-        }
+        Node::new(self.shell, self.ledger, self.policy, &self.home)
     }
 
     pub fn remote_argv(&self, host: &Host, args: &[String]) -> Vec<String> {

@@ -451,37 +451,10 @@ fn repositories(
         }
     }
     for configured in &node.cleanup.repositories {
-        let path = configured.strip_prefix("~/").map_or_else(
-            || configured.clone(),
-            |rest| Path::new(node.home).join(rest).display().to_string(),
-        );
-        let root = if Path::new(&path).is_dir() {
-            match main_root(node.shell, &path) {
-                Ok(root) => root,
-                Err(error) => {
-                    plan.entries.push(entry(
-                        "repositories",
-                        path.clone(),
-                        format!("cleanup.repositories entry is unreadable: {error}"),
-                        false,
-                    ));
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
-        match root {
-            Some(root) => {
-                repos.insert(root);
-            }
-            None => plan.entries.push(entry(
-                "repositories",
-                path,
-                "configured in cleanup.repositories but not a Git checkout".into(),
-                false,
-            )),
-        }
+        configured_repository(node, configured, "cleanup.repositories", &mut repos, plan);
+    }
+    for repo in node.repos {
+        configured_repository(node, &repo.path, "repos", &mut repos, plan);
     }
     // A discovered Herdr repository is still a warning when its directory has vanished.
     repos.extend(
@@ -518,6 +491,46 @@ fn repositories(
         .into_iter()
         .map(|repo| std::fs::canonicalize(&repo).map_or(repo, |p| p.display().to_string()))
         .collect())
+}
+
+fn configured_repository(
+    node: &Node<'_>,
+    configured: &str,
+    source: &str,
+    repos: &mut BTreeSet<String>,
+    plan: &mut Plan,
+) {
+    let path = configured.strip_prefix("~/").map_or_else(
+        || configured.to_owned(),
+        |rest| Path::new(node.home).join(rest).display().to_string(),
+    );
+    let root = if Path::new(&path).is_dir() {
+        match main_root(node.shell, &path) {
+            Ok(root) => root,
+            Err(error) => {
+                plan.entries.push(entry(
+                    "repositories",
+                    path,
+                    format!("{source} entry is unreadable: {error}"),
+                    false,
+                ));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    match root {
+        Some(root) => {
+            repos.insert(root);
+        }
+        None => plan.entries.push(entry(
+            "repositories",
+            path,
+            format!("configured in {source} but not a Git checkout"),
+            false,
+        )),
+    }
 }
 
 /// Linked worktrees, on a branch or detached (an empty branch). The main checkout is never a
@@ -1767,6 +1780,7 @@ pub fn close_holds(
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: "",
         cleanup: &cleanup,
+        repos: &[],
     };
     let tree = Tree {
         repo: linked.checkout.display().to_string(),
@@ -2652,6 +2666,7 @@ mod tests {
                 thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
                 home: "/",
                 cleanup: &self.cleanup,
+                repos: &[],
             }
         }
 
@@ -2710,6 +2725,59 @@ mod tests {
         json!({"workspace_id":id,"label":"jalgpall","worktree":{
             "repo_root":"/repo","repo_key":"/repo/.git","is_linked_worktree":linked
         }})
+    }
+
+    #[test]
+    fn configured_repos_discover_checkouts_from_home_relative_paths() {
+        let rig = Rig::new(json!([]));
+        let root = rig.ledger.dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        rig.shell.on(
+            &format!(
+                "git -C {} rev-parse --path-format=absolute --git-common-dir",
+                root.display()
+            ),
+            &format!("{}/.git\n", root.display()),
+        );
+        let repos = [crate::config::Repo {
+            path: "~/repo".into(),
+            origin: "https://example.org/repo.git".into(),
+        }];
+        let node = Node {
+            home: rig.ledger.dir.to_str().unwrap(),
+            repos: &repos,
+            ..rig.node()
+        };
+        let mut plan = Plan::default();
+        let discovered = repositories(&node, &[], &[], &mut plan).unwrap();
+        let root = root.canonicalize().unwrap().display().to_string();
+        assert!(discovered.contains(&root));
+        assert!(plan.entries.iter().all(|entry| entry.id != root));
+    }
+
+    #[test]
+    fn configured_repos_use_home_relative_paths_and_are_not_removable() {
+        let rig = Rig::new(json!([]));
+        let repos = [crate::config::Repo {
+            path: "~/missing".into(),
+            origin: "https://example.org/repo.git".into(),
+        }];
+        let node = Node {
+            home: rig.ledger.dir.to_str().unwrap(),
+            repos: &repos,
+            ..rig.node()
+        };
+        let mut plan = Plan::default();
+        let discovered = repositories(&node, &[], &[], &mut plan).unwrap();
+        let missing = rig.ledger.dir.join("missing").display().to_string();
+        assert!(!discovered.contains(&missing));
+        let warning = plan
+            .entries
+            .iter()
+            .find(|entry| entry.id == missing)
+            .unwrap();
+        assert!(!warning.removable);
+        assert_eq!(warning.detail, "configured in repos but not a Git checkout");
     }
 
     #[test]

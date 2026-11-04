@@ -1994,6 +1994,182 @@ fn repository(path: &Path) {
 }
 
 #[test]
+fn repo_commands_preserve_config_and_match_origin_identity() {
+    let rig = Rig::new("repo-commands");
+    let repo = rig.dir.join("home/repo space");
+    repository(&repo);
+    rig.config(
+        "# keep this comment\nreservation_load = 1.0 # keep this key\n\n[web]\nport = 8080\n",
+    );
+    let before = fs::read_to_string(rig.dir.join("config.toml")).unwrap();
+    let added = rig
+        .cmd(&["repo", "add"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let configured = fs::read_to_string(rig.dir.join("config.toml")).unwrap();
+    assert!(configured.starts_with(&before), "{configured}");
+    let (status, repos) = rig.json(&["repo", "list"]);
+    assert_eq!(status, 0);
+    assert_eq!(
+        repos,
+        json!([{"path":"~/repo space", "origin":"https://example.invalid/repo.git"}])
+    );
+    let second = rig.run(&["repo", "add", repo.to_str().unwrap()]);
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("already configured"));
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("config.toml")).unwrap(),
+        configured
+    );
+    let removed = rig.run(&["repo", "remove", "git@example.invalid:repo.git"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(rig.json(&["repo", "list"]), (0, json!([])));
+    let after = fs::read_to_string(rig.dir.join("config.toml")).unwrap();
+    assert!(after.starts_with(&before), "{after}");
+    let unknown = rig.run(&["repo", "remove", "https://example.invalid/unknown.git"]);
+    assert!(!unknown.status.success());
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("config.toml")).unwrap(),
+        after
+    );
+}
+
+#[test]
+fn repo_commands_create_missing_config_and_follow_selected_symlink() {
+    let rig = Rig::new("repo-config-path");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    let config = rig.dir.join("nested/config.toml");
+    let selected = config.to_str().unwrap();
+    let out = rig.run(&["--config", selected, "repo", "add", repo.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.dir.join("config.toml").exists());
+    let link = rig.dir.join("config-link.toml");
+    std::os::unix::fs::symlink(&config, &link).unwrap();
+    let out = rig.run(&[
+        "--config",
+        link.to_str().unwrap(),
+        "repo",
+        "remove",
+        repo.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        rig.json(&["--config", selected, "repo", "list"]),
+        (0, json!([]))
+    );
+    let out = rig.run(&[
+        "--config",
+        link.to_str().unwrap(),
+        "repo",
+        "add",
+        repo.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        rig.json(&["--config", selected, "repo", "list"])
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn repo_commands_preserve_comments_on_inline_repo_arrays() {
+    let rig = Rig::new("repo-inline-array");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.config("# retain header\nrepos = [] # retain repo comment\nreservation_load = 1.0\n");
+    let out = rig.run(&["repo", "add", repo.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read_to_string(rig.dir.join("config.toml")).unwrap();
+    assert!(text.starts_with("# retain header\nrepos = "), "{text}");
+    assert!(
+        text.contains("# retain repo comment\nreservation_load = 1.0\n"),
+        "{text}"
+    );
+    assert_eq!(rig.json(&["repo", "list"]).1.as_array().unwrap().len(), 1);
+    let out = rig.run(&["repo", "remove", "~/repo"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("config.toml")).unwrap(),
+        "# retain header\nrepos = [] # retain repo comment\nreservation_load = 1.0\n"
+    );
+}
+
+#[test]
+fn repo_add_rejects_invalid_inputs_without_changing_config() {
+    let rig = Rig::new("repo-invalid");
+    let repo = rig.dir.join("home/repo");
+    repository(&repo);
+    rig.config("# unchanged\n");
+    let out = rig.run(&["repo", "add"]);
+    assert!(!out.status.success());
+    let out = rig.run(&["repo", "add", rig.dir.to_str().unwrap()]);
+    assert!(!out.status.success());
+    let outside = rig.dir.join("outside-home");
+    repository(&outside);
+    let out = rig.run(&["repo", "add", outside.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("outside the home directory"));
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("config.toml")).unwrap(),
+        "# unchanged\n"
+    );
+    rig.config("unknown_key = true\n");
+    let out = rig.run(&["repo", "add", repo.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert_eq!(
+        fs::read_to_string(rig.dir.join("config.toml")).unwrap(),
+        "unknown_key = true\n"
+    );
+}
+
+#[test]
 fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     let rig = Rig::new("remote-prepare");
     let repo = rig.dir.join("home/repo space");

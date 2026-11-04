@@ -37,9 +37,19 @@ pub struct Policy {
     /// `ssh -T -o BatchMode=yes`. mise shims are not on the non-interactive
     /// PATH, but `mise` itself is, so the default goes through `mise x`.
     pub remote_command: Vec<String>,
+    #[serde(default)]
+    pub repos: Vec<Repo>,
     pub cleanup: Cleanup,
     pub quota: Quota,
     pub web: Web,
+}
+
+/// A repository origin and its home-relative checkout path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Repo {
+    pub path: String,
+    pub origin: String,
 }
 
 /// The web portal's settings.
@@ -83,6 +93,7 @@ impl Default for Policy {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            repos: Vec::new(),
             cleanup: Cleanup::default(),
             quota: Quota::default(),
             web: Web::default(),
@@ -159,6 +170,28 @@ mod tests {
         assert!((p.free_core_fraction_min - 0.5).abs() < f64::EPSILON);
         assert!((p.disk_free_min_percent - 15.0).abs() < f64::EPSILON);
         assert_eq!(p.memory_reserve_bytes, 3 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn repo_entries_keep_paths_and_origins() {
+        let policy = parse(
+            "[[repos]]\npath = '~/dev/dogsled'\norigin = 'git@github.com:oisin-ee/dogsled.git'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            policy.repos,
+            [Repo {
+                path: "~/dev/dogsled".into(),
+                origin: "git@github.com:oisin-ee/dogsled.git".into(),
+            }]
+        );
+        assert!(parse("[[repos]]\npath = '~/dev/repo'\n").is_err());
+        assert!(
+            parse(
+                "[[repos]]\npath = '~/dev/repo'\norigin = 'https://example.org/r'\nextra = true\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]
