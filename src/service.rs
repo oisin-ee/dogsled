@@ -12,6 +12,9 @@ use crate::{items, work};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[path = "observation/wake.rs"]
+pub(crate) mod wake;
+
 /// The action lanes, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lane {
@@ -94,6 +97,7 @@ enum Event {
     Finished(usize, Result<()>),
     Sweep,
     Swept(Result<()>),
+    Observe,
 }
 
 /// Wake the loop without waiting for its publication interval. The ledger request is durable;
@@ -231,6 +235,39 @@ fn start_lanes(
     }
 }
 
+fn publish(
+    node: &Node<'_>,
+    collector: &mut crate::observation::collect::Collector,
+    publisher: &mut crate::observation::Publisher,
+    herdr: &mut wake::Herdr,
+    sample: bool,
+    once: bool,
+) -> Result<()> {
+    let collection = crate::store::observing(|| {
+        if sample {
+            collector.collect(node, now_ms())
+        } else {
+            collector.refresh(node, now_ms(), false)
+        }
+    });
+    herdr.interests(collector.panes());
+    let frame = publisher.replace(collection.input)?;
+    for gap in &frame.gaps {
+        if gap.domain == "todos" {
+            eprintln!("dogsled service: todo intake failed: {}", gap.detail);
+        } else {
+            eprintln!(
+                "dogsled service: {} collection failed: {}",
+                gap.domain, gap.detail
+            );
+        }
+    }
+    if once {
+        collection.sample?;
+    }
+    Ok(())
+}
+
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let mut publisher = crate::observation::Publisher::new()?;
     let mut publication_server = crate::observation::ipc::Server::new(&node.ledger.dir)?;
@@ -239,6 +276,15 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     }
     let mut collector = crate::observation::collect::Collector::default();
     let (send, recv) = mpsc::channel();
+    let dirty = wake::Dirty::new(send.clone());
+    let _commits = match wake::Commits::start(node.ledger, dirty.clone()) {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            eprintln!("dogsled service: observation commit wake unavailable: {error}");
+            None
+        }
+    };
+    let mut herdr = wake::Herdr::start(dirty.clone(), interval);
     let _listener = match Listener::start(node.ledger, send.clone()) {
         Ok(listener) => Some(listener),
         Err(error) => {
@@ -253,26 +299,23 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
     loop {
+        let scheduled = Instant::now() >= next;
+        let domains = dirty.take();
         // The socket only reduces latency. Recover pending requests on every publication
         // iteration, including when the socket cannot bind or a notification was lost.
         requested |= crate::sweep::pending(node.ledger)?;
-        let collection = collector.collect(node, now_ms());
-        let frame = publisher.replace(collection.input)?;
-        for gap in &frame.gaps {
-            if gap.domain == "todos" {
-                eprintln!("dogsled service: todo intake failed: {}", gap.detail);
-            } else {
-                eprintln!(
-                    "dogsled service: {} collection failed: {}",
-                    gap.domain, gap.detail
-                );
-            }
+        publish(
+            node,
+            &mut collector,
+            &mut publisher,
+            &mut herdr,
+            domains == wake::LOCAL || scheduled,
+            once,
+        )?;
+        if scheduled {
+            start_lanes(node, policy, once, &mut workers, completed, &send);
+            next += interval;
         }
-        if once {
-            collection.sample?;
-        }
-        start_lanes(node, policy, once, &mut workers, completed, &send);
-        next += interval;
         loop {
             if requested && sweep.is_none() {
                 requested = false;
@@ -292,7 +335,13 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             }
             match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(Event::Sweep) => requested = true,
+                Ok(Event::Observe) => {
+                    if dirty.pending() && !once {
+                        break;
+                    }
+                }
                 Ok(Event::Swept(result)) => {
+                    dirty.mark(wake::LOCAL);
                     if let Some(handle) = sweep.take() {
                         handle
                             .join()
@@ -310,6 +359,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     }
                     completed[lane] = true;
                     diagnostics.record(node.ledger, LANES[lane], result);
+                    dirty.mark(wake::LEDGER);
                     if once {
                         start_lanes(node, policy, once, &mut workers, completed, &send);
                     }

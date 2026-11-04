@@ -226,6 +226,7 @@ impl Subscription {
             .map_err(|error| fail(format!("{}: {error}", client.path.display())))?;
         stream
             .set_write_timeout(Some(TIMEOUT))
+            .and_then(|()| stream.set_read_timeout(Some(TIMEOUT)))
             .map_err(|error| fail(error.to_string()))?;
         let id = format!("dogsled_{}", crate::ledger::new_id());
         let mut line = serde_json::to_string(
@@ -252,6 +253,11 @@ impl Subscription {
                 error["message"].as_str().unwrap_or_default()
             )));
         }
+        if reply["id"] != id.as_str() || reply["result"]["type"] != "subscription_started" {
+            return Err(fail("invalid subscription acknowledgement".into()));
+        }
+        // Bound the acknowledgement, but never time out halfway through an event line.
+        reader.get_ref().set_read_timeout(None)?;
         // Keep a socket handle so dropping the subscription interrupts its reader.
         let socket = reader.get_ref().try_clone()?;
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -713,6 +719,17 @@ mod tests {
             .unwrap_err();
         assert!(matches!(&error, Error::Invalid(message)
             if message == "herdr events.subscribe: pane_not_found: pane w9:p9 not found"));
+    }
+
+    #[test]
+    fn a_subscription_requires_a_correlated_started_acknowledgement() {
+        let server = fake::Server::start(|_, _| json!({"result": {"type": "ok"}}));
+        let error = server
+            .client()
+            .subscribe(&[json!({"type": "pane.created"})])
+            .unwrap_err();
+        assert!(matches!(&error, Error::Invalid(message)
+            if message == "herdr events.subscribe: invalid subscription acknowledgement"));
     }
 
     #[test]
