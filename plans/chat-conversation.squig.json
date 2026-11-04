@@ -1,0 +1,2425 @@
+{
+  "fileName": "chat-conversation",
+  "look": {
+    "theme": "graphite",
+    "paper": "subtle",
+    "font": "sans",
+    "grid": false
+  },
+  "nodes": {
+    "feature-title": {
+      "seed": 1,
+      "id": "feature-title",
+      "w": 1500,
+      "h": 36.4,
+      "fontSize": 28,
+      "text": "Conversation: Message timeline — selected",
+      "x": 0,
+      "y": -130,
+      "groupIds": [
+        "conversation"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "feature-note": {
+      "seed": 1,
+      "id": "feature-note",
+      "w": 1650,
+      "h": 20.8,
+      "fontSize": 16,
+      "text": "Selected through Impeccable on 4 November 2026. Illustrative content. Existing palette and surrounding panels stay unchanged.",
+      "x": 0,
+      "y": -78,
+      "groupIds": [
+        "conversation"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-frame": {
+      "seed": 1,
+      "id": "wide-frame",
+      "w": 2560,
+      "h": 900,
+      "x": 0,
+      "y": 0,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "component",
+      "kind": "frame",
+      "props": {
+        "label": "Conversation / wide / 2560 × 900",
+        "preset": "free",
+        "statusBar": false
+      }
+    },
+    "wide-top": {
+      "seed": 1,
+      "id": "wide-top",
+      "w": 2560,
+      "h": 44,
+      "shape": "rect",
+      "fill": "none",
+      "x": 0,
+      "y": 0,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-brand": {
+      "seed": 1,
+      "id": "wide-brand",
+      "w": 190,
+      "h": 26,
+      "fontSize": 16,
+      "text": "Dogsled",
+      "x": 16,
+      "y": 10,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-capacity": {
+      "seed": 1,
+      "id": "wide-capacity",
+      "w": 344,
+      "h": 24,
+      "fontSize": 12,
+      "text": "local       netcup       momokaya-2",
+      "x": 2200,
+      "y": 12,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-inbox": {
+      "seed": 1,
+      "id": "wide-inbox",
+      "w": 280,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 0,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-inbox-title": {
+      "seed": 1,
+      "id": "wide-inbox-title",
+      "w": 248,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Waiting on you    2",
+      "x": 16,
+      "y": 58,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-inbox-rows": {
+      "seed": 1,
+      "id": "wide-inbox-rows",
+      "w": 248,
+      "h": 180,
+      "fontSize": 13,
+      "text": "Questions · 2 min\nConversation direction\nlead · dogsled\n\nPlan review · 18 min\nAgent activity\nlead · dogsled",
+      "x": 16,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-agents": {
+      "seed": 1,
+      "id": "wide-agents",
+      "w": 248,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 280,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-agents-title": {
+      "seed": 1,
+      "id": "wide-agents-title",
+      "w": 216,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Agents    5",
+      "x": 296,
+      "y": 58,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-agents-rows": {
+      "seed": 1,
+      "id": "wide-agents-rows",
+      "w": 216,
+      "h": 150,
+      "fontSize": 13,
+      "text": "dogsled\nConversation improvements\n    Layout reviewer\n    Activity architect",
+      "x": 296,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-todos": {
+      "seed": 1,
+      "id": "wide-todos",
+      "w": 300,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2260,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-todos-title": {
+      "seed": 1,
+      "id": "wide-todos-title",
+      "w": 268,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Todos    1 of 3",
+      "x": 2276,
+      "y": 58,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-todos-rows": {
+      "seed": 1,
+      "id": "wide-todos-rows",
+      "w": 268,
+      "h": 174,
+      "fontSize": 13,
+      "text": "In progress\nImprove conversation view\n\nPending\nVerify live activity\n\nCompleted\nFind alignment cause",
+      "x": 2276,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-chat-header": {
+      "seed": 1,
+      "id": "wide-chat-header",
+      "w": 1732,
+      "h": 64,
+      "shape": "rect",
+      "fill": "none",
+      "x": 528,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-chat-title": {
+      "seed": 1,
+      "id": "wide-chat-title",
+      "w": 1684,
+      "h": 24,
+      "fontSize": 16,
+      "text": "Conversation improvements",
+      "x": 552,
+      "y": 54,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-chat-meta": {
+      "seed": 1,
+      "id": "wide-chat-meta",
+      "w": 1684,
+      "h": 22,
+      "fontSize": 12,
+      "text": "lead · Pi · local",
+      "x": 552,
+      "y": 80,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-day": {
+      "seed": 1,
+      "id": "wide-day",
+      "w": 564,
+      "h": 15.600000000000001,
+      "fontSize": 12,
+      "text": "Today · 4 November",
+      "x": 1150,
+      "y": 156,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-pinned-region": {
+      "seed": 1,
+      "id": "wide-pinned-region",
+      "w": 1732,
+      "h": 110,
+      "shape": "rect",
+      "fill": "none",
+      "x": 528,
+      "y": 790,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-activity": {
+      "seed": 1,
+      "id": "wide-activity",
+      "w": 636,
+      "h": 24,
+      "fontSize": 13,
+      "text": "Conversation improvements · Thinking…",
+      "x": 1076,
+      "y": 802,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-composer": {
+      "seed": 1,
+      "id": "wide-composer",
+      "w": 640,
+      "h": 46,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1074,
+      "y": 838,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-attach": {
+      "seed": 1,
+      "id": "wide-attach",
+      "w": 30,
+      "h": 30,
+      "x": 1080,
+      "y": 846,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "component",
+      "kind": "icon-button",
+      "props": {
+        "icon": "plus",
+        "variant": "ghost",
+        "shape": "square"
+      }
+    },
+    "wide-send": {
+      "seed": 1,
+      "id": "wide-send",
+      "w": 30,
+      "h": 30,
+      "x": 1678,
+      "y": 846,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "component",
+      "kind": "icon-button",
+      "props": {
+        "icon": "arrow-up",
+        "variant": "filled",
+        "shape": "square"
+      }
+    },
+    "wide-annotation": {
+      "seed": 1,
+      "id": "wide-annotation",
+      "w": 1732,
+      "h": 74.9,
+      "fontSize": 14,
+      "text": "Selected timeline: one bounded conversation column.\n46 px time gutter + 12 px source markers + flexible prose.\nWorker reports and compact tool rows keep their origins.\nActivity and composer stay pinned; history scrolls.",
+      "x": 528,
+      "y": 928,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-frame": {
+      "seed": 1,
+      "id": "desktop-frame",
+      "w": 1440,
+      "h": 900,
+      "x": 2720,
+      "y": 0,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "component",
+      "kind": "frame",
+      "props": {
+        "label": "Conversation / desktop / 1440 × 900",
+        "preset": "free",
+        "statusBar": false
+      }
+    },
+    "desktop-top": {
+      "seed": 1,
+      "id": "desktop-top",
+      "w": 1440,
+      "h": 44,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2720,
+      "y": 0,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-brand": {
+      "seed": 1,
+      "id": "desktop-brand",
+      "w": 190,
+      "h": 26,
+      "fontSize": 16,
+      "text": "Dogsled",
+      "x": 2736,
+      "y": 10,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-capacity": {
+      "seed": 1,
+      "id": "desktop-capacity",
+      "w": 344,
+      "h": 24,
+      "fontSize": 12,
+      "text": "local       netcup       momokaya-2",
+      "x": 3800,
+      "y": 12,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-inbox": {
+      "seed": 1,
+      "id": "desktop-inbox",
+      "w": 280,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2720,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-inbox-title": {
+      "seed": 1,
+      "id": "desktop-inbox-title",
+      "w": 248,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Waiting on you    2",
+      "x": 2736,
+      "y": 58,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-inbox-rows": {
+      "seed": 1,
+      "id": "desktop-inbox-rows",
+      "w": 248,
+      "h": 180,
+      "fontSize": 13,
+      "text": "Questions · 2 min\nConversation direction\nlead · dogsled\n\nPlan review · 18 min\nAgent activity\nlead · dogsled",
+      "x": 2736,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-agents": {
+      "seed": 1,
+      "id": "desktop-agents",
+      "w": 248,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3000,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-agents-title": {
+      "seed": 1,
+      "id": "desktop-agents-title",
+      "w": 216,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Agents    5",
+      "x": 3016,
+      "y": 58,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-agents-rows": {
+      "seed": 1,
+      "id": "desktop-agents-rows",
+      "w": 216,
+      "h": 150,
+      "fontSize": 13,
+      "text": "dogsled\nConversation improvements\n    Layout reviewer\n    Activity architect",
+      "x": 3016,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-todos": {
+      "seed": 1,
+      "id": "desktop-todos",
+      "w": 300,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3860,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-todos-title": {
+      "seed": 1,
+      "id": "desktop-todos-title",
+      "w": 268,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Todos    1 of 3",
+      "x": 3876,
+      "y": 58,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-todos-rows": {
+      "seed": 1,
+      "id": "desktop-todos-rows",
+      "w": 268,
+      "h": 174,
+      "fontSize": 13,
+      "text": "In progress\nImprove conversation view\n\nPending\nVerify live activity\n\nCompleted\nFind alignment cause",
+      "x": 3876,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-chat-header": {
+      "seed": 1,
+      "id": "desktop-chat-header",
+      "w": 612,
+      "h": 64,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3248,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-chat-title": {
+      "seed": 1,
+      "id": "desktop-chat-title",
+      "w": 564,
+      "h": 24,
+      "fontSize": 16,
+      "text": "Conversation improvements",
+      "x": 3272,
+      "y": 54,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-chat-meta": {
+      "seed": 1,
+      "id": "desktop-chat-meta",
+      "w": 564,
+      "h": 22,
+      "fontSize": 12,
+      "text": "lead · Pi · local",
+      "x": 3272,
+      "y": 80,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-day": {
+      "seed": 1,
+      "id": "desktop-day",
+      "w": 488,
+      "h": 15.600000000000001,
+      "fontSize": 12,
+      "text": "Today · 4 November",
+      "x": 3348,
+      "y": 156,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-pinned-region": {
+      "seed": 1,
+      "id": "desktop-pinned-region",
+      "w": 612,
+      "h": 110,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3248,
+      "y": 790,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-activity": {
+      "seed": 1,
+      "id": "desktop-activity",
+      "w": 560,
+      "h": 24,
+      "fontSize": 13,
+      "text": "Conversation improvements · Thinking…",
+      "x": 3274,
+      "y": 802,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-composer": {
+      "seed": 1,
+      "id": "desktop-composer",
+      "w": 564,
+      "h": 46,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3272,
+      "y": 838,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-attach": {
+      "seed": 1,
+      "id": "desktop-attach",
+      "w": 30,
+      "h": 30,
+      "x": 3278,
+      "y": 846,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "component",
+      "kind": "icon-button",
+      "props": {
+        "icon": "plus",
+        "variant": "ghost",
+        "shape": "square"
+      }
+    },
+    "desktop-send": {
+      "seed": 1,
+      "id": "desktop-send",
+      "w": 30,
+      "h": 30,
+      "x": 3800,
+      "y": 846,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "component",
+      "kind": "icon-button",
+      "props": {
+        "icon": "arrow-up",
+        "variant": "filled",
+        "shape": "square"
+      }
+    },
+    "desktop-annotation": {
+      "seed": 1,
+      "id": "desktop-annotation",
+      "w": 612,
+      "h": 74.9,
+      "fontSize": 14,
+      "text": "Selected timeline: one bounded conversation column.\n46 px time gutter + 12 px source markers + flexible prose.\nWorker reports and compact tool rows keep their origins.\nActivity and composer stay pinned; history scrolls.",
+      "x": 3248,
+      "y": 928,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-frame": {
+      "seed": 1,
+      "id": "narrow-frame",
+      "w": 1024,
+      "h": 900,
+      "x": 4320,
+      "y": 0,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "component",
+      "kind": "frame",
+      "props": {
+        "label": "Conversation / narrow / 1024 × 900",
+        "preset": "free",
+        "statusBar": false
+      }
+    },
+    "narrow-top": {
+      "seed": 1,
+      "id": "narrow-top",
+      "w": 1024,
+      "h": 44,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4320,
+      "y": 0,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-brand": {
+      "seed": 1,
+      "id": "narrow-brand",
+      "w": 190,
+      "h": 26,
+      "fontSize": 16,
+      "text": "Dogsled",
+      "x": 4336,
+      "y": 10,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "narrow-capacity": {
+      "seed": 1,
+      "id": "narrow-capacity",
+      "w": 344,
+      "h": 24,
+      "fontSize": 12,
+      "text": "local       netcup       momokaya-2",
+      "x": 4984,
+      "y": 12,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-inbox": {
+      "seed": 1,
+      "id": "narrow-inbox",
+      "w": 280,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4320,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-inbox-title": {
+      "seed": 1,
+      "id": "narrow-inbox-title",
+      "w": 248,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Waiting on you    2",
+      "x": 4336,
+      "y": 58,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "narrow-inbox-rows": {
+      "seed": 1,
+      "id": "narrow-inbox-rows",
+      "w": 248,
+      "h": 180,
+      "fontSize": 13,
+      "text": "Questions · 2 min\nConversation direction\nlead · dogsled\n\nPlan review · 18 min\nAgent activity\nlead · dogsled",
+      "x": 4336,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-chat-header": {
+      "seed": 1,
+      "id": "narrow-chat-header",
+      "w": 744,
+      "h": 64,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4600,
+      "y": 44,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-chat-title": {
+      "seed": 1,
+      "id": "narrow-chat-title",
+      "w": 696,
+      "h": 24,
+      "fontSize": 16,
+      "text": "Conversation improvements",
+      "x": 4624,
+      "y": 54,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "narrow-chat-meta": {
+      "seed": 1,
+      "id": "narrow-chat-meta",
+      "w": 696,
+      "h": 22,
+      "fontSize": 12,
+      "text": "lead · Pi · local",
+      "x": 4624,
+      "y": 80,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-tabs": {
+      "seed": 1,
+      "id": "narrow-tabs",
+      "w": 696,
+      "h": 32,
+      "x": 4624,
+      "y": 116,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "component",
+      "kind": "tabs",
+      "props": {
+        "labels": "Agents, Chat, Todos 1/3",
+        "active": 2
+      }
+    },
+    "narrow-day": {
+      "seed": 1,
+      "id": "narrow-day",
+      "w": 564,
+      "h": 15.600000000000001,
+      "fontSize": 12,
+      "text": "Today · 4 November",
+      "x": 4728,
+      "y": 180,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-pinned-region": {
+      "seed": 1,
+      "id": "narrow-pinned-region",
+      "w": 744,
+      "h": 110,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4600,
+      "y": 790,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-activity": {
+      "seed": 1,
+      "id": "narrow-activity",
+      "w": 636,
+      "h": 24,
+      "fontSize": 13,
+      "text": "Conversation improvements · Thinking…",
+      "x": 4654,
+      "y": 802,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-composer": {
+      "seed": 1,
+      "id": "narrow-composer",
+      "w": 640,
+      "h": 46,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4652,
+      "y": 838,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-attach": {
+      "seed": 1,
+      "id": "narrow-attach",
+      "w": 30,
+      "h": 30,
+      "x": 4658,
+      "y": 846,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "component",
+      "kind": "icon-button",
+      "props": {
+        "icon": "plus",
+        "variant": "ghost",
+        "shape": "square"
+      }
+    },
+    "narrow-send": {
+      "seed": 1,
+      "id": "narrow-send",
+      "w": 30,
+      "h": 30,
+      "x": 5256,
+      "y": 846,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "component",
+      "kind": "icon-button",
+      "props": {
+        "icon": "arrow-up",
+        "variant": "filled",
+        "shape": "square"
+      }
+    },
+    "narrow-annotation": {
+      "seed": 1,
+      "id": "narrow-annotation",
+      "w": 744,
+      "h": 74.9,
+      "fontSize": 14,
+      "text": "Selected timeline: one bounded conversation column.\n46 px time gutter + 12 px source markers + flexible prose.\nWorker reports and compact tool rows keep their origins.\nActivity and composer stay pinned; history scrolls.",
+      "x": 4600,
+      "y": 928,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-timeline-axis": {
+      "seed": 1,
+      "id": "wide-timeline-axis",
+      "w": 1,
+      "h": 508,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1133,
+      "y": 210,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-owner-time": {
+      "seed": 1,
+      "id": "wide-owner-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:10",
+      "x": 1074,
+      "y": 202,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-owner-marker": {
+      "seed": 1,
+      "id": "wide-owner-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1130,
+      "y": 207,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-request-box": {
+      "seed": 1,
+      "id": "wide-request-box",
+      "w": 574,
+      "h": 86,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1140,
+      "y": 194,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-owner-author": {
+      "seed": 1,
+      "id": "wide-owner-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "You",
+      "x": 1150,
+      "y": 202,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-owner-body": {
+      "seed": 1,
+      "id": "wide-owner-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Make this feel like a conversation, not columns of text.",
+      "x": 1150,
+      "y": 234,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-lead-time": {
+      "seed": 1,
+      "id": "wide-lead-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:11",
+      "x": 1074,
+      "y": 310,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-lead-marker": {
+      "seed": 1,
+      "id": "wide-lead-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1130,
+      "y": 315,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-lead-author": {
+      "seed": 1,
+      "id": "wide-lead-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Conversation lead · Pi · local",
+      "x": 1150,
+      "y": 310,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-lead-body": {
+      "seed": 1,
+      "id": "wide-lead-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "The width is only part of it. There is no visible author, time, or activity between replies.",
+      "x": 1150,
+      "y": 342,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-tool-time": {
+      "seed": 1,
+      "id": "wide-tool-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:11",
+      "x": 1074,
+      "y": 426,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-tool-marker": {
+      "seed": 1,
+      "id": "wide-tool-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1130,
+      "y": 431,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-tool-summary": {
+      "seed": 1,
+      "id": "wide-tool-summary",
+      "w": 564,
+      "h": 28,
+      "fontSize": 12,
+      "text": "Read 4 files · transcript and layout",
+      "x": 1150,
+      "y": 426,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-report-time": {
+      "seed": 1,
+      "id": "wide-report-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:12",
+      "x": 1074,
+      "y": 486,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-report-marker": {
+      "seed": 1,
+      "id": "wide-report-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1130,
+      "y": 491,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-report-author": {
+      "seed": 1,
+      "id": "wide-report-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Layout reviewer · Worker report · local",
+      "x": 1150,
+      "y": 486,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-report-body": {
+      "seed": 1,
+      "id": "wide-report-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Use the same reading width for the messages and composer. Keep live activity visible when reading older replies.",
+      "x": 1150,
+      "y": 518,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-reply-time": {
+      "seed": 1,
+      "id": "wide-reply-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:13",
+      "x": 1074,
+      "y": 612,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "wide-reply-marker": {
+      "seed": 1,
+      "id": "wide-reply-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1130,
+      "y": 617,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "wide-reply-author": {
+      "seed": 1,
+      "id": "wide-reply-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Conversation lead · Pi · local",
+      "x": 1150,
+      "y": 612,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "wide-reply-body": {
+      "seed": 1,
+      "id": "wide-reply-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Next is the activity source. Thinking must come from a live event, not a guess based on old text.",
+      "x": 1150,
+      "y": 644,
+      "groupIds": [
+        "conversation",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-timeline-axis": {
+      "seed": 1,
+      "id": "desktop-timeline-axis",
+      "w": 1,
+      "h": 508,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3331,
+      "y": 210,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-owner-time": {
+      "seed": 1,
+      "id": "desktop-owner-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:10",
+      "x": 3272,
+      "y": 202,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-owner-marker": {
+      "seed": 1,
+      "id": "desktop-owner-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3328,
+      "y": 207,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-request-box": {
+      "seed": 1,
+      "id": "desktop-request-box",
+      "w": 498,
+      "h": 86,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3338,
+      "y": 194,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-owner-author": {
+      "seed": 1,
+      "id": "desktop-owner-author",
+      "w": 488,
+      "h": 23,
+      "fontSize": 12,
+      "text": "You",
+      "x": 3348,
+      "y": 202,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-owner-body": {
+      "seed": 1,
+      "id": "desktop-owner-body",
+      "w": 488,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Make this feel like a conversation, not columns of text.",
+      "x": 3348,
+      "y": 234,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-lead-time": {
+      "seed": 1,
+      "id": "desktop-lead-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:11",
+      "x": 3272,
+      "y": 310,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-lead-marker": {
+      "seed": 1,
+      "id": "desktop-lead-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3328,
+      "y": 315,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-lead-author": {
+      "seed": 1,
+      "id": "desktop-lead-author",
+      "w": 488,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Conversation lead · Pi · local",
+      "x": 3348,
+      "y": 310,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-lead-body": {
+      "seed": 1,
+      "id": "desktop-lead-body",
+      "w": 488,
+      "h": 65,
+      "fontSize": 14,
+      "text": "The width is only part of it. There is no visible author, time, or activity between replies.",
+      "x": 3348,
+      "y": 342,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-tool-time": {
+      "seed": 1,
+      "id": "desktop-tool-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:11",
+      "x": 3272,
+      "y": 426,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-tool-marker": {
+      "seed": 1,
+      "id": "desktop-tool-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3328,
+      "y": 431,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-tool-summary": {
+      "seed": 1,
+      "id": "desktop-tool-summary",
+      "w": 488,
+      "h": 28,
+      "fontSize": 12,
+      "text": "Read 4 files · transcript and layout",
+      "x": 3348,
+      "y": 426,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-report-time": {
+      "seed": 1,
+      "id": "desktop-report-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:12",
+      "x": 3272,
+      "y": 486,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-report-marker": {
+      "seed": 1,
+      "id": "desktop-report-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3328,
+      "y": 491,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-report-author": {
+      "seed": 1,
+      "id": "desktop-report-author",
+      "w": 488,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Layout reviewer · Worker report · local",
+      "x": 3348,
+      "y": 486,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-report-body": {
+      "seed": 1,
+      "id": "desktop-report-body",
+      "w": 488,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Use the same reading width for the messages and composer. Keep live activity visible when reading older replies.",
+      "x": 3348,
+      "y": 518,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-reply-time": {
+      "seed": 1,
+      "id": "desktop-reply-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:13",
+      "x": 3272,
+      "y": 612,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-reply-marker": {
+      "seed": 1,
+      "id": "desktop-reply-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 3328,
+      "y": 617,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "type": "shape"
+    },
+    "desktop-reply-author": {
+      "seed": 1,
+      "id": "desktop-reply-author",
+      "w": 488,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Conversation lead · Pi · local",
+      "x": 3348,
+      "y": 612,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-reply-body": {
+      "seed": 1,
+      "id": "desktop-reply-body",
+      "w": 488,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Next is the activity source. Thinking must come from a live event, not a guess based on old text.",
+      "x": 3348,
+      "y": 644,
+      "groupIds": [
+        "conversation",
+        "desktop"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-timeline-axis": {
+      "seed": 1,
+      "id": "narrow-timeline-axis",
+      "w": 1,
+      "h": 508,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4711,
+      "y": 234,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-owner-time": {
+      "seed": 1,
+      "id": "narrow-owner-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:10",
+      "x": 4652,
+      "y": 226,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-owner-marker": {
+      "seed": 1,
+      "id": "narrow-owner-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4708,
+      "y": 231,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-request-box": {
+      "seed": 1,
+      "id": "narrow-request-box",
+      "w": 574,
+      "h": 86,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4718,
+      "y": 218,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-owner-author": {
+      "seed": 1,
+      "id": "narrow-owner-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "You",
+      "x": 4728,
+      "y": 226,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "narrow-owner-body": {
+      "seed": 1,
+      "id": "narrow-owner-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Make this feel like a conversation, not columns of text.",
+      "x": 4728,
+      "y": 258,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-lead-time": {
+      "seed": 1,
+      "id": "narrow-lead-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:11",
+      "x": 4652,
+      "y": 334,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-lead-marker": {
+      "seed": 1,
+      "id": "narrow-lead-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4708,
+      "y": 339,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-lead-author": {
+      "seed": 1,
+      "id": "narrow-lead-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Conversation lead · Pi · local",
+      "x": 4728,
+      "y": 334,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "narrow-lead-body": {
+      "seed": 1,
+      "id": "narrow-lead-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "The width is only part of it. There is no visible author, time, or activity between replies.",
+      "x": 4728,
+      "y": 366,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-tool-time": {
+      "seed": 1,
+      "id": "narrow-tool-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:11",
+      "x": 4652,
+      "y": 450,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-tool-marker": {
+      "seed": 1,
+      "id": "narrow-tool-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4708,
+      "y": 455,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-tool-summary": {
+      "seed": 1,
+      "id": "narrow-tool-summary",
+      "w": 564,
+      "h": 28,
+      "fontSize": 12,
+      "text": "Read 4 files · transcript and layout",
+      "x": 4728,
+      "y": 450,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-report-time": {
+      "seed": 1,
+      "id": "narrow-report-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:12",
+      "x": 4652,
+      "y": 510,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-report-marker": {
+      "seed": 1,
+      "id": "narrow-report-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4708,
+      "y": 515,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-report-author": {
+      "seed": 1,
+      "id": "narrow-report-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Layout reviewer · Worker report · local",
+      "x": 4728,
+      "y": 510,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "narrow-report-body": {
+      "seed": 1,
+      "id": "narrow-report-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Use the same reading width for the messages and composer. Keep live activity visible when reading older replies.",
+      "x": 4728,
+      "y": 542,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-reply-time": {
+      "seed": 1,
+      "id": "narrow-reply-time",
+      "w": 46,
+      "h": 22,
+      "fontSize": 12,
+      "text": "13:13",
+      "x": 4652,
+      "y": 636,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "narrow-reply-marker": {
+      "seed": 1,
+      "id": "narrow-reply-marker",
+      "w": 7,
+      "h": 7,
+      "shape": "rect",
+      "fill": "none",
+      "x": 4708,
+      "y": 641,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "narrow-reply-author": {
+      "seed": 1,
+      "id": "narrow-reply-author",
+      "w": 564,
+      "h": 23,
+      "fontSize": 12,
+      "text": "Conversation lead · Pi · local",
+      "x": 4728,
+      "y": 636,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "narrow-reply-body": {
+      "seed": 1,
+      "id": "narrow-reply-body",
+      "w": 564,
+      "h": 65,
+      "fontSize": 14,
+      "text": "Next is the activity source. Thinking must come from a live event, not a guess based on old text.",
+      "x": 4728,
+      "y": 668,
+      "groupIds": [
+        "conversation",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    }
+  },
+  "order": [
+    "feature-title",
+    "feature-note",
+    "wide-frame",
+    "wide-top",
+    "wide-brand",
+    "wide-capacity",
+    "wide-inbox",
+    "wide-inbox-title",
+    "wide-inbox-rows",
+    "wide-agents",
+    "wide-agents-title",
+    "wide-agents-rows",
+    "wide-todos",
+    "wide-todos-title",
+    "wide-todos-rows",
+    "wide-chat-header",
+    "wide-chat-title",
+    "wide-chat-meta",
+    "wide-day",
+    "wide-pinned-region",
+    "wide-activity",
+    "wide-composer",
+    "wide-attach",
+    "wide-send",
+    "wide-annotation",
+    "desktop-frame",
+    "desktop-top",
+    "desktop-brand",
+    "desktop-capacity",
+    "desktop-inbox",
+    "desktop-inbox-title",
+    "desktop-inbox-rows",
+    "desktop-agents",
+    "desktop-agents-title",
+    "desktop-agents-rows",
+    "desktop-todos",
+    "desktop-todos-title",
+    "desktop-todos-rows",
+    "desktop-chat-header",
+    "desktop-chat-title",
+    "desktop-chat-meta",
+    "desktop-day",
+    "desktop-pinned-region",
+    "desktop-activity",
+    "desktop-composer",
+    "desktop-attach",
+    "desktop-send",
+    "desktop-annotation",
+    "narrow-frame",
+    "narrow-top",
+    "narrow-brand",
+    "narrow-capacity",
+    "narrow-inbox",
+    "narrow-inbox-title",
+    "narrow-inbox-rows",
+    "narrow-chat-header",
+    "narrow-chat-title",
+    "narrow-chat-meta",
+    "narrow-tabs",
+    "narrow-day",
+    "narrow-pinned-region",
+    "narrow-activity",
+    "narrow-composer",
+    "narrow-attach",
+    "narrow-send",
+    "narrow-annotation",
+    "wide-timeline-axis",
+    "wide-owner-time",
+    "wide-owner-marker",
+    "wide-request-box",
+    "wide-owner-author",
+    "wide-owner-body",
+    "wide-lead-time",
+    "wide-lead-marker",
+    "wide-lead-author",
+    "wide-lead-body",
+    "wide-tool-time",
+    "wide-tool-marker",
+    "wide-tool-summary",
+    "wide-report-time",
+    "wide-report-marker",
+    "wide-report-author",
+    "wide-report-body",
+    "wide-reply-time",
+    "wide-reply-marker",
+    "wide-reply-author",
+    "wide-reply-body",
+    "desktop-timeline-axis",
+    "desktop-owner-time",
+    "desktop-owner-marker",
+    "desktop-request-box",
+    "desktop-owner-author",
+    "desktop-owner-body",
+    "desktop-lead-time",
+    "desktop-lead-marker",
+    "desktop-lead-author",
+    "desktop-lead-body",
+    "desktop-tool-time",
+    "desktop-tool-marker",
+    "desktop-tool-summary",
+    "desktop-report-time",
+    "desktop-report-marker",
+    "desktop-report-author",
+    "desktop-report-body",
+    "desktop-reply-time",
+    "desktop-reply-marker",
+    "desktop-reply-author",
+    "desktop-reply-body",
+    "narrow-timeline-axis",
+    "narrow-owner-time",
+    "narrow-owner-marker",
+    "narrow-request-box",
+    "narrow-owner-author",
+    "narrow-owner-body",
+    "narrow-lead-time",
+    "narrow-lead-marker",
+    "narrow-lead-author",
+    "narrow-lead-body",
+    "narrow-tool-time",
+    "narrow-tool-marker",
+    "narrow-tool-summary",
+    "narrow-report-time",
+    "narrow-report-marker",
+    "narrow-report-author",
+    "narrow-report-body",
+    "narrow-reply-time",
+    "narrow-reply-marker",
+    "narrow-reply-author",
+    "narrow-reply-body"
+  ],
+  "variations": [
+    {
+      "id": "wide",
+      "title": "Conversation / wide / selected Message timeline",
+      "description": "Approved layout direction; activity labels are illustrative and require real events in production.",
+      "nodeIds": [
+        "wide-frame",
+        "wide-top",
+        "wide-brand",
+        "wide-capacity",
+        "wide-inbox",
+        "wide-inbox-title",
+        "wide-inbox-rows",
+        "wide-agents",
+        "wide-agents-title",
+        "wide-agents-rows",
+        "wide-todos",
+        "wide-todos-title",
+        "wide-todos-rows",
+        "wide-chat-header",
+        "wide-chat-title",
+        "wide-chat-meta",
+        "wide-day",
+        "wide-pinned-region",
+        "wide-activity",
+        "wide-composer",
+        "wide-attach",
+        "wide-send",
+        "wide-annotation",
+        "wide-timeline-axis",
+        "wide-owner-time",
+        "wide-owner-marker",
+        "wide-request-box",
+        "wide-owner-author",
+        "wide-owner-body",
+        "wide-lead-time",
+        "wide-lead-marker",
+        "wide-lead-author",
+        "wide-lead-body",
+        "wide-tool-time",
+        "wide-tool-marker",
+        "wide-tool-summary",
+        "wide-report-time",
+        "wide-report-marker",
+        "wide-report-author",
+        "wide-report-body",
+        "wide-reply-time",
+        "wide-reply-marker",
+        "wide-reply-author",
+        "wide-reply-body"
+      ]
+    },
+    {
+      "id": "desktop",
+      "title": "Conversation / desktop / selected Message timeline",
+      "description": "Approved layout direction; activity labels are illustrative and require real events in production.",
+      "nodeIds": [
+        "desktop-frame",
+        "desktop-top",
+        "desktop-brand",
+        "desktop-capacity",
+        "desktop-inbox",
+        "desktop-inbox-title",
+        "desktop-inbox-rows",
+        "desktop-agents",
+        "desktop-agents-title",
+        "desktop-agents-rows",
+        "desktop-todos",
+        "desktop-todos-title",
+        "desktop-todos-rows",
+        "desktop-chat-header",
+        "desktop-chat-title",
+        "desktop-chat-meta",
+        "desktop-day",
+        "desktop-pinned-region",
+        "desktop-activity",
+        "desktop-composer",
+        "desktop-attach",
+        "desktop-send",
+        "desktop-annotation",
+        "desktop-timeline-axis",
+        "desktop-owner-time",
+        "desktop-owner-marker",
+        "desktop-request-box",
+        "desktop-owner-author",
+        "desktop-owner-body",
+        "desktop-lead-time",
+        "desktop-lead-marker",
+        "desktop-lead-author",
+        "desktop-lead-body",
+        "desktop-tool-time",
+        "desktop-tool-marker",
+        "desktop-tool-summary",
+        "desktop-report-time",
+        "desktop-report-marker",
+        "desktop-report-author",
+        "desktop-report-body",
+        "desktop-reply-time",
+        "desktop-reply-marker",
+        "desktop-reply-author",
+        "desktop-reply-body"
+      ]
+    },
+    {
+      "id": "narrow",
+      "title": "Conversation / narrow / selected Message timeline",
+      "description": "Approved layout direction; activity labels are illustrative and require real events in production.",
+      "nodeIds": [
+        "narrow-frame",
+        "narrow-top",
+        "narrow-brand",
+        "narrow-capacity",
+        "narrow-inbox",
+        "narrow-inbox-title",
+        "narrow-inbox-rows",
+        "narrow-chat-header",
+        "narrow-chat-title",
+        "narrow-chat-meta",
+        "narrow-tabs",
+        "narrow-day",
+        "narrow-pinned-region",
+        "narrow-activity",
+        "narrow-composer",
+        "narrow-attach",
+        "narrow-send",
+        "narrow-annotation",
+        "narrow-timeline-axis",
+        "narrow-owner-time",
+        "narrow-owner-marker",
+        "narrow-request-box",
+        "narrow-owner-author",
+        "narrow-owner-body",
+        "narrow-lead-time",
+        "narrow-lead-marker",
+        "narrow-lead-author",
+        "narrow-lead-body",
+        "narrow-tool-time",
+        "narrow-tool-marker",
+        "narrow-tool-summary",
+        "narrow-report-time",
+        "narrow-report-marker",
+        "narrow-report-author",
+        "narrow-report-body",
+        "narrow-reply-time",
+        "narrow-reply-marker",
+        "narrow-reply-author",
+        "narrow-reply-body"
+      ]
+    }
+  ],
+  "comments": [],
+  "app": "squig",
+  "version": 1
+}

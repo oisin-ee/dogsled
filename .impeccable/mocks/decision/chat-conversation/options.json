@@ -1,0 +1,49 @@
+{
+  "title": "A conversation you can follow",
+  "question": "Compare three conversation layouts. Each keeps the existing console, adds message attribution and timestamps, and makes live activity visible. Expand a preview to read it at full size. Preview content is illustrative.",
+  "options": [
+    {
+      "id": "turns",
+      "kind": "assigned",
+      "label": "Turn by turn",
+      "kicker": "THE ROLL",
+      "thesis": "Keep each request and its replies together, with worker reports nested inside the exchange.",
+      "palette": ["#0e0f11", "#1b1c20", "#e6e6e9", "#5e6ad2"],
+      "materials": ["Grouped exchanges", "Quiet dividers", "Pinned activity"],
+      "viewport": "Each exchange starts with your compact request, followed by the lead and attributed worker updates on one left edge.",
+      "risk": "Long exchanges need more scrolling, and each request is less visually separate from its answer.",
+      "html": ".impeccable/mocks/decision/chat-conversation/turns.html",
+      "htmlFrame": "1440x900",
+      "comp": ".impeccable/mocks/decision/chat-conversation/turns.png"
+    },
+    {
+      "id": "timeline",
+      "kind": "dealt",
+      "label": "Message timeline",
+      "thesis": "Read one chronological timeline with a time gutter and distinct message and activity rows.",
+      "palette": ["#0e0f11", "#1b1c20", "#e6e6e9", "#5e6ad2"],
+      "materials": ["Time gutter", "Author markers", "Inline activity summaries"],
+      "viewport": "All authors share one text column. Time and source stay beside each message, with compact execution summaries between replies.",
+      "risk": "More operational detail competes with the conversation, even when tool output stays collapsed.",
+      "html": ".impeccable/mocks/decision/chat-conversation/timeline.html",
+      "htmlFrame": "1440x900",
+      "comp": ".impeccable/mocks/decision/chat-conversation/timeline.png"
+    },
+    {
+      "id": "focused",
+      "kind": "dealt",
+      "label": "Focused chat",
+      "thesis": "Keep familiar chat bubbles inside one centered reading column, with clear names and times.",
+      "palette": ["#0e0f11", "#1b1c20", "#e6e6e9", "#5e6ad2"],
+      "materials": ["Content-width owner bubbles", "Open agent replies", "Pinned activity"],
+      "viewport": "Your messages sit on the right of the reading column, not the panel. Agent replies and worker reports carry visible attribution.",
+      "risk": "The slight left-right alternation remains, though both sides share the same narrow column.",
+      "html": ".impeccable/mocks/decision/chat-conversation/focused.html",
+      "htmlFrame": "1440x900",
+      "comp": ".impeccable/mocks/decision/chat-conversation/focused.png"
+    }
+  ],
+  "reroll": { "registers": ["safer", "bolder"] },
+  "steer": true,
+  "buildPath": { "value": "code", "toggle": true }
+}
