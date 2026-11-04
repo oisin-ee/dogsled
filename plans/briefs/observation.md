@@ -1,6 +1,6 @@
 # One observer per host — writer brief
 
-**Status:** Proposed design. No implementation authorization.
+**Status:** Approved 2026-11-04. Dispatch O1 to O13 in order. The lead work (L2 to L4) is paused until O13 lands.
 
 **Source revision:** `68352890fb043a2fee533cc8dc5a4753f99f62a8`. The lead confirmed that `269b1c4` adds only `plans/observation.md`.
 
@@ -363,13 +363,16 @@ Require these five regression groups:
 
 Retain the symlinked-TMPDIR regressions on Linux and macOS. Do not claim native macOS proof from a Linux-only run.
 
-### Decisions before dispatch
+### Decisions (user, 2026-11-04)
 
-| Decision | Recommendation |
+There is one orchestrator: `dogsled serve`. No other process probes, locks, derives, or writes observed state.
+
+| Decision | Outcome |
 |---|---|
-| Cold reads while `serve` is absent | Return explicit unavailable. Do not add reader-side reconstruction. Durable offline display requires a separate storage design. |
-| Agent conversation/screen scope | Include O10 to satisfy the strict observer boundary. Excluding it requires an explicit content-reader exception to the acceptance criterion. |
-| Herdr event coverage | Verify supported event filters before O4. Keep the service fallback for unsupported changes without modifying dependencies. |
+| Cold reads while `serve` is absent | Return explicit unavailable. No reader-side reconstruction. |
+| Agent conversation/screen scope | O10 is in scope. `serve` collects detail only for agents that a reader is viewing. |
+| Order | Finish L1, pause L2 to L4, then run O1 to O13. |
+| Herdr event coverage | Verify supported event filters before O4. Keep the service fallback for unsupported changes, and do not modify dependencies. |
 
 **Review evidence:** Source inspection only. No files or Git state changed. `git diff --check` passed. Tests were not run.
 
