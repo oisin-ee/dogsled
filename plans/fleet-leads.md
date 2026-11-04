@@ -66,7 +66,9 @@ Herdr already forwards its API to saved machines: `herdr --machine <label> <comm
 
 Two gaps remain:
 
-1. **Forwarding is a CLI feature, not a socket feature.** The portal uses the socket directly (`herdr_socket::Client`). The socket schema (`herdr api schema --json`, protocol 22) has no machine field. For a remote agent, the portal must call the `herdr --machine` CLI. There is no subscription command, so live events use `herdr --machine <label> agent wait` or polling.
+1. **Forwarding is a CLI feature, not a socket feature.** The portal uses the socket directly (`herdr_socket::Client`). The socket schema (`herdr api schema --json`, protocol 22) has no machine field. For a remote agent, the portal must call the `herdr --machine` CLI.
+   - Live events (`events.subscribe`, `events.wait`) are socket methods only. The v0.9.5 CLI reference lists the forwarded commands (`workspace`, `worktree`, `tab`, `pane`, `notification`, `agent` except `attach`, `api snapshot`, `status server`, plugin commands), and none of them subscribes. Source: https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/cli-reference.mdx, "Saved SSH machines".
+   - Unverified: `herdr --machine <label> agent wait` against a live remote pane. The test job (`herdr --machine netcup agent wait w1W5:p1 --status done`) could not run on 2026-11-04: local and netcup refused work at disk below 15%. Prove it before stage 2 relies on it; otherwise remote state polls.
 2. **Transcripts are files on the remote host.** The conversation view reads the agent's session file (`agent_session.value`, for example a path under `/var/lib/workloads/home/dev/` on netcup). Herdr does not forward file reads. Add a `dogsled host conversation <pane>` command that the portal runs through the existing `Fleet::remote` SSH path.
 
 The agent list in the portal merges the local socket with `herdr --machine <label> agent list` for each enabled machine. Each agent row carries its host label, and every agent route takes the host.
