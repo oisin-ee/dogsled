@@ -32,6 +32,10 @@ mod job_store;
 mod jobs;
 mod launch;
 mod launch_store;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by lead launch in L3"))]
+mod lead_store;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by lead lifetime in L2"))]
+mod leads;
 mod ledger;
 mod lifecycle;
 mod loss;

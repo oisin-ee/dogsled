@@ -504,7 +504,7 @@ fn summary(host: &HostReport) -> String {
                 p.memory.used_bytes as f64 / gib,
                 p.memory.total_bytes as f64 / gib,
                 p.disk_free_percent,
-                p.agents.total,
+                p.agent_panes.len(),
                 states
                     .iter()
                     .map(|(state, n)| format!("{} {n}", one_line(state)))
