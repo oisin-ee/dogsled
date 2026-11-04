@@ -1,6 +1,7 @@
 //! Immutable, host-owned observations. Collection and projection belong to the producer;
 //! clients receive complete publications without a shell, ledger, or fleet.
 
+pub(crate) mod collect;
 pub(crate) mod ipc;
 
 use crate::error::{Error, Result};

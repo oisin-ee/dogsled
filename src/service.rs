@@ -232,6 +232,12 @@ fn start_lanes(
 }
 
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
+    let mut publisher = crate::observation::Publisher::new()?;
+    let mut publication_server = crate::observation::ipc::Server::new(&node.ledger.dir)?;
+    if let Err(error) = publication_server.bind(publisher.subscribe()) {
+        eprintln!("observation socket unavailable: {error}");
+    }
+    let mut collector = crate::observation::collect::Collector::default();
     let (send, recv) = mpsc::channel();
     let _listener = match Listener::start(node.ledger, send.clone()) {
         Ok(listener) => Some(listener),
@@ -250,9 +256,20 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
         // The socket only reduces latency. Recover pending requests on every publication
         // iteration, including when the socket cannot bind or a notification was lost.
         requested |= crate::sweep::pending(node.ledger)?;
-        node.tick(now_ms())?;
-        if let Err(error) = crate::board::collect_todos(node.ledger) {
-            eprintln!("dogsled service: todo intake failed: {error}");
+        let collection = collector.collect(node, now_ms());
+        let frame = publisher.replace(collection.input)?;
+        for gap in &frame.gaps {
+            if gap.domain == "todos" {
+                eprintln!("dogsled service: todo intake failed: {}", gap.detail);
+            } else {
+                eprintln!(
+                    "dogsled service: {} collection failed: {}",
+                    gap.domain, gap.detail
+                );
+            }
+        }
+        if once {
+            collection.sample?;
         }
         start_lanes(node, policy, once, &mut workers, completed, &send);
         next += interval;

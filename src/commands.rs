@@ -22,42 +22,8 @@ pub struct Status {
 }
 
 pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
-    let hosts = fleet.status(crate::ledger::now_ms())?;
-    let mut items = crate::items::list(fleet.ledger)?;
-    crate::items::merge_handoffs(&mut items, &hosts);
-    let mut status = Status {
-        hosts,
-        items,
-        queue: crate::work::queue(fleet.ledger)?,
-        orphans: crate::sweep::list(fleet.ledger)?,
-        sweep: crate::sweep::latest(fleet.ledger)?,
-        stopped_activity: std::collections::BTreeMap::new(),
-        holds: Vec::new(),
-    };
-    status.holds = status
-        .hosts
-        .iter()
-        .flat_map(|host| host.holds.clone())
-        .collect();
-    status.holds.extend(crate::holds::owner(&status));
-    // Prefer the owner-side projection when the execution host reports the same branch.
-    status.holds.retain(|hold| {
-        hold.code != "retained_branch"
-            || !status.items.iter().any(|item| {
-                hold.request_id.as_deref() == Some(item.id.as_str())
-                    && (item.dropped_ms.is_some()
-                        || item.branch.as_ref().is_some_and(|branch| branch.landed))
-            })
-    });
-    status.holds.reverse();
-    let mut resources = std::collections::BTreeSet::new();
-    status.holds.retain(|hold| {
-        resources.insert((hold.host.clone(), hold.code.clone(), hold.resource.clone()))
-    });
-    status.holds.reverse();
-    status.stopped_activity =
-        crate::watchdog::stopped_activity(fleet.ledger, &status, crate::ledger::now_ms())?;
-    Ok(status)
+    let now = crate::ledger::now_ms();
+    crate::observation::collect::status(fleet.ledger, fleet.status(now)?, now)
 }
 
 #[derive(Debug, Serialize)]
