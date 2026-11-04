@@ -8,6 +8,36 @@ pub mod reviews;
 
 use serde::{Deserialize, Serialize};
 
+/// One coherent portal update. All payloads and gaps belong to this exact publication.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PortalSnapshot {
+    pub version: u32,
+    pub epoch: String,
+    pub revision: u64,
+    pub published_ms: u64,
+    pub board: Option<BoardView>,
+    pub agents: Option<Vec<agents::AgentView>>,
+    pub inbox: Option<inbox::InboxView>,
+    pub gaps: Vec<ObservationGap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationAvailability {
+    Available,
+    Unavailable,
+    Failed,
+    Unsupported,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationGap {
+    pub domain: String,
+    pub availability: ObservationAvailability,
+    pub detail: String,
+}
+
 /// Everything the board shows, grouped by repository.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardView {

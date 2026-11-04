@@ -277,16 +277,17 @@ impl Branches {
     }
 }
 
-pub(crate) fn import(ledger: &Ledger, host: &str, results: &[BranchObservation]) -> Result<()> {
+pub(crate) fn import(ledger: &Ledger, host: &str, results: &[BranchObservation]) -> Result<bool> {
+    let mut changed = false;
     for result in results {
-        crate::items::checked(
+        changed |= crate::items::checked(
             ledger,
             host,
             std::slice::from_ref(&result.checked),
             result.measured_ms,
         )?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 #[derive(Default)]
@@ -294,9 +295,19 @@ pub(crate) struct Ingestion {
     export: Option<Export>,
     pub source: Option<PeerSource>,
     pub cached: Option<Cached>,
+    local_changed: bool,
 }
 
 impl Ingestion {
+    /// Imported items are local inputs, unlike ordinary peer cache replacements.
+    pub fn take_local_changes(&mut self) -> u8 {
+        if std::mem::take(&mut self.local_changed) {
+            crate::service::wake::LEDGER
+        } else {
+            0
+        }
+    }
+
     pub fn reset(&mut self) {
         self.export = None;
     }
@@ -512,7 +523,10 @@ impl Ingestion {
         if cached.available
             && let Ok((_, branches)) = received
         {
-            import(fleet.ledger, &host.id, &branches)?;
+            for branch in branches {
+                self.local_changed |=
+                    import(fleet.ledger, &host.id, std::slice::from_ref(&branch))?;
+            }
         }
         Ok(changed)
     }

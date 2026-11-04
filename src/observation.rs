@@ -5,6 +5,7 @@ pub(crate) mod collect;
 pub(crate) mod ipc;
 pub(crate) mod peers;
 pub(crate) mod peers_runtime;
+pub(crate) mod project;
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -19,15 +20,7 @@ pub(crate) const VERSION: u32 = 1;
 /// foreign paths nor assembles projections. Collectors supply these complete maps together.
 pub(crate) type Domains = BTreeMap<String, Value>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Availability {
-    Available,
-    Unavailable,
-    Failed,
-    Unsupported,
-    Stale,
-}
+pub(crate) use portal_types::{ObservationAvailability as Availability, ObservationGap as Gap};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PeerSource {
@@ -42,13 +35,6 @@ pub(crate) struct Sources {
     pub local: BTreeMap<String, u64>,
     /// Keys are execution-host identifiers, never the receiver-relative `local` alias.
     pub peers: BTreeMap<String, PeerSource>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Gap {
-    pub domain: String,
-    pub availability: Availability,
-    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,7 +97,7 @@ impl Publisher {
         self.sender.subscribe()
     }
 
-    pub fn replace(&mut self, input: Publication) -> Result<Arc<Published>> {
+    pub fn replace(&mut self, mut input: Publication) -> Result<Arc<Published>> {
         let increment = |value: u64| {
             value.checked_add(1).ok_or_else(|| {
                 Error::Invalid("observation revision exhausted; restart the publisher".into())
@@ -131,6 +117,19 @@ impl Publisher {
             };
             (revision, local_revision)
         };
+        if let Some(portal) = input
+            .views
+            .get_mut("portal")
+            .and_then(|view| view.get_mut("data"))
+            && !portal.is_null()
+        {
+            let mut snapshot: portal_types::PortalSnapshot =
+                serde_json::from_value(portal.clone())?;
+            snapshot.epoch.clone_from(&self.epoch);
+            snapshot.revision = revision;
+            snapshot.published_ms = input.published_ms;
+            *portal = serde_json::to_value(snapshot)?;
+        }
         let published = Arc::new(Published {
             version: VERSION,
             epoch: self.epoch.clone(),

@@ -893,7 +893,7 @@ fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
     );
 }
 
-/// Add portal metadata on the blocking board reader, never on an HTTP request.
+/// Capture metadata once before deriving reader boards.
 pub fn enrich(
     board: &mut Board,
     status: &Status,
@@ -901,8 +901,8 @@ pub fn enrich(
     ledger: &Ledger,
     shell: &dyn Shell,
 ) -> Result<()> {
-    let messages = inbox_messages(ledger)?;
-    enrich_rows(board, status, todos, &messages, shell);
+    let captured = capture_enrichment(board, status, inbox_messages(ledger)?, shell);
+    enrich_captured(board, status, todos, &captured);
     Ok(())
 }
 
@@ -910,6 +910,7 @@ fn inbox_messages(ledger: &Ledger) -> Result<Vec<crate::inbox::Record>> {
     crate::store::read(ledger, crate::web_store::inbox::all_records)
 }
 
+#[cfg(test)]
 fn enrich_rows(
     board: &mut Board,
     status: &Status,
@@ -917,7 +918,22 @@ fn enrich_rows(
     messages: &[crate::inbox::Record],
     shell: &dyn Shell,
 ) {
-    let mut defaults = std::collections::BTreeMap::new();
+    let captured = capture_enrichment(board, status, messages.to_vec(), shell);
+    enrich_captured(board, status, todos, &captured);
+}
+
+#[derive(Debug)]
+pub(crate) struct Enrichment {
+    messages: Vec<crate::inbox::Record>,
+    ancestry: std::collections::BTreeMap<String, i32>,
+}
+
+pub(crate) fn enrich_captured(
+    board: &mut Board,
+    status: &Status,
+    todos: &[TodoSections],
+    captured: &Enrichment,
+) {
     for row in &mut board.rows {
         let item = status.items.iter().find(|item| item.id == row.id);
         if row.state == "closed" {
@@ -935,15 +951,36 @@ fn enrich_rows(
             item.closed_ms.is_some()
                 || crate::watchdog::turn_ended(crate::items::lifecycle(item, &status.hosts).state)
         });
-        row.unseen = unseen(row, pane, messages, ended);
+        row.unseen = unseen(row, pane, &captured.messages, ended);
+        row.cleanup = if row.dirty {
+            classify_cleanup(row, 0)
+        } else {
+            captured
+                .ancestry
+                .get(&row.id)
+                .and_then(|status| classify_cleanup(row, *status))
+        };
+    }
+}
+
+pub(crate) fn capture_enrichment(
+    board: &Board,
+    status: &Status,
+    messages: Vec<crate::inbox::Record>,
+    shell: &dyn Shell,
+) -> Enrichment {
+    let mut ancestry = std::collections::BTreeMap::new();
+    let mut defaults = std::collections::BTreeMap::new();
+    for row in &board.rows {
         if row.group != Group::ToLand {
             continue;
         }
         if row.dirty {
-            row.cleanup = Some(cleanup(portal_types::CleanupCause::Dirty));
             continue;
         }
-        let Some(item) = item else { continue };
+        let Some(item) = status.items.iter().find(|item| item.id == row.id) else {
+            continue;
+        };
         let local = status
             .hosts
             .iter()
@@ -999,10 +1036,11 @@ fn enrich_rows(
                 default.clone(),
             ],
         );
-        row.cleanup = output
-            .ok()
-            .and_then(|output| classify_cleanup(row, output.status));
+        if let Ok(output) = output {
+            ancestry.insert(row.id.clone(), output.status);
+        }
     }
+    Enrichment { messages, ancestry }
 }
 
 fn cleanup(cause: portal_types::CleanupCause) -> portal_types::Cleanup {

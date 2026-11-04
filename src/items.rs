@@ -422,8 +422,10 @@ pub fn checked(
     host: &str,
     checked: &[crate::drop::Checked],
     now: u64,
-) -> Result<()> {
-    change(ledger, |items| {
+) -> Result<bool> {
+    crate::store::write(ledger, |tx| {
+        let mut items = crate::tables::items(tx)?;
+        let before = tx.total_changes();
         for check in checked {
             if let Some(item) = items
                 .iter_mut()
@@ -440,6 +442,8 @@ pub fn checked(
                 item.branch_checked_ms = Some(now);
             }
         }
+        crate::tables::sync_items(tx, &items)?;
+        Ok(tx.total_changes() != before)
     })
 }
 

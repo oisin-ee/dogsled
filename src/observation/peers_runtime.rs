@@ -49,6 +49,7 @@ pub(crate) struct Observers {
     hosts: Vec<Host>,
     workers: BTreeMap<String, Worker>,
     discovered: Option<Instant>,
+    projector: super::project::Projector,
 }
 
 impl Observers {
@@ -120,12 +121,13 @@ impl Observers {
     }
 
     pub fn compose(
-        &self,
+        &mut self,
         fleet: &Fleet<'_>,
         input: &mut Publication,
         now: u64,
         mut reports: Vec<HostReport>,
     ) -> Result<()> {
+        let local = self.projector.inputs(fleet, input);
         for host in self.hosts.iter().filter(|host| !host.is_local()) {
             let state = self
                 .workers
@@ -139,10 +141,7 @@ impl Observers {
                         .clone()
                 })
                 .unwrap_or_default();
-            let report = state.cached.map_or_else(
-                || fleet.read_host(host, now),
-                |cached| fleet.cached_report(host, cached, now),
-            );
+            let report = fleet.cached_report(host, state.cached.unwrap_or_default(), now);
             let mut source = state.sources.get(&host.id).cloned().unwrap_or(PeerSource {
                 epoch: String::new(),
                 local_revision: 0,
@@ -167,14 +166,7 @@ impl Observers {
             input.sources.peers.insert(host.id.clone(), source);
             reports.push(report);
         }
-        input
-            .views
-            .insert("hosts".into(), serde_json::to_value(&reports)?);
-        input.views.insert(
-            "status".into(),
-            serde_json::to_value(super::collect::status(fleet.ledger, reports, now)?)?,
-        );
-        Ok(())
+        super::project::derive(&local, reports, &fleet.policy.into(), input)
     }
 }
 
@@ -221,6 +213,7 @@ fn poll(
             let interests = peers::interests(&ledger, &host.id, now)?;
             ingestion.refresh(&fleet, host, now, interests, !once && !retry)
         });
+        let local_changes = ingestion.take_local_changes();
         let mut state = shared
             .0
             .lock()
@@ -236,8 +229,9 @@ fn poll(
         if result.as_ref().is_ok_and(|changed| *changed)
             || previous.as_ref() != ingestion.source.as_ref()
             || gaps_changed
+            || local_changes != 0
         {
-            dirty.mark(PEERS);
+            dirty.mark(PEERS | local_changes);
         }
         if let Err(error) = result {
             eprintln!("dogsled peer {}: {error}", host.label);

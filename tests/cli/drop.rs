@@ -269,7 +269,7 @@ fn observe_branches(rig: &Rig, execution: &Rig) {
             .is_some_and(|checks| !checks.is_empty())
     });
     wait_publication(rig, |frame| {
-        frame["views"]["status"]["items"]
+        frame["views"]["status"]["data"]["items"]
             .as_array()
             .is_some_and(|items| {
                 items.iter().all(|item| {

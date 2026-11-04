@@ -21,7 +21,7 @@ pub struct Notice {
 /// Findings about work that no agent created, or that another agent created, stay in
 /// `dogsled status`; they never reach an agent that did not create the work. Repository
 /// warnings and failures without a target are about the host, which no agent created.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Findings {
     pub failures: BTreeSet<String>,
     pub holds: BTreeSet<String>,
@@ -54,13 +54,33 @@ pub fn findings(
             .and_then(|agent| agent.agent_session),
         Err(_) => None,
     };
+    Ok(findings_from(
+        owner,
+        report,
+        &items,
+        &panes,
+        &launches,
+        &custody,
+        session.as_deref(),
+    ))
+}
+
+pub(crate) fn findings_from(
+    owner: &str,
+    report: &crate::sweep::Report,
+    items: &[crate::items::Item],
+    panes: &[crate::probe::Pane],
+    launches: &[crate::work::Launch],
+    custody: &[crate::custody::Custody],
+    session: Option<&str>,
+) -> Findings {
+    let applied = &report.applied;
     let holder = Holder {
         pane: owner,
-        session: session.as_deref(),
-        records: &custody,
+        session,
+        records: custody,
     };
-    let recipient =
-        |entry: &crate::cleanup::Entry| created(entry, &holder, &items, &panes, &launches);
+    let recipient = |entry: &crate::cleanup::Entry| created(entry, &holder, items, panes, launches);
     let failures = applied
         .failures
         .iter()
@@ -81,11 +101,11 @@ pub fn findings(
             Some(format!("{} (branch {}): its commits are already in the default branch. Dirty paths ({} total): {}", tree.path, tree.branch, entry.dirty_count.unwrap_or(entry.dirty_paths.len()), entry.dirty_paths.join(", ")))
         })
         .collect();
-    Ok(Findings {
+    Findings {
         failures,
         holds: entries(&applied.unlinked, &recipient),
         landed_dirty,
-    })
+    }
 }
 
 pub fn notices(
