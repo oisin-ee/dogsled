@@ -114,4 +114,8 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 Each writer receives one bounded unit, an exact base revision, owned paths, and focused acceptance commands. Shared-file changes run in dependency order.
 
-The history unit is under implementation on `feat/conversation-timeline`. Its focused checks pass, but acceptance still requires a committed result and review. No release, installation, or fleet rollout is authorized by this plan.
+The history unit is staged on `feat/conversation-timeline` at base `9f02d715493e2948bbaa9417f9a27bce87cfaac2`. Its focused suites, formatting, and strict Clippy pass. Review also added coverage for displayed Dogsled messages without delivery records.
+
+Delivery is blocked by the enabled commit gate. The complete retry passed 738 root unit tests and 684 CLI tests; ten CLI tests failed. The failures are in jobs, launch retry, lifecycle, sweep, and seeded-unit fixtures. Their cause is not established, and this evidence does not prove they predate the history changes. Full diagnostics are in `/tmp/dogsled-history-commit-final.log` on the local host.
+
+No history commit or push exists. Preserve the four staged files and worker checkout. Do not retry the gate, bypass hooks, or change unrelated subsystems without the next scope decision. Dependent implementation remains pending. No release, installation, or fleet rollout is authorized by this plan.
