@@ -714,7 +714,15 @@ pub fn stopped_activity(
     now: u64,
 ) -> Result<BTreeMap<String, String>> {
     let state: State = crate::host_store::watchdog(ledger)?.unwrap_or_default();
-    Ok(status
+    Ok(stopped_activity_from(&state, status, now))
+}
+
+pub(crate) fn stopped_activity_from(
+    state: &State,
+    status: &crate::commands::Status,
+    now: u64,
+) -> BTreeMap<String, String> {
+    status
         .items
         .iter()
         .filter_map(|item| {
@@ -744,7 +752,7 @@ pub fn stopped_activity(
             };
             Some((item.id.clone(), activity))
         })
-        .collect())
+        .collect()
 }
 
 pub fn tick(fleet: &Fleet, reports: &[HostReport], now: u64) -> Result<()> {

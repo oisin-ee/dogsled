@@ -56,7 +56,7 @@ async fn read(state: &AppState) -> Result<InboxView> {
     ))
 }
 
-fn view(
+pub(crate) fn view(
     board: &BoardView,
     reviews: &[Review],
     questions: &[Pending],

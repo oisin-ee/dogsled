@@ -780,7 +780,7 @@ fn summary(record: &Record) -> ReviewSummary {
 }
 
 /// Pending reviews for the portal inbox, from the same durable store.
-pub(super) fn pending(web: &Ledger) -> Result<Vec<Review>> {
+pub(crate) fn pending(web: &Ledger) -> Result<Vec<Review>> {
     crate::store::read(web, |tx| {
         Ok(records::select(tx, "decision IS NULL", &[])?
             .into_iter()

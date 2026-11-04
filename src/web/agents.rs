@@ -105,40 +105,42 @@ pub(super) fn views(socket: &Client) -> crate::error::Result<Vec<AgentView>> {
         } else {
             None
         };
-        views.push(AgentView {
-            pane,
-            name: agent["name"].as_str().map(str::to_owned),
-            title: title_of(&agent),
-            agent: agent["agent"].as_str().map(str::to_owned),
-            state,
-            cwd: agent["cwd"].as_str().map(str::to_owned),
-            repository: agent["cwd"]
+        views.push(view_of(
+            &agent,
+            title_of(&agent),
+            agent["cwd"]
                 .as_str()
                 .and_then(|cwd| repository(&crate::shell::System::default(), cwd)),
             blocked,
-        });
+        ));
     }
     Ok(views)
 }
 
+fn view_of(
+    agent: &Value,
+    title: Option<String>,
+    repository: Option<String>,
+    blocked: Option<portal_types::agents::BlockedPrompt>,
+) -> AgentView {
+    AgentView {
+        pane: agent["pane_id"].as_str().unwrap_or_default().to_owned(),
+        name: agent["name"].as_str().map(str::to_owned),
+        title,
+        agent: agent["agent"].as_str().map(str::to_owned),
+        state: agent["agent_status"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned(),
+        cwd: agent["cwd"].as_str().map(str::to_owned),
+        repository,
+        blocked,
+    }
+}
+
 /// Use the same origin normalization as the board's observed agents.
 fn repository(shell: &dyn crate::shell::Shell, cwd: &str) -> Option<String> {
-    let output = shell
-        .run(
-            "git",
-            &[
-                "-C".into(),
-                cwd.into(),
-                "remote".into(),
-                "get-url".into(),
-                "origin".into(),
-            ],
-        )
-        .ok()?;
-    output
-        .ok()
-        .then(|| crate::checkout::identity(output.stdout.trim()))
-        .flatten()
+    crate::facts::repository(shell, cwd)
 }
 
 /// One agent's turns, read from its transcript.
@@ -320,23 +322,73 @@ fn agent_of(socket: &Client, pane: &str) -> Option<Value> {
 /// read once for a path is kept. A path read before it had a first message
 /// is read again when its size changes.
 fn title_of(agent: &Value) -> Option<String> {
-    static TITLES: std::sync::Mutex<std::collections::BTreeMap<String, (u64, Option<String>)>> =
-        std::sync::Mutex::new(std::collections::BTreeMap::new());
-    let harness = agent["agent"].as_str()?;
-    let transcript = agent["agent_session"]["value"].as_str()?;
-    let path = crate::transcript::resolve(Some(harness), kind_of(agent), transcript)?;
-    let size = std::fs::metadata(&path).ok()?.len();
-    let mut titles = TITLES
+    static TITLES: std::sync::Mutex<Titles> = std::sync::Mutex::new(Titles::new());
+    TITLES
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((seen, title)) = titles.get(&path)
-        && (title.is_some() || *seen == size)
-    {
-        return title.clone();
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .read(agent)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Titles(std::collections::BTreeMap<String, (u64, Option<String>)>);
+
+impl Titles {
+    const fn new() -> Self {
+        Self(std::collections::BTreeMap::new())
     }
-    let title = crate::activity::title(harness, &path);
-    titles.insert(path, (size, title.clone()));
-    title
+
+    pub(crate) fn read(&mut self, agent: &Value) -> Option<String> {
+        let harness = agent["agent"].as_str()?;
+        let transcript = agent["agent_session"]["value"].as_str()?;
+        let path = crate::transcript::resolve(Some(harness), kind_of(agent), transcript)?;
+        let size = std::fs::metadata(&path).ok()?.len();
+        if let Some((seen, title)) = self.0.get(&path)
+            && (title.is_some() || *seen == size)
+        {
+            return title.clone();
+        }
+        let title = crate::activity::title(harness, &path);
+        self.0.insert(path, (size, title.clone()));
+        title
+    }
+}
+
+/// Producer input uses the already captured agent set and host-owned repository facts.
+pub(crate) fn capture(
+    agents: &[crate::probe::Agent],
+    titles: &mut Titles,
+) -> crate::error::Result<Vec<AgentView>> {
+    let socket = if agents.iter().any(|agent| agent.state == "blocked") {
+        Some(Client::discover()?)
+    } else {
+        None
+    };
+    agents
+        .iter()
+        .map(|agent| {
+            let blocked = if agent.state == "blocked" {
+                let socket = socket.as_ref().ok_or_else(|| {
+                    crate::error::Error::Invalid("agent screen unavailable".into())
+                })?;
+                let read = socket.pane_read(&agent.pane, "visible", Some(SCREEN_LINES))?;
+                let text = read["text"].as_str().ok_or_else(|| {
+                    crate::error::Error::Invalid("agent screen has no text".into())
+                })?;
+                crate::activity::blocked_prompt(text)
+            } else {
+                None
+            };
+            let raw = json!({"pane_id":agent.pane,"name":agent.name,"agent":agent.agent,
+            "agent_status":agent.state,"cwd":agent.cwd,
+            "agent_session":{"kind":"path","value":agent.transcript}});
+            Ok(view_of(
+                &raw,
+                titles.read(&raw),
+                agent.repository.clone(),
+                blocked,
+            ))
+        })
+        .collect()
 }
 
 fn kind_of(agent: &Value) -> &str {

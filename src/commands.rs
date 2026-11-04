@@ -6,7 +6,7 @@ use crate::plan;
 use crate::prepare::Prepared;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct Status {
     pub hosts: Vec<HostReport>,
     pub items: Vec<crate::items::Item>,
@@ -360,7 +360,8 @@ fn full(reports: Vec<HostReport>, pinned: Option<&Host>) -> Result<Placement> {
 }
 
 /// Whether a host can take work, as `status --line` marks it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HostState {
     Eligible,
     /// Reachable, but admission would refuse new work (` ▲`).

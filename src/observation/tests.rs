@@ -1,5 +1,7 @@
 mod local;
 mod peer;
+mod projection;
+mod projection_import;
 
 mod publication {
     use super::super::*;

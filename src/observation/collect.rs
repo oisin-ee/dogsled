@@ -38,9 +38,8 @@ pub(crate) fn host(
 /// Capture and assemble from an already observed host set. No fleet discovery or probing.
 /// All store operations end before any publication is serialized or replaced.
 pub(crate) fn status(ledger: &Ledger, hosts: Vec<HostReport>, now: u64) -> Result<Status> {
-    let mut items = crate::items::list(ledger)?;
-    crate::items::merge_handoffs(&mut items, &hosts);
-    let mut status = Status {
+    let items = crate::items::list(ledger)?;
+    let status = Status {
         hosts,
         items,
         queue: crate::work::queue(ledger)?,
@@ -49,6 +48,14 @@ pub(crate) fn status(ledger: &Ledger, hosts: Vec<HostReport>, now: u64) -> Resul
         stopped_activity: BTreeMap::new(),
         holds: Vec::new(),
     };
+    let mut status = assemble(status);
+    status.stopped_activity = crate::watchdog::stopped_activity(ledger, &status, now)?;
+    Ok(status)
+}
+
+/// Recompute fleet-dependent state from frozen inventory and host-owned facts.
+pub(crate) fn assemble(mut status: Status) -> Status {
+    crate::items::merge_handoffs(&mut status.items, &status.hosts);
     status.holds = status
         .hosts
         .iter()
@@ -70,8 +77,7 @@ pub(crate) fn status(ledger: &Ledger, hosts: Vec<HostReport>, now: u64) -> Resul
         resources.insert((hold.host.clone(), hold.code.clone(), hold.resource.clone()))
     });
     status.holds.reverse();
-    status.stopped_activity = crate::watchdog::stopped_activity(ledger, &status, now)?;
-    Ok(status)
+    status
 }
 
 fn todos(ledger: &Ledger) -> Result<Vec<crate::board::TodoSections>> {
