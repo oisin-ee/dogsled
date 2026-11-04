@@ -1722,6 +1722,8 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     rig.snapshot("state", now(), 50.0, 12);
     rig.config("remote_command = ['custom-dogsled', 'argument with spaces']\n");
     rig.ingest_peers();
+    // Serve probed herdr above; readers must never probe it themselves.
+    let probes = rig.log("herdr.log").matches("agent list").count();
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0);
     assert_eq!(status["hosts"].as_array().unwrap().len(), 2);
@@ -1742,6 +1744,7 @@ fn status_reads_snapshots_and_caches_peer_reads() {
         rig.log("ssh.log")
             .contains("custom-dogsled 'argument with spaces' host snapshot --json")
     );
+    assert_eq!(rig.log("herdr.log").matches("agent list").count(), probes);
     let reads = rig.log("ssh.log").lines().count();
     rig.expire_cache();
     rig.json(&["status"]);
@@ -1750,6 +1753,7 @@ fn status_reads_snapshots_and_caches_peer_reads() {
         reads,
         "status never fills an expired cache"
     );
+    assert_eq!(rig.log("herdr.log").matches("agent list").count(), probes);
     rig.ingest_peers();
     assert_eq!(rig.log("ssh.log").lines().count(), reads + 2);
 }
