@@ -74,7 +74,9 @@ The proposed event path uses Pi message-block events, tool-execution events, and
 
 Detailed activity starts with the verified Pi event interface. Other harnesses retain honest coarse states until their integration supplies equivalent evidence.
 
-Transport ownership, session correlation, freshness, and supported harness coverage require a bounded implementation contract. The architect's broader history-model and availability proposals are not automatic scope additions.
+The reviewed implementation contract is in `briefs/chat-conversation/activity-protocol.md`. It defines native session stamps, authenticated producer registration, ordered full snapshots, bounded freshness, and unavailable states.
+
+Session-safe reads are a separate prerequisite. This fixes false 404/empty responses and prevents cached history from acquiring another session's attribution. It does not add a second history model, select an active transcript branch, or change lifecycle.
 
 Relevant primary evidence from that report:
 
@@ -105,10 +107,11 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 ## Delivery order
 
 1. Preserve historical message identity, timestamps, source attribution, and bounded tool summaries in the shared conversation contract.
-2. Add a session-correlated transient activity endpoint with authenticated input, ordered snapshots, and explicit unavailable states.
-3. Publish Pi activity from actual message and tool events without blocking agent execution.
-4. Render the selected timeline from those contracts, then verify the integrated result in the browser.
+2. Bind conversation and metadata reads to verified native sessions. Propagate actual read failures and reject stale cache responses.
+3. Add the transient activity endpoint with authenticated input, ordered snapshots, and explicit unavailable states.
+4. Publish Pi activity from actual message and tool events without blocking agent execution.
+5. Render the selected timeline from those contracts, then verify the integrated result in the browser.
 
 Each writer receives one bounded unit, an exact base revision, owned paths, and focused acceptance commands. Shared-file changes run in dependency order.
 
-The production files remain unchanged at design handoff. No release, installation, or fleet rollout is authorized by this plan.
+The history unit is under implementation on `feat/conversation-timeline`. Its focused checks pass, but acceptance still requires a committed result and review. No release, installation, or fleet rollout is authorized by this plan.
