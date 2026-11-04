@@ -158,7 +158,7 @@ On an owning blocker, stop without widening scope. Return the branch, SHA, chang
 ## L1 — Persist lead identity and exclude its demand
 
 Branch: `feat/lead-record`.
-Prerequisite: landed `repo-list`.
+Prerequisite: none. Start from `origin/main`; L1 uses no repo-list code. The repo-list branch also edits `src/node.rs` and `src/main.rs`, and the lead resolves that overlap at integration.
 Deliverable: durable ownerless records and correct capacity counts.
 
 | File and function | Edit |
@@ -166,7 +166,7 @@ Deliverable: durable ownerless records and correct capacity counts.
 | New `src/leads.rs`: `Record`, `Phase`, `matches_agent`, `protects_pane` | Define the lifecycle record and identity rules. Missing identity is unknown. A proven replacement terminal is not the old lead. |
 | New `src/lead_store.rs`: `SCHEMA`, `get`, `list`, `insert`, `update`, `exists_in` | Add typed SQLite storage with unique request IDs and names. Store launch intent and outcome separately. |
 | `src/main.rs:33`: module declarations | Register `leads` and `lead_store`. |
-| `src/store.rs:11`: `VERSION`, `schema` | Advance the supported schema and include the lead table. Preserve the existing schema-transition policy. |
+| `src/store.rs:11`: `VERSION`, `schema` | Raise `VERSION` from 4 to 5 and include the lead table. Keep the existing schema-transition policy (user decision, 2026-11-04). |
 | `src/probe.rs:15`: new `AgentCounts::from_agents`, `local` | Centralize count construction. Preserve raw agent inventory. |
 | `src/node.rs:679`: `observed_probe` | Rebuild capacity counts excluding exact registered lead identities. Preserve measured CPU, memory, disk, and reservations. |
 | `src/commands.rs:484`: `summary` | Use observed inventory length for the displayed agent total. Keep it consistent with the displayed state breakdown. |
@@ -179,7 +179,7 @@ Keep records independent of child result retention. No lead record expires merel
 Acceptance: `cargo test lead_` and `cargo test --bin dogsled store::`.
 Expected: records survive reopen, leads remain visible, and their declared demand is zero.
 
-**Deployment caution:** `store::open` deletes older-schema tables (`src/store.rs:72`). Installation requires a separately approved, quiescent rollout. This unit does not authorize opening live state with the new binary.
+**Deployment caution:** `store::open` deletes older-schema tables (`src/store.rs:72`). The user chose to keep this rule: roll out only when no children run on any host. This unit does not authorize opening live state with the new binary.
 
 ## L2 — Protect lifetime and support explicit close
 
