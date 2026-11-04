@@ -3179,16 +3179,10 @@ fn reconcile_finished(ledger: &Ledger) -> Result<()> {
             {
                 return Ok(());
             }
-            let effective = jobs::advance_clock(ledger, crate::ledger::now_ms().max(closed))?;
-            if attempt
-                .finished_ms
-                .is_some_and(|finished| finished != closed || finished > effective)
-            {
-                return Err(Error::Invalid(
-                    "closed admission completion timestamp changed".into(),
-                ));
-            }
+            // Completion is written once. An ordinary release may already have saved the
+            // execution host's own close time, which precedes this host's observation.
             if attempt.finished_ms.is_none() {
+                jobs::advance_clock(ledger, crate::ledger::now_ms().max(closed))?;
                 attempt.finished_ms = Some(closed);
                 crate::admissions::put(ledger, id, &attempt)?;
             }
