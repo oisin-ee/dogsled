@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.32.0](https://github.com/oisin-ee/dogsled/compare/v0.31.0...v0.32.0) (2026-11-04)
+
+
+### Features
+
+* **web:** redesign the portal as a dark agent console ([31b61ee](https://github.com/oisin-ee/dogsled/commit/31b61ee25d549fc3b97a50bfed12a5e55c65c77d))
+
+
+### Bug Fixes
+
+* **done:** remove handoff.lock ([fbdcdba](https://github.com/oisin-ee/dogsled/commit/fbdcdbaa9d8d2bdeb127a880095c30b84d9674d8))
+* **done:** remove handoff.lock so the children lane never waits on a close ([201289c](https://github.com/oisin-ee/dogsled/commit/201289cf0f7a2d48b4e9bf49f9cc8161cf234e7a))
+* **release:** grant release-please its documented permissions and state the commit-subject rule ([a798771](https://github.com/oisin-ee/dogsled/commit/a798771368c94cb4a13b8d334630476dedd02a74))
+* **release:** select the dogsled lockfile version ([f2a406b](https://github.com/oisin-ee/dogsled/commit/f2a406b3ab1091144a4dce24c013e098805fd2d1))
+* **service:** children lane imports handoffs without taking handoff.lock ([4a75fc2](https://github.com/oisin-ee/dogsled/commit/4a75fc2f25c2771b9768597dab0f9fbf318512db))
+* **service:** children lane runs handoff only when its lock is free ([43da9e4](https://github.com/oisin-ee/dogsled/commit/43da9e431616a7d2140be29fa1825f73e3f183d1))
+* **upgrade:** keep running services alive when a newer writer's handover fails ([#259](https://github.com/oisin-ee/dogsled/issues/259)) ([996fda2](https://github.com/oisin-ee/dogsled/commit/996fda2bedfd4533f7497e92a700f383ac1b335e))
+* **upgrade:** remove the executable handover ([0512826](https://github.com/oisin-ee/dogsled/commit/0512826e054f42358aef762a7a69277fdc49b495))
+* **upgrade:** remove the executable handover ([121a072](https://github.com/oisin-ee/dogsled/commit/121a072471cc841991a3fc9e731ab26d5cf0876a))
+* **work:** keep a released completion time instead of failing admission ([b8bc70f](https://github.com/oisin-ee/dogsled/commit/b8bc70f1565f4f2d5d0622058268a844767ffd2e))
+* **work:** keep a released completion time instead of failing admission ([d6e8040](https://github.com/oisin-ee/dogsled/commit/d6e804080856502e9933a679266498933b21a2ea))
+
 ## 0.31.0 - 2026-11-03
 
 - Settle finished and refused jobs without permanent resource alarms. Keep released replay evidence until normal expiry, record agent-pane owners, and show actionable cleanup commands.
