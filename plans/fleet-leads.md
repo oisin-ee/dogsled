@@ -41,7 +41,9 @@ A lead is a top-level agent. It has no owner pane, no done/ask/blocked contract,
 ### 1b. `dogsled lead`
 
 - `dogsled lead --repo <origin-or-path> --message <text>` (also `--message-file`). The MCP tool `lead` takes the same arguments.
-- Record an item with kind `lead`: no owner pane, host `local`.
+- Record the lead in its own host-local table, not as an `Item`. `Item.owner_pane` and its SQL column are required (`src/items.rs:14`, `src/tables.rs:52`), and a fake owner would misstate the child contract. The record holds the request ID, the name `lead-<request-id>`, the repo, the pane, the terminal identity, the launch phase, and explicit closure.
+- Leads stay in the observed agent inventory but are excluded from the admission counts (`src/plan.rs:48`).
+- Writer brief with units L1 to L4: `plans/briefs/lead-command.md`.
 - Open a tab with the same placement rule as `work::pane`. Start `pi` with `herdr agent start <name> --kind pi --pane <pane>` and no contract flags. Then submit the first message.
 - `close` and `read` accept a lead. A lead never takes part in handoff or the watchdog.
 
