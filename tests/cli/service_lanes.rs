@@ -214,3 +214,281 @@ fn repeated_handoff_warning_prints_once_across_lane_threads() {
     );
     assert_eq!(rig.state(&["done"]), original);
 }
+
+struct Observer {
+    rig: Rig,
+    child: Owned,
+    events: std::os::unix::net::UnixStream,
+    subscriptions: Vec<Value>,
+}
+
+impl Observer {
+    fn start(name: &str, interval: &str) -> Self {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let rig = Rig::short(name);
+        let path = rig.dir.join("herdr.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut cmd = rig.cmd(&["serve", "--interval", interval]);
+        cmd.env("HERDR_SOCKET_PATH", &path)
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(rig.dir.join("journal")).unwrap());
+        let child = Owned::spawn(&mut cmd);
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        let (events, subscriptions) = loop {
+            assert!(Instant::now() < deadline, "Herdr subscription missing");
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::yield_now();
+                continue;
+            };
+            stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "events.subscribe");
+            writeln!(
+                stream,
+                "{}",
+                json!({"id":request["id"],"result":{"type":"subscription_started"}})
+            )
+            .unwrap();
+            let filters = request["params"]["subscriptions"].as_array().unwrap();
+            if filters.iter().any(|filter| filter["pane_id"] == "w1:p1") {
+                break (stream, filters.clone());
+            }
+        };
+        let observer = Self {
+            rig,
+            child,
+            events,
+            subscriptions,
+        };
+        observer.wait(|_| {
+            let db = observer.rig.database();
+            db.query_row::<i64, _, _>("SELECT count(*) FROM service_lanes", [], |row| row.get(0))
+                .unwrap()
+                == 7
+        });
+        observer.quiet();
+        observer
+    }
+
+    fn current(&self) -> Value {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(self.rig.dir.join("state/observation.sock"))
+                .unwrap();
+        stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+        writeln!(stream, "{{\"version\":1,\"operation\":\"current\"}}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn wait(&self, condition: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        loop {
+            let frame = self.current();
+            if condition(&frame) {
+                return frame;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "observation did not change: {frame}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn quiet(&self) -> Value {
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        let mut frame = self.current();
+        let mut stable = Instant::now();
+        loop {
+            assert!(Instant::now() < deadline, "observation never became quiet");
+            let next = self.current();
+            if next["revision"] != frame["revision"] {
+                stable = Instant::now();
+                frame = next;
+            }
+            if stable.elapsed() >= Duration::from_millis(200) {
+                return frame;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    fn event(&mut self, name: &str) {
+        use std::io::Write as _;
+        writeln!(
+            self.events,
+            "{}",
+            json!({"event":name,"data":{"pane_id":"w1:p1"}})
+        )
+        .unwrap();
+    }
+
+    fn samples(&self) -> usize {
+        self.rig.state(&["samples"]).as_array().unwrap().len()
+    }
+}
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        self.child.terminate();
+    }
+}
+
+#[test]
+fn observation_commit_wakes_inventory_without_terminal_resampling() {
+    let observer = Observer::start("observe-commit", "3600");
+    let before = observer.samples();
+    let item = json!({"id":"new","kind":"agent","host":"local","pane":"gone:p1","owner_pane":"w1:p1","created_ms":1,"closed_ms":2});
+    observer.rig.put_items(&json!([item]));
+    let frame = observer.wait(|frame| frame["local"]["status"]["items"][0]["id"] == "new");
+    assert_eq!(frame["local"]["status"]["items"][0]["closed_ms"], 2);
+    assert_eq!(
+        observer.samples(),
+        before,
+        "ledger input resampled terminals"
+    );
+}
+
+#[test]
+fn observation_herdr_status_event_wakes_local_collection() {
+    let mut observer = Observer::start("observe-herdr", "3600");
+    for event in [
+        "pane.created",
+        "pane.closed",
+        "pane.updated",
+        "pane.exited",
+        "pane.agent_detected",
+        "worktree.created",
+        "worktree.opened",
+        "worktree.removed",
+    ] {
+        assert!(
+            observer
+                .subscriptions
+                .iter()
+                .any(|filter| filter["type"] == event),
+            "missing {event}"
+        );
+    }
+    assert!(observer.subscriptions.iter().any(|filter| filter["type"]
+        == "pane.agent_status_changed"
+        && filter["pane_id"] == "w1:p1"));
+    let before = observer.samples();
+    let mut panes = observer.rig.read("panes.json");
+    panes["result"]["panes"][0]["name"] = json!("changed");
+    observer.rig.put("panes.json", &panes);
+    observer.event("pane.agent_status_changed");
+    observer.wait(|frame| frame["local"]["host"]["probe"]["panes"][0]["name"] == "changed");
+    assert_eq!(observer.samples(), before + 1);
+}
+
+#[test]
+fn observation_commit_burst_coalesces_after_inflight_collection() {
+    let mut observer = Observer::start("observe-coalesce", "3600");
+    let before = observer.quiet();
+    let samples = observer.samples();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(observer.rig.dir.join("state/host.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let calls = fs::read_to_string(observer.rig.dir.join("herdr.log"))
+        .unwrap()
+        .matches("agent list")
+        .count();
+    observer.event("pane.updated");
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    while fs::read_to_string(observer.rig.dir.join("herdr.log"))
+        .unwrap()
+        .matches("agent list")
+        .count()
+        == calls
+    {
+        assert!(Instant::now() < deadline, "collection did not start");
+        std::thread::yield_now();
+    }
+    for id in 0..12 {
+        observer.rig.put_state(
+            &["state", "ingress", &format!("burst-{id}"), "--put"],
+            &json!({"version":1}),
+        );
+    }
+    lock.unlock().unwrap();
+    observer.wait(|frame| {
+        frame["revision"].as_u64().unwrap() >= before["revision"].as_u64().unwrap() + 2
+    });
+    let after = observer.quiet();
+    assert_eq!(
+        after["revision"].as_u64().unwrap(),
+        before["revision"].as_u64().unwrap() + 2
+    );
+    assert_eq!(
+        observer.samples(),
+        samples + 1,
+        "commit follow-up must reuse the terminal sample"
+    );
+    let db = observer.rig.database();
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT count(*) FROM request_ingress", [], |row| row.get(0))
+            .unwrap(),
+        12
+    );
+}
+
+#[test]
+fn observation_fallback_collects_without_supported_event_or_commit() {
+    let observer = Observer::start("observe-fallback", "1");
+    let before = observer.samples();
+    let mut panes = observer.rig.read("panes.json");
+    panes["result"]["panes"][0]["foreground_cwd"] = json!("/changed-without-event");
+    observer.rig.put("panes.json", &panes);
+    observer.wait(|frame| {
+        frame["local"]["host"]["probe"]["panes"][0]["foreground_cwd"] == "/changed-without-event"
+    });
+    assert!(observer.samples() > before);
+}
+
+#[test]
+fn observation_producer_writes_do_not_create_feedback_or_reschedule_lanes() {
+    let observer = Observer::start("observe-no-feedback", "3600");
+    let before = observer.quiet();
+    let samples = observer.samples();
+    let lanes: Vec<(String, i64)> = observer
+        .rig
+        .database()
+        .prepare("SELECT lane, last_ms FROM service_lanes ORDER BY lane")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    observer.rig.put_state(
+        &["state", "ingress", "input", "--put"],
+        &json!({"version":1}),
+    );
+    observer
+        .wait(|frame| frame["revision"].as_u64().unwrap() > before["revision"].as_u64().unwrap());
+    let after = observer.quiet();
+    assert_eq!(
+        after["revision"].as_u64().unwrap(),
+        before["revision"].as_u64().unwrap() + 1
+    );
+    assert_eq!(observer.samples(), samples);
+    let after_lanes: Vec<(String, i64)> = observer
+        .rig
+        .database()
+        .prepare("SELECT lane, last_ms FROM service_lanes ORDER BY lane")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(after_lanes, lanes, "input wake reran action lanes");
+}

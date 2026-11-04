@@ -94,6 +94,8 @@ pub(crate) struct Collector {
     local: Domains,
     measured: BTreeMap<String, u64>,
     gaps: BTreeMap<String, Gap>,
+    snapshot: Option<Snapshot>,
+    sample_error: Option<String>,
 }
 
 impl Collector {
@@ -121,7 +123,50 @@ impl Collector {
     /// capabilities, lane diagnostics, agent metadata and checkout/retained-branch facts.
     /// `status` is local-only inventory, not an aggregated fleet projection.
     pub fn collect(&mut self, node: &Node<'_>, now: u64) -> Collection {
-        let (host, sample) = match node.tick(now) {
+        self.refresh(node, now, true)
+    }
+
+    pub fn panes(&self) -> BTreeSet<String> {
+        self.snapshot
+            .as_ref()
+            .map_or_else(BTreeSet::new, |snapshot| {
+                snapshot
+                    .probe
+                    .panes
+                    .iter()
+                    .map(|pane| pane.pane_id.clone())
+                    .collect()
+            })
+    }
+
+    /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
+    /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
+    pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
+        let snapshot = if let Some(error) = self.sample_error.as_ref().filter(|_| !sample) {
+            Err(crate::error::Error::Invalid(error.clone()))
+        } else if let Some(snapshot) = self.snapshot.as_ref().filter(|_| !sample) {
+            let mut snapshot = snapshot.clone();
+            (|| {
+                snapshot.jobs = crate::jobs::list(node.ledger)?;
+                snapshot.probe.reservations = node
+                    .ledger
+                    .reservations(now, node.thresholds.reservation_ttl_ms)?;
+                Ok(snapshot)
+            })()
+        } else {
+            match node.tick(now) {
+                Ok(snapshot) => {
+                    self.snapshot = Some(snapshot.clone());
+                    self.sample_error = None;
+                    Ok(snapshot)
+                }
+                Err(error) => {
+                    self.sample_error = Some(error.to_string());
+                    Err(error)
+                }
+            }
+        };
+        let (host, sample) = match snapshot {
             Ok(snapshot) => (host(node, Some(snapshot), true, now), Ok(())),
             Err(error) => (
                 Err(crate::error::Error::Invalid(error.to_string())),

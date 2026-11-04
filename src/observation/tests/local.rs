@@ -208,6 +208,37 @@ fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
 }
 
 #[test]
+fn ledger_refresh_reuses_terminal_sample_and_preserves_failed_sample_gaps() {
+    let fixture = Fixture::new();
+    let mut collector = Collector::default();
+    let original = collector.collect(&fixture.node(), 100).input;
+    let calls = fixture.shell.calls.lock().unwrap().len();
+    fixture.seed_job("new-job");
+    let refreshed = collector.refresh(&fixture.node(), 200, false).input;
+    assert_eq!(refreshed.local["host"]["sampled_ms"], 100);
+    assert_eq!(refreshed.local["host"]["jobs"][0]["id"], "new-job");
+    assert_eq!(
+        refreshed.local["host"]["probe"],
+        original.local["host"]["probe"]
+    );
+    assert_eq!(fixture.shell.calls.lock().unwrap().len(), calls);
+    assert_eq!(crate::node::samples(&fixture.ledger).unwrap().len(), 1);
+    fixture.fail_probe();
+    let failed = collector.collect(&fixture.node(), 300).input;
+    let calls = fixture.shell.calls.lock().unwrap().len();
+    let ledger_only = collector.refresh(&fixture.node(), 400, false).input;
+    assert_eq!(ledger_only.local, failed.local);
+    for domain in ["host", "status", "headroom"] {
+        assert_eq!(
+            ledger_only.sources.local[domain],
+            failed.sources.local[domain]
+        );
+        assert!(ledger_only.gaps.iter().any(|gap| gap.domain == domain));
+    }
+    assert_eq!(fixture.shell.calls.lock().unwrap().len(), calls);
+}
+
+#[test]
 fn failed_collection_retains_values_and_times_then_recovers() {
     let fixture = Fixture::new();
     let mut collector = Collector::default();
