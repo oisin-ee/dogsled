@@ -898,25 +898,7 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
             }
         }
         Command::Retry { host } => {
-            let host = fleet.find(&host)?;
-            fleet.retry_now(host)?;
-            let report = fleet
-                .status(now_ms())?
-                .into_iter()
-                .find(|r| r.host.id == host.id);
-            crate::print(json_output, &report, || {
-                report.as_ref().map_or_else(String::new, |r| {
-                    format!(
-                        "{}: {}\n",
-                        r.host.label,
-                        if r.reachable {
-                            "reachable".to_owned()
-                        } else {
-                            r.error.clone().unwrap_or_else(|| "unreachable".into())
-                        }
-                    )
-                })
-            })?;
+            return crate::observation::peers::retry_command(fleet, &host, json_output);
         }
         Command::Stop { id } => stop(fleet, &id)?,
         Command::Wait { id, .. } => return Ok(ExitCode::from(wait_job(fleet, &id)? as u8)),

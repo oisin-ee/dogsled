@@ -271,6 +271,7 @@ fn a_peer_launch_is_not_refused_for_a_long_caller_path() {
     // work::LINE_BUDGET is 960. Files::at puts task and contract paths on the line.
     assert!(2 * deep.as_os_str().len() > 960);
     fs::create_dir_all(&deep).unwrap();
+    rig.ingest_peers();
     let copy = Command::new("cp")
         .arg("-R")
         .arg(rig.dir.join("state/."))

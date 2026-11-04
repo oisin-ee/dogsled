@@ -5,6 +5,7 @@ fn launch_peer(rig: &Rig) {
     let mut snapshot = rig.read("remote.json");
     snapshot["job_validity"] = json!(2);
     rig.put("remote.json", &snapshot);
+    rig.ingest_peers();
 }
 
 fn run_json(rig: &Rig, args: &[&str]) -> (i32, Value) {
@@ -422,6 +423,7 @@ fn cli_preserves_known_causes_and_never_peer_text() {
         repository(&repo);
         rig.peer();
         fail_peer(&rig, "prepare", &envelope(cause));
+        rig.ingest_peers();
         let (code, error) = rig.json(&[
             "agent",
             "--host",
@@ -499,6 +501,7 @@ fn a_real_remote_unknown_base_names_the_base_in_the_ticket() {
     let (rig, repo) = place::place_rig("diagnostic-real-unknown-base");
     rig.peer();
     real_peer_prepare(&rig);
+    rig.ingest_peers();
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -655,6 +658,7 @@ fn a_remote_peer_fetches_a_base_its_clone_has_not_fetched() {
     origin_with_branch(&rig, &repo, "feature");
     rig.peer();
     real_peer_prepare(&rig);
+    rig.ingest_peers();
     let (code, prepared) = rig.json(&[
         "agent",
         "--host",
@@ -786,6 +790,7 @@ fn real_remote_preparation_causes_are_safe_through_transport() {
         if case == "occupied" {
             fs::create_dir_all(repo.join(".worktrees/worker")).unwrap();
         }
+        rig.ingest_peers();
         let (code, error) = rig.json(&[
             "agent",
             "--host",
@@ -826,6 +831,7 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
     repository(&repo);
     rig.peer();
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
+    rig.ingest_peers();
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -869,6 +875,7 @@ setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; \"$DOGSLE
     );
     rig.peer();
     real_peer_prepare(&rig);
+    rig.ingest_peers();
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -943,6 +950,7 @@ fn malformed_unknown_and_secret_envelopes_never_import_peer_text() {
         let rig = Rig::new(&format!("diagnostic-invalid-{index}"));
         let repo = rig.dir.join("home/repo"); repository(&repo); rig.peer();
         fail_peer(&rig,"prepare",&json!({"error":"SECRET_SENTINEL","diagnostic":diagnostic}));
+        rig.ingest_peers();
         let (code, error) = rig.json(&["agent","--host","netcup","--cwd",repo.to_str().unwrap(),
             "--branch","worker","--base","missing","--name","worker","--message","TASK_SECRET"]);
         assert_eq!(code,2,"{error}");
@@ -970,6 +978,7 @@ fn parse_errors_do_not_format_launch_payloads_or_echo_remote_output() {
             "  *'host launch'*) echo 'PAYLOAD_SECRET'; exit 0;",
         ),
     );
+    rig.ingest_peers();
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -997,6 +1006,7 @@ fn remote_deadline_keeps_operation_and_correlation_without_launch_payload() {
         "ssh",
         &script.replace("  *'host launch'*)", "  *'host launch'*) printf '%s\\n' '{\"deadline\":true,\"error\":\"TASK_SECRET\"}'; exit 2;"),
     );
+    rig.ingest_peers();
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -1029,6 +1039,7 @@ fn remote_checkout_causes_and_legacy_clone_code_keep_the_diagnostic() {
             response["code"] = json!("CLONE_FAILED");
         }
         fail_peer(&rig, "checkout", &response);
+        rig.ingest_peers();
         let (code, error) = rig.json(&[
             "agent",
             "--host",
@@ -1060,6 +1071,7 @@ fn mcp_place_preserves_structured_cause_and_safe_text() {
     repository(&repo);
     rig.peer();
     fail_peer(&rig, "prepare", &envelope("branch_exists"));
+    rig.ingest_peers();
     let mut client = mcp::Client::start(&rig);
     let (error, failed) = client.call(
         "place",
@@ -1083,6 +1095,7 @@ fn unit_commit_error_and_observe_keep_diagnostic() {
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
     let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{
         "host":"netcup","branch":"worker","base":"missing"}});
+    rig.ingest_peers();
     let out = rig
         .cmd(&[
             "unit",
@@ -1122,6 +1135,7 @@ fn queued_unit_receipt_retains_diagnostic_after_service_admission_fails() {
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{
         "host":"netcup","branch":"worker","base":"missing"}});
+    rig.ingest_peers();
     let out = rig
         .cmd(&[
             "unit",
@@ -1452,6 +1466,7 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
     rig.peer();
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
+    rig.ingest_peers();
     let mut child = rig
         .cmd(&[
             "agent",
@@ -1513,6 +1528,7 @@ fn a_typed_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
     );
     assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    rig.ingest_peers();
     let (code, queued) = rig.json(&[
         "agent",
         "--host",
@@ -1562,6 +1578,7 @@ fn queued_failure_keeps_cause_in_ticket_admission_and_owner_inbox() {
     rig.put("agents.json",&json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}));
     assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    rig.ingest_peers();
     let (code, queued) = rig.json(&[
         "agent",
         "--host",

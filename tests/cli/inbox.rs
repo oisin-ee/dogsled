@@ -214,6 +214,7 @@ esac
     let remote = rig.host_at("remote-state");
     rig.put("remote.json", &remote);
     agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
+    rig.ingest_peers();
 
     let (code, refused) = rig.json(&["send", "far", "--message", "hi"]);
     assert_eq!(code, 2);
@@ -287,6 +288,7 @@ esac
     let remote = rig.host_at("remote-state");
     rig.put("remote.json", &remote);
     agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
+    rig.ingest_peers();
 
     let mut seen = Vec::new();
     for args in [

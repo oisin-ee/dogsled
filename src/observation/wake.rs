@@ -13,8 +13,10 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 const SOCKET: &str = "observation-wake.sock";
-pub(super) const LEDGER: u8 = 1;
-pub(super) const LOCAL: u8 = 3;
+pub(crate) const LEDGER: u8 = 1;
+pub(crate) const LOCAL: u8 = 3;
+pub(crate) const PEERS: u8 = 4;
+pub(crate) const BRANCHES: u8 = 8;
 
 /// Best-effort post-commit notification. Never wait for the service or run collection.
 pub(crate) fn notify(ledger: &Ledger) {
@@ -25,10 +27,11 @@ pub(crate) fn notify(ledger: &Ledger) {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct Dirty {
+#[derive(Debug, Clone)]
+pub(crate) struct Dirty {
     pending: Arc<AtomicU8>,
     send: mpsc::Sender<Event>,
+    peers: Arc<std::sync::Mutex<BTreeSet<String>>>,
 }
 
 impl Dirty {
@@ -36,10 +39,28 @@ impl Dirty {
         Self {
             pending: Arc::new(AtomicU8::new(0)),
             send,
+            peers: Arc::default(),
         }
     }
 
-    pub(super) fn mark(&self, domains: u8) {
+    pub(crate) fn retry_peer(&self, host: String) {
+        self.peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(host);
+        self.mark(PEERS);
+    }
+
+    pub(crate) fn take_peers(&self) -> BTreeSet<String> {
+        std::mem::take(
+            &mut *self
+                .peers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    pub(crate) fn mark(&self, domains: u8) {
         if self.pending.fetch_or(domains, Ordering::AcqRel) == 0 {
             let _ = self.send.send(Event::Observe);
         }

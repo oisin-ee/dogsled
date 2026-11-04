@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 256;
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CLIENTS: usize = 64;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET: &str = "observation.sock";
@@ -28,6 +28,8 @@ const SOCKET: &str = "observation.sock";
 enum Operation {
     Current,
     Subscribe,
+    Peer,
+    Retry,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +37,10 @@ enum Operation {
 struct Request {
     version: u32,
     operation: Operation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer: Option<super::peers::Request>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,6 +69,8 @@ pub(crate) struct Server {
     thread: Option<JoinHandle<()>>,
     lock: File,
     path: PathBuf,
+    interests: super::peers::Interests,
+    dirty: Option<crate::service::wake::Dirty>,
 }
 
 impl Server {
@@ -82,7 +90,18 @@ impl Server {
             thread: None,
             lock,
             path: state.join(SOCKET),
+            interests: super::peers::Interests::default(),
+            dirty: None,
         })
+    }
+
+    pub fn branches(
+        &mut self,
+        interests: super::peers::Interests,
+        dirty: crate::service::wake::Dirty,
+    ) {
+        self.interests = interests;
+        self.dirty = Some(dirty);
     }
 
     pub fn bind(&mut self, receiver: watch::Receiver<Option<Arc<Frame>>>) -> Result<()> {
@@ -121,8 +140,10 @@ impl Server {
             }
         };
         let (stop, stopped) = oneshot::channel();
+        let interests = self.interests.clone();
+        let dirty = self.dirty.clone();
         let thread = std::thread::spawn(move || {
-            runtime.block_on(serve(listener, receiver, stopped));
+            runtime.block_on(serve(listener, receiver, stopped, interests, dirty));
         });
         self.stop = Some(stop);
         self.thread = Some(thread);
@@ -148,6 +169,8 @@ async fn serve(
     listener: tokio::net::UnixListener,
     receiver: watch::Receiver<Option<Arc<Frame>>>,
     mut stopped: oneshot::Receiver<()>,
+    interests: super::peers::Interests,
+    dirty: Option<crate::service::wake::Dirty>,
 ) {
     let mut clients = tokio::task::JoinSet::new();
     loop {
@@ -158,7 +181,9 @@ async fn serve(
                 let Ok((socket, _)) = accepted else { break; };
                 if clients.len() < MAX_CLIENTS {
                     let receiver = receiver.clone();
-                    clients.spawn(async move { let _ = connection(socket, receiver).await; });
+                    let interests = interests.clone();
+                    let dirty = dirty.clone();
+                    clients.spawn(async move { let _ = connection(socket, receiver, interests, dirty).await; });
                 }
             }
         }
@@ -219,6 +244,8 @@ async fn failure(socket: &tokio::net::UnixStream, code: &str, message: &str) -> 
 async fn connection(
     socket: tokio::net::UnixStream,
     mut receiver: watch::Receiver<Option<Arc<Frame>>>,
+    interests: super::peers::Interests,
+    dirty: Option<crate::service::wake::Dirty>,
 ) -> Result<()> {
     let Ok(Ok(request)) = tokio::time::timeout(TIMEOUT, request(&socket)).await else {
         return failure(&socket, "invalid", "invalid observation request").await;
@@ -231,6 +258,50 @@ async fn connection(
         )
         .await;
     }
+    if matches!(request.operation, Operation::Retry) {
+        if let Some(host) = request.host
+            && let Some(dirty) = dirty.as_ref()
+        {
+            dirty.retry_peer(host);
+        } else {
+            return failure(&socket, "unavailable", "peer observer unavailable").await;
+        }
+    }
+    if matches!(request.operation, Operation::Peer) {
+        let Some(peer) = request.peer else {
+            return failure(&socket, "invalid", "missing peer request").await;
+        };
+        match interests.register(&peer.interests) {
+            Ok(true) => {
+                if let Some(dirty) = dirty {
+                    dirty.mark(crate::service::wake::BRANCHES);
+                }
+            }
+            Ok(false) => (),
+            Err(_) => return failure(&socket, "invalid", "invalid branch interests").await,
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let frame = receiver.borrow_and_update().clone();
+            let Some(frame) = frame else {
+                return failure(&socket, "unavailable", "observation unavailable").await;
+            };
+            if !peer.wait
+                || peer.epoch.as_ref() != Some(&frame.published.epoch)
+                || peer.local_revision != Some(frame.published.local_revision)
+                || tokio::time::Instant::now() >= deadline
+            {
+                let mut bytes = serde_json::to_vec(&super::peers::Export::of(&frame.published))?;
+                bytes.push(b'\n');
+                return write(&socket, &bytes).await;
+            }
+            match tokio::time::timeout_at(deadline, updated(&socket, &mut receiver)).await {
+                Ok(Ok(false)) => return Ok(()),
+                Ok(Err(error)) => return Err(error),
+                _ => (),
+            }
+        }
+    }
     loop {
         if receiver.has_changed().is_err() {
             return failure(&socket, "unavailable", "observation publisher disconnected").await;
@@ -241,7 +312,7 @@ async fn connection(
             Some(frame) => write(&socket, &frame.bytes).await?,
             None => return failure(&socket, "unavailable", "observation unavailable").await,
         }
-        if matches!(request.operation, Operation::Current)
+        if matches!(request.operation, Operation::Current | Operation::Retry)
             || !updated(&socket, &mut receiver).await?
         {
             return Ok(());
@@ -297,12 +368,58 @@ impl Client {
             &Request {
                 version: VERSION,
                 operation,
+                peer: None,
+                host: None,
             },
         )?;
         socket
             .write_all(b"\n")
             .map_err(|error| unavailable(&error))?;
         Ok(socket)
+    }
+
+    pub fn retry(&self, host: &str) -> Result<()> {
+        let mut socket = UnixStream::connect(&self.path).map_err(|error| unavailable(&error))?;
+        socket.set_write_timeout(Some(TIMEOUT))?;
+        socket.set_read_timeout(Some(TIMEOUT))?;
+        serde_json::to_writer(
+            &mut socket,
+            &Request {
+                version: VERSION,
+                operation: Operation::Retry,
+                peer: None,
+                host: Some(host.into()),
+            },
+        )?;
+        socket.write_all(b"\n")?;
+        read(&mut BufReader::new(socket))?;
+        Ok(())
+    }
+
+    pub fn peer(&self, request: super::peers::Request) -> Result<super::peers::Export> {
+        let mut socket = UnixStream::connect(&self.path).map_err(|error| unavailable(&error))?;
+        socket.set_read_timeout(Some(TIMEOUT))?;
+        socket.set_write_timeout(Some(TIMEOUT))?;
+        serde_json::to_writer(
+            &mut socket,
+            &Request {
+                version: VERSION,
+                operation: Operation::Peer,
+                peer: Some(request),
+                host: None,
+            },
+        )?;
+        socket.write_all(b"\n")?;
+        let mut bytes = Vec::new();
+        BufReader::new(socket)
+            .take(MAX_FRAME_BYTES as u64 + 1)
+            .read_until(b'\n', &mut bytes)?;
+        if bytes.len() > MAX_FRAME_BYTES || bytes.last() != Some(&b'\n') {
+            return Err(Error::Invalid(
+                "observation unavailable: invalid peer frame".into(),
+            ));
+        }
+        serde_json::from_slice(&bytes).map_err(Into::into)
     }
 
     pub fn current(&self) -> Result<Published> {

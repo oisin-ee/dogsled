@@ -10,6 +10,7 @@ use crate::shell::{Shell, quote};
 use serde::{Deserialize, Serialize};
 
 pub const LOCAL: &str = "local";
+#[cfg(test)]
 const CACHE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -656,28 +657,15 @@ impl<'a> Fleet<'a> {
     }
 
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
-        let reports: Result<Vec<HostReport>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = self
-                .hosts
-                .iter()
-                .map(|host| (host, scope.spawn(move || self.read_host(host, now))))
-                .collect();
-            handles
-                .into_iter()
-                .map(|(host, handle)| {
-                    handle
-                        .join()
-                        .map_err(|_| Error::Invalid(format!("{} status worker failed", host.label)))
-                })
-                .collect()
-        });
         self.shell.budget().remaining("fleet status")?;
-        let reports = reports?;
-        crate::drop::reconcile(self, &reports, now)?;
-        Ok(reports)
+        Ok(self
+            .hosts
+            .iter()
+            .map(|host| self.read_host(host, now))
+            .collect())
     }
 
-    fn read_host(&self, host: &Host, now: u64) -> HostReport {
+    pub(crate) fn read_host(&self, host: &Host, now: u64) -> HostReport {
         let result = if host.is_local() {
             self.node().snapshot().map(|report| Cached {
                 service_lanes: report.service_lanes,
@@ -695,7 +683,9 @@ impl<'a> Fleet<'a> {
                 job_validity: report.job_validity,
             })
         } else {
-            self.cached_peer(host, now)
+            // Interim reader until O7 cuts all store reads to publication. Only serve
+            // refreshes this row; a status call never starts SSH or takes a peer lock.
+            crate::host_store::peer(self.ledger, &host.id).map(Option::unwrap_or_default)
         };
         let cached = result.unwrap_or_else(|e| Cached {
             service_lanes: Vec::new(),
@@ -712,6 +702,10 @@ impl<'a> Fleet<'a> {
             retry: crate::backoff::Backoff::default(),
             job_validity: None,
         });
+        self.cached_report(host, cached, now)
+    }
+
+    pub(crate) fn cached_report(&self, host: &Host, cached: Cached, now: u64) -> HostReport {
         // Only the category describes an unreachable host. This also covers a cache written
         // before categories existed, which may still hold raw ssh text.
         let failure = (!cached.reachable).then(|| cached.failure.unwrap_or(Failure::Other));
@@ -779,11 +773,13 @@ impl<'a> Fleet<'a> {
         }
     }
 
-    /// Clear `host`'s backoff and cache so the next status reads it at once ("retry now").
-    pub fn retry_now(&self, host: &Host) -> Result<()> {
+    /// Explicit command: reset backoff, wake the observer, and await its publication.
+    /// Neither this command nor the status read starts SSH.
+    pub fn retry_now(&self, host: &Host) -> Result<HostReport> {
         if host.is_local() {
-            return Ok(());
+            return Ok(self.read_host(host, crate::ledger::now_ms()));
         }
+        let reset_ms = crate::ledger::now_ms();
         self.ledger.with_lock(&Self::peer_lock(host), || {
             crate::store::write(self.ledger, |tx| {
                 if let Some(mut cached) = crate::host_store::peer_row(tx, &host.id)? {
@@ -793,7 +789,42 @@ impl<'a> Fleet<'a> {
                 }
                 Ok(())
             })
-        })
+        })?;
+        let client = crate::observation::ipc::Client::at(&self.ledger.dir);
+        let mut subscription = client.subscribe().map_err(|_| {
+            Error::Invalid(
+                "backoff reset; observation unavailable because serve is not running".into(),
+            )
+        })?;
+        client.retry(&host.id)?;
+        let deadline = std::time::Instant::now()
+            + crate::budget::CALL_LIMIT
+            + std::time::Duration::from_secs(10);
+        loop {
+            let connection = subscription.current();
+            if let Some(source) = connection.publication.sources.peers.get(&host.id)
+                && source.received_ms > reset_ms
+            {
+                // O7 removes this final interim cache projection together with status.
+                // The wait itself is publication-only, never a store-polling loop.
+                return Ok(self.read_host(host, crate::ledger::now_ms()));
+            }
+            if matches!(
+                connection.status,
+                crate::observation::ipc::Status::Disconnected(_)
+            ) {
+                return Err(Error::Invalid(
+                    "backoff reset; observation unavailable because serve stopped".into(),
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Invalid(
+                    "backoff reset; peer observation pending".into(),
+                ));
+            }
+            let _ = subscription.changed(remaining);
+        }
     }
 
     fn peer_lock(host: &Host) -> String {
@@ -812,71 +843,6 @@ impl<'a> Fleet<'a> {
             .collect::<String>();
         format!("peer-{key}")
     }
-
-    fn cached_peer(&self, host: &Host, now: u64) -> Result<Cached> {
-        let source = self.remote_argv(host, &["snapshot".into()]);
-        // Serialize the SSH process for this peer, never all host database writes.
-        self.ledger.with_lock(&Self::peer_lock(host), || {
-            let previous =
-                crate::host_store::peer(self.ledger, &host.id)?.filter(|c| c.source == source);
-            if let Some(cached) = &previous
-                && now.saturating_sub(cached.fetched_ms) < CACHE_MS
-            {
-                return Ok(cached.clone());
-            }
-            if let Some(cached) = &previous
-                && !cached.retry.ready(now)
-            {
-                return Ok(cached.clone());
-            }
-            let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
-            let previous_holds = previous
-                .as_ref()
-                .map_or_else(Vec::new, |cached| cached.holds.clone());
-            let mut cached = match self
-                .remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
-            {
-                Ok(Some(report)) => Cached {
-                    available: report.snapshot.is_some(),
-                    snapshot: report
-                        .snapshot
-                        .or_else(|| previous.and_then(|c| c.snapshot)),
-                    reachable: true,
-                    running: report.running,
-                    handoffs: report.handoffs,
-                    holds: report.holds,
-                    service_lanes: report.service_lanes,
-                    job_validity: report.job_validity,
-                    ..Cached::default()
-                },
-                Ok(None) => Cached {
-                    snapshot: previous.and_then(|c| c.snapshot),
-                    reachable: true,
-                    error: Some("host snapshot is missing; service: down".into()),
-                    ..Cached::default()
-                },
-                Err(e) => Cached {
-                    snapshot: previous.and_then(|c| c.snapshot),
-                    holds: previous_holds
-                        .into_iter()
-                        .map(crate::holds::Hold::unavailable)
-                        .collect(),
-                    failure: Some(Failure::of(&e)),
-                    ..Cached::default()
-                },
-            };
-            if cached.reachable {
-                retry.reset();
-            } else {
-                retry.fail(now, &host.id);
-            }
-            cached.fetched_ms = now;
-            cached.source.clone_from(&source);
-            cached.retry = retry;
-            crate::host_store::put_peer(self.ledger, &host.id, &cached)?;
-            Ok(cached)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -886,6 +852,19 @@ mod tests {
     use crate::ledger::new_id;
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
+
+    fn observed_status(fleet: &Fleet<'_>, now: u64) -> Result<Vec<HostReport>> {
+        for host in fleet.hosts.iter().filter(|host| !host.is_local()) {
+            crate::observation::peers::Ingestion::default().refresh(
+                fleet,
+                host,
+                now,
+                Vec::new(),
+                false,
+            )?;
+        }
+        fleet.status(now)
+    }
 
     #[test]
     fn transport_deadline_retains_operation_and_request_without_argv() {
@@ -1027,17 +1006,17 @@ mod tests {
             fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
         );
         shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
-        assert_eq!(fleet.status(100).unwrap()[0].service, "up");
+        assert_eq!(observed_status(&fleet, 100).unwrap()[0].service, "up");
         shell.on(&command, "null");
-        assert_eq!(fleet.status(10_099).unwrap()[0].service, "up");
-        let missing = fleet.status(10_100).unwrap();
+        assert_eq!(observed_status(&fleet, 10_099).unwrap()[0].service, "up");
+        let missing = observed_status(&fleet, 10_100).unwrap();
         assert_eq!(missing[0].service, "down");
         assert!(missing[0].reachable);
         assert!(missing[0].probe.is_some());
         shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
-        assert_eq!(fleet.status(30_100).unwrap()[0].service, "up");
-        assert_eq!(fleet.status(30_101).unwrap()[0].service, "down");
-        let stale = fleet.status(44_100).unwrap();
+        assert_eq!(observed_status(&fleet, 30_100).unwrap()[0].service, "up");
+        assert_eq!(observed_status(&fleet, 30_101).unwrap()[0].service, "down");
+        let stale = observed_status(&fleet, 44_100).unwrap();
         assert_eq!(stale[0].service, "down");
         assert_eq!(
             stale[0].headroom.as_ref().unwrap().reason.as_deref(),
@@ -1047,15 +1026,15 @@ mod tests {
         let mut wire = serde_json::to_value(&snapshot).unwrap();
         wire["running"] = serde_json::json!(true);
         shell.on(&command, &wire.to_string());
-        let late = fleet.status(60_100).unwrap();
+        let late = observed_status(&fleet, 60_100).unwrap();
         assert_eq!(late[0].service, "up");
         assert_eq!(late[0].sampled_ms, Some(100));
         assert!(!late[0].headroom.as_ref().unwrap().eligible);
         wire["running"] = serde_json::json!(false);
         shell.on(&command, &wire.to_string());
-        assert_eq!(fleet.status(70_100).unwrap()[0].service, "down");
+        assert_eq!(observed_status(&fleet, 70_100).unwrap()[0].service, "down");
         shell.on(&command, r#"{"running":true}"#);
-        let starting = fleet.status(80_100).unwrap();
+        let starting = observed_status(&fleet, 80_100).unwrap();
         assert_eq!(starting[0].service, "up");
         assert!(!starting[0].headroom.as_ref().unwrap().eligible);
         std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -1104,9 +1083,9 @@ mod tests {
         let snapshot = snapshot.as_str();
         // A reachable host whose service is not running keeps `service: down`.
         shell.on(&command, snapshot);
-        fleet.status(100).unwrap();
+        observed_status(&fleet, 100).unwrap();
         shell.on(&command, "null");
-        let stopped = fleet.status(20_100).unwrap().remove(0);
+        let stopped = observed_status(&fleet, 20_100).unwrap().remove(0);
         assert!(stopped.reachable);
         assert_eq!(stopped.condition(), "service: down");
         assert_eq!(
@@ -1120,7 +1099,7 @@ mod tests {
             ..fleet
         };
         shell.on(&command, snapshot);
-        fleet.status(100).unwrap();
+        observed_status(&fleet, 100).unwrap();
         shell.on_output(
             &command,
             crate::shell::Output {
@@ -1129,7 +1108,7 @@ mod tests {
                 stderr: "ssh: connect to host peer port 22: Operation timed out\n".into(),
             },
         );
-        let asleep = fleet.status(20_100).unwrap().remove(0);
+        let asleep = observed_status(&fleet, 20_100).unwrap().remove(0);
         assert!(!asleep.reachable);
         assert_eq!(asleep.failure, Some(Failure::Timeout));
         assert_eq!(asleep.condition(), "unreachable: timeout");
@@ -1263,7 +1242,7 @@ mod tests {
                     stderr,
                 },
             );
-            let report = fleet.status(100).unwrap().remove(0);
+            let report = observed_status(&fleet, 100).unwrap().remove(0);
             assert_eq!(report.condition(), format!("unreachable: {want}"));
             let printed = serde_json::to_string(&report).unwrap();
             assert!(!printed.contains("EXAMPLE_SECRET"), "{printed}");
@@ -1486,30 +1465,30 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|c| c.starts_with("ssh "))
+                .filter(|c| c.starts_with("ssh ") && c.contains("host snapshot"))
                 .count()
         };
         // No scripted answer: every read fails.
-        assert!(!fleet.status(0).unwrap()[0].reachable);
+        assert!(!observed_status(&fleet, 0).unwrap()[0].reachable);
         assert_eq!(reads(), 1);
         // A retry waits for both the cache and the backoff.
         let first = crate::backoff::delay(1, "peer").max(CACHE_MS);
-        fleet.status(first - 1).unwrap();
+        observed_status(&fleet, first - 1).unwrap();
         assert_eq!(reads(), 1);
-        fleet.status(first).unwrap();
+        observed_status(&fleet, first).unwrap();
         assert_eq!(reads(), 2);
         let second = first + crate::backoff::delay(2, "peer");
-        fleet.status(second - 1).unwrap();
+        observed_status(&fleet, second - 1).unwrap();
         assert_eq!(reads(), 2);
         let command = format!(
             "ssh {}",
             fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
         );
         shell.on(&command, "null");
-        fleet.status(second).unwrap();
+        observed_status(&fleet, second).unwrap();
         assert_eq!(reads(), 3);
         // Reachable again: the next read follows the plain cache.
-        fleet.status(second + CACHE_MS).unwrap();
+        observed_status(&fleet, second + CACHE_MS).unwrap();
         assert_eq!(reads(), 4);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }

@@ -507,6 +507,7 @@ fn lost_placement_reply(marker: &str) {
     let (rig, repo) = place_rig(marker);
     real_preparation_peer(&rig);
     fs::write(rig.dir.join(marker), "").unwrap();
+    rig.ingest_peers();
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -580,6 +581,7 @@ fn review_verified_absent_preparation_resends_original_delivery() {
     real_preparation_peer(&rig);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replacen("  *'host prepare '*|*'host prepared '*)", "  *'host prepare '*|*'host prepared '*)\n    case \"$*\" in *'host prepare '*) if test ! -f \"$RIG/failed-before-receipt\"; then touch \"$RIG/failed-before-receipt\"; exit 255; fi ;; esac", 1));
+    rig.ingest_peers();
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -694,6 +696,7 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
         &script.replace("DOGSLED_STATE=", "HOME=\"$RIG/alias-home\" DOGSLED_STATE="),
     );
     fs::write(rig.dir.join("lose-preparation"), "").unwrap();
+    rig.ingest_peers();
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -904,6 +907,8 @@ case "$*" in
  *) echo 'must not reserve after report deadline' >&2; exit 2 ;;
 esac
 "#);
+    rig.ingest_peers();
+    assert!(!rig.log("ssh.log").contains("host reserve"));
     let (code, error) = rig.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 2, "{error}");
     assert_eq!(error["deadline"], true, "{error}");
@@ -985,6 +990,7 @@ fn placement_request_is_recorded_before_reservation() {
     let go = Fifo::new(&rig.dir, "reserve.go");
     let _ready = ready.hold();
     let mut release = go.hold();
+    rig.ingest_peers();
     let mut child = rig.start(&["place", "--host", "netcup"]);
     assert!(read_fifo_within(ready.path(), "reserve ingress", PROCESS_DEADLINE).is_some());
     let files = rig.admissions().as_array().unwrap().clone();
@@ -1016,6 +1022,7 @@ fn lost_reply_replay(after_ttl: bool) {
     });
     real_reservation_peer(&rig, false);
     fs::write(rig.dir.join("lose-reply"), "").unwrap();
+    rig.ingest_peers();
     let (code, queued) = rig.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 1, "{queued}");
     let ticket = rig.tickets()[0].clone();
@@ -1064,6 +1071,7 @@ fn acknowledged_remote_placement(name: &str) -> (Rig, String) {
     repository(&repo);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
+    rig.ingest_peers();
     let (code, queued) = rig.json(&[
         "place",
         "--host",
@@ -1162,6 +1170,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     let (rig, repo) = place_rig("cancel-pending-release");
     real_preparation_peer(&rig);
     fs::write(rig.dir.join("lose-release"), "").unwrap();
+    rig.ingest_peers();
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -1473,6 +1482,7 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
     let mut snapshot = peer.read("remote.json");
     snapshot.as_object_mut().unwrap().remove("placement_replay");
     peer.put("remote.json", &snapshot);
+    peer.ingest_peers();
     let (code, error) = peer.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 2, "{error}");
     assert!(!peer.log("ssh.log").contains("host reserve"));
@@ -1482,6 +1492,7 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
     unsupported.peer();
     let script = fs::read_to_string(unsupported.dir.join("bin/ssh")).unwrap();
     unsupported.script("ssh", &script.replace("  *'host reserve'*)\n    for remote do :; done\n    sh -c \"$RIG/bin/peer-fixture $remote\" ;;", "  *'host reserve'*) cat \"$RIG/reserve.json\" ;;"));
+    unsupported.ingest_peers();
     let (code, error) = unsupported.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 2, "{error}");
     assert!(

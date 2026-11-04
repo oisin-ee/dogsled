@@ -1,4 +1,5 @@
 mod local;
+mod peer;
 
 mod publication {
     use super::super::*;

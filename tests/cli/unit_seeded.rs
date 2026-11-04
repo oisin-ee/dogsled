@@ -1063,6 +1063,7 @@ fn remote_preparation_and_placement_release_route_the_same_request_id() {
     repository(&repo);
     rig.peer();
     rig.snapshot("remote.json", now(), 0.0, 8);
+    rig.ingest_peers();
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -1465,6 +1466,7 @@ fn selected_remote_host_receives_exact_seed_and_durable_receipt_refresh() {
     );
     rig.snapshot("remote.json", now(), 0.0, 2);
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
+    rig.ingest_peers();
     let (_, execution) = rig.json(&[
         "unit",
         "prepare",

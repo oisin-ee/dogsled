@@ -96,6 +96,7 @@ pub(crate) struct Collector {
     gaps: BTreeMap<String, Gap>,
     snapshot: Option<Snapshot>,
     sample_error: Option<String>,
+    report: Option<HostReport>,
 }
 
 impl Collector {
@@ -124,6 +125,24 @@ impl Collector {
     /// `status` is local-only inventory, not an aggregated fleet projection.
     pub fn collect(&mut self, node: &Node<'_>, now: u64) -> Collection {
         self.refresh(node, now, true)
+    }
+
+    /// Peer-only wakes reuse local inputs without touching Git, terminals or the ledger.
+    pub fn publication(&self, now: u64) -> Publication {
+        Publication {
+            published_ms: now,
+            sources: Sources {
+                local: self.measured.clone(),
+                peers: BTreeMap::new(),
+            },
+            local: self.local.clone(),
+            views: Domains::new(),
+            gaps: self.gaps.values().cloned().collect(),
+        }
+    }
+
+    pub fn reports(&self) -> Vec<HostReport> {
+        self.report.iter().cloned().collect()
     }
 
     pub fn panes(&self) -> BTreeSet<String> {
@@ -201,6 +220,7 @@ impl Collector {
                     retry_ms: None,
                     job_validity: host.job_validity,
                 };
+                self.report = Some(report.clone());
                 (Ok(headroom), status(node.ledger, vec![report], now))
             }
             Err(error) => {

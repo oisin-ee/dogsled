@@ -729,7 +729,10 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
         )?,
         HostCommand::RefreshBranches { items } => print(
             true,
-            &drop::refresh(node.shell, serde_json::from_str(&items)?)?,
+            &observation::ipc::Client::at(&node.ledger.dir).peer(observation::peers::Request {
+                interests: serde_json::from_str(&items)?,
+                ..observation::peers::Request::default()
+            })?,
             String::new,
         )?,
         _ => unreachable!("only child commands"),
@@ -1353,6 +1356,12 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         HostCommand::Prune { plan } => print(
             true,
             &cleanup::apply(node, &serde_json::from_str(&plan)?, now_ms())?,
+            String::new,
+        )?,
+        HostCommand::Observation { request } => print(
+            true,
+            &observation::ipc::Client::at(&node.ledger.dir)
+                .peer(serde_json::from_str(&request)?)?,
             String::new,
         )?,
         HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,

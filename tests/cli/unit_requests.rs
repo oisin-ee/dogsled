@@ -384,6 +384,7 @@ fn dispatch_before_cancel_preserves_possible_execution() {
     let rig = rig("cancel-lost-launch-reply", true);
     rig.peer();
     rig.snapshot("remote.json", rig.origin_ms, 1000.0, 1);
+    rig.ingest_peers();
     let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{"host":"netcup"}});
     let (code, execution) = rig.json(&[
         "unit",
@@ -503,6 +504,7 @@ fn remotely_prepared_queued(name: &str) -> (Rig, Value, String) {
     worker_profile(&rig);
     rig.peer();
     rig.snapshot("remote.json", rig.origin_ms, 1000.0, 1);
+    rig.ingest_peers();
     let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{"host":"netcup","branch":"cancel-worker","base":"main"}});
     let out = rig
         .cmd(&[
@@ -865,6 +867,7 @@ fn unknown_release_does_not_settle_possibly_launched_unit() {
             "  *'host prepared'*) printf '{\"prepared\":true}\n'; exit 0;"
         };
         rig.script("ssh", &script.replace("  *'host prepared'*)", handler));
+        rig.ingest_peers();
         let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{"host":"netcup","branch":"ambiguous","base":"main"}});
         let (code, execution) = rig.json(&[
             "unit",

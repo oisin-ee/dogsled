@@ -2,13 +2,11 @@
 
 use crate::done::Branch;
 use crate::error::{Error, Result};
-use crate::hosts::{Fleet, HostReport};
+use crate::hosts::Fleet;
 use crate::items::{self, Item};
 use crate::ledger::{Ledger, now_ms};
 use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
-
-const CHECK_INTERVAL_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Dropped {
@@ -25,7 +23,7 @@ impl Dropped {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checked {
     pub item: String,
     pub branch: Branch,
@@ -241,76 +239,5 @@ fn delete_origin(shell: &dyn Shell, branch: &Branch) -> Result<()> {
             &format!("refs/remotes/origin/{}", branch.name),
         ],
     )?;
-    Ok(())
-}
-
-pub fn refresh(shell: &dyn Shell, items: Vec<Checked>) -> Result<Vec<Checked>> {
-    items
-        .into_iter()
-        .map(|mut checked| {
-            crate::done::refresh_branch(shell, &mut checked.branch)?;
-            Ok(checked)
-        })
-        .collect()
-}
-
-/// One request per fresh host, at most once per hour for each unsettled closed item.
-/// Failed requests do not replace the last observation or its timestamp.
-pub fn reconcile(fleet: &Fleet<'_>, reports: &[HostReport], now: u64) -> Result<()> {
-    // Serialize observation and persistence so concurrent status readers share the hourly bound.
-    // This is an origin ledger lock, not the future C1 repository deletion lock.
-    fleet
-        .ledger
-        .with_lock("branch-checks", || reconcile_locked(fleet, reports, now))
-}
-
-fn reconcile_locked(fleet: &Fleet<'_>, reports: &[HostReport], now: u64) -> Result<()> {
-    let items = items::list(fleet.ledger)?;
-    for report in reports.iter().filter(|h| h.fresh(now)) {
-        let due: Vec<_> = items
-            .iter()
-            .filter(|i| {
-                i.host == report.host.id
-                    && i.kind == "agent"
-                    && i.closed_ms.is_some()
-                    && i.dropped_ms.is_none()
-            })
-            .filter(|i| {
-                i.branch_checked_ms
-                    .is_none_or(|t| now.saturating_sub(t) >= CHECK_INTERVAL_MS)
-            })
-            .filter(|i| {
-                !report
-                    .handoffs
-                    .iter()
-                    .any(|m| m.pane == i.pane && m.item.as_deref().is_none_or(|id| id == i.id))
-            })
-            .filter_map(|i| {
-                i.branch.as_ref().filter(|b| !b.landed).map(|b| Checked {
-                    item: i.id.clone(),
-                    branch: b.clone(),
-                })
-            })
-            .collect();
-        if due.is_empty() {
-            continue;
-        }
-        let checked = if report.host.is_local() {
-            refresh(fleet.shell, due)
-        } else {
-            fleet.remote_setup(
-                &report.host,
-                &[
-                    "refresh-branches".into(),
-                    "--items".into(),
-                    serde_json::to_string(&due)?,
-                ],
-            )
-        };
-        match checked {
-            Ok(checked) => items::checked(fleet.ledger, &report.host.id, &checked, now)?,
-            Err(error) => eprintln!("dogsled branches: {}: {error}", report.host.label),
-        }
-    }
     Ok(())
 }
