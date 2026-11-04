@@ -292,7 +292,6 @@ pub(crate) fn import(ledger: &Ledger, host: &str, results: &[BranchObservation])
 #[derive(Default)]
 pub(crate) struct Ingestion {
     export: Option<Export>,
-    legacy: bool,
     pub source: Option<PeerSource>,
     pub cached: Option<Cached>,
 }
@@ -397,7 +396,6 @@ impl Ingestion {
                 Availability::Stale
             },
         });
-        self.legacy = true;
         Ok((report, Vec::new()))
     }
 
@@ -408,9 +406,6 @@ impl Ingestion {
         request: &Request,
         now: u64,
     ) -> Result<(Option<crate::node::SnapshotReport>, Vec<BranchObservation>)> {
-        if self.legacy {
-            return self.legacy(fleet, host, now);
-        }
         let reply = fleet.remote::<serde_json::Value>(
             host,
             &[

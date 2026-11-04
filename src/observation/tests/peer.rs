@@ -40,18 +40,23 @@ impl Fixture {
         }
     }
 
-    fn answer(&self, export: &peers::Export) {
+    fn request(&self, request: &peers::Request) -> String {
         let args = [
             "observation".into(),
             "--request".into(),
-            serde_json::to_string(&peers::Request::default()).unwrap(),
+            serde_json::to_string(request).unwrap(),
         ];
-        let command = format!(
+        format!(
             "ssh {}",
             self.fleet().remote_argv(&self.host, &args).join(" ")
+        )
+    }
+
+    fn answer(&self, export: &peers::Export) {
+        self.shell.on(
+            &self.request(&peers::Request::default()),
+            &serde_json::to_string(export).unwrap(),
         );
-        self.shell
-            .on(&command, &serde_json::to_string(export).unwrap());
     }
 }
 
@@ -326,6 +331,127 @@ fn unsupported_peer_export_does_not_downgrade_or_break_status() {
         1,
         "unsupported versions cannot fall back to an older protocol"
     );
+}
+
+#[test]
+fn native_export_recovers_after_a_temporary_legacy_fallback() {
+    let fixture = Fixture::new();
+    let mut publisher = Publisher::new().unwrap();
+    let original = peers::Export::of(&publisher.replace(input(100)).unwrap());
+    fixture.answer(&original);
+    let fleet = fixture.fleet();
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fleet, &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    assert_eq!(ingestion.source.as_ref().unwrap().epoch, original.epoch);
+    let native = fixture.request(&peers::Request {
+        epoch: Some(original.epoch.clone()),
+        local_revision: Some(original.local_revision),
+        ..peers::Request::default()
+    });
+    fixture.shell.on_output(
+        &native,
+        Output {
+            status: 2,
+            stdout: json!({"error":"observation unavailable"}).to_string(),
+            stderr: String::new(),
+        },
+    );
+    let legacy = format!(
+        "ssh {}",
+        fleet
+            .remote_argv(&fixture.host, &["snapshot".into()])
+            .join(" ")
+    );
+    fixture
+        .shell
+        .on(&legacy, &input(10_100).local["host"].to_string());
+    ingestion
+        .refresh(&fleet, &fixture.host, 10_100, Vec::new(), false)
+        .unwrap();
+    assert_eq!(ingestion.source.as_ref().unwrap().epoch, "legacy");
+    assert_eq!(fleet.status(10_100).unwrap()[0].sampled_ms, Some(10_100));
+    let recovered = peers::Export::of(&publisher.replace(input(20_100)).unwrap());
+    fixture
+        .shell
+        .on(&native, &serde_json::to_string(&recovered).unwrap());
+    ingestion
+        .refresh(&fleet, &fixture.host, 20_100, Vec::new(), false)
+        .unwrap();
+    assert_eq!(ingestion.source.as_ref().unwrap().epoch, recovered.epoch);
+    assert_eq!(fleet.status(20_100).unwrap()[0].sampled_ms, Some(20_100));
+    assert_eq!(
+        fixture.shell.calls.lock().unwrap().as_slice(),
+        &[
+            fixture.request(&peers::Request::default()),
+            native.clone(),
+            legacy,
+            native
+        ]
+    );
+}
+
+#[test]
+fn failed_peer_refresh_never_doubles_ssh_and_keeps_original_failure() {
+    for (status, stdout, stderr, failure) in [
+        (
+            255,
+            "",
+            "Connection refused",
+            crate::hosts::Failure::ConnectionRefused,
+        ),
+        (
+            2,
+            r#"{"deadline":true,"error":"PRIVATE_REMOTE_DEADLINE"}"#,
+            "",
+            crate::hosts::Failure::Deadline,
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let mut publisher = Publisher::new().unwrap();
+        let original = peers::Export::of(&publisher.replace(input(100)).unwrap());
+        fixture.answer(&original);
+        let fleet = fixture.fleet();
+        let mut ingestion = peers::Ingestion::default();
+        ingestion
+            .refresh(&fleet, &fixture.host, 100, Vec::new(), false)
+            .unwrap();
+        let native = fixture.request(&peers::Request {
+            epoch: Some(original.epoch),
+            local_revision: Some(original.local_revision),
+            ..peers::Request::default()
+        });
+        fixture.shell.on_output(
+            &native,
+            Output {
+                status,
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+            },
+        );
+        for (attempt, now) in [(1, 10_100), (2, 20_100)] {
+            let before = fixture.shell.calls.lock().unwrap().len();
+            ingestion
+                .refresh(&fleet, &fixture.host, now, Vec::new(), false)
+                .unwrap();
+            let report = fleet.status(now).unwrap().remove(0);
+            assert!(!report.reachable);
+            assert_eq!(report.failure, Some(failure));
+            assert_eq!(report.error, Some(failure.to_string()));
+            assert_eq!(report.sampled_ms, Some(100));
+            assert_eq!(fixture.shell.calls.lock().unwrap().len(), before + 1);
+            let cached = crate::host_store::peer(&fixture.ledger, &fixture.host.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cached.retry.attempts, attempt);
+            assert!(cached.retry.next_ms > now);
+            assert_eq!(
+                ingestion.source.as_ref().unwrap().availability,
+                Availability::Unavailable
+            );
+        }
+    }
 }
 
 #[test]
