@@ -555,6 +555,53 @@ fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
 
+#[test]
+fn released_completion_time_is_kept_when_the_item_closes_later() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let _service = service(&ledger);
+    let shell = Fake::new();
+    let policy = Policy::default();
+    let fleet = Fleet {
+        ledger: &ledger,
+        shell: &shell,
+        policy: &policy,
+        home: "/".into(),
+        hosts: vec![Host::local()],
+    };
+    let request = place_request(&ledger, "released");
+    let launch = json!({
+        "id": "released", "validity": request.validity, "action": request.action,
+        "host": "local", "cwd": "/", "owner": "owner", "owner_host": "origin",
+        "pane": null, "workspace": null, "workspace_name": null,
+    });
+    // The ordinary release saved the execution host's close time first.
+    let admission = json!({
+        "request": request, "host": Host::local(), "launch": launch, "error": null,
+        "result": {"pane": "child"}, "finished_ms": 400,
+    });
+    crate::admissions::put_value(&ledger, "released", &admission).unwrap();
+    items::record(
+        &ledger,
+        Item {
+            id: "released".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "child".into(),
+            owner_pane: "owner".into(),
+            created_ms: 100,
+            closed_ms: Some(500),
+            ..Item::default()
+        },
+    )
+    .unwrap();
+    work::tick(&fleet, 600).unwrap();
+    let attempt = crate::admissions::get(&ledger, "released")
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.finished_ms, Some(400));
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
 fn place_request(ledger: &Ledger, id: &str) -> Request {
     let validity = crate::jobs::origin_validity(ledger).unwrap();
     crate::jobs::record_request_validity(ledger, id, Some(validity)).unwrap();
