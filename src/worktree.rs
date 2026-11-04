@@ -25,22 +25,25 @@ pub struct Guard {
 }
 
 /// A Git administrative directory and its write-once checkout generation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Local capture canonicalizes administrative paths; stored and peer values stay unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Identity {
     pub common: PathBuf,
     pub gitdir: PathBuf,
     pub generation: String,
 }
 
-impl PartialEq for Identity {
-    fn eq(&self, other: &Self) -> bool {
-        resolved(&self.common) == resolved(&other.common)
-            && resolved(&self.gitdir) == resolved(&other.gitdir)
-            && self.generation == other.generation
+impl Identity {
+    /// Normalize a fresh host-local registration, without rediscovering its generation.
+    /// Never use this for stored evidence, peer values, or stale-request validation.
+    pub(crate) fn normalize_local(self) -> Result<Self> {
+        Ok(Self {
+            common: self.common.canonicalize()?,
+            gitdir: self.gitdir.canonicalize()?,
+            generation: self.generation,
+        })
     }
 }
-
-impl Eq for Identity {}
 
 const CHECKOUT_ID: &str = "dogsled-checkout-id";
 
@@ -94,7 +97,8 @@ impl Guard {
 
     /// Discovery returns only the generation; it never supplies a new HEAD expectation.
     fn discover_identity(&self, gitdir: &Path) -> Result<Identity> {
-        let id = if let Some(id) = generation(gitdir)? {
+        let gitdir = gitdir.canonicalize()?;
+        let id = if let Some(id) = generation(&gitdir)? {
             id
         } else {
             use std::io::Write as _;
@@ -121,7 +125,7 @@ impl Guard {
                     id
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    generation(gitdir)?.ok_or_else(|| {
+                    generation(&gitdir)?.ok_or_else(|| {
                         refuse("checkout generation disappeared")
                             .because(Cause::CheckoutUnavailable)
                     })?
@@ -131,7 +135,7 @@ impl Guard {
         };
         Ok(Identity {
             common: self.common.clone(),
-            gitdir: gitdir.into(),
+            gitdir,
             generation: id,
         })
     }
@@ -611,6 +615,7 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
         common.clone()
     };
     let gitdir = Path::new(dir).canonicalize()?;
+    // Both administrative paths are canonical at this local capture boundary.
     let identity = generation(&gitdir)?.map(|generation| Identity {
         common,
         gitdir: gitdir.clone(),
@@ -621,8 +626,8 @@ fn capture(shell: &dyn Shell, cwd: &str, linked_only: bool) -> Result<Option<Lin
         gitdir,
         identity,
         checkout,
-        // Keep Git's checkout spelling for listings and removal commands. Identity
-        // comparisons resolve aliases; administrative paths remain canonical.
+        // Keep Git's checkout spelling for listings and removal commands, separate
+        // from the canonical administrative paths stored in Identity.
         path: top.into(),
         branch: if branch == "HEAD" {
             String::new()
@@ -1427,6 +1432,124 @@ mod tests {
             }
             self.run(program, args)
         }
+    }
+
+    fn aliased_registration() -> (Ledger, crate::cleanup::Tree) {
+        let root = std::env::temp_dir().join(crate::ledger::new_id());
+        let repo = root.join("repo");
+        let admin = repo.join(".git/worktrees/feature");
+        std::fs::create_dir_all(&admin).unwrap();
+        // A registration must retain its supplied generation, not adopt the current marker.
+        std::fs::write(
+            admin.join(CHECKOUT_ID),
+            "ffffffffffffffffffffffffffffffff\n",
+        )
+        .unwrap();
+        let home = root.join("home");
+        std::os::unix::fs::symlink(&repo, &home).unwrap();
+        let tree = crate::cleanup::Tree {
+            repo: home.display().to_string(),
+            path: home.join(".worktrees/feature").display().to_string(),
+            branch: "feature".into(),
+            head: "head".into(),
+            identity: Some(Identity {
+                common: home.join(".git"),
+                gitdir: home.join(".git/worktrees/feature"),
+                generation: "0123456789abcdef0123456789abcdef".into(),
+            }),
+        };
+        (Ledger::new(root), tree)
+    }
+
+    #[test]
+    fn identity_equality_compares_recorded_fields_without_resolving_aliases() {
+        let (ledger, tree) = aliased_registration();
+        let aliased = tree.identity.unwrap();
+        let canonical = aliased.clone().normalize_local().unwrap();
+        let decoded: Identity =
+            serde_json::from_value(serde_json::to_value(&aliased).unwrap()).unwrap();
+        assert_eq!(decoded.common, aliased.common);
+        assert_eq!(decoded.gitdir, aliased.gitdir);
+        assert_eq!(decoded, aliased);
+        for identity in [
+            Identity {
+                common: aliased.common.clone(),
+                ..canonical.clone()
+            },
+            Identity {
+                gitdir: aliased.gitdir.clone(),
+                ..canonical.clone()
+            },
+            Identity {
+                generation: "ffffffffffffffffffffffffffffffff".into(),
+                ..canonical.clone()
+            },
+        ] {
+            assert_ne!(canonical, identity);
+        }
+        assert_ne!(canonical, aliased);
+        std::fs::remove_file(ledger.dir.join("home")).unwrap();
+        assert_eq!(decoded, aliased);
+        assert_ne!(canonical, aliased);
+        std::os::unix::fs::symlink(&ledger.dir, ledger.dir.join("home")).unwrap();
+        assert_eq!(decoded, aliased);
+        assert_ne!(canonical, aliased);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn local_registration_normalizes_paths_but_preserves_generation_and_spelling() {
+        let (ledger, tree) = aliased_registration();
+        let expected = crate::cleanup::Tree {
+            identity: Some(tree.identity.clone().unwrap().normalize_local().unwrap()),
+            ..tree.clone()
+        };
+        let pending = crate::prepare::Pending {
+            request_id: "request".into(),
+            tree,
+        };
+        crate::cleanup::remember(&ledger, pending.tree.clone()).unwrap();
+        crate::preparation_store::record_pending(&ledger, &pending).unwrap();
+        assert_eq!(
+            crate::host_store::trees(&ledger).unwrap(),
+            std::slice::from_ref(&expected)
+        );
+        let records = crate::preparation_store::pending(&ledger).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].request_id, pending.request_id);
+        assert_eq!(records[0].tree, expected);
+        std::fs::remove_file(ledger.dir.join("home")).unwrap();
+        assert!(crate::cleanup::remember(&ledger, pending.tree.clone()).is_err());
+        assert!(crate::preparation_store::record_pending(&ledger, &pending).is_err());
+        assert_eq!(crate::host_store::trees(&ledger).unwrap(), [expected]);
+        assert_eq!(crate::preparation_store::pending(&ledger).unwrap(), records);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn generic_identity_storage_preserves_recorded_paths_after_alias_disappears() {
+        let (ledger, tree) = aliased_registration();
+        let pending = crate::prepare::Pending {
+            request_id: "request".into(),
+            tree: tree.clone(),
+        };
+        crate::host_store::put_trees(&ledger, std::slice::from_ref(&tree)).unwrap();
+        crate::preparation_store::put_pending(&ledger, std::slice::from_ref(&pending)).unwrap();
+        assert_eq!(
+            crate::host_store::trees(&ledger).unwrap(),
+            std::slice::from_ref(&tree)
+        );
+        assert_eq!(
+            crate::preparation_store::pending(&ledger).unwrap(),
+            std::slice::from_ref(&pending)
+        );
+        std::fs::remove_file(ledger.dir.join("home")).unwrap();
+        assert_eq!(crate::host_store::trees(&ledger).unwrap(), [tree]);
+        assert_eq!(
+            crate::preparation_store::pending(&ledger).unwrap(),
+            [pending]
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
     #[test]

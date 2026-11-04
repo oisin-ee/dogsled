@@ -377,6 +377,12 @@ fn save_pending_row(tx: &Transaction<'_>, record: &Pending) -> Result<()> {
 }
 
 pub(crate) fn record_pending(ledger: &Ledger, record: &Pending) -> Result<()> {
+    let mut record = record.clone();
+    record.tree.identity = record
+        .tree
+        .identity
+        .map(crate::worktree::Identity::normalize_local)
+        .transpose()?;
     store::write(ledger, |tx| {
         for old in pending_request_rows(tx, &record.request_id)? {
             if crate::worktree::same(&old.tree.path, &record.tree.path) {
@@ -386,7 +392,7 @@ pub(crate) fn record_pending(ledger: &Ledger, record: &Pending) -> Result<()> {
                 )?;
             }
         }
-        save_pending_row(tx, record)
+        save_pending_row(tx, &record)
     })
 }
 
