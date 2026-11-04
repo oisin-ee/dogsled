@@ -178,6 +178,7 @@ fn service_publishes_snapshots_while_remote_action_times_out() {
     rig.peer();
     rig.snapshot("state", now(), 9999.0, 1);
     rig.config("free_core_fraction_min = 2\n");
+    rig.ingest_peers();
     // Queue without consulting a hung peer, then make that peer hang for admission.
     let (_, ticket) = rig.json(&["place", "--host", "netcup"]);
     rig.expire_cache();

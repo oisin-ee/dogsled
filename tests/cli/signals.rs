@@ -272,13 +272,7 @@ fn remote_snapshot_imports_and_clears_the_signal() {
     report["snapshot"]["probe"]["agent_panes"][0]["signal"] = Value::Null;
     report["snapshot"]["probe"]["agent_panes"][0]["state"] = json!("working");
     rig.put("remote.json", &report);
-    let out = rig.run(&["retry", "netcup"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serve(&rig);
+    refresh_remote(&rig);
     assert!(rig.items()[0]["signal"].is_null());
     assert_eq!(notes(&rig, "ask").len(), 1);
 }
@@ -318,12 +312,15 @@ fn remote_signal(name: &str) -> (Rig, Value) {
 }
 
 fn refresh_remote(rig: &Rig) {
+    let observer = rig.start(&["serve", "--interval", "3600"]);
+    wait_publication(rig, |frame| frame["sources"]["peers"]["8103"].is_object());
     let out = rig.run(&["retry", "netcup"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    drop(observer);
     serve(rig);
 }
 

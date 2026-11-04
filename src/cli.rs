@@ -723,12 +723,17 @@ pub enum HostCommand {
         command: RecoveryCommand,
     },
     Snapshot,
+    /// Export host-owned observer facts, optionally waiting for a new local revision.
+    Observation {
+        #[arg(long)]
+        request: String,
+    },
     /// Delete an owner-authorized closed item's branch on this host.
     Drop {
         #[arg(long)]
         item: String,
     },
-    /// Refresh retained branches in one host call.
+    /// Register retained branch interests and return the last published observations.
     RefreshBranches {
         #[arg(long)]
         items: String,

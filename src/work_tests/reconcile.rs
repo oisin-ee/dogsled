@@ -50,6 +50,10 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
             ..pinned(&ledger, "late-child", "peer")
         };
         let queued_at = 100 + owner_skew;
+        let mut ingestion = crate::observation::peers::Ingestion::default();
+        ingestion
+            .refresh(&fleet, &peer, queued_at, Vec::new(), false)
+            .unwrap();
         work::enqueue(&ledger, request.clone(), false, queued_at).unwrap();
         work::tick(&fleet, queued_at).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "pending");
@@ -65,7 +69,6 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
             "owner":"owner","owner_host":"origin","pane":null,"workspace":null,"workspace_name":null
         }))
         .unwrap();
-        let receipt = json!({"host":"peer","pane":"child","launch_confirmed_ms":22_000});
         shell.on(
             &remote(&[
                 "launch".into(),
@@ -76,15 +79,17 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
                 "--request-validity".into(),
                 "1".into(),
             ]),
-            &receipt.to_string(),
+            &json!({"host":"peer","pane":"child","launch_confirmed_ms":22_000}).to_string(),
         );
         // Reservation IDs are generated at runtime; script just that transport operation.
-        let reserving = ReservingShell(&shell);
         let fleet = Fleet {
-            shell: &reserving,
+            shell: &ReservingShell(&shell),
             ..fleet
         };
         let admitted_at = 11_000 + owner_skew;
+        ingestion
+            .refresh(&fleet, &peer, admitted_at, Vec::new(), false)
+            .unwrap();
         work::tick(&fleet, admitted_at).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "admitted");
         let item = items::list(&ledger).unwrap().remove(0);

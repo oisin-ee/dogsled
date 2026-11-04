@@ -50,6 +50,7 @@ fn stripped_queued_job(rig: &Rig, remote: bool) -> String {
         let mut snapshot = rig.read("remote.json");
         snapshot["job_validity"] = json!(2);
         rig.put("remote.json", &snapshot);
+        rig.ingest_peers();
     }
     let args = if remote {
         vec!["run", "--host", "netcup", "--", "true"]
@@ -463,6 +464,7 @@ fn rv_old_peer_cannot_silently_bypass_validity() {
     let mut peer = rig.read("remote.json");
     peer.as_object_mut().unwrap().remove("request_validity");
     rig.put("remote.json", &peer);
+    rig.ingest_peers();
     assert_eq!(
         rig.json(&[
             "agent",
@@ -1013,6 +1015,7 @@ fn a_new_caller_refuses_an_old_peer_without_a_fallback() {
     rig.snapshot("state", now, 0.0, 8);
     // The peer reports no validity protocol.
     rig.snapshot("remote.json", now, 0.0, 8);
+    rig.ingest_peers();
     let out = rig.run(&["run", "--host", "netcup", "--", "true"]);
     assert_eq!(
         out.status.code(),

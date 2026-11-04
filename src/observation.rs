@@ -3,6 +3,8 @@
 
 pub(crate) mod collect;
 pub(crate) mod ipc;
+pub(crate) mod peers;
+pub(crate) mod peers_runtime;
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -63,7 +65,7 @@ pub(crate) struct Published {
 }
 
 /// A frozen input set. An absent domain must have an explicit gap, not an empty success.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Publication {
     pub published_ms: u64,
     pub sources: Sources,
@@ -120,7 +122,11 @@ impl Publisher {
             let previous = previous.as_ref().map(|frame| &frame.published);
             let revision = increment(previous.map_or(0, |value| value.revision))?;
             let local_revision = match previous {
-                Some(value) if value.local == input.local => value.local_revision,
+                Some(value)
+                    if peers::exportable(&value.local) == peers::exportable(&input.local) =>
+                {
+                    value.local_revision
+                }
                 value => increment(value.map_or(0, |value| value.local_revision))?,
             };
             (revision, local_revision)

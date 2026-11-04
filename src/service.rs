@@ -93,7 +93,8 @@ impl LaneDiagnostics {
     }
 }
 
-enum Event {
+#[derive(Debug)]
+pub(crate) enum Event {
     Finished(usize, Result<()>),
     Sweep,
     Swept(Result<()>),
@@ -235,21 +236,62 @@ fn start_lanes(
     }
 }
 
+struct Exchange {
+    peers: crate::observation::peers_runtime::Observers,
+    branches: crate::observation::peers::Branches,
+    interests: crate::observation::peers::Interests,
+}
+
 fn publish(
     node: &Node<'_>,
     collector: &mut crate::observation::collect::Collector,
     publisher: &mut crate::observation::Publisher,
     herdr: &mut wake::Herdr,
-    sample: bool,
-    once: bool,
+    cycle: (u8, bool),
+    exchange: &mut Exchange,
+    fleet: &Fleet<'_>,
 ) -> Result<()> {
-    let collection = crate::store::observing(|| {
-        if sample {
-            collector.collect(node, now_ms())
+    let (domains, once) = cycle;
+    let Exchange {
+        peers,
+        branches,
+        interests,
+    } = exchange;
+    let now = now_ms();
+    let collection = crate::store::observing(|| -> Result<_> {
+        let gaps = if domains & !wake::PEERS != 0 {
+            branches.observe(node, &interests.current()?, now)?
         } else {
-            collector.refresh(node, now_ms(), false)
+            branches.gaps()
+        };
+        let mut collection = if domains & wake::LOCAL == wake::LOCAL {
+            collector.collect(node, now)
+        } else if domains & (wake::LEDGER | wake::BRANCHES) != 0 {
+            collector.refresh(node, now, false)
+        } else {
+            crate::observation::collect::Collection {
+                input: collector.publication(now),
+                sample: Ok(()),
+            }
+        };
+        let results = branches.results();
+        if !results.is_empty() {
+            collection
+                .input
+                .local
+                .insert("branches".into(), serde_json::to_value(&results)?);
+            if let Some(measured) = results.iter().map(|result| result.measured_ms).max() {
+                collection
+                    .input
+                    .sources
+                    .local
+                    .insert("branches".into(), measured);
+            }
         }
-    });
+        collection.input.gaps.extend(gaps);
+        peers.compose(fleet, &mut collection.input, now, collector.reports())?;
+        Ok(collection)
+    })?;
     herdr.interests(collector.panes());
     let frame = publisher.replace(collection.input)?;
     for gap in &frame.gaps {
@@ -268,23 +310,80 @@ fn publish(
     Ok(())
 }
 
-fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
-    let mut publisher = crate::observation::Publisher::new()?;
-    let mut publication_server = crate::observation::ipc::Server::new(&node.ledger.dir)?;
-    if let Err(error) = publication_server.bind(publisher.subscribe()) {
-        eprintln!("observation socket unavailable: {error}");
+struct Observation {
+    publisher: crate::observation::Publisher,
+    _server: crate::observation::ipc::Server,
+    collector: crate::observation::collect::Collector,
+    exchange: Exchange,
+    _commits: Option<wake::Commits>,
+    herdr: wake::Herdr,
+}
+
+impl Observation {
+    fn new(node: &Node<'_>, interval: Duration, dirty: &wake::Dirty) -> Result<Self> {
+        let publisher = crate::observation::Publisher::new()?;
+        let mut server = crate::observation::ipc::Server::new(&node.ledger.dir)?;
+        let interests = crate::observation::peers::Interests::default();
+        server.branches(interests.clone(), dirty.clone());
+        if let Err(error) = server.bind(publisher.subscribe()) {
+            eprintln!("observation socket unavailable: {error}");
+        }
+        let commits = match wake::Commits::start(node.ledger, dirty.clone()) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                eprintln!("dogsled service: observation commit wake unavailable: {error}");
+                None
+            }
+        };
+        Ok(Self {
+            publisher,
+            _server: server,
+            collector: crate::observation::collect::Collector::default(),
+            exchange: Exchange {
+                peers: crate::observation::peers_runtime::Observers::default(),
+                branches: crate::observation::peers::Branches::default(),
+                interests,
+            },
+            _commits: commits,
+            herdr: wake::Herdr::start(dirty.clone(), interval),
+        })
     }
-    let mut collector = crate::observation::collect::Collector::default();
+
+    fn refresh(
+        &mut self,
+        node: &Node<'_>,
+        policy: &Policy,
+        dirty: &wake::Dirty,
+        cycle: (u8, bool),
+    ) -> Result<()> {
+        let (domains, once) = cycle;
+        let fleet = Fleet {
+            shell: node.shell,
+            ledger: node.ledger,
+            policy,
+            home: node.home.to_owned(),
+            hosts: vec![crate::hosts::Host::local()],
+        };
+        self.exchange.peers.retry(dirty.take_peers());
+        if let Err(error) = self.exchange.peers.discover(&fleet, dirty, once) {
+            eprintln!("dogsled peer discovery: {error}");
+        }
+        publish(
+            node,
+            &mut self.collector,
+            &mut self.publisher,
+            &mut self.herdr,
+            (domains, once),
+            &mut self.exchange,
+            &fleet,
+        )
+    }
+}
+
+fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
     let dirty = wake::Dirty::new(send.clone());
-    let _commits = match wake::Commits::start(node.ledger, dirty.clone()) {
-        Ok(listener) => Some(listener),
-        Err(error) => {
-            eprintln!("dogsled service: observation commit wake unavailable: {error}");
-            None
-        }
-    };
-    let mut herdr = wake::Herdr::start(dirty.clone(), interval);
+    let mut observation = Observation::new(node, interval, &dirty)?;
     let _listener = match Listener::start(node.ledger, send.clone()) {
         Ok(listener) => Some(listener),
         Err(error) => {
@@ -304,13 +403,18 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
         // The socket only reduces latency. Recover pending requests on every publication
         // iteration, including when the socket cannot bind or a notification was lost.
         requested |= crate::sweep::pending(node.ledger)?;
-        publish(
+        observation.refresh(
             node,
-            &mut collector,
-            &mut publisher,
-            &mut herdr,
-            domains == wake::LOCAL || scheduled,
-            once,
+            policy,
+            &dirty,
+            (
+                if scheduled {
+                    domains | wake::LOCAL
+                } else {
+                    domains
+                },
+                once,
+            ),
         )?;
         if scheduled {
             start_lanes(node, policy, once, &mut workers, completed, &send);

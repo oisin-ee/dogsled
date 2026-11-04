@@ -127,6 +127,7 @@ fn remote_repository_clone_precedes_prepare_and_failures_do_not_fall_back() {
         "--branch",
         "feature",
     ];
+    rig.ingest_peers();
     assert_eq!(rig.json(&args).0, 0);
     let log = rig.log("ssh.log");
     assert!(log.find("host checkout").unwrap() < log.find("host prepare").unwrap());

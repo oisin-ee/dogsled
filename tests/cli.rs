@@ -962,6 +962,20 @@ esac
         }
     }
 
+    /// Explicit observer peer ingestion without replacing the local fixture sample.
+    /// The failed local probe publishes a gap and exits 2, after peer ingestion.
+    fn ingest_peers(&self) {
+        let running = self.service.lock().unwrap().is_some();
+        let agents = fs::read(self.dir.join("agents.json")).unwrap();
+        fs::write(self.dir.join("agents.json"), "unavailable local probe").unwrap();
+        let output = self.run(&["serve", "--once", "--interval", "1"]);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        fs::write(self.dir.join("agents.json"), agents).unwrap();
+        if running {
+            self.service();
+        }
+    }
+
     fn peer(&self) {
         self.put(
             "machines.json",
@@ -1553,7 +1567,7 @@ impl Drop for Rig {
 }
 
 #[test]
-fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
+fn serve_once_publishes_local_facts_and_discovers_peers_once_without_ssh() {
     let rig = Rig::new("serve");
     rig.put(
         "agents.json",
@@ -1583,6 +1597,21 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
     // add ticks. Every tick reads agents, panes, and each shell's foreground.
     // No Stop request means no doctor survey or workspace list.
     let herdr = rig.log("herdr.log");
+    assert_eq!(
+        herdr
+            .lines()
+            .filter(|line| *line == "machine list --json")
+            .count(),
+        1
+    );
+    let herdr = herdr
+        .lines()
+        .filter(|line| *line != "machine list --json")
+        .fold(String::new(), |mut text, line| {
+            text.push_str(line);
+            text.push('\n');
+            text
+        });
     let ticks: Vec<_> = herdr.split("agent list\n").collect();
     assert_eq!(ticks[0], "");
     assert!(ticks.len() > 1);
@@ -1692,6 +1721,7 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     rig.peer();
     rig.snapshot("state", now(), 50.0, 12);
     rig.config("remote_command = ['custom-dogsled', 'argument with spaces']\n");
+    rig.ingest_peers();
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0);
     assert_eq!(status["hosts"].as_array().unwrap().len(), 2);
@@ -1707,15 +1737,21 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     assert_eq!(brief.lines().count(), 3);
     assert!(brief.contains("mem 1.0/8.0GiB disk 50% free agents 1"));
     assert!(brief.contains("Run `dogsled status`"));
-    assert_eq!(rig.log("ssh.log").lines().count(), 1);
+    assert_eq!(rig.log("ssh.log").lines().count(), 2);
     assert!(
         rig.log("ssh.log")
             .contains("custom-dogsled 'argument with spaces' host snapshot --json")
     );
-    assert!(!rig.log("herdr.log").contains("agent list"));
+    let reads = rig.log("ssh.log").lines().count();
     rig.expire_cache();
     rig.json(&["status"]);
-    assert_eq!(rig.log("ssh.log").lines().count(), 2);
+    assert_eq!(
+        rig.log("ssh.log").lines().count(),
+        reads,
+        "status never fills an expired cache"
+    );
+    rig.ingest_peers();
+    assert_eq!(rig.log("ssh.log").lines().count(), reads + 2);
 }
 
 #[test]
@@ -1723,6 +1759,7 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     let rig = Rig::new("down");
     rig.peer();
     rig.snapshot("remote.json", now() - 31_000, 6.0, 7);
+    rig.ingest_peers();
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["hosts"][0]["service"], "down");
     assert!(status["hosts"][0]["probe"].is_null());
@@ -1735,6 +1772,7 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     );
     rig.expire_cache();
     fs::write(rig.dir.join("unreachable"), "").unwrap();
+    rig.ingest_peers();
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["hosts"][1]["reachable"], false);
     assert_eq!(status["hosts"][1]["probe"]["load1"], 6.0);
@@ -1748,21 +1786,39 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
             .unwrap()
             .contains("netcup 4/7 ?")
     );
-    // "Retry now" reads the peer at once instead of waiting out the backoff.
+    // Retry wakes a live observer and awaits its IPC publication. The command itself
+    // never starts SSH. This peer now supports the native host export.
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
+    let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
+    rig.put("peer-export.json", &json!({"version":1,"epoch":"retry-peer","local_revision":1,
+        "measured":{"host":now()-31_000},"local":{"host":serde_json::from_str::<Value>(&rig.log("remote.json")).unwrap()},"gaps":[]}));
+    rig.script(
+        "ssh",
+        &script.replacen(
+            "case \"$*\" in",
+            "case \"$*\" in\n  *'host observation'*) cat \"$RIG/peer-export.json\" ;;",
+            1,
+        ),
+    );
+    let observer = rig.start(&["serve", "--interval", "3600"]);
+    wait_publication(&rig, |frame| frame["sources"]["peers"]["8103"].is_object());
     let reads = rig.log("ssh.log").lines().count();
     let (code, report) = rig.json(&["retry", "netcup"]);
     assert_eq!(code, 0, "{report}");
     assert_eq!(report["reachable"], true);
     assert!(report["retry_ms"].is_null());
     assert_eq!(rig.log("ssh.log").lines().count(), reads + 1);
+    drop(observer);
+    rig.script("ssh", &script);
     rig.expire_cache();
     rig.put("remote.json", &Value::Null);
+    rig.ingest_peers();
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["hosts"][1]["service"], "down");
     assert_eq!(status["hosts"][1]["probe"]["load1"], 6.0);
     rig.expire_cache();
     fs::write(rig.dir.join("remote.json"), "bad json").unwrap();
+    rig.ingest_peers();
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["hosts"].as_array().unwrap().len(), 2);
     assert!(
@@ -1771,6 +1827,58 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
             .unwrap()
             .contains("unexpected output")
     );
+}
+
+fn wait_publication(rig: &Rig, ready: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let mut last = String::new();
+    loop {
+        if let Ok(mut socket) =
+            std::os::unix::net::UnixStream::connect(rig.dir.join("state/observation.sock"))
+        {
+            use std::io::{BufRead as _, Write as _};
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .write_all(b"{\"version\":1,\"operation\":\"current\"}\n")
+                .unwrap();
+            let mut line = String::new();
+            if std::io::BufReader::new(socket).read_line(&mut line).is_ok()
+                && let Ok(frame) = serde_json::from_str::<Value>(&line)
+                && ready(&frame)
+            {
+                return frame;
+            }
+            last = line;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "observer did not publish expected facts at {}: {last}; herdr: {}",
+            rig.dir.display(),
+            rig.log("herdr.log")
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn retry_without_serve_resets_backoff_but_never_starts_ssh() {
+    let rig = Rig::new("retry-no-observer");
+    rig.peer();
+    rig.ingest_peers();
+    let reads = rig.log("ssh.log");
+    let (code, error) = rig.json(&["retry", "netcup"]);
+    assert_eq!(code, 2);
+    assert!(error["error"].as_str().unwrap().contains("backoff reset"));
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("serve is not running")
+    );
+    assert_eq!(rig.log("ssh.log"), reads);
+    assert_eq!(rig.state(&["peer", "8103"])["fetched_ms"], 0);
 }
 
 #[test]
@@ -1796,6 +1904,9 @@ fn brief_keeps_every_host_within_six_lines_and_line_sanitizes_labels() {
 fn concurrent_status_callers_share_one_peer_cache_fill() {
     let rig = Rig::new("concurrent-cache");
     rig.peer();
+    rig.ingest_peers();
+    let reads = rig.log("ssh.log").lines().count();
+    assert_eq!(rig.log("ssh.log").matches("host snapshot").count(), 1);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| rig.json(&["status"]).0))
@@ -1804,7 +1915,11 @@ fn concurrent_status_callers_share_one_peer_cache_fill() {
             assert_eq!(handle.join().unwrap(), 0);
         }
     });
-    assert_eq!(rig.log("ssh.log").lines().count(), 1);
+    assert_eq!(
+        rig.log("ssh.log").lines().count(),
+        reads,
+        "concurrent readers do no SSH"
+    );
 }
 
 #[test]
@@ -1841,7 +1956,7 @@ cat "$RIG/remote.json"
     // The test owns the command as its own child, so the test reaps it and reads its
     // exit status. The guard kills the command's group, so the peers it started never
     // outlive the test.
-    let mut command = rig.cmd(&["status", "--json"]);
+    let mut command = rig.cmd(&["serve", "--once", "--interval", "1"]);
     command.stdout(std::process::Stdio::piped());
     let mut owned = Owned::spawn(&mut command);
     let status = owned.wait();
@@ -1852,6 +1967,7 @@ cat "$RIG/remote.json"
 fn place_reserves_most_headroom_and_respects_host_pin() {
     let rig = Rig::new("place");
     rig.peer();
+    rig.ingest_peers();
     rig.snapshot("state", now(), 0.0, 2);
     let (code, placed) = rig.json(&["place"]);
     assert_eq!(code, 0, "{placed}");
@@ -1870,6 +1986,7 @@ fn place_reserves_most_headroom_and_respects_host_pin() {
 fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
     let rig = Rig::new("fallback");
     rig.peer();
+    rig.ingest_peers();
     rig.snapshot("state", now(), 0.0, 2);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     let (code, placed) = rig.json(&["place"]);
@@ -2176,6 +2293,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     repository(&repo);
     rig.peer();
     rig.config("remote_command = ['custom', 'dogsled']\n");
+    rig.ingest_peers();
     let (code, placed) = rig.json(&[
         "place",
         "--host",

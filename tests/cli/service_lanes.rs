@@ -142,6 +142,7 @@ fn remote_lane_failures_reach_full_brief_and_context_status() {
         "since_ms":43_260_000, "last_ms":43_600_000, "repeats":340
     }]);
     rig.put("remote.json", &remote);
+    rig.ingest_peers();
     let expected = "netcup service: admission lane failing since 12:01 UTC (x340): remote admission cannot read state";
     for args in [vec!["status"], vec!["status", "--brief"]] {
         let out = rig.start(&args).output().0;

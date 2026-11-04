@@ -539,6 +539,7 @@ fn v1_only_host_refuses_jobs_before_dispatch() {
     let mut peer = rig.read("remote.json");
     peer["job_validity"] = json!(1);
     rig.put("remote.json", &peer);
+    rig.ingest_peers();
     let out = rig.run(&["run", "--host", "netcup", "--", "true"]);
     assert_eq!(out.status.code(), Some(2));
     let error = String::from_utf8_lossy(&out.stderr);
@@ -1314,6 +1315,7 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
     rig.put_items(&json!([{
         "id":"remote-job","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","created_ms":0,"closed_ms":null,"name":null
     }]));
+    rig.ingest_peers();
     assert_eq!(
         rig.run(&["wait", "remote-job", "--max", "30s"])
             .status
@@ -2018,6 +2020,7 @@ case "$*" in
 #[test]
 fn settled_remote_job_releases_holds_on_both_hosts() {
     let (rig, _peer_service) = settled_peer_rig("settled-peer-job");
+    rig.ingest_peers();
     let mut command = rig.start(&[
         "run",
         "--host",
@@ -2070,6 +2073,7 @@ fn peer_refused_job_reports_once_and_releases_holds() {
 "#,
         ),
     );
+    rig.ingest_peers();
     let mut command = rig.start(&[
         "run",
         "--host",
@@ -2136,6 +2140,7 @@ fn peer_allocation_refusal_settles_its_non_executable_intent() {
 "#,
         ),
     );
+    rig.ingest_peers();
     let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     let tickets = rig.tickets();
@@ -2205,6 +2210,7 @@ fn peer_reserve_failure_releases_unstarted_evidence_and_fences_dispatch() {
 "#,
             ),
         );
+        rig.ingest_peers();
         let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
         assert_eq!(
             output.status.code(),

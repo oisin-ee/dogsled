@@ -237,6 +237,7 @@ fn peer_holds_are_routed_to_their_host_and_cached_when_it_is_unreachable() {
         "command_argv":["dogsled","doctor","--host","local"]
     }]);
     rig.put("remote.json", &remote);
+    rig.ingest_peers();
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0, "{status}");
     let hold = status["holds"]
@@ -249,6 +250,7 @@ fn peer_holds_are_routed_to_their_host_and_cached_when_it_is_unreachable() {
     assert_eq!(hold["next_command"], "dogsled doctor --host 8103");
     rig.expire_cache();
     rig.script("ssh", "#!/bin/sh\nexit 255\n");
+    rig.ingest_peers();
     let (_, status) = rig.json(&["status"]);
     let hold = status["holds"]
         .as_array()

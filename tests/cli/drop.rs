@@ -204,6 +204,8 @@ fn missing_mark_and_missing_branch_leave_board_but_existing_branch_stays() {
             git(&repo, &["branch", "-D", "feat/x"]);
             git(&repo, &["push", "origin", "--delete", "feat/x"]);
         }
+        let out = rig.run(&["serve", "--once", "--interval", "1"]);
+        assert!(out.status.success(), "{out:?}");
         assert_eq!(rows(&rig).is_empty(), gone);
         let item = &rig.items()[0];
         assert_eq!(item["branch"]["landed"], gone);
@@ -211,36 +213,83 @@ fn missing_mark_and_missing_branch_leave_board_but_existing_branch_stays() {
     }
 }
 
-fn remote(rig: &Rig) {
+fn remote(rig: &Rig) -> (Rig, Background) {
     rig.peer();
     let mut items = rig.items();
     items[0]["host"] = json!("8103");
     rig.put_items(&items);
-    // Exercise host subcommands in a separate ledger, through the real SSH dispatch path.
-    fs::create_dir_all(rig.dir.join("remote-state")).unwrap();
+    let name = rig.dir.file_name().unwrap().to_string_lossy();
+    let execution = Rig::new(&format!("{name}-e"));
+    let git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let git = String::from_utf8(git.stdout).unwrap();
+    execution.script(
+        "git",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/git.log\"\nexec {} \"$@\"\n",
+            git.trim()
+        ),
+    );
+    // The real SSH dispatch reads the execution observer's publication. No helper
+    // process measures a branch, and foreign paths are carried through unchanged.
     rig.script(
         "ssh",
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> "$RIG/ssh.log"
-case "$*" in
-  *'host snapshot'*) printf '{"running":true,'; tr -d '\n' < "$RIG/remote.json" | cut -c2- ;;
-  *) for last do :; done
-     export DOGSLED_STATE="$RIG/remote-state"
-     eval "$last" ;;
-esac
+        &format!(
+            r#"#!/bin/sh
+printf '%s
+' "$*" >> "$RIG/ssh.log"
+for last do :; done
+export DOGSLED_STATE={state}
+export DOGSLED_CONFIG={config}
+export RIG={dir}
+eval "$last"
 "#,
+            state = execution.dir.join("state").display(),
+            config = execution.dir.join("config.toml").display(),
+            dir = execution.dir.display()
+        ),
     );
-    // remote_command is the test binary, not whichever dogsled happens to be on PATH.
     rig.config(&format!(
         "remote_command = [{}]\n",
         serde_json::to_string(env!("CARGO_BIN_EXE_dogsled")).unwrap()
     ));
+    let observer = execution.start(&["serve", "--interval", "3600"]);
+    wait_publication(&execution, |frame| frame["local"]["host"].is_object());
+    (execution, observer)
+}
+
+fn observe_branches(rig: &Rig, execution: &Rig) {
+    let before = rig.items();
+    let observer = rig.start(&["serve", "--interval", "3600"]);
+    wait_publication(execution, |frame| {
+        frame["local"]["branches"]
+            .as_array()
+            .is_some_and(|checks| !checks.is_empty())
+    });
+    wait_publication(rig, |frame| {
+        frame["views"]["status"]["items"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().all(|item| {
+                    item["branch_checked_ms"].is_u64()
+                        && before
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|old| old["id"] == item["id"])
+                            .is_none_or(|old| old["branch_checked_ms"] != item["branch_checked_ms"])
+                })
+            })
+    });
+    drop(observer);
 }
 
 #[test]
 fn remote_drop_uses_ssh_and_settles_origin_item() {
     let (rig, repo) = rig("drop-remote");
-    remote(&rig);
+    let (_execution, _observer) = remote(&rig);
     let (code, dropped) = rig.json(&["drop", "i1", "--host", "netcup"]);
     assert_eq!(code, 0, "{dropped}");
     assert_eq!(dropped["discarded"], 1);
@@ -256,32 +305,51 @@ fn remote_drop_uses_ssh_and_settles_origin_item() {
 #[test]
 fn missing_mark_checks_batch_once_per_host_per_hour() {
     let (rig, _) = rig("drop-hourly");
-    remote(&rig);
+    let (execution, observer) = remote(&rig);
     let mut items = rig.items();
     let mut second = items[0].clone();
     second["id"] = json!("i2");
     second["pane"] = json!("w2:p2");
     items.as_array_mut().unwrap().push(second);
     rig.put_items(&items);
+    observe_branches(&rig, &execution);
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
-        rig.log("ssh.log").matches("host refresh-branches").count(),
+        execution
+            .log("git.log")
+            .matches("show-ref --verify --quiet refs/heads/feat/x")
+            .count(),
         1
     );
     assert!(rig.items()[1]["branch_checked_ms"].is_u64());
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
-        rig.log("ssh.log").matches("host refresh-branches").count(),
+        execution
+            .log("git.log")
+            .matches("show-ref --verify --quiet refs/heads/feat/x")
+            .count(),
         1
     );
+    drop(observer);
+    fs::write(execution.dir.join("clock"), (now() + 3_600_001).to_string()).unwrap();
+    let _observer = execution.start(&["serve", "--interval", "3600"]);
+    wait_publication(&execution, |frame| {
+        frame["local"]["host"]["sampled_ms"]
+            .as_u64()
+            .is_some_and(|time| time > now())
+    });
     let mut items = rig.items();
     for item in items.as_array_mut().unwrap() {
         item["branch_checked_ms"] = json!(now() - 3_600_001);
     }
     rig.put_items(&items);
+    observe_branches(&rig, &execution);
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
-        rig.log("ssh.log").matches("host refresh-branches").count(),
+        execution
+            .log("git.log")
+            .matches("show-ref --verify --quiet refs/heads/feat/x")
+            .count(),
         2
     );
 }
@@ -289,34 +357,49 @@ fn missing_mark_checks_batch_once_per_host_per_hour() {
 #[test]
 fn concurrent_status_reads_share_the_hourly_check() {
     let (rig, _) = rig("drop-concurrent");
-    remote(&rig);
+    let (execution, _observer) = remote(&rig);
+    observe_branches(&rig, &execution);
+    let before = rig.log("ssh.log");
     let mut first = rig.start(&["board", "--all", "--json"]);
     let mut second = rig.start(&["board", "--all", "--json"]);
     assert!(first.wait().success());
     assert!(second.wait().success());
     assert_eq!(
-        rig.log("ssh.log").matches("host refresh-branches").count(),
+        execution
+            .log("git.log")
+            .matches("show-ref --verify --quiet refs/heads/feat/x")
+            .count(),
         1
+    );
+    assert_eq!(
+        rig.log("ssh.log"),
+        before,
+        "concurrent readers never observe branches"
     );
 }
 
 #[test]
 fn failed_branch_check_keeps_item_unchanged_and_only_logs() {
     let (rig, _) = rig("drop-refresh-failure");
-    remote(&rig);
+    let (execution, _observer) = remote(&rig);
     let before = rig.items();
-    rig.script(
-        "ssh",
-        r#"#!/bin/sh
-case "$*" in
-  *'host snapshot'*) printf '{"running":true,'; tr -d '\n' < "$RIG/remote.json" | cut -c2- ;;
-  *) echo branch-check-failed >&2; exit 1 ;;
-esac
-"#,
-    );
+    execution.script("git", "#!/bin/sh\necho branch-check-failed >&2\nexit 2\n");
+    let mut observer = rig.start(&["serve", "--interval", "3600"]);
+    wait_publication(&execution, |frame| {
+        frame["gaps"]
+            .as_array()
+            .is_some_and(|gaps| gaps.iter().any(|gap| gap["domain"] == "branches"))
+    });
+    wait_publication(&rig, |frame| {
+        frame["gaps"]
+            .as_array()
+            .is_some_and(|gaps| gaps.iter().any(|gap| gap["domain"] == "peer:8103:branches"))
+    });
+    observer.owned.terminate();
+    let (_, journal) = observer.output();
+    assert!(journal.contains("peer:8103:branches"), "{journal}");
     let out = rig.run(&["board", "--all", "--json"]);
-    assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("dogsled branches: netcup:"));
+    assert!(out.status.success(), "{out:?}");
     assert_eq!(rig.items(), before);
 }
 
