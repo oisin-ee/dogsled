@@ -1,5 +1,5 @@
 //! Admission and reconciliation with injected timestamps and a scripted OS seam.
-use crate::config::{Policy, Thresholds};
+use crate::config::Policy;
 use crate::hosts::{Fleet, Host};
 use crate::items::{self, Item};
 use crate::ledger::{Ledger, new_id};
@@ -1067,13 +1067,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
         memory_reserve_bytes: 0,
         ..Policy::default()
     };
-    let node = crate::node::Node {
-        shell: &shell,
-        ledger: &ledger,
-        thresholds: Thresholds::from(&policy),
-        home: "/",
-        cleanup: &policy.cleanup,
-    };
+    let node = crate::node::Node::new(&shell, &ledger, &policy, "/");
     let now = crate::jobs::VALIDITY_WINDOW_MS + 1_000_000_u64;
     crate::host_store::put_snapshot(
         &ledger,

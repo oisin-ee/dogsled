@@ -49,6 +49,7 @@ mod preservation;
 mod probe;
 mod profiles;
 mod quota;
+mod repos;
 mod repository;
 mod rows;
 mod runtime;
@@ -197,20 +198,18 @@ fn turn_command(ledger: &Ledger, shell: &System, json: bool, command: Command) -
 }
 
 fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
-    let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
+    let config_path = cli.config.unwrap_or_else(config::default_path);
+    let policy = config::load(&config_path)?;
     let shell = System { budget };
     let mut ledger = Ledger::new(ledger::default_dir());
     ledger.budget = budget;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    let node = Node {
-        shell: &shell,
-        ledger: &ledger,
-        thresholds: config::Thresholds::from(&policy),
-        home: &home,
-        cleanup: &policy.cleanup,
-    };
+    let node = Node::new(&shell, &ledger, &policy, &home);
     match cli.command {
         Command::Quota(args) => quota_command(&shell, &ledger, &policy, &home, &args, cli.json)?,
+        Command::Repo(command) => {
+            repo_command(&shell, &home, &config_path, &policy, command, cli.json)?;
+        }
         Command::Serve { interval, once } => service::serve(
             &node,
             &policy,
@@ -299,6 +298,34 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn repo_command(
+    shell: &dyn shell::Shell,
+    home: &str,
+    config_path: &std::path::Path,
+    policy: &config::Policy,
+    command: cli::RepoCommand,
+    json: bool,
+) -> Result<()> {
+    match command {
+        cli::RepoCommand::Add { path } => {
+            let path = path.map_or_else(
+                || std::env::current_dir().map(|path| path.display().to_string()),
+                Ok,
+            )?;
+            let repo = repos::add(shell, home, config_path, &path)?;
+            print(json, &repo, || repos::render(std::slice::from_ref(&repo)))
+        }
+        cli::RepoCommand::Remove { selector } => {
+            let repo = repos::remove(config_path, &selector)?;
+            print(json, &repo, || repos::render(std::slice::from_ref(&repo)))
+        }
+        cli::RepoCommand::List => {
+            let repos = repos::list(policy);
+            print(json, &repos, || repos::render(repos))
+        }
+    }
 }
 
 /// Route commands after fleet discovery, keeping their adapters with their owners.
