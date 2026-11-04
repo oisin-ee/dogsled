@@ -256,7 +256,11 @@ impl Seen {
     }
 }
 
-pub fn remember(ledger: &Ledger, tree: Tree) -> Result<()> {
+pub fn remember(ledger: &Ledger, mut tree: Tree) -> Result<()> {
+    tree.identity = tree
+        .identity
+        .map(crate::worktree::Identity::normalize_local)
+        .transpose()?;
     crate::store::write(ledger, |tx| {
         let mut repos = crate::host_store::repositories_rows(tx)?;
         repos.insert(tree.repo.clone());
@@ -3068,9 +3072,11 @@ mod tests {
                 generation: "0123456789abcdef0123456789abcdef".into(),
             }),
         };
+        let admin = tree.identity.as_ref().unwrap().gitdir.clone();
+        std::fs::create_dir_all(&admin).unwrap();
         remember(&rig.ledger, tree.clone()).unwrap();
         // The survey planned the removal; then the worktree left Git's list before apply.
-        std::fs::create_dir(Path::new(&repo).join(".git")).unwrap();
+        std::fs::remove_dir(&admin).unwrap();
         rig.shell.on(
             &format!("git -C {repo} rev-parse --path-format=absolute --git-common-dir"),
             &format!("{repo}/.git\n"),

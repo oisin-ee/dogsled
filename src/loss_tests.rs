@@ -2230,6 +2230,7 @@ fn symlinked_home_preserves_identity_through_prune_and_close() {
         std::os::unix::fs::symlink(&fixture.repo.repo, &home).unwrap();
         let path = home.join(".worktrees/feature");
         let mut tree = recorded(&fixture.ledger).remove(0);
+        let expected_identity = tree.identity.clone();
         tree.repo = home.display().to_string();
         tree.path = path.display().to_string();
         let identity = tree.identity.as_mut().unwrap();
@@ -2240,12 +2241,12 @@ fn symlinked_home_preserves_identity_through_prune_and_close() {
                 .unwrap(),
         );
         identity.common = home.join(".git");
-        crate::host_store::put_trees(&fixture.ledger, &[tree]).unwrap();
-        crate::host_store::put_repositories(
-            &fixture.ledger,
-            &vec![home.display().to_string()].into_iter().collect(),
-        )
-        .unwrap();
+        crate::cleanup::remember(&fixture.ledger, tree).unwrap();
+        let registered = recorded(&fixture.ledger);
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].identity, expected_identity);
+        assert_eq!(registered[0].repo, home.display().to_string());
+        assert_eq!(registered[0].path, path.display().to_string());
         if close {
             save_close_checkout(&fixture);
             let shell = LifecycleShell::new(&path, || {});
