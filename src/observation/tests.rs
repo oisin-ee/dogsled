@@ -1,3 +1,5 @@
+mod local;
+
 mod publication {
     use super::super::*;
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -18,7 +20,8 @@ mod publication {
         fn new() -> Self {
             let state = std::env::temp_dir().join(crate::ledger::new_id());
             let publisher = Publisher::new().unwrap();
-            let server = ipc::Server::bind(&state, publisher.subscribe()).unwrap();
+            let mut server = ipc::Server::new(&state).unwrap();
+            server.bind(publisher.subscribe()).unwrap();
             let client = ipc::Client::at(&state);
             Self {
                 publisher,
@@ -133,8 +136,9 @@ mod publication {
                 .contains("unavailable")
         );
         fixture.publisher = Publisher::new().unwrap();
-        fixture.server =
-            Some(ipc::Server::bind(&fixture.state, fixture.publisher.subscribe()).unwrap());
+        let mut server = ipc::Server::new(&fixture.state).unwrap();
+        server.bind(fixture.publisher.subscribe()).unwrap();
+        fixture.server = Some(server);
         let new = fixture.publish(2);
         assert_ne!(old.epoch, new.epoch);
         assert_eq!(new.revision, 1);
@@ -311,7 +315,7 @@ mod publication {
     fn single_endpoint_owner_and_clean_shutdown() {
         let mut fixture = Fixture::new();
         fixture.publish(1);
-        assert!(ipc::Server::bind(&fixture.state, fixture.publisher.subscribe()).is_err());
+        assert!(ipc::Server::new(&fixture.state).is_err());
         consistent(&fixture.client.current().unwrap());
         let _silent = UnixStream::connect(fixture.state.join("observation.sock")).unwrap();
         let started = Instant::now();

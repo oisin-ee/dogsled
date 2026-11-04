@@ -55,7 +55,8 @@ enum Reply {
     Failure(Failure),
 }
 
-/// Owns the endpoint and joins all transport tasks before releasing its lifetime lock.
+/// Owns publication for the service lifetime, even when its endpoint cannot be bound.
+/// Joins all transport tasks before releasing the lifetime lock.
 #[derive(Debug)]
 pub(crate) struct Server {
     stop: Option<oneshot::Sender<()>>,
@@ -65,7 +66,7 @@ pub(crate) struct Server {
 }
 
 impl Server {
-    pub fn bind(state: &Path, receiver: watch::Receiver<Option<Arc<Frame>>>) -> Result<Self> {
+    pub fn new(state: &Path) -> Result<Self> {
         std::fs::create_dir_all(state)?;
         let lock = File::options()
             .create(true)
@@ -76,9 +77,21 @@ impl Server {
         lock.try_lock().map_err(|error| {
             Error::Invalid(format!("observation publisher already owned: {error}"))
         })?;
-        let path = state.join(SOCKET);
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(&path)?,
+        Ok(Self {
+            stop: None,
+            thread: None,
+            lock,
+            path: state.join(SOCKET),
+        })
+    }
+
+    pub fn bind(&mut self, receiver: watch::Receiver<Option<Arc<Frame>>>) -> Result<()> {
+        if self.thread.is_some() {
+            return Err(Error::Invalid("observation endpoint already bound".into()));
+        }
+        let path = &self.path;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)?,
             Ok(_) => {
                 return Err(Error::Invalid(
                     "observation endpoint is not a socket".into(),
@@ -87,9 +100,9 @@ impl Server {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
             Err(error) => return Err(error.into()),
         }
-        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        let listener = std::os::unix::net::UnixListener::bind(path)?;
         let setup = || -> Result<_> {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
             listener.set_nonblocking(true)?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -103,7 +116,7 @@ impl Server {
         let (runtime, listener) = match setup() {
             Ok(ready) => ready,
             Err(error) => {
-                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path);
                 return Err(error);
             }
         };
@@ -111,12 +124,9 @@ impl Server {
         let thread = std::thread::spawn(move || {
             runtime.block_on(serve(listener, receiver, stopped));
         });
-        Ok(Self {
-            stop: Some(stop),
-            thread: Some(thread),
-            lock,
-            path,
-        })
+        self.stop = Some(stop);
+        self.thread = Some(thread);
+        Ok(())
     }
 }
 
@@ -127,8 +137,8 @@ impl Drop for Server {
         }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+            let _ = std::fs::remove_file(&self.path);
         }
-        let _ = std::fs::remove_file(&self.path);
         // Release copies inherited by a concurrent fork before exec, as Ledger's lock does.
         let _ = self.lock.unlock();
     }

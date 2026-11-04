@@ -338,25 +338,17 @@ impl<'a> Node<'a> {
     }
 
     pub fn snapshot(&self) -> Result<SnapshotReport> {
-        Ok(SnapshotReport {
-            service_lanes: crate::store::read(self.ledger, crate::tables::failing_lanes)?,
-            snapshot: crate::host_store::snapshot(self.ledger)?,
-            running: Some(self.ledger.locked("service")?),
-            handoffs: crate::done::list(self.ledger)?,
-            job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
-            request_validity: Some(crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION),
-            placement_replay: Some(PLACEMENT_VERSION),
-            holds: crate::holds::local(
-                self.ledger,
-                crate::hosts::LOCAL,
-                crate::ledger::now_ms(),
-                self.thresholds.reservation_ttl_ms,
-            )?,
-        })
+        crate::observation::collect::host(
+            self,
+            crate::host_store::snapshot(self.ledger)?,
+            self.ledger.locked("service")?,
+            crate::ledger::now_ms(),
+        )
     }
 
-    /// Publication never waits for prompts, notifications, or cleanup.
-    pub fn tick(&self, now: u64) -> Result<()> {
+    /// Collection never waits for prompts, notifications, or cleanup. Return the exact
+    /// persisted sample so publication cannot accidentally reread a newer reservation write.
+    pub(crate) fn tick(&self, now: u64) -> Result<Snapshot> {
         let mut probe = observed_probe(self.ledger, self.shell, self.home)?;
         self.ledger.with_lock("host", || {
             let previous: Option<Snapshot> = crate::host_store::snapshot(self.ledger)?;
@@ -367,14 +359,13 @@ impl<'a> Node<'a> {
             probe.reservations = self.live_reservations(now)?;
             let headroom = evaluate(&probe, &self.thresholds);
             self.append_sample(&probe, &headroom, now)?;
-            crate::host_store::put_snapshot(
-                self.ledger,
-                &Snapshot {
-                    sampled_ms: now,
-                    probe,
-                    jobs: crate::jobs::list(self.ledger)?,
-                },
-            )
+            let snapshot = Snapshot {
+                sampled_ms: now,
+                probe,
+                jobs: crate::jobs::list(self.ledger)?,
+            };
+            crate::host_store::put_snapshot(self.ledger, &snapshot)?;
+            Ok(snapshot)
         })
     }
 

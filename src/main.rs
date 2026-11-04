@@ -44,7 +44,6 @@ mod loss_tests;
 mod machines;
 mod mcp;
 mod node;
-#[cfg_attr(not(test), expect(dead_code, reason = "producer wiring follows in O3"))]
 mod observation;
 mod plan;
 mod preparation_retirement;

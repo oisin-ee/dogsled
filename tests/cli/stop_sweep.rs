@@ -748,6 +748,47 @@ fn long_state_path_without_a_socket_still_consumes_stop_requests() {
 }
 
 #[test]
+fn long_state_path_keeps_collecting_without_an_observation_endpoint() {
+    let rig = Rig::new("observation-long-path");
+    let state = rig
+        .dir
+        .join("state")
+        .join("long-state-directory-".repeat(8));
+    fs::create_dir_all(&state).unwrap();
+    let journal_path = rig.dir.join("service.log");
+    let journal = fs::File::create(&journal_path).unwrap();
+    let mut service = rig.cmd(&["serve", "--interval", "1"]);
+    service
+        .env("DOGSLED_STATE", &state)
+        .stdout(Stdio::null())
+        .stderr(journal);
+    let _service = Service(Owned::spawn(&mut service));
+    until(|| !rig.host_at(state.to_str().unwrap()).is_null());
+    let sampled = rig.host_at(state.to_str().unwrap())["sampled_ms"]
+        .as_u64()
+        .unwrap();
+    until(|| {
+        rig.host_at(state.to_str().unwrap())["sampled_ms"]
+            .as_u64()
+            .is_some_and(|next| next > sampled)
+    });
+    let journal = fs::read_to_string(&journal_path).unwrap();
+    assert_eq!(
+        journal.matches("observation socket unavailable:").count(),
+        1
+    );
+    assert!(state.join("observation.lock").is_file());
+    assert!(!state.join("observation.sock").exists());
+    let out = rig
+        .cmd(&["observation", "current"])
+        .env("DOGSLED_STATE", &state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("observation unavailable"));
+}
+
+#[test]
 fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
     for harness in ["pi", "claude", "codex"] {
         let rig = Rig::new(&format!("stop-write-failure-{harness}"));
