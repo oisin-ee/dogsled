@@ -614,13 +614,20 @@ impl Client {
     }
 
     fn connect(&self) -> Result<UnixStream> {
-        let path = super::socket_path(&self.state, SOCKET)?;
+        let not_running =
+            || Error::Invalid("observation unavailable: dogsled serve is not running".into());
+        // A long state path resolves its socket through the state directory itself, so a
+        // missing state directory is the same fact as a missing socket: nothing serves it.
+        let path = super::socket_path(&self.state, SOCKET).map_err(|error| match error {
+            Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound => not_running(),
+            other => other,
+        })?;
         UnixStream::connect(path).map_err(|error| {
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
             ) {
-                Error::Invalid("observation unavailable: dogsled serve is not running".into())
+                not_running()
             } else {
                 unavailable(&error)
             }

@@ -28,6 +28,17 @@ fn foreign_agent_cannot_satisfy_local_detail_or_activity_selection() {
     assert_eq!(agent.state, "idle");
 }
 
+/// A state path too long for a socket address (any macOS `$TMPDIR` test directory) with
+/// no state directory reads as "not running", like a missing socket on a short path.
+#[test]
+fn a_long_missing_state_directory_reads_as_not_running() {
+    let state = std::env::temp_dir()
+        .join("x".repeat(120))
+        .join(crate::ledger::new_id());
+    let error = Client::at(&state).current().unwrap_err().to_string();
+    assert!(error.contains("dogsled serve is not running"), "{error}");
+}
+
 #[test]
 fn publication_shutdown_unlocks_even_with_an_inherited_descriptor() {
     let state = std::env::temp_dir().join(crate::ledger::new_id());
